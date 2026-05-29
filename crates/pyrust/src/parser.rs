@@ -412,7 +412,13 @@ impl Parser {
                     if self.is(&Token::Star) {
                         self.bump();
                         let name = self.expect_ident("star pattern name")?;
-                        elements.push((Pattern::Capture(name), true));
+                        // `*_` is a non-binding wildcard star (PEP 634).
+                        let pat = if name == "_" {
+                            Pattern::Wildcard
+                        } else {
+                            Pattern::Capture(name)
+                        };
+                        elements.push((pat, true));
                     } else {
                         elements.push((self.parse_pattern()?, false));
                     }
@@ -466,7 +472,13 @@ impl Parser {
                 let first = if self.is(&Token::Star) {
                     self.bump();
                     let name = self.expect_ident("star pattern name")?;
-                    (Pattern::Capture(name), true)
+                    // `*_` is a non-binding wildcard star (PEP 634).
+                    let pat = if name == "_" {
+                        Pattern::Wildcard
+                    } else {
+                        Pattern::Capture(name)
+                    };
+                    (pat, true)
                 } else {
                     (self.parse_pattern()?, false)
                 };
@@ -481,7 +493,13 @@ impl Parser {
                         if self.is(&Token::Star) {
                             self.bump();
                             let name = self.expect_ident("star pattern name")?;
-                            elements.push((Pattern::Capture(name), true));
+                            // `*_` is a non-binding wildcard star (PEP 634).
+                            let pat = if name == "_" {
+                                Pattern::Wildcard
+                            } else {
+                                Pattern::Capture(name)
+                            };
+                            elements.push((pat, true));
                         } else {
                             elements.push((self.parse_pattern()?, false));
                         }
