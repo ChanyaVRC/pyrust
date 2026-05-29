@@ -7935,6 +7935,40 @@ fn min_max_impl(
     }
 }
 
+/// Returns `true` when a container element (a `Value`) requires interpreter
+/// access during repr — i.e., when `Value::repr()` alone is insufficient.
+///
+/// The only cases that need interpreter dispatch are:
+/// - `PyInstance` — may have a user-defined `__repr__`
+/// - Container types (`List`, `Tuple`, `Dict`, `Set`) — may *contain* an
+///   instance at any nesting depth
+/// - `BuiltinObject` — may be a frozenset containing `PyKey::Object`, or
+///   another builtin type with user-backing
+///
+/// Plain scalars (`Int`, `Str`, `Float`, `Bool`, `None`, `BigInt`, `Bytes`,
+/// `Complex`, `Ellipsis`, `NotImplemented`) always return `false`.
+#[inline]
+fn value_needs_interp_repr(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::PyInstance(_)
+            | ValueKind::BuiltinObject { .. }
+            | ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+    )
+}
+
+/// Returns `true` when a container key (`PyKey`) requires interpreter access
+/// during repr.  Only `PyKey::Object` (user instance), `PyKey::Tuple` (may
+/// contain an Object), and `PyKey::FrozenSet` (may contain an Object) need
+/// the slow path; all primitive key variants are handled by `key_repr`.
+#[inline]
+fn key_needs_interp_repr(k: &PyKey) -> bool {
+    matches!(k, PyKey::Object { .. } | PyKey::Tuple(_) | PyKey::FrozenSet(_))
+}
+
 /// Render `value` to its Python repr string, honouring `__repr__` on user
 /// instances and recursing into containers (list/tuple/dict/set) with the same
 /// interpreter-aware dispatch on each element.
@@ -8047,6 +8081,13 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
 
     match value.kind() {
         ValueKind::List(items) => {
+            // Fast path: all elements are plain scalars — no interpreter
+            // dispatch needed.  `Value::repr()` handles cycle detection
+            // internally and produces the same output without a snapshot.
+            if !items.iter().any(value_needs_interp_repr) {
+                drop(items);
+                return Ok(value.repr());
+            }
             let id = value.value_id();
             let already_in = id.map_or(false, |id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
@@ -8076,6 +8117,11 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             Ok(format!("[{}]", parts.join(", ")))
         }
         ValueKind::Tuple(items) => {
+            // Fast path: all elements are plain scalars — no interpreter
+            // dispatch needed.
+            if !items.iter().any(value_needs_interp_repr) {
+                return Ok(value.repr());
+            }
             let id = value.value_id();
             let already_in = id.map_or(false, |id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
@@ -8108,6 +8154,15 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             }
         }
         ValueKind::Dict(items) => {
+            // Fast path: all keys and values are plain scalars — no interpreter
+            // dispatch needed.
+            if !items
+                .iter()
+                .any(|(k, v)| key_needs_interp_repr(k) || value_needs_interp_repr(v))
+            {
+                drop(items);
+                return Ok(value.repr());
+            }
             let id = value.value_id();
             let already_in = id.map_or(false, |id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
@@ -8149,6 +8204,12 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             if items.is_empty() {
                 return Ok("set()".to_string());
             }
+            // Fast path: all elements are plain scalar keys — no interpreter
+            // dispatch needed.
+            if !items.iter().any(key_needs_interp_repr) {
+                drop(items);
+                return Ok(value.repr());
+            }
             let id = value.value_id();
             let already_in = id.map_or(false, |id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
@@ -8186,6 +8247,12 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             };
             if items.is_empty() {
                 return Ok("frozenset()".to_string());
+            }
+            // Fast path: all elements are plain scalar keys — no interpreter
+            // dispatch needed.
+            if !items.iter().any(key_needs_interp_repr) {
+                drop(items);
+                return Ok(value.repr());
             }
             let id = value.value_id();
             let already_in = id.map_or(false, |id| {
