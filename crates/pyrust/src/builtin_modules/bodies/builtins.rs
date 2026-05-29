@@ -4669,10 +4669,21 @@ pyrust_module! {
         // Raise TypeError if any keyword arguments reach this point.  Each
         // level of the MRO should have consumed its own kwargs before calling
         // super().__init_subclass__(**remaining_kwargs).
+        //
+        // CPython's error message uses the new class's name (the `cls` arg),
+        // not the literal string "object". E.g. for `class B(A, foo=1)` the
+        // message is "B.__init_subclass__() takes no keyword arguments".
         if args.iter().any(|a| a.name.is_some()) {
+            let cls_name = args
+                .first()
+                .and_then(|a| match a.value.kind() {
+                    ValueKind::PyClass(c) => Some(c.borrow().name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "object".to_string());
             return Err(PyError::named(
                 "TypeError",
-                "object.__init_subclass__() takes no keyword arguments".to_string(),
+                format!("{cls_name}.__init_subclass__() takes no keyword arguments"),
             ));
         }
         Ok(Value::none())
