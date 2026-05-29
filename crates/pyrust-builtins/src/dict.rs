@@ -123,21 +123,37 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
         }
         // Helper: handle a single key/value pair from the iterable form
         // (`[(k1, v1), (k2, v2), ...]`).  Each `pair` must itself be a
-        // length-2 sequence.  Factored out so the `List` and `Tuple`
-        // arms below can share it without combining their patterns
-        // (List now carries `Ref<'_, Vec<Value>>`, Tuple still carries
-        // `&[Value]` — they can't bind to the same variable post-#450).
-        fn push_pair(pair: &Value, out: &mut Vec<(PyKey, Value)>) -> Result<()> {
-            let kv: Vec<Value> = match pair.kind() {
-                ValueKind::List(items) if items.len() == 2 => items.clone(),
-                ValueKind::Tuple(items) if items.len() == 2 => items.to_vec(),
+        // length-2 sequence.  Factored out so the `List`, `Tuple`, and
+        // `Str` arms below can share it without combining their patterns.
+        // `idx` is the 0-based element position within the outer iterable,
+        // used to match CPython's error messages.
+        fn push_pair(pair: &Value, idx: usize, out: &mut Vec<(PyKey, Value)>) -> Result<()> {
+            let (len, kv): (usize, Vec<Value>) = match pair.kind() {
+                ValueKind::List(items) => (items.len(), items.clone()),
+                ValueKind::Tuple(items) => (items.len(), items.to_vec()),
+                ValueKind::Str(s) => {
+                    let chars: Vec<Value> =
+                        s.chars().map(|c| Value::string(c.to_string())).collect();
+                    (chars.len(), chars)
+                }
                 _ => {
+                    // Non-sequence element: CPython raises TypeError here.
                     return Err(PyError::named(
                         "TypeError",
-                        "dict.update() element must be a (key, value) pair".to_string(),
+                        format!(
+                            "cannot convert dictionary update sequence element #{idx} to a sequence"
+                        ),
                     ));
                 }
             };
+            if len != 2 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!(
+                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                    ),
+                ));
+            }
             let k = kv[0].to_key().ok_or_else(|| {
                 PyError::named(
                     "TypeError",
@@ -157,19 +173,41 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
                 }
             }
             ValueKind::List(items) => {
-                for pair in items.iter() {
-                    push_pair(pair, &mut out)?;
+                for (idx, pair) in items.iter().enumerate() {
+                    push_pair(pair, idx, &mut out)?;
                 }
             }
             ValueKind::Tuple(items) => {
-                for pair in items {
-                    push_pair(pair, &mut out)?;
+                for (idx, pair) in items.iter().enumerate() {
+                    push_pair(pair, idx, &mut out)?;
+                }
+            }
+            ValueKind::Str(s) => {
+                // Strings are iterable (yield 1-char strings), but each
+                // char is length 1, so push_pair will raise the
+                // CPython-matching ValueError on element #0.
+                for (idx, ch) in s.chars().enumerate() {
+                    let char_val = Value::string(ch.to_string());
+                    push_pair(&char_val, idx, &mut out)?;
+                }
+            }
+            ValueKind::Bytes(rc) => {
+                // Bytes are iterable (yield integers 0-255), but integers
+                // are not sequences, so push_pair raises TypeError element #0.
+                for (idx, b) in rc.iter().enumerate() {
+                    let byte_val = Value::int(*b as i64);
+                    push_pair(&byte_val, idx, &mut out)?;
                 }
             }
             _ => {
+                // Non-iterable argument: CPython propagates the TypeError
+                // from the iterator protocol — `'X' object is not iterable`.
                 return Err(PyError::named(
                     "TypeError",
-                    "dict.update() argument must be a dict or iterable of pairs".to_string(),
+                    format!(
+                        "'{}' object is not iterable",
+                        pyrust_core::builtin_type_name(arg)
+                    ),
                 ));
             }
         }
