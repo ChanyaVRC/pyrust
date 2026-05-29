@@ -710,7 +710,7 @@ fn decode_utf16_le(bytes: &[u8]) -> Result<Value> {
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
-    decode_utf16_units(&units, "utf-16-le")
+    decode_utf16_units(&units, bytes, "utf-16-le")
 }
 
 /// Decode a big-endian UTF-16 byte slice (no BOM) into a Python string.
@@ -728,11 +728,16 @@ fn decode_utf16_be(bytes: &[u8]) -> Result<Value> {
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    decode_utf16_units(&units, "utf-16-be")
+    decode_utf16_units(&units, bytes, "utf-16-be")
 }
 
 /// Decode a slice of UTF-16 code units into a Python string.
-fn decode_utf16_units(units: &[u16], codec_name: &str) -> Result<Value> {
+///
+/// `raw_bytes` is the original encoded byte slice (before unit extraction) and
+/// is used verbatim as `UnicodeDecodeError.object`, matching CPython's behaviour
+/// where `.object` always contains the original input bytes in their on-wire
+/// encoding (LE for utf-16-le, BE for utf-16-be).
+fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Result<Value> {
     let mut out = String::with_capacity(units.len());
     let mut iter = units.iter().copied().enumerate();
     while let Some((i, u)) = iter.next() {
@@ -743,13 +748,24 @@ fn decode_utf16_units(units: &[u16], codec_name: &str) -> Result<Value> {
                     let cp = 0x10000 + ((u as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
                     out.push(char::from_u32(cp).expect("valid surrogate pair"));
                 }
-                _ => {
+                // End of stream after a high surrogate: no low surrogate follows.
+                None => {
                     return Err(PyError::UnicodeDecodeError {
                         encoding: codec_name.to_string(),
-                        object: units.iter().flat_map(|&w| w.to_le_bytes()).collect(),
+                        object: raw_bytes.to_vec(),
                         start: i * 2,
                         end: i * 2 + 2,
-                        reason: "illegal encoding".to_string(),
+                        reason: "unexpected end of data".to_string(),
+                    });
+                }
+                // A non-low-surrogate unit follows the high surrogate.
+                Some(_) => {
+                    return Err(PyError::UnicodeDecodeError {
+                        encoding: codec_name.to_string(),
+                        object: raw_bytes.to_vec(),
+                        start: i * 2,
+                        end: i * 2 + 2,
+                        reason: "illegal UTF-16 surrogate".to_string(),
                     });
                 }
             },
@@ -757,7 +773,7 @@ fn decode_utf16_units(units: &[u16], codec_name: &str) -> Result<Value> {
             0xDC00..=0xDFFF => {
                 return Err(PyError::UnicodeDecodeError {
                     encoding: codec_name.to_string(),
-                    object: units.iter().flat_map(|&w| w.to_le_bytes()).collect(),
+                    object: raw_bytes.to_vec(),
                     start: i * 2,
                     end: i * 2 + 2,
                     reason: "illegal encoding".to_string(),
@@ -773,18 +789,17 @@ fn decode_utf16_units(units: &[u16], codec_name: &str) -> Result<Value> {
 }
 
 /// Decode a little-endian UTF-32 byte slice (no BOM) into a Python string.
+///
+/// CPython processes complete 4-byte chunks first (reporting "code point not in
+/// range" on any invalid chunk) and only then reports "truncated data" for any
+/// trailing bytes that don't form a complete chunk.  The early-truncation guard
+/// is therefore removed in favour of checking the remainder after all full
+/// chunks have been decoded successfully.
 fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
-    if bytes.len() % 4 != 0 {
-        return Err(PyError::UnicodeDecodeError {
-            encoding: "utf-32-le".to_string(),
-            object: bytes.to_vec(),
-            start: bytes.len() - (bytes.len() % 4),
-            end: bytes.len(),
-            reason: "truncated data".to_string(),
-        });
-    }
+    let chunks = bytes.chunks_exact(4);
+    let remainder = chunks.remainder();
     let mut out = String::with_capacity(bytes.len() / 4);
-    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+    for (i, chunk) in chunks.enumerate() {
         let cp = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         match char::from_u32(cp) {
             Some(c) => out.push(c),
@@ -794,27 +809,33 @@ fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
                     object: bytes.to_vec(),
                     start: i * 4,
                     end: i * 4 + 4,
-                    reason: "codepoint not in range(0x110000)".to_string(),
+                    reason: "code point not in range(0x110000)".to_string(),
                 });
             }
         }
+    }
+    if !remainder.is_empty() {
+        let n = bytes.len() - remainder.len();
+        return Err(PyError::UnicodeDecodeError {
+            encoding: "utf-32-le".to_string(),
+            object: bytes.to_vec(),
+            start: n,
+            end: bytes.len(),
+            reason: "truncated data".to_string(),
+        });
     }
     Ok(Value::string(&out))
 }
 
 /// Decode a big-endian UTF-32 byte slice (no BOM) into a Python string.
+///
+/// Same chunk-first approach as `decode_utf32_le` — see that function's
+/// doc comment for the CPython compatibility rationale.
 fn decode_utf32_be(bytes: &[u8]) -> Result<Value> {
-    if bytes.len() % 4 != 0 {
-        return Err(PyError::UnicodeDecodeError {
-            encoding: "utf-32-be".to_string(),
-            object: bytes.to_vec(),
-            start: bytes.len() - (bytes.len() % 4),
-            end: bytes.len(),
-            reason: "truncated data".to_string(),
-        });
-    }
+    let chunks = bytes.chunks_exact(4);
+    let remainder = chunks.remainder();
     let mut out = String::with_capacity(bytes.len() / 4);
-    for (i, chunk) in bytes.chunks_exact(4).enumerate() {
+    for (i, chunk) in chunks.enumerate() {
         let cp = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         match char::from_u32(cp) {
             Some(c) => out.push(c),
@@ -824,10 +845,20 @@ fn decode_utf32_be(bytes: &[u8]) -> Result<Value> {
                     object: bytes.to_vec(),
                     start: i * 4,
                     end: i * 4 + 4,
-                    reason: "codepoint not in range(0x110000)".to_string(),
+                    reason: "code point not in range(0x110000)".to_string(),
                 });
             }
         }
+    }
+    if !remainder.is_empty() {
+        let n = bytes.len() - remainder.len();
+        return Err(PyError::UnicodeDecodeError {
+            encoding: "utf-32-be".to_string(),
+            object: bytes.to_vec(),
+            start: n,
+            end: bytes.len(),
+            reason: "truncated data".to_string(),
+        });
     }
     Ok(Value::string(&out))
 }
