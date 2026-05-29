@@ -4095,6 +4095,30 @@ fn pattern_bound_names(pat: &Pattern) -> HashSet<String> {
     }
 }
 
+/// Walk the leading edge of a pattern — descending into the first alternative
+/// of nested `Pattern::Or` nodes — and return the name of the first bare
+/// `Pattern::Capture` found, or `None` if the leading edge is not a capture.
+///
+/// Used by the `Pattern::Or` unreachable-check to detect cases like
+/// `case (x | 1) | z:` where the inner OR's first alternative `x` is a
+/// capture that makes subsequent outer alternatives unreachable.
+fn or_leading_capture(pat: &Pattern) -> Option<&str> {
+    match pat {
+        Pattern::Capture(name) if name != "_" => Some(name),
+        Pattern::Or(alts) => alts.first().and_then(or_leading_capture),
+        _ => None,
+    }
+}
+
+/// Same as `or_leading_capture` but for wildcards.
+fn or_leading_is_wildcard(pat: &Pattern) -> bool {
+    match pat {
+        Pattern::Wildcard => true,
+        Pattern::Or(alts) => alts.first().map_or(false, or_leading_is_wildcard),
+        _ => false,
+    }
+}
+
 impl Compiler {
     fn new(
         local_index: Rc<HashMap<String, Reg>>,
@@ -5852,19 +5876,18 @@ impl Compiler {
                 // distinct from the generic "bind different names" error.
                 let non_last = alternatives.len().saturating_sub(1);
                 for alt in alternatives.iter().take(non_last) {
-                    match alt {
-                        Pattern::Capture(name) if name != "_" => {
-                            self.set_syntax_error(&format!(
-                                "name capture '{}' makes remaining patterns unreachable",
-                                name
-                            ));
-                            return;
-                        }
-                        Pattern::Wildcard => {
-                            self.set_syntax_error("wildcard makes remaining patterns unreachable");
-                            return;
-                        }
-                        _ => {}
+                    // Recurse into the leading edge of nested OR patterns so that
+                    // `case (x | 1) | z:` is caught the same way as `case x | z:`.
+                    if let Some(name) = or_leading_capture(alt) {
+                        self.set_syntax_error(&format!(
+                            "name capture '{}' makes remaining patterns unreachable",
+                            name
+                        ));
+                        return;
+                    }
+                    if or_leading_is_wildcard(alt) {
+                        self.set_syntax_error("wildcard makes remaining patterns unreachable");
+                        return;
                     }
                 }
                 if let Some(first) = alternatives.first() {
@@ -5940,8 +5963,12 @@ impl Compiler {
                 let has_star = elements.iter().any(|(_, is_star)| *is_star);
                 let fixed_count = elements.iter().filter(|(_, s)| !s).count();
 
-                // R_len = len(subj)
+                // R_len = len(subj).  Wrap the call in try/except so that a
+                // TypeError (subject has no __len__) is treated as a sequence
+                // mismatch rather than a propagated error — matching CPython's
+                // behaviour for non-sequence types inside OR patterns.
                 let len_name_idx = self.intern_name("len");
+                let setup_idx = self.emit(Insn::SetupExcept(0));
                 let len_fn = self.alloc_temp();
                 self.emit(Insn::LoadGlobal(len_fn, len_name_idx));
                 let len_arg = self.alloc_temp();
@@ -5949,6 +5976,16 @@ impl Compiler {
                 self.emit(Insn::Call(len_fn, 1));
                 let r_len = len_fn; // result in len_fn after call
                 self.free_temp(len_arg);
+                // Success path: remove the exception handler.
+                self.emit(Insn::PopExcept);
+                let jmp_over_handler = self.emit(Insn::Jump(0));
+                // Exception handler: any error from len() means the subject is
+                // not a sequence — treat as match failure.
+                self.patch_jump(setup_idx);
+                self.emit(Insn::EndExcept);
+                let len_err_jmp = self.emit(Insn::Jump(0));
+                fail_patches.push(len_err_jmp);
+                self.patch_jump(jmp_over_handler);
 
                 // Check length
                 let count_val = self.intern_const(Value::int(fixed_count as i64));
