@@ -1340,6 +1340,10 @@ pyrust_module! {
                     | ValueKind::PyClass(_) => true,
                     ValueKind::BuiltinObject { .. } => {
                         pyrust_builtins::bound_method::is_bound_method(&callable)
+                            || pyrust_builtins::super_bound_builtin::as_super_bound_builtin(
+                                &callable,
+                            )
+                            .is_some()
                             || pyrust_builtins::property::property_partial_slot(&callable)
                                 .is_some_and(|slot| slot.is_some())
                     }
