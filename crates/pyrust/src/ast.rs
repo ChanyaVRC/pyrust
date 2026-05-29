@@ -73,6 +73,10 @@ pub enum Stmt {
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
         return_annotation: Option<Expr>,
+        /// Whether this function was declared with `async def`.
+        /// Stored for future use when async function execution is implemented;
+        /// the compiler currently rejects `await` expressions regardless.
+        #[allow(dead_code)]
         is_async: bool,
     },
     Class {

@@ -1333,18 +1333,6 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
     Ok(())
 }
 
-/// Returns true if the named builtin function is a classmethod on `object`.
-///
-/// CPython's `object.__init_subclass__` is a `classmethod_descriptor`; all
-/// other `object` dunders (`__init__`, `__str__`, etc.) are instance-method
-/// `wrapper_descriptor`s.  When `super()` is used inside a classmethod and
-/// the MRO walk resolves to a `BuiltinFunction` sentinel, we must only bind
-/// `cls` (not the class as if it were an instance `self`) for the known-
-/// classmethod entries.
-pub(crate) fn is_builtin_classmethod(fn_name: &str) -> bool {
-    matches!(fn_name, "object.__init_subclass__")
-}
-
 pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
     // `i64::MIN % -1` overflows; the mathematical result is 0.
     let mut remainder = a.wrapping_rem(b);
