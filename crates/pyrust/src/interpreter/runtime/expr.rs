@@ -4005,8 +4005,10 @@ impl Interpreter {
     /// The right-hand side may be a single value (implicitly a one-element
     /// positional tuple), a tuple (positional), or a dict (named lookup).
     fn str_printf_format(&mut self, fmt_val: Value, args: Value) -> Result<Value> {
-        let fmt = match fmt_val.kind() {
-            ValueKind::Str(s) => s.to_string(),
+        // Borrow the format string directly from the Value to avoid a heap allocation.
+        // fmt_val is held by value for the duration of this function, so the &str is valid.
+        let fmt: &str = match fmt_val.kind() {
+            ValueKind::Str(s) => s,
             _ => unreachable!("str_printf_format called with non-str left"),
         };
 
@@ -4058,8 +4060,8 @@ impl Interpreter {
                 ));
             }
 
-            // Named key: %(key)s
-            let named_key: Option<String> = if bytes[i] == b'(' {
+            // Named key: %(key)s — borrow a slice of fmt directly to avoid allocating.
+            let named_key: Option<&str> = if bytes[i] == b'(' {
                 i += 1;
                 let start = i;
                 while i < len && bytes[i] != b')' {
@@ -4071,7 +4073,7 @@ impl Interpreter {
                         "incomplete format key".to_string(),
                     ));
                 }
-                let key = fmt[start..i].to_string();
+                let key = &fmt[start..i];
                 i += 1; // consume ')'
                 Some(key)
             } else {
@@ -4169,7 +4171,7 @@ impl Interpreter {
             }
 
             // Get the argument value.
-            let arg: Value = if let Some(ref key) = named_key {
+            let arg: Value = if let Some(key) = named_key {
                 if is_mapping {
                     match args.kind() {
                         ValueKind::Dict(d) => {
@@ -4177,7 +4179,7 @@ impl Interpreter {
                             match d.get(&k) {
                                 Some(v) => v.clone(),
                                 None => {
-                                    return Err(PyError::key_error(Value::string(key.clone())));
+                                    return Err(PyError::key_error(Value::string(key)));
                                 }
                             }
                         }
@@ -4218,16 +4220,13 @@ impl Interpreter {
                         }
                         PrintfInt::Big(b) => {
                             // to_str_radix(10) includes the '-' sign for negatives.
-                            let s = b.to_str_radix(10);
-                            if s.starts_with('-') {
-                                s
-                            } else if flag_plus {
-                                format!("+{}", s)
-                            } else if flag_space {
-                                format!(" {}", s)
-                            } else {
-                                s
+                            let mut s = b.to_str_radix(10);
+                            if !s.starts_with('-') && flag_plus {
+                                s.insert(0, '+');
+                            } else if !s.starts_with('-') && flag_space {
+                                s.insert(0, ' ');
                             }
+                            s
                         }
                     }
                 }
@@ -4335,14 +4334,13 @@ impl Interpreter {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6);
-                    let s = format_scientific(f, prec, conv == 'E');
+                    let mut s = format_scientific(f, prec, conv == 'E');
                     if f.is_sign_positive() && flag_plus {
-                        format!("+{}", s)
+                        s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
-                        format!(" {}", s)
-                    } else {
-                        s
+                        s.insert(0, ' ');
                     }
+                    s
                 }
                 'f' | 'F' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
@@ -4351,7 +4349,7 @@ impl Interpreter {
                     // Special-case NaN and Inf before calling format!(), which
                     // produces Rust-style 'NaN'/'inf' rather than CPython-style
                     // 'nan'/'inf'/'NAN'/'INF'.
-                    let s = if f.is_nan() {
+                    let mut s = if f.is_nan() {
                         if upper { "NAN".to_string() } else { "nan".to_string() }
                     } else if f.is_infinite() {
                         if f > 0.0 {
@@ -4366,25 +4364,23 @@ impl Interpreter {
                         format!("{:.prec$}", f, prec = prec)
                     };
                     if f.is_sign_positive() && flag_plus {
-                        format!("+{}", s)
+                        s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
-                        format!(" {}", s)
-                    } else {
-                        s
+                        s.insert(0, ' ');
                     }
+                    s
                 }
                 'g' | 'G' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
-                    let s = format_general_float(f, prec, conv == 'G');
+                    let mut s = format_general_float(f, prec, conv == 'G');
                     if f.is_sign_positive() && flag_plus {
-                        format!("+{}", s)
+                        s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
-                        format!(" {}", s)
-                    } else {
-                        s
+                        s.insert(0, ' ');
                     }
+                    s
                 }
                 'c' => {
                     // Coerce int subclasses and __index__ objects the same way
