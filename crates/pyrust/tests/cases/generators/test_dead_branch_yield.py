@@ -63,3 +63,43 @@ def yields_if_true():
 
 g4 = yields_if_true()
 print(next(g4))  # 42
+
+# 7. while False: yield — dead loop body still marks the function as a generator.
+def while_false_yield():
+    while False:
+        yield 1
+
+g5 = while_false_yield()
+try:
+    next(g5)
+    print("FAIL: should raise StopIteration")
+except StopIteration:
+    print("ok-while-false")  # ok-while-false
+
+# 8. if True: pass; else: yield — skipped else still marks as generator.
+def if_true_else_yield():
+    if True:
+        pass
+    else:
+        yield 99
+
+g6 = if_true_else_yield()
+try:
+    next(g6)
+    print("FAIL: should raise StopIteration")
+except StopIteration:
+    print("ok-skipped-else")  # ok-skipped-else
+
+# 9. if True: pass; elif ...: yield — skipped elif still marks as generator.
+def if_true_elif_yield():
+    if True:
+        pass
+    elif False:
+        yield 99
+
+g7 = if_true_elif_yield()
+try:
+    next(g7)
+    print("FAIL: should raise StopIteration")
+except StopIteration:
+    print("ok-skipped-elif")  # ok-skipped-elif

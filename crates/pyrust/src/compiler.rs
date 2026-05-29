@@ -5880,11 +5880,20 @@ impl Compiler {
                         if self.failed {
                             return;
                         }
+                        // A `yield`/`yield from` in a skipped branch still makes
+                        // the enclosing function a generator (CPython parity,
+                        // issue #1758).
+                        if self.is_function_scope && stmts_contain_yield(skipped_body) {
+                            self.has_dead_yield = true;
+                        }
                     }
                     if let Some(else_stmts) = else_branch {
                         self.check_dead_block(else_stmts, in_loop);
                         if self.failed {
                             return;
+                        }
+                        if self.is_function_scope && stmts_contain_yield(else_stmts) {
+                            self.has_dead_yield = true;
                         }
                     }
                     for idx in end_patches {
@@ -6448,6 +6457,11 @@ impl Compiler {
             self.check_dead_block(body, true);
             if self.failed {
                 return;
+            }
+            // A `yield`/`yield from` in a dead `while False` body still makes
+            // the enclosing function a generator (CPython parity, issue #1758).
+            if self.is_function_scope && stmts_contain_yield(body) {
+                self.has_dead_yield = true;
             }
             if let Some(else_stmts) = else_branch {
                 self.compile_block(else_stmts);
