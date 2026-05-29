@@ -4058,6 +4058,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
         // Def and Class bodies are separate scopes — their yields do not make
         // the enclosing function a generator.
         Stmt::Def { .. } | Stmt::Class { .. } => false,
+        Stmt::TypeAlias { value, .. } => expr_contains_yield(value),
     }
 }
 
