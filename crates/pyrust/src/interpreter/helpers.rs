@@ -4731,6 +4731,72 @@ fn format_single_exc_line(value: &Value) -> String {
     }
 }
 
+/// Call `__del__` on `val` if it is a `PyInstance` with a `__del__` method
+/// AND no other Python-visible binding to the same instance still exists.
+///
+/// "Python-visible" bindings are:
+///   - Named local-variable registers (indices `0..num_locals`).  Compiler
+///     temporaries (index `>= num_locals`) are not Python names and must
+///     not prevent `__del__` from firing.  The deleted register has already
+///     been cleared to `Value::unset()` by the caller, so it naturally
+///     produces no match during the scan.
+///   - `interp.env.borrow().values`: global / nonlocal / cell-var bindings.
+///
+/// This deliberately ignores interpreter-internal state (reusable argument
+/// buffers, inline caches, etc.) because those are implementation details
+/// invisible to Python code, mirroring CPython's refcount semantics where
+/// only Python-level references keep an object alive.
+///
+/// Errors from `__del__` are silently swallowed (CPython prints a warning to
+/// stderr but does not propagate the exception to the caller).
+pub(crate) fn call_del_if_last_binding(
+    interp: &mut Interpreter,
+    val: Value,
+    regs: &RegSlice,
+    num_locals: usize,
+) {
+    let del_rc = match val.as_py_instance_rc() {
+        Some(rc) => rc,
+        None => return,
+    };
+    // Look up __del__ before the scan so we exit early for objects without it.
+    let method = match lookup_class_attr(&del_rc.borrow().class, "__del__") {
+        Some(m)
+            if matches!(
+                m.kind(),
+                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+            ) =>
+        {
+            m
+        }
+        _ => return,
+    };
+    // Scan named local-variable registers (0..num_locals) for another binding.
+    // Registers >= num_locals are compiler temporaries — not Python variables.
+    let scan_limit = num_locals.min(regs.len());
+    for i in 0..scan_limit {
+        if let Some(other_rc) = regs[i].as_py_instance_rc() {
+            if Rc::ptr_eq(other_rc, del_rc) {
+                return; // another named local still holds the instance
+            }
+        }
+    }
+    // Scan env.values for a Python-level binding (globals / nonlocals / cells).
+    for v in interp.env.borrow().values.values() {
+        if let Some(other_rc) = v.as_py_instance_rc() {
+            if Rc::ptr_eq(other_rc, del_rc) {
+                return; // a global/nonlocal/cell var still holds the instance
+            }
+        }
+    }
+    // No other Python-visible binding — invoke __del__.
+    let instance = Value::py_instance(Rc::clone(del_rc));
+    drop(val); // release our reference before calling __del__
+    // Swallow errors — CPython prints a warning but does not propagate
+    // __del__ exceptions to the caller.
+    let _ = invoke_class_method(interp, method, instance, &[]);
+}
+
 #[cfg(test)]
 mod purity_tests {
     use super::is_pure_body;
