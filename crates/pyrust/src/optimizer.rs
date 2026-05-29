@@ -1700,6 +1700,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             (r >= *bases_base && r < *bases_base + *bases_n as u32)
                 || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n as u32)
         }
+        MakeTypeAlias(_, _, value_reg) => *value_reg == r,
 
         // Yield reads src and writes dst.
         Yield { src, dst: _ } => *src == r,
@@ -1871,6 +1872,9 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             for r in *kwarg_base..*kwarg_base + *kwarg_n as u32 {
                 reads.insert(r);
             }
+        }
+        MakeTypeAlias(_, _, value_reg) => {
+            reads.insert(*value_reg);
         }
         Yield { src, .. } => {
             reads.insert(*src);
@@ -2438,6 +2442,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | ImportModule(r, _)
         | MakeFunction(r, _, _, _, _, _)
         | MakeClass(r, _, _, _, _, _, _)
+        | MakeTypeAlias(r, _, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildSlice(r, _)
@@ -5317,6 +5322,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
                 mark(&mut used, *step);
             }
             Insn::ForCountReg(_, _, _, step, _) => mark(&mut used, *step),
+            Insn::MakeTypeAlias(_, name_idx, _) => mark(&mut used, *name_idx),
             _ => {}
         }
     }
@@ -5350,6 +5356,9 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             }
             Insn::ForCountReg(v, op, stop, step, k) => {
                 Insn::ForCountReg(v, op, stop, remap(step), k)
+            }
+            Insn::MakeTypeAlias(dst, name_idx, value_reg) => {
+                Insn::MakeTypeAlias(dst, remap(name_idx), value_reg)
             }
             other => other,
         })
@@ -5835,6 +5844,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
         }
+        MakeTypeAlias(_, _, value_reg) => f(*value_reg),
         Yield { src, .. } => f(*src),
         YieldFrom {
             iter_reg, sent_reg, ..

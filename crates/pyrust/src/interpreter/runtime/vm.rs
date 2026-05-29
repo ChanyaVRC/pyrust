@@ -4509,6 +4509,23 @@ impl Interpreter {
                     regs[*dst as usize] = Value::py_class(class);
                 }
 
+                // ── PEP 695 type alias ───────────────────────────────────
+                Insn::MakeTypeAlias(dst, name_idx, value_reg) => {
+                    let name_val = pool_get!(code.consts, *name_idx, "const");
+                    let name_str = match name_val.kind() {
+                        pyrust_core::ValueKind::Str(s) => s.to_string(),
+                        _ => {
+                            vm_try!(Err(PyError::Runtime(
+                                "MakeTypeAlias: name must be a string constant".to_string(),
+                            )));
+                            unreachable!()
+                        }
+                    };
+                    let value_val = vm_try!(vm_read(&regs, *value_reg, num_locals)).clone();
+                    let inst = make_type_alias_instance(name_str, value_val);
+                    regs[*dst as usize] = inst;
+                }
+
                 // ── Import ───────────────────────────────────────────────
                 Insn::ImportModule(dst, name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name");
@@ -6138,6 +6155,46 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
 
     // Fallback: builtins not yet installed (startup) or materialisation failed.
     PyError::named("RuntimeError", "generator raised StopIteration")
+}
+
+// ── PEP 695 TypeAliasType support ────────────────────────────────────────────
+
+thread_local! {
+    /// Class singleton for `TypeAliasType` objects created by `type X = ...`.
+    static TYPE_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        // __repr__ is handled by the instance's __name__ attribute via a
+        // builtin function registered as "builtins.TypeAliasType.__repr__".
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("builtins.TypeAliasType.__repr__"),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: "TypeAliasType".to_string(),
+            qualname: "TypeAliasType".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs,
+            mutation_version: Cell::new(0),
+            subclasses: RefCell::new(vec![]),
+            metatype: None,
+        }))
+    };
+}
+
+/// Construct a `TypeAliasType` `PyInstance` with `__name__` and `__value__`
+/// attributes, matching the observable behaviour of CPython's
+/// `typing.TypeAliasType`.
+pub(crate) fn make_type_alias_instance(name: String, value: Value) -> Value {
+    TYPE_ALIAS_CLASS.with(|cls| {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert("__name__".to_string(), Value::string(name));
+        attrs.insert("__value__".to_string(), value);
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(cls),
+            attrs,
+        })))
+    })
 }
 
 #[cfg(test)]

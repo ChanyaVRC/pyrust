@@ -6825,6 +6825,26 @@ pyrust_module! {
             }
         }
     }
+
+    /// PEP 695: `TypeAliasType.__repr__` — returns the alias name string.
+    /// CPython: `print(Vector)` outputs just `Vector` (the alias name).
+    #[py_name = "builtins.TypeAliasType.__repr__"]
+    fn type_alias_type_repr(args) -> Result<Value> {
+        let _ = _interp;
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__repr__' of 'TypeAliasType' needs an argument".to_string(),
+            )
+        })?;
+        if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
+            let borrowed = inst_rc.borrow();
+            if let Some(name_val) = borrowed.attrs.get("__name__") {
+                return Ok(Value::string(name_val.to_string()));
+            }
+        }
+        Ok(Value::string(self_val.repr()))
+    }
 }
 
 /// Detect the numeric base and build the digits string to parse when
