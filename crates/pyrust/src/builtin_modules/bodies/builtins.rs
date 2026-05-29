@@ -1336,6 +1336,10 @@ pyrust_module! {
                     | ValueKind::PyClass(_) => true,
                     ValueKind::BuiltinObject { .. } => {
                         pyrust_builtins::bound_method::is_bound_method(&callable)
+                            || pyrust_builtins::super_bound_builtin::as_super_bound_builtin(
+                                &callable,
+                            )
+                            .is_some()
                             || pyrust_builtins::property::property_partial_slot(&callable)
                                 .is_some_and(|slot| slot.is_some())
                     }
@@ -4312,8 +4316,14 @@ pyrust_module! {
             // callable.  Accessor partials (intermediate results of
             // prop.setter / prop.getter / prop.deleter) are callable too —
             // but a plain property descriptor isn't.
+            // Issue #1772: super_bound_builtin (returned by e.g.
+            // `object.__subclasshook__` or `object.__init_subclass__`) are
+            // also callable — CPython exposes these as
+            // `builtin_function_or_method` which is always callable.
             ValueKind::BuiltinObject { .. } => {
                 pyrust_builtins::bound_method::is_bound_method(value)
+                    || pyrust_builtins::super_bound_builtin::as_super_bound_builtin(value)
+                        .is_some()
                     || pyrust_builtins::property::property_partial_slot(value)
                         .is_some_and(|slot| slot.is_some())
             }
