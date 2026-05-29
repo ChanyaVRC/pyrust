@@ -177,7 +177,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             _ => Err(PyError::named(
                 "TypeError",
                 format!(
-                    "argument should be integer or bytes-like object, not '{}'",
+                    "a bytes-like object is required, not '{}'",
                     pyrust_core::builtin_type_name(item)
                 ),
             )),
@@ -842,7 +842,7 @@ fn value_to_index(key: &Value, len: usize, type_name: &str) -> Result<usize> {
 
 /// Convert a `Value` to a single byte (0..255).  Used for item assignment
 /// and `append`.
-fn value_to_byte(v: &Value, context: &str) -> Result<u8> {
+fn value_to_byte(v: &Value, _context: &str) -> Result<u8> {
     match v.kind() {
         ValueKind::Int(n) => {
             if (0..=255).contains(&n) {
@@ -850,7 +850,7 @@ fn value_to_byte(v: &Value, context: &str) -> Result<u8> {
             } else {
                 Err(PyError::named(
                     "ValueError",
-                    format!("{context}: byte must be in range(0, 256)"),
+                    "byte must be in range(0, 256)".to_string(),
                 ))
             }
         }
@@ -858,7 +858,7 @@ fn value_to_byte(v: &Value, context: &str) -> Result<u8> {
         _ => Err(PyError::named(
             "TypeError",
             format!(
-                "{context}: an integer is required, not '{}'",
+                "'{}' object cannot be interpreted as an integer",
                 pyrust_core::builtin_type_name(v)
             ),
         )),
@@ -891,16 +891,31 @@ fn bytes_from_value(v: &Value, context: &str) -> Result<Vec<u8>> {
             }
             Ok(out)
         }
+        // CPython rejects str in slice assignment with a special message;
+        // for extend() it iterates the string and fails per-character.
+        ValueKind::Str(_) if context != "bytearray.extend" => Err(PyError::named(
+            "TypeError",
+            "can assign only bytes, buffers, or iterables of ints in range(0, 256)".to_string(),
+        )),
         _ => {
+            let type_name = pyrust_core::builtin_type_name(v);
             // Try materialising via the registered iter callback.
             let items = pyrust_core::iter_values_via_registry(v).map_err(|_| {
-                PyError::named(
-                    "TypeError",
-                    format!(
-                        "cannot convert '{}' to bytes",
-                        pyrust_core::builtin_type_name(v)
-                    ),
-                )
+                // Mirror CPython wording for the two call sites:
+                // extend() → "can't extend bytearray with <type>"
+                // slice assignment → "can assign only bytes, buffers, or iterables of ints in range(0, 256)"
+                if context == "bytearray.extend" {
+                    PyError::named(
+                        "TypeError",
+                        format!("can't extend bytearray with {type_name}"),
+                    )
+                } else {
+                    PyError::named(
+                        "TypeError",
+                        "can assign only bytes, buffers, or iterables of ints in range(0, 256)"
+                            .to_string(),
+                    )
+                }
             })?;
             let mut out = Vec::with_capacity(items.len());
             for item in &items {
