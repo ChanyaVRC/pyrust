@@ -10,21 +10,25 @@
 //
 // ## Design
 //
-// Each ABC is a per-thread `PyClass` singleton with no methods.
-// `isinstance` checks work through two mechanisms:
+// Each ABC is a per-thread `PyClass` singleton.  `isinstance` checks work
+// through three mechanisms:
 //
-// 1. **Structural subtyping via `abc_subclasshook`**: when `isinstance(x, ABC)`
-//    is called, `isinstance_single` calls `abc_subclasshook(abc_name, x)`.
-//    For user-defined instances, this walks the class MRO checking whether
-//    each required abstract method is present and non-None.  For built-in
-//    values, a hardcoded protocol table covers the known dunders.
-//    Returns `Some(true)`/`Some(false)` to short-circuit, `None` to fall
-//    through to the `extra_bases` / MRO check.
+// 1. **`__instancecheck__` / `__subclasshook__` method dispatch**: each ABC
+//    stores `__instancecheck__`, `__subclasshook__`, and `__subclasscheck__`
+//    as `BuiltinFunction` attrs.  The `isinstance` builtin detects these and
+//    calls them via the interpreter, mirroring CPython's
+//    `ABCMeta.__instancecheck__` → `__subclasshook__` → `_check_methods`
+//    chain.  This enables:
+//      - `hasattr(Iterable, '__instancecheck__')` → True
+//      - `Iterable.__instancecheck__(Foo())` → True (direct call)
+//      - `issubclass(UserClass, Iterable)` → structural check (fixes #1799)
 //
-//    This mirrors CPython's `__subclasshook__` + `_check_methods` mechanism
-//    from `Lib/_collections_abc.py`.
+// 2. **`abc_subclasshook`** (internal helper): the shared Rust implementation
+//    used by `__subclasshook__` and `__instancecheck__` for the structural
+//    check.  Walks the class MRO for user instances, or uses the hardcoded
+//    primitive protocol table for built-in values.
 //
-// 2. **`extra_bases` registration** (legacy / complex ABCs): on first module
+// 3. **`extra_bases` registration** (legacy / complex ABCs): on first module
 //    load, `register_abc_extra_bases()` links each ABC that lacks a direct
 //    structural hook (Sequence, MutableSequence, Set, MutableSet, Mapping,
 //    MutableMapping) into the `extra_bases` of the relevant primitive class
@@ -73,6 +77,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::error::{PyError, Result};
+use crate::interpreter::{class_is_subclass_of, ExpandedCallArg};
 use crate::value::{PyClass, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -124,20 +130,6 @@ thread_local! {
 
     // Once-per-thread flag: `true` after `register_abc_extra_bases` has run.
     static ABC_REGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Public accessor: return the Callable ABC PyClass singleton.
-/// Used by `isinstance_single` in builtins.rs to handle
-/// `isinstance(len, Callable)` for built-in function values.
-pub(crate) fn callable_abc_class() -> Rc<RefCell<PyClass>> {
-    ABC_CALLABLE.with(Rc::clone)
-}
-
-/// Public accessor: return the Hashable ABC PyClass singleton.
-/// Used by `isinstance_single` in builtins.rs to handle
-/// `isinstance(len, Hashable)` for built-in function and bound-method values.
-pub(crate) fn hashable_abc_class() -> Rc<RefCell<PyClass>> {
-    ABC_HASHABLE.with(Rc::clone)
 }
 
 // ── Required-method table (mirrors CPython's __subclasshook__ impls) ──────────
@@ -309,10 +301,10 @@ fn class_mro_has_method(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<bool
 
 // ── Public structural subtyping hook ─────────────────────────────────────────
 
-/// `__subclasshook__`-style structural subtyping check.
+/// `__subclasshook__`-style structural subtyping check for an *instance*.
 ///
-/// Called by `isinstance_single` in `builtins.rs` when the expected class is
-/// a known ABC.  Mirrors CPython's `ABCMeta.__instancecheck__` → `__subclasshook__`
+/// Used internally by the `__instancecheck__` and `__subclasshook__` builtins.
+/// Mirrors CPython's `ABCMeta.__instancecheck__` → `__subclasshook__`
 /// → `_check_methods` chain.
 ///
 /// Returns:
@@ -340,10 +332,6 @@ pub(crate) fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
         // All other value kinds (primitives, BuiltinFunction, Generator, …):
         // use the hardcoded protocol table.
         _ => {
-            // Special case: BuiltinFunction and BuiltinObject bound methods are
-            // already handled by dedicated arms in isinstance_single for Callable
-            // and Hashable.  For other ABCs they correctly return false via the
-            // primitive_value_has_dunder table.
             for &method in required {
                 if !primitive_value_has_dunder(value, method) {
                     return Some(false);
@@ -353,6 +341,37 @@ pub(crate) fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
         }
     }
 }
+
+/// `__subclasshook__`-style structural subtyping check for a *class* (used by
+/// `issubclass`).  Checks whether the class `C` has all required methods in
+/// its MRO.  Returns `NotImplemented` (as `None`) when a method is absent —
+/// this allows the caller to fall back to the `extra_bases` / MRO check
+/// (`class_is_subclass_of`), which is the source of truth for primitive types
+/// like `list` whose methods are not stored in the `PyClass` attrs dict.
+///
+/// Mirrors CPython's `_check_methods`: absent → `NotImplemented`, explicit
+/// `None` (e.g., `__hash__ = None`) → `False`.
+fn abc_subclasshook_for_class(abc_name: &str, class: &Rc<RefCell<PyClass>>) -> Option<bool> {
+    let required = required_methods(abc_name)?;
+    for &method in required {
+        match class_mro_has_method(class, method) {
+            Some(true) => {} // present and non-None; continue
+            Some(false) => return Some(false), // explicitly None → hard False
+            None => return None,              // absent → NotImplemented; let caller fall back
+        }
+    }
+    Some(true)
+}
+
+// ── Registry names for the three ABC dunder methods ─────────────────────────
+//
+// These must match the `fn <short_name>(args)` declarations inside the
+// `pyrust_module!` below, prefixed with the module's `FN_PREFIX`
+// ("collections.abc.").
+
+const ABC_INSTANCECHECK_FN:   &str = "collections.abc.__instancecheck__";
+const ABC_SUBCLASSHOOK_FN:    &str = "collections.abc.__subclasshook__";
+const ABC_SUBCLASSCHECK_FN:   &str = "collections.abc.__subclasscheck__";
 
 pyrust_module! {
     constants {
@@ -381,6 +400,135 @@ pyrust_module! {
         "AsyncGenerator"   => Value::py_class(ABC_ASYNC_GENERATOR.with(Rc::clone)),
         "Buffer"           => Value::py_class(ABC_BUFFER.with(Rc::clone))
     }
+
+    /// ABC.__instancecheck__(cls, instance) — called by the `isinstance` builtin
+    /// when `cls` is an ABC with this method in its attrs.
+    ///
+    /// Protocol:
+    ///   1. Call cls.__subclasshook__(type(instance)).
+    ///   2. If the result is True or False, return it.
+    ///   3. Otherwise fall through to class_is_subclass_of (MRO / extra_bases).
+    ///
+    /// args[0] = cls (the ABC class value), args[1] = instance.
+    #[py_name = "__instancecheck__"]
+    fn abc_instancecheck(args) -> Result<Value> {
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 2 arguments ({} given)", args.len()),
+            ));
+        }
+        let cls_val  = &args[0].value;
+        let instance = &args[1].value;
+
+        let abc_name = match cls_val.kind() {
+            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+            _ => return Err(PyError::named("TypeError",
+                format!("{FN_NAME}() first argument must be a class"))),
+        };
+
+        // Step 1: structural hook (instance-based).
+        if let Some(result) = abc_subclasshook(&abc_name, instance) {
+            return Ok(Value::bool_(result));
+        }
+
+        // Step 2: MRO / extra_bases fallback.
+        let actual_class = match instance.kind() {
+            ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+                Some(crate::interpreter::method_type_singleton())
+            }
+            ValueKind::UserFunction(_) => Some(crate::interpreter::function_type_singleton()),
+            ValueKind::PyClass(cls_rc) => {
+                let meta = cls_rc.borrow().metatype.clone();
+                Some(meta.unwrap_or_else(crate::interpreter::type_class_singleton))
+            }
+            _ => crate::interpreter::primitive_class_for_value(instance),
+        };
+
+        if let (Some(actual), ValueKind::PyClass(expected_rc)) = (actual_class, cls_val.kind()) {
+            return Ok(Value::bool_(class_is_subclass_of(&actual, expected_rc)));
+        }
+
+        Ok(Value::bool_(false))
+    }
+
+    /// ABC.__subclasshook__(cls, C) — classmethod-style structural check.
+    ///
+    /// Called directly or via `__subclasscheck__`.  Returns True/False if this
+    /// ABC has a structural hook for `C`, or NotImplemented if not applicable.
+    ///
+    /// args[0] = cls (the ABC class value), args[1] = C (class to check).
+    #[py_name = "__subclasshook__"]
+    fn abc_subclasshook_method(args) -> Result<Value> {
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 2 arguments ({} given)", args.len()),
+            ));
+        }
+        let cls_val = &args[0].value;
+        let c_val   = &args[1].value;
+
+        let abc_name = match cls_val.kind() {
+            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+            _ => return Err(PyError::named("TypeError",
+                format!("{FN_NAME}() first argument must be a class"))),
+        };
+
+        match c_val.kind() {
+            ValueKind::PyClass(c_rc) => {
+                match abc_subclasshook_for_class(&abc_name, c_rc) {
+                    Some(result) => Ok(Value::bool_(result)),
+                    None => Ok(Value::not_implemented()),
+                }
+            }
+            _ => Ok(Value::not_implemented()),
+        }
+    }
+
+    /// ABC.__subclasscheck__(cls, subclass) — called by the `issubclass` builtin
+    /// when `cls` is an ABC with this method in its attrs.
+    ///
+    /// Protocol:
+    ///   1. Call cls.__subclasshook__(subclass).
+    ///   2. If the result is True or False, return it.
+    ///   3. Otherwise fall through to class_is_subclass_of (MRO / extra_bases).
+    ///
+    /// args[0] = cls (the ABC class value), args[1] = subclass.
+    #[py_name = "__subclasscheck__"]
+    fn abc_subclasscheck(args) -> Result<Value> {
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 2 arguments ({} given)", args.len()),
+            ));
+        }
+        let cls_val      = &args[0].value;
+        let subclass_val = &args[1].value;
+
+        let abc_name = match cls_val.kind() {
+            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+            _ => return Err(PyError::named("TypeError",
+                format!("{FN_NAME}() first argument must be a class"))),
+        };
+
+        match subclass_val.kind() {
+            ValueKind::PyClass(c_rc) => {
+                // Step 1: structural hook (class-based).
+                if let Some(result) = abc_subclasshook_for_class(&abc_name, c_rc) {
+                    return Ok(Value::bool_(result));
+                }
+                // Step 2: MRO / extra_bases fallback.
+                let expected_rc = match cls_val.kind() {
+                    ValueKind::PyClass(rc) => rc,
+                    _ => unreachable!(),
+                };
+                Ok(Value::bool_(class_is_subclass_of(c_rc, expected_rc)))
+            }
+            _ => Ok(Value::bool_(false)),
+        }
+    }
 }
 
 // `make_abc_module` is called for the "Container" constant to trigger
@@ -395,7 +543,9 @@ fn make_abc_module() -> Value {
     Value::py_class(ABC_CONTAINER.with(Rc::clone))
 }
 
-/// Register each ABC as an `extra_base` on the relevant primitive class(es).
+/// Register each ABC as an `extra_base` on the relevant primitive class(es),
+/// and add `__instancecheck__`, `__subclasshook__`, and `__subclasscheck__`
+/// as `BuiltinFunction` attrs on every ABC class.
 ///
 /// Called once per thread on first module load.  Mutates `extra_bases`
 /// on the per-thread primitive class singletons so that
@@ -406,11 +556,9 @@ fn make_abc_module() -> Value {
 /// as well as Callable for user-defined functions / classes.
 ///
 /// The simple ABCs (Hashable, Iterable, Sized, Container, etc.) are now
-/// handled by `abc_subclasshook` for all value kinds, so they no longer need
-/// entries here.  The legacy entries are kept for the primitive class singletons
-/// so that `issubclass(list, Iterable)` etc. still works via the class MRO —
-/// the `extra_bases` on the primitive classes are still the source of truth
-/// for class-vs-class subclass relationships.
+/// handled by `__instancecheck__` / `__subclasscheck__` for all value kinds.
+/// The `extra_bases` entries are kept for the primitive class singletons so
+/// that `issubclass(list, Iterable)` etc. still works via the class MRO.
 ///
 /// CPython registration table (from Lib/_collections_abc.py):
 ///
@@ -426,8 +574,8 @@ fn make_abc_module() -> Value {
 ///   MutableSet:      set
 ///   Mapping:         dict
 ///   MutableMapping:  dict
-///   Callable:        function, method, type  (+ BuiltinFunction — handled
-///                    via name check in isinstance_single)
+///   Callable:        function, method, type  (+ BuiltinFunction / BuiltinObject
+///                    bound methods — now handled via __instancecheck__)
 fn register_abc_extra_bases() {
     use crate::interpreter::{
         function_type_singleton, method_type_singleton, object_class_singleton,
@@ -455,11 +603,31 @@ fn register_abc_extra_bases() {
             .push(Rc::downgrade(prim));
     }
 
+    // Add __instancecheck__, __subclasshook__, __subclasscheck__ to an ABC as
+    // BuiltinFunction values.  When accessed on a PyClass via env.rs::get_attr,
+    // these are intercepted by `is_builtin_classmethod` and wrapped as
+    // `super_bound_builtin(fn_name, cls)`, so that direct access
+    // `Iterable.__instancecheck__` returns a bound callable where cls=Iterable.
+    // This means `Iterable.__instancecheck__(x)` is called as
+    // `abc_instancecheck([Iterable, x])` after the super_bound_builtin dispatch
+    // prepends the receiver.
+    fn add_dunder_methods(abc: &Rc<RefCell<PyClass>>) {
+        let mut borrowed = abc.borrow_mut();
+        borrowed.attrs.entry("__instancecheck__".to_string())
+            .or_insert_with(|| Value::builtin_function(ABC_INSTANCECHECK_FN));
+        borrowed.attrs.entry("__subclasshook__".to_string())
+            .or_insert_with(|| Value::builtin_function(ABC_SUBCLASSHOOK_FN));
+        borrowed.attrs.entry("__subclasscheck__".to_string())
+            .or_insert_with(|| Value::builtin_function(ABC_SUBCLASSCHECK_FN));
+    }
+
     // Resolve ABCs once.
     let container       = ABC_CONTAINER.with(Rc::clone);
     let hashable        = ABC_HASHABLE.with(Rc::clone);
     let iterable        = ABC_ITERABLE.with(Rc::clone);
+    let iterator        = ABC_ITERATOR.with(Rc::clone);
     let reversible      = ABC_REVERSIBLE.with(Rc::clone);
+    let generator       = ABC_GENERATOR.with(Rc::clone);
     let sized           = ABC_SIZED.with(Rc::clone);
     let callable        = ABC_CALLABLE.with(Rc::clone);
     let sequence        = ABC_SEQUENCE.with(Rc::clone);
@@ -468,6 +636,27 @@ fn register_abc_extra_bases() {
     let mut_set         = ABC_MUTABLE_SET.with(Rc::clone);
     let mapping         = ABC_MAPPING.with(Rc::clone);
     let mut_mapping     = ABC_MUTABLE_MAPPING.with(Rc::clone);
+    let mapping_view    = ABC_MAPPING_VIEW.with(Rc::clone);
+    let keys_view       = ABC_KEYS_VIEW.with(Rc::clone);
+    let items_view      = ABC_ITEMS_VIEW.with(Rc::clone);
+    let values_view     = ABC_VALUES_VIEW.with(Rc::clone);
+    let awaitable       = ABC_AWAITABLE.with(Rc::clone);
+    let coroutine       = ABC_COROUTINE.with(Rc::clone);
+    let async_iterable  = ABC_ASYNC_ITERABLE.with(Rc::clone);
+    let async_iterator  = ABC_ASYNC_ITERATOR.with(Rc::clone);
+    let async_generator = ABC_ASYNC_GENERATOR.with(Rc::clone);
+    let buffer          = ABC_BUFFER.with(Rc::clone);
+
+    // Add __instancecheck__ / __subclasshook__ / __subclasscheck__ to every ABC.
+    for abc in [
+        &container, &hashable, &iterable, &iterator, &reversible, &generator,
+        &sized, &callable, &sequence, &mut_sequence, &set_abc, &mut_set,
+        &mapping, &mut_mapping, &mapping_view, &keys_view, &items_view,
+        &values_view, &awaitable, &coroutine, &async_iterable, &async_iterator,
+        &async_generator, &buffer,
+    ] {
+        add_dunder_methods(abc);
+    }
 
     // Resolve primitive classes.
     macro_rules! prim {
@@ -569,8 +758,8 @@ fn register_abc_extra_bases() {
     }
 
     // ── Callable ────────────────────────────────────────────────────────────
-    // function, method, type.  BuiltinFunction values are handled via
-    // name check in isinstance_single (builtins.rs).
+    // function, method, type.  BuiltinFunction and BuiltinObject bound methods
+    // are now handled via __instancecheck__ using the primitive protocol table.
     let fn_type  = function_type_singleton();
     let meth_type = method_type_singleton();
     let type_cls = type_class_singleton();
