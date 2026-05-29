@@ -17,6 +17,16 @@ try:
 except TypeError as e:
     print(e)  # islice expected at most 4 arguments, got 5
 
+try:
+    itertools.islice([1, 2, 3], -2)
+except ValueError as e:
+    print(e)  # Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.
+
+try:
+    itertools.islice([1, 2, 3], -1, 2)
+except ValueError as e:
+    print(e)  # Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.
+
 # count: optional start and step
 try:
     itertools.count(1, 2, 3)
@@ -132,6 +142,22 @@ try:
     itertools.compress([1], [1], [1])
 except TypeError as e:
     print(e)  # compress() takes at most 2 arguments (3 given)
+
+# groupby: iterable required, key optional
+try:
+    itertools.groupby()
+except TypeError as e:
+    print(e)  # groupby() missing required argument 'iterable' (pos 1)
+
+try:
+    itertools.groupby([1, 2], foo=1)
+except TypeError as e:
+    print(e)  # 'foo' is an invalid keyword argument for groupby()
+
+try:
+    itertools.groupby([1, 2], lambda x: x, lambda x: x)
+except TypeError as e:
+    print(e)  # groupby() takes at most 2 arguments (3 given)
 
 # Happy-path smoke check: correct arity should not raise
 print(list(itertools.islice([1, 2, 3, 4], 2)))  # [1, 2]

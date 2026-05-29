@@ -87,7 +87,7 @@ pyrust_module! {
             if stop.is_some_and(|s| s < 0) || start < 0 {
                 return Err(PyError::named(
                     "ValueError",
-                    "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
+                    "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize."
                         .to_string(),
                 ));
             }
@@ -1090,7 +1090,7 @@ pyrust_module! {
                     Some("key") => key_kw = Some(a.value.clone()),
                     Some(other) => return Err(PyError::named(
                         "TypeError",
-                        format!("'{other}' is an invalid keyword argument for accumulate()"),
+                        format!("'{other}' is an invalid keyword argument for groupby()"),
                     )),
                     None => positional.push(a.value.clone()),
                 }
@@ -1098,14 +1098,14 @@ pyrust_module! {
             if positional.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    "accumulate() missing required argument 'iterable' (pos 1)".to_string(),
+                    "groupby() missing required argument 'iterable' (pos 1)".to_string(),
                 ));
             }
             if positional.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "accumulate() takes at most 2 positional arguments ({} given)",
+                        "groupby() takes at most 2 arguments ({} given)",
                         positional.len()
                     ),
                 ));
