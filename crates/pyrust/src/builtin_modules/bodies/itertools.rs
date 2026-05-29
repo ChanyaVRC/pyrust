@@ -1342,7 +1342,7 @@ pyrust_module! {
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                    format!("filterfalse expected 2 arguments, got {}", user.len()),
                 ));
             }
             let iter = make_iter(_interp, user[1].value.clone())?;
@@ -1391,20 +1391,30 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/itertools.html#itertools.tee>
     fn tee(args) -> Result<Value> {
         // Parse: tee(iterable) or tee(iterable, n)
+        // CPython rejects keyword arguments outright for tee().
         let mut positional: Vec<Value> = Vec::new();
         for a in args {
             match a.name.as_deref() {
-                Some(other) => return Err(PyError::named(
-                    "TypeError",
-                    format!("tee() got an unexpected keyword argument '{other}'"),
-                )),
+                Some(_) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "itertools.tee() takes no keyword arguments".to_string(),
+                    ))
+                }
                 None => positional.push(a.value.clone()),
             }
         }
-        if positional.is_empty() || positional.len() > 2 {
+        let got = positional.len();
+        if got == 0 {
             return Err(PyError::named(
                 "TypeError",
-                "tee() takes 1 or 2 arguments".to_string(),
+                format!("tee expected at least 1 argument, got {got}"),
+            ));
+        }
+        if got > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("tee expected at most 2 arguments, got {got}"),
             ));
         }
         let n: usize = match positional.get(1).map(|v| v.kind()) {
@@ -1459,7 +1469,10 @@ pyrust_module! {
             if user.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
+                    format!(
+                        "pairwise expected 1 argument, got {}",
+                        user.len()
+                    ),
                 ));
             }
             let iter = make_iter(_interp, user[0].value.clone())?;
@@ -1531,10 +1544,16 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
             reject_keyword_args_expanded(FN_NAME, user)?;
-            if user.len() != 2 {
+            if user.len() < 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                    "batched() missing required argument 'n' (pos 2)".to_string(),
+                ));
+            }
+            if user.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("batched() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
             let n = match user[1].value.kind() {
@@ -1544,10 +1563,16 @@ pyrust_module! {
                     "ValueError",
                     "n must be at least one".to_string(),
                 )),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() n must be an integer"),
-                )),
+                _ => {
+                    let n_val = &user[1].value;
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(n_val),
+                        ),
+                    ));
+                }
             };
             let iter = make_iter(_interp, user[0].value.clone())?;
             let mut a = inst.borrow_mut();
