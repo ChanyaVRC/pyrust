@@ -4690,13 +4690,23 @@ pyrust_module! {
             ));
         }
         // args[0] is the implicit `cls` prepended by the classmethod dispatch.
-        // Any additional positional arguments are excess.
+        // Any additional positional arguments are excess.  Use the same cls_name
+        // lookup as the keyword-error path: CPython uses the subclass name in
+        // the positional error too (e.g. "B.__init_subclass__() takes no
+        // arguments (1 given)" when called as `B.__init_subclass__(42)`).
         let n_positional = args.iter().filter(|a| a.name.is_none()).count();
         if n_positional > 1 {
             let excess = n_positional - 1;
+            let cls_name = args
+                .first()
+                .and_then(|a| match a.value.kind() {
+                    ValueKind::PyClass(c) => Some(c.borrow().name.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "object".to_string());
             return Err(PyError::named(
                 "TypeError",
-                format!("object.__init_subclass__() takes no arguments ({excess} given)"),
+                format!("{cls_name}.__init_subclass__() takes no arguments ({excess} given)"),
             ));
         }
         Ok(Value::none())

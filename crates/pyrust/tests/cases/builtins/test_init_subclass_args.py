@@ -1,8 +1,6 @@
 # Parity fixture for issue #1739: object.__init_subclass__() must raise
 # TypeError when called with excess positional or keyword arguments.
 
-import sys
-
 # --- No arguments: should succeed ---
 try:
     object.__init_subclass__()
@@ -51,3 +49,13 @@ try:
     print("class B with bad_kwarg: no error (wrong)")
 except TypeError as e:
     print(f"class B with bad_kwarg: TypeError: {e}")
+
+# --- Subclass positional error uses the subclass name, not "object" ---
+class C:
+    pass
+
+try:
+    C.__init_subclass__(42)
+    print("C one positional: no error (wrong)")
+except TypeError as e:
+    print(f"C one positional: TypeError: {e}")
