@@ -127,6 +127,19 @@ impl Interpreter {
         // is available here.  Prepend the instance and call the registry
         // dispatch — mirroring what `invoke_class_method` does for the normal
         // `__init__` path (called from `call_class_expanded`).
+        //
+        // Issue #1771: if the method is not in the registry (e.g. `dict.update`,
+        // `list.append`, `set.add` — dispatched via the bound-method table rather
+        // than the builtin registry), fall back to constructing a bound_method
+        // value and re-entering call_function_expanded.  This covers all
+        // type-qualified names of the form "<type>.<method>".
+        //
+        // When the instance is a PyInstance (subclass of a builtin), use its
+        // `__builtin_data__` backing value as the bound-method receiver so
+        // that the method operates on the underlying native container.  This
+        // is the same mechanism used in the normal instance-attribute dispatch
+        // (the `BuiltinFunction` + `instance_builtin_data` path in
+        // `call_function_expanded`'s `Kind::Other` arm).
         if let Some((fn_name, instance)) =
             pyrust_builtins::super_bound_builtin::as_super_bound_builtin(&function)
         {
@@ -135,6 +148,23 @@ impl Interpreter {
                 combined.push(ExpandedCallArg { name: None, value: instance });
                 combined.extend(args.iter().cloned());
                 return dispatch(self, &combined);
+            }
+            // Bound-method fallback: construct a bound_method carrying the
+            // bare method name (after the '.') bound to the native backing
+            // value.  For a PyInstance subclass (`class MyDict(dict)`), the
+            // `__builtin_data__` attribute holds the live dict/list/set that
+            // the bound-method dispatch operates on.  For a plain native value
+            // (e.g. `super()` from a class whose instance IS the native type),
+            // use the instance directly.
+            if let Some(method_name) = fn_name.split_once('.').map(|(_, m)| m) {
+                // Drop the kind() borrow before we may move `instance`.
+                let backing_opt = match instance.kind() {
+                    ValueKind::PyInstance(inst) => instance_builtin_data(inst),
+                    _ => None,
+                };
+                let receiver = backing_opt.unwrap_or(instance);
+                let bound = pyrust_builtins::bound_method::bound_method(method_name, receiver);
+                return self.call_function_expanded(bound, args);
             }
         }
 
