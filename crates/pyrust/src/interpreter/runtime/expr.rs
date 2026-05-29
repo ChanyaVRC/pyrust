@@ -4061,12 +4061,14 @@ impl Interpreter {
         };
         let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
         // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
-        let positional: Option<Vec<Value>> = if is_mapping {
+        // Use &[Value] to avoid cloning the tuple's items upfront; borrow from
+        // args directly for the single-value case to avoid an extra clone.
+        let positional: Option<&[Value]> = if is_mapping {
             None
         } else {
             match args.kind() {
-                ValueKind::Tuple(items) => Some(items.to_vec()),
-                _ => Some(vec![args.clone()]),
+                ValueKind::Tuple(items) => Some(items),
+                _ => Some(std::slice::from_ref(&args)),
             }
         };
         let mut pos_idx: usize = 0;
@@ -4490,7 +4492,7 @@ impl Interpreter {
         }
 
         // Unconsumed positional arguments: raise TypeError.
-        if let Some(ref pos) = positional {
+        if let Some(pos) = positional {
             if pos_idx < pos.len() {
                 return Err(PyError::named(
                     "TypeError",
@@ -4505,7 +4507,7 @@ impl Interpreter {
 }
 
 /// Take the next positional argument for printf-style formatting.
-fn str_printf_take_positional(positional: &Option<Vec<Value>>, idx: &mut usize) -> Result<Value> {
+fn str_printf_take_positional(positional: &Option<&[Value]>, idx: &mut usize) -> Result<Value> {
     match positional {
         None => Err(PyError::named(
             "TypeError",
