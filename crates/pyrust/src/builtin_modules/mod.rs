@@ -130,6 +130,7 @@ macro_rules! pyrust_builtin_modules_internal {
 pyrust_builtin_modules! {
     math,
     sys,
+    errno,
     @flat builtins,
     "os.path" as os_path,
     // `os` is a parent for `os.path` — see `bodies/os.rs`.  Must come
