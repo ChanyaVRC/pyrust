@@ -1492,6 +1492,26 @@ pyrust_module! {
                 format!("{FN_NAME}() arg 1 must be a class"),
             ));
         }
+        // Dispatch through __subclasscheck__ when classinfo is a PyClass that
+        // defines it (e.g. all ABC classes).  We use get_attr so the descriptor
+        // protocol wraps the raw BuiltinFunction as super_bound_builtin(fn, cls).
+        // Calling it with [subclass] gives abc_subclasscheck([classinfo, subclass])
+        // after the super_bound_builtin dispatch prepends classinfo.  This handles
+        // structural subtyping for `issubclass(UserClass, Iterable)` (fixes #1799).
+        // Tuple and UnionType cases still go through issubclass_check below.
+        if let ValueKind::PyClass(classinfo_rc) = args[1].value.kind() {
+            let has_sc = classinfo_rc.borrow().attrs.contains_key("__subclasscheck__");
+            if has_sc {
+                let classinfo_val = Value::py_class(Rc::clone(classinfo_rc));
+                let sc_fn = _interp.get_attr(&classinfo_val, "__subclasscheck__")?;
+                let call_args = [crate::interpreter::ExpandedCallArg {
+                    name: None,
+                    value: args[0].value.clone(),
+                }];
+                let result = _interp.call_function_expanded(sc_fn, &call_args)?;
+                return Ok(Value::bool_(_interp.truthy_value(&result)?));
+            }
+        }
         let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value)?;
         Ok(Value::bool_(result))
     }
@@ -1525,7 +1545,7 @@ pyrust_module! {
                 format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
             ));
         }
-        let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value)?;
+        let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
         Ok(Value::bool_(result))
     }
 
@@ -7718,6 +7738,11 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
 /// walk — no per-type hard-coded arms.  Only `NoneType` and `BuiltinObject`
 /// (frozenset, range, enumerate, …) still take the legacy
 /// `BuiltinFunction(name)` path until they're migrated too.
+///
+/// Note: `isinstance_check` dispatches `__instancecheck__` for ABC classes
+/// before reaching this function, so `cls` here is never an ABC class when
+/// called from `isinstance_check`.  `isinstance_single` is also called from
+/// other internal sites that do not go through `isinstance_check`.
 fn isinstance_single(obj: &Value, cls: &Value) -> bool {
     // Migrated primitives: `type(obj)` returns the per-thread PyClass
     // singleton, so a class-vs-class walk handles every primitive check
@@ -7744,18 +7769,6 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, expected) {
             return hit;
         }
-        // Structural subtyping: mirror CPython's __subclasshook__ / _check_methods.
-        // Handles user-defined instances whose classes implement the required
-        // dunders, and built-in types that aren't yet covered by extra_bases
-        // registration (e.g. bytearray, range, generators).
-        {
-            let class_ref = expected.borrow();
-            if let Some(result) =
-                crate::builtin_modules::collections_abc::abc_subclasshook(&class_ref.name, obj)
-            {
-                return result;
-            }
-        }
         let actual_class = match obj.kind() {
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
@@ -7775,44 +7788,6 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             ValueKind::PyClass(cls_rc) => {
                 let meta = cls_rc.borrow().metatype.clone();
                 Some(meta.unwrap_or_else(type_class_singleton))
-            }
-            // Built-in functions (`len`, `print`, …) are instances of
-            // `builtin_function_or_method` in CPython.  pyrust does not
-            // have a dedicated PyClass for them, so they don't map through
-            // `primitive_class_for_value`.  Handle the ABCs that apply to
-            // all built-in callables: Callable and Hashable (issue #1770).
-            ValueKind::BuiltinFunction(_) => {
-                let callable_abc =
-                    crate::builtin_modules::collections_abc::callable_abc_class();
-                if Rc::ptr_eq(expected, &callable_abc) {
-                    return true;
-                }
-                let hashable_abc =
-                    crate::builtin_modules::collections_abc::hashable_abc_class();
-                if Rc::ptr_eq(expected, &hashable_abc) {
-                    return true;
-                }
-                return false;
-            }
-            // Built-in bound methods (`[].append`, `"".upper`, …) are also
-            // `builtin_function_or_method` in CPython and are both Callable
-            // and Hashable.  They fall through `primitive_class_for_value`
-            // as None, so intercept them here before the fallthrough (issue #1770).
-            ValueKind::BuiltinObject { ops, .. }
-                if ops.type_name()
-                    == pyrust_builtins::bound_method::TYPE_NAME =>
-            {
-                let callable_abc =
-                    crate::builtin_modules::collections_abc::callable_abc_class();
-                if Rc::ptr_eq(expected, &callable_abc) {
-                    return true;
-                }
-                let hashable_abc =
-                    crate::builtin_modules::collections_abc::hashable_abc_class();
-                if Rc::ptr_eq(expected, &hashable_abc) {
-                    return true;
-                }
-                return false;
             }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };
@@ -7843,10 +7818,16 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
 /// arbitrarily-nested tuple of classes or `UnionType`, matching CPython's
 /// recursive contract.  Raises `TypeError` if a leaf is neither a class nor a
 /// tuple.  See <https://docs.python.org/3/library/functions.html#isinstance>.
-fn isinstance_check(fn_name: &str, obj: &Value, cls: &Value) -> Result<bool> {
+fn isinstance_check(
+    fn_name: &str,
+    obj: &Value,
+    cls: &Value,
+    interp: &mut crate::Interpreter,
+) -> Result<bool> {
     if let ValueKind::Tuple(items) = cls.kind() {
-        for item in items {
-            if isinstance_check(fn_name, obj, item)? {
+        let items: Vec<Value> = items.to_vec();
+        for item in &items {
+            if isinstance_check(fn_name, obj, item, interp)? {
                 return Ok(true);
             }
         }
@@ -7855,8 +7836,9 @@ fn isinstance_check(fn_name: &str, obj: &Value, cls: &Value) -> Result<bool> {
     // PEP 604: `isinstance(x, int | str)` — unwrap UnionType to its __args__.
     if let Some(args) = pyrust_builtins::union_type::union_type_args(cls) {
         if let ValueKind::Tuple(items) = args.kind() {
-            for item in items {
-                if isinstance_check(fn_name, obj, item)? {
+            let items: Vec<Value> = items.to_vec();
+            for item in &items {
+                if isinstance_check(fn_name, obj, item, interp)? {
                     return Ok(true);
                 }
             }
@@ -7868,6 +7850,26 @@ fn isinstance_check(fn_name: &str, obj: &Value, cls: &Value) -> Result<bool> {
             "TypeError",
             format!("{fn_name}() arg 2 must be a type, a tuple of types, or a union"),
         ));
+    }
+    // Dispatch through __instancecheck__ when cls is a PyClass that defines it
+    // (e.g. all ABC classes).  We look up the attr via get_attr so that the
+    // descriptor protocol applies (`is_builtin_classmethod` wraps the raw
+    // BuiltinFunction as `super_bound_builtin(fn, cls)` on access).  Calling
+    // the resulting super_bound_builtin with [obj] causes it to prepend cls,
+    // giving abc_instancecheck([cls, obj]).  This also makes
+    // `Iterable.__instancecheck__(x)` callable directly.
+    if let ValueKind::PyClass(cls_rc) = cls.kind() {
+        let has_ic = cls_rc.borrow().attrs.contains_key("__instancecheck__");
+        if has_ic {
+            let cls_val = Value::py_class(Rc::clone(cls_rc));
+            let ic_fn = interp.get_attr(&cls_val, "__instancecheck__")?;
+            let call_args = [crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: obj.clone(),
+            }];
+            let result = interp.call_function_expanded(ic_fn, &call_args)?;
+            return Ok(interp.truthy_value(&result)?);
+        }
     }
     Ok(isinstance_single(obj, cls))
 }
