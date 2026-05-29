@@ -3861,7 +3861,9 @@ struct Compiler {
     /// Stack of cleanup actions needed by early exits (`break`/`continue`/`return`)
     /// that cross a `try`/`except` boundary.  Entries are pushed when entering a
     /// guarded block and popped when leaving it normally.
-    except_cleanups: Vec<EarlyExitCleanup>,
+    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of at most
+    /// four nested try/except levels.
+    except_cleanups: SmallVec<[EarlyExitCleanup; 4]>,
     failed: bool,
     error_msg: Option<String>,
     def_set: u64,
@@ -3893,7 +3895,8 @@ struct Compiler {
     /// `nonlocal`).  Innermost enclosing function is at the end of the Vec.
     /// Used at compile time to validate `nonlocal` declarations in nested
     /// function bodies.
-    outer_locals: Vec<Rc<HashMap<String, Reg>>>,
+    /// `SmallVec<[_; 4]>` avoids heap allocation for typical nesting depths (≤ 4).
+    outer_locals: SmallVec<[Rc<HashMap<String, Reg>>; 4]>,
     /// True when this Compiler is producing the body of a function `def`
     /// (or a comprehension, which implicitly creates a function scope).
     /// False for module-level compilation and class-body compilation.
@@ -4133,7 +4136,7 @@ impl Compiler {
                 0
             },
             loops: Vec::new(),
-            except_cleanups: Vec::new(),
+            except_cleanups: SmallVec::new(),
             failed: n > Reg::MAX as usize,
             error_msg: if n > Reg::MAX as usize {
                 Some(format!("too many local variables (max {})", Reg::MAX))
@@ -4146,7 +4149,7 @@ impl Compiler {
             is_class_body: false,
             is_class_method: false,
             qualname_prefix: String::new(),
-            outer_locals: Vec::new(),
+            outer_locals: SmallVec::new(),
             is_function_scope: false,
             is_async_function: false,
             is_syntax_error: false,
@@ -4513,7 +4516,8 @@ impl Compiler {
                         if let (true, Some(r)) = (push_exc_ctx, pending_exc_reg) {
                             self.emit(Insn::PushExcContext(r));
                         }
-                        let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
+                        let saved_tail: Vec<EarlyExitCleanup> =
+                            self.except_cleanups.drain(i..).collect();
                         self.compile_block(&stmts);
                         self.except_cleanups.extend(saved_tail);
                         if push_exc_ctx {
@@ -4546,7 +4550,7 @@ impl Compiler {
             // Shadow the cleanup stack: any nested cleanup emission triggered
             // by `compile_block` below must not see frames `[i..]` (we are
             // already in the process of unwinding them).
-            let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
+            let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.drain(i..).collect();
             match cleanup {
                 EarlyExitCleanup::TryBody { finally_stmts } => {
                     self.emit(Insn::PopExcept);
