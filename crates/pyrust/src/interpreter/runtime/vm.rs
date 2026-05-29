@@ -2925,9 +2925,11 @@ impl Interpreter {
                     };
 
                     // __match_args__ must be a tuple (CPython 3.12 rejects lists).
-                    let match_args_vec: Vec<Value> = match match_args.kind() {
-                        ValueKind::Tuple(items) => items.to_vec(),
-                        _ => {
+                    // Use as_tuple() to borrow the slice directly — avoids cloning
+                    // all elements into a Vec just to index them.
+                    let match_args_len = match match_args.as_tuple() {
+                        Some(items) => items.len(),
+                        None => {
                             let type_name = value_type_name_str(&match_args);
                             vm_try!(Err(PyError::named(
                                 "TypeError",
@@ -2940,32 +2942,38 @@ impl Interpreter {
                     };
 
                     // Length must be >= n.
-                    if match_args_vec.len() < n {
-                        let plural = if match_args_vec.len() == 1 { "" } else { "s" };
+                    if match_args_len < n {
+                        let plural = if match_args_len == 1 { "" } else { "s" };
                         vm_try!(Err(PyError::named(
                             "TypeError",
                             format!(
                                 "{cls_name}() accepts {} positional sub-pattern{plural} ({n} given)",
-                                match_args_vec.len()
+                                match_args_len
                             ),
                         )));
                     }
 
                     // For each positional index, get the attribute name from
                     // __match_args__[i] and load that attribute from the subject.
+                    // Index into the tuple directly — `match_args` is an owned Value
+                    // on the stack, so borrowing its slice does not conflict with
+                    // the `&mut self` in `get_attr`.
                     for i in 0..n {
-                        let name_val = &match_args_vec[i];
-                        let attr_name = match name_val.as_str() {
-                            Some(s) => s.to_string(),
-                            None => {
-                                vm_try!(Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "__match_args__ elements must be strings (got {})",
-                                        value_type_name_str(name_val)
-                                    ),
-                                )));
-                                unreachable!()
+                        let attr_name = {
+                            let items = match_args.as_tuple().unwrap();
+                            let name_val = &items[i];
+                            match name_val.as_str() {
+                                Some(s) => s.to_string(),
+                                None => {
+                                    let type_name = value_type_name_str(name_val);
+                                    vm_try!(Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "__match_args__ elements must be strings (got {type_name})"
+                                        ),
+                                    )));
+                                    unreachable!()
+                                }
                             }
                         };
                         let attr_val = vm_try!(self.get_attr(&subj_val, &attr_name));
@@ -5300,21 +5308,19 @@ impl Interpreter {
                 }
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(&obj_val, method)?;
-                let mut expanded: ExpandedArgBuf = pos_items
-                    .into_iter()
-                    .map(|v| ExpandedCallArg { name: None, value: v })
-                    .collect();
+                // Build directly into the reusable call buffer, bypassing the
+                // intermediate ExpandedArgBuf allocation.
+                let mut buf = std::mem::take(&mut self.call_arg_buf);
+                buf.clear();
+                buf.extend(pos_items.into_iter().map(|v| ExpandedCallArg { name: None, value: v }));
                 for (k, v) in &kw_map {
                     if let PyKey::Str(name) = k {
-                        expanded.push(ExpandedCallArg {
+                        buf.push(ExpandedCallArg {
                             name: Some(name.as_str().unwrap_or("").to_owned()),
                             value: v.clone(),
                         });
                     }
                 }
-                let mut buf = std::mem::take(&mut self.call_arg_buf);
-                buf.clear();
-                buf.extend(expanded);
                 let r = self.call_function_expanded(method_val, &buf);
                 self.call_arg_buf = buf;
                 r

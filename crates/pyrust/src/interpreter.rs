@@ -160,6 +160,14 @@ pub struct Interpreter {
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
+    /// Reusable argument buffer for `invoke_class_method`'s `BuiltinFunction`
+    /// path — avoids a per-invocation heap allocation on the hot dunder
+    /// dispatch path (`__add__`, `__iter__`, `__next__`, `__len__`, …).
+    /// Pattern: `std::mem::take`, clear, fill `self + args`, call dispatch,
+    /// then restore so subsequent invocations reuse the grown capacity.
+    /// On recursive entry the field is empty (already taken), so a fresh
+    /// SmallVec is allocated only for the nested frame.
+    pub(crate) invoke_arg_buf: ExpandedArgBuf,
     /// Reusable positional-args buffer for the builtin bound-method dispatch
     /// path — avoids a per-call heap allocation on the hot path (issue #276).
     /// Pattern: `std::mem::take`, clear, fill, use (borrow or drain), then
@@ -408,6 +416,7 @@ impl Default for Interpreter {
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),
             call_arg_buf: Vec::new(),
+            invoke_arg_buf: ExpandedArgBuf::new(),
             bound_method_pos_buf: Vec::new(),
             key_scratch: Vec::new(),
             class_store_order: Vec::new(),
