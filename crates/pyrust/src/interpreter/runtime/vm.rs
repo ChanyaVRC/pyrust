@@ -725,7 +725,7 @@ impl Interpreter {
             funcname: frame.fn_name.clone(),
         });
         let result = self.run_bytecode_inner(
-            &frame.code.clone(),
+            &frame.code,
             regs_slice,
             std::mem::take(&mut frame.iters),
             std::mem::take(&mut frame.exc_handlers),
@@ -1263,7 +1263,7 @@ impl Interpreter {
                     regs[*dst as usize] = val;
                 }
                 Insn::StoreGlobal(name_idx, src) => {
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
+                    let name = pool_get!(code.names, *name_idx, "name");
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     self.assign_name(name, val);
                 }
@@ -2494,17 +2494,17 @@ impl Interpreter {
                     }
                 }
                 Insn::DeleteName(name_idx) => {
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
-                    let is_global = self.env.borrow().global_names.contains(&name);
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let is_global = self.env.borrow().global_names.contains(name.as_str());
                     if is_global {
                         // For `global x; del x` inside a function: target the module
                         // env, not the function's local env.  Remove from both
                         // env.values and module_globals_dict (issue #706); raise
                         // NameError only if absent from both.
                         let me = module_env(&self.env);
-                        let in_env = me.borrow_mut().values.remove(&name).is_some();
+                        let in_env = me.borrow_mut().values.remove(name.as_str()).is_some();
                         let in_dict = self.module_globals_dict
-                            .dict_shift_remove(&PyKey::str_from(&*name))
+                            .dict_shift_remove(&PyKey::str_from(name.as_str()))
                             .ok()
                             .flatten()
                             .is_some();
@@ -2535,7 +2535,7 @@ impl Interpreter {
                             .iter()
                             .find(|v| v.kind == FrameKind::Script)
                         {
-                            if let Some(&slot) = script_view.local_index.get(&name) {
+                            if let Some(&slot) = script_view.local_index.get(name.as_str()) {
                                 let slot = slot as usize;
                                 if slot < script_view.regs_len {
                                     unsafe {
@@ -2550,11 +2550,11 @@ impl Interpreter {
                         // module_globals_dict (issue #706) so LoadGlobal cannot
                         // resurrect the deleted name.  Raise NameError if absent
                         // from both.
-                        let in_env = self.env.borrow_mut().values.remove(&name).is_some();
+                        let in_env = self.env.borrow_mut().values.remove(name.as_str()).is_some();
                         let is_module_scope = self.env.borrow().parent.is_none();
                         let in_dict = if is_module_scope {
                             self.module_globals_dict
-                                .dict_shift_remove(&PyKey::str_from(&*name))
+                                .dict_shift_remove(&PyKey::str_from(name.as_str()))
                                 .ok()
                                 .flatten()
                                 .is_some()
@@ -2954,7 +2954,7 @@ impl Interpreter {
                     // For each positional index, get the attribute name from
                     // __match_args__[i] and load that attribute from the subject.
                     for i in 0..n {
-                        let name_val = match_args_vec[i].clone();
+                        let name_val = &match_args_vec[i];
                         let attr_name = match name_val.as_str() {
                             Some(s) => s.to_string(),
                             None => {
@@ -2962,7 +2962,7 @@ impl Interpreter {
                                     "TypeError",
                                     format!(
                                         "__match_args__ elements must be strings (got {})",
-                                        value_type_name_str(&name_val)
+                                        value_type_name_str(name_val)
                                     ),
                                 )));
                                 unreachable!()
@@ -4503,8 +4503,8 @@ impl Interpreter {
 
                 // ── Import ───────────────────────────────────────────────
                 Insn::ImportModule(dst, name_idx) => {
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
-                    let module = vm_try!(self.load_module(&name));
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let module = vm_try!(self.load_module(name));
                     regs[*dst as usize] = module;
                 }
                 Insn::ImportStar(mod_reg) => {
@@ -4612,7 +4612,7 @@ impl Interpreter {
                         }
                     };
                     for (name, val) in pairs {
-                        self.assign_name(name, val);
+                        self.assign_name(&name, val);
                     }
                 }
 

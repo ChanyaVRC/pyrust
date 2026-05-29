@@ -2437,15 +2437,15 @@ impl Interpreter {
         ))
     }
 
-    fn assign_name(&self, name: String, value: Value) {
+    fn assign_name(&self, name: &str, value: Value) {
         let (is_global, is_nonlocal) = {
             let env = self.env.borrow();
-            (env.global_names.contains(&name), env.nonlocal_names.contains(&name))
+            (env.global_names.contains(name), env.nonlocal_names.contains(name))
         };
         if is_global {
             // Write to the module env HashMap so LoadGlobal / post-run
             // inspection can find the new value.
-            module_env(&self.env).borrow_mut().values.insert(name.clone(), value.clone());
+            module_env(&self.env).borrow_mut().values.insert(name.to_string(), value.clone());
             // Invalidate the LoadGlobal inline cache: any function that cached
             // this global under the current version will re-fetch on its next call.
             bump_global_env_version(self);
@@ -2458,7 +2458,7 @@ impl Interpreter {
             // the dict live from that point on.
             if self.globals_accessed {
                 let _ = self.module_globals_dict.dict_insert(
-                    PyKey::str_from(&name),
+                    PyKey::str_from(name),
                     value.clone(),
                 );
             }
@@ -2479,7 +2479,7 @@ impl Interpreter {
                 .iter()
                 .find(|v| v.kind == FrameKind::Script)
             {
-                if let Some(&slot) = script_view.local_index.get(&name) {
+                if let Some(&slot) = script_view.local_index.get(name) {
                     let slot = slot as usize;
                     if slot < script_view.regs_len {
                         unsafe {
@@ -2491,8 +2491,8 @@ impl Interpreter {
             return;
         }
         if is_nonlocal
-            && let Some(env) = find_enclosing_local_env_for_name(&self.env, &name) {
-                env_assign_local(&env, &name, value);
+            && let Some(env) = find_enclosing_local_env_for_name(&self.env, name) {
+                env_assign_local(&env, name, value);
                 return;
             }
         // Module scope: `self.env` is the root env (no parent).  Mirror into
@@ -2504,12 +2504,12 @@ impl Interpreter {
             bump_global_env_version(self);
             if self.globals_accessed {
                 let _ = self.module_globals_dict.dict_insert(
-                    PyKey::str_from(&name),
+                    PyKey::str_from(name),
                     value.clone(),
                 );
             }
         }
-        env_assign_local(&self.env, &name, value);
+        env_assign_local(&self.env, name, value);
     }
 
     fn lookup_name(&self, name: &str) -> Result<Option<Value>> {
