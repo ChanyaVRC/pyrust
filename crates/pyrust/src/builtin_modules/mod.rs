@@ -145,4 +145,5 @@ pyrust_builtin_modules! {
     copy,
     pathlib,
     "__future__" as future,
+    warnings,
 }
