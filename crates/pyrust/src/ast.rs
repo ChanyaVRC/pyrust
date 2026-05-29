@@ -145,6 +145,12 @@ pub enum Stmt {
         subject: Expr,
         arms: Vec<MatchArm>,
     },
+    /// PEP 695 type alias statement: `type <name> = <value>`.
+    /// Creates a `TypeAliasType` object and binds it to `name`.
+    TypeAlias {
+        name: String,
+        value: Expr,
+    },
 }
 
 /// A single `case <pattern> [if <guard>]: <body>` arm in a `match` statement.

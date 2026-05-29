@@ -769,6 +769,9 @@ fn lambda_captures_in_stmt(
                 lambda_captures_in_expr(v, local_index, is_class_scope, cells);
             }
         }
+        Stmt::TypeAlias { value, .. } => {
+            lambda_captures_in_expr(value, local_index, is_class_scope, cells);
+        }
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -1193,7 +1196,7 @@ fn collect_class_body_names_textual(
                     ordered.push(name.clone());
                 }
             }
-            Stmt::Def { name, .. } | Stmt::Class { name, .. } => {
+            Stmt::Def { name, .. } | Stmt::Class { name, .. } | Stmt::TypeAlias { name, .. } => {
                 if body_local.contains(name) && seen.insert(name.clone()) {
                     ordered.push(name.clone());
                 }
@@ -1779,6 +1782,9 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(v, uses);
             }
         }
+        Stmt::TypeAlias { value, .. } => {
+            collect_free_var_reads_in_expr(value, uses);
+        }
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -2153,6 +2159,9 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             if let Some(v) = value {
                 collect_transitive_free_vars_in_expr(v, uses);
             }
+        }
+        Stmt::TypeAlias { value, .. } => {
+            collect_transitive_free_vars_in_expr(value, uses);
         }
         Stmt::Return(None)
         | Stmt::Import { .. }
@@ -3448,6 +3457,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
             expr_reads_var(annotation, name)
                 || value.as_ref().is_some_and(|v| expr_reads_var(v, name))
         }
+        Stmt::TypeAlias { value, .. } => expr_reads_var(value, name),
         Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::Break
@@ -4048,6 +4058,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
         // Def and Class bodies are separate scopes — their yields do not make
         // the enclosing function a generator.
         Stmt::Def { .. } | Stmt::Class { .. } => false,
+        Stmt::TypeAlias { value, .. } => expr_contains_yield(value),
     }
 }
 
@@ -5141,7 +5152,41 @@ impl Compiler {
             Stmt::Match { subject, arms } => {
                 self.compile_match(subject, arms);
             }
+            Stmt::TypeAlias { name, value } => {
+                self.compile_type_alias(name, value);
+            }
         }
+    }
+
+    // ── Type alias (PEP 695) ──────────────────────────────────────────────────
+
+    fn compile_type_alias(&mut self, name: &str, value: &Expr) {
+        // Evaluate the RHS expression.
+        let val_reg = self.compile_expr(value);
+        // Intern the alias name as a string constant.
+        let name_str = crate::value::Value::string(name.to_string());
+        let name_idx = self.intern_const(name_str);
+        // Allocate a destination register and emit MakeTypeAlias.
+        let dst = self.alloc_temp();
+        self.emit(Insn::MakeTypeAlias(dst, name_idx as u16, val_reg));
+        self.free_temp(val_reg);
+        // Store the result under `name` in the current namespace.
+        let target = crate::ast::AssignTarget::Name(name.to_string());
+        if let Some(reg) = self.local_reg(name) {
+            if reg != dst {
+                self.emit(Insn::Move(reg, dst));
+            }
+            self.maybe_record_class_store(reg);
+            if self.is_module_scope {
+                let name_idx = self.intern_name(name);
+                self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+            }
+        } else {
+            let name_idx = self.intern_name(name);
+            self.emit(Insn::StoreGlobal(name_idx, dst));
+        }
+        self.free_temp(dst);
+        self.mark_target_def(&target);
     }
 
     // ── Assignment ────────────────────────────────────────────────────────────

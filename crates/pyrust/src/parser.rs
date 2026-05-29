@@ -74,6 +74,11 @@ impl Parser {
             Some(Token::Ident(kw)) if kw == "match" && self.is_match_stmt() => {
                 Ok(vec![self.parse_match()?])
             }
+            // `type` is a soft keyword (PEP 695): `type <name> = <expr>`.
+            // Only treat it as a type alias when followed by an identifier and `=`.
+            Some(Token::Ident(kw)) if kw == "type" && self.is_type_alias_stmt() => {
+                Ok(vec![self.parse_type_alias()?])
+            }
             Some(Token::Return) => {
                 self.bump();
                 if self.at_stmt_end() {
@@ -151,6 +156,84 @@ impl Parser {
                 }
             }
         }
+    }
+
+    /// Determine if the current position starts a `type` alias statement (PEP 695).
+    /// Returns true when `type` is followed by an identifier and then `=` (or `[`
+    /// for the generic form, which we skip for now — just skip past `[...]` to
+    /// find `=`).  This disambiguates `type = 1` (ordinary assignment) from
+    /// `type Vector = list[float]` (type alias).
+    fn is_type_alias_stmt(&self) -> bool {
+        // self.pos points at Token::Ident("type").
+        // Next token must be an identifier (the alias name).
+        let i = self.pos + 1;
+        if !matches!(self.tokens.get(i), Some(Token::Ident(_))) {
+            return false;
+        }
+        // After the name, allow an optional `[...]` for generic type params,
+        // then require `=`.
+        let mut j = i + 1;
+        if matches!(self.tokens.get(j), Some(Token::LBracket)) {
+            // Skip balanced brackets.
+            let mut depth = 0usize;
+            loop {
+                match self.tokens.get(j) {
+                    None | Some(Token::Eof) => return false,
+                    Some(Token::LBracket) => {
+                        depth += 1;
+                        j += 1;
+                    }
+                    Some(Token::RBracket) => {
+                        depth -= 1;
+                        j += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {
+                        j += 1;
+                    }
+                }
+            }
+        }
+        matches!(self.tokens.get(j), Some(Token::Assign))
+    }
+
+    fn parse_type_alias(&mut self) -> Result<Stmt> {
+        // Consume `type` (soft keyword, tokenised as Ident).
+        self.bump();
+        let name = self.expect_ident("type alias name")?;
+        // Skip optional generic type parameters `[T, ...]` — we don't implement
+        // generic type params; they are parsed and discarded for now.
+        if self.is(&Token::LBracket) {
+            let mut depth = 0usize;
+            loop {
+                match self.current() {
+                    None | Some(Token::Eof) => {
+                        return Err(PyError::Parse(
+                            "unterminated type parameter list in type alias".to_string(),
+                        ));
+                    }
+                    Some(Token::LBracket) => {
+                        depth += 1;
+                        self.bump();
+                    }
+                    Some(Token::RBracket) => {
+                        depth -= 1;
+                        self.bump();
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {
+                        self.bump();
+                    }
+                }
+            }
+        }
+        self.expect(&Token::Assign)?;
+        let value = self.parse_expr_or_tuple()?;
+        Ok(Stmt::TypeAlias { name, value })
     }
 
     fn parse_match(&mut self) -> Result<Stmt> {
