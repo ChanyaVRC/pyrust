@@ -1,6 +1,5 @@
 # Parity fixture for CPython 3.12 error message wording.
 # Issue #1779: super() AttributeError should say "'super' object has no attribute 'x'"
-# Issue #1780: iter(v, w) TypeError should say "iter(object, sentinel): object must be callable"
 
 # ── super() AttributeError (issue #1779) ─────────────────────────────────────
 
@@ -34,22 +33,22 @@ class Sub(Parent):
 
 print(Sub().test())  # hi
 
-# ── iter(object, sentinel) TypeError (issue #1780) ───────────────────────────
+# ── iter(v, w) TypeError (issue #1780 — CPython says "iter(v, w): v must be callable") ──
 
 try:
     iter(42, None)
 except TypeError as e:
-    print(e)  # iter(object, sentinel): object must be callable
+    print(e)  # iter(v, w): v must be callable
 
 try:
     iter("not callable", 0)
 except TypeError as e:
-    print(e)  # iter(object, sentinel): object must be callable
+    print(e)  # iter(v, w): v must be callable
 
 try:
     iter([], None)
 except TypeError as e:
-    print(e)  # iter(object, sentinel): object must be callable
+    print(e)  # iter(v, w): v must be callable
 
 # Happy path: callable first argument should succeed (exhaust immediately here).
 count = [0]
