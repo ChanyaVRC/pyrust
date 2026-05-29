@@ -135,7 +135,7 @@ mod method_table_drift_guard {
     fn dict_methods_dispatched() {
         for &name in super::dict::METHODS {
             let receiver = Value::dict(IndexMap::<PyKey, Value>::new());
-            let r = super::dict::call(name, &receiver, vec![]);
+            let r = super::dict::call(name, &receiver, vec![], &IndexMap::new());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "dict::call({name}) hit fallback: {e:?}");
             }

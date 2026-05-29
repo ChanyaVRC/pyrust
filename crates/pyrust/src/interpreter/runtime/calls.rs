@@ -383,7 +383,7 @@ impl Interpreter {
                     }
                     Kind::Dict => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
-                        self.call_dict_method(method, receiver, args_vec)
+                        self.call_dict_method(method, receiver, args_vec, &kw)
                     }
                     Kind::Set => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
@@ -529,7 +529,7 @@ impl Interpreter {
                                                     bound, &expanded,
                                                 );
                                             }
-                                            self.call_dict_method(method, backing, args_vec)
+                                            self.call_dict_method(method, backing, args_vec, &kw)
                                         }
                                         BkKind::List => {
                                             if method == "index" || method == "count" {
@@ -1389,7 +1389,7 @@ impl Interpreter {
                             }
                         }
                     }
-                    "dict" => self.call_dict_method(method, self_val, pos),
+                    "dict" => self.call_dict_method(method, self_val, pos, &kw),
                     "set" => self.call_set_method(method, self_val, pos),
                     "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
                     "frozenset" => pyrust_builtins::frozenset::call(method, &self_val, pos),
