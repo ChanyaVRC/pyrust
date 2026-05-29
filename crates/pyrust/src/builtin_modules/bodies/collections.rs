@@ -63,7 +63,15 @@ pyrust_module! {
                     "{FN_NAME}() takes at most one argument",
                 )));
             }
-            let mut counts: IndexMap<PyKey, Value> = IndexMap::new();
+            let mut counts: IndexMap<PyKey, Value> = if let Some(arg) = user.first() {
+                if let ValueKind::Dict(map) = arg.value.kind() {
+                    IndexMap::with_capacity(map.len())
+                } else {
+                    IndexMap::new()
+                }
+            } else {
+                IndexMap::new()
+            };
             if let Some(arg) = user.first() {
                 if let ValueKind::Dict(map) = arg.value.kind() {
                     for (k, v) in map.iter() {

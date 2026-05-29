@@ -2293,16 +2293,14 @@ pyrust_module! {
         }
         let mut items = _interp.collect_iterable(&positional[0].value)?;
         if let Some(kfn) = key_fn {
-            let mut keyed: Vec<(Value, Value)> = items
-                .into_iter()
-                .map(|v| {
-                    let k = _interp.call_function_expanded(
-                        kfn.clone(),
-                        &[ExpandedCallArg { name: None, value: v.clone() }],
-                    )?;
-                    Ok((k, v))
-                })
-                .collect::<Result<_>>()?;
+            let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+            for v in std::mem::take(&mut items) {
+                let k = _interp.call_function_expanded(
+                    kfn.clone(),
+                    &[ExpandedCallArg { name: None, value: v.clone() }],
+                )?;
+                keyed.push((k, v));
+            }
             // Pre-scan: if no key is a PyInstance, all comparisons are
             // primitive — skip the interpreter-dispatch overhead entirely.
             let has_instance =
@@ -2326,7 +2324,9 @@ pyrust_module! {
                 });
             }
             if let Some(e) = sort_err { return Err(e); }
-            items = keyed.into_iter().map(|(_, v)| v).collect();
+            // Reuse the `items` buffer (now empty after `take`) to avoid
+            // a fresh allocation when extracting values from the keyed pairs.
+            items.extend(keyed.into_iter().map(|(_, v)| v));
         } else {
             // Pre-scan: if no item is a PyInstance, use compare_values
             // directly — zero interpreter-dispatch overhead for the common
@@ -3807,8 +3807,8 @@ pyrust_module! {
     fn dict(args) -> Result<Value> {
         // Separate positional and keyword args.
         // CPython: dict([mapping_or_iterable], **kwargs)
-        let mut pos_args: Vec<&ExpandedCallArg> = Vec::new();
-        let mut kw_pairs: Vec<(String, Value)> = Vec::new();
+        let mut pos_args: Vec<&ExpandedCallArg> = Vec::with_capacity(1);
+        let mut kw_pairs: Vec<(String, Value)> = Vec::with_capacity(args.len());
         for a in args {
             match &a.name {
                 None => pos_args.push(a),
@@ -3825,7 +3825,8 @@ pyrust_module! {
             ));
         }
 
-        let mut result: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+        let mut result: indexmap::IndexMap<PyKey, Value> =
+            indexmap::IndexMap::with_capacity(kw_pairs.len());
 
         // Process the optional positional argument.
         if let Some(arg) = pos_args.first() {
@@ -7913,16 +7914,14 @@ fn min_max_impl(
         ));
     }
     if let Some(kfn) = key_fn {
-        let keyed: Vec<(Value, Value)> = items
-            .into_iter()
-            .map(|v| {
-                let k = interp.call_function_expanded(
-                    kfn.clone(),
-                    &[ExpandedCallArg { name: None, value: v.clone() }],
-                )?;
-                Ok((k, v))
-            })
-            .collect::<Result<_>>()?;
+        let mut keyed: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+        for v in items {
+            let k = interp.call_function_expanded(
+                kfn.clone(),
+                &[ExpandedCallArg { name: None, value: v.clone() }],
+            )?;
+            keyed.push((k, v));
+        }
         // Pre-scan: if no key is a PyInstance, all comparisons are primitive —
         // use compare_values_with_op directly to avoid interpreter-dispatch
         // overhead while still emitting the correct operator token.
