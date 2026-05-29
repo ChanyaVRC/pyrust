@@ -435,8 +435,10 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
 /// Shared implementation for `bytes.decode()` and the 2/3-arg form of
 /// `str(bytes, encoding[, errors])`.
 ///
-/// Supported encodings: `utf-8` (and aliases), `latin-1` (and aliases), `ascii`.
-/// Supported error handlers: `strict`, `replace`, `ignore`.
+/// Supported encodings: `utf-8` (and aliases), `utf-8-sig`, `latin-1` (and
+/// aliases), `ascii`, `utf-16` (LE/BE/BOM), `utf-32` (LE/BE/BOM).
+/// Supported error handlers: `strict`, `replace`, `ignore`,
+/// `backslashreplace`, `surrogateescape`.
 pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value> {
     // Normalise encoding name (strip hyphens/underscores, lowercase).
     let enc_norm: String = encoding
@@ -451,103 +453,414 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
             // invoked, so we must not validate its name (CPython is lazy here).
             match std::str::from_utf8(bytes) {
                 Ok(s) => Ok(Value::string(s)),
-                Err(e) => {
-                    // Decoding failed — now the error handler matters.
-                    match errors {
-                        "strict" => {
-                            let start = e.valid_up_to();
-                            let end = start + e.error_len().unwrap_or(bytes.len() - start);
-                            let reason = if e.error_len().is_none() {
-                                "unexpected end of data"
-                            } else {
-                                let b = bytes[start];
-                                // CPython 3.12 reports "invalid continuation byte" when the
-                                // byte at `start` is a valid multi-byte sequence start
-                                // (0xC2..=0xF4) but the bytes that follow are not valid
-                                // continuation bytes.  All other cases (lone continuation
-                                // bytes 0x80..=0xBF, overlong-sequence starts 0xC0..=0xC1,
-                                // and out-of-range starts 0xF5..=0xFF) are "invalid start
-                                // byte" because the byte itself cannot begin a legal UTF-8
-                                // sequence.
-                                if matches!(b, 0xC2..=0xF4) {
-                                    "invalid continuation byte"
-                                } else {
-                                    "invalid start byte"
-                                }
-                            };
-                            Err(PyError::UnicodeDecodeError {
-                                encoding: "utf-8".to_string(),
-                                object: bytes.to_vec(),
-                                start,
-                                end,
-                                reason: reason.to_string(),
-                            })
-                        }
-                        "ignore" => Ok(Value::string(&bytes_decode_utf8_ignore(bytes))),
-                        "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
-                        _ => Err(PyError::named(
-                            "LookupError",
-                            format!("unknown error handler name '{errors}'"),
-                        )),
-                    }
-                }
+                Err(_) => decode_utf8_with_errors(bytes, errors, "utf-8"),
             }
         }
-        "latin1" | "iso88591" | "iso8859" => {
-            // Latin-1: byte N maps directly to Unicode code point N.
-            // This encoding never fails, so the error handler is never invoked.
+        // UTF-8-SIG: strip leading BOM (U+FEFF encoded as EF BB BF) if present.
+        "utf8sig" => {
+            let payload = if bytes.starts_with(b"\xef\xbb\xbf") {
+                &bytes[3..]
+            } else {
+                bytes
+            };
+            match std::str::from_utf8(payload) {
+                Ok(s) => Ok(Value::string(s)),
+                Err(_) => decode_utf8_with_errors(payload, errors, "utf-8-sig"),
+            }
+        }
+        // Latin-1 and its many aliases: byte N → Unicode code point N.
+        // This encoding never fails, so the error handler is never invoked.
+        "latin1" | "iso88591" | "iso8859" | "l1" | "cp819" | "latin" => {
             let s: String = bytes.iter().map(|&b| b as char).collect();
             Ok(Value::string(&s))
         }
         "ascii" => {
             // Find the first non-ASCII byte, if any.
-            let first_bad = bytes.iter().enumerate().find(|&(_, &b)| b > 0x7F);
-            match first_bad {
-                None => {
-                    // All bytes are valid ASCII; error handler is never invoked.
-                    // SAFETY: all bytes validated as ASCII (≤ 0x7F, valid UTF-8).
-                    Ok(Value::string(unsafe {
-                        std::str::from_utf8_unchecked(bytes)
-                    }))
-                }
-                Some((i, _b)) => {
-                    // At least one bad byte — now the error handler matters.
-                    match errors {
-                        "strict" => Err(PyError::UnicodeDecodeError {
-                            encoding: "ascii".to_string(),
-                            object: bytes.to_vec(),
-                            start: i,
-                            end: i + 1,
-                            reason: "ordinal not in range(128)".to_string(),
-                        }),
-                        "ignore" => {
-                            let s: String = bytes
-                                .iter()
-                                .filter(|&&b| b <= 0x7F)
-                                .map(|&b| b as char)
-                                .collect();
-                            Ok(Value::string(&s))
-                        }
-                        "replace" => {
-                            let s: String = bytes
-                                .iter()
-                                .map(|&b| if b <= 0x7F { b as char } else { '\u{FFFD}' })
-                                .collect();
-                            Ok(Value::string(&s))
-                        }
-                        _ => Err(PyError::named(
-                            "LookupError",
-                            format!("unknown error handler name '{errors}'"),
-                        )),
-                    }
-                }
+            let has_bad = bytes.iter().any(|&b| b > 0x7F);
+            if !has_bad {
+                // All bytes are valid ASCII; error handler is never invoked.
+                // SAFETY: all bytes validated as ASCII (≤ 0x7F, valid UTF-8).
+                Ok(Value::string(unsafe {
+                    std::str::from_utf8_unchecked(bytes)
+                }))
+            } else {
+                decode_ascii_with_errors(bytes, errors)
             }
         }
+        // UTF-16 with BOM detection: first two bytes are the BOM (\xff\xfe for LE,
+        // \xfe\xff for BE).  If absent, default to little-endian (matches x86/x64/ARM64).
+        "utf16" => {
+            if bytes.starts_with(b"\xff\xfe") {
+                decode_utf16_le(&bytes[2..])
+            } else if bytes.starts_with(b"\xfe\xff") {
+                decode_utf16_be(&bytes[2..])
+            } else {
+                decode_utf16_le(bytes)
+            }
+        }
+        "utf16le" => decode_utf16_le(bytes),
+        "utf16be" => decode_utf16_be(bytes),
+        // UTF-32 with BOM detection: first four bytes are the BOM.
+        "utf32" => {
+            if bytes.starts_with(b"\xff\xfe\x00\x00") {
+                decode_utf32_le(&bytes[4..])
+            } else if bytes.starts_with(b"\x00\x00\xfe\xff") {
+                decode_utf32_be(&bytes[4..])
+            } else {
+                decode_utf32_le(bytes)
+            }
+        }
+        "utf32le" => decode_utf32_le(bytes),
+        "utf32be" => decode_utf32_be(bytes),
         _ => Err(PyError::named(
             "LookupError",
             format!("unknown encoding: {encoding}"),
         )),
     }
+}
+
+/// Decode UTF-8 bytes that are known to contain at least one invalid sequence,
+/// applying the specified error handler.
+fn decode_utf8_with_errors(bytes: &[u8], errors: &str, codec_name: &str) -> Result<Value> {
+    match errors {
+        "strict" => {
+            let e = std::str::from_utf8(bytes).unwrap_err();
+            let start = e.valid_up_to();
+            let end = start + e.error_len().unwrap_or(bytes.len() - start);
+            let reason = if e.error_len().is_none() {
+                "unexpected end of data"
+            } else {
+                let b = bytes[start];
+                // CPython 3.12 reports "invalid continuation byte" when the
+                // byte at `start` is a valid multi-byte sequence start
+                // (0xC2..=0xF4) but the bytes that follow are not valid
+                // continuation bytes.  All other cases are "invalid start byte".
+                if matches!(b, 0xC2..=0xF4) {
+                    "invalid continuation byte"
+                } else {
+                    "invalid start byte"
+                }
+            };
+            Err(PyError::UnicodeDecodeError {
+                encoding: codec_name.to_string(),
+                object: bytes.to_vec(),
+                start,
+                end,
+                reason: reason.to_string(),
+            })
+        }
+        "ignore" => Ok(Value::string(&bytes_decode_utf8_ignore(bytes))),
+        "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
+        "backslashreplace" => Ok(Value::string(&bytes_decode_utf8_backslashreplace(bytes))),
+        "surrogateescape" => Ok(Value::string(&bytes_decode_utf8_surrogateescape(bytes))),
+        _ => Err(PyError::named(
+            "LookupError",
+            format!("unknown error handler name '{errors}'"),
+        )),
+    }
+}
+
+/// Decode ASCII bytes that contain at least one byte > 0x7F, applying the
+/// specified error handler.
+fn decode_ascii_with_errors(bytes: &[u8], errors: &str) -> Result<Value> {
+    match errors {
+        "strict" => {
+            let i = bytes.iter().position(|&b| b > 0x7F).unwrap();
+            Err(PyError::UnicodeDecodeError {
+                encoding: "ascii".to_string(),
+                object: bytes.to_vec(),
+                start: i,
+                end: i + 1,
+                reason: "ordinal not in range(128)".to_string(),
+            })
+        }
+        "ignore" => {
+            let s: String = bytes
+                .iter()
+                .filter(|&&b| b <= 0x7F)
+                .map(|&b| b as char)
+                .collect();
+            Ok(Value::string(&s))
+        }
+        "replace" => {
+            let s: String = bytes
+                .iter()
+                .map(|&b| if b <= 0x7F { b as char } else { '\u{FFFD}' })
+                .collect();
+            Ok(Value::string(&s))
+        }
+        "backslashreplace" => {
+            let mut out = String::with_capacity(bytes.len());
+            for &b in bytes {
+                if b <= 0x7F {
+                    out.push(b as char);
+                } else {
+                    use std::fmt::Write as _;
+                    let _ = write!(out, "\\x{:02x}", b);
+                }
+            }
+            Ok(Value::string(&out))
+        }
+        "surrogateescape" => {
+            // Each byte > 0x7F maps to the lone surrogate U+DC80 + byte.
+            let mut out = String::with_capacity(bytes.len());
+            for &b in bytes {
+                if b <= 0x7F {
+                    out.push(b as char);
+                } else {
+                    push_surrogate_escape(&mut out, b);
+                }
+            }
+            Ok(Value::string(&out))
+        }
+        _ => Err(PyError::named(
+            "LookupError",
+            format!("unknown error handler name '{errors}'"),
+        )),
+    }
+}
+
+/// Push the CESU-8 encoding of the lone surrogate codepoint U+DC00 | b into
+/// `out`.  Pyrust uses CESU-8 to represent surrogate codepoints throughout.
+#[inline]
+fn push_surrogate_escape(out: &mut String, b: u8) {
+    // surrogateescape maps byte b (0x80..=0xFF) to U+DC80..=U+DCFF.
+    // DC80 = 0xDC80, so codepoint = 0xDC00 | (b & 0x7F) only for 0x80..=0xFF:
+    // U+DC80 + (b - 0x80) = 0xDC80 + b - 0x80 = 0xDC00 + b.
+    let cp: u32 = 0xDC00u32 | (b as u32);
+    // CESU-8 for a surrogate codepoint (0xD800..=0xDFFF):
+    // Safety: we hold &mut String exclusively and push a valid CESU-8 triplet.
+    unsafe {
+        out.as_mut_vec().extend_from_slice(&[
+            0xE0 | (cp >> 12) as u8,
+            0x80 | ((cp >> 6) & 0x3F) as u8,
+            0x80 | (cp & 0x3F) as u8,
+        ]);
+    }
+}
+
+/// Decode UTF-8 with `backslashreplace`: each invalid byte `b` becomes `\xNN`.
+/// Valid UTF-8 bytes pass through unchanged.
+fn bytes_decode_utf8_backslashreplace(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match std::str::from_utf8(&bytes[i..]) {
+            Ok(s) => {
+                out.push_str(s);
+                break;
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // SAFETY: validated by from_utf8.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + valid_up_to]) });
+                // Each byte in the invalid sequence gets its own \xNN escape.
+                let skip = e.error_len().unwrap_or(1);
+                for j in 0..skip {
+                    use std::fmt::Write as _;
+                    let _ = write!(out, "\\x{:02x}", bytes[i + valid_up_to + j]);
+                }
+                i += valid_up_to + skip;
+            }
+        }
+    }
+    out
+}
+
+/// Decode UTF-8 with `surrogateescape`: each invalid byte `b` becomes the lone
+/// surrogate U+DC80 + (b - 0x80) (stored as CESU-8).  Valid UTF-8 passes through.
+fn bytes_decode_utf8_surrogateescape(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match std::str::from_utf8(&bytes[i..]) {
+            Ok(s) => {
+                out.push_str(s);
+                break;
+            }
+            Err(e) => {
+                let valid_up_to = e.valid_up_to();
+                // SAFETY: validated by from_utf8.
+                out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + valid_up_to]) });
+                // Each byte in the invalid sequence individually maps to a surrogate.
+                let skip = e.error_len().unwrap_or(1);
+                for j in 0..skip {
+                    push_surrogate_escape(&mut out, bytes[i + valid_up_to + j]);
+                }
+                i += valid_up_to + skip;
+            }
+        }
+    }
+    out
+}
+
+/// Decode a little-endian UTF-16 byte slice (no BOM) into a Python string.
+/// Raises `UnicodeDecodeError` on odd-length input or invalid code units.
+fn decode_utf16_le(bytes: &[u8]) -> Result<Value> {
+    if bytes.len() % 2 != 0 {
+        return Err(PyError::UnicodeDecodeError {
+            encoding: "utf-16-le".to_string(),
+            object: bytes.to_vec(),
+            start: bytes.len() - 1,
+            end: bytes.len(),
+            reason: "truncated data".to_string(),
+        });
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    decode_utf16_units(&units, bytes, "utf-16-le")
+}
+
+/// Decode a big-endian UTF-16 byte slice (no BOM) into a Python string.
+fn decode_utf16_be(bytes: &[u8]) -> Result<Value> {
+    if bytes.len() % 2 != 0 {
+        return Err(PyError::UnicodeDecodeError {
+            encoding: "utf-16-be".to_string(),
+            object: bytes.to_vec(),
+            start: bytes.len() - 1,
+            end: bytes.len(),
+            reason: "truncated data".to_string(),
+        });
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    decode_utf16_units(&units, bytes, "utf-16-be")
+}
+
+/// Decode a slice of UTF-16 code units into a Python string.
+///
+/// `raw_bytes` is the original encoded byte slice (before unit extraction) and
+/// is used verbatim as `UnicodeDecodeError.object`, matching CPython's behaviour
+/// where `.object` always contains the original input bytes in their on-wire
+/// encoding (LE for utf-16-le, BE for utf-16-be).
+fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Result<Value> {
+    let mut out = String::with_capacity(units.len());
+    let mut iter = units.iter().copied().enumerate();
+    while let Some((i, u)) = iter.next() {
+        match u {
+            // High surrogate: expect a following low surrogate.
+            0xD800..=0xDBFF => match iter.next() {
+                Some((_, low)) if (0xDC00..=0xDFFF).contains(&low) => {
+                    let cp = 0x10000 + ((u as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+                    out.push(char::from_u32(cp).expect("valid surrogate pair"));
+                }
+                // End of stream after a high surrogate: no low surrogate follows.
+                None => {
+                    return Err(PyError::UnicodeDecodeError {
+                        encoding: codec_name.to_string(),
+                        object: raw_bytes.to_vec(),
+                        start: i * 2,
+                        end: i * 2 + 2,
+                        reason: "unexpected end of data".to_string(),
+                    });
+                }
+                // A non-low-surrogate unit follows the high surrogate.
+                Some(_) => {
+                    return Err(PyError::UnicodeDecodeError {
+                        encoding: codec_name.to_string(),
+                        object: raw_bytes.to_vec(),
+                        start: i * 2,
+                        end: i * 2 + 2,
+                        reason: "illegal UTF-16 surrogate".to_string(),
+                    });
+                }
+            },
+            // Lone low surrogate: invalid.
+            0xDC00..=0xDFFF => {
+                return Err(PyError::UnicodeDecodeError {
+                    encoding: codec_name.to_string(),
+                    object: raw_bytes.to_vec(),
+                    start: i * 2,
+                    end: i * 2 + 2,
+                    reason: "illegal encoding".to_string(),
+                });
+            }
+            // BMP character.
+            _ => {
+                out.push(char::from_u32(u as u32).expect("BMP codepoint is valid"));
+            }
+        }
+    }
+    Ok(Value::string(&out))
+}
+
+/// Decode a little-endian UTF-32 byte slice (no BOM) into a Python string.
+///
+/// CPython processes complete 4-byte chunks first (reporting "code point not in
+/// range" on any invalid chunk) and only then reports "truncated data" for any
+/// trailing bytes that don't form a complete chunk.  The early-truncation guard
+/// is therefore removed in favour of checking the remainder after all full
+/// chunks have been decoded successfully.
+fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
+    let chunks = bytes.chunks_exact(4);
+    let remainder = chunks.remainder();
+    let mut out = String::with_capacity(bytes.len() / 4);
+    for (i, chunk) in chunks.enumerate() {
+        let cp = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        match char::from_u32(cp) {
+            Some(c) => out.push(c),
+            None => {
+                return Err(PyError::UnicodeDecodeError {
+                    encoding: "utf-32-le".to_string(),
+                    object: bytes.to_vec(),
+                    start: i * 4,
+                    end: i * 4 + 4,
+                    reason: "code point not in range(0x110000)".to_string(),
+                });
+            }
+        }
+    }
+    if !remainder.is_empty() {
+        let n = bytes.len() - remainder.len();
+        return Err(PyError::UnicodeDecodeError {
+            encoding: "utf-32-le".to_string(),
+            object: bytes.to_vec(),
+            start: n,
+            end: bytes.len(),
+            reason: "truncated data".to_string(),
+        });
+    }
+    Ok(Value::string(&out))
+}
+
+/// Decode a big-endian UTF-32 byte slice (no BOM) into a Python string.
+///
+/// Same chunk-first approach as `decode_utf32_le` — see that function's
+/// doc comment for the CPython compatibility rationale.
+fn decode_utf32_be(bytes: &[u8]) -> Result<Value> {
+    let chunks = bytes.chunks_exact(4);
+    let remainder = chunks.remainder();
+    let mut out = String::with_capacity(bytes.len() / 4);
+    for (i, chunk) in chunks.enumerate() {
+        let cp = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        match char::from_u32(cp) {
+            Some(c) => out.push(c),
+            None => {
+                return Err(PyError::UnicodeDecodeError {
+                    encoding: "utf-32-be".to_string(),
+                    object: bytes.to_vec(),
+                    start: i * 4,
+                    end: i * 4 + 4,
+                    reason: "code point not in range(0x110000)".to_string(),
+                });
+            }
+        }
+    }
+    if !remainder.is_empty() {
+        let n = bytes.len() - remainder.len();
+        return Err(PyError::UnicodeDecodeError {
+            encoding: "utf-32-be".to_string(),
+            object: bytes.to_vec(),
+            start: n,
+            end: bytes.len(),
+            reason: "truncated data".to_string(),
+        });
+    }
+    Ok(Value::string(&out))
 }
 
 /// Decode UTF-8 bytes, skipping any invalid byte sequences (errors='ignore').
