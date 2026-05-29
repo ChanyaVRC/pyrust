@@ -2556,7 +2556,7 @@ impl Interpreter {
             // Try __bool__ first.
             if let Some(method_val) = lookup_class_attr(&class, "__bool__") {
                 let self_val = if matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(value.clone())
+                    coerce_numeric(value)
                 } else {
                     Value::py_instance(Rc::clone(&inst_rc))
                 };
@@ -2575,7 +2575,7 @@ impl Interpreter {
             // Fall back to __len__.
             if let Some(method_val) = lookup_class_attr(&class, "__len__") {
                 let self_val = if matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(value.clone())
+                    coerce_numeric(value)
                 } else {
                     Value::py_instance(Rc::clone(&inst_rc))
                 };

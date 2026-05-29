@@ -342,9 +342,14 @@ impl Interpreter {
                 Ok(items[idx].clone())
             }
             ValueKind::Str(text) => {
-                let chars: Vec<char> = text.chars().collect();
-                let idx = normalize_index(&index, chars.len(), "string")?;
-                Ok(Value::string(chars[idx].to_string()))
+                let char_count = text.chars().count();
+                let idx = normalize_index(&index, char_count, "string")?;
+                // Use nth() to avoid collecting a Vec<char>; normalize_index
+                // guarantees idx < char_count so unwrap is safe.
+                let ch = text.chars().nth(idx).expect("normalize_index bounds check");
+                // Stack-encode to a &str to avoid an intermediate String allocation.
+                let mut buf = [0u8; 4];
+                Ok(Value::string(ch.encode_utf8(&mut buf) as &str))
             }
             ValueKind::Bytes(rc) => {
                 let idx = normalize_index(&index, rc.len(), "bytes")?;
@@ -578,7 +583,7 @@ impl Interpreter {
                     // `eval_binary` inside the dunder doesn't re-dispatch to the
                     // same method on the still-wrapped PyInstance (infinite loop).
                     let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right.clone())
+                        coerce_numeric(right)
                     } else {
                         Value::py_instance(Rc::clone(inst))
                     };
@@ -600,7 +605,7 @@ impl Interpreter {
                 && is_callable_method(&m)
             {
                 let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(left.clone())
+                    coerce_numeric(left)
                 } else {
                     Value::py_instance(Rc::clone(inst))
                 };
@@ -622,7 +627,7 @@ impl Interpreter {
                     && is_callable_method(&m)
                 {
                     let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right.clone())
+                        coerce_numeric(right)
                     } else {
                         Value::py_instance(Rc::clone(inst))
                     };
@@ -652,7 +657,7 @@ impl Interpreter {
                 // BuiltinFunction dunders operate on the backing primitive value;
                 // pass the coerced value so they don't reject the PyInstance wrapper.
                 let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(val.clone())
+                    coerce_numeric(val)
                 } else {
                     Value::py_instance(Rc::clone(inst))
                 };
@@ -1628,8 +1633,8 @@ impl Interpreter {
         // Issue #1204: if a PyInstance has a scalar primitive backing
         // (e.g. MyInt subclass) and no user __eq__ was found, compare the
         // backing values so `MyInt(5) == 5` returns True.
-        let a_cmp = coerce_numeric(a.clone());
-        let b_cmp = coerce_numeric(b.clone());
+        let a_cmp = coerce_numeric(a);
+        let b_cmp = coerce_numeric(b);
         if !matches!(a_cmp.kind(), ValueKind::PyInstance(_))
             || !matches!(b_cmp.kind(), ValueKind::PyInstance(_))
         {
@@ -2162,14 +2167,14 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                self.div(coerce_numeric(left), coerce_numeric(right))
+                self.div(coerce_numeric(&left), coerce_numeric(&right))
             }
             BinaryOp::FloorDiv => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__floordiv__", "__rfloordiv__") {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                self.floor_div(coerce_numeric(left), coerce_numeric(right))
+                self.floor_div(coerce_numeric(&left), coerce_numeric(&right))
             }
             BinaryOp::Mod => {
                 // str % args: printf-style formatting (#1393).
@@ -2202,7 +2207,7 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                self.modulo(coerce_numeric(left), coerce_numeric(right))
+                self.modulo(coerce_numeric(&left), coerce_numeric(&right))
             }
             BinaryOp::Eq => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
@@ -2263,8 +2268,8 @@ impl Interpreter {
                 }
                 // Issue #1204: extract scalar primitive backing so that
                 // `MyInt(42) ** 2` works identically to `42 ** 2`.
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 // Integer ** non-negative integer stays in the int domain
                 // (BigInt promotion when the result overflows i64).  Once
                 // overflow promotes (#421), `(2**64) ** 2` arrives here as
@@ -2355,8 +2360,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 // BigInt × int / int × BigInt / BigInt × BigInt all flow
                 // through the BigInt path; int × int stays on the fast
                 // path inside `bitwise_op`.  See issue #485.
@@ -2431,8 +2436,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named(
@@ -2460,8 +2465,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named(
@@ -2486,8 +2491,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 // BigInt LHS: shift exactly, no `& 63` truncation.
                 // Int LHS with a BigInt RHS: the shift count is
                 // astronomically large.  See #485.
@@ -2581,8 +2586,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named(
@@ -2651,7 +2656,7 @@ impl Interpreter {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
         }
-        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
                     Some(r) => Value::int(r),
@@ -2700,7 +2705,7 @@ impl Interpreter {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 - b.0, a.1 - b.1));
         }
-        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
                 Some(r) => Value::int(r),
@@ -2801,7 +2806,7 @@ impl Interpreter {
             // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
             return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
         }
-        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
                 Some(r) => Value::int(r),
@@ -3358,8 +3363,8 @@ impl Interpreter {
     ) -> Result<Value> {
         // Issue #1204: extract scalar primitive backing for subclasses of
         // int/float/str/bytes so that `MyInt(5) < 10` etc. works.
-        let left = coerce_numeric(left);
-        let right = coerce_numeric(right);
+        let left = coerce_numeric(&left);
+        let right = coerce_numeric(&right);
         if matches!(left.kind(), ValueKind::Float(f) if f.is_nan())
             || matches!(right.kind(), ValueKind::Float(f) if f.is_nan())
         {
@@ -4824,11 +4829,10 @@ fn is_callable_method(v: &Value) -> bool {
     )
 }
 
-pub(crate) fn coerce_numeric(v: Value) -> Value {
+pub(crate) fn coerce_numeric(v: &Value) -> Value {
     // Extract via kind() in a scope so the borrow is dropped before we
-    // return `v` from the fallthrough — #450 made `kind()`'s borrow
-    // explicit, so we can't move `v` while a `ValueKind::List(_)` (or
-    // any other Ref-bearing variant) might be live.
+    // clone `v` in the fallthrough — #450 made `kind()`'s borrow
+    // explicit, so we can't hold a borrow while returning an owned Value.
     if let ValueKind::Bool(b) = v.kind() {
         return Value::int(b as i64);
     }
@@ -4852,7 +4856,7 @@ pub(crate) fn coerce_numeric(v: Value) -> Value {
             }
         }
     }
-    v
+    v.clone()
 }
 
 pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
