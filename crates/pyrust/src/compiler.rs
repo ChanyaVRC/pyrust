@@ -3898,6 +3898,10 @@ struct Compiler {
     /// import must be rejected with
     /// `SyntaxError: from __future__ imports must occur at the beginning of the file`.
     past_future_zone: bool,
+    /// True when `from __future__ import annotations` has been seen (PEP 563).
+    /// When set, annotation expressions are NOT evaluated; instead, their source
+    /// text is stored as a string literal in `__annotations__`.
+    future_annotations: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -3915,6 +3919,112 @@ fn class_body_has_annotations(body: &[Stmt]) -> bool {
         Stmt::While { body, .. } | Stmt::For { body, .. } => class_body_has_annotations(body),
         _ => false,
     })
+}
+
+/// Produce Python's `repr()` of a string value, matching CPython's output.
+///
+/// Rules (same as CPython's `repr()` for `str`):
+/// - Prefer single-quote delimiters.
+/// - If the string contains a single quote but no double quote, use double-quote
+///   delimiters instead (avoids the need to escape `'`).
+/// - If both quote types appear, use single-quote delimiters and escape `'` as `\'`.
+/// - Escape backslashes, non-printable control characters, and surrogates.
+fn py_repr_str(s: &str) -> String {
+    let has_single = s.contains('\'');
+    let has_double = s.contains('"');
+    let quote = if has_single && !has_double { '"' } else { '\'' };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            '\x0b' => out.push_str("\\v"),
+            '\'' if quote == '\'' => out.push_str("\\'"),
+            '"' if quote == '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
+/// Convert an annotation expression to its source-text string representation,
+/// as required by PEP 563 (`from __future__ import annotations`).
+///
+/// CPython stores the unparsed source text of the annotation as a string in
+/// `__annotations__`.  We reconstruct a canonical form from the AST that
+/// matches CPython output for the annotation expressions commonly found in
+/// real code.  String-literal annotations are preserved with their quotes
+/// (e.g. `x: 'Foo'` → `"'Foo'"`), consistent with CPython 3.12 behaviour.
+fn stringify_annotation(expr: &Expr) -> String {
+    match expr {
+        Expr::Var(name) => name.clone(),
+        Expr::None => "None".to_string(),
+        Expr::Ellipsis => "...".to_string(),
+        Expr::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+        Expr::Int(n) => n.to_string(),
+        Expr::Float(f) => format!("{f}"),
+        Expr::Str(s) => py_repr_str(s),
+        Expr::Attr { target, name } => {
+            format!("{}.{}", stringify_annotation(target), name)
+        }
+        Expr::Index { target, index } => {
+            // In subscript position, a tuple is rendered without outer parens:
+            // `dict[str, int]` not `dict[(str, int)]`.
+            let index_str = match index.as_ref() {
+                Expr::Tuple(elts) => {
+                    let parts: Vec<String> = elts.iter().map(stringify_annotation).collect();
+                    parts.join(", ")
+                }
+                other => stringify_annotation(other),
+            };
+            format!("{}[{}]", stringify_annotation(target), index_str)
+        }
+        Expr::List(elts) => {
+            let parts: Vec<String> = elts.iter().map(stringify_annotation).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Expr::Tuple(elts) => {
+            let parts: Vec<String> = elts.iter().map(stringify_annotation).collect();
+            format!("({})", parts.join(", "))
+        }
+        Expr::Binary { left, op, right } => {
+            let op_str = match op {
+                BinaryOp::BitOr => " | ",
+                BinaryOp::Add => " + ",
+                BinaryOp::Sub => " - ",
+                BinaryOp::Mul => " * ",
+                _ => " | ",
+            };
+            format!(
+                "{}{}{}",
+                stringify_annotation(left),
+                op_str,
+                stringify_annotation(right)
+            )
+        }
+        Expr::Unary { op, expr } => {
+            let op_str = match op {
+                UnaryOp::Neg => "-",
+                UnaryOp::Pos => "+",
+                UnaryOp::Not => "not ",
+                UnaryOp::BitNot => "~",
+            };
+            format!("{}{}", op_str, stringify_annotation(expr))
+        }
+        // For anything else (calls, comprehensions, etc.) fall back to a
+        // best-effort representation — these are rarely used as annotations.
+        _ => format!("{expr:?}"),
+    }
 }
 
 /// Collect all names that a pattern binds on a successful match.
@@ -4020,6 +4130,7 @@ impl Compiler {
             is_syntax_error: false,
             is_module_scope: false,
             past_future_zone: false,
+            future_annotations: false,
         }
     }
 
@@ -5036,12 +5147,18 @@ impl Compiler {
         if self.is_function_scope {
             return;
         }
-        // 3. Evaluate the annotation expression.
-        let ann_reg = self.compile_expr(annotation);
-        if self.failed {
-            self.free_temp(ann_reg);
-            return;
-        }
+        // 3. Produce the annotation value: either evaluate the expression (eager,
+        //    default) or store its source text as a string (PEP 563 lazy mode).
+        let ann_reg = if self.future_annotations {
+            self.compile_literal(Value::string(stringify_annotation(annotation)))
+        } else {
+            let r = self.compile_expr(annotation);
+            if self.failed {
+                self.free_temp(r);
+                return;
+            }
+            r
+        };
         // 4. Load the string key for this annotation.
         let name_str_val = crate::value::Value::string(name);
         let key_idx = self.intern_const(name_str_val);
@@ -6863,10 +6980,15 @@ impl Compiler {
                     return;
                 }
             }
-            // All names are valid.  Fall through to the ordinary import-from
-            // bytecode path below.  CPython 3.12 also emits real import
-            // bytecode for `from __future__ import X` (IMPORT_NAME followed
-            // by IMPORT_FROM + STORE_NAME), so the feature name is bound in
+            // All names are valid.  Activate compiler flags for directives
+            // that affect code generation.
+            if names.iter().any(|(n, _)| n == "annotations") {
+                self.future_annotations = true;
+            }
+            // Fall through to the ordinary import-from bytecode path below.
+            // CPython 3.12 also emits real import bytecode for
+            // `from __future__ import X` (IMPORT_NAME followed by
+            // IMPORT_FROM + STORE_NAME), so the feature name is bound in
             // the module namespace and `import __future__; __future__.X` also
             // works.  With a real `__future__` module stub in the registry
             // the emitted ImportModule / ImportFromAttr / StoreGlobal sequence
@@ -7022,6 +7144,8 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        // Propagate PEP 563 lazy-annotation flag to the inner compiler.
+        sub.future_annotations = self.future_annotations;
         // A function compiled directly inside a class body is a class method and
         // gets access to zero-arg super().  Functions compiled inside other
         // functions (nested) do not — they get is_class_method = false (the
@@ -7148,6 +7272,8 @@ impl Compiler {
         }
 
         // Compile annotation expressions (evaluated in enclosing scope, like defaults).
+        // Under PEP 563 (`from __future__ import annotations`), emit the annotation
+        // source text as a string literal instead of evaluating the expression.
         // Order: annotated params in declaration order, then return annotation.
         let annotated_params: Vec<(usize, &Expr)> = params
             .iter()
@@ -7170,7 +7296,11 @@ impl Compiler {
             }
             for (slot_i, (_, annot_expr)) in (0u32..).zip(annotated_params.iter()) {
                 let saved = self.next_temp;
-                let r = self.compile_expr(annot_expr);
+                let r = if self.future_annotations {
+                    self.compile_literal(Value::string(stringify_annotation(annot_expr)))
+                } else {
+                    self.compile_expr(annot_expr)
+                };
                 if r != annots_base + slot_i {
                     self.emit(Insn::Move(annots_base + slot_i, r));
                 }
@@ -7179,7 +7309,11 @@ impl Compiler {
             if let Some(ret_annot) = return_annotation {
                 let slot_i = annots_n as u32 - 1;
                 let saved = self.next_temp;
-                let r = self.compile_expr(ret_annot);
+                let r = if self.future_annotations {
+                    self.compile_literal(Value::string(stringify_annotation(ret_annot)))
+                } else {
+                    self.compile_expr(ret_annot)
+                };
                 if r != annots_base + slot_i {
                     self.emit(Insn::Move(annots_base + slot_i, r));
                 }
@@ -7410,6 +7544,8 @@ impl Compiler {
         if self.is_function_scope {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
+        // Propagate PEP 563 lazy-annotation flag to the class body compiler.
+        sub.future_annotations = self.future_annotations;
         sub.compile_block(body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
@@ -8910,6 +9046,7 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        sub.future_annotations = self.future_annotations;
         sub.compile_block(&fn_body);
         let inner_code = match sub.finish() {
             Ok(c) => c,
@@ -9232,6 +9369,7 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        sub.future_annotations = self.future_annotations;
         sub.compile_block(&body);
         let inner_code = match sub.finish() {
             Ok(c) => c,
