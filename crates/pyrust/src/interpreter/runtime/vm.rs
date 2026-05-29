@@ -2502,12 +2502,13 @@ impl Interpreter {
                         // env.values and module_globals_dict (issue #706); raise
                         // NameError only if absent from both.
                         let me = module_env(&self.env);
-                        let in_env = me.borrow_mut().values.remove(name.as_str()).is_some();
-                        let in_dict = self.module_globals_dict
+                        let from_env = me.borrow_mut().values.remove(name.as_str());
+                        let in_env = from_env.is_some();
+                        let from_dict = self.module_globals_dict
                             .dict_shift_remove(&PyKey::str_from(name.as_str()))
                             .ok()
-                            .flatten()
-                            .is_some();
+                            .flatten();
+                        let in_dict = from_dict.is_some();
                         if !in_env && !in_dict {
                             vm_try!(Err(PyError::name_error(
                                 "NameError",
@@ -2544,23 +2545,30 @@ impl Interpreter {
                                 }
                             }
                         }
+                        // All three possible bindings (env, dict, register) have been
+                        // released.  Check for __del__ now.
+                        let del_candidate = from_env.or(from_dict);
+                        if let Some(val) = del_candidate {
+                            call_del_if_last_binding(self, val, &regs, code.num_locals as usize);
+                        }
                     } else {
                         // Module-scope `del x` (or non-global local): remove from
                         // current env.  At module scope, also remove from
                         // module_globals_dict (issue #706) so LoadGlobal cannot
                         // resurrect the deleted name.  Raise NameError if absent
                         // from both.
-                        let in_env = self.env.borrow_mut().values.remove(name.as_str()).is_some();
+                        let from_env = self.env.borrow_mut().values.remove(name.as_str());
+                        let in_env = from_env.is_some();
                         let is_module_scope = self.env.borrow().parent.is_none();
-                        let in_dict = if is_module_scope {
+                        let from_dict = if is_module_scope {
                             self.module_globals_dict
                                 .dict_shift_remove(&PyKey::str_from(name.as_str()))
                                 .ok()
                                 .flatten()
-                                .is_some()
                         } else {
-                            false
+                            None
                         };
+                        let in_dict = from_dict.is_some();
                         if !in_env && !in_dict {
                             vm_try!(Err(PyError::name_error(
                                 "NameError",
@@ -2573,6 +2581,14 @@ impl Interpreter {
                         if is_module_scope {
                             bump_global_env_version(self);
                         }
+                        // Check __del__ after all bindings are released.  Prefer
+                        // from_env since it is more likely to be the canonical ref;
+                        // from_dict (if present) was a clone stored by globals_accessed
+                        // syncing and will be dropped here naturally.
+                        let del_candidate = from_env.or(from_dict);
+                        if let Some(val) = del_candidate {
+                            call_del_if_last_binding(self, val, &regs, code.num_locals as usize);
+                        }
                     }
                 }
                 Insn::DeleteLocal(reg, name_idx) => {
@@ -2581,9 +2597,20 @@ impl Interpreter {
                     // Skip the check (name_idx == u16::MAX) for compiler-
                     // guaranteed-bound deletions such as PEP 3110
                     // `except E as var:` cleanup.
+                    //
+                    // Use the frame-view stack to detect the actual scope rather
+                    // than checking `self.env.parent`.  When a function has no
+                    // global/nonlocal/cell vars, `self.env` is set to the
+                    // closure's captured env (often the module env, which has
+                    // `parent == None`), so the env-parent check gives a false
+                    // "module scope" reading inside those functions.
+                    let is_module_scope = self
+                        .vm_frame_views
+                        .last()
+                        .map(|v| v.kind == FrameKind::Script)
+                        .unwrap_or(false);
                     if *name_idx != u16::MAX && regs[*reg as usize].is_unset() {
                         let name = pool_get!(code.names, *name_idx, "name");
-                        let is_module_scope = self.env.borrow().parent.is_none();
                         if is_module_scope {
                             vm_try!(Err(PyError::name_error(
                                 "NameError",
@@ -2601,7 +2628,24 @@ impl Interpreter {
                             )));
                         }
                     }
-                    regs[*reg as usize] = Value::unset();
+                    // At function scope: the register is the only binding for
+                    // this variable (fastlocals are not in env.values unless
+                    // they are cell vars, which use env and not registers).
+                    // Call __del__ immediately if no other named variable holds
+                    // the same instance.
+                    //
+                    // At module scope: the compiler also emits DeleteModuleGlobal
+                    // right after this instruction.  Module-scope fastlocals
+                    // can also be in module_globals_dict when globals() was
+                    // called (globals_accessed == true).  If globals_accessed is
+                    // false the register was the only binding, so we can call
+                    // __del__ here.  If globals_accessed is true the dict may
+                    // hold a ref, so we defer to DeleteModuleGlobal which will
+                    // remove the dict entry and then check.
+                    let deleted_val = std::mem::replace(&mut regs[*reg as usize], Value::unset());
+                    if (!is_module_scope || !self.globals_accessed) && !deleted_val.is_unset() {
+                        call_del_if_last_binding(self, deleted_val, &regs, code.num_locals as usize);
+                    }
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
                     // Always bump global_env_version: this instruction fires on
@@ -2626,16 +2670,34 @@ impl Interpreter {
                 }
                 Insn::DeleteModuleGlobal(name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name");
-                    module_env(&self.env).borrow_mut().values.remove(name);
+                    // Capture the removed value so we can check for __del__ after
+                    // all module-level bindings (env + dict) have been released.
+                    // `from_env` is Some only for module globals stored via
+                    // StoreGlobal (e.g. `global x; x = ...` from inside a function
+                    // or module vars without a fastlocal register).
+                    let from_env = module_env(&self.env).borrow_mut().values.remove(name);
                     // Always remove from module_globals_dict regardless of
                     // globals_accessed: pre-seeded dunders (__name__, __doc__,
                     // __builtins__) live in the dict unconditionally and must
                     // be cleared when deleted, otherwise they can resurface
                     // through a subsequent globals() lookup (issue #846).
-                    let _ = self.module_globals_dict
-                        .dict_shift_remove(&PyKey::str_from(name));
+                    // Capture the removed value to check __del__ after.
+                    let from_dict = self.module_globals_dict
+                        .dict_shift_remove(&PyKey::str_from(name))
+                        .ok()
+                        .flatten();
                     // Invalidate the LoadGlobal inline cache.
                     bump_global_env_version(self);
+                    // The preceding DeleteLocal already cleared the fastlocal
+                    // register.  Now that env.values and module_globals_dict have
+                    // also been cleared, check whether this was the last
+                    // Python-visible binding to the instance.  Use the same
+                    // register scan as DeleteLocal so that module-level temp
+                    // registers (>= num_locals) do not prevent __del__ from firing.
+                    let del_val = from_env.or(from_dict);
+                    if let Some(val) = del_val {
+                        call_del_if_last_binding(self, val, &regs, code.num_locals as usize);
+                    }
                 }
 
                 // ── Control flow ─────────────────────────────────────────
