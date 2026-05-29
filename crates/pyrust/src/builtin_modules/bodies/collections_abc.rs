@@ -11,40 +11,75 @@
 // ## Design
 //
 // Each ABC is a per-thread `PyClass` singleton with no methods.
-// `isinstance` checks work because on first module load we register
-// each ABC as an `extra_base` on the relevant primitive class(es).
-// `class_is_subclass_of` walks `base` and `extra_bases`, so
-// `isinstance([], Sequence)` → `list`'s extra_bases contains
-// `Sequence` → `True`.
+// `isinstance` checks work through two mechanisms:
 //
-// The `Callable` ABC is special: it covers user functions, bound
-// methods, classes (callable via `type`), and built-in functions
-// (`len`, `print`).  We register it on `function_type_singleton()`,
-// `method_type_singleton()`, and `type_class_singleton()`.
-// `isinstance_single` has an extra arm that fires when the expected
-// class's name is "Callable" and the value is a builtin-function kind.
+// 1. **Structural subtyping via `abc_subclasshook`**: when `isinstance(x, ABC)`
+//    is called, `isinstance_single` calls `abc_subclasshook(abc_name, x)`.
+//    For user-defined instances, this walks the class MRO checking whether
+//    each required abstract method is present and non-None.  For built-in
+//    values, a hardcoded protocol table covers the known dunders.
+//    Returns `Some(true)`/`Some(false)` to short-circuit, `None` to fall
+//    through to the `extra_bases` / MRO check.
 //
-// ## Registration
+//    This mirrors CPython's `__subclasshook__` + `_check_methods` mechanism
+//    from `Lib/_collections_abc.py`.
 //
-// `register_abc_extra_bases()` is called once per thread from
-// `make_abc_module()` (the expression in the `constants` block).
-// It adds each ABC Rc to the `extra_bases` of the relevant primitive
-// class singletons so subsequent `isinstance` calls work without any
-// additional dispatch overhead.
+// 2. **`extra_bases` registration** (legacy / complex ABCs): on first module
+//    load, `register_abc_extra_bases()` links each ABC that lacks a direct
+//    structural hook (Sequence, MutableSequence, Set, MutableSet, Mapping,
+//    MutableMapping) into the `extra_bases` of the relevant primitive class
+//    singletons.  The Callable ABC is also registered here for user-defined
+//    functions and classes.
+//
+// ## Which ABCs have structural hooks (mirrors CPython)?
+//
+//   Hashable:       __hash__
+//   Iterable:       __iter__
+//   Iterator:       __iter__ + __next__
+//   Reversible:     __reversed__ + __iter__
+//   Generator:      __iter__ + __next__ + send + throw + close
+//   Sized:          __len__
+//   Container:      __contains__
+//   Callable:       __call__
+//   Buffer:         __buffer__
+//   Awaitable:      __await__
+//   Coroutine:      __await__ + send + throw + close
+//   AsyncIterable:  __aiter__
+//   AsyncIterator:  __anext__ + __aiter__
+//   AsyncGenerator: __aiter__ + __anext__ + asend + athrow + aclose
+//
+// ## Primitive protocol table
+//
+//   type       __iter__ __len__ __contains__ __hash__ __reversed__ __call__
+//   str          yes     yes      yes          yes       yes
+//   bytes        yes     yes      yes          yes       yes
+//   list         yes     yes      yes          no        yes
+//   tuple        yes     yes      yes          yes       yes
+//   dict         yes     yes      yes          no
+//   set          yes     yes      yes          no
+//   frozenset    yes     yes      yes          yes
+//   int/bool     no      no       no           yes
+//   float        no      no       no           yes
+//   complex      no      no       no           yes
+//   NoneType     no      no       no           yes
+//   bytearray    yes     yes      yes          no        yes
+//   range        yes     yes      yes          yes       yes
+//   generator    yes     no       no           no
+//   BuiltinFn    no      no       no           yes       yes
+//   BoundMethod  no      no       no           yes       yes
 //
 // Reference: <https://docs.python.org/3/library/collections.abc.html>
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::value::{PyClass, Value};
+use crate::value::{PyClass, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
 // ── ABC class singletons ──────────────────────────────────────────────────────
 //
-// One thread-local per ABC.  Each is an empty PyClass with no methods —
-// `isinstance` works purely through the `extra_bases` registration path.
+// One thread-local per ABC.
 
 macro_rules! abc_class {
     ($name:expr) => {
@@ -105,6 +140,220 @@ pub(crate) fn hashable_abc_class() -> Rc<RefCell<PyClass>> {
     ABC_HASHABLE.with(Rc::clone)
 }
 
+// ── Required-method table (mirrors CPython's __subclasshook__ impls) ──────────
+//
+// Each entry maps an ABC name to the slice of method names that must all be
+// present and non-None on a class for `isinstance(x, ABC)` to return True.
+// ABCs that lack a direct structural hook (Sequence, Mapping, Set, …) are NOT
+// in this table; they fall through to the `extra_bases` / MRO path.
+
+const ABC_REQUIRED_METHODS: &[(&str, &[&str])] = &[
+    ("Hashable",        &["__hash__"]),
+    ("Iterable",        &["__iter__"]),
+    ("Iterator",        &["__iter__", "__next__"]),
+    ("Reversible",      &["__reversed__", "__iter__"]),
+    ("Generator",       &["__iter__", "__next__", "send", "throw", "close"]),
+    ("Sized",           &["__len__"]),
+    ("Container",       &["__contains__"]),
+    ("Callable",        &["__call__"]),
+    ("Buffer",          &["__buffer__"]),
+    ("Awaitable",       &["__await__"]),
+    ("Coroutine",       &["__await__", "send", "throw", "close"]),
+    ("AsyncIterable",   &["__aiter__"]),
+    ("AsyncIterator",   &["__anext__", "__aiter__"]),
+    ("AsyncGenerator",  &["__aiter__", "__anext__", "asend", "athrow", "aclose"]),
+];
+
+/// Required methods for an ABC, or `None` if the ABC has no structural hook.
+fn required_methods(abc_name: &str) -> Option<&'static [&'static str]> {
+    ABC_REQUIRED_METHODS
+        .iter()
+        .find(|(name, _)| *name == abc_name)
+        .map(|(_, methods)| *methods)
+}
+
+// ── Primitive protocol support table ─────────────────────────────────────────
+//
+// Maps (value type tag, dunder name) → bool.  Covers only the dunders that
+// appear in `ABC_REQUIRED_METHODS`.  Used for non-instance values where there
+// is no class MRO to walk.
+
+fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
+    match value.kind() {
+        // str: iterable, sized, contains, hashable, reversed, no __call__
+        ValueKind::Str(_) => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
+        ),
+
+        // bytes: same as str
+        ValueKind::Bytes(_) => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
+        ),
+
+        // list: iterable, sized, contains, reversed, NOT hashable (__hash__ = None)
+        ValueKind::List(_) => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__reversed__"
+        ),
+
+        // tuple: iterable, sized, contains, hashable, reversed
+        ValueKind::Tuple(_) => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
+        ),
+
+        // dict: iterable, sized, contains, reversed, NOT hashable
+        ValueKind::Dict(_) => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__reversed__"
+        ),
+
+        // set: iterable, sized, contains, NOT hashable, NOT reversed
+        ValueKind::Set(_) => matches!(dunder, "__iter__" | "__len__" | "__contains__"),
+
+        // int (and BigInt): hashable only, not iterable/sized/contains
+        ValueKind::Int(_) | ValueKind::BigInt(_) => dunder == "__hash__",
+
+        // bool is a subclass of int — same protocol support
+        ValueKind::Bool(_) => dunder == "__hash__",
+
+        // float: hashable only
+        ValueKind::Float(_) => dunder == "__hash__",
+
+        // complex: hashable only
+        ValueKind::Complex(_, _) => dunder == "__hash__",
+
+        // None: hashable only (NoneType is hashable in CPython)
+        ValueKind::None => dunder == "__hash__",
+
+        // NotImplemented, Ellipsis: hashable
+        ValueKind::NotImplemented | ValueKind::Ellipsis => dunder == "__hash__",
+
+        // range: iterable, sized, contains, hashable, reversed
+        ValueKind::Range { .. } => matches!(
+            dunder,
+            "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
+        ),
+
+        // generator objects: have __iter__, __next__, send, throw, close
+        ValueKind::Generator(_) => matches!(
+            dunder,
+            "__iter__" | "__next__" | "send" | "throw" | "close"
+        ),
+
+        // BuiltinObject variants
+        ValueKind::BuiltinObject { ops, .. } => {
+            let type_name = ops.type_name();
+            if type_name == "bytearray" {
+                // bytearray: iterable, sized, contains, reversed, NOT hashable
+                matches!(
+                    dunder,
+                    "__iter__" | "__len__" | "__contains__" | "__reversed__"
+                )
+            } else if type_name == "frozenset" {
+                // frozenset: iterable, sized, contains, hashable, NOT reversed
+                matches!(
+                    dunder,
+                    "__iter__" | "__len__" | "__contains__" | "__hash__"
+                )
+            } else if type_name == pyrust_builtins::bound_method::TYPE_NAME {
+                // Built-in bound methods are callable and hashable
+                matches!(dunder, "__call__" | "__hash__")
+            } else {
+                false
+            }
+        }
+
+        // BuiltinFunction (`len`, `print`, …): callable and hashable
+        ValueKind::BuiltinFunction(_) => matches!(dunder, "__call__" | "__hash__"),
+
+        // UserFunction (lambdas, def'd functions): callable and hashable
+        ValueKind::UserFunction(_) => matches!(dunder, "__call__" | "__hash__"),
+
+        // BoundMethod / ClassBoundMethod: callable and hashable
+        ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+            matches!(dunder, "__call__" | "__hash__")
+        }
+
+        // PyClass values (class objects): callable (__call__ = construct) and hashable
+        ValueKind::PyClass(_) => matches!(dunder, "__call__" | "__hash__"),
+
+        // PyInstance: handled separately via MRO walk — don't fall through here.
+        // PyModule, SuperProxy, and any future variants: no protocol support.
+        _ => false,
+    }
+}
+
+// ── MRO method check (mirrors CPython's _check_methods) ──────────────────────
+//
+// Walks the class chain looking for `name`.  Returns:
+//   Some(true)  — found in MRO and the value is not None
+//   Some(false) — found in MRO but the value IS None (explicitly excluded,
+//                 e.g. `__hash__ = None` on list-like user types)
+//   None        — not found anywhere in the MRO (= NotImplemented in CPython)
+//
+// The `object` fallback in `lookup_class_attr` ensures that user classes
+// without an explicit `__hash__` still resolve to `object.__hash__`, so they
+// are correctly treated as Hashable by default.
+
+fn class_mro_has_method(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<bool> {
+    use crate::interpreter::lookup_class_attr;
+    match lookup_class_attr(class, name) {
+        Some(v) if v.is_none() => Some(false),
+        Some(_) => Some(true),
+        None => None,
+    }
+}
+
+// ── Public structural subtyping hook ─────────────────────────────────────────
+
+/// `__subclasshook__`-style structural subtyping check.
+///
+/// Called by `isinstance_single` in `builtins.rs` when the expected class is
+/// a known ABC.  Mirrors CPython's `ABCMeta.__instancecheck__` → `__subclasshook__`
+/// → `_check_methods` chain.
+///
+/// Returns:
+///   `Some(true)`  — all required methods present; `isinstance` should return True.
+///   `Some(false)` — a required method is explicitly None; isinstance returns False.
+///   `None`        — ABC not in our structural table, or check inconclusive;
+///                   fall through to the `extra_bases` / MRO path.
+pub(crate) fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
+    let required = required_methods(abc_name)?;
+
+    match value.kind() {
+        // User-defined instances: walk the class MRO.
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            for &method in required {
+                match class_mro_has_method(&class, method) {
+                    Some(true) => {} // present and non-None; continue
+                    Some(false) => return Some(false), // explicitly None
+                    None => return Some(false), // method absent from entire MRO
+                }
+            }
+            Some(true)
+        }
+
+        // All other value kinds (primitives, BuiltinFunction, Generator, …):
+        // use the hardcoded protocol table.
+        _ => {
+            // Special case: BuiltinFunction and BuiltinObject bound methods are
+            // already handled by dedicated arms in isinstance_single for Callable
+            // and Hashable.  For other ABCs they correctly return false via the
+            // primitive_value_has_dunder table.
+            for &method in required {
+                if !primitive_value_has_dunder(value, method) {
+                    return Some(false);
+                }
+            }
+            Some(true)
+        }
+    }
+}
+
 pyrust_module! {
     constants {
         "Container"        => make_abc_module(),
@@ -152,17 +401,27 @@ fn make_abc_module() -> Value {
 /// on the per-thread primitive class singletons so that
 /// `class_is_subclass_of(list_class, sequence_class)` returns `true`.
 ///
+/// This handles the complex ABCs that do NOT have direct structural hooks
+/// (Sequence, MutableSequence, Set, MutableSet, Mapping, MutableMapping),
+/// as well as Callable for user-defined functions / classes.
+///
+/// The simple ABCs (Hashable, Iterable, Sized, Container, etc.) are now
+/// handled by `abc_subclasshook` for all value kinds, so they no longer need
+/// entries here.  The legacy entries are kept for the primitive class singletons
+/// so that `issubclass(list, Iterable)` etc. still works via the class MRO —
+/// the `extra_bases` on the primitive classes are still the source of truth
+/// for class-vs-class subclass relationships.
+///
 /// CPython registration table (from Lib/_collections_abc.py):
 ///
 ///   Hashable:        int, float, complex, str, bytes, tuple, frozenset,
 ///                    bool, NoneType, NotImplementedType, ellipsis
-///   Iterable:        str, bytes, list, tuple, dict, set, frozenset,
-///                    range-like (not yet), bool(no)
-///   Container:       str, bytes, list, tuple, dict, set, frozenset
-///   Sized:           str, bytes, list, tuple, dict, set, frozenset
-///   Reversible:      str, bytes, list, tuple (not set, frozenset, dict)
-///   Sequence:        str, bytes, list, tuple
-///   MutableSequence: list
+///   Iterable:        str, bytes, list, tuple, dict, set, frozenset, bytearray
+///   Container:       str, bytes, list, tuple, dict, set, frozenset, bytearray
+///   Sized:           str, bytes, list, tuple, dict, set, frozenset, bytearray
+///   Reversible:      str, bytes, list, tuple, dict, bytearray
+///   Sequence:        str, bytes, list, tuple, bytearray
+///   MutableSequence: list, bytearray
 ///   Set:             set, frozenset
 ///   MutableSet:      set
 ///   Mapping:         dict
@@ -220,33 +479,37 @@ fn register_abc_extra_bases() {
         };
     }
 
-    let list_cls      = prim!("list");
-    let tuple_cls     = prim!("tuple");
-    let str_cls       = prim!("str");
-    let bytes_cls     = prim!("bytes");
-    let dict_cls      = prim!("dict");
-    let set_cls       = prim!("set");
-    let frozenset_cls = prim!("frozenset");
-    let int_cls       = prim!("int");
-    let float_cls     = prim!("float");
-    let complex_cls   = prim!("complex");
-    let bool_cls      = prim!("bool");
-    let none_cls      = prim!("NoneType");
+    let list_cls        = prim!("list");
+    let tuple_cls       = prim!("tuple");
+    let str_cls         = prim!("str");
+    let bytes_cls       = prim!("bytes");
+    let bytearray_cls   = prim!("bytearray");
+    let dict_cls        = prim!("dict");
+    let set_cls         = prim!("set");
+    let frozenset_cls   = prim!("frozenset");
+    let int_cls         = prim!("int");
+    let float_cls       = prim!("float");
+    let complex_cls     = prim!("complex");
+    let bool_cls        = prim!("bool");
+    let none_cls        = prim!("NoneType");
 
     // ── Sequence ────────────────────────────────────────────────────────────
-    // list, tuple, str, bytes are Sequences.
-    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls] {
+    // list, tuple, str, bytes, bytearray are Sequences.
+    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &bytearray_cls] {
         link(cls, &sequence);
     }
 
     // ── MutableSequence ─────────────────────────────────────────────────────
-    // Only list.
-    link(&list_cls, &mut_sequence);
+    // list and bytearray.
+    for cls in [&list_cls, &bytearray_cls] {
+        link(cls, &mut_sequence);
+    }
 
     // ── Reversible ──────────────────────────────────────────────────────────
-    // list, tuple, str, bytes, dict (not set, frozenset in CPython).
+    // list, tuple, str, bytes, dict, bytearray
+    // (not set, frozenset in CPython).
     // dict became Reversible in Python 3.8 (dict keys preserve insertion order).
-    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &dict_cls] {
+    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &dict_cls, &bytearray_cls] {
         link(cls, &reversible);
     }
 
@@ -269,28 +532,28 @@ fn register_abc_extra_bases() {
     link(&dict_cls, &mut_mapping);
 
     // ── Container ───────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset.
+    // str, bytes, list, tuple, dict, set, frozenset, bytearray.
     for cls in [
         &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls,
+        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls,
     ] {
         link(cls, &container);
     }
 
     // ── Sized ───────────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset.
+    // str, bytes, list, tuple, dict, set, frozenset, bytearray.
     for cls in [
         &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls,
+        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls,
     ] {
         link(cls, &sized);
     }
 
     // ── Iterable ────────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset.
+    // str, bytes, list, tuple, dict, set, frozenset, bytearray.
     for cls in [
         &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls,
+        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls,
     ] {
         link(cls, &iterable);
     }

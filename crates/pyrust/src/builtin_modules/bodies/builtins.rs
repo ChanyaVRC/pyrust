@@ -7744,6 +7744,18 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, expected) {
             return hit;
         }
+        // Structural subtyping: mirror CPython's __subclasshook__ / _check_methods.
+        // Handles user-defined instances whose classes implement the required
+        // dunders, and built-in types that aren't yet covered by extra_bases
+        // registration (e.g. bytearray, range, generators).
+        {
+            let class_ref = expected.borrow();
+            if let Some(result) =
+                crate::builtin_modules::collections_abc::abc_subclasshook(&class_ref.name, obj)
+            {
+                return result;
+            }
+        }
         let actual_class = match obj.kind() {
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
