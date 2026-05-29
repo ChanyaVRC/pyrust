@@ -1046,34 +1046,50 @@ impl Interpreter {
         // Slow path — `Object` keys (and cross-variant None/Object matching,
         // issue #906).  Extract candidates under a narrow borrow, then drop
         // the borrow before user `__eq__` runs.
+        //
+        // Fast pre-check: skip the Vec allocation entirely when no entry
+        // with the same hash exists (the common case for non-adversarial inputs).
         if let PyKey::Object {
             hash: target_hash,
             value: target,
         } = key
         {
-            let candidates: Vec<(usize, Value, Value)> = {
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            let has_candidate = {
                 let dict = receiver
                     .as_dict()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                dict.iter()
-                    .enumerate()
-                    .filter_map(|(i, (k, v))| match k {
-                        PyKey::Object { hash, value } if hash == target_hash => {
-                            Some((i, value.clone(), v.clone()))
-                        }
-                        // PyKey::None has Python-level hash py_hash_none().  When
-                        // the Object key hashes to the same value, check whether
-                        // __eq__ considers them equal (issue #906).
-                        PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => {
-                            Some((i, Value::none(), v.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect()
+                dict.keys().any(|k| match k {
+                    PyKey::Object { hash, .. } => hash == target_hash,
+                    PyKey::None => *target_hash == none_hash,
+                    _ => false,
+                })
             };
-            for (idx, candidate_key, value) in candidates {
-                if self.values_user_eq(&candidate_key, target)? {
-                    return Ok(Some((idx, value)));
+            if has_candidate {
+                let candidates: Vec<(usize, Value, Value)> = {
+                    let dict = receiver
+                        .as_dict()
+                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    dict.iter()
+                        .enumerate()
+                        .filter_map(|(i, (k, v))| match k {
+                            PyKey::Object { hash, value } if hash == target_hash => {
+                                Some((i, value.clone(), v.clone()))
+                            }
+                            // PyKey::None has Python-level hash py_hash_none().  When
+                            // the Object key hashes to the same value, check whether
+                            // __eq__ considers them equal (issue #906).
+                            PyKey::None if *target_hash == none_hash => {
+                                Some((i, Value::none(), v.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for (idx, candidate_key, value) in candidates {
+                    if self.values_user_eq(&candidate_key, target)? {
+                        return Ok(Some((idx, value)));
+                    }
                 }
             }
         }
@@ -1229,32 +1245,47 @@ impl Interpreter {
                 return Ok(Some(idx));
             }
         }
+        // Fast pre-check for the Object-key slow path: skip the Vec allocation
+        // when no entry with the same hash exists (the common case).
         if let PyKey::Object {
             hash: target_hash,
             value: target,
         } = key
         {
-            let candidates: Vec<(usize, Value)> = {
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            let has_candidate = {
                 let set = receiver
                     .as_set()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                set.iter()
-                    .enumerate()
-                    .filter_map(|(i, k)| match k {
-                        PyKey::Object { hash, value } if hash == target_hash => {
-                            Some((i, value.clone()))
-                        }
-                        // PyKey::None has Python-level hash py_hash_none(); include it
-                        // as a candidate when the Object key hashes to the same value
-                        // so that __eq__ can confirm the match (issue #906).
-                        PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => Some((i, Value::none())),
-                        _ => None,
-                    })
-                    .collect()
+                set.iter().any(|k| match k {
+                    PyKey::Object { hash, .. } => hash == target_hash,
+                    PyKey::None => *target_hash == none_hash,
+                    _ => false,
+                })
             };
-            for (idx, candidate) in candidates {
-                if self.values_user_eq(&candidate, target)? {
-                    return Ok(Some(idx));
+            if has_candidate {
+                let candidates: Vec<(usize, Value)> = {
+                    let set = receiver
+                        .as_set()
+                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    set.iter()
+                        .enumerate()
+                        .filter_map(|(i, k)| match k {
+                            PyKey::Object { hash, value } if hash == target_hash => {
+                                Some((i, value.clone()))
+                            }
+                            // PyKey::None has Python-level hash py_hash_none(); include it
+                            // as a candidate when the Object key hashes to the same value
+                            // so that __eq__ can confirm the match (issue #906).
+                            PyKey::None if *target_hash == none_hash => Some((i, Value::none())),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for (idx, candidate) in candidates {
+                    if self.values_user_eq(&candidate, target)? {
+                        return Ok(Some(idx));
+                    }
                 }
             }
         }
