@@ -1758,7 +1758,7 @@ pyrust_module! {
                 format!("{FN_NAME}(): attribute name must be a string"),
             )),
         };
-        let result = match _interp.get_attr(args[0].value.clone(), &name) {
+        let result = match _interp.get_attr(&args[0].value, &name) {
             Ok(_) => true,
             Err(ref e) if e.class_name_is("AttributeError") => false,
             Err(e) => return Err(e),
@@ -1789,7 +1789,7 @@ pyrust_module! {
                 format!("{FN_NAME}(): attribute name must be a string"),
             )),
         };
-        match _interp.get_attr(args[0].value.clone(), &name) {
+        match _interp.get_attr(&args[0].value, &name) {
             Ok(v) => Ok(v),
             Err(ref e) if e.class_name_is("AttributeError") && args.len() == 3 => {
                 Ok(args[2].value.clone())
@@ -3969,7 +3969,7 @@ pyrust_module! {
         if let Some(file_val) = print_options.file {
             // CPython calls file.write() once per item separated by sep,
             // then calls file.write(end), then file.flush() if flush=True.
-            let write_fn = _interp.get_attr(file_val.clone(), "write")?;
+            let write_fn = _interp.get_attr(&file_val, "write")?;
             let sep = print_options.sep;
             let end = print_options.end;
             for (i, text) in rendered.into_iter().enumerate() {
@@ -3989,7 +3989,7 @@ pyrust_module! {
                 &[ExpandedCallArg { name: None, value: Value::string(end) }],
             )?;
             if print_options.flush {
-                let flush_fn = _interp.get_attr(file_val, "flush")?;
+                let flush_fn = _interp.get_attr(&file_val, "flush")?;
                 _interp.call_function_expanded(flush_fn, &[])?;
             }
         } else {
@@ -6466,7 +6466,7 @@ pyrust_module! {
         let instance_rc = match args[0].value.kind() {
             ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
-                return _interp.get_attr(args[0].value.clone(), &name);
+                return _interp.get_attr(&args[0].value, &name);
             }
         };
         _interp.get_attr_instance_raw(instance_rc, &name)

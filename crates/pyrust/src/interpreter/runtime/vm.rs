@@ -1431,7 +1431,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), true)) {
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, true)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
@@ -1456,7 +1456,7 @@ impl Interpreter {
                     // pass_copy_prop preserves this invariant by not substituting
                     // lhs when dst == lhs.
                     let is_aug = *dst == *lhs;
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), is_aug)) {
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, is_aug)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
@@ -1479,7 +1479,7 @@ impl Interpreter {
                     // pass_copy_prop preserves this invariant by not substituting
                     // lhs when dst == lhs.
                     let is_aug = *dst == *lhs;
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), is_aug)) {
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, is_aug)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
@@ -1683,7 +1683,7 @@ impl Interpreter {
                         AttrFastResult::Miss => {
                             let name = pool_get!(code.names, *name_idx, "name");
                             let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                            let result = vm_try!(self.get_attr(obj_val.clone(), name));
+                            let result = vm_try!(self.get_attr(&obj_val, name));
                             regs[*dst as usize] = result;
                             // Fill the cache after the slow path, but only for
                             // PyInstance targets that resolve to a class attr
@@ -1767,7 +1767,7 @@ impl Interpreter {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     let type_name = value_type_name_str(&obj_val);
-                    match self.get_attr(obj_val, name) {
+                    match self.get_attr(&obj_val, name) {
                         Ok(v) => regs[*dst as usize] = v,
                         Err(_) => {
                             // CPython converts any lookup failure (AttributeError or
@@ -1791,10 +1791,7 @@ impl Interpreter {
                 Insn::ImportFromAttr(dst, mod_reg, name_idx) => {
                     let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
-                    // Pass mod_val directly (already cloned by vm_read); do NOT
-                    // clone again here — the extra clone on the success path was
-                    // a measurable regression (~14 %) on tight import-from loops.
-                    let result = self.get_attr(mod_val, name);
+                    let result = self.get_attr(&mod_val, name);
                     match result {
                         Ok(v) => regs[*dst as usize] = v,
                         Err(e) if e.class_name_is("AttributeError") => {
@@ -2910,7 +2907,7 @@ impl Interpreter {
                     };
 
                     // Load __match_args__ from the class.
-                    let match_args = match self.get_attr(cls_val, "__match_args__") {
+                    let match_args = match self.get_attr(&cls_val, "__match_args__") {
                         Ok(v) => v,
                         Err(e) if e.class_name_is("AttributeError") => {
                             vm_try!(Err(PyError::named(
@@ -2971,7 +2968,7 @@ impl Interpreter {
                                 unreachable!()
                             }
                         };
-                        let attr_val = vm_try!(self.get_attr(subj_val.clone(), &attr_name));
+                        let attr_val = vm_try!(self.get_attr(&subj_val, &attr_name));
                         regs[(*dst_base as usize) + i] = attr_val;
                     }
                 }
@@ -3668,7 +3665,7 @@ impl Interpreter {
                         }
                         Some(IterState::UserDefined(iter_obj)) => {
                             // Call __next__() on the iterator object; stop on StopIteration.
-                            let iter_val = iter_obj.clone();
+                            let iter_val: &Value = iter_obj;
                             let next_result: Option<Result<Value>> =
                                 if let ValueKind::Generator(state_rc) = iter_val.kind() {
                                     let state_rc = Rc::clone(state_rc);
@@ -4973,7 +4970,7 @@ impl Interpreter {
                 }
 
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val.clone(), method)?;
+                let method_val = self.get_attr(&obj_val, method)?;
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                 buf.clear();
                 for arg in args {
@@ -5302,7 +5299,7 @@ impl Interpreter {
                     return self.call_generator_method(obj_val, method, pos_items);
                 }
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val, method)?;
+                let method_val = self.get_attr(&obj_val, method)?;
                 let mut expanded: ExpandedArgBuf = pos_items
                     .into_iter()
                     .map(|v| ExpandedCallArg { name: None, value: v })

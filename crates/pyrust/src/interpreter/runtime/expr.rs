@@ -2933,9 +2933,9 @@ impl Interpreter {
 
     pub(crate) fn try_inplace_op(
         &mut self,
-        left: Value,
+        left: &Value,
         op: BinaryOp,
-        right: Value,
+        right: &Value,
         is_augmented_assign: bool,
     ) -> Result<Option<Value>> {
         // Fast paths for built-in mutable containers: mutate in-place and
@@ -2970,9 +2970,9 @@ impl Interpreter {
             match op {
                 BinaryOp::Add => {
                     // list += iterable  =>  list.extend(iterable)
-                    let items = self.collect_iterable(&right)?;
+                    let items = self.collect_iterable(right)?;
                     left.list_extend(items)?;
-                    return Ok(Some(left));
+                    return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
                     // list *= n  =>  repeat in-place
@@ -2991,7 +2991,7 @@ impl Interpreter {
                             }
                         }
                     });
-                    return Ok(Some(left));
+                    return Ok(Some(left.clone()));
                 }
                 _ => {}
             }
@@ -3049,7 +3049,7 @@ impl Interpreter {
                         }
                         _ => unreachable!(),
                     });
-                    return Ok(Some(left));
+                    return Ok(Some(left.clone()));
                 }
                 _ => {}
             }
@@ -3060,10 +3060,10 @@ impl Interpreter {
             // valid; fall through to eval_binary for the TypeError with correct
             // operand names.  For |= the full dict.update() semantics apply
             // (accepts dicts and iterables of pairs).
-            if is_augmented_assign || dict_entries_from_value(&right).is_some() {
+            if is_augmented_assign || dict_entries_from_value(right).is_some() {
                 let empty_kw = indexmap::IndexMap::new();
-                pyrust_builtins::dict::call("update", &left, vec![right], &empty_kw)?;
-                return Ok(Some(left));
+                pyrust_builtins::dict::call("update", left, vec![right.clone()], &empty_kw)?;
+                return Ok(Some(left.clone()));
             }
         }
 
@@ -3099,10 +3099,10 @@ impl Interpreter {
             if let Some(inst_rc) = left.as_py_instance_rc() {
                 if let Some(backing) = instance_builtin_data(inst_rc) {
                     if matches!(backing.kind(), ValueKind::Dict(_)) {
-                        if is_augmented_assign || dict_entries_from_value(&right).is_some() {
+                        if is_augmented_assign || dict_entries_from_value(right).is_some() {
                             let empty_kw = indexmap::IndexMap::new();
-                            pyrust_builtins::dict::call("update", &backing, vec![right], &empty_kw)?;
-                            return Ok(Some(left));
+                            pyrust_builtins::dict::call("update", &backing, vec![right.clone()], &empty_kw)?;
+                            return Ok(Some(left.clone()));
                         }
                     }
                 }
@@ -3173,7 +3173,7 @@ impl Interpreter {
                             }
                             _ => unreachable!(),
                         });
-                        return Ok(Some(left));
+                        return Ok(Some(left.clone()));
                     }
                 }
             } else {
@@ -4203,7 +4203,7 @@ impl Interpreter {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4232,7 +4232,7 @@ impl Interpreter {
                     }
                 }
                 'o' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4266,7 +4266,7 @@ impl Interpreter {
                     }
                 }
                 'x' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4299,7 +4299,7 @@ impl Interpreter {
                     }
                 }
                 'X' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4332,7 +4332,7 @@ impl Interpreter {
                     }
                 }
                 'e' | 'E' => {
-                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6);
                     let s = format_scientific(f, prec, conv == 'E');
@@ -4345,7 +4345,7 @@ impl Interpreter {
                     }
                 }
                 'f' | 'F' => {
-                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let upper = conv == 'F';
                     // Special-case NaN and Inf before calling format!(), which
@@ -4374,7 +4374,7 @@ impl Interpreter {
                     }
                 }
                 'g' | 'G' => {
-                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
                     let s = format_general_float(f, prec, conv == 'G');
@@ -4391,7 +4391,7 @@ impl Interpreter {
                     // as %d/%x etc.  If __index__ returns non-int, we fall back
                     // to the original value so the match below emits the correct
                     // "%c requires int or char" TypeError.
-                    let coerced_char = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_char = self.coerce_printf_int_arg(arg)?;
                     match coerced_char.kind() {
                         ValueKind::Str(s) => {
                             let mut cs = s.chars();

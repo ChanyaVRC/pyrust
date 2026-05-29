@@ -1573,7 +1573,7 @@ impl Interpreter {
                 // Re-dispatch as attribute access on the first argument.
                 let receiver = args[0].value.clone();
                 let remaining = &args[1..];
-                let method_val = self.get_attr(receiver.clone(), attr_name)?;
+                let method_val = self.get_attr(&receiver, attr_name)?;
                 let expanded: Vec<ExpandedCallArg> = remaining
                     .iter()
                     .map(|a| ExpandedCallArg {
@@ -6054,7 +6054,7 @@ fn apply_field_accessors(
             // Dispatch getattr through the full attribute resolution path so
             // that built-in types (int, float, complex, …) work the same way
             // `getattr(value, attr)` does — not just PyInstance values (#1031).
-            value = interp.get_attr(value, attr)?;
+            value = interp.get_attr(&value, attr)?;
         } else if bytes[0] == b'[' {
             let end = bytes
                 .iter()
