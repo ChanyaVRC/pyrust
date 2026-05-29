@@ -1969,7 +1969,7 @@ impl Interpreter {
                             }
                             FastResult::Miss => {
                                 let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                                let r = vm_try!(self.eval_index(obj_val, idx_val));
+                                let r = vm_try!(self.eval_index(&obj_val, idx_val));
                                 regs[*dst as usize] = r;
                             }
                         }

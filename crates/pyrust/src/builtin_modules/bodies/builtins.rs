@@ -4520,7 +4520,7 @@ pyrust_module! {
                 "descriptor '__getitem__' requires a 'list' object".to_string(),
             )
         })?;
-        _interp.eval_index(backing, key)
+        _interp.eval_index(&backing, key)
     }
 
     /// Issue #1134 (review): `tuple.__getitem__(self, key)` — native tuple subscript
@@ -4556,7 +4556,7 @@ pyrust_module! {
                 "descriptor '__getitem__' requires a 'tuple' object".to_string(),
             )
         })?;
-        _interp.eval_index(backing, key)
+        _interp.eval_index(&backing, key)
     }
 
     /// Issue #1134 (review): `bytes.__getitem__(self, key)` — native bytes subscript
@@ -4592,7 +4592,7 @@ pyrust_module! {
                 "descriptor '__getitem__' requires a 'bytes' object".to_string(),
             )
         })?;
-        _interp.eval_index(backing, key)
+        _interp.eval_index(&backing, key)
     }
 
     /// Issue #988: `set.__init__(self[, iterable])` — resets the backing

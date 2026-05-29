@@ -3891,7 +3891,7 @@ impl Interpreter {
                 }
                 // Look up the named key in the mapping via __getitem__.
                 let base =
-                    self.eval_index(mapping.clone(), Value::string(head.to_string()))?;
+                    self.eval_index(&mapping, Value::string(head.to_string()))?;
 
                 let value = apply_field_accessors(self, base, rest)?;
                 let value = match conversion {
@@ -3952,7 +3952,7 @@ impl Interpreter {
                                     ));
                                 }
                                 let sv = self.eval_index(
-                                    mapping.clone(),
+                                    &mapping,
                                     Value::string(inner.to_string()),
                                 )?;
                                 spec_out.push_str(&sv.to_py_str());
@@ -6082,7 +6082,7 @@ fn apply_field_accessors(
             } else {
                 Value::string(key_str.to_string())
             };
-            value = interp.eval_index(value, key)?;
+            value = interp.eval_index(&value, key)?;
         } else {
             return Err(PyError::named(
                 "ValueError",

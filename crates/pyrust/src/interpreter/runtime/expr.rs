@@ -265,7 +265,7 @@ impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
     }
-    pub(crate) fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
+    pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
         // into a `__getitem__` call, which then subscripts a built-in sequence
         // with it), extract the bounds and delegate to `eval_slice` so that
@@ -295,7 +295,7 @@ impl Interpreter {
                 let hi = if s.stop.is_none() { None } else { Some(s.stop.clone()) };
                 let st = if s.step.is_none() { None } else { Some(s.step.clone()) };
                 drop(borrow);
-                return self.eval_slice(target, lo, hi, st);
+                return self.eval_slice(target.clone(), lo, hi, st);
             }
         }
         // Handle Dict separately so the temporary `&IndexMap` from
@@ -510,7 +510,7 @@ impl Interpreter {
                             }
                         };
                     }
-                    return self.eval_index(backing, index);
+                    return self.eval_index(&backing, index);
                 }
                 Err(PyError::named(
                     "TypeError",
@@ -521,7 +521,7 @@ impl Interpreter {
                 "TypeError",
                 format!(
                     "'{}' object is not subscriptable",
-                    pyrust_core::builtin_type_name(&target)
+                    pyrust_core::builtin_type_name(target)
                 ),
             )),
         }
@@ -1979,7 +1979,7 @@ impl Interpreter {
             let mut out = String::with_capacity(s.len());
             for c in chars {
                 let cp = Value::int(c as i64);
-                match self.eval_index(table.clone(), cp) {
+                match self.eval_index(&table, cp) {
                     Ok(v) => {
                         // Resolve int/str subclass instances to their backing
                         // primitive before the value match. This covers:
