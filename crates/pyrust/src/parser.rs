@@ -49,8 +49,12 @@ impl Parser {
         }
 
         match self.current() {
-            Some(Token::Def) => Ok(vec![self.parse_def(decorators)?]),
+            Some(Token::Def) => Ok(vec![self.parse_def(decorators, false)?]),
             Some(Token::Class) => Ok(vec![self.parse_class(decorators)?]),
+            // `async def` — soft keyword `async` followed by `def`
+            Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::Def)) => {
+                Ok(vec![self.parse_async_def(decorators)?])
+            }
             _ if !decorators.is_empty() => Err(PyError::Parse(
                 "decorator must be followed by def or class".to_string(),
             )),
@@ -756,7 +760,7 @@ impl Parser {
         }
     }
 
-    fn parse_def(&mut self, decorators: Vec<Expr>) -> Result<Stmt> {
+    fn parse_def(&mut self, decorators: Vec<Expr>, is_async: bool) -> Result<Stmt> {
         self.expect(&Token::Def)?;
         let name = self.expect_ident("function name")?;
         self.expect(&Token::LParen)?;
@@ -777,7 +781,15 @@ impl Parser {
             body,
             decorators,
             return_annotation,
+            is_async,
         })
+    }
+
+    /// Parse `async def name(...) -> ...: ...`  (the `async` keyword has already
+    /// been identified by the caller via lookahead but not consumed yet).
+    fn parse_async_def(&mut self, decorators: Vec<Expr>) -> Result<Stmt> {
+        self.bump(); // consume `async`
+        self.parse_def(decorators, true)
     }
 
     fn parse_params(&mut self) -> Result<Vec<FunctionParam>> {
@@ -1953,6 +1965,12 @@ impl Parser {
                 expr: Box::new(self.parse_unary()?),
             });
         }
+        // `await expr` — soft keyword, only meaningful inside `async def`; the
+        // compiler will reject it outside async context.
+        if matches!(self.current(), Some(Token::Ident(kw)) if kw == "await") {
+            self.bump();
+            return Ok(Expr::Await(Box::new(self.parse_unary()?)));
+        }
         self.parse_power()
     }
 
@@ -2118,7 +2136,7 @@ impl Parser {
                     }
                     let val = self.parse_expr()?;
                     // Generator expression as sole call argument: f(expr for x in it)
-                    if self.is(&Token::For) && args.is_empty() {
+                    if (self.is(&Token::For) || self.is_async_for()) && args.is_empty() {
                         let clauses = self.parse_comp_clauses()?;
                         args.push(CallArg {
                             name: None,
@@ -2146,7 +2164,7 @@ impl Parser {
                 }
                 let val = self.parse_expr()?;
                 // Generator expression as sole call argument: f(expr for x in it)
-                if self.is(&Token::For) && args.is_empty() {
+                if (self.is(&Token::For) || self.is_async_for()) && args.is_empty() {
                     let clauses = self.parse_comp_clauses()?;
                     args.push(CallArg {
                         name: None,
@@ -2354,8 +2372,8 @@ impl Parser {
                     return Ok(Expr::Tuple(items));
                 }
                 let first = self.parse_expr()?;
-                if self.is(&Token::For) {
-                    // Generator expression: (elt for target in iter ...)
+                if self.is(&Token::For) || self.is_async_for() {
+                    // Generator expression: (elt for target in iter ...) or async variant
                     let clauses = self.parse_comp_clauses()?;
                     self.expect(&Token::RParen)?;
                     return Ok(Expr::GenExp {
@@ -2395,9 +2413,9 @@ impl Parser {
             return Ok(Expr::List(vec![]));
         }
         let first = self.parse_seq_item()?;
-        // Detect list comprehension: [expr for ...]
+        // Detect list comprehension: [expr for ...] or [expr async for ...]
         // Comprehensions cannot start with `*expr` (PEP 448 syntax restriction).
-        if self.is(&Token::For) {
+        if self.is(&Token::For) || self.is_async_for() {
             if let Expr::Starred(_) = &first {
                 return Err(PyError::Parse(
                     "iterable unpacking cannot be used in comprehension".to_string(),
@@ -2437,10 +2455,24 @@ impl Parser {
         }
     }
 
+    /// Returns `true` if the current token is the soft keyword `async` and the
+    /// next token is `for`.  Used to detect `async for` comprehension clauses.
+    fn is_async_for(&self) -> bool {
+        matches!(self.current(), Some(Token::Ident(kw)) if kw == "async")
+            && matches!(self.peek(), Some(Token::For))
+    }
+
     /// Parse one or more comprehension clauses: `for target in iter (if cond)? ...`
+    /// Also handles `async for target in iter ...` (PEP 530).
     fn parse_comp_clauses(&mut self) -> Result<Vec<CompClause>> {
         let mut clauses = Vec::new();
-        while self.is(&Token::For) {
+        while self.is(&Token::For) || self.is_async_for() {
+            let is_async = if self.is_async_for() {
+                self.bump(); // consume `async`
+                true
+            } else {
+                false
+            };
             self.bump(); // consume `for`
             // Parse possibly-tuple target (same as for-loop)
             let first = self.expect_ident("comprehension variable")?;
@@ -2467,7 +2499,12 @@ impl Parser {
             } else {
                 None
             };
-            clauses.push(CompClause { target, iter, cond });
+            clauses.push(CompClause {
+                target,
+                iter,
+                cond,
+                is_async,
+            });
         }
         Ok(clauses)
     }
@@ -2514,8 +2551,8 @@ impl Parser {
             // Dict or dict comprehension
             self.bump();
             let val = self.parse_expr()?;
-            if self.is(&Token::For) {
-                // Dict comprehension: {key: val for ...}
+            if self.is(&Token::For) || self.is_async_for() {
+                // Dict comprehension: {key: val for ...} or {key: val async for ...}
                 let clauses = self.parse_comp_clauses()?;
                 self.expect(&Token::RBrace)?;
                 return Ok(Expr::DictComp {
@@ -2536,8 +2573,8 @@ impl Parser {
             Ok(Expr::Dict(items))
         } else {
             // Set or set comprehension
-            if self.is(&Token::For) {
-                // Set comprehension: {elt for ...}
+            if self.is(&Token::For) || self.is_async_for() {
+                // Set comprehension: {elt for ...} or {elt async for ...}
                 let clauses = self.parse_comp_clauses()?;
                 self.expect(&Token::RBrace)?;
                 return Ok(Expr::SetComp {

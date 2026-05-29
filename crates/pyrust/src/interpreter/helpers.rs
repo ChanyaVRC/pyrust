@@ -3431,6 +3431,7 @@ fn collect_var_refs_in_expr(
         }
         Expr::Yield(Some(e)) => collect_var_refs_in_expr(e, used, assigned),
         Expr::YieldFrom(e) => collect_var_refs_in_expr(e, used, assigned),
+        Expr::Await(e) => collect_var_refs_in_expr(e, used, assigned),
         // Literals / constants — no names.
         Expr::Int(_)
         | Expr::BigInt(_)
@@ -4002,8 +4003,8 @@ fn is_pure_expr(
             }
             check_parts(parts, pure_fns, local_names)
         }
-        // yield/yield from always have side effects (generator suspension).
-        Expr::Yield(_) | Expr::YieldFrom(_) => false,
+        // yield/yield from/await always have side effects (suspension).
+        Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) => false,
     }
 }
 
