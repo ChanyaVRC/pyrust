@@ -65,3 +65,12 @@ try:
     "hello".encode('utf-8', 42)
 except TypeError as e:
     print("TypeError errors:", str(e))
+
+# --- return type is bytes ---
+print(type("hello".encode()) is bytes)
+
+# --- unknown errors handler raises LookupError when character IS unencodable ---
+try:
+    "héllo".encode("ascii", "totally_unknown_handler")
+except LookupError as e:
+    print("LookupError unknown handler:", str(e))
