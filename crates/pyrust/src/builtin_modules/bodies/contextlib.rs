@@ -369,7 +369,21 @@ pyrust_module! {
                 );
                 match result {
                     Ok(v) => {
-                        if !exc_type.is_none() && is_truthy(&v) {
+                        // Use the interpreter's full truthiness evaluation so that
+                        // containers (empty list/tuple/dict/set = falsy) and custom
+                        // __bool__ / __len__ are handled correctly, matching CPython.
+                        let truthy = match _interp.truthy_value(&v) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                pending_err = Some(e);
+                                suppressed = false;
+                                exc_type = Value::none();
+                                exc_val = Value::none();
+                                tb = Value::none();
+                                continue;
+                            }
+                        };
+                        if !exc_type.is_none() && truthy {
                             suppressed = true;
                             // Subsequent callbacks see no active exception.
                             exc_type = Value::none();
@@ -548,18 +562,6 @@ fn is_stop_iteration(err: &PyError) -> bool {
             _ => false,
         },
         _ => false,
-    }
-}
-
-/// Whether a Value is truthy in the Python sense (for ExitStack suppress check).
-fn is_truthy(v: &Value) -> bool {
-    match v.kind() {
-        ValueKind::None => false,
-        ValueKind::Bool(b) => b,
-        ValueKind::Int(n) => n != 0,
-        ValueKind::Float(f) => f != 0.0,
-        ValueKind::Str(s) => !s.is_empty(),
-        _ => true,
     }
 }
 
