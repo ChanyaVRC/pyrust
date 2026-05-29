@@ -2643,7 +2643,7 @@ impl Interpreter {
                     // hold a ref, so we defer to DeleteModuleGlobal which will
                     // remove the dict entry and then check.
                     let deleted_val = std::mem::replace(&mut regs[*reg as usize], Value::unset());
-                    if !is_module_scope || !self.globals_accessed {
+                    if (!is_module_scope || !self.globals_accessed) && !deleted_val.is_unset() {
                         call_del_if_last_binding(self, deleted_val, &regs, code.num_locals as usize);
                     }
                 }

@@ -4755,6 +4755,10 @@ pub(crate) fn call_del_if_last_binding(
     regs: &RegSlice,
     num_locals: usize,
 ) {
+    // Uninitialised register slots (Value::unset()) are not Python values.
+    if val.is_unset() {
+        return;
+    }
     let del_rc = match val.as_py_instance_rc() {
         Some(rc) => rc,
         None => return,
