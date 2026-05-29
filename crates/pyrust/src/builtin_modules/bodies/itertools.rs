@@ -34,7 +34,7 @@ pyrust_module! {
     /// Lazy across sources (each is materialised only when reached).
     /// <https://docs.python.org/3/library/itertools.html#itertools.chain>
     fn chain(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
+        reject_keyword_args_expanded("chain", args)?;
         // Pre-materialise user `PyInstance` AND `Generator` sources so
         // user `__iter__` dispatch / generator resumption (both of
         // which need the interpreter) happen here instead of inside
@@ -57,17 +57,19 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("islice", user)?;
             if user.is_empty() || user.len() > 4 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes between 2 and 4 arguments"),
-                ));
+                let msg = if user.len() > 4 {
+                    format!("islice expected at most 4 arguments, got {}", user.len())
+                } else {
+                    format!("islice expected at least 2 arguments, got {}", user.len())
+                };
+                return Err(PyError::named("TypeError", msg));
             }
             let (start, stop, step) = match user.len() {
                 1 => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes at least 2 arguments"),
+                    "islice expected at least 2 arguments, got 1".to_string(),
                 )),
                 2 => (0i64, slice_arg(FN_NAME, &user[1].value, "stop")?, 1i64),
                 3 => (
@@ -82,12 +84,17 @@ pyrust_module! {
                 ),
                 _ => unreachable!("guarded above"),
             };
-            if start < 0 || step <= 0 || stop.is_some_and(|s| s < 0) {
+            if stop.is_some_and(|s| s < 0) || start < 0 {
                 return Err(PyError::named(
                     "ValueError",
-                    format!(
-                        "{FN_NAME}() arguments must be non-negative integers (and step > 0)",
-                    ),
+                    "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
+                        .to_string(),
+                ));
+            }
+            if step <= 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    "Step for islice() must be a positive integer or None.".to_string(),
                 ));
             }
             let iter = make_iter(_interp, user[0].value.clone())?;
@@ -150,11 +157,11 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("count", user)?;
             if user.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes at most 2 arguments"),
+                    format!("count() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
             let start = user
@@ -203,11 +210,17 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
-            if user.is_empty() || user.len() > 2 {
+            reject_keyword_args_expanded("repeat", user)?;
+            if user.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes 1 or 2 arguments"),
+                    "repeat() missing required argument 'object' (pos 1)".to_string(),
+                ));
+            }
+            if user.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("repeat() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
             let object = user[0].value.clone();
@@ -217,7 +230,10 @@ pyrust_module! {
                 Some(ValueKind::Bool(b)) => Some(b as i64),
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() times argument must be an integer"),
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        value_type_name_str(&user[1].value),
+                    ),
                 )),
             };
             let mut a = inst.borrow_mut();
@@ -263,11 +279,11 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("cycle", user)?;
             if user.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
+                    format!("cycle expected 1 argument, got {}", user.len()),
                 ));
             }
             let iter = make_iter(_interp, user[0].value.clone())?;
@@ -363,11 +379,11 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("takewhile", user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                    format!("takewhile expected 2 arguments, got {}", user.len()),
                 ));
             }
             let iter = make_iter(_interp, user[1].value.clone())?;
@@ -429,11 +445,11 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("dropwhile", user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                    format!("dropwhile expected 2 arguments, got {}", user.len()),
                 ));
             }
             let iter = make_iter(_interp, user[1].value.clone())?;
@@ -499,11 +515,11 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("starmap", user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                    format!("starmap expected 2 arguments, got {}", user.len()),
                 ));
             }
             let iter = make_iter(_interp, user[1].value.clone())?;
@@ -564,15 +580,24 @@ pyrust_module! {
                     }
                     Some(other) => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                        format!("'{other}' is an invalid keyword argument for accumulate()"),
                     )),
                     None => positional.push(a.value.clone()),
                 }
             }
-            if positional.is_empty() || positional.len() > 2 {
+            if positional.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes 1 or 2 positional arguments"),
+                    "accumulate() missing required argument 'iterable' (pos 1)".to_string(),
+                ));
+            }
+            if positional.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "accumulate() takes at most 2 positional arguments ({} given)",
+                        positional.len()
+                    ),
                 ));
             }
             let iter = make_iter(_interp, positional[0].clone())?;
@@ -675,12 +700,15 @@ pyrust_module! {
                         ValueKind::Bool(b) => repeat = b as i64,
                         _ => return Err(PyError::named(
                             "TypeError",
-                            format!("{FN_NAME}() repeat must be an integer"),
+                            format!(
+                                "'{}' object cannot be interpreted as an integer",
+                                value_type_name_str(&a.value),
+                            ),
                         )),
                     },
                     Some(other) => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                        format!("'{other}' is an invalid keyword argument for product()"),
                     )),
                     None => positional.push(a.value.clone()),
                 }
@@ -688,7 +716,7 @@ pyrust_module! {
             if repeat < 0 {
                 return Err(PyError::named(
                     "ValueError",
-                    format!("{FN_NAME}() repeat must be non-negative"),
+                    "repeat argument cannot be negative".to_string(),
                 ));
             }
             // Build the pool list — each input iterable materialised, the
@@ -831,7 +859,7 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/itertools.html#itertools.combinations>
     class combinations {
         fn __init__(args) -> Result<Value> {
-            init_combo_state(_interp, args, FN_NAME, /* with_replacement = */ false)
+            init_combo_state(_interp, args, "combinations", /* with_replacement = */ false)
         }
 
         fn __iter__(args) -> Result<Value> {
@@ -839,7 +867,7 @@ pyrust_module! {
         }
 
         fn __next__(args) -> Result<Value> {
-            advance_combinations(args, FN_NAME, /* with_replacement = */ false)
+            advance_combinations(args, "combinations", /* with_replacement = */ false)
         }
     }
 
@@ -848,7 +876,12 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/itertools.html#itertools.combinations_with_replacement>
     class combinations_with_replacement {
         fn __init__(args) -> Result<Value> {
-            init_combo_state(_interp, args, FN_NAME, /* with_replacement = */ true)
+            init_combo_state(
+                _interp,
+                args,
+                "combinations_with_replacement",
+                /* with_replacement = */ true,
+            )
         }
 
         fn __iter__(args) -> Result<Value> {
@@ -856,7 +889,11 @@ pyrust_module! {
         }
 
         fn __next__(args) -> Result<Value> {
-            advance_combinations(args, FN_NAME, /* with_replacement = */ true)
+            advance_combinations(
+                args,
+                "combinations_with_replacement",
+                /* with_replacement = */ true,
+            )
         }
     }
 
@@ -868,11 +905,17 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
-            if user.is_empty() || user.len() > 2 {
+            reject_keyword_args_expanded("permutations", user)?;
+            if user.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes 1 or 2 arguments"),
+                    "permutations() missing required argument 'iterable' (pos 1)".to_string(),
+                ));
+            }
+            if user.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("permutations() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
             // `collect_iterable` walks generators / __iter__ classes too.
@@ -885,12 +928,12 @@ pyrust_module! {
                 Some(ValueKind::Int(n)) if n >= 0 => n as usize,
                 Some(ValueKind::Int(_)) => return Err(PyError::named(
                     "ValueError",
-                    format!("{FN_NAME}() r must be non-negative"),
+                    "r must be non-negative".to_string(),
                 )),
                 Some(ValueKind::Bool(b)) => b as usize,
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() r must be an integer or None"),
+                    "Expected int as r".to_string(),
                 )),
             };
             // CPython's algorithm: keep `indices` (running combination) and
@@ -1047,21 +1090,30 @@ pyrust_module! {
                     Some("key") => key_kw = Some(a.value.clone()),
                     Some(other) => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                        format!("'{other}' is an invalid keyword argument for accumulate()"),
                     )),
                     None => positional.push(a.value.clone()),
                 }
             }
-            if positional.is_empty() || positional.len() > 2 {
+            if positional.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes 1 or 2 positional arguments"),
+                    "accumulate() missing required argument 'iterable' (pos 1)".to_string(),
+                ));
+            }
+            if positional.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "accumulate() takes at most 2 positional arguments ({} given)",
+                        positional.len()
+                    ),
                 ));
             }
             if positional.len() == 2 && key_kw.is_some() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() got multiple values for argument 'key'"),
+                    "groupby() got multiple values for argument 'key'".to_string(),
                 ));
             }
             let iter = make_iter(_interp, positional[0].clone())?;
@@ -1173,11 +1225,23 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
-            if user.len() != 2 {
+            reject_keyword_args_expanded("compress", user)?;
+            if user.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                    "compress() missing required argument 'data' (pos 1)".to_string(),
+                ));
+            }
+            if user.len() == 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    "compress() missing required argument 'selectors' (pos 2)".to_string(),
+                ));
+            }
+            if user.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("compress() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
             let data_iter = make_iter(_interp, user[0].value.clone())?;
@@ -1231,9 +1295,9 @@ pyrust_module! {
             for a in &args[1..] {
                 match a.name.as_deref() {
                     Some("fillvalue") => fillvalue = a.value.clone(),
-                    Some(other) => return Err(PyError::named(
+                    Some(_other) => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                        "zip_longest() got an unexpected keyword argument".to_string(),
                     )),
                     None => positional.push(a.value.clone()),
                 }
@@ -1338,7 +1402,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("filterfalse", user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -1465,7 +1529,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("pairwise", user)?;
             if user.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -1543,7 +1607,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            reject_keyword_args_expanded(FN_NAME, user)?;
+            reject_keyword_args_expanded("batched", user)?;
             if user.len() < 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -1683,7 +1747,7 @@ fn slice_arg(fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
 /// running `_cur` may then transition between `Int` and `BigInt`
 /// as values cross the i64 boundary, but `eval_binary(Add)`
 /// handles both directions of that conversion.
-fn require_numeric(v: &Value, fn_name: &str, slot: &str) -> Result<()> {
+fn require_numeric(v: &Value, _fn_name: &str, _slot: &str) -> Result<()> {
     if matches!(
         v.kind(),
         ValueKind::Int(_) | ValueKind::Float(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
@@ -1692,7 +1756,7 @@ fn require_numeric(v: &Value, fn_name: &str, slot: &str) -> Result<()> {
     } else {
         Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() {slot} must be a number"),
+            "a number is required".to_string(),
         ))
     }
 }
@@ -1811,10 +1875,22 @@ fn init_combo_state(
     let inst = expect_self(args, fn_name)?;
     let user = &args[1..];
     reject_keyword_args_expanded(fn_name, user)?;
-    if user.len() != 2 {
+    if user.is_empty() {
         return Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() takes 2 arguments"),
+            format!("{fn_name}() missing required argument 'iterable' (pos 1)"),
+        ));
+    }
+    if user.len() == 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() missing required argument 'r' (pos 2)"),
+        ));
+    }
+    if user.len() > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes at most 2 arguments ({} given)", user.len()),
         ));
     }
     // `collect_iterable` walks generators / __iter__ classes.
@@ -1825,12 +1901,15 @@ fn init_combo_state(
         ValueKind::Int(n) if n >= 0 => n as usize,
         ValueKind::Int(_) => return Err(PyError::named(
             "ValueError",
-            format!("{fn_name}() r must be non-negative"),
+            "r must be non-negative".to_string(),
         )),
         ValueKind::Bool(b) => b as usize,
         _ => return Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() r must be an integer"),
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&user[1].value),
+            ),
         )),
     };
     // For combinations (no replacement), `r > pool.len()` yields nothing.
