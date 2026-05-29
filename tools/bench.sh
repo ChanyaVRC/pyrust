@@ -7,6 +7,7 @@
 #   --release              use target/release/pyrust  (default: debug)
 #   --base-bin PATH        also time a base-branch binary (PR-vs-base comparison)
 #   --top N                rows shown in each table (default: 15)
+#   --measure-memory       also measure peak RSS via /usr/bin/time -v (Linux only)
 #   --config PATH          bench.toml path (default: tools/bench.toml)
 #   --pr-comment-out PATH  write Markdown PR comment to PATH
 #   --benchmark-action-out PATH
@@ -32,6 +33,7 @@ BENCHMARK_ACTION_OUT=""
 SVG_OUT=""
 MARKDOWN_OUT=""
 JSON_OUT=""
+MEASURE_MEMORY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --svg-out)              SVG_OUT="$2";               shift ;;
     --markdown-out)         MARKDOWN_OUT="$2";          shift ;;
     --json-out)             JSON_OUT="$2";              shift ;;
+    --measure-memory)       MEASURE_MEMORY=1 ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
   shift
@@ -141,12 +144,49 @@ for script in "${SCRIPTS[@]}"; do
     "${CMDS[@]}"
 done
 
+# ── measure peak RSS (Linux only, requires /usr/bin/time -v) ──────────────────
+MEMORY_DIR=""
+if [[ "$MEASURE_MEMORY" -eq 1 ]]; then
+  if ! /usr/bin/time --version 2>&1 | grep -q "GNU"; then
+    echo "  [memory] /usr/bin/time -v not available (GNU time required); skipping" >&2
+    MEASURE_MEMORY=0
+  else
+    MEMORY_DIR=$(mktemp -d)
+    echo "Measuring peak RSS..."
+    for script in "${SCRIPTS[@]}"; do
+      rel="${script#"$CASES_DIR/"}"
+      name="${rel//\//__}"
+      name="${name%.py}"
+
+      # Extract "Maximum resident set size (kbytes): N" from GNU time stderr.
+      _mem_kb() {
+        local bin="$1"
+        { /usr/bin/time -v "$bin" "$script" >/dev/null 2>&1; } 2>&1 \
+          | grep -i "Maximum resident" | awk '{print $NF}' || echo "null"
+      }
+
+      py_kb=$(_mem_kb "$PYTHON")
+      rs_kb=$(_mem_kb "$PYRUST")
+      base_kb="null"
+      if [[ -n "$BASE_BIN" ]] && [[ -x "$BASE_BIN" ]]; then
+        base_kb=$(_mem_kb "$BASE_BIN")
+      fi
+
+      printf '{"rel":"%s","py_kb":%s,"rs_kb":%s,"base_kb":%s}\n' \
+        "$rel" "$py_kb" "$rs_kb" "$base_kb" \
+        > "$MEMORY_DIR/$name.json"
+    done
+    echo ""
+  fi
+fi
+
 # ── generate reports ───────────────────────────────────────────────────────────
 REPORT_ARGS=(
   --results-dir "$RESULTS_DIR"
   --config      "$CONFIG"
   --top         "$TOP"
 )
+[[ -n "$MEMORY_DIR" ]] && REPORT_ARGS+=(--memory-dir "$MEMORY_DIR")
 [[ -n "$PR_COMMENT_OUT"       ]] && REPORT_ARGS+=(--pr-comment-out       "$PR_COMMENT_OUT")
 [[ -n "$BENCHMARK_ACTION_OUT" ]] && REPORT_ARGS+=(--benchmark-action-out "$BENCHMARK_ACTION_OUT")
 [[ -n "$SVG_OUT"              ]] && REPORT_ARGS+=(--svg-out              "$SVG_OUT")

@@ -40,7 +40,7 @@ jobs:
         run: |
           bash tools/bench.sh \
             --release \
-            --top 15 \
+            --measure-memory \
             --base-bin /tmp/pyrust-base/target/release/pyrust \
             --pr-comment-out /tmp/benchmark_body.md
 

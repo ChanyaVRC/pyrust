@@ -255,58 +255,154 @@ def _indicator(pct: float) -> str:
     return "➡️"
 
 
-def _summary_md(rows: list[ScriptResult]) -> str:
+def _fmt_kb(kb: "int | None") -> str:
+    if kb is None:
+        return "—"
+    if kb >= 1024:
+        return f"{kb / 1024:.1f} MB"
+    return f"{kb} KB"
+
+
+def _summary_md(rows: list[ScriptResult], memory: "dict[str, dict] | None" = None) -> str:
     lines: list[str] = []
     base_rows = [r for r in rows if r.has_base]
 
+    # ── PR vs Base ────────────────────────────────────────────────────────────
     if base_rows:
         total_base = sum(r.base_avg_ms for r in base_rows)
         total_pr   = sum(r.rs_avg_ms   for r in base_rows)
         overall    = (total_pr / total_base - 1.0) * 100.0 if total_base > 0 else math.inf
         lines += [
-            "## Benchmark: PR vs Base",
+            "### ⏱ PR vs Base",
             "",
-            f"- Base total: {total_base:.3f} ms",
-            f"- PR total:   {total_pr:.3f} ms",
-            f"- Change:     {overall:+.2f}% {_indicator(overall)}",
+            f"| | Time |",
+            "|---|---|",
+            f"| Base total | {total_base:.1f} ms |",
+            f"| PR total   | {total_pr:.1f} ms |",
+            f"| Change     | {overall:+.2f}% {_indicator(overall)} |",
+            "",
+            f"<details><summary>All {len(base_rows)} scripts — PR vs Base</summary>",
             "",
             "| Script | iters | Base (ms) | PR (ms) | Change |",
             "|---|---:|---:|---:|---:|",
         ]
-        for r in base_rows[:20]:
+        for r in base_rows:
             lines.append(
-                f"| {r.rel} | {r.cfg.iterations}"
+                f"| `{r.rel}` | {r.cfg.iterations}"
                 f" | {r.base_avg_ms:.3f} | {r.rs_avg_ms:.3f}"
                 f" | {r.pr_change_pct:+.2f}% {_indicator(r.pr_change_pct)} |"
             )
-        lines += ["", "---", ""]
+        lines += ["", "</details>", "", "---", ""]
 
+    # ── Memory usage ──────────────────────────────────────────────────────────
+    if memory:
+        py_mems = [memory[r.rel]["py_kb"] for r in rows if r.rel in memory and memory[r.rel].get("py_kb") is not None]
+        rs_mems = [memory[r.rel]["rs_kb"] for r in rows if r.rel in memory and memory[r.rel].get("rs_kb") is not None]
+        py_med = sorted(py_mems)[len(py_mems) // 2] if py_mems else None
+        rs_med = sorted(rs_mems)[len(rs_mems) // 2] if rs_mems else None
+        lines += [
+            "### 🧠 Memory Usage (peak RSS)",
+            "",
+            f"| | Median peak RSS |",
+            "|---|---|",
+            f"| Python  | {_fmt_kb(py_med)} |",
+            f"| PyRust  | {_fmt_kb(rs_med)} |",
+            "",
+            f"<details><summary>All {len(rows)} scripts — peak memory</summary>",
+            "",
+        ]
+        has_base_mem = any(
+            memory.get(r.rel, {}).get("base_kb") is not None for r in rows
+        )
+        if has_base_mem:
+            lines += [
+                "| Script | Python | PyRust | Base |",
+                "|---|---:|---:|---:|",
+            ]
+            for r in rows:
+                m = memory.get(r.rel, {})
+                lines.append(
+                    f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))}"
+                    f" | {_fmt_kb(m.get('rs_kb'))} | {_fmt_kb(m.get('base_kb'))} |"
+                )
+        else:
+            lines += [
+                "| Script | Python | PyRust |",
+                "|---|---:|---:|",
+            ]
+            for r in rows:
+                m = memory.get(r.rel, {})
+                lines.append(
+                    f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))} | {_fmt_kb(m.get('rs_kb'))} |"
+                )
+        lines += ["", "</details>", "", "---", ""]
+
+    # ── Speed: Python vs PyRust ───────────────────────────────────────────────
     total_py = sum(r.py_avg_ms for r in rows)
     total_rs = sum(r.rs_avg_ms for r in rows)
     overall_ratio = total_rs / total_py if total_py > 0 else math.inf
     lines += [
-        "## Speed: Python vs PyRust",
+        "### 🚀 Speed: Python vs PyRust",
         "",
-        f"- Scripts: {len(rows)}",
-        f"- Python total: {total_py:.3f} ms",
-        f"- PyRust total: {total_rs:.3f} ms",
-        f"- Overall ratio: {overall_ratio:.3f}x",
+        f"| | |",
+        "|---|---|",
+        f"| Scripts       | {len(rows)} |",
+        f"| Python total  | {total_py:.1f} ms |",
+        f"| PyRust total  | {total_rs:.1f} ms |",
+        f"| Overall ratio | {overall_ratio:.3f}x |",
         "",
-        "| Script | iters | Python (ms) | PyRust (ms) | Ratio |",
-        "|---|---:|---:|---:|---:|",
+        f"<details><summary>All {len(rows)} scripts — timing</summary>",
+        "",
     ]
-    for r in rows[:20]:
-        lines.append(
-            f"| {r.rel} | {r.cfg.iterations}"
-            f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x |"
-        )
+    if memory:
+        lines += [
+            "| Script | iters | Python (ms) | PyRust (ms) | Ratio | py mem | rs mem |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+        for r in rows:
+            m = memory.get(r.rel, {})
+            lines.append(
+                f"| `{r.rel}` | {r.cfg.iterations}"
+                f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x"
+                f" | {_fmt_kb(m.get('py_kb'))} | {_fmt_kb(m.get('rs_kb'))} |"
+            )
+    else:
+        lines += [
+            "| Script | iters | Python (ms) | PyRust (ms) | Ratio |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for r in rows:
+            lines.append(
+                f"| `{r.rel}` | {r.cfg.iterations}"
+                f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x |"
+            )
+    lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
 
 
-def write_github_step_summary(rows: list[ScriptResult]) -> None:
+def load_memory(memory_dir: str) -> "dict[str, dict] | None":
+    """Load per-script peak RSS data from JSON files written by bench.sh."""
+    if not memory_dir:
+        return None
+    d = Path(memory_dir)
+    if not d.is_dir():
+        return None
+    result: dict[str, dict] = {}
+    for p in sorted(d.glob("*.json")):
+        try:
+            obj = json.loads(p.read_text())
+            rel = obj.get("rel")
+            if rel:
+                result[rel] = obj
+        except Exception:
+            pass
+    return result or None
+
+
+def write_github_step_summary(rows: list[ScriptResult], memory: "dict[str, dict] | None" = None) -> None:
     dest = os.environ.get("GITHUB_STEP_SUMMARY")
     if dest:
-        Path(dest).write_text(_summary_md(rows), encoding="utf-8")
+        Path(dest).write_text(_summary_md(rows, memory), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +561,8 @@ def main() -> int:
     p.add_argument("--results-dir", default="", metavar="DIR",
                    help="directory containing hyperfine *.json result files")
     p.add_argument("--top", type=int, default=15)
+    p.add_argument("--memory-dir",           default="", metavar="DIR",
+                   help="directory with per-script peak-RSS JSON files from bench.sh")
     p.add_argument("--pr-comment-out",       default="", metavar="PATH")
     p.add_argument("--benchmark-action-out", default="", metavar="PATH")
     p.add_argument("--svg-out",              default="", metavar="PATH")
@@ -487,13 +585,15 @@ def main() -> int:
         print("error: no results found in results-dir", file=sys.stderr)
         return 2
 
+    memory = load_memory(args.memory_dir)
+
     print_summary(rows)
     print_per_script(rows, args.top)
     print_pr_vs_base(rows, args.top)
-    write_github_step_summary(rows)
+    write_github_step_summary(rows, memory)
 
     if args.pr_comment_out:
-        Path(args.pr_comment_out).write_text(_summary_md(rows), encoding="utf-8")
+        Path(args.pr_comment_out).write_text(_summary_md(rows, memory), encoding="utf-8")
     if args.benchmark_action_out:
         Path(args.benchmark_action_out).write_text(
             json.dumps(build_benchmark_action(rows), indent=2), encoding="utf-8"
