@@ -5845,6 +5845,28 @@ impl Compiler {
             Pattern::Or(alternatives) => {
                 // Validate that every alternative binds the same set of names
                 // (PEP 634; CPython 3.12 raises SyntaxError if they differ).
+                //
+                // Check first: a bare name capture or wildcard in a non-last
+                // position makes every subsequent alternative unreachable —
+                // CPython 3.12 emits a dedicated message for each case,
+                // distinct from the generic "bind different names" error.
+                let non_last = alternatives.len().saturating_sub(1);
+                for alt in alternatives.iter().take(non_last) {
+                    match alt {
+                        Pattern::Capture(name) if name != "_" => {
+                            self.set_syntax_error(&format!(
+                                "name capture '{}' makes remaining patterns unreachable",
+                                name
+                            ));
+                            return;
+                        }
+                        Pattern::Wildcard => {
+                            self.set_syntax_error("wildcard makes remaining patterns unreachable");
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(first) = alternatives.first() {
                     let first_names = pattern_bound_names(first);
                     for alt in alternatives.iter().skip(1) {
