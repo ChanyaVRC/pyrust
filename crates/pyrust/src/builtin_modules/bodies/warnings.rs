@@ -270,19 +270,10 @@ fn restore_filters(snapshot: &Value) {
 
 pyrust_module! {
     constants {
-        // Warning category classes — aliases to the exception hierarchy.
-        "Warning"                   => warning_class_by_name("Warning"),
-        "UserWarning"               => warning_class_by_name("UserWarning"),
-        "DeprecationWarning"        => warning_class_by_name("DeprecationWarning"),
-        "PendingDeprecationWarning" => warning_class_by_name("PendingDeprecationWarning"),
-        "RuntimeWarning"            => warning_class_by_name("RuntimeWarning"),
-        "SyntaxWarning"             => warning_class_by_name("SyntaxWarning"),
-        "ResourceWarning"           => warning_class_by_name("ResourceWarning"),
-        "FutureWarning"             => warning_class_by_name("FutureWarning"),
-        "ImportWarning"             => warning_class_by_name("ImportWarning"),
-        "UnicodeWarning"            => warning_class_by_name("UnicodeWarning"),
-        "BytesWarning"              => warning_class_by_name("BytesWarning"),
-        "EncodingWarning"           => warning_class_by_name("EncodingWarning"),
+        // Warning category classes live in builtins, NOT in the warnings module.
+        // CPython 3.12: `hasattr(warnings, 'UserWarning')` is False.
+        // `warnings.warn("msg", UserWarning)` still works because UserWarning
+        // is resolved from the caller's builtins namespace, not from here.
 
         // filters: the active filter list.  Rebuilt at module() time.
         "filters"                   => snapshot_filters(),
