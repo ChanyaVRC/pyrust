@@ -159,10 +159,16 @@ if [[ "$MEASURE_MEMORY" -eq 1 ]]; then
       name="${name%.py}"
 
       # Extract "Maximum resident set size (kbytes): N" from GNU time stderr.
+      # Redirect only stdout to /dev/null; stderr (time's report + any script
+      # error output) goes through the pipe and grep filters to just the RSS line.
+      # Do NOT use "2>/dev/null" inside the block — that would also suppress
+      # /usr/bin/time's own output which it writes to its stderr.
       _mem_kb() {
         local bin="$1"
-        { /usr/bin/time -v "$bin" "$script" >/dev/null 2>&1; } 2>&1 \
-          | grep -i "Maximum resident" | awk '{print $NF}' || echo "null"
+        local kb
+        kb=$( { /usr/bin/time -v "$bin" "$script" >/dev/null; } 2>&1 \
+                | grep -i "Maximum resident" | awk '{print $NF}' )
+        printf '%s' "${kb:-null}"
       }
 
       py_kb=$(_mem_kb "$PYTHON")
