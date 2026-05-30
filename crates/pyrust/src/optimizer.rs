@@ -157,6 +157,7 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
                 }
                 SetupExcept(k) => SetupExcept(thread(k)),
                 MatchExcept(r, k) => MatchExcept(r, thread(k)),
+                MatchExceptStar(r, src, dst, k) => MatchExceptStar(r, src, dst, thread(k)),
                 other => other,
             }
         })
@@ -401,7 +402,8 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -610,6 +612,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     | Insn::ForCountConstInline(..)
                     | Insn::SetupExcept(_)
                     | Insn::MatchExcept(..)
+                    | Insn::MatchExceptStar(..)
                     | Insn::Return(_)
                     | Insn::ReturnNone
                     | Insn::RaiseValue(_)
@@ -688,7 +691,8 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -779,6 +783,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::ForCountConstInline(..)
             | Insn::SetupExcept(_)
             | Insn::MatchExcept(..)
+            | Insn::MatchExceptStar(..)
             | Insn::Return(_)
             | Insn::ReturnNone
             | Insn::RaiseValue(_)
@@ -972,7 +977,8 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
-            | Insn::MatchExcept(_, k) => {
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => {
                 queue.push(pc + 1);
                 queue.push(jt(*k));
             }
@@ -1039,7 +1045,8 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -1370,7 +1377,8 @@ fn pass_str_method_const_fold(
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -1647,6 +1655,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | RecordClassDel(s)
         | PushExcContext(s)
         | SyncModuleGlobal(s, _) => *s == r,
+        MatchExceptStar(type_r, src, _, _) => *type_r == r || *src == r,
 
         // Two source registers.
         BinOp(_, a, _, b)
@@ -1780,6 +1789,10 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | PushExcContext(s)
         | SyncModuleGlobal(s, _) => {
             reads.insert(*s);
+        }
+        MatchExceptStar(type_r, src, _, _) => {
+            reads.insert(*type_r);
+            reads.insert(*src);
         }
 
         BinOp(_, a, _, b)
@@ -2469,6 +2482,10 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | DeleteLocal(r, _) => {
             written.insert(*r);
         }
+        MatchExceptStar(_, src, dst, _) => {
+            written.insert(*src); // src_group is updated to remaining
+            written.insert(*dst); // matched_dst gets the sub-group
+        }
         LoadNoneRange { start, count } => {
             for i in 0..*count as u32 {
                 written.insert(start + i);
@@ -2968,7 +2985,8 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -3191,6 +3209,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::ForCountConstInline(..)
                 | Insn::SetupExcept(_)
                 | Insn::MatchExcept(..)
+                | Insn::MatchExceptStar(..)
                 | Insn::Return(_)
                 | Insn::ReturnNone
                 | Insn::RaiseValue(_)
@@ -3917,7 +3936,8 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
             | Insn::CmpJumpIfTrueConst(_, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = offset {
@@ -4019,6 +4039,9 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             },
             Insn::CheckLocal(r, n) => Insn::CheckLocal(s(&copies, r), n),
             Insn::MatchExcept(r, k) => Insn::MatchExcept(s(&copies, r), k),
+            Insn::MatchExceptStar(r, src, dst, k) => {
+                Insn::MatchExceptStar(s(&copies, r), s(&copies, src), s(&copies, dst), k)
+            }
             Insn::ForCountReg(var, op, stop, step_idx, k) => {
                 Insn::ForCountReg(var, op, s(&copies, stop), step_idx, k)
             }
@@ -4209,6 +4232,7 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k)
             | Insn::SetupExcept(k) => {
                 let t = jt(*k);
                 if t < n {
@@ -4637,7 +4661,9 @@ fn pass_forcount_unroll(
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k) => Some(*k),
-            Insn::SetupExcept(k) | Insn::MatchExcept(_, k) => Some(*k),
+            Insn::SetupExcept(k) | Insn::MatchExcept(_, k) | Insn::MatchExceptStar(_, _, _, k) => {
+                Some(*k)
+            }
             _ => None,
         }
     };
@@ -4960,6 +4986,7 @@ fn pass_forcount_unroll(
             }
             Insn::SetupExcept(k) => Insn::SetupExcept(fix(k)),
             Insn::MatchExcept(r, k) => Insn::MatchExcept(r, fix(k)),
+            Insn::MatchExceptStar(r, src, dst, k) => Insn::MatchExceptStar(r, src, dst, fix(k)),
             other => other,
         };
     }
@@ -5027,7 +5054,8 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -5225,7 +5253,8 @@ fn pass_loadnone_merge(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -5444,6 +5473,7 @@ pub(crate) fn rewrite_offsets_with(
         ForCountConstInline(v, op, stop, step, k) => ForCountConstInline(v, op, stop, step, fix(k)),
         SetupExcept(k) => SetupExcept(fix(k)),
         MatchExcept(r, k) => MatchExcept(r, fix(k)),
+        MatchExceptStar(r, src, dst, k) => MatchExceptStar(r, src, dst, fix(k)),
         other => other,
     }
 }
@@ -5537,7 +5567,8 @@ fn pass_concat_merge_once(
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -5761,6 +5792,10 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | RecordClassStore(s)
         | RecordClassDel(s)
         | PushExcContext(s) => f(*s),
+        MatchExceptStar(type_r, src, _, _) => {
+            f(*type_r);
+            f(*src);
+        }
 
         BinOp(_, a, _, b)
         | BinOpInPlace(_, a, _, b)
@@ -6031,7 +6066,8 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
-            | Insn::MatchExcept(_, k) => Some(*k),
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -6061,6 +6097,7 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
                 | Insn::ForCountConstInline(..)
                 | Insn::SetupExcept(_)
                 | Insn::MatchExcept(..)
+                | Insn::MatchExceptStar(..)
         )
     };
 
