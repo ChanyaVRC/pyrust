@@ -722,6 +722,7 @@ impl Interpreter {
         pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
             filename: tb_filename,
             lineno: None,
+            source_line: None,
             funcname: frame.fn_name.clone(),
         });
         let result = self.run_bytecode_inner(
@@ -1114,6 +1115,14 @@ impl Interpreter {
                     code.insns.len()
                 )));
             };
+            // Update the current-line tracker when the lineno table has a
+            // non-zero entry for this instruction.  `0` means "same line as
+            // the previous instruction" and is deliberately not updated here.
+            if let Some(&ln) = code.lineno_table.get(pc) {
+                if ln != 0 {
+                    pyrust_core::set_current_vm_line(ln);
+                }
+            }
             pc += 1;
 
             macro_rules! jump_pc {
@@ -6410,6 +6419,7 @@ mod vm_tests {
         let n = insns.len();
         FnCode {
             insns,
+            lineno_table: vec![0u32; n],
             consts: vec![],
             names: vec![],
             num_regs: 0,
@@ -6433,6 +6443,7 @@ mod vm_tests {
         code.insns.push(Insn::LoadNone(0));           // type_reg = None (placeholder)
         code.insns.push(Insn::MatchExcept(0, 1));     // no active_exception → error
         code.insns.push(Insn::ReturnNone);
+        code.lineno_table.extend([0u32, 0, 0]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![Value::unset(); 1];
         // SAFETY (test): regs is alive for the duration of run_bytecode;

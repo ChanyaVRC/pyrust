@@ -156,6 +156,13 @@ fn normalize_pythonish_output(raw: &str) -> String {
             }
             continue;
         }
+        // Strip PEP 657 underline markers (`^` and `~` lines).  CPython emits
+        // precise column markers (e.g. `    ~~^^~~~`) while pyrust emits a
+        // simpler full-width `^` underline.  Strip both so the parity diff
+        // focuses on the exception message and echoed source line only.
+        if !trimmed.is_empty() && trimmed.chars().all(|c| c == '^' || c == '~') {
+            continue;
+        }
         out.push(line.trim_end());
     }
     out.join("\n")
