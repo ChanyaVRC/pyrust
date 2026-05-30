@@ -61,6 +61,24 @@ try:
 except TypeError as e:
     print(e)
 
+# int + bytearray → TypeError with operand type names (CPython 3.12 parity)
+try:
+    42 + bytearray(b"a")
+except TypeError as e:
+    print(e)
+
+# str + bytearray → TypeError: can only concatenate str (not "bytearray") to str
+try:
+    "x" + bytearray(b"a")
+except TypeError as e:
+    print(e)
+
+# list + bytearray → TypeError: can only concatenate list (not "bytearray") to list
+try:
+    [1] + bytearray(b"a")
+except TypeError as e:
+    print(e)
+
 # --- OverflowError for BigInt repetition count ---
 try:
     bytearray(b"a") * (2 ** 100)

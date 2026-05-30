@@ -2746,8 +2746,18 @@ impl Interpreter {
                         out.extend_from_slice(&b);
                         return Ok(Value::bytes(out));
                     }
-                    // Non-bytes LHS with bytearray RHS: unsupported.
-                    return Err(Self::unsupported_binary_operand("+"));
+                    // Non-bytes LHS with bytearray RHS: mirror CPython's
+                    // per-type error messages.
+                    let lt = value_type_name_str(&left);
+                    let err_msg = match left.kind() {
+                        ValueKind::Str(_) | ValueKind::List(_) | ValueKind::Tuple(_) => {
+                            format!("can only concatenate {lt} (not \"bytearray\") to {lt}")
+                        }
+                        _ => format!(
+                            "unsupported operand type(s) for +: '{lt}' and 'bytearray'"
+                        ),
+                    };
+                    return Err(PyError::named("TypeError", err_msg));
                 }
                 (None, None) => unreachable!(),
             }
