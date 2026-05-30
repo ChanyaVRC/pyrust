@@ -8292,7 +8292,15 @@ impl Compiler {
 
         // PEP 695: if this is a generic class, build the __type_params__ tuple
         // and store it on the class object before decorators are applied.
+        // Ensure next_temp is at least dst + 1 before calling emit_type_params_attr:
+        // when there are base classes and no metaclass, next_temp is reset to
+        // bases_base + 1 (which equals dst when bases_n == 1), and
+        // emit_type_params_attr would allocate TypeVar registers starting at dst,
+        // overwriting the class object with a TypeVar.
         if !type_params.is_empty() {
+            if self.next_temp <= dst {
+                self.next_temp = dst + 1;
+            }
             self.emit_type_params_attr(dst, type_params);
         }
 
