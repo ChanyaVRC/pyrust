@@ -6981,6 +6981,27 @@ pyrust_module! {
         }
         Ok(Value::string(self_val.repr()))
     }
+
+    /// PEP 695: `TypeVar.__repr__` — returns the TypeVar name string.
+    /// CPython: `repr(T)` outputs `~T` for invariant TypeVars, but the
+    /// `__name__` attribute is just the bare name `T`.
+    #[py_name = "builtins.TypeVar.__repr__"]
+    fn typevar_repr(args) -> Result<Value> {
+        let _ = _interp;
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__repr__' of 'TypeVar' needs an argument".to_string(),
+            )
+        })?;
+        if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
+            let borrowed = inst_rc.borrow();
+            if let Some(name_val) = borrowed.attrs.get("__name__") {
+                return Ok(Value::string(name_val.to_string()));
+            }
+        }
+        Ok(Value::string(self_val.repr()))
+    }
 }
 
 /// Detect the numeric base and build the digits string to parse when

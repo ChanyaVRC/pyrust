@@ -276,10 +276,13 @@ pub enum Insn {
     /// PEP 487: kwarg_n keyword arg values are in R[kwarg_base..kwarg_base+kwarg_n];
     /// names come from fn_protos[proto_idx].class_kwarg_names.
     MakeClass(Reg, u8, Reg, u8, u16, Reg, u8),
-    /// R[dst] = TypeAliasType(name=consts[name_idx], value=R[value_reg])
-    /// PEP 695: construct a `TypeAliasType` object from a string name and the
-    /// evaluated value expression.
-    MakeTypeAlias(Reg, u16, Reg),
+    /// R[dst] = TypeVar(name=consts[name_idx])
+    /// PEP 695: construct a `TypeVar` object for a generic type parameter.
+    MakeTypeVar(Reg, u16),
+    /// R[dst] = TypeAliasType(name=consts[name_idx], value=R[value_reg], type_params=R[params_reg])
+    /// PEP 695: construct a `TypeAliasType` object from a string name, the evaluated value
+    /// expression, and a tuple of TypeVar objects (may be an empty tuple).
+    MakeTypeAlias(Reg, u16, Reg, Reg),
     /// Print R[src] if not None (REPL expression output).
     PrintExpr(Reg),
     /// R[set].insert(R[val])  — in-place add for set comprehension construction

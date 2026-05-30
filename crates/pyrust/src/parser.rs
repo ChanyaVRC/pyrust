@@ -203,10 +203,13 @@ impl Parser {
         // Consume `type` (soft keyword, tokenised as Ident).
         self.bump();
         let name = self.expect_ident("type alias name")?;
-        // Skip optional generic type parameters `[T, ...]` — we don't implement
-        // generic type params; they are parsed and discarded for now.
-        if self.is(&Token::LBracket) {
-            let mut depth = 0usize;
+        // Parse optional generic type parameters `[T, U, ...]`.
+        // PEP 695: each parameter is a simple identifier (TypeVar name).
+        // We only support the simple `[T]` / `[T, U]` form here; bound/constraint
+        // syntax (`T: int`, `*Ts`, `**P`) is not yet supported.
+        let type_params = if self.is(&Token::LBracket) {
+            self.bump(); // consume `[`
+            let mut params: Vec<String> = Vec::new();
             loop {
                 match self.current() {
                     None | Some(Token::Eof) => {
@@ -214,26 +217,34 @@ impl Parser {
                             "unterminated type parameter list in type alias".to_string(),
                         ));
                     }
-                    Some(Token::LBracket) => {
-                        depth += 1;
-                        self.bump();
-                    }
                     Some(Token::RBracket) => {
-                        depth -= 1;
-                        self.bump();
-                        if depth == 0 {
-                            break;
-                        }
+                        self.bump(); // consume `]`
+                        break;
+                    }
+                    Some(Token::Comma) => {
+                        self.bump(); // consume `,`
+                    }
+                    Some(Token::Ident(_)) => {
+                        let param_name = self.expect_ident("type parameter name")?;
+                        params.push(param_name);
                     }
                     _ => {
+                        // Skip any non-identifier token (e.g. `:` in `T: int`).
                         self.bump();
                     }
                 }
             }
-        }
+            params
+        } else {
+            vec![]
+        };
         self.expect(&Token::Assign)?;
         let value = self.parse_expr_or_tuple()?;
-        Ok(Stmt::TypeAlias { name, value })
+        Ok(Stmt::TypeAlias {
+            name,
+            type_params,
+            value,
+        })
     }
 
     fn parse_match(&mut self) -> Result<Stmt> {

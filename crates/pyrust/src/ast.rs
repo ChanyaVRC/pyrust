@@ -145,10 +145,14 @@ pub enum Stmt {
         subject: Expr,
         arms: Vec<MatchArm>,
     },
-    /// PEP 695 type alias statement: `type <name> = <value>`.
+    /// PEP 695 type alias statement: `type <name>[T, U] = <value>`.
     /// Creates a `TypeAliasType` object and binds it to `name`.
+    /// `type_params` holds the names of the generic type parameters (e.g. `["T", "U"]`).
+    /// When non-empty, each param becomes a `TypeVar` bound in the scope where `value` is
+    /// evaluated; the resulting alias gets a `__type_params__` attribute.
     TypeAlias {
         name: String,
+        type_params: Vec<String>,
         value: Expr,
     },
 }

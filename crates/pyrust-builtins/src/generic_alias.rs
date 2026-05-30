@@ -139,12 +139,23 @@ impl BuiltinTypeOps for GenericAliasOps {
 /// Produce the repr for a single type argument, matching how CPython formats
 /// `GenericAlias.__repr__`.  For a class this is just the qualified name
 /// (e.g. `"int"`, `"str"`).  For nested GenericAlias values (e.g.
-/// `list[list[int]]`) it recursively produces `"list[int]"`.  For anything
-/// else we fall back to the general `Value::repr()`.
+/// `list[list[int]]`) it recursively produces `"list[int]"`.  For a
+/// `PyInstance` that has a `__name__` attribute (e.g. a `TypeVar` created by
+/// PEP 695 `type X[T] = ...` syntax), we use the `__name__` string directly
+/// so that `list[T]` renders as `list[T]` rather than `list[<object at ...>]`.
+/// For anything else we fall back to the general `Value::repr()`.
 fn repr_type_arg(v: &Value) -> String {
     match v.kind() {
         ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
+        ValueKind::PyInstance(inst_rc) => {
+            if let Some(name_val) = inst_rc.borrow().attrs.get("__name__") {
+                if let Some(s) = name_val.as_str() {
+                    return s.to_string();
+                }
+            }
+            v.repr()
+        }
         _ => v.repr(),
     }
 }
