@@ -481,6 +481,12 @@ impl std::fmt::Debug for AttrCacheEntry {
 #[derive(Debug, Clone)]
 pub struct FnCode {
     pub(crate) insns: Vec<Insn>,
+    /// 1-based source line number for each instruction, parallel to `insns`.
+    /// A value of 0 means "unknown / same as the previous instruction".  Set by
+    /// the compiler when per-statement line information is available (i.e. when
+    /// the script was compiled with line tracking enabled).  Used by the VM to
+    /// update the current-line counter when building tracebacks.
+    pub(crate) lineno_table: Vec<u32>,
     /// Constant pool (literals used in the function body)
     pub(crate) consts: Vec<Value>,
     /// Name pool (global variable names and attribute names)

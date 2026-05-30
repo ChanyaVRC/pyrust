@@ -4196,8 +4196,7 @@ pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
 /// A single frame in a Python-style traceback.
 ///
 /// Populated by the interpreter when errors propagate out of
-/// `run_bytecode` / `run_bytecode_for_fn`.  `lineno` is `None` until
-/// per-instruction line-number tracking is implemented (Phase 2).
+/// `run_bytecode` / `run_bytecode_for_fn`.
 #[derive(Debug, Clone)]
 pub struct FrameInfo {
     /// Path to the source file that contains this frame.  Stored as `Arc<str>`
@@ -4205,8 +4204,12 @@ pub struct FrameInfo {
     /// is a cheap reference-count bump rather than a heap allocation.
     pub filename: Arc<str>,
     /// 1-based source line that raised the error, or `None` when no line
-    /// table is available (Phase 1 limitation).
+    /// table is available.
     pub lineno: Option<u32>,
+    /// Verbatim text of the source line pointed to by `lineno`, or `None`.
+    /// Leading whitespace is preserved; trailing whitespace is stripped.
+    /// Stored as `Arc<str>` so that cloning is a cheap reference-count bump.
+    pub source_line: Option<Arc<str>>,
     /// Function or method name.  `"<module>"` for module-scope code.
     /// `Arc<str>` so cloning a frame is a reference-count bump, not a heap alloc.
     pub funcname: Arc<str>,
@@ -4229,6 +4232,14 @@ thread_local! {
     ///
     /// Reset to `None` at the top of each `try_exec_vm_script_with_index` run.
     static CAPTURED_ERROR_FRAMES: RefCell<Option<Vec<FrameInfo>>> = RefCell::new(None);
+
+    /// The 1-based source line number of the most recently executed instruction
+    /// in the innermost VM dispatch loop.  Updated on every instruction whose
+    /// `lineno_table` entry is non-zero.  Read by the traceback builder after
+    /// `run_bytecode` returns an error, to fill in the `<module>` frame's `lineno`.
+    ///
+    /// Reset to 0 at the start of each top-level script execution.
+    static CURRENT_VM_LINE: RefCell<u32> = RefCell::new(0);
 }
 
 /// Push a frame onto the current thread's traceback stack.
@@ -4296,18 +4307,45 @@ pub fn reset_captured_error_frames() {
     CAPTURED_ERROR_FRAMES.with(|c| *c.borrow_mut() = None);
 }
 
+/// Update the current VM line counter.  Called by the VM dispatch loop when
+/// the `lineno_table` entry for the current instruction is non-zero.
+#[inline]
+pub fn set_current_vm_line(lineno: u32) {
+    CURRENT_VM_LINE.with(|c| *c.borrow_mut() = lineno);
+}
+
+/// Read the current VM line counter.  Called by `try_exec_vm_script_with_index`
+/// after `run_bytecode` returns an error, to fill in the `<module>` frame.
+#[inline]
+pub fn get_current_vm_line() -> u32 {
+    CURRENT_VM_LINE.with(|c| *c.borrow())
+}
+
+/// Reset the current VM line counter.  Called at the start of each top-level
+/// script execution (via `reset_captured_error_frames`).
+#[inline]
+pub fn reset_current_vm_line() {
+    CURRENT_VM_LINE.with(|c| *c.borrow_mut() = 0);
+}
+
 /// Format a traceback chain as CPython does, returning it as a `String`.
 ///
 /// `frames` is the list produced by `snapshot_traceback_frames()` (innermost
 /// last) with the `<module>` frame prepended by the caller.
 ///
-/// Output format (no column underlines — Phase 1):
+/// Output format:
 /// ```text
 /// Traceback (most recent call last):
-///   File "test.py", in <module>
-///   File "test.py", in foo
+///   File "test.py", line 3, in <module>
+///     source_line
+///     ^^^^^^^^^^^
 /// SomeError: message
 /// ```
+///
+/// When `lineno` is `None` the `line N` part is omitted.  When `source_line`
+/// is `None` the source echo and underline are omitted.  The underline is a
+/// full-width `^` row (one caret per non-space character in the stripped line)
+/// — a simplified approximation of CPython's PEP 657 fine-grained underlines.
 pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::from("Traceback (most recent call last):\n");
@@ -4326,6 +4364,27 @@ pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
                     "  File \"{}\", in {}\n",
                     frame.filename, frame.funcname
                 );
+            }
+        }
+        // Emit source line + underline when available.
+        if let Some(src) = &frame.source_line {
+            // CPython indents the source line with four spaces.
+            let _ = write!(out, "    {src}\n");
+            // Build the underline: leading spaces matching the source line's
+            // own indentation, then `^` for each non-whitespace character.
+            // Use char counts so the alignment is correct for non-ASCII source.
+            // This matches CPython's minimum underline (no `~` context marks
+            // since we don't track sub-expression column offsets yet).
+            let stripped = src.trim_start();
+            let leading = src.chars().count() - stripped.chars().count();
+            let carets = stripped.trim_end().chars().count();
+            if carets > 0 {
+                let underline = format!(
+                    "    {spaces}{carets}\n",
+                    spaces = " ".repeat(leading),
+                    carets = "^".repeat(carets),
+                );
+                out.push_str(&underline);
             }
         }
     }

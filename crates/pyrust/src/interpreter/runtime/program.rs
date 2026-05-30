@@ -16,7 +16,26 @@ impl Interpreter {
     }
 
     pub fn exec_program(&mut self, program: &[Stmt], repl_mode: bool) -> Result<()> {
-        let result = if let Some(r) = self.try_exec_vm_script(program, repl_mode) {
+        self.exec_program_with_linenos(program, &[], "", repl_mode)
+    }
+
+    /// Like `exec_program` but with per-statement line numbers and the
+    /// verbatim source text.  Used by the file-execution path to enable
+    /// traceback source echoing and underlines.
+    ///
+    /// `linenos` is a parallel slice of 1-based source line numbers for each
+    /// statement in `program` (empty = no line info).  `src` is the full
+    /// source text of the script file (empty = no source echo in tracebacks).
+    pub fn exec_program_with_linenos(
+        &mut self,
+        program: &[Stmt],
+        linenos: &[u32],
+        src: &str,
+        repl_mode: bool,
+    ) -> Result<()> {
+        let result = if let Some(r) =
+            self.try_exec_vm_script_with_src(program, linenos, src, repl_mode)
+        {
             r
         } else {
             Err(PyError::Runtime("compilation failed".to_string()))
@@ -47,7 +66,13 @@ impl Interpreter {
         result
     }
 
-    fn try_exec_vm_script(&mut self, program: &[Stmt], repl_mode: bool) -> Option<Result<()>> {
+    fn try_exec_vm_script_with_src(
+        &mut self,
+        program: &[Stmt],
+        linenos: &[u32],
+        src: &str,
+        repl_mode: bool,
+    ) -> Option<Result<()>> {
         // Issue #820: restore fastlocal registers for module scope.
         //
         // Prior to PR #810, module-scope names were allocated fastlocal registers
@@ -81,7 +106,7 @@ impl Interpreter {
                 // top-level names) so the old regression is acceptable there.
                 Rc::new(HashMap::new())
             };
-        self.try_exec_vm_script_with_index(program, local_index, repl_mode)
+        self.try_exec_vm_script_with_index(program, linenos, src, local_index, repl_mode)
     }
 
     /// Seed the module-level global namespace with the standard dunder keys
@@ -146,12 +171,20 @@ impl Interpreter {
     fn try_exec_vm_script_with_index(
         &mut self,
         program: &[Stmt],
+        linenos: &[u32],
+        src: &str,
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         repl_mode: bool,
     ) -> Option<Result<()>> {
         // Reset any captured frames from a previous run (REPL re-invocation).
         pyrust_core::reset_captured_error_frames();
-        let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), repl_mode) {
+        pyrust_core::reset_current_vm_line();
+        let code = match crate::compiler::compile_script_with_linenos(
+            program,
+            Rc::clone(&local_index),
+            repl_mode,
+            linenos,
+        ) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Some(Err(e)),
         };
@@ -237,9 +270,29 @@ impl Interpreter {
             } else {
                 // Build the full frame list: <module> at the bottom (outermost),
                 // then the function frames in innermost-last order.
+                //
+                // The `<module>` frame's line number comes from the VM's
+                // current-line tracker (updated per instruction by the dispatch
+                // loop via `set_current_vm_line`).  When no line info is
+                // available (lineno_table all-zero), `get_current_vm_line()`
+                // returns 0, which we map to `None`.
+                let module_lineno = {
+                    let n = pyrust_core::get_current_vm_line();
+                    if n != 0 { Some(n) } else { None }
+                };
+                // If we have the source text, look up the line's text.
+                let module_source_line: Option<std::sync::Arc<str>> =
+                    if let (Some(n), false) = (module_lineno, src.is_empty()) {
+                        src.lines()
+                            .nth((n as usize).saturating_sub(1))
+                            .map(|l| std::sync::Arc::from(l.trim_end()))
+                    } else {
+                        None
+                    };
                 let mut frames = vec![pyrust_core::FrameInfo {
                     filename: filename.clone(),
-                    lineno: None,
+                    lineno: module_lineno,
+                    source_line: module_source_line,
                     funcname: std::sync::Arc::from("<module>"),
                 }];
                 frames.extend(inner_frames);

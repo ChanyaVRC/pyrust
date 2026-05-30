@@ -16,6 +16,61 @@ pub fn optimize(code: FnCode) -> FnCode {
     optimize_fn_code(code)
 }
 
+/// Remap a `lineno_table` from an old instruction sequence to a new one.
+///
+/// Uses a greedy forward scan: for each instruction in `new_insns`, finds
+/// the first matching instruction in `old_insns` (by opcode equality) that
+/// hasn't been consumed yet and inherits its line number.  When no match is
+/// found, the entry defaults to 0 (= inherit from the previous instruction in
+/// the VM's line tracker).
+///
+/// This works well for typical optimizations (dead-code removal, instruction
+/// fusion) that preserve relative order while possibly removing some entries.
+/// It is deliberately approximate — the important property is that error-raising
+/// instructions (BinOp, Call, GetAttr, etc.) are never removed by the optimizer
+/// because they have side effects, so their line numbers are preserved.
+fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) -> Vec<u32> {
+    if old_linenos.is_empty() {
+        return vec![0u32; new_insns.len()];
+    }
+    // Build a "current best lineno" prefix from old_linenos: for each position
+    // in old_insns, the last non-zero lineno seen up to and including that position.
+    // This lets us approximate the lineno of any new instruction that can't be
+    // matched by using the lineno at the corresponding position in the old stream.
+    let mut running: u32 = 0;
+    let old_prefix: Vec<u32> = old_linenos
+        .iter()
+        .map(|&ln| {
+            if ln != 0 {
+                running = ln;
+            }
+            running
+        })
+        .collect();
+
+    let mut old_pos: usize = 0;
+    let mut result = Vec::with_capacity(new_insns.len());
+    'outer: for new_insn in new_insns {
+        // Search forward from old_pos for the first matching instruction.
+        for i in old_pos..old_insns.len() {
+            if &old_insns[i] == new_insn {
+                let ln = old_linenos.get(i).copied().unwrap_or(0);
+                result.push(ln);
+                old_pos = i + 1;
+                continue 'outer;
+            }
+        }
+        // No match found (instruction was created by the optimizer, e.g. a
+        // fused BinOpConst from a BinOp that existed after a LoadConst).
+        // Use the "running" lineno at old_pos — the lineno of the next unmatched
+        // instruction in the original stream, which is the best approximation
+        // for the source location of this derived instruction.
+        let approx = old_prefix.get(old_pos).copied().unwrap_or(0);
+        result.push(approx);
+    }
+    result
+}
+
 fn optimize_fn_code(code: FnCode) -> FnCode {
     // Recursively optimize nested function / class bodies first.
     let fn_protos: Vec<FnProto> = code
@@ -32,6 +87,8 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let mut num_regs = code.num_regs;
     let mut consts = code.consts;
     let names = code.names;
+    let original_insns = code.insns.clone();
+    let original_linenos = code.lineno_table.clone();
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
@@ -81,10 +138,12 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_loadnone_merge(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
+    let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
     let insns_len = insns.len();
     let names_len = names.len();
     FnCode {
         insns,
+        lineno_table,
         consts,
         names,
         num_regs,

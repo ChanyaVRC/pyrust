@@ -24,6 +24,15 @@ fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
     parser.parse_program()
 }
 
+/// Parse source text and return both the statement list and a parallel vector
+/// of 1-based line numbers (one per top-level statement).  Used by `run_file`
+/// to thread line information through to the compiler.
+fn parse_source_with_linenos(src: &str) -> Result<(Vec<ast::Stmt>, Vec<u32>)> {
+    let (tokens, line_nos) = Lexer::new(src)?.into_tokens_with_linenos();
+    let mut parser = Parser::new_with_lines(tokens, line_nos);
+    parser.parse_program_with_linenos()
+}
+
 // 256 MB stack so that deep Python recursion (up to RecursionError limit of
 // 1000 calls) never overflows the OS default (1 MB on Windows), even in
 // debug builds where Rust stack frames can be 80–100 KB each.
@@ -32,8 +41,9 @@ const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
 fn run_file(path: &str) -> Result<()> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
-    let program = parse_source(&src)?;
+    let (program, linenos) = parse_source_with_linenos(&src)?;
     let path_owned = path.to_string();
+    let src_owned = src;
 
     // Marshal errors as strings so the Result crosses the thread boundary
     // (Value contains Rc which is not Send).
@@ -46,10 +56,13 @@ fn run_file(path: &str) -> Result<()> {
         .stack_size(INTERPRETER_STACK_SIZE)
         .spawn(move || {
             let mut interp = Interpreter::with_script_path(&path_owned);
-            interp.exec_program(&program, false).err().map(|e| match e {
-                PyError::Runtime(msg) => msg,
-                other => other.to_string(),
-            })
+            interp
+                .exec_program_with_linenos(&program, &linenos, &src_owned, false)
+                .err()
+                .map(|e| match e {
+                    PyError::Runtime(msg) => msg,
+                    other => other.to_string(),
+                })
         })
         .expect("failed to spawn interpreter thread")
         .join()

@@ -2978,6 +2978,7 @@ impl Interpreter {
                 pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
                     filename: tb_filename,
                     lineno: None,
+                    source_line: None,
                     funcname: std::sync::Arc::from(function.name.as_str()),
                 });
                 let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
@@ -3314,6 +3315,7 @@ impl Interpreter {
             pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
                 filename: tb_filename,
                 lineno: None,
+                source_line: None,
                 funcname: std::sync::Arc::from(function.name.as_str()),
             });
             let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);

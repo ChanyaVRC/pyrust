@@ -19,10 +19,24 @@ use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
 ///
 /// When `repl_mode` is true, top-level `Stmt::Expr` statements emit
 /// `Insn::PrintExpr` instead of discarding the result.
+///
+/// `linenos` is an optional parallel slice of 1-based source line numbers for
+/// each statement in `stmts`.  Pass an empty slice when no line information is
+/// available (the resulting `FnCode::lineno_table` will be all zeros).
 pub fn compile_script(
     stmts: &[Stmt],
     local_index: Rc<HashMap<String, Reg>>,
     repl_mode: bool,
+) -> Result<FnCode, PyError> {
+    compile_script_with_linenos(stmts, local_index, repl_mode, &[])
+}
+
+/// Like `compile_script` but with per-statement line numbers.
+pub fn compile_script_with_linenos(
+    stmts: &[Stmt],
+    local_index: Rc<HashMap<String, Reg>>,
+    repl_mode: bool,
+    linenos: &[u32],
 ) -> Result<FnCode, PyError> {
     // Validate global/nonlocal ordering at module scope.  CPython 3.12 raises
     // SyntaxError for `x = 1; global x` at module level too.
@@ -42,21 +56,32 @@ pub fn compile_script(
     // rest.  In REPL mode every string-expression is just a value expression
     // whose repr is printed; it is NOT a module docstring (CPython's interactive
     // console does not set __doc__ from string literals typed interactively).
-    let body = if !repl_mode {
+    let (body, body_linenos): (&[Stmt], &[u32]) = if !repl_mode {
         match stmts {
             [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
+                // Record lineno of the docstring statement if available.
+                if let Some(&ln) = linenos.first() {
+                    if ln != 0 {
+                        c.set_lineno(ln);
+                    }
+                }
                 let r = c.compile_literal(Value::string(s.clone()));
                 c.compile_store_name("__doc__", r);
                 c.free_temp(r);
-                rest
+                (rest, linenos.get(1..).unwrap_or(&[]))
             }
-            _ => stmts,
+            _ => (stmts, linenos),
         }
     } else {
-        stmts
+        (stmts, linenos)
     };
     if repl_mode {
-        for stmt in body {
+        for (idx, stmt) in body.iter().enumerate() {
+            if let Some(&ln) = body_linenos.get(idx) {
+                if ln != 0 {
+                    c.set_lineno(ln);
+                }
+            }
             if let Stmt::Expr(e) = stmt {
                 let r = c.compile_expr(e);
                 c.emit(Insn::PrintExpr(r));
@@ -66,7 +91,7 @@ pub fn compile_script(
             }
         }
     } else {
-        c.compile_block(body);
+        c.compile_block_with_linenos(body, body_linenos);
     }
     c.finish()
 }
@@ -3858,6 +3883,13 @@ struct Compiler {
     local_index: Rc<HashMap<String, Reg>>,
     cell_vars: HashSet<String>,
     insns: Vec<Insn>,
+    /// Per-instruction 1-based source line numbers, parallel to `insns`.
+    /// Filled by `emit()` from `current_lineno`.  0 = unknown.
+    lineno_table: Vec<u32>,
+    /// 1-based line number of the statement currently being compiled.
+    /// Set by `set_lineno()` before each `compile_stmt` call when line
+    /// information is available.  0 when no line info is known.
+    current_lineno: u32,
     consts: Vec<Value>,
     const_index: HashMap<crate::value::PyKey, u16>,
     names: Vec<String>,
@@ -4332,6 +4364,8 @@ impl Compiler {
             local_index,
             cell_vars: cell_set,
             insns: Vec::new(),
+            lineno_table: Vec::new(),
+            current_lineno: 0,
             consts: Vec::new(),
             const_index: HashMap::new(),
             names: Vec::new(),
@@ -4536,7 +4570,14 @@ impl Compiler {
     fn emit(&mut self, insn: Insn) -> usize {
         let idx = self.insns.len();
         self.insns.push(insn);
+        self.lineno_table.push(self.current_lineno);
         idx
+    }
+
+    /// Set the source line number for all subsequently emitted instructions.
+    /// Call this at the start of each statement (when line info is available).
+    fn set_lineno(&mut self, lineno: u32) {
+        self.current_lineno = lineno;
     }
 
     fn set_syntax_error(&mut self, msg: &str) {
@@ -4608,9 +4649,22 @@ impl Compiler {
     }
 
     fn compile_block(&mut self, stmts: &[Stmt]) {
+        self.compile_block_with_linenos(stmts, &[]);
+    }
+
+    /// Like `compile_block` but with per-statement line numbers.  When
+    /// `linenos` is shorter than `stmts` (or empty), the missing entries
+    /// default to 0 (= keep current lineno).
+    fn compile_block_with_linenos(&mut self, stmts: &[Stmt], linenos: &[u32]) {
         for (idx, stmt) in stmts.iter().enumerate() {
             if self.failed {
                 return;
+            }
+            // Update the current line number when info is available.
+            if let Some(&ln) = linenos.get(idx) {
+                if ln != 0 {
+                    self.set_lineno(ln);
+                }
             }
             // #289: rewrite `while i < len(c): ...; i += 1` → `for i in c: ...`
             // when `i` is unused after the loop.  Needs the post-loop suffix
@@ -4840,6 +4894,7 @@ impl Compiler {
         let names_len = self.names.len();
         Ok(FnCode {
             insns,
+            lineno_table: self.lineno_table,
             consts: self.consts,
             names: self.names,
             num_regs,
