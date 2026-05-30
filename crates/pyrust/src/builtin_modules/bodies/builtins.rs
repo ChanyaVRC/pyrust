@@ -1682,7 +1682,6 @@ pyrust_module! {
                 let meta = cls_rc.borrow().metatype.clone();
                 Ok(Value::py_class(meta.unwrap_or_else(type_class_singleton)))
             }
-            ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
             ValueKind::UserFunction(f) => match f.kind {
                 UserFunctionKind::StaticMethod => Ok(Value::builtin_function("staticmethod")),
                 UserFunctionKind::ClassMethod => Ok(Value::builtin_function("classmethod")),
@@ -1733,6 +1732,7 @@ pyrust_module! {
             | ValueKind::Tuple(_) | ValueKind::Dict(_) | ValueKind::Set(_)
             | ValueKind::Bytes(_) | ValueKind::Complex(_, _)
             | ValueKind::None | ValueKind::NotImplemented | ValueKind::Ellipsis
+            | ValueKind::Range { .. }
             | ValueKind::PyInstance(_) => unreachable!(
                 "primitive_class_for_value should have handled this variant"
             ),
