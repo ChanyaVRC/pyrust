@@ -7234,7 +7234,7 @@ pub(super) fn materialize_user_iter(
 ///
 /// Used by `map()` and `filter()` to avoid eagerly exhausting generator sources
 /// at construction time (issue #1388).
-pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Result<Value> {
+pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Result<Value> {
     enum IterKind {
         Generator,
         PyInstance(Rc<RefCell<crate::value::PyInstance>>),
