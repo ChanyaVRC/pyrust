@@ -904,6 +904,101 @@ impl Interpreter {
                             }
                         }
                     }
+                    // Range methods: count, index, __len__ (issue #1807).
+                    // These are dispatched directly here rather than through
+                    // pyrust_builtins because range is not a BuiltinObject.
+                    ValueKind::Range { start, stop, step } => {
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        match method {
+                            "__len__" => {
+                                if !args_vec.is_empty() || !kw.is_empty() {
+                                    Err(PyError::named(
+                                        "TypeError",
+                                        "range.__len__() takes no arguments".to_string(),
+                                    ))
+                                } else {
+                                    use crate::value::range_len;
+                                    Ok(Value::int(range_len(start, stop, step)))
+                                }
+                            }
+                            "count" => {
+                                if args_vec.len() != 1 || !kw.is_empty() {
+                                    Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "count() takes exactly one argument ({} given)",
+                                            args_vec.len() + kw.len()
+                                        ),
+                                    ))
+                                } else {
+                                    let contained = self.range_contains_value(
+                                        start, stop, step, &args_vec[0],
+                                    )?;
+                                    Ok(Value::int(if contained { 1 } else { 0 }))
+                                }
+                            }
+                            "index" => {
+                                if args_vec.len() != 1 || !kw.is_empty() {
+                                    Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "index() takes exactly one argument ({} given)",
+                                            args_vec.len() + kw.len()
+                                        ),
+                                    ))
+                                } else {
+                                    use crate::value::PyToPrimitive;
+                                    let v = &args_vec[0];
+                                    // Convert v to i64 if possible; non-integer types
+                                    // can never be in a range (CPython returns the
+                                    // "x not in sequence" message for those).
+                                    let vi_opt: Option<i64> = match v.kind() {
+                                        ValueKind::Int(x) => Some(x),
+                                        ValueKind::Bool(b) => Some(b as i64),
+                                        ValueKind::BigInt(n) => n.to_i64(),
+                                        ValueKind::Float(f) => {
+                                            const I64_MIN_F: f64 = i64::MIN as f64;
+                                            const I64_MAX_PLUS1_F: f64 =
+                                                9_223_372_036_854_775_808.0_f64;
+                                            if f.is_finite()
+                                                && f.fract() == 0.0
+                                                && f >= I64_MIN_F
+                                                && f < I64_MAX_PLUS1_F
+                                            {
+                                                Some(f as i64)
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        _ => None,
+                                    };
+                                    match vi_opt {
+                                        None => Err(PyError::named(
+                                            "ValueError",
+                                            "sequence.index(x): x not in sequence".to_string(),
+                                        )),
+                                        Some(vi) => {
+                                            let contained = self.range_contains_value(
+                                                start, stop, step, v,
+                                            )?;
+                                            if contained {
+                                                Ok(Value::int((vi - start) / step))
+                                            } else {
+                                                Err(PyError::named(
+                                                    "ValueError",
+                                                    format!("{} is not in range", v.repr()),
+                                                ))
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => Err(PyError::named(
+                                "AttributeError",
+                                format!("'range' object has no attribute '{method}'"),
+                            )),
+                        }
+                    }
                     // Issue #1413: generator bound-methods (__iter__, __next__,
                     // send, close, throw) captured via get_attr route here.
                     // Delegate to call_generator_method which holds all the VM
@@ -4270,6 +4365,36 @@ impl Interpreter {
                     | ValueKind::Set(_)
                     | ValueKind::BuiltinObject { .. }
             )
+        })
+    }
+
+    /// O(1) membership test for range values, matching `eval_in` for Range.
+    /// Returns `true` iff `v` is an element of `range(start, stop, step)`.
+    fn range_contains_value(&self, start: i64, stop: i64, step: i64, v: &Value) -> Result<bool> {
+        use crate::value::PyToPrimitive;
+        let range_contains_i64 = |x: i64| -> bool {
+            if step > 0 {
+                x >= start && x < stop && (x - start) % step == 0
+            } else if step < 0 {
+                x <= start && x > stop && (x - start) % step == 0
+            } else {
+                false
+            }
+        };
+        Ok(match v.kind() {
+            ValueKind::Int(x) => range_contains_i64(x),
+            ValueKind::Bool(b) => range_contains_i64(b as i64),
+            ValueKind::BigInt(n) => n.to_i64().is_some_and(range_contains_i64),
+            ValueKind::Float(f) => {
+                const I64_MIN_F: f64 = i64::MIN as f64;
+                const I64_MAX_PLUS1_F: f64 = 9_223_372_036_854_775_808.0_f64;
+                f.is_finite()
+                    && f.fract() == 0.0
+                    && f >= I64_MIN_F
+                    && f < I64_MAX_PLUS1_F
+                    && range_contains_i64(f as i64)
+            }
+            _ => false,
         })
     }
 
