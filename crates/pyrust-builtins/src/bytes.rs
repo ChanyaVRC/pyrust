@@ -502,29 +502,34 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
         }
         // UTF-16 with BOM detection: first two bytes are the BOM (\xff\xfe for LE,
         // \xfe\xff for BE).  If absent, default to little-endian (matches x86/x64/ARM64).
+        //
+        // `original_bytes` and `bom_offset` are threaded through so that any
+        // UnicodeDecodeError carries the full original byte sequence (including
+        // the BOM) as `.object`, with `start`/`end` adjusted accordingly —
+        // matching CPython's behaviour (see issue #1781).
         "utf16" => {
             if bytes.starts_with(b"\xff\xfe") {
-                decode_utf16_le(&bytes[2..])
+                decode_utf16_le(&bytes[2..], bytes, 2)
             } else if bytes.starts_with(b"\xfe\xff") {
-                decode_utf16_be(&bytes[2..])
+                decode_utf16_be(&bytes[2..], bytes, 2)
             } else {
-                decode_utf16_le(bytes)
+                decode_utf16_le(bytes, bytes, 0)
             }
         }
-        "utf16le" => decode_utf16_le(bytes),
-        "utf16be" => decode_utf16_be(bytes),
+        "utf16le" => decode_utf16_le(bytes, bytes, 0),
+        "utf16be" => decode_utf16_be(bytes, bytes, 0),
         // UTF-32 with BOM detection: first four bytes are the BOM.
         "utf32" => {
             if bytes.starts_with(b"\xff\xfe\x00\x00") {
-                decode_utf32_le(&bytes[4..])
+                decode_utf32_le(&bytes[4..], bytes, 4)
             } else if bytes.starts_with(b"\x00\x00\xfe\xff") {
-                decode_utf32_be(&bytes[4..])
+                decode_utf32_be(&bytes[4..], bytes, 4)
             } else {
-                decode_utf32_le(bytes)
+                decode_utf32_le(bytes, bytes, 0)
             }
         }
-        "utf32le" => decode_utf32_le(bytes),
-        "utf32be" => decode_utf32_be(bytes),
+        "utf32le" => decode_utf32_le(bytes, bytes, 0),
+        "utf32be" => decode_utf32_be(bytes, bytes, 0),
         _ => Err(PyError::named(
             "LookupError",
             format!("unknown encoding: {encoding}"),
@@ -708,14 +713,19 @@ fn bytes_decode_utf8_surrogateescape(bytes: &[u8]) -> String {
 }
 
 /// Decode a little-endian UTF-16 byte slice (no BOM) into a Python string.
-/// Raises `UnicodeDecodeError` on odd-length input or invalid code units.
-fn decode_utf16_le(bytes: &[u8]) -> Result<Value> {
+///
+/// `original_bytes` is the full original byte sequence passed by the caller,
+/// which may include a BOM prefix.  `bom_offset` is the number of BOM bytes
+/// that were stripped before `bytes` was derived from `original_bytes`.
+/// Both are forwarded to `decode_utf16_units` so that any `UnicodeDecodeError`
+/// carries the full original bytes and correct start/end offsets.
+fn decode_utf16_le(bytes: &[u8], original_bytes: &[u8], bom_offset: usize) -> Result<Value> {
     if bytes.len() % 2 != 0 {
         return Err(PyError::UnicodeDecodeError {
             encoding: "utf-16-le".to_string(),
-            object: bytes.to_vec(),
-            start: bytes.len() - 1,
-            end: bytes.len(),
+            object: original_bytes.to_vec(),
+            start: bom_offset + bytes.len() - 1,
+            end: bom_offset + bytes.len(),
             reason: "truncated data".to_string(),
         });
     }
@@ -723,17 +733,19 @@ fn decode_utf16_le(bytes: &[u8]) -> Result<Value> {
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
-    decode_utf16_units(&units, bytes, "utf-16-le")
+    decode_utf16_units(&units, original_bytes, bom_offset, "utf-16-le")
 }
 
 /// Decode a big-endian UTF-16 byte slice (no BOM) into a Python string.
-fn decode_utf16_be(bytes: &[u8]) -> Result<Value> {
+///
+/// See `decode_utf16_le` for the `original_bytes`/`bom_offset` contract.
+fn decode_utf16_be(bytes: &[u8], original_bytes: &[u8], bom_offset: usize) -> Result<Value> {
     if bytes.len() % 2 != 0 {
         return Err(PyError::UnicodeDecodeError {
             encoding: "utf-16-be".to_string(),
-            object: bytes.to_vec(),
-            start: bytes.len() - 1,
-            end: bytes.len(),
+            object: original_bytes.to_vec(),
+            start: bom_offset + bytes.len() - 1,
+            end: bom_offset + bytes.len(),
             reason: "truncated data".to_string(),
         });
     }
@@ -741,16 +753,21 @@ fn decode_utf16_be(bytes: &[u8]) -> Result<Value> {
         .chunks_exact(2)
         .map(|c| u16::from_be_bytes([c[0], c[1]]))
         .collect();
-    decode_utf16_units(&units, bytes, "utf-16-be")
+    decode_utf16_units(&units, original_bytes, bom_offset, "utf-16-be")
 }
 
 /// Decode a slice of UTF-16 code units into a Python string.
 ///
-/// `raw_bytes` is the original encoded byte slice (before unit extraction) and
-/// is used verbatim as `UnicodeDecodeError.object`, matching CPython's behaviour
-/// where `.object` always contains the original input bytes in their on-wire
-/// encoding (LE for utf-16-le, BE for utf-16-be).
-fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Result<Value> {
+/// `raw_bytes` is the full original byte sequence (including any BOM prefix).
+/// `bom_offset` is the number of BOM bytes preceding the encoded units, used
+/// to adjust `start`/`end` so that `UnicodeDecodeError` offsets index into
+/// `raw_bytes` rather than the post-BOM slice — matching CPython's behaviour.
+fn decode_utf16_units(
+    units: &[u16],
+    raw_bytes: &[u8],
+    bom_offset: usize,
+    codec_name: &str,
+) -> Result<Value> {
     let mut out = String::with_capacity(units.len());
     let mut iter = units.iter().copied().enumerate();
     while let Some((i, u)) = iter.next() {
@@ -766,8 +783,8 @@ fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Resu
                     return Err(PyError::UnicodeDecodeError {
                         encoding: codec_name.to_string(),
                         object: raw_bytes.to_vec(),
-                        start: i * 2,
-                        end: i * 2 + 2,
+                        start: bom_offset + i * 2,
+                        end: bom_offset + i * 2 + 2,
                         reason: "unexpected end of data".to_string(),
                     });
                 }
@@ -776,8 +793,8 @@ fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Resu
                     return Err(PyError::UnicodeDecodeError {
                         encoding: codec_name.to_string(),
                         object: raw_bytes.to_vec(),
-                        start: i * 2,
-                        end: i * 2 + 2,
+                        start: bom_offset + i * 2,
+                        end: bom_offset + i * 2 + 2,
                         reason: "illegal UTF-16 surrogate".to_string(),
                     });
                 }
@@ -787,8 +804,8 @@ fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Resu
                 return Err(PyError::UnicodeDecodeError {
                     encoding: codec_name.to_string(),
                     object: raw_bytes.to_vec(),
-                    start: i * 2,
-                    end: i * 2 + 2,
+                    start: bom_offset + i * 2,
+                    end: bom_offset + i * 2 + 2,
                     reason: "illegal encoding".to_string(),
                 });
             }
@@ -808,7 +825,11 @@ fn decode_utf16_units(units: &[u16], raw_bytes: &[u8], codec_name: &str) -> Resu
 /// trailing bytes that don't form a complete chunk.  The early-truncation guard
 /// is therefore removed in favour of checking the remainder after all full
 /// chunks have been decoded successfully.
-fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
+///
+/// `original_bytes` is the full original byte sequence (including any BOM prefix).
+/// `bom_offset` is the number of BOM bytes preceding `bytes` so that error
+/// `start`/`end` offsets index into `original_bytes` — matching CPython's behaviour.
+fn decode_utf32_le(bytes: &[u8], original_bytes: &[u8], bom_offset: usize) -> Result<Value> {
     let chunks = bytes.chunks_exact(4);
     let remainder = chunks.remainder();
     let mut out = String::with_capacity(bytes.len() / 4);
@@ -819,9 +840,9 @@ fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
             None => {
                 return Err(PyError::UnicodeDecodeError {
                     encoding: "utf-32-le".to_string(),
-                    object: bytes.to_vec(),
-                    start: i * 4,
-                    end: i * 4 + 4,
+                    object: original_bytes.to_vec(),
+                    start: bom_offset + i * 4,
+                    end: bom_offset + i * 4 + 4,
                     reason: "code point not in range(0x110000)".to_string(),
                 });
             }
@@ -831,9 +852,9 @@ fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
         let n = bytes.len() - remainder.len();
         return Err(PyError::UnicodeDecodeError {
             encoding: "utf-32-le".to_string(),
-            object: bytes.to_vec(),
-            start: n,
-            end: bytes.len(),
+            object: original_bytes.to_vec(),
+            start: bom_offset + n,
+            end: bom_offset + bytes.len(),
             reason: "truncated data".to_string(),
         });
     }
@@ -844,7 +865,8 @@ fn decode_utf32_le(bytes: &[u8]) -> Result<Value> {
 ///
 /// Same chunk-first approach as `decode_utf32_le` — see that function's
 /// doc comment for the CPython compatibility rationale.
-fn decode_utf32_be(bytes: &[u8]) -> Result<Value> {
+/// See `decode_utf32_le` for the `original_bytes`/`bom_offset` contract.
+fn decode_utf32_be(bytes: &[u8], original_bytes: &[u8], bom_offset: usize) -> Result<Value> {
     let chunks = bytes.chunks_exact(4);
     let remainder = chunks.remainder();
     let mut out = String::with_capacity(bytes.len() / 4);
@@ -855,9 +877,9 @@ fn decode_utf32_be(bytes: &[u8]) -> Result<Value> {
             None => {
                 return Err(PyError::UnicodeDecodeError {
                     encoding: "utf-32-be".to_string(),
-                    object: bytes.to_vec(),
-                    start: i * 4,
-                    end: i * 4 + 4,
+                    object: original_bytes.to_vec(),
+                    start: bom_offset + i * 4,
+                    end: bom_offset + i * 4 + 4,
                     reason: "code point not in range(0x110000)".to_string(),
                 });
             }
@@ -867,9 +889,9 @@ fn decode_utf32_be(bytes: &[u8]) -> Result<Value> {
         let n = bytes.len() - remainder.len();
         return Err(PyError::UnicodeDecodeError {
             encoding: "utf-32-be".to_string(),
-            object: bytes.to_vec(),
-            start: n,
-            end: bytes.len(),
+            object: original_bytes.to_vec(),
+            start: bom_offset + n,
+            end: bom_offset + bytes.len(),
             reason: "truncated data".to_string(),
         });
     }
