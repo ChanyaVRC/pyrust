@@ -8,11 +8,34 @@ use crate::token::{FStringPart as LexFStringPart, Token};
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Optional 1-based line numbers, one per token.  Empty when the parser was
+    /// constructed without line tracking (via `Parser::new`).
+    line_nos: Vec<u32>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            line_nos: Vec::new(),
+        }
+    }
+
+    /// Construct a parser with per-token line numbers produced by
+    /// `Lexer::into_tokens_with_linenos`.
+    pub fn new_with_lines(tokens: Vec<Token>, line_nos: Vec<u32>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            line_nos,
+        }
+    }
+
+    /// Return the 1-based source line number of the current token, or 0 when
+    /// no line number information is available.
+    fn current_lineno(&self) -> u32 {
+        self.line_nos.get(self.pos).copied().unwrap_or(0)
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>> {
@@ -23,6 +46,27 @@ impl Parser {
             self.skip_newlines();
         }
         Ok(stmts)
+    }
+
+    /// Like `parse_program` but also returns a parallel `Vec<u32>` of 1-based
+    /// source line numbers (one per top-level statement).  Only meaningful
+    /// when the parser was constructed with `new_with_lines`.
+    pub fn parse_program_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
+        let mut stmts: Vec<Stmt> = Vec::new();
+        let mut linenos: Vec<u32> = Vec::new();
+        self.skip_newlines();
+        while !self.is(&Token::Eof) {
+            let stmt_lineno = self.current_lineno();
+            let new_stmts = self.parse_stmt_sequence()?;
+            // All statements produced from one parse_stmt_sequence share the
+            // starting line (they are separated by `;` on the same logical line).
+            for _ in &new_stmts {
+                linenos.push(stmt_lineno);
+            }
+            stmts.extend(new_stmts);
+            self.skip_newlines();
+        }
+        Ok((stmts, linenos))
     }
 
     fn parse_stmt_sequence(&mut self) -> Result<Vec<Stmt>> {

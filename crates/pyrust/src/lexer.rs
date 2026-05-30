@@ -18,6 +18,35 @@ impl Lexer {
         self.tokens
     }
 
+    /// Consume the lexer, returning the token stream together with a parallel
+    /// vector of 1-based source line numbers (one entry per token).  A
+    /// `Token::Newline` is assigned the line it terminates; the token after
+    /// it gets the next line number.  Tokens emitted by `handle_indent`
+    /// (Indent / Dedent) receive the line of the physical line that caused
+    /// the indentation change.
+    ///
+    /// The line numbers are computed post-hoc by counting `Token::Newline`
+    /// occurrences in the flat token stream, which is equivalent to scanning
+    /// the source text for `\n` characters.  Multi-line expressions (those
+    /// inside `( [ {`) do not emit intermediate `Newline` tokens, so all
+    /// tokens within the expression are assigned the line of the opening
+    /// delimiter — this is a known approximation.
+    pub fn into_tokens_with_linenos(self) -> (Vec<Token>, Vec<u32>) {
+        let mut line: u32 = 1;
+        let line_nos: Vec<u32> = self
+            .tokens
+            .iter()
+            .map(|tok| {
+                let l = line;
+                if matches!(tok, Token::Newline) {
+                    line += 1;
+                }
+                l
+            })
+            .collect();
+        (self.tokens, line_nos)
+    }
+
     fn lex_source(&mut self, src: &str) -> Result<()> {
         let mut indent_stack: Vec<usize> = vec![0];
         let mut paren_depth: usize = 0; // track ( [ { for implicit line continuation
