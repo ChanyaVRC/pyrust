@@ -38,17 +38,17 @@ print(Sub().test())  # hi
 try:
     iter(42, None)
 except TypeError as e:
-    print(e)  # iter(object, sentinel): object must be callable
+    print(e)  # iter(v, w): v must be callable
 
 try:
     iter("not callable", 0)
 except TypeError as e:
-    print(e)  # iter(object, sentinel): object must be callable
+    print(e)  # iter(v, w): v must be callable
 
 try:
     iter([], None)
 except TypeError as e:
-    print(e)  # iter(object, sentinel): object must be callable
+    print(e)  # iter(v, w): v must be callable
 
 # Happy path: callable first argument should succeed (exhaust immediately here).
 count = [0]
