@@ -1499,8 +1499,12 @@ fn glob_match(pat: &[u8], s: &[u8]) -> bool {
 /// CPython's `fnmatch` semantics: only `!` is the negation marker; `^` is
 /// treated as a literal character.
 fn char_class_matches(class: &[u8], c: u8) -> bool {
-    // Detect and strip a leading `!` negation character.
-    let (negated, class) = if class.first() == Some(&b'!') {
+    // Detect and strip a leading `!` negation character.  Only treat `!` as
+    // the negation marker when the class has at least one more byte after it;
+    // a bare `[!]` (class = b"!") is a degenerate case where the only element
+    // is the literal `!` — stripping it would leave an empty class that always
+    // returns true under negation, breaking CPython parity.
+    let (negated, class) = if class.len() > 1 && class[0] == b'!' {
         (true, &class[1..])
     } else {
         (false, class)
