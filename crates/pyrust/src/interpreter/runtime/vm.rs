@@ -1242,18 +1242,16 @@ impl Interpreter {
                         // these registers change).
                         (v, cur_ver)
                     } else {
-                        let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
-                            PyError::name_error(
-                                "NameError",
-                                format!("name '{}' is not defined", name),
-                                Some(name.to_string()),
-                            )
-                        }));
-                        // Cache with the current global_env_version so that a
-                        // subsequent module-level assignment of the same name
-                        // (e.g. `len = my_fn`) bumps the version and invalidates
-                        // this entry, forcing a re-resolve on the next LoadGlobal.
-                        (v, cur_ver)
+                        // Issue #1810: delegate to a #[cold] helper that checks
+                        // whether globals["__builtins__"] is a restricted dict.
+                        // Keeping this in a separate function avoids growing
+                        // run_bytecode_inner_impl's I-cache footprint on the
+                        // common (cache-hit) path.
+                        vm_try!(resolve_global_via_builtins(
+                            &self.module_globals_dict,
+                            name,
+                            cur_ver,
+                        ))
                     };
                     // Update the cache slot.
                     if cache_ver != GLOBAL_CACHE_EMPTY {
@@ -6073,6 +6071,65 @@ impl Interpreter {
             _ => Err(exc),
         }
     }
+}
+
+/// Issue #1810: cold slow path for `LoadGlobal` after the env-chain,
+/// `module_globals_dict`, and script-frame lookups all miss.
+///
+/// Checks whether `globals["__builtins__"]` is a plain dict.  If it is, the
+/// lookup is restricted to that dict only — the hardcoded Rust builtin table
+/// is not consulted.  This matches CPython's `PyEval_EvalCode` behaviour: a
+/// caller that passes `{"__builtins__": {}}` gets an empty builtin namespace.
+///
+/// When `__builtins__` is a module, absent, or any other non-dict value, the
+/// function delegates to `resolve_builtin()` (the normal execution path).
+///
+/// Isolated into a `#[cold] #[inline(never)]` function so that the expanded
+/// match body does not inflate the I-cache footprint of the `LoadGlobal`
+/// fast path (cache hit).
+#[cold]
+#[inline(never)]
+fn resolve_global_via_builtins(
+    module_globals_dict: &Value,
+    name: &str,
+    cur_ver: u32,
+) -> crate::interpreter::Result<(Value, u32)> {
+    use crate::bytecode::GLOBAL_CACHE_EMPTY;
+    let restricted = module_globals_dict
+        .dict_with(|d| d.get(&StrKey("__builtins__")).cloned())
+        .flatten();
+    if let Some(builtins_val) = restricted {
+        if let ValueKind::Dict(_) = builtins_val.kind() {
+            // __builtins__ is a dict — look up name there only.
+            // Do not cache: the dict can be mutated without bumping
+            // global_env_version.
+            let v = builtins_val
+                .dict_with(|d| d.get(&StrKey(name)).cloned())
+                .flatten()
+                .ok_or_else(|| {
+                    PyError::name_error(
+                        "NameError",
+                        format!("name '{}' is not defined", name),
+                        Some(name.to_string()),
+                    )
+                })?;
+            return Ok((v, GLOBAL_CACHE_EMPTY));
+        }
+        // __builtins__ is a module or other non-dict object — fall through
+        // to the hardcoded Rust builtin table (normal execution path).
+    }
+    // No dict-restricted builtins: use the hardcoded Rust builtin table.
+    // Cache the result with the current env version so that a subsequent
+    // module-level assignment of the same name (e.g. `len = my_fn`) bumps
+    // global_env_version and forces a re-resolve on the next LoadGlobal.
+    let v = resolve_builtin(name).ok_or_else(|| {
+        PyError::name_error(
+            "NameError",
+            format!("name '{}' is not defined", name),
+            Some(name.to_string()),
+        )
+    })?;
+    Ok((v, cur_ver))
 }
 
 #[inline]
