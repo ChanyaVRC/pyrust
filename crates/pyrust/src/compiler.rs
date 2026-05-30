@@ -8580,6 +8580,10 @@ impl Compiler {
 
         // Compile try body
         self.compile_block_with_linenos(body, body_linenos);
+        // Save the lineno after the try body so that the "no handler matched"
+        // RaiseReRaise instruction is attributed to the try-body, not to some
+        // handler body statement that happened to run last during dispatch.
+        let try_body_lineno = self.current_lineno;
 
         // Pop the try-body cleanup entries before emitting normal-exit cleanup.
         if inner_handler_patch.is_some() {
@@ -8723,7 +8727,10 @@ impl Compiler {
                 }
             }
 
-            // No handler matched: re-raise (outer finally will catch it if present)
+            // No handler matched: re-raise (outer finally will catch it if present).
+            // Restore the try-body lineno so the re-raise is attributed to the
+            // failing statement in the try block, not to handler body code.
+            self.set_lineno(try_body_lineno);
             self.free_temp(exc_tmp);
             self.emit(Insn::RaiseReRaise);
         }
@@ -8749,6 +8756,9 @@ impl Compiler {
             if self.failed {
                 return;
             }
+            // Restore the try-body lineno so the re-raise is attributed to the
+            // failing statement in the try block, not to the finally body.
+            self.set_lineno(try_body_lineno);
             self.emit(Insn::RaiseReRaise);
         }
 
@@ -8799,6 +8809,10 @@ impl Compiler {
         });
 
         self.compile_block_with_linenos(body, body_linenos);
+        // Save the lineno after the try body so that the "no handler matched"
+        // RaiseValue instruction is attributed to the try-body, not to some
+        // handler body statement that happened to run last during dispatch.
+        let try_body_lineno_star = self.current_lineno;
 
         self.except_cleanups.pop();
         if outer_finally_patch.is_some() {
@@ -8913,6 +8927,9 @@ impl Compiler {
         // If a handler matched but left some exceptions (partial match): the outer
         // SetupExcept was already popped, so the finally will NOT run here; this
         // is a known limitation (see follow-up issue for except*+finally+partial-match).
+        // Restore the try-body lineno so the re-raise is attributed to the
+        // failing statement in the try block, not to handler body code.
+        self.set_lineno(try_body_lineno_star);
         self.emit(Insn::RaiseValue(group_reg));
         self.patch_jump(remaining_check);
 
