@@ -2965,6 +2965,12 @@ fn call_descriptor_set(
             );
             return Ok(Some(result.map(|_| ())));
         }
+        // CPython: a descriptor with __delete__ but no __set__ is still a data
+        // descriptor and blocks assignment.  Raise AttributeError: __set__
+        // (CPython's exact message) rather than falling through to instance dict.
+        if lookup_class_attr(&desc_class, "__delete__").is_some() {
+            return Ok(Some(Err(PyError::named("AttributeError", "__set__"))));
+        }
     }
     Ok(None)
 }

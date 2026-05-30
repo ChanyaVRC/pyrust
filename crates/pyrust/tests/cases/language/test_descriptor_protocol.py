@@ -92,6 +92,11 @@ class D:
 d = D()
 print(d.z)      # del_only — __get__
 del d.z         # deleted — __delete__
+# Assignment must raise AttributeError: __set__ (data descriptor blocks write)
+try:
+    d.z = "x"
+except AttributeError as e:
+    print(f"blocked: {e}")  # blocked: __set__
 
 # --- Class-level access: __get__(None, cls) must be called ---
 # CPython calls __get__(None, owner) when accessed on the class directly.
