@@ -42,7 +42,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::ExpandedCallArg;
+use crate::interpreter::{ExpandedCallArg, NativeIterFrame};
 use crate::value::{PyClass, PyInstance, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -693,6 +693,449 @@ pyrust_module! {
             Err(e) => Err(PyError::from_io_error(&e, Some(&p))),
         }
     }
+
+    // ── class methods (cwd, home) ─────────────────────────────────────────────
+
+    /// `Path.cwd()` — return a new path representing the current working
+    /// directory.  Works both as `Path.cwd()` (class call) and as
+    /// `Path('/tmp').cwd()` (instance call) — the receiver is ignored.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.cwd>
+    #[py_name = "Path.cwd"]
+    fn path_cwd(_args) -> Result<Value> {
+        let _ = _interp;
+        let cwd = std::env::current_dir()
+            .map_err(|e| PyError::from_io_error(&e, None))?;
+        let p = cwd.to_string_lossy();
+        Ok(make_path_instance(&p))
+    }
+
+    /// `Path.home()` — return a new path representing the user's home
+    /// directory.  Works both as `Path.home()` (class call) and as
+    /// `Path('/tmp').home()` (instance call) — the receiver is ignored.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.home>
+    #[py_name = "Path.home"]
+    fn path_home(_args) -> Result<Value> {
+        let _ = _interp;
+        // Use the HOME env var on POSIX (same as CPython's fallback path),
+        // falling back to `dirs::home_dir` equivalent via `std::env::var`.
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .map_err(|_| PyError::named(
+                "RuntimeError",
+                "Could not determine home directory".to_string(),
+            ))?;
+        Ok(make_path_instance(&home))
+    }
+
+    // ── pure path predicates ──────────────────────────────────────────────────
+
+    /// `path.is_absolute()` — True if the path is absolute (starts with `/`
+    /// on POSIX).
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.PurePath.is_absolute>
+    #[py_name = "Path.is_absolute"]
+    fn path_is_absolute(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        Ok(Value::bool_(p.starts_with('/')))
+    }
+
+    /// `path.resolve()` — make the path absolute, resolving symlinks.
+    /// Returns a `PosixPath` with the canonicalised absolute path.
+    /// Falls back to joining cwd + path when `canonicalize` fails (e.g.
+    /// the path doesn't exist yet) — matching CPython 3.12's behaviour of
+    /// returning an absolute path without raising for non-existent paths
+    /// (it resolves strictly only in Python < 3.6).
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.resolve>
+    #[py_name = "Path.resolve"]
+    fn path_resolve(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        // `strict` kwarg is accepted (Python 3.6+) but ignored — we never
+        // raise for non-existent paths (matching the strict=False default).
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        let resolved = std::fs::canonicalize(&p).unwrap_or_else(|_| {
+            // Path does not exist or canonicalize failed — build an absolute
+            // path by joining cwd + relative path, without resolving symlinks.
+            let raw = std::path::Path::new(&p);
+            if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                    .join(raw)
+            }
+        });
+        Ok(make_path_instance(&resolved.to_string_lossy()))
+    }
+
+    // ── I/O (bytes) ───────────────────────────────────────────────────────────
+
+    /// `path.read_bytes()` — read the file as raw bytes.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.read_bytes>
+    #[py_name = "Path.read_bytes"]
+    fn path_read_bytes(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments"),
+            ));
+        }
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        match std::fs::read(&p) {
+            Ok(bytes) => Ok(Value::bytes(bytes)),
+            Err(e) => Err(PyError::from_io_error(&e, Some(&p))),
+        }
+    }
+
+    /// `path.write_bytes(data)` — write bytes to the file.  Returns the
+    /// number of bytes written, matching CPython 3.10+.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.write_bytes>
+    #[py_name = "Path.write_bytes"]
+    fn path_write_bytes(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument"),
+            ));
+        }
+        let data = match args[1].value.kind() {
+            ValueKind::Bytes(b) => b.to_vec(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}(): data must be bytes-like, not {}",
+                    pyrust_core::builtin_type_name(&args[1].value),
+                ),
+            )),
+        };
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        let n = data.len();
+        std::fs::write(&p, &data)
+            .map_err(|e| PyError::from_io_error(&e, Some(&p)))?;
+        Ok(Value::int(n as i64))
+    }
+
+    /// `path.open(mode='r', buffering=-1, encoding=None, errors=None,
+    /// newline=None)` — open the file and return a file object.  Thin
+    /// wrapper around the built-in `open()` using the path string.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.open>
+    #[py_name = "Path.open"]
+    fn path_open(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        let p = get_path(&inst, FN_NAME)?;
+        // Extract mode and encoding from args (positional or keyword).
+        let mut mode = "r".to_string();
+        let mut encoding: Option<String> = None;
+        for a in args.iter().skip(1) {
+            match a.name.as_deref() {
+                Some("mode") => {
+                    if let ValueKind::Str(s) = a.value.kind() {
+                        mode = s.to_string();
+                    }
+                }
+                Some("encoding") => {
+                    if let ValueKind::Str(s) = a.value.kind() {
+                        encoding = Some(s.to_string());
+                    }
+                }
+                Some("buffering") | Some("errors") | Some("newline") => {
+                    // Accepted and ignored, matching the write_text approach.
+                }
+                Some(other) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                    ));
+                }
+                None => {
+                    // First positional after self is mode.
+                    if let ValueKind::Str(s) = a.value.kind() {
+                        mode = s.to_string();
+                    }
+                }
+            }
+        }
+        let _ = _interp;
+        pyrust_builtins::file::open(&p, &mode, encoding.as_deref(), true)
+    }
+
+    // ── file removal ──────────────────────────────────────────────────────────
+
+    /// `path.unlink(missing_ok=False)` — delete the file.  If
+    /// `missing_ok=True` silently ignores the file not existing.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.unlink>
+    #[py_name = "Path.unlink"]
+    fn path_unlink(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        let mut missing_ok = false;
+        for a in args.iter().skip(1) {
+            match a.name.as_deref() {
+                Some("missing_ok") => {
+                    missing_ok = matches!(a.value.kind(), ValueKind::Bool(true))
+                        || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                }
+                Some(other) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                    ));
+                }
+                None => {
+                    // positional missing_ok
+                    missing_ok = matches!(a.value.kind(), ValueKind::Bool(true))
+                        || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                }
+            }
+        }
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        match std::fs::remove_file(&p) {
+            Ok(()) => Ok(Value::none()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && missing_ok => Ok(Value::none()),
+            Err(e) => Err(PyError::from_io_error(&e, Some(&p))),
+        }
+    }
+
+    // ── directory iteration ───────────────────────────────────────────────────
+
+    /// `path.iterdir()` — yield all children of the directory.  Each child
+    /// is returned as an absolute `PosixPath`.  Raises `NotADirectoryError`
+    /// (via `OSError`) if the path is not a directory.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.iterdir>
+    #[py_name = "Path.iterdir"]
+    fn path_iterdir(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments"),
+            ));
+        }
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        let entries = std::fs::read_dir(&p)
+            .map_err(|e| PyError::from_io_error(&e, Some(&p)))?;
+        let mut items: Vec<Value> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| PyError::from_io_error(&e, Some(&p)))?;
+            let child_path = entry.path().to_string_lossy().into_owned();
+            items.push(make_path_instance(&child_path));
+        }
+        Ok(Value::generator(Box::new(NativeIterFrame {
+            items,
+            pos: 0,
+            type_name: "generator",
+        })))
+    }
+
+    /// `path.glob(pattern)` — yield all paths matching `pattern` relative to
+    /// this directory.  Supports `*` (single directory level) and `**`
+    /// (recursive).  Returns an iterator of `PosixPath` instances.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.glob>
+    #[py_name = "Path.glob"]
+    fn path_glob(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument"),
+            ));
+        }
+        let pattern = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}(): pattern must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[1].value),
+                ),
+            )),
+        };
+        let _ = _interp;
+        let base = get_path(&inst, FN_NAME)?;
+        let items = glob_collect(&base, &pattern)?;
+        Ok(Value::generator(Box::new(NativeIterFrame {
+            items,
+            pos: 0,
+            type_name: "generator",
+        })))
+    }
+
+    // ── path mutation (with_*) ────────────────────────────────────────────────
+
+    /// `path.with_name(name)` — return a new path with the file name
+    /// replaced by `name`.  Raises `ValueError` if the path has no name
+    /// (e.g. `Path('/')`) or if `name` is empty / contains a slash.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.PurePath.with_name>
+    #[py_name = "Path.with_name"]
+    fn path_with_name(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument"),
+            ));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}(): name must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[1].value),
+                ),
+            )),
+        };
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        // Validate: name must be non-empty and contain no slashes.
+        if name.is_empty() {
+            return Err(PyError::named(
+                "ValueError",
+                format!("Invalid name '{name}'"),
+            ));
+        }
+        if name.contains('/') {
+            return Err(PyError::named(
+                "ValueError",
+                format!("Invalid name '{name}'"),
+            ));
+        }
+        // The current path must have a non-empty name component.
+        let current_name = if p == "." || p == "/" || p == "//" {
+            return Err(PyError::named(
+                "ValueError",
+                format!("{self_repr} has an empty name", self_repr = repr_path(&p)),
+            ));
+        } else {
+            p.rsplit('/').next().unwrap_or(&p)
+        };
+        let _ = current_name;
+        let new_path = match p.rfind('/') {
+            Some(i) => format!("{}/{name}", &p[..i]),
+            None => name,
+        };
+        Ok(make_path_instance(&new_path))
+    }
+
+    /// `path.with_stem(stem)` — return a new path with the stem (name
+    /// without suffix) replaced.  Raises `ValueError` if the path has no
+    /// name.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.PurePath.with_stem>
+    #[py_name = "Path.with_stem"]
+    fn path_with_stem(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument"),
+            ));
+        }
+        let stem = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}(): stem must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[1].value),
+                ),
+            )),
+        };
+        let _ = _interp;
+        let p = get_path(&inst, FN_NAME)?;
+        if p == "." || p == "/" || p == "//" {
+            return Err(PyError::named(
+                "ValueError",
+                format!("{self_repr} has an empty name", self_repr = repr_path(&p)),
+            ));
+        }
+        let name = p.rsplit('/').next().unwrap_or(&p);
+        // Compute the current suffix (same logic as path_suffix).
+        let suffix = if name.chars().all(|c| c == '.') {
+            String::new()
+        } else {
+            match name.rfind('.') {
+                Some(i) if i > 0 => name[i..].to_string(),
+                _ => String::new(),
+            }
+        };
+        let new_name = format!("{stem}{suffix}");
+        let new_path = match p.rfind('/') {
+            Some(i) => format!("{}/{new_name}", &p[..i]),
+            None => new_name,
+        };
+        Ok(make_path_instance(&new_path))
+    }
+
+    /// `path.with_suffix(suffix)` — return a new path with the suffix
+    /// replaced.  `suffix` must start with `.` unless it is empty (which
+    /// removes the suffix).  Raises `ValueError` on invalid suffix.
+    /// <https://docs.python.org/3/library/pathlib.html#pathlib.PurePath.with_suffix>
+    #[py_name = "Path.with_suffix"]
+    fn path_with_suffix(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument"),
+            ));
+        }
+        let suffix = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}(): suffix must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[1].value),
+                ),
+            )),
+        };
+        let _ = _interp;
+        // Validate suffix: empty is allowed (removes suffix); otherwise must
+        // start with '.' and not be a bare '.'.  Multiple dots (e.g. '.tar.gz')
+        // are allowed (CPython 3.12 parity).
+        if !suffix.is_empty() {
+            if !suffix.starts_with('.') {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("Invalid suffix '{suffix}'"),
+                ));
+            }
+            // A bare '.' is not a valid suffix — must have at least one char after.
+            if suffix == "." {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("Invalid suffix '{suffix}'"),
+                ));
+            }
+        }
+        let p = get_path(&inst, FN_NAME)?;
+        let name = if p == "." || p == "/" || p == "//" {
+            "".to_string()
+        } else {
+            p.rsplit('/').next().unwrap_or(&p).to_string()
+        };
+        // Compute the stem of the current name (same logic as path_stem).
+        let stem = if name.chars().all(|c| c == '.') {
+            name.clone()
+        } else {
+            match name.rfind('.') {
+                Some(i) if i > 0 => name[..i].to_string(),
+                _ => name.clone(),
+            }
+        };
+        let new_name = format!("{stem}{suffix}");
+        let new_path = match p.rfind('/') {
+            Some(i) => format!("{}/{new_name}", &p[..i]),
+            None => new_name,
+        };
+        Ok(make_path_instance(&new_path))
+    }
 }
 
 // ── Path and PosixPath class singletons ───────────────────────────────────────
@@ -720,9 +1163,25 @@ const PATH_METHODS: &[(&str, &str)] = &[
     ("exists", "pathlib.Path.exists"),
     ("is_file", "pathlib.Path.is_file"),
     ("is_dir", "pathlib.Path.is_dir"),
+    ("is_absolute", "pathlib.Path.is_absolute"),
+    ("resolve", "pathlib.Path.resolve"),
     ("read_text", "pathlib.Path.read_text"),
     ("write_text", "pathlib.Path.write_text"),
+    ("read_bytes", "pathlib.Path.read_bytes"),
+    ("write_bytes", "pathlib.Path.write_bytes"),
+    ("open", "pathlib.Path.open"),
     ("mkdir", "pathlib.Path.mkdir"),
+    ("unlink", "pathlib.Path.unlink"),
+    ("iterdir", "pathlib.Path.iterdir"),
+    ("glob", "pathlib.Path.glob"),
+    ("with_name", "pathlib.Path.with_name"),
+    ("with_stem", "pathlib.Path.with_stem"),
+    ("with_suffix", "pathlib.Path.with_suffix"),
+    // cwd and home are classmethods in CPython, but we expose them as
+    // regular callables on the class (receiver-agnostic) so both
+    // `Path.cwd()` and `Path('/tmp').cwd()` work (matching CPython).
+    ("cwd", "pathlib.Path.cwd"),
+    ("home", "pathlib.Path.home"),
 ];
 
 /// (attr-short, registry-name) pairs for `Path` attributes that CPython exposes
@@ -800,4 +1259,212 @@ fn make_path_class_value() -> Value {
 /// Return a `Value::py_class` wrapping the thread-local `PosixPath` singleton.
 fn make_posix_path_class_value() -> Value {
     POSIX_PATH_CLASS.with(|c| Value::py_class(Rc::clone(c)))
+}
+
+/// Format a path as a `PosixPath('...')` repr for use in `ValueError` messages,
+/// matching CPython's `str(path)` → PosixPath repr in error strings.
+fn repr_path(p: &str) -> String {
+    format!("PosixPath('{p}')")
+}
+
+/// Collect all paths under `base` that match `pattern`, returning them as a
+/// `Vec<Value>` of `PosixPath` instances.
+///
+/// Supports:
+/// - `*`  — wildcard within a single path component (no directory traversal).
+/// - `**` — recursive wildcard (all descendants).
+/// - `?`  — single-character wildcard within a component.
+/// - `[…]` — character class within a component.
+///
+/// Non-recursive patterns (no `**`) are resolved in a single directory
+/// level, matching `glob.glob(base + '/' + pattern)` semantics.
+/// Recursive `**` patterns walk the entire subtree.
+fn glob_collect(base: &str, pattern: &str) -> Result<Vec<Value>> {
+    // Split pattern into parts on `/`.
+    let parts: Vec<&str> = pattern.split('/').collect();
+    let base_path = std::path::Path::new(base);
+
+    // Check for `**` in pattern — triggers recursive walk.
+    let has_recursive = parts.iter().any(|p| *p == "**");
+
+    let mut results: Vec<std::path::PathBuf> = Vec::new();
+
+    if has_recursive {
+        // Collect all descendants via `collect_recursive`, then filter.
+        let all = collect_all_descendants(base_path);
+        for candidate in &all {
+            let rel = candidate
+                .strip_prefix(base_path)
+                .unwrap_or(candidate);
+            let rel_str = rel.to_string_lossy();
+            if glob_pattern_matches(pattern, &rel_str) {
+                results.push(candidate.clone());
+            }
+        }
+    } else {
+        // Non-recursive: resolve step by step.
+        let mut current_dirs: Vec<std::path::PathBuf> = vec![base_path.to_path_buf()];
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                continue;
+            }
+            let is_last = i == parts.len() - 1;
+            let mut next: Vec<std::path::PathBuf> = Vec::new();
+            for dir in &current_dirs {
+                let entries = match std::fs::read_dir(dir) {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if glob_component_matches(part, &name_str) {
+                        let child = entry.path();
+                        if is_last {
+                            results.push(child);
+                        } else if child.is_dir() {
+                            next.push(child);
+                        }
+                    }
+                }
+            }
+            if !is_last {
+                current_dirs = next;
+            }
+        }
+    }
+
+    Ok(results
+        .into_iter()
+        .map(|p| make_path_instance(&p.to_string_lossy()))
+        .collect())
+}
+
+/// Recursively collect all entries under `dir`, including `dir` itself.
+fn collect_all_descendants(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let sub = collect_all_descendants(&path);
+            out.push(path);
+            out.extend(sub);
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Match a full glob pattern (with `/` separators and `**`) against a relative
+/// path string (also `/`-separated).  Used for the recursive `**` case.
+fn glob_pattern_matches(pattern: &str, path: &str) -> bool {
+    let pat_parts: Vec<&str> = pattern.split('/').collect();
+    let path_parts: Vec<&str> = path.split('/').collect();
+    glob_parts_match(&pat_parts, &path_parts)
+}
+
+/// Recursive pattern matcher over slices of path components.
+fn glob_parts_match(pat: &[&str], path: &[&str]) -> bool {
+    match (pat.first(), path.first()) {
+        (None, None) => true,
+        (None, _) => false,
+        (Some(&"**"), _) => {
+            // `**` matches zero or more path components.
+            let rest_pat = &pat[1..];
+            // Try matching rest_pat against every suffix of path.
+            for skip in 0..=path.len() {
+                if glob_parts_match(rest_pat, &path[skip..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        (Some(_p), None) => {
+            // Pattern has more parts but path is exhausted.
+            // Only matches if remaining pattern parts are all `**`.
+            pat.iter().all(|x| *x == "**")
+        }
+        (Some(p), Some(q)) => {
+            glob_component_matches(p, q) && glob_parts_match(&pat[1..], &path[1..])
+        }
+    }
+}
+
+/// Match a single glob component (no `/`) against a single path component.
+/// Supports `*`, `?`, and `[…]` within the component.
+fn glob_component_matches(pattern: &str, name: &str) -> bool {
+    glob_match(pattern.as_bytes(), name.as_bytes())
+}
+
+/// Byte-level glob matcher for a single path component.  Handles:
+/// - `*`  — any sequence of bytes (but not `/`, which can't appear in a
+///           component anyway).
+/// - `?`  — exactly one byte.
+/// - `[…]` — character class (only simple ranges, no negation for now).
+fn glob_match(pat: &[u8], s: &[u8]) -> bool {
+    match (pat.first(), s.first()) {
+        (None, None) => true,
+        (None, _) => false,
+        (Some(b'*'), _) => {
+            // `*` matches zero or more bytes.
+            for skip in 0..=s.len() {
+                if glob_match(&pat[1..], &s[skip..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        (Some(b'?'), Some(_)) => glob_match(&pat[1..], &s[1..]),
+        (Some(b'?'), None) => false,
+        (Some(b'['), _) => {
+            // Find closing `]`.
+            let close = pat[1..].iter().position(|&b| b == b']');
+            let close = match close {
+                Some(i) => i + 1, // index in pat
+                None => {
+                    // Malformed class — treat `[` as literal.
+                    if s.first() == Some(&b'[') {
+                        return glob_match(&pat[1..], &s[1..]);
+                    }
+                    return false;
+                }
+            };
+            let class = &pat[1..close];
+            let rest_pat = &pat[close + 1..];
+            let c = match s.first() {
+                Some(&c) => c,
+                None => return false,
+            };
+            let matched = char_class_matches(class, c);
+            matched && glob_match(rest_pat, &s[1..])
+        }
+        (Some(&p), Some(&q)) => p == q && glob_match(&pat[1..], &s[1..]),
+        (Some(_), None) => false,
+    }
+}
+
+/// Check if byte `c` belongs to a character class spec `class` (the bytes
+/// between `[` and `]`).  Supports `a-z` ranges and literal characters.
+fn char_class_matches(class: &[u8], c: u8) -> bool {
+    let mut i = 0;
+    while i < class.len() {
+        if i + 2 < class.len() && class[i + 1] == b'-' {
+            // Range: e.g. `a-z`.
+            if c >= class[i] && c <= class[i + 2] {
+                return true;
+            }
+            i += 3;
+        } else {
+            if class[i] == c {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
 }
