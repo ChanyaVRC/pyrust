@@ -61,3 +61,35 @@ try:
     print("FAIL: should raise AttributeError")
 except AttributeError:
     print("ok: non-slot blocked on Single")
+
+# Exception subclasses with __slots__: CPython's BaseException has a C-level
+# tp_dictoffset so instances of Python subclasses always carry a real __dict__
+# even when __slots__ is declared.  Declared slots are still usable, but
+# arbitrary attributes must also be allowed.
+class MyError(Exception):
+    __slots__ = ('code',)
+
+err = MyError("msg")
+err.code = 42
+print(err.code)
+err.extra = "allowed"
+print(err.extra)
+
+# Non-slotted middle class reintroduces __dict__ for all descendants:
+# class Parent has __slots__; class Child has none (gets __dict__ back);
+# class GrandChild has __slots__ again — but because Child in the MRO
+# has no __slots__, GrandChild instances still have __dict__.
+class SlottedParent:
+    __slots__ = ('x',)
+
+class UnslottedChild(SlottedParent):
+    pass  # no __slots__ — reintroduces __dict__
+
+class ReSlottedGrand(UnslottedChild):
+    __slots__ = ('extra',)
+
+gc = ReSlottedGrand()
+gc.x = 1
+gc.extra = 2
+gc.arbitrary = 3  # allowed because UnslottedChild contributes __dict__
+print(gc.x, gc.extra, gc.arbitrary)
