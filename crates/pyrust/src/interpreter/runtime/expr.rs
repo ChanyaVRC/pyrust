@@ -1810,14 +1810,23 @@ impl Interpreter {
                 // Intercept: the arg is a non-primitive iterable (Range,
                 // Generator, BuiltinObject, PyInstance, …).
                 let arg = args.into_iter().next().unwrap();
-                // Materialise the iterable.  collect_iterable handles Range,
-                // Generator, PyInstance (__iter__/__getitem__), and BuiltinObjects.
-                let elements = self.collect_iterable(&arg)?;
+                // Drive the iterable one element at a time and insert each
+                // pair into the dict eagerly.  This matches CPython: items
+                // yielded before a mid-iteration exception are already in the
+                // dict.  Using collect_iterable (materialise-then-process)
+                // would silently drop those items when the generator raises.
+                let iter = crate::builtin_modules::builtins::make_iterator(self, &arg)?;
                 // Each element must be a length-2 sequence; extract the key and
                 // value.  Mirror the logic in pyrust_builtins::dict's push_pair,
                 // but use value_to_pykey so user-defined __hash__/__eq__ fire
                 // correctly for PyInstance keys.
-                for (idx, elem) in elements.iter().enumerate() {
+                let mut idx: usize = 0;
+                loop {
+                    let elem = match self.call_next(&iter, None) {
+                        Ok(v) => v,
+                        Err(ref e) if e.class_name_is("StopIteration") => break,
+                        Err(e) => return Err(e),
+                    };
                     let (k_val, v_val): (Value, Value) = match elem.kind() {
                         ValueKind::List(items) => {
                             let len = items.len();
@@ -1876,6 +1885,7 @@ impl Interpreter {
                         .ok_or_else(|| {
                             PyError::Runtime("internal: expected dict".to_string())
                         })?;
+                    idx += 1;
                 }
                 // Apply keyword arguments after the positional iterable,
                 // matching CPython's order.
