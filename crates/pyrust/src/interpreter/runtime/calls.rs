@@ -3729,13 +3729,27 @@ impl Interpreter {
                 let exc_items = if let Some(items) = exc_items {
                     items
                 } else {
-                    // Non-sequence: iterate item-by-item to match CPython's
-                    // "Item 0 of second argument (exceptions) is not an exception"
-                    // error for string-like iterables.
-                    // For truly non-iterable values, CPython raises ValueError.
+                    // CPython raises TypeError for non-sequence second argument
+                    // (e.g. an integer, a generator/iterator), and ValueError
+                    // for a sequence whose items are not exceptions (e.g. a string
+                    // whose characters are not exceptions).
+                    // Match CPython: str is a sequence, so each character is
+                    // checked and produces ValueError; everything else is TypeError.
+                    if let ValueKind::Str(s) = values[1].kind() {
+                        if s.is_empty() {
+                            return Err(PyError::named(
+                                "ValueError",
+                                "second argument (exceptions) must be a non-empty sequence",
+                            ));
+                        }
+                        return Err(PyError::named(
+                            "ValueError",
+                            "Item 0 of second argument (exceptions) is not an exception",
+                        ));
+                    }
                     return Err(PyError::named(
-                        "ValueError",
-                        "Item 0 of second argument (exceptions) is not an exception",
+                        "TypeError",
+                        "second argument (exceptions) must be a sequence",
                     ));
                 };
                 if exc_items.is_empty() {
