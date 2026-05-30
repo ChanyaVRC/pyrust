@@ -804,6 +804,19 @@ pyrust_module! {
         }
         let data = match args[1].value.kind() {
             ValueKind::Bytes(b) => b.to_vec(),
+            // Accept bytearray as a bytes-like object, matching CPython.
+            ValueKind::BuiltinObject { .. } => {
+                match pyrust_builtins::bytearray::as_bytearray_snapshot(&args[1].value) {
+                    Some(v) => v,
+                    None => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}(): data must be bytes-like, not {}",
+                            pyrust_core::builtin_type_name(&args[1].value),
+                        ),
+                    )),
+                }
+            }
             _ => return Err(PyError::named(
                 "TypeError",
                 format!(
@@ -1115,8 +1128,13 @@ pyrust_module! {
             }
         }
         let p = get_path(&inst, FN_NAME)?;
+        // CPython raises ValueError when the path has no name component (root,
+        // ".", or "//").  Compute the name first and guard before proceeding.
         let name = if p == "." || p == "/" || p == "//" {
-            "".to_string()
+            return Err(PyError::named(
+                "ValueError",
+                format!("{self_repr} has an empty name", self_repr = repr_path(&p)),
+            ));
         } else {
             p.rsplit('/').next().unwrap_or(&p).to_string()
         };
