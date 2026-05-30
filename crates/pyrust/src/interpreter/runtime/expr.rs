@@ -1775,6 +1775,121 @@ impl Interpreter {
                     _ => unreachable!(),
                 }
             }
+            // `update` with non-primitive iterables (range, generators,
+            // user-defined iterables) — the builtins crate has no interpreter
+            // access and falls to its `_` arm raising "'X' object is not
+            // iterable" for these types.  Intercept here when the positional
+            // arg is not one of the five primitive types the builtins crate
+            // already handles (Dict/List/Tuple/Str/Bytes).  Delegate for those
+            // types to preserve existing behaviour (including the self-alias
+            // snapshot logic in snapshot_update_arg).
+            "update" => {
+                if args.len() > 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("update expected at most 1 argument, got {}", args.len()),
+                    ));
+                }
+                // Check whether we need to intercept.  If the single positional
+                // arg is a primitive type that pyrust_builtins::dict::call already
+                // handles correctly, delegate.
+                let needs_interp = match args.first() {
+                    None => false,
+                    Some(arg) => !matches!(
+                        arg.kind(),
+                        ValueKind::Dict(_)
+                            | ValueKind::List(_)
+                            | ValueKind::Tuple(_)
+                            | ValueKind::Str(_)
+                            | ValueKind::Bytes(_)
+                    ),
+                };
+                if !needs_interp {
+                    return pyrust_builtins::dict::call("update", &receiver, args, kwargs);
+                }
+                // Intercept: the arg is a non-primitive iterable (Range,
+                // Generator, BuiltinObject, PyInstance, …).
+                let arg = args.into_iter().next().unwrap();
+                // Materialise the iterable.  collect_iterable handles Range,
+                // Generator, PyInstance (__iter__/__getitem__), and BuiltinObjects.
+                let elements = self.collect_iterable(&arg)?;
+                // Each element must be a length-2 sequence; extract the key and
+                // value.  Mirror the logic in pyrust_builtins::dict's push_pair,
+                // but use value_to_pykey so user-defined __hash__/__eq__ fire
+                // correctly for PyInstance keys.
+                for (idx, elem) in elements.iter().enumerate() {
+                    let (k_val, v_val): (Value, Value) = match elem.kind() {
+                        ValueKind::List(items) => {
+                            let len = items.len();
+                            if len != 2 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!(
+                                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                                    ),
+                                ));
+                            }
+                            (items[0].clone(), items[1].clone())
+                        }
+                        ValueKind::Tuple(items) => {
+                            let len = items.len();
+                            if len != 2 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!(
+                                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                                    ),
+                                ));
+                            }
+                            (items[0].clone(), items[1].clone())
+                        }
+                        ValueKind::Str(s) => {
+                            let chars: Vec<char> = s.chars().collect();
+                            let len = chars.len();
+                            if len != 2 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!(
+                                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                                    ),
+                                ));
+                            }
+                            (
+                                Value::string(chars[0].to_string()),
+                                Value::string(chars[1].to_string()),
+                            )
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "cannot convert dictionary update sequence element #{idx} to a sequence"
+                                ),
+                            ));
+                        }
+                    };
+                    let pk = self.value_to_pykey(&k_val)?;
+                    receiver
+                        .dict_with_mut(|dict| {
+                            dict.insert(pk, v_val);
+                        })
+                        .ok_or_else(|| {
+                            PyError::Runtime("internal: expected dict".to_string())
+                        })?;
+                }
+                // Apply keyword arguments after the positional iterable,
+                // matching CPython's order.
+                for (k, v) in kwargs {
+                    receiver
+                        .dict_with_mut(|dict| {
+                            dict.insert(k.clone(), v.clone());
+                        })
+                        .ok_or_else(|| {
+                            PyError::Runtime("internal: expected dict".to_string())
+                        })?;
+                }
+                Ok(Value::none())
+            }
             // `fromkeys` is a classmethod: ignore the dict receiver and call
             // the registry dispatch directly with the user-supplied args.
             "fromkeys" => {
