@@ -43,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --top)                  TOP="$2";                   shift ;;
     --config)               CONFIG="$2";                shift ;;
     --pr-comment-out)       PR_COMMENT_OUT="$2";        shift ;;
+    --memory-comment-out)   MEMORY_COMMENT_OUT="$2";    shift ;;
     --benchmark-action-out) BENCHMARK_ACTION_OUT="$2";  shift ;;
     --svg-out)              SVG_OUT="$2";               shift ;;
     --markdown-out)         MARKDOWN_OUT="$2";          shift ;;
