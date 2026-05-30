@@ -99,7 +99,7 @@ thread_local! {
 
     // `Generic` must be a real `PyClass` so that `class Stack(Generic[T]): pass`
     // can use it as a class base.  The `__class_getitem__` is registered under
-    // the name "typing.generic_cgi" which does NOT contain ".__class_getitem__",
+    // the name "typing._generic_cgi" which does NOT contain ".__class_getitem__",
     // so expr.rs calls our function rather than creating a sentinel GenericAlias.
     // Our function returns the Generic class itself, making `Generic[T]` a valid
     // class base.
@@ -107,7 +107,7 @@ thread_local! {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert(
             "__class_getitem__".to_string(),
-            Value::builtin_function("typing.generic_cgi"),
+            Value::builtin_function("typing._generic_cgi"),
         );
         Rc::new(RefCell::new(PyClass {
             name: "Generic".to_string(),
@@ -127,7 +127,7 @@ thread_local! {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert(
             "__class_getitem__".to_string(),
-            Value::builtin_function("typing.protocol_cgi"),
+            Value::builtin_function("typing._protocol_cgi"),
         );
         Rc::new(RefCell::new(PyClass {
             name: "Protocol".to_string(),
@@ -242,12 +242,12 @@ pyrust_module! {
 
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────
     //
-    // The name "typing.generic_cgi" does NOT contain ".__class_getitem__", so
+    // The name "typing._generic_cgi" does NOT contain ".__class_getitem__", so
     // pyrust's expr.rs subscript handler calls our function rather than
     // creating a sentinel GenericAlias.  We return the Generic class itself
     // so that `Generic[T]` is a valid class base in `class Stack(Generic[T])`.
 
-    #[py_name = "generic_cgi"]
+    #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
         let _ = (_interp, args);
         Ok(GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))))
@@ -255,7 +255,7 @@ pyrust_module! {
 
     // ── Protocol.__class_getitem__ ────────────────────────────────────────────
 
-    #[py_name = "protocol_cgi"]
+    #[py_name = "_protocol_cgi"]
     fn protocol_class_getitem(args) -> Result<Value> {
         let _ = (_interp, args);
         Ok(PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))))
@@ -314,9 +314,13 @@ pyrust_module! {
     // This mirrors the surface of CPython's typing.TypeVar so that
     // `T = TypeVar('T')` followed by `class Stack(Generic[T]): pass` works.
     //
-    // The first positional argument is the name string.  Additional
-    // arguments (constraints, bound=, covariant=, contravariant=) are
-    // accepted and silently ignored — pyrust performs no type checking.
+    // CPython signature: TypeVar(name, *constraints, bound=None,
+    //                            covariant=False, contravariant=False)
+    // - args[0]    = self
+    // - args[1]    = name (required, positional)
+    // - args[2..]  = positional constraint types (e.g. TypeVar('T', int, str))
+    // - bound=     = optional keyword argument
+    // - covariant=/contravariant= accepted and ignored (runtime no-op)
 
     class TypeVar {
         fn __init__(args) -> Result<Value> {
@@ -337,14 +341,29 @@ pyrust_module! {
                     ));
                 }
             };
+
+            // Collect positional constraints (args[2..] without a keyword name).
+            let constraints: Vec<Value> = args[2..]
+                .iter()
+                .filter(|a| a.name.is_none())
+                .map(|a| a.value.clone())
+                .collect();
+
+            // Find the `bound=` keyword argument.
+            let bound = args
+                .iter()
+                .find(|a| a.name.as_deref() == Some("bound"))
+                .map(|a| a.value.clone())
+                .unwrap_or_else(Value::none);
+
             let mut borrow = inst.borrow_mut();
             borrow
                 .attrs
                 .insert("__name__".to_string(), Value::string(name_str));
             borrow
                 .attrs
-                .insert("__constraints__".to_string(), Value::tuple(vec![]));
-            borrow.attrs.insert("__bound__".to_string(), Value::none());
+                .insert("__constraints__".to_string(), Value::tuple(constraints));
+            borrow.attrs.insert("__bound__".to_string(), bound);
             Ok(Value::none())
         }
 
