@@ -6099,24 +6099,40 @@ fn resolve_global_via_builtins(
         .dict_with(|d| d.get(&StrKey("__builtins__")).cloned())
         .flatten();
     if let Some(builtins_val) = restricted {
-        if let ValueKind::Dict(_) = builtins_val.kind() {
-            // __builtins__ is a dict — look up name there only.
-            // Do not cache: the dict can be mutated without bumping
-            // global_env_version.
-            let v = builtins_val
-                .dict_with(|d| d.get(&StrKey(name)).cloned())
-                .flatten()
-                .ok_or_else(|| {
-                    PyError::name_error(
-                        "NameError",
-                        format!("name '{}' is not defined", name),
-                        Some(name.to_string()),
-                    )
-                })?;
-            return Ok((v, GLOBAL_CACHE_EMPTY));
+        match builtins_val.kind() {
+            ValueKind::Dict(_) => {
+                // __builtins__ is a dict — look up name there only.
+                // Do not cache: the dict can be mutated without bumping
+                // global_env_version.
+                let v = builtins_val
+                    .dict_with(|d| d.get(&StrKey(name)).cloned())
+                    .flatten()
+                    .ok_or_else(|| {
+                        PyError::name_error(
+                            "NameError",
+                            format!("name '{}' is not defined", name),
+                            Some(name.to_string()),
+                        )
+                    })?;
+                return Ok((v, GLOBAL_CACHE_EMPTY));
+            }
+            ValueKind::PyModule(_) => {
+                // __builtins__ is a module — fall through to the hardcoded
+                // Rust builtin table (normal execution path).
+            }
+            _ => {
+                // __builtins__ is a non-dict, non-module value (e.g. None,
+                // int).  CPython 3.12 raises TypeError when it tries to
+                // subscript the value to look up a builtin name.
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object is not subscriptable",
+                        value_type_name_str(&builtins_val),
+                    ),
+                ));
+            }
         }
-        // __builtins__ is a module or other non-dict object — fall through
-        // to the hardcoded Rust builtin table (normal execution path).
     }
     // No dict-restricted builtins: use the hardcoded Rust builtin table.
     // Cache the result with the current env version so that a subsequent
