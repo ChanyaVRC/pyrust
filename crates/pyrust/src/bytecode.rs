@@ -262,6 +262,18 @@ pub enum Insn {
     LoadExc(Reg),
     /// if active_exception is NOT an instance of R[type_reg]: pc += offset.
     MatchExcept(Reg, i32),
+    /// PEP 654 `except*` filter.
+    ///
+    /// Reads R[src_group] (must be a BaseExceptionGroup instance).  Filters
+    /// its `.exceptions` for instances of R[type_reg].  If no exceptions
+    /// match, jump to pc + offset.  Otherwise:
+    ///   - R[matched_dst] = new sub-group containing only matching exceptions
+    ///   - R[src_group]   = new sub-group containing only non-matching exceptions
+    ///                       (or None if all exceptions were matched)
+    /// Multiple handlers are compiled sequentially; after each matched handler
+    /// runs, the compiler emits code that moves the remaining sub-group back
+    /// into R[src_group] so the next MatchExceptStar sees only leftovers.
+    MatchExceptStar(Reg, Reg, Reg, i32),
     /// Clear active_exception (end of except handler).
     EndExcept,
     /// Push R[src] onto handled_exc_stack and set active_exception = R[src].

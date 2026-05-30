@@ -3691,6 +3691,114 @@ impl Interpreter {
             } else if class_chain_contains_name(&class, "UnicodeTranslateError") {
                 Self::validate_unicode_translate_args(&values)?;
             }
+            // PEP 654 (Python 3.11+): BaseExceptionGroup and ExceptionGroup validation.
+            // CPython validates in BaseExceptionGroup.__new__:
+            //  - message must be a str
+            //  - exceptions must be a non-empty sequence of BaseException instances
+            //  - If calling ExceptionGroup, all exceptions must be Exception subclasses
+            //  - If calling BaseExceptionGroup and all exceptions are Exception subclasses,
+            //    the returned type is silently promoted to ExceptionGroup.
+            let is_base_exception_group = class_chain_contains_name(&class, "BaseExceptionGroup");
+            if is_base_exception_group {
+                // Validate arg count.
+                if values.len() != 2 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        &format!(
+                            "BaseExceptionGroup.__new__() takes exactly 2 arguments ({} given)",
+                            values.len()
+                        ),
+                    ));
+                }
+                // Validate message is a str.
+                // CPython: "BaseExceptionGroup.__new__() argument 1 must be str, not <type>"
+                if !matches!(values[0].kind(), ValueKind::Str(_)) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        &format!(
+                            "BaseExceptionGroup.__new__() argument 1 must be str, not {}",
+                            pyrust_core::builtin_type_name(&values[0])
+                        ),
+                    ));
+                }
+                // Validate exceptions is a non-empty sequence.
+                let exc_items: Option<Vec<Value>> = values[1]
+                    .as_tuple()
+                    .map(|s| s.to_vec())
+                    .or_else(|| values[1].as_list().map(|s| s.to_vec()));
+                let exc_items = if let Some(items) = exc_items {
+                    items
+                } else {
+                    // Non-sequence: iterate item-by-item to match CPython's
+                    // "Item 0 of second argument (exceptions) is not an exception"
+                    // error for string-like iterables.
+                    // For truly non-iterable values, CPython raises ValueError.
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Item 0 of second argument (exceptions) is not an exception",
+                    ));
+                };
+                if exc_items.is_empty() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "second argument (exceptions) must be a non-empty sequence",
+                    ));
+                }
+                // Validate each exception is a BaseException instance.
+                for (i, exc_val) in exc_items.iter().enumerate() {
+                    let ok = if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
+                        class_chain_contains_name(&inst_rc.borrow().class, "BaseException")
+                    } else {
+                        false
+                    };
+                    if !ok {
+                        return Err(PyError::named(
+                            "ValueError",
+                            &format!(
+                                "Item {} of second argument (exceptions) is not an exception",
+                                i
+                            ),
+                        ));
+                    }
+                }
+                // If ExceptionGroup, all exceptions must be Exception (not just BaseException).
+                let actual_class_name = class.borrow().name.clone();
+                let is_eg = actual_class_name.as_str() == "ExceptionGroup";
+                if is_eg {
+                    for exc_val in &exc_items {
+                        if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
+                            if !class_chain_contains_name(&inst_rc.borrow().class, "Exception") {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "Cannot nest BaseExceptions in an ExceptionGroup",
+                                ));
+                            }
+                        }
+                    }
+                }
+                // CPython: if calling BaseExceptionGroup and all exceptions are Exception
+                // subclasses, the returned type is ExceptionGroup.
+                let is_beg = actual_class_name.as_str() == "BaseExceptionGroup";
+                let actual_class = if is_beg {
+                    let all_exceptions = exc_items.iter().all(|exc_val| {
+                        if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
+                            class_chain_contains_name(&inst_rc.borrow().class, "Exception")
+                        } else {
+                            false
+                        }
+                    });
+                    if all_exceptions {
+                        // Promote to ExceptionGroup.
+                        lookup_exc_class("ExceptionGroup").unwrap_or(class)
+                    } else {
+                        class
+                    }
+                } else {
+                    class
+                };
+                let instance = instantiate_exception(actual_class, values);
+                return Ok(instance);
+            }
             let instance = instantiate_exception(class, values);
             // Apply keyword arguments extracted above for NameError and ImportError.
             // `instantiate_exception` already initialised `.name` (and `.path`) to

@@ -22,6 +22,8 @@ pub struct ExceptHandler {
     pub kind: Option<Expr>,
     pub name: Option<String>,
     pub body: Vec<Stmt>,
+    /// `true` for PEP 654 `except*` handlers; `false` for ordinary `except`.
+    pub is_star: bool,
 }
 
 /// Assignment target (left-hand side of = or augmented =)

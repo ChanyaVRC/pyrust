@@ -1693,13 +1693,16 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // User-constructed instances (`AttributeError('msg')`) have both set to `None`.
     // Interpreter-raised instances set them via `instantiate_attribute_error` instead.
     let is_attribute_error = class_chain_contains_name(&class, "AttributeError");
+    // PEP 654 (Python 3.11+): BaseExceptionGroup / ExceptionGroup.
+    // Both have `.message` (str) and `.exceptions` (tuple of exceptions).
+    let is_base_exception_group = class_chain_contains_name(&class, "BaseExceptionGroup");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     // CPython 3.12: every BaseException instance has __traceback__ initialised
     // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
     // real traceback object once the exception propagates through a frame.
     attrs.insert("__traceback__".to_string(), Value::none());
     if is_stop_iteration {
-        let val = args.into_iter().next().unwrap_or_else(Value::none);
+        let val = args.first().cloned().unwrap_or_else(Value::none);
         attrs.insert("value".to_string(), val);
     } else if is_system_exit {
         // CPython 3.12 SystemExit.__init__: code = args[0] if 1 arg, tuple(args) if
@@ -1828,6 +1831,24 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         // instances set them via `instantiate_attribute_error` with the actual values.
         attrs.insert("name".to_string(), Value::none());
         attrs.insert("obj".to_string(), Value::none());
+    }
+    if is_base_exception_group {
+        // PEP 654: BaseExceptionGroup(message, exceptions).
+        // Set `.message` = args[0] (str) and `.exceptions` = args[1] as a tuple.
+        // args[0] defaults to "" and args[1] defaults to an empty tuple on bad input,
+        // but CPython validates in __new__; we set what we have.
+        let message = args.first().cloned().unwrap_or_else(|| Value::string(String::new()));
+        let exceptions_raw = args.get(1).cloned().unwrap_or_else(|| Value::tuple(vec![]));
+        // Normalise the exceptions to a tuple (accept list too).
+        let exceptions = if exceptions_raw.as_tuple().is_some() {
+            exceptions_raw
+        } else if let Some(lst) = exceptions_raw.as_list() {
+            Value::tuple(lst.to_vec())
+        } else {
+            Value::tuple(vec![])
+        };
+        attrs.insert("message".to_string(), message);
+        attrs.insert("exceptions".to_string(), exceptions);
     }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
@@ -2200,6 +2221,34 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let system_exit = mk("SystemExit", Some(Rc::clone(&base_exception)));
     let generator_exit = mk("GeneratorExit", Some(Rc::clone(&base_exception)));
     let keyboard_interrupt = mk("KeyboardInterrupt", Some(Rc::clone(&base_exception)));
+    // PEP 654 (Python 3.11+): BaseExceptionGroup and ExceptionGroup.
+    // BaseExceptionGroup(message, exceptions) — accepts any BaseException subclass.
+    // ExceptionGroup(message, exceptions)    — only accepts Exception subclasses;
+    //   inherits from both BaseExceptionGroup (primary) and Exception (extra base).
+    let base_exception_group = mk("BaseExceptionGroup", Some(Rc::clone(&base_exception)));
+    // ExceptionGroup uses multiple inheritance: primary base = BaseExceptionGroup,
+    // extra base = Exception.  Build it manually so we can set extra_bases.
+    let exception_group = Rc::new(RefCell::new(PyClass {
+        name: "ExceptionGroup".to_string(),
+        qualname: "ExceptionGroup".to_string(),
+        base: Some(Rc::clone(&base_exception_group)),
+        extra_bases: vec![Rc::clone(&exception)],
+        attrs: IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
+        subclasses: std::cell::RefCell::new(vec![]),
+        metatype: None,
+        slots: None,
+    }));
+    base_exception_group
+        .borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&exception_group));
+    exception
+        .borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&exception_group));
     vec![
         ("BaseException", base_exception),
         ("Exception", exception),
@@ -2270,6 +2319,8 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("SystemExit", system_exit),
         ("GeneratorExit", generator_exit),
         ("KeyboardInterrupt", keyboard_interrupt),
+        ("BaseExceptionGroup", base_exception_group),
+        ("ExceptionGroup", exception_group),
     ]
 }
 
@@ -2478,6 +2529,8 @@ pub(crate) fn builtin_class_doc(name: &str) -> Option<&'static str> {
         "SystemExit" => "Request to exit from the interpreter.",
         "GeneratorExit" => "Request that a generator exit.",
         "KeyboardInterrupt" => "Program interrupted by user.",
+        "BaseExceptionGroup" => "A combination of multiple unrelated exceptions.",
+        "ExceptionGroup" => "A combination of multiple unrelated exceptions.",
         _ => return None,
     })
 }

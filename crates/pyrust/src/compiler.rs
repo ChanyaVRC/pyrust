@@ -4562,6 +4562,7 @@ impl Compiler {
             | Insn::ForIter(_, _, off)
             | Insn::SetupExcept(off)
             | Insn::MatchExcept(_, off)
+            | Insn::MatchExceptStar(_, _, _, off)
             | Insn::CmpJumpIfFalse(_, _, _, off)
             | Insn::CmpJumpIfTrue(_, _, _, off)
             | Insn::CmpJumpIfFalseConst(_, _, _, off)
@@ -8184,6 +8185,15 @@ impl Compiler {
         else_branch: Option<&[Stmt]>,
         finally_branch: Option<&[Stmt]>,
     ) {
+        // PEP 654: if any handler is `except*`, route to the star compilation path.
+        // (Mixing `except` and `except*` is a SyntaxError in CPython, so we treat
+        // all-star or all-non-star as the two cases.)
+        let has_star_handlers = handlers.iter().any(|h| h.is_star);
+        if has_star_handlers {
+            self.compile_try_star(body, handlers, else_branch, finally_branch);
+            return;
+        }
+
         let has_handlers = !handlers.is_empty();
 
         // Strategy:
@@ -8400,6 +8410,184 @@ impl Compiler {
         self.patch_jump(end_patch);
         for idx in handler_end_patches {
             self.patch_jump(idx);
+        }
+    }
+
+    /// PEP 654 `except*` compilation.
+    ///
+    /// All handlers are tried sequentially against the same exception group.
+    /// Each matching handler receives a sub-group of the matched exceptions;
+    /// the group register is narrowed after each match so subsequent handlers
+    /// only see the remaining (unhandled) exceptions.
+    ///
+    /// After all handlers, if any exceptions remain un-handled, they are
+    /// re-raised as a new group.
+    fn compile_try_star(
+        &mut self,
+        body: &[Stmt],
+        handlers: &[crate::ast::ExceptHandler],
+        else_branch: Option<&[Stmt]>,
+        finally_branch: Option<&[Stmt]>,
+    ) {
+        // Outer finally handler patch (only if finally_branch is Some)
+        let outer_finally_patch: Option<usize> = if finally_branch.is_some() {
+            Some(self.emit(Insn::SetupExcept(0)))
+        } else {
+            None
+        };
+
+        // Inner handler patch for except* block
+        let inner_handler_patch = self.emit(Insn::SetupExcept(0));
+
+        // Register cleanup entries for early exits from the try body.
+        if outer_finally_patch.is_some() {
+            self.except_cleanups.push(EarlyExitCleanup::TryBody {
+                finally_stmts: Some(finally_branch.unwrap().to_vec()),
+            });
+        }
+        self.except_cleanups.push(EarlyExitCleanup::TryBody {
+            finally_stmts: None,
+        });
+
+        self.compile_block(body);
+
+        self.except_cleanups.pop();
+        if outer_finally_patch.is_some() {
+            self.except_cleanups.pop();
+        }
+
+        if self.failed {
+            return;
+        }
+
+        // Normal exit from try body
+        self.emit(Insn::PopExcept);
+        if let Some(else_stmts) = else_branch {
+            self.compile_block(else_stmts);
+            if self.failed {
+                return;
+            }
+        }
+        if outer_finally_patch.is_some() {
+            self.emit(Insn::PopExcept);
+            let finally_stmts = finally_branch.unwrap();
+            self.compile_block(finally_stmts);
+            if self.failed {
+                return;
+            }
+        }
+        let end_patch = self.emit(Insn::Jump(0));
+
+        // ── Exception path ──
+        self.patch_jump(inner_handler_patch);
+
+        // Load the active exception into a group register.
+        // This register will be narrowed by each MatchExceptStar.
+        let group_reg = self.alloc_temp();
+        self.emit(Insn::LoadExc(group_reg));
+
+        for handler in handlers {
+            if let Some(kind_expr) = &handler.kind {
+                let type_reg = self.compile_expr(kind_expr);
+                let subgroup_reg = self.alloc_temp();
+                let skip_patch =
+                    self.emit(Insn::MatchExceptStar(type_reg, group_reg, subgroup_reg, 0));
+                self.free_temp(type_reg);
+
+                // Bind the `as VAR` variable to the sub-group.
+                let var_bind_cleanup = if let Some(var_name) = &handler.name {
+                    if let Some(reg) = self.local_reg(var_name) {
+                        self.emit(Insn::Move(reg, subgroup_reg));
+                        self.mark_def(reg);
+                        if self.is_module_scope {
+                            let name_idx = self.intern_name(var_name);
+                            self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                        }
+                        Some(ExceptAsVarDel::Local(reg))
+                    } else {
+                        let name_idx = self.intern_name(var_name);
+                        self.emit(Insn::StoreGlobal(name_idx, subgroup_reg));
+                        Some(ExceptAsVarDel::Name(name_idx))
+                    }
+                } else {
+                    None
+                };
+
+                // Pop outer finally handler before running handler body
+                if outer_finally_patch.is_some() {
+                    self.emit(Insn::PopExcept);
+                }
+
+                // Register except-body cleanup for early exits.
+                self.except_cleanups.push(EarlyExitCleanup::ExceptBody {
+                    finally_stmts: finally_branch.map(|s| s.to_vec()),
+                    as_var_delete: var_bind_cleanup.clone(),
+                });
+
+                self.compile_block(&handler.body);
+
+                self.except_cleanups.pop();
+
+                if self.failed {
+                    self.free_temp(subgroup_reg);
+                    return;
+                }
+
+                // PEP 3110-style cleanup: delete the `as VAR` binding.
+                if let Some(var_name) = &handler.name {
+                    if let Some(reg) = self.local_reg(var_name) {
+                        self.emit(Insn::DeleteLocal(reg, u16::MAX));
+                        if (reg as usize) < 64 {
+                            self.def_set &= !(1u64 << reg);
+                        }
+                    } else {
+                        let name_idx = self.intern_name(var_name);
+                        self.emit(Insn::DeleteName(name_idx));
+                    }
+                }
+
+                self.free_temp(subgroup_reg);
+
+                // `skip_patch` jumps here (no match → continue to next handler)
+                self.patch_jump(skip_patch);
+            }
+        }
+
+        // After all handlers: check if group_reg has remaining exceptions.
+        // If group_reg is None (all matched), call EndExcept + jump to end.
+        // If group_reg is a group, re-raise it.
+        // We check by using JumpIfFalse on group_reg (None is falsy; a group is truthy).
+        let remaining_check = self.emit(Insn::JumpIfFalse(group_reg, 0));
+        // Remaining exceptions exist — re-raise the group.
+        self.emit(Insn::RaiseValue(group_reg));
+        self.patch_jump(remaining_check);
+
+        // No remaining exceptions — clean up normally.
+        self.free_temp(group_reg);
+        self.emit(Insn::EndExcept);
+
+        if let Some(finally_stmts) = finally_branch {
+            self.compile_block(finally_stmts);
+            if self.failed {
+                return;
+            }
+        }
+
+        // Patch end
+        self.patch_jump(end_patch);
+
+        // Outer finally handler (exception path)
+        if let Some(outer_idx) = outer_finally_patch {
+            self.patch_jump(outer_idx);
+            let exc_tmp = self.alloc_temp();
+            self.emit(Insn::LoadExc(exc_tmp));
+            self.free_temp(exc_tmp);
+            let finally_stmts = finally_branch.unwrap();
+            self.compile_block(finally_stmts);
+            if self.failed {
+                return;
+            }
+            self.emit(Insn::RaiseReRaise);
         }
     }
 

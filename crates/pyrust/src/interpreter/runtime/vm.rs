@@ -2822,6 +2822,30 @@ impl Interpreter {
                     // the exception onto `handled_exc_stack` when vm_try!
                     // routed us here, so MatchExcept is purely a filter.
                 }
+                Insn::MatchExceptStar(type_reg, src_group, matched_dst, offset) => {
+                    // PEP 654 `except*` filter.
+                    // Reads R[src_group] (a BaseExceptionGroup), filters for instances
+                    // of R[type_reg].  If no match: jump.
+                    // If match: R[matched_dst] = sub-group of matching exceptions;
+                    //           R[src_group]   = sub-group of remaining (non-matching)
+                    //                            exceptions, or None if all matched.
+                    let type_val = vm_try!(vm_read(&regs, *type_reg, num_locals));
+                    let group_val = vm_try!(vm_read(&regs, *src_group, num_locals));
+                    // Gather matching and remaining exceptions from the group.
+                    let result = vm_try!(self.split_exception_group(&group_val, &type_val));
+                    match result {
+                        None => {
+                            // No match — jump past the handler.
+                            pc = jump_pc!(*offset);
+                        }
+                        Some((matched_group, remaining)) => {
+                            // Store matched sub-group into R[matched_dst].
+                            regs[*matched_dst as usize] = matched_group;
+                            // Update R[src_group] with remaining (None = exhausted).
+                            regs[*src_group as usize] = remaining.unwrap_or_else(Value::none);
+                        }
+                    }
+                }
                 Insn::EndExcept => {
                     // Leaving an `except` handler body normally (the exception
                     // was truly handled, not re-raised).  Pop the entry that

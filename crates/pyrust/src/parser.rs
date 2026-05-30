@@ -1355,7 +1355,19 @@ impl Parser {
 
         while self.is(&Token::Except) {
             self.bump();
+            // PEP 654: `except*` — star immediately follows `except`
+            let is_star = if self.is(&Token::Star) {
+                self.bump();
+                true
+            } else {
+                false
+            };
             let kind = if self.is(&Token::Colon) {
+                if is_star {
+                    return Err(PyError::Parse(
+                        "except* requires an exception type".to_string(),
+                    ));
+                }
                 saw_bare_except = true;
                 None
             } else {
@@ -1376,6 +1388,7 @@ impl Parser {
                 kind,
                 name,
                 body: handler_body,
+                is_star,
             });
         }
 
