@@ -6081,8 +6081,10 @@ impl Interpreter {
 /// is not consulted.  This matches CPython's `PyEval_EvalCode` behaviour: a
 /// caller that passes `{"__builtins__": {}}` gets an empty builtin namespace.
 ///
-/// When `__builtins__` is a module, absent, or any other non-dict value, the
-/// function delegates to `resolve_builtin()` (the normal execution path).
+/// When `__builtins__` is a module or absent, the function delegates to
+/// `resolve_builtin()` (the normal execution path).  When `__builtins__` is
+/// any other non-dict, non-module value, raises `TypeError` matching
+/// CPython 3.12's behaviour when it tries to subscript the value.
 ///
 /// Isolated into a `#[cold] #[inline(never)]` function so that the expanded
 /// match body does not inflate the I-cache footprint of the `LoadGlobal`
@@ -6099,24 +6101,40 @@ fn resolve_global_via_builtins(
         .dict_with(|d| d.get(&StrKey("__builtins__")).cloned())
         .flatten();
     if let Some(builtins_val) = restricted {
-        if let ValueKind::Dict(_) = builtins_val.kind() {
-            // __builtins__ is a dict — look up name there only.
-            // Do not cache: the dict can be mutated without bumping
-            // global_env_version.
-            let v = builtins_val
-                .dict_with(|d| d.get(&StrKey(name)).cloned())
-                .flatten()
-                .ok_or_else(|| {
-                    PyError::name_error(
-                        "NameError",
-                        format!("name '{}' is not defined", name),
-                        Some(name.to_string()),
-                    )
-                })?;
-            return Ok((v, GLOBAL_CACHE_EMPTY));
+        match builtins_val.kind() {
+            ValueKind::Dict(_) => {
+                // __builtins__ is a dict — look up name there only.
+                // Do not cache: the dict can be mutated without bumping
+                // global_env_version.
+                let v = builtins_val
+                    .dict_with(|d| d.get(&StrKey(name)).cloned())
+                    .flatten()
+                    .ok_or_else(|| {
+                        PyError::name_error(
+                            "NameError",
+                            format!("name '{}' is not defined", name),
+                            Some(name.to_string()),
+                        )
+                    })?;
+                return Ok((v, GLOBAL_CACHE_EMPTY));
+            }
+            ValueKind::PyModule(_) => {
+                // __builtins__ is a module — fall through to the hardcoded
+                // Rust builtin table (normal execution path).
+            }
+            _ => {
+                // __builtins__ is a non-dict, non-module value (e.g. None,
+                // int).  CPython 3.12 raises TypeError when it tries to
+                // subscript the value to look up a builtin name.
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object is not subscriptable",
+                        value_type_name_str(&builtins_val),
+                    ),
+                ));
+            }
         }
-        // __builtins__ is a module or other non-dict object — fall through
-        // to the hardcoded Rust builtin table (normal execution path).
     }
     // No dict-restricted builtins: use the hardcoded Rust builtin table.
     // Cache the result with the current env version so that a subsequent
