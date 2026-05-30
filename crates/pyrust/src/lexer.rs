@@ -488,7 +488,7 @@ impl Lexer {
                     self.tokens.push(tok);
                     pos = next;
                 }
-                Some(c) => return Err(PyError::Lex(format!("unexpected character '{c}'"))),
+                Some(_) => return Err(PyError::Lex("invalid syntax".to_string())),
             }
         }
     }
