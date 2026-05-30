@@ -66,10 +66,6 @@ impl Interpreter {
         result
     }
 
-    fn try_exec_vm_script(&mut self, program: &[Stmt], repl_mode: bool) -> Option<Result<()>> {
-        self.try_exec_vm_script_with_src(program, &[], "", repl_mode)
-    }
-
     fn try_exec_vm_script_with_src(
         &mut self,
         program: &[Stmt],
