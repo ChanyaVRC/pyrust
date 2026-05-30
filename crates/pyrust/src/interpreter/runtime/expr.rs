@@ -95,6 +95,25 @@ fn seq_repeat_bytes(data: &[u8], n: i64) -> Result<Value> {
     Ok(Value::bytes(out))
 }
 
+fn seq_repeat_bytearray(data: &[u8], n: i64) -> Result<Value> {
+    if n <= 0 {
+        return Ok(pyrust_builtins::bytearray::bytearray(Vec::new()));
+    }
+    let n = n as usize;
+    let total = match data.len().checked_mul(n) {
+        Some(t) => t,
+        None => return Err(PyError::named("MemoryError", String::new())),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    if out.try_reserve(total).is_err() {
+        return Err(PyError::named("MemoryError", String::new()));
+    }
+    for _ in 0..n {
+        out.extend_from_slice(data);
+    }
+    Ok(pyrust_builtins::bytearray::bytearray(out))
+}
+
 /// Outcome of the borrow-only sequence equality fast path used by
 /// `values_user_eq` for `List`/`Tuple` pairs.
 ///
@@ -2691,6 +2710,48 @@ impl Interpreter {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
         }
+        // bytearray concatenation: handle before coerce_numeric since bytearray
+        // is a BuiltinObject and would fall through the numeric match arms.
+        // CPython 3.12: bytearray + bytearray → bytearray, bytearray + bytes →
+        // bytearray, bytes + bytearray → bytes.
+        let lhs_ba = pyrust_builtins::bytearray::as_bytearray_snapshot(&left);
+        let rhs_ba = pyrust_builtins::bytearray::as_bytearray_snapshot(&right);
+        if lhs_ba.is_some() || rhs_ba.is_some() {
+            match (lhs_ba, rhs_ba) {
+                (Some(a), Some(b)) => {
+                    // bytearray + bytearray → bytearray
+                    let mut out = a;
+                    out.extend_from_slice(&b);
+                    return Ok(pyrust_builtins::bytearray::bytearray(out));
+                }
+                (Some(a), None) => {
+                    // bytearray + bytes → bytearray
+                    if let ValueKind::Bytes(rc) = right.kind() {
+                        let mut out = a;
+                        out.extend_from_slice(&rc);
+                        return Ok(pyrust_builtins::bytearray::bytearray(out));
+                    }
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "can't concat {} to bytearray",
+                            pyrust_core::builtin_type_name(&right)
+                        ),
+                    ));
+                }
+                (None, Some(b)) => {
+                    // bytes + bytearray → bytes (CPython 3.12 parity)
+                    if let ValueKind::Bytes(rc) = left.kind() {
+                        let mut out = rc.as_ref().clone();
+                        out.extend_from_slice(&b);
+                        return Ok(Value::bytes(out));
+                    }
+                    // Non-bytes LHS with bytearray RHS: unsupported.
+                    return Err(Self::unsupported_binary_operand("+"));
+                }
+                (None, None) => unreachable!(),
+            }
+        }
         let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
@@ -2840,6 +2901,48 @@ impl Interpreter {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
             return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
+        }
+        // bytearray * int / int * bytearray — handled before coerce_numeric
+        // because bytearray is a BuiltinObject and won't match any explicit arm.
+        if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(&left) {
+            let n = match right.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                ValueKind::BigInt(_) => {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "cannot fit 'int' into an index-sized integer".to_string(),
+                    ));
+                }
+                _ => {
+                    let type_name = value_type_name_str(&right);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("can't multiply sequence by non-int of type '{type_name}'"),
+                    ));
+                }
+            };
+            return seq_repeat_bytearray(&data, n);
+        }
+        if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(&right) {
+            let n = match left.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                ValueKind::BigInt(_) => {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "cannot fit 'int' into an index-sized integer".to_string(),
+                    ));
+                }
+                _ => {
+                    let type_name = value_type_name_str(&left);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("can't multiply sequence by non-int of type '{type_name}'"),
+                    ));
+                }
+            };
+            return seq_repeat_bytearray(&data, n);
         }
         let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
@@ -3084,6 +3187,59 @@ impl Interpreter {
                         }
                         _ => unreachable!(),
                     });
+                    return Ok(Some(left.clone()));
+                }
+                _ => {}
+            }
+        } else if let Some(data_rc) = pyrust_builtins::bytearray::as_bytearray_rc(left) {
+            // bytearray += / bytearray *= — mutate backing Vec in place so
+            // that aliases (other variables referencing the same bytearray)
+            // also see the change.
+            match op {
+                BinaryOp::Add => {
+                    let rhs = if let Some(rhs_data) =
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(right)
+                    {
+                        rhs_data
+                    } else if let ValueKind::Bytes(rc) = right.kind() {
+                        rc.as_slice().to_vec()
+                    } else {
+                        let type_name = value_type_name_str(right);
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("can't concat {type_name} to bytearray"),
+                        ));
+                    };
+                    data_rc.borrow_mut().extend_from_slice(&rhs);
+                    return Ok(Some(left.clone()));
+                }
+                BinaryOp::Mul => {
+                    let n = match right.kind() {
+                        ValueKind::Int(n) => n,
+                        ValueKind::Bool(b) => b as i64,
+                        ValueKind::BigInt(_) => {
+                            return Err(PyError::named(
+                                "OverflowError",
+                                "cannot fit 'int' into an index-sized integer".to_string(),
+                            ));
+                        }
+                        _ => {
+                            let type_name = value_type_name_str(right);
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("can't multiply sequence by non-int of type '{type_name}'"),
+                            ));
+                        }
+                    };
+                    let mut data = data_rc.borrow_mut();
+                    if n <= 0 {
+                        data.clear();
+                    } else {
+                        let orig = data.clone();
+                        for _ in 1..n {
+                            data.extend_from_slice(&orig);
+                        }
+                    }
                     return Ok(Some(left.clone()));
                 }
                 _ => {}
