@@ -528,6 +528,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 }
@@ -620,6 +621,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 }

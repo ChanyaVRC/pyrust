@@ -98,6 +98,7 @@ macro_rules! abc_class {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 }

@@ -47,6 +47,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         exception_base.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
         class

@@ -292,6 +292,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 
@@ -346,6 +347,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
@@ -365,6 +367,7 @@ thread_local! {
         mutation_version: std::cell::Cell::new(0),
         subclasses: std::cell::RefCell::new(vec![]),
         metatype: None,
+        slots: None,
     }));
 
     /// Per-thread `PyClass` singleton for the `function` type.  In CPython,
@@ -381,6 +384,7 @@ thread_local! {
         mutation_version: std::cell::Cell::new(0),
         subclasses: std::cell::RefCell::new(vec![]),
         metatype: None,
+        slots: None,
     }));
 
     /// Per-thread `PyClass` singleton for the `range` type.  In CPython,
@@ -399,6 +403,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
@@ -541,6 +546,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
@@ -2058,6 +2064,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));

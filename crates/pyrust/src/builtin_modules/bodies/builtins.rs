@@ -1640,6 +1640,7 @@ pyrust_module! {
                 mutation_version: std::cell::Cell::new(0),
                 subclasses: std::cell::RefCell::new(vec![]),
                 metatype: None,
+                slots: None,
             }));
             if let Some(ref b) = base {
                 b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
@@ -5394,6 +5395,7 @@ pyrust_module! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype,
+            slots: None,
         }));
         // Register the new class as a direct subclass of each base so that
         // base.__subclasses__() includes it.

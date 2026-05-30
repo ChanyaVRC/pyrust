@@ -984,6 +984,11 @@ pub struct PyClass {
     /// actual metaclass instead of always returning the `type` singleton
     /// (issue #1626).
     pub metatype: Option<Rc<RefCell<PyClass>>>,
+    /// Slot names declared by `__slots__` in this class body (issue #1106).
+    /// `None` means no `__slots__` was declared (instances have a full `__dict__`).
+    /// `Some(set)` means only attributes whose names are in `set` may be stored
+    /// on instances of this class (when no parent class adds a `__dict__` back).
+    pub slots: Option<IndexSet<String>>,
 }
 
 #[derive(Debug, Clone)]
