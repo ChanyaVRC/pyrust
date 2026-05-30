@@ -21,6 +21,19 @@
 //   `GenericAlias` directly on subscript so no extra interpreter plumbing
 //   is needed.
 //
+// - `Generic` and `Protocol` are real `PyClass` singletons so that they
+//   can be used as class bases (`class Stack(Generic[T]): pass`).  pyrust's
+//   `MakeClass` instruction requires every base to be `ValueKind::PyClass`;
+//   the subscript `Generic[T]` returns the `Generic` class itself (not a
+//   `_TypingAlias` instance) to satisfy that constraint.
+//
+// - `TypeVar` is a real class defined via the `class { … }` block so that
+//   `TypeVar('T')` creates a `PyInstance` with `__name__ = 'T'`.
+//
+// - `cast(typ, val)` is a runtime no-op: returns `val`.
+//
+// - `overload` is a no-op decorator: returns the function unchanged.
+//
 // ## Why thread-locals instead of `module_class()`?
 //
 // `module_class(name)` calls `module()`, and `module()` is itself evaluating
@@ -83,6 +96,51 @@ thread_local! {
             slots: None,
         }))
     };
+
+    // `Generic` must be a real `PyClass` so that `class Stack(Generic[T]): pass`
+    // can use it as a class base.  The `__class_getitem__` is registered under
+    // the name "typing._generic_cgi" which does NOT contain ".__class_getitem__",
+    // so expr.rs calls our function rather than creating a sentinel GenericAlias.
+    // Our function returns the Generic class itself, making `Generic[T]` a valid
+    // class base.
+    static GENERIC_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__class_getitem__".to_string(),
+            Value::builtin_function("typing._generic_cgi"),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: "Generic".to_string(),
+            qualname: "Generic".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+            slots: None,
+        }))
+    };
+
+    // `Protocol` follows the same pattern as `Generic`.
+    static PROTOCOL_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__class_getitem__".to_string(),
+            Value::builtin_function("typing._protocol_cgi"),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: "Protocol".to_string(),
+            qualname: "Protocol".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+            slots: None,
+        }))
+    };
 }
 
 /// (method-short, registry-name) pairs for `_Any`.
@@ -122,6 +180,11 @@ pyrust_module! {
         "Final"    => class_value_for("Final"),
         "Literal"  => class_value_for("Literal"),
         "Type"     => class_value_for("Type"),
+
+        // `Generic` and `Protocol` are real PyClass values (not _TypingAlias
+        // instances) so they can serve as class bases.
+        "Generic"  => GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+        "Protocol" => PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))),
     }
 
     // ── _Any dispatch fns ─────────────────────────────────────────────────────
@@ -176,14 +239,154 @@ pyrust_module! {
         let subscript = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
         Ok(make_typing_alias("_TypingAlias", subscript))
     }
+
+    // ── Generic.__class_getitem__ ─────────────────────────────────────────────
+    //
+    // The name "typing._generic_cgi" does NOT contain ".__class_getitem__", so
+    // pyrust's expr.rs subscript handler calls our function rather than
+    // creating a sentinel GenericAlias.  We return the Generic class itself
+    // so that `Generic[T]` is a valid class base in `class Stack(Generic[T])`.
+
+    #[py_name = "_generic_cgi"]
+    fn generic_class_getitem(args) -> Result<Value> {
+        let _ = (_interp, args);
+        Ok(GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))))
+    }
+
+    // ── Protocol.__class_getitem__ ────────────────────────────────────────────
+
+    #[py_name = "_protocol_cgi"]
+    fn protocol_class_getitem(args) -> Result<Value> {
+        let _ = (_interp, args);
+        Ok(PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))))
+    }
+
+    // ── cast ─────────────────────────────────────────────────────────────────
+    //
+    // `cast(typ, val)` is a runtime no-op in CPython — it simply returns
+    // `val` unchanged.  Type checkers use the annotation to narrow types.
+
+    fn cast(args) -> Result<Value> {
+        let _ = _interp;
+        match args.get(1).map(|a| a.value.clone()) {
+            Some(v) => Ok(v),
+            None => Err(PyError::named(
+                "TypeError",
+                "cast() requires 2 positional arguments: 'typ' and 'val'".to_string(),
+            )),
+        }
+    }
+
+    // ── overload ─────────────────────────────────────────────────────────────
+    //
+    // `@overload` is a no-op decorator at runtime.  CPython registers the
+    // decorated function internally but the last plain definition wins.
+    // Returning the function unchanged preserves that behaviour.
+
+    fn overload(args) -> Result<Value> {
+        let _ = _interp;
+        match args.first().map(|a| a.value.clone()) {
+            Some(v) => Ok(v),
+            None => Err(PyError::named(
+                "TypeError",
+                "overload() requires 1 argument".to_string(),
+            )),
+        }
+    }
+
+    // ── TypedDict ─────────────────────────────────────────────────────────────
+    //
+    // Minimal stub: raises NotImplementedError.  Sufficient to allow imports
+    // without crashing when the module is imported but TypedDict is not called.
+
+    #[py_name = "TypedDict"]
+    fn typed_dict(args) -> Result<Value> {
+        let _ = (_interp, args);
+        Err(PyError::named(
+            "NotImplementedError",
+            "TypedDict is not yet fully implemented in pyrust".to_string(),
+        ))
+    }
+
+    // ── TypeVar class ─────────────────────────────────────────────────────────
+    //
+    // `TypeVar('T')` returns a TypeVar instance with `__name__ = 'T'`.
+    // This mirrors the surface of CPython's typing.TypeVar so that
+    // `T = TypeVar('T')` followed by `class Stack(Generic[T]): pass` works.
+    //
+    // CPython signature: TypeVar(name, *constraints, bound=None,
+    //                            covariant=False, contravariant=False)
+    // - args[0]    = self
+    // - args[1]    = name (required, positional)
+    // - args[2..]  = positional constraint types (e.g. TypeVar('T', int, str))
+    // - bound=     = optional keyword argument
+    // - covariant=/contravariant= accepted and ignored (runtime no-op)
+
+    class TypeVar {
+        fn __init__(args) -> Result<Value> {
+            let _ = _interp;
+            let inst = expect_self(args, FN_NAME)?;
+            let name_val = args.get(1).map(|a| a.value.clone()).ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "TypeVar() requires at least 1 argument (the name)".to_string(),
+                )
+            })?;
+            let name_str = match name_val.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "TypeVar() name must be a string".to_string(),
+                    ));
+                }
+            };
+
+            // Collect positional constraints (args[2..] without a keyword name).
+            let constraints: Vec<Value> = args[2..]
+                .iter()
+                .filter(|a| a.name.is_none())
+                .map(|a| a.value.clone())
+                .collect();
+
+            // Find the `bound=` keyword argument.
+            let bound = args
+                .iter()
+                .find(|a| a.name.as_deref() == Some("bound"))
+                .map(|a| a.value.clone())
+                .unwrap_or_else(Value::none);
+
+            let mut borrow = inst.borrow_mut();
+            borrow
+                .attrs
+                .insert("__name__".to_string(), Value::string(name_str));
+            borrow
+                .attrs
+                .insert("__constraints__".to_string(), Value::tuple(constraints));
+            borrow.attrs.insert("__bound__".to_string(), bound);
+            Ok(Value::none())
+        }
+
+        fn __repr__(args) -> Result<Value> {
+            let _ = _interp;
+            let inst = expect_self(args, FN_NAME)?;
+            let borrow = inst.borrow();
+            let name = borrow
+                .attrs
+                .get("__name__")
+                .and_then(|v| match v.kind() {
+                    ValueKind::Str(s) => Some(s.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "T".to_string());
+            Ok(Value::string(name))
+        }
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn expect_self(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<RefCell<PyInstance>>> {
+fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
         Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
         _ => Err(PyError::Runtime(format!(
