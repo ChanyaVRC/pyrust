@@ -247,6 +247,77 @@ impl Parser {
         })
     }
 
+    /// Parse an optional PEP 695 type parameter list `[T, U, ...]`.
+    /// Returns the list of type parameter names (bounds are parsed and discarded).
+    /// Consumes `[` through the matching `]`; returns an empty `Vec` if no `[`
+    /// is present.  Used by `parse_def` and `parse_class`.
+    fn parse_type_params(&mut self, ctx: &str) -> Result<Vec<String>> {
+        if !self.is(&Token::LBracket) {
+            return Ok(vec![]);
+        }
+        self.bump(); // consume `[`
+        let mut params: Vec<String> = Vec::new();
+        loop {
+            match self.current() {
+                None | Some(Token::Eof) => {
+                    return Err(PyError::Parse(format!(
+                        "unterminated type parameter list in {ctx}"
+                    )));
+                }
+                Some(Token::RBracket) => {
+                    self.bump(); // consume `]`
+                    break;
+                }
+                Some(Token::Comma) => {
+                    self.bump(); // consume `,`
+                }
+                Some(Token::Ident(_)) => {
+                    let param_name = self.expect_ident("type parameter name")?;
+                    params.push(param_name);
+                    // Skip optional bound: `: expr` — consume until `,` or `]`,
+                    // tracking nested bracket depth for complex expressions.
+                    if self.is(&Token::Colon) {
+                        self.bump(); // consume `:`
+                        let mut depth = 0usize;
+                        loop {
+                            match self.current() {
+                                None | Some(Token::Eof) => {
+                                    return Err(PyError::Parse(format!(
+                                        "unterminated type parameter bound in {ctx}"
+                                    )));
+                                }
+                                Some(Token::LBracket)
+                                | Some(Token::LParen)
+                                | Some(Token::LBrace) => {
+                                    depth += 1;
+                                    self.bump();
+                                }
+                                Some(Token::RBracket)
+                                | Some(Token::RParen)
+                                | Some(Token::RBrace) => {
+                                    if depth == 0 {
+                                        break; // let outer loop handle `]`
+                                    }
+                                    depth -= 1;
+                                    self.bump();
+                                }
+                                Some(Token::Comma) if depth == 0 => break,
+                                _ => {
+                                    self.bump();
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Skip unexpected token (e.g. `*Ts`, `**P` variance markers).
+                    self.bump();
+                }
+            }
+        }
+        Ok(params)
+    }
+
     fn parse_match(&mut self) -> Result<Stmt> {
         // Consume `match` (soft keyword, tokenised as Ident)
         self.bump();
@@ -875,6 +946,8 @@ impl Parser {
     fn parse_def(&mut self, decorators: Vec<Expr>, is_async: bool) -> Result<Stmt> {
         self.expect(&Token::Def)?;
         let name = self.expect_ident("function name")?;
+        // PEP 695: optional `[T, U, ...]` type parameter list before `(`.
+        let type_params = self.parse_type_params("function")?;
         self.expect(&Token::LParen)?;
         let params = self.parse_params()?;
         self.expect(&Token::RParen)?;
@@ -894,6 +967,7 @@ impl Parser {
             decorators,
             return_annotation,
             is_async,
+            type_params,
         })
     }
 
@@ -1052,6 +1126,8 @@ impl Parser {
     fn parse_class(&mut self, decorators: Vec<Expr>) -> Result<Stmt> {
         self.expect(&Token::Class)?;
         let name = self.expect_ident("class name")?;
+        // PEP 695: optional `[T, U, ...]` type parameter list before `(` or `:`.
+        let type_params = self.parse_type_params("class")?;
 
         let mut bases = Vec::new();
         let mut metaclass: Option<Expr> = None;
@@ -1102,6 +1178,7 @@ impl Parser {
             keywords,
             body,
             decorators,
+            type_params,
         })
     }
 

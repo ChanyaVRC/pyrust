@@ -5125,6 +5125,7 @@ impl Compiler {
                 decorators,
                 return_annotation,
                 is_async,
+                type_params,
             } => {
                 self.compile_def(
                     name,
@@ -5133,6 +5134,7 @@ impl Compiler {
                     decorators,
                     return_annotation.as_ref(),
                     *is_async,
+                    type_params,
                 );
             }
             Stmt::Class {
@@ -5142,8 +5144,17 @@ impl Compiler {
                 keywords,
                 body,
                 decorators,
+                type_params,
             } => {
-                self.compile_class(name, bases, metaclass.as_ref(), keywords, body, decorators);
+                self.compile_class(
+                    name,
+                    bases,
+                    metaclass.as_ref(),
+                    keywords,
+                    body,
+                    decorators,
+                    type_params,
+                );
             }
             Stmt::Try {
                 body,
@@ -5289,6 +5300,47 @@ impl Compiler {
         }
         self.free_temp(dst);
         self.mark_target_def(&target);
+    }
+
+    // ── PEP 695 generic type parameters helper ────────────────────────────────
+
+    /// Emit code to build a `__type_params__` tuple from `type_params` names
+    /// and store it as an attribute on `obj_reg` via `SetAttr`.
+    ///
+    /// This is shared by `compile_def` (generic functions) and `compile_class`
+    /// (generic classes).  `obj_reg` must be live and writable after this call.
+    /// All temporary registers allocated inside are fully freed before returning.
+    fn emit_type_params_attr(&mut self, obj_reg: Reg, type_params: &[String]) {
+        let n = type_params.len() as u8;
+        let saved_next = self.next_temp;
+        // Allocate a contiguous block of n registers for the TypeVar objects,
+        // then one more for the tuple destination.
+        let base = self.next_temp;
+        let needed = n as u32 + 1; // n TypeVar slots + 1 tuple slot
+        if self.next_temp.checked_add(needed).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for type params".to_string());
+            }
+            return;
+        }
+        self.next_temp += needed;
+        if self.next_temp - 1 > self.max_reg {
+            self.max_reg = self.next_temp - 1;
+        }
+        let tuple_reg = base + n as Reg;
+        // Emit MakeTypeVar for each parameter name into consecutive registers.
+        for (i, param) in type_params.iter().enumerate() {
+            let name_const = self.intern_const(crate::value::Value::string(param.clone()));
+            self.emit(Insn::MakeTypeVar(base + i as Reg, name_const));
+        }
+        // Build the __type_params__ tuple from the TypeVar registers.
+        self.emit(Insn::BuildTuple(tuple_reg, base, n));
+        // Store as obj.__type_params__ = tuple.
+        let attr_name_idx = self.intern_name("__type_params__");
+        self.emit(Insn::SetAttr(obj_reg, attr_name_idx, tuple_reg));
+        // All TypeVar + tuple registers are dead after SetAttr.
+        self.next_temp = saved_next;
     }
 
     // ── Assignment ────────────────────────────────────────────────────────────
@@ -7495,6 +7547,7 @@ impl Compiler {
         decorators: &[Expr],
         return_annotation: Option<&Expr>,
         is_async: bool,
+        type_params: &[String],
     ) {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
@@ -7816,6 +7869,15 @@ impl Compiler {
             self.next_temp = dst + 1;
         }
 
+        // PEP 695: if this is a generic function, build the __type_params__ tuple
+        // and store it on the function object before decorators are applied.
+        // CPython sets __type_params__ on the raw function, before wrapping it
+        // with decorators (verified: the decorator receives a function that already
+        // has __type_params__).
+        if !type_params.is_empty() {
+            self.emit_type_params_attr(dst, type_params);
+        }
+
         // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
         // CPython evaluates decorators in declaration order (top first) but applies
         // them innermost-first (bottom first): fn = d1(d2(d3(fn))).
@@ -7878,6 +7940,7 @@ impl Compiler {
         keywords: &[(String, Expr)],
         body: &[Stmt],
         decorators: &[Expr],
+        type_params: &[String],
     ) {
         // Class body: zero-param function that returns its locals as class dict.
         // Collect names explicitly declared `global` in the class body so they
@@ -8225,6 +8288,12 @@ impl Compiler {
             self.emit(Insn::Call(frame, 3));
             self.emit(Insn::Move(dst, frame));
             self.next_temp = dst + 1;
+        }
+
+        // PEP 695: if this is a generic class, build the __type_params__ tuple
+        // and store it on the class object before decorators are applied.
+        if !type_params.is_empty() {
+            self.emit_type_params_attr(dst, type_params);
         }
 
         // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
@@ -10309,7 +10378,7 @@ impl Compiler {
         // Convert lambda body into an implicit return statement.
         let body_stmts = vec![Stmt::Return(Some(body.clone()))];
         let temp_name = "<lambda>";
-        self.compile_def(temp_name, params, &body_stmts, &[], None, false);
+        self.compile_def(temp_name, params, &body_stmts, &[], None, false, &[]);
         // compile_def stored the result in local or global named "<lambda>".
         // We need to return the register it's in.
         // Actually compile_def uses compile_store_name which may put it in a

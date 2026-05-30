@@ -78,6 +78,9 @@ pub enum Stmt {
         /// the compiler currently rejects `await` expressions regardless.
         #[allow(dead_code)]
         is_async: bool,
+        /// PEP 695 type parameter names from `def foo[T, U]():`.
+        /// Bounds are not yet evaluated; only the names are stored.
+        type_params: Vec<String>,
     },
     Class {
         name: String,
@@ -93,6 +96,9 @@ pub enum Stmt {
         keywords: Vec<(String, Expr)>,
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
+        /// PEP 695 type parameter names from `class Foo[T, U]:`.
+        /// Bounds are not yet evaluated; only the names are stored.
+        type_params: Vec<String>,
     },
     Global(Vec<String>),
     Nonlocal(Vec<String>),
