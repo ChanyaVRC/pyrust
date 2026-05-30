@@ -1933,6 +1933,11 @@ pyrust_module! {
     /// namespace.  Returns `None`.
     fn exec(args) -> Result<Value> {
         let (source_val, globals_opt, locals_opt) = parse_exec_eval_args(FN_NAME, args)?;
+        // Inject `__builtins__` into a caller-supplied globals dict, matching
+        // CPython's PyEval_EvalCode behaviour.
+        if let Some(g) = &globals_opt {
+            inject_builtins_into_globals(g);
+        }
         // Code object path (from compile()).
         if let Some(result) = crate::interpreter::with_code_state(&source_val, |cs| {
             use crate::interpreter::CodeMode;
@@ -1978,6 +1983,11 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#eval>
     fn eval(args) -> Result<Value> {
         let (source_val, globals_opt, locals_opt) = parse_exec_eval_args(FN_NAME, args)?;
+        // Inject `__builtins__` into a caller-supplied globals dict, matching
+        // CPython's PyEval_EvalCode behaviour.
+        if let Some(g) = &globals_opt {
+            inject_builtins_into_globals(g);
+        }
         // Code object path (from compile()).
         if let Some(result) = crate::interpreter::with_code_state(&source_val, |cs| {
             _interp.run_eval_code_dispatch(
@@ -8793,6 +8803,23 @@ fn parse_exec_eval_args(
         if matches!(v.kind(), ValueKind::None) { None } else { Some(v) }
     });
     Ok((source_val, globals_opt, locals_opt))
+}
+
+
+/// CPython injects `__builtins__` into a caller-supplied globals dict the first
+/// time `eval()` or `exec()` is called with it (see `PyEval_EvalCode`).  If the
+/// dict does not already contain `"__builtins__"`, insert the builtins module.
+///
+/// Existing values (including `{}` as a deliberate override) are left alone.
+fn inject_builtins_into_globals(globals: &Value) {
+    use crate::value::StrKey;
+    let already_present = globals
+        .dict_with(|d| d.contains_key(&StrKey("__builtins__")))
+        .unwrap_or(true); // not a dict — leave it alone
+    if !already_present {
+        let builtins = crate::interpreter::cached_builtins_module();
+        let _ = globals.dict_insert(PyKey::str_from("__builtins__"), builtins);
+    }
 }
 
 /// Return the Python type name for a value, with correct iterator type names
