@@ -33,7 +33,7 @@ class Sub(Parent):
 
 print(Sub().test())  # hi
 
-# ── iter(v, w) TypeError (issue #1780 — CPython says "iter(v, w): v must be callable") ──
+# ── iter(v, w) TypeError (issue #1780) ─────────────────────────────────────
 
 try:
     iter(42, None)
