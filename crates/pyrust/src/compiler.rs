@@ -8559,6 +8559,11 @@ impl Compiler {
         // We check by using JumpIfFalse on group_reg (None is falsy; a group is truthy).
         let remaining_check = self.emit(Insn::JumpIfFalse(group_reg, 0));
         // Remaining exceptions exist — re-raise the group.
+        // If no handler matched: the outer SetupExcept is still active and will
+        // catch this re-raise to run the finally block.
+        // If a handler matched but left some exceptions (partial match): the outer
+        // SetupExcept was already popped, so the finally will NOT run here; this
+        // is a known limitation (see follow-up issue for except*+finally+partial-match).
         self.emit(Insn::RaiseValue(group_reg));
         self.patch_jump(remaining_check);
 
@@ -8573,11 +8578,16 @@ impl Compiler {
             }
         }
 
-        // Patch end
-        self.patch_jump(end_patch);
-
-        // Outer finally handler (exception path)
+        // Outer finally handler (exception path for exceptions that escape the
+        // outer SetupExcept — i.e. exceptions raised inside the try body before
+        // any handler fires, or exceptions raised by the handler bodies themselves
+        // that re-activate the outer SetupExcept).
         if let Some(outer_idx) = outer_finally_patch {
+            // After EndExcept + inline finally above, we must jump past the outer
+            // finally handler block — otherwise execution falls through into it
+            // and hits RaiseReRaise / LoadExc with no active exception.
+            let exc_path_end = self.emit(Insn::Jump(0));
+
             self.patch_jump(outer_idx);
             let exc_tmp = self.alloc_temp();
             self.emit(Insn::LoadExc(exc_tmp));
@@ -8588,7 +8598,14 @@ impl Compiler {
                 return;
             }
             self.emit(Insn::RaiseReRaise);
+
+            // Both the normal-exit Jump and the exception-path Jump land here
+            // (past the outer finally handler).
+            self.patch_jump(exc_path_end);
         }
+
+        // Patch the normal-exit Jump to land here (past the outer finally handler).
+        self.patch_jump(end_patch);
     }
 
     fn compile_with(&mut self, items: &[(Expr, Option<AssignTarget>)], body: &[Stmt]) {
