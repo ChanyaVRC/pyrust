@@ -4852,11 +4852,12 @@ pub(crate) fn call_del_if_last_binding(
     // exceptions to the caller (issue #1797).
     if let Err(e) = invoke_class_method(interp, method, instance, &[]) {
         eprintln!("Exception ignored in: <function {}.__del__>", class_name);
-        // For a Raised instance, print its repr (e.g. "ValueError('oops')")
-        // rather than the "Uncaught exception: ..." Display prefix, which is
-        // misleading in this context.
+        // For a Raised instance, format as "ClassName: msg" (CPython parity)
+        // using format_single_exc_line, which calls to_py_str() on the
+        // instance — matching CPython's `ValueError: oops` output.
+        // For other PyError variants, Display already formats as "ClassName: msg".
         match &e {
-            PyError::Raised(v) => eprintln!("{}", v.repr()),
+            PyError::Raised(v) => eprintln!("{}", format_single_exc_line(v)),
             _ => eprintln!("{}", e),
         }
     }
