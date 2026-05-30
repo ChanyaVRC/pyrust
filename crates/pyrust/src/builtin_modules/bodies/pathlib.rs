@@ -740,33 +740,60 @@ pyrust_module! {
         Ok(Value::bool_(p.starts_with('/')))
     }
 
-    /// `path.resolve()` — make the path absolute, resolving symlinks.
-    /// Returns a `PosixPath` with the canonicalised absolute path.
-    /// Falls back to joining cwd + path when `canonicalize` fails (e.g.
-    /// the path doesn't exist yet) — matching CPython 3.12's behaviour of
-    /// returning an absolute path without raising for non-existent paths
-    /// (it resolves strictly only in Python < 3.6).
+    /// `path.resolve(strict=False)` — make the path absolute, resolving
+    /// symlinks.  Returns a `PosixPath` with the canonicalised absolute path.
+    /// When `strict=True` the path must exist; if it does not,
+    /// `FileNotFoundError` is raised (CPython 3.6+ parity).
     /// <https://docs.python.org/3/library/pathlib.html#pathlib.Path.resolve>
     #[py_name = "Path.resolve"]
     fn path_resolve(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
-        // `strict` kwarg is accepted (Python 3.6+) but ignored — we never
-        // raise for non-existent paths (matching the strict=False default).
+        // Parse the `strict` kwarg (Python 3.6+, default False).
+        let mut strict = false;
+        for a in args.iter().skip(1) {
+            match a.name.as_deref() {
+                Some("strict") => {
+                    strict = matches!(a.value.kind(), ValueKind::Bool(true))
+                        || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                }
+                Some(other) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() got an unexpected keyword argument '{other}'",
+                        ),
+                    ));
+                }
+                None => {
+                    // First positional after self is `strict`.
+                    strict = matches!(a.value.kind(), ValueKind::Bool(true))
+                        || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                }
+            }
+        }
         let _ = _interp;
         let p = get_path(&inst, FN_NAME)?;
-        let resolved = std::fs::canonicalize(&p).unwrap_or_else(|_| {
-            // Path does not exist or canonicalize failed — build an absolute
-            // path by joining cwd + relative path, without resolving symlinks.
-            let raw = std::path::Path::new(&p);
-            if raw.is_absolute() {
-                raw.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-                    .join(raw)
+        match std::fs::canonicalize(&p) {
+            Ok(resolved) => Ok(make_path_instance(&resolved.to_string_lossy())),
+            Err(e) => {
+                if strict {
+                    // strict=True: propagate the OS error as FileNotFoundError.
+                    Err(PyError::from_io_error(&e, Some(&p)))
+                } else {
+                    // strict=False (default): build an absolute path without
+                    // resolving symlinks — matching CPython 3.12 behaviour.
+                    let raw = std::path::Path::new(&p);
+                    let abs = if raw.is_absolute() {
+                        raw.to_path_buf()
+                    } else {
+                        std::env::current_dir()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                            .join(raw)
+                    };
+                    Ok(make_path_instance(&abs.to_string_lossy()))
+                }
             }
-        });
-        Ok(make_path_instance(&resolved.to_string_lossy()))
+        }
     }
 
     // ── I/O (bytes) ───────────────────────────────────────────────────────────
@@ -1467,22 +1494,38 @@ fn glob_match(pat: &[u8], s: &[u8]) -> bool {
 }
 
 /// Check if byte `c` belongs to a character class spec `class` (the bytes
-/// between `[` and `]`).  Supports `a-z` ranges and literal characters.
+/// between `[` and `]`).  Supports `a-z` ranges, literal characters, and
+/// negation via a leading `!` (e.g. `[!a-z]`, `[!abc]`).  This matches
+/// CPython's `fnmatch` semantics: only `!` is the negation marker; `^` is
+/// treated as a literal character.
 fn char_class_matches(class: &[u8], c: u8) -> bool {
+    // Detect and strip a leading `!` negation character.  Only treat `!` as
+    // the negation marker when the class has at least one more byte after it;
+    // a bare `[!]` (class = b"!") is a degenerate case where the only element
+    // is the literal `!` — stripping it would leave an empty class that always
+    // returns true under negation, breaking CPython parity.
+    let (negated, class) = if class.len() > 1 && class[0] == b'!' {
+        (true, &class[1..])
+    } else {
+        (false, class)
+    };
+
     let mut i = 0;
+    let mut matched = false;
     while i < class.len() {
         if i + 2 < class.len() && class[i + 1] == b'-' {
             // Range: e.g. `a-z`.
             if c >= class[i] && c <= class[i + 2] {
-                return true;
+                matched = true;
             }
             i += 3;
         } else {
             if class[i] == c {
-                return true;
+                matched = true;
             }
             i += 1;
         }
     }
-    false
+
+    if negated { !matched } else { matched }
 }
