@@ -4844,8 +4844,8 @@ fn format_single_exc_line(value: &Value) -> String {
 /// invisible to Python code, mirroring CPython's refcount semantics where
 /// only Python-level references keep an object alive.
 ///
-/// Errors from `__del__` are silently swallowed (CPython prints a warning to
-/// stderr but does not propagate the exception to the caller).
+/// If `__del__` raises an exception, a CPython-format warning is printed to
+/// stderr but the exception is not propagated to the caller (issue #1797).
 pub(crate) fn call_del_if_last_binding(
     interp: &mut Interpreter,
     val: Value,
@@ -4896,11 +4896,22 @@ pub(crate) fn call_del_if_last_binding(
         }
     }
     // No other Python-visible binding — invoke __del__.
+    let class_name = del_rc.borrow().class.borrow().name.clone();
     let instance = Value::py_instance(Rc::clone(del_rc));
     drop(val); // release our reference before calling __del__
-    // Swallow errors — CPython prints a warning but does not propagate
-    // __del__ exceptions to the caller.
-    let _ = invoke_class_method(interp, method, instance, &[]);
+    // CPython prints a warning to stderr but does not propagate __del__
+    // exceptions to the caller (issue #1797).
+    if let Err(e) = invoke_class_method(interp, method, instance, &[]) {
+        eprintln!("Exception ignored in: <function {}.__del__>", class_name);
+        // For a Raised instance, format as "ClassName: msg" (CPython parity)
+        // using format_single_exc_line, which calls to_py_str() on the
+        // instance — matching CPython's `ValueError: oops` output.
+        // For other PyError variants, Display already formats as "ClassName: msg".
+        match &e {
+            PyError::Raised(v) => eprintln!("{}", format_single_exc_line(v)),
+            _ => eprintln!("{}", e),
+        }
+    }
 }
 
 #[cfg(test)]
