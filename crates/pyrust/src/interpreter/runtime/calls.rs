@@ -911,10 +911,11 @@ impl Interpreter {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
                         match method {
                             "__len__" => {
-                                if !args_vec.is_empty() || !kw.is_empty() {
+                                let extra = args_vec.len() + kw.len();
+                                if extra != 0 {
                                     Err(PyError::named(
                                         "TypeError",
-                                        "range.__len__() takes no arguments".to_string(),
+                                        format!("expected 0 arguments, got {extra}"),
                                     ))
                                 } else {
                                     use crate::value::range_len;
@@ -926,7 +927,7 @@ impl Interpreter {
                                     Err(PyError::named(
                                         "TypeError",
                                         format!(
-                                            "count() takes exactly one argument ({} given)",
+                                            "range.count() takes exactly one argument ({} given)",
                                             args_vec.len() + kw.len()
                                         ),
                                     ))
@@ -942,7 +943,7 @@ impl Interpreter {
                                     Err(PyError::named(
                                         "TypeError",
                                         format!(
-                                            "index() takes exactly one argument ({} given)",
+                                            "range.index() takes exactly one argument ({} given)",
                                             args_vec.len() + kw.len()
                                         ),
                                     ))

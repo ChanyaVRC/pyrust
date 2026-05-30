@@ -67,3 +67,23 @@ except ValueError as e:
 # count / index with bool (bool is subclass of int)
 print(range(0, 2).count(True))   # 1
 print(range(0, 2).index(False))  # 0
+
+# integer-valued float
+print(r.index(5.0))   # 2
+
+# arity errors carry the right prefix (CPython: "range.count()" / "range.index()")
+try:
+    r.count()
+except TypeError as e:
+    print(e)
+
+try:
+    r.index()
+except TypeError as e:
+    print(e)
+
+# __len__ arity: CPython says "expected 0 arguments, got N"
+try:
+    r.__len__(1)
+except TypeError as e:
+    print(e)
