@@ -29,6 +29,7 @@ BASE_BIN=""
 TOP=15
 CONFIG="$SCRIPT_DIR/bench.toml"
 PR_COMMENT_OUT=""
+MEMORY_COMMENT_OUT=""
 BENCHMARK_ACTION_OUT=""
 SVG_OUT=""
 MARKDOWN_OUT=""
@@ -194,6 +195,7 @@ REPORT_ARGS=(
 )
 [[ -n "$MEMORY_DIR" ]] && REPORT_ARGS+=(--memory-dir "$MEMORY_DIR")
 [[ -n "$PR_COMMENT_OUT"       ]] && REPORT_ARGS+=(--pr-comment-out       "$PR_COMMENT_OUT")
+[[ -n "$MEMORY_COMMENT_OUT"   ]] && REPORT_ARGS+=(--memory-comment-out   "$MEMORY_COMMENT_OUT")
 [[ -n "$BENCHMARK_ACTION_OUT" ]] && REPORT_ARGS+=(--benchmark-action-out "$BENCHMARK_ACTION_OUT")
 [[ -n "$SVG_OUT"              ]] && REPORT_ARGS+=(--svg-out              "$SVG_OUT")
 [[ -n "$MARKDOWN_OUT"         ]] && REPORT_ARGS+=(--markdown-out         "$MARKDOWN_OUT")

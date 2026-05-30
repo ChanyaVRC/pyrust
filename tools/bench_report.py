@@ -263,7 +263,8 @@ def _fmt_kb(kb: "int | None") -> str:
     return f"{kb} KB"
 
 
-def _summary_md(rows: list[ScriptResult], memory: "dict[str, dict] | None" = None) -> str:
+def _summary_md(rows: list[ScriptResult]) -> str:
+    """Timing-only PR comment. Memory is a separate comment."""
     lines: list[str] = []
     base_rows = [r for r in rows if r.has_base]
 
@@ -294,49 +295,6 @@ def _summary_md(rows: list[ScriptResult], memory: "dict[str, dict] | None" = Non
             )
         lines += ["", "</details>", "", "---", ""]
 
-    # ── Memory usage ──────────────────────────────────────────────────────────
-    if memory:
-        py_mems = [memory[r.rel]["py_kb"] for r in rows if r.rel in memory and memory[r.rel].get("py_kb") is not None]
-        rs_mems = [memory[r.rel]["rs_kb"] for r in rows if r.rel in memory and memory[r.rel].get("rs_kb") is not None]
-        py_med = sorted(py_mems)[len(py_mems) // 2] if py_mems else None
-        rs_med = sorted(rs_mems)[len(rs_mems) // 2] if rs_mems else None
-        lines += [
-            "### 🧠 Memory Usage (peak RSS)",
-            "",
-            f"| | Median peak RSS |",
-            "|---|---|",
-            f"| Python  | {_fmt_kb(py_med)} |",
-            f"| PyRust  | {_fmt_kb(rs_med)} |",
-            "",
-            f"<details><summary>All {len(rows)} scripts — peak memory</summary>",
-            "",
-        ]
-        has_base_mem = any(
-            memory.get(r.rel, {}).get("base_kb") is not None for r in rows
-        )
-        if has_base_mem:
-            lines += [
-                "| Script | Python | PyRust | Base |",
-                "|---|---:|---:|---:|",
-            ]
-            for r in rows:
-                m = memory.get(r.rel, {})
-                lines.append(
-                    f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))}"
-                    f" | {_fmt_kb(m.get('rs_kb'))} | {_fmt_kb(m.get('base_kb'))} |"
-                )
-        else:
-            lines += [
-                "| Script | Python | PyRust |",
-                "|---|---:|---:|",
-            ]
-            for r in rows:
-                m = memory.get(r.rel, {})
-                lines.append(
-                    f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))} | {_fmt_kb(m.get('rs_kb'))} |"
-                )
-        lines += ["", "</details>", "", "---", ""]
-
     # ── Speed: Python vs PyRust ───────────────────────────────────────────────
     total_py = sum(r.py_avg_ms for r in rows)
     total_rs = sum(r.rs_avg_ms for r in rows)
@@ -353,28 +311,62 @@ def _summary_md(rows: list[ScriptResult], memory: "dict[str, dict] | None" = Non
         "",
         f"<details><summary>All {len(rows)} scripts — timing</summary>",
         "",
+        "| Script | iters | Python (ms) | PyRust (ms) | Ratio |",
+        "|---|---:|---:|---:|---:|",
     ]
-    if memory:
-        lines += [
-            "| Script | iters | Python (ms) | PyRust (ms) | Ratio | py mem | rs mem |",
-            "|---|---:|---:|---:|---:|---:|---:|",
-        ]
+    for r in rows:
+        lines.append(
+            f"| `{r.rel}` | {r.cfg.iterations}"
+            f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x |"
+        )
+    lines += ["", "</details>"]
+    return "\n".join(lines) + "\n"
+
+
+def _memory_comment_md(rows: list[ScriptResult], memory: "dict[str, dict]") -> str:
+    """Standalone memory-usage comment (peak RSS per script)."""
+    py_mems = [memory[r.rel]["py_kb"] for r in rows
+               if r.rel in memory and isinstance(memory[r.rel].get("py_kb"), (int, float))]
+    rs_mems = [memory[r.rel]["rs_kb"] for r in rows
+               if r.rel in memory and isinstance(memory[r.rel].get("rs_kb"), (int, float))]
+    py_med = sorted(py_mems)[len(py_mems) // 2] if py_mems else None
+    rs_med = sorted(rs_mems)[len(rs_mems) // 2] if rs_mems else None
+    has_base = any(
+        isinstance(memory.get(r.rel, {}).get("base_kb"), (int, float)) for r in rows
+    )
+
+    lines: list[str] = [
+        "### 🧠 Memory Usage (peak RSS)",
+        "",
+        "| | Median peak RSS |",
+        "|---|---|",
+        f"| Python | {_fmt_kb(py_med)} |",
+        f"| PyRust | {_fmt_kb(rs_med)} |",
+    ]
+    if has_base:
+        base_mems = [memory[r.rel]["base_kb"] for r in rows
+                     if r.rel in memory and isinstance(memory[r.rel].get("base_kb"), (int, float))]
+        base_med = sorted(base_mems)[len(base_mems) // 2] if base_mems else None
+        lines.append(f"| Base   | {_fmt_kb(base_med)} |")
+    lines += [
+        "",
+        f"<details><summary>All {len(rows)} scripts — peak memory</summary>",
+        "",
+    ]
+    if has_base:
+        lines += ["| Script | Python | PyRust | Base |", "|---|---:|---:|---:|"]
         for r in rows:
             m = memory.get(r.rel, {})
             lines.append(
-                f"| `{r.rel}` | {r.cfg.iterations}"
-                f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x"
-                f" | {_fmt_kb(m.get('py_kb'))} | {_fmt_kb(m.get('rs_kb'))} |"
+                f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))}"
+                f" | {_fmt_kb(m.get('rs_kb'))} | {_fmt_kb(m.get('base_kb'))} |"
             )
     else:
-        lines += [
-            "| Script | iters | Python (ms) | PyRust (ms) | Ratio |",
-            "|---|---:|---:|---:|---:|",
-        ]
+        lines += ["| Script | Python | PyRust |", "|---|---:|---:|"]
         for r in rows:
+            m = memory.get(r.rel, {})
             lines.append(
-                f"| `{r.rel}` | {r.cfg.iterations}"
-                f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x |"
+                f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))} | {_fmt_kb(m.get('rs_kb'))} |"
             )
     lines += ["", "</details>"]
     return "\n".join(lines) + "\n"
@@ -399,10 +391,10 @@ def load_memory(memory_dir: str) -> "dict[str, dict] | None":
     return result or None
 
 
-def write_github_step_summary(rows: list[ScriptResult], memory: "dict[str, dict] | None" = None) -> None:
+def write_github_step_summary(rows: list[ScriptResult]) -> None:
     dest = os.environ.get("GITHUB_STEP_SUMMARY")
     if dest:
-        Path(dest).write_text(_summary_md(rows, memory), encoding="utf-8")
+        Path(dest).write_text(_summary_md(rows), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +556,8 @@ def main() -> int:
     p.add_argument("--memory-dir",           default="", metavar="DIR",
                    help="directory with per-script peak-RSS JSON files from bench.sh")
     p.add_argument("--pr-comment-out",       default="", metavar="PATH")
+    p.add_argument("--memory-comment-out",   default="", metavar="PATH",
+                   help="write memory-usage comment to PATH (requires --memory-dir)")
     p.add_argument("--benchmark-action-out", default="", metavar="PATH")
     p.add_argument("--svg-out",              default="", metavar="PATH")
     p.add_argument("--markdown-out",         default="", metavar="PATH")
@@ -590,10 +584,12 @@ def main() -> int:
     print_summary(rows)
     print_per_script(rows, args.top)
     print_pr_vs_base(rows, args.top)
-    write_github_step_summary(rows, memory)
+    write_github_step_summary(rows)
 
     if args.pr_comment_out:
-        Path(args.pr_comment_out).write_text(_summary_md(rows, memory), encoding="utf-8")
+        Path(args.pr_comment_out).write_text(_summary_md(rows), encoding="utf-8")
+    if args.memory_comment_out and memory:
+        Path(args.memory_comment_out).write_text(_memory_comment_md(rows, memory), encoding="utf-8")
     if args.benchmark_action_out:
         Path(args.benchmark_action_out).write_text(
             json.dumps(build_benchmark_action(rows), indent=2), encoding="utf-8"
