@@ -2995,8 +2995,10 @@ fn collect_local_names_from_block(
                     collect_local_names_from_block(&arm.body, names, global_names, nonlocal_names);
                 }
             }
-            // `type X = expr` binds `X` as a local name (PEP 695).
-            Stmt::TypeAlias { name, value } => {
+            // `type X[T] = expr` binds `X` as a local name (PEP 695).
+            // The type params (T) are NOT local names — they are temporaries
+            // visible only during RHS evaluation and do not escape to the scope.
+            Stmt::TypeAlias { name, value, .. } => {
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
@@ -3461,8 +3463,8 @@ fn check_global_nonlocal_order_block(
                 collect_var_refs_in_expr(expr, used, assigned);
             }
             Stmt::Break | Stmt::Continue | Stmt::Pass => {}
-            // `type X = expr` binds X; references in expr are "used".
-            Stmt::TypeAlias { name, value } => {
+            // `type X[T] = expr` binds X; references in expr are "used".
+            Stmt::TypeAlias { name, value, .. } => {
                 collect_var_refs_in_expr(value, used, assigned);
                 assigned.insert(name.clone());
             }

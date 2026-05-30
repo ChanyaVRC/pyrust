@@ -5164,25 +5164,115 @@ impl Compiler {
             Stmt::Match { subject, arms } => {
                 self.compile_match(subject, arms);
             }
-            Stmt::TypeAlias { name, value } => {
-                self.compile_type_alias(name, value);
+            Stmt::TypeAlias {
+                name,
+                type_params,
+                value,
+            } => {
+                self.compile_type_alias(name, type_params, value);
             }
         }
     }
 
     // ── Type alias (PEP 695) ──────────────────────────────────────────────────
 
-    fn compile_type_alias(&mut self, name: &str, value: &Expr) {
-        // Evaluate the RHS expression.
+    fn compile_type_alias(&mut self, name: &str, type_params: &[String], value: &Expr) {
+        // ── Step 1: create TypeVar objects for each type parameter ───────────
+        // Each TypeVar is stored to the current namespace so that the RHS
+        // expression can reference it by name.  After evaluating the RHS we
+        // delete them again so they do not leak into the enclosing scope.
+        let mut typevar_regs: Vec<Reg> = Vec::with_capacity(type_params.len());
+        for param in type_params {
+            let param_name_str = crate::value::Value::string(param.clone());
+            let param_const_idx = self.intern_const(param_name_str) as u16;
+            let tv_reg = self.alloc_temp();
+            self.emit(Insn::MakeTypeVar(tv_reg, param_const_idx));
+            // Bind the TypeVar to the param name so the RHS expression can
+            // load it via LoadGlobal.  We use StoreGlobal unconditionally
+            // (even if `param` happens to be in local_index) because DeleteName
+            // removes from env.values, and StoreGlobal is the only instruction
+            // that writes there.  compile_store_name would use Move+SyncModuleGlobal
+            // for names in local_index, which writes only to a register and
+            // module_globals_dict — neither of which DeleteName removes from.
+            let param_name_idx = self.intern_name(param);
+            self.emit(Insn::StoreGlobal(param_name_idx, tv_reg));
+            typevar_regs.push(tv_reg);
+        }
+
+        // ── Step 2: build the __type_params__ tuple ──────────────────────────
+        // BuildTuple(dst, base, n) reads R[base..base+n].  The TypeVar regs are
+        // guaranteed to be contiguous from alloc_temp calls above *only* if no
+        // other allocation happened in between; compile_store_name may emit
+        // SyncModuleGlobal which doesn't allocate regs, so they stay contiguous.
+        // However to be safe we copy them to a fresh contiguous block.
+        let params_reg = if type_params.is_empty() {
+            // Empty tuple: use a literal empty tuple constant.
+            let empty_tuple = crate::value::Value::tuple(vec![]);
+            let const_idx = self.intern_const(empty_tuple) as u16;
+            let r = self.alloc_temp();
+            self.emit(Insn::LoadConst(r, const_idx));
+            r
+        } else {
+            let base = self.alloc_temp();
+            // We already allocated typevar_regs[0] as a temp.  If the first
+            // TypeVar reg equals `base` we can reuse the block; otherwise we
+            // need to copy.  In practice alloc_temp increments sequentially, so
+            // after alloc_temp() for `base` the next regs would conflict.
+            // The simplest safe approach: copy all TypeVar values into a fresh
+            // contiguous range.
+            let n = type_params.len() as u8;
+            // base is the first slot of the contiguous block we'll pass to
+            // BuildTuple.  Allocate n-1 more slots after it.
+            for _ in 1..n as usize {
+                self.alloc_temp();
+            }
+            // Copy each TypeVar into the contiguous range.
+            for (i, &tv_reg) in typevar_regs.iter().enumerate() {
+                let slot = base + i as Reg;
+                if slot != tv_reg {
+                    self.emit(Insn::Move(slot, tv_reg));
+                }
+            }
+            let tuple_dst = self.alloc_temp();
+            self.emit(Insn::BuildTuple(tuple_dst, base, n));
+            // Free the contiguous block (but not tuple_dst which we return).
+            for i in 0..n as usize {
+                self.free_temp(base + i as Reg);
+            }
+            tuple_dst
+        };
+        // Free the individual TypeVar regs (the tuple holds the values via clone).
+        for tv_reg in &typevar_regs {
+            self.free_temp(*tv_reg);
+        }
+
+        // ── Step 3: evaluate the RHS ─────────────────────────────────────────
+        // TypeVar names are now bound in the current namespace, so LoadGlobal
+        // for e.g. `T` will find the TypeVar object.
         let val_reg = self.compile_expr(value);
-        // Intern the alias name as a string constant.
+
+        // ── Step 4: remove TypeVar bindings from the namespace ───────────────
+        // Mirrors CPython's hidden annotation scope: type params must NOT be
+        // visible in the enclosing scope after the type alias statement.
+        for param in type_params {
+            let name_idx = self.intern_name(param);
+            self.emit(Insn::DeleteName(name_idx));
+        }
+
+        // ── Step 5: intern the alias name and emit MakeTypeAlias ────────────
         let name_str = crate::value::Value::string(name.to_string());
         let name_idx = self.intern_const(name_str);
-        // Allocate a destination register and emit MakeTypeAlias.
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeTypeAlias(dst, name_idx as u16, val_reg));
+        self.emit(Insn::MakeTypeAlias(
+            dst,
+            name_idx as u16,
+            val_reg,
+            params_reg,
+        ));
         self.free_temp(val_reg);
-        // Store the result under `name` in the current namespace.
+        self.free_temp(params_reg);
+
+        // ── Step 6: store the alias under `name` ─────────────────────────────
         let target = crate::ast::AssignTarget::Name(name.to_string());
         if let Some(reg) = self.local_reg(name) {
             if reg != dst {

@@ -4633,7 +4633,20 @@ impl Interpreter {
                 }
 
                 // ── PEP 695 type alias ───────────────────────────────────
-                Insn::MakeTypeAlias(dst, name_idx, value_reg) => {
+                Insn::MakeTypeVar(dst, name_idx) => {
+                    let name_val = pool_get!(code.consts, *name_idx, "const");
+                    let name_str = match name_val.kind() {
+                        pyrust_core::ValueKind::Str(s) => s.to_string(),
+                        _ => {
+                            vm_try!(Err(PyError::Runtime(
+                                "MakeTypeVar: name must be a string constant".to_string(),
+                            )));
+                            unreachable!()
+                        }
+                    };
+                    regs[*dst as usize] = make_typevar_instance(name_str);
+                }
+                Insn::MakeTypeAlias(dst, name_idx, value_reg, params_reg) => {
                     let name_val = pool_get!(code.consts, *name_idx, "const");
                     let name_str = match name_val.kind() {
                         pyrust_core::ValueKind::Str(s) => s.to_string(),
@@ -4645,7 +4658,8 @@ impl Interpreter {
                         }
                     };
                     let value_val = vm_try!(vm_read(&regs, *value_reg, num_locals)).clone();
-                    let inst = make_type_alias_instance(name_str, value_val);
+                    let params_val = vm_try!(vm_read(&regs, *params_reg, num_locals)).clone();
+                    let inst = make_type_alias_instance(name_str, value_val, params_val);
                     regs[*dst as usize] = inst;
                 }
 
@@ -6280,7 +6294,7 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
     PyError::named("RuntimeError", "generator raised StopIteration")
 }
 
-// ── PEP 695 TypeAliasType support ────────────────────────────────────────────
+// ── PEP 695 TypeAliasType / TypeVar support ──────────────────────────────────
 
 thread_local! {
     /// Class singleton for `TypeAliasType` objects created by `type X = ...`.
@@ -6304,16 +6318,56 @@ thread_local! {
             slots: None,
         }))
     };
+
+    /// Class singleton for `TypeVar` objects created by generic type params.
+    static TYPEVAR_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("builtins.TypeVar.__repr__"),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: "TypeVar".to_string(),
+            qualname: "TypeVar".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs,
+            mutation_version: Cell::new(0),
+            subclasses: RefCell::new(vec![]),
+            metatype: None,
+            slots: None,
+        }))
+    };
 }
 
-/// Construct a `TypeAliasType` `PyInstance` with `__name__` and `__value__`
-/// attributes, matching the observable behaviour of CPython's
+/// Construct a `TypeVar` `PyInstance` with `__name__`, `__constraints__`, and
+/// `__bound__` attributes, matching the observable surface of CPython's
+/// `typing.TypeVar` as created by PEP 695 type parameter syntax.
+pub(crate) fn make_typevar_instance(name: String) -> Value {
+    TYPEVAR_CLASS.with(|cls| {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert("__name__".to_string(), Value::string(name));
+        attrs.insert(
+            "__constraints__".to_string(),
+            Value::tuple(vec![]),
+        );
+        attrs.insert("__bound__".to_string(), Value::none());
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(cls),
+            attrs,
+        })))
+    })
+}
+
+/// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`, and
+/// `__type_params__` attributes, matching the observable behaviour of CPython's
 /// `typing.TypeAliasType`.
-pub(crate) fn make_type_alias_instance(name: String, value: Value) -> Value {
+pub(crate) fn make_type_alias_instance(name: String, value: Value, type_params: Value) -> Value {
     TYPE_ALIAS_CLASS.with(|cls| {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert("__name__".to_string(), Value::string(name));
         attrs.insert("__value__".to_string(), value);
+        attrs.insert("__type_params__".to_string(), type_params);
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,
