@@ -994,6 +994,17 @@ impl Interpreter {
                     },
                     _ => {}
                 }
+                // Range read-only properties: start, stop, step (issue #1807).
+                // These are stored directly on the value; return them as plain ints.
+                // count / index / __len__ fall through to builtin_has_method below.
+                if let ValueKind::Range { start, stop, step } = target.kind() {
+                    match name {
+                        "start" => return Ok(Value::int(start)),
+                        "stop" => return Ok(Value::int(stop)),
+                        "step" => return Ok(Value::int(step)),
+                        _ => {}
+                    }
+                }
                 // `BuiltinObject` types can expose arbitrary attributes via
                 // `BuiltinTypeOps::getattr` (e.g. `GenericAlias.__origin__`,
                 // `GenericAlias.__args__`).  Probe before the generic
@@ -1865,6 +1876,21 @@ impl Interpreter {
                 let module = Rc::clone(module);
                 module.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
+            }
+            ValueKind::Range { .. } => {
+                // Range objects are immutable.  start/stop/step are read-only
+                // C-level slots in CPython; the error message is "readonly attribute".
+                // Any other attribute gives "has no attribute" (issue #1807).
+                match name {
+                    "start" | "stop" | "step" => Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    )),
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'range' object has no attribute '{name}'"),
+                    )),
+                }
             }
             ValueKind::Generator(state_rc) => {
                 // CPython 3.12 allows setting __name__ and __qualname__ on
@@ -3100,7 +3126,9 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
         ValueKind::Dict(_) => pyrust_builtins::dict::has_method(name),
         ValueKind::Set(_) => pyrust_builtins::set::has_method(name),
-        ValueKind::Range { .. } => name == "__iter__",
+        ValueKind::Range { .. } => {
+            matches!(name, "__iter__" | "__len__" | "count" | "index")
+        }
         ValueKind::BuiltinObject { ops, .. } => ops.has_method(name),
         _ => false,
     }
