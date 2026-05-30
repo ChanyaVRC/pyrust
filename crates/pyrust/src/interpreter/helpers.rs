@@ -2967,7 +2967,7 @@ fn collect_local_names_from_block(
                     collect_walrus_targets_in_expr(m, names, global_names, nonlocal_names);
                 }
             }
-            Stmt::With { items, body } => {
+            Stmt::With { items, body, .. } => {
                 for (_, alias) in items {
                     if let Some(target) = alias {
                         collect_assign_target_names(target, names, global_names, nonlocal_names);
@@ -2978,6 +2978,7 @@ fn collect_local_names_from_block(
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (cond, branch) in branches {
                     collect_walrus_targets_in_expr(cond, names, global_names, nonlocal_names);
@@ -2991,6 +2992,7 @@ fn collect_local_names_from_block(
                 cond,
                 body,
                 else_branch,
+                ..
             } => {
                 collect_walrus_targets_in_expr(cond, names, global_names, nonlocal_names);
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
@@ -3003,6 +3005,7 @@ fn collect_local_names_from_block(
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
                 for handler in handlers {
@@ -3029,6 +3032,7 @@ fn collect_local_names_from_block(
                 iter,
                 body,
                 else_branch,
+                ..
             } => {
                 collect_walrus_targets_in_expr(iter, names, global_names, nonlocal_names);
                 collect_assign_target_names(target, names, global_names, nonlocal_names);
@@ -3145,7 +3149,7 @@ fn collect_annotation_target_names_from_block(body: &[Stmt], names: &mut HashSet
             }
             // Do not descend into nested function/class scopes.
             Stmt::Def { .. } | Stmt::Class { .. } => {}
-            Stmt::If { branches, else_branch } => {
+            Stmt::If { branches, else_branch, .. } => {
                 for (_, branch) in branches {
                     collect_annotation_target_names_from_block(branch, names);
                 }
@@ -3165,7 +3169,7 @@ fn collect_annotation_target_names_from_block(body: &[Stmt], names: &mut HashSet
                     collect_annotation_target_names_from_block(branch, names);
                 }
             }
-            Stmt::Try { body, handlers, else_branch, finally_branch } => {
+            Stmt::Try { body, handlers, else_branch, finally_branch, .. } => {
                 collect_annotation_target_names_from_block(body, names);
                 for handler in handlers {
                     collect_annotation_target_names_from_block(&handler.body, names);
@@ -3207,7 +3211,7 @@ fn collect_declared_names_from_block(
             continue;
         }
         match stmt {
-            Stmt::If { branches, else_branch } => {
+            Stmt::If { branches, else_branch, .. } => {
                 for (_, branch) in branches {
                     collect_declared_names_from_block(branch, names, pick);
                 }
@@ -3227,7 +3231,7 @@ fn collect_declared_names_from_block(
                     collect_declared_names_from_block(branch, names, pick);
                 }
             }
-            Stmt::Try { body, handlers, else_branch, finally_branch } => {
+            Stmt::Try { body, handlers, else_branch, finally_branch, .. } => {
                 collect_declared_names_from_block(body, names, pick);
                 for handler in handlers {
                     collect_declared_names_from_block(&handler.body, names, pick);
@@ -3363,7 +3367,7 @@ fn check_global_nonlocal_order_block(
                 }
                 assigned.insert(name.clone());
             }
-            Stmt::For { target, iter, body, else_branch } => {
+            Stmt::For { target, iter, body, else_branch, .. } => {
                 collect_var_refs_in_expr(iter, used, assigned);
                 collect_assign_target_bound_names(target, assigned);
                 if let Some(msg) = check_global_nonlocal_order_block(body, assigned, used) {
@@ -3377,7 +3381,7 @@ fn check_global_nonlocal_order_block(
                     }
                 }
             }
-            Stmt::With { items, body } => {
+            Stmt::With { items, body, .. } => {
                 for (expr, alias) in items {
                     collect_var_refs_in_expr(expr, used, assigned);
                     if let Some(target) = alias {
@@ -3395,7 +3399,7 @@ fn check_global_nonlocal_order_block(
                 collect_var_refs_in_expr(e, used, assigned);
             }
             Stmt::Return(None) => {}
-            Stmt::If { branches, else_branch } => {
+            Stmt::If { branches, else_branch, .. } => {
                 for (cond, branch) in branches {
                     collect_var_refs_in_expr(cond, used, assigned);
                     if let Some(msg) =
@@ -3412,7 +3416,7 @@ fn check_global_nonlocal_order_block(
                     }
                 }
             }
-            Stmt::While { cond, body, else_branch } => {
+            Stmt::While { cond, body, else_branch, .. } => {
                 collect_var_refs_in_expr(cond, used, assigned);
                 if let Some(msg) = check_global_nonlocal_order_block(body, assigned, used) {
                     return Some(msg);
@@ -3425,7 +3429,7 @@ fn check_global_nonlocal_order_block(
                     }
                 }
             }
-            Stmt::Try { body, handlers, else_branch, finally_branch } => {
+            Stmt::Try { body, handlers, else_branch, finally_branch, .. } => {
                 if let Some(msg) = check_global_nonlocal_order_block(body, assigned, used) {
                     return Some(msg);
                 }
@@ -4255,7 +4259,7 @@ fn is_pure_stmt(
         }
 
         // Control flow: recurse into sub-blocks.
-        Stmt::If { branches, else_branch } => {
+        Stmt::If { branches, else_branch, .. } => {
             branches
                 .iter()
                 .all(|(cond, blk)| is_pure_expr(cond, pure_fns, local_names) && is_pure_body(blk, pure_fns, local_names))
@@ -4263,7 +4267,7 @@ fn is_pure_stmt(
                     .as_deref()
                     .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
         }
-        Stmt::While { cond, body, else_branch } => {
+        Stmt::While { cond, body, else_branch, .. } => {
             is_pure_expr(cond, pure_fns, local_names)
                 && is_pure_body(body, pure_fns, local_names)
                 && else_branch
@@ -4277,7 +4281,7 @@ fn is_pure_stmt(
                     .as_deref()
                     .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
         }
-        Stmt::Try { body, handlers, else_branch, finally_branch } => {
+        Stmt::Try { body, handlers, else_branch, finally_branch, .. } => {
             is_pure_body(body, pure_fns, local_names)
                 && handlers.iter().all(|h| is_pure_body(&h.body, pure_fns, local_names))
                 && else_branch
