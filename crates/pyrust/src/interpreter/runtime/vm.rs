@@ -6081,8 +6081,10 @@ impl Interpreter {
 /// is not consulted.  This matches CPython's `PyEval_EvalCode` behaviour: a
 /// caller that passes `{"__builtins__": {}}` gets an empty builtin namespace.
 ///
-/// When `__builtins__` is a module, absent, or any other non-dict value, the
-/// function delegates to `resolve_builtin()` (the normal execution path).
+/// When `__builtins__` is a module or absent, the function delegates to
+/// `resolve_builtin()` (the normal execution path).  When `__builtins__` is
+/// any other non-dict, non-module value, raises `TypeError` matching
+/// CPython 3.12's behaviour when it tries to subscript the value.
 ///
 /// Isolated into a `#[cold] #[inline(never)]` function so that the expanded
 /// match body does not inflate the I-cache footprint of the `LoadGlobal`
