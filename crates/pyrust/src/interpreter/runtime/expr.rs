@@ -5027,6 +5027,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "bool" | "bytearray" | "bytes" | "complex" | "dict" | "float" | "frozenset"
             | "int"
             | "list"
+            | "range"
             | "set"
             | "str"
             | "tuple"

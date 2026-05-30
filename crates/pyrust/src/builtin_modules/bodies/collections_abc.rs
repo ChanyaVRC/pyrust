@@ -579,7 +579,7 @@ fn make_abc_module() -> Value {
 fn register_abc_extra_bases() {
     use crate::interpreter::{
         function_type_singleton, method_type_singleton, object_class_singleton,
-        primitive_class_by_name, type_class_singleton,
+        primitive_class_by_name, range_class_singleton, type_class_singleton,
     };
 
     // Helper: add `abc` to `prim`'s extra_bases, and add `prim` to
@@ -682,9 +682,17 @@ fn register_abc_extra_bases() {
     let bool_cls        = prim!("bool");
     let none_cls        = prim!("NoneType");
 
+    // ── Singleton class objects ──────────────────────────────────────────────
+    let fn_type   = function_type_singleton();
+    let meth_type = method_type_singleton();
+    let type_cls  = type_class_singleton();
+    let range_cls = range_class_singleton();
+    let _obj_cls  = object_class_singleton(); // ensure singleton initialised
+
     // ── Sequence ────────────────────────────────────────────────────────────
-    // list, tuple, str, bytes, bytearray are Sequences.
-    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &bytearray_cls] {
+    // list, tuple, str, bytes, bytearray, range are Sequences.
+    // CPython: Sequence.register(range) in Lib/_collections_abc.py (issue #1800).
+    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &bytearray_cls, &range_cls] {
         link(cls, &sequence);
     }
 
@@ -695,10 +703,13 @@ fn register_abc_extra_bases() {
     }
 
     // ── Reversible ──────────────────────────────────────────────────────────
-    // list, tuple, str, bytes, dict, bytearray
+    // list, tuple, str, bytes, dict, bytearray, range
     // (not set, frozenset in CPython).
     // dict became Reversible in Python 3.8 (dict keys preserve insertion order).
-    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &dict_cls, &bytearray_cls] {
+    // CPython: Reversible.register(range) in Lib/_collections_abc.py (issue #1800).
+    for cls in [
+        &list_cls, &tuple_cls, &str_cls, &bytes_cls, &dict_cls, &bytearray_cls, &range_cls,
+    ] {
         link(cls, &reversible);
     }
 
@@ -721,49 +732,50 @@ fn register_abc_extra_bases() {
     link(&dict_cls, &mut_mapping);
 
     // ── Container ───────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset, bytearray.
+    // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
     for cls in [
         &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls,
+        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls, &range_cls,
     ] {
         link(cls, &container);
     }
 
     // ── Sized ───────────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset, bytearray.
+    // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
     for cls in [
         &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls,
+        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls, &range_cls,
     ] {
         link(cls, &sized);
     }
 
     // ── Iterable ────────────────────────────────────────────────────────────
-    // str, bytes, list, tuple, dict, set, frozenset, bytearray.
+    // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
     for cls in [
         &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls,
+        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls, &range_cls,
     ] {
         link(cls, &iterable);
     }
 
     // ── Hashable ────────────────────────────────────────────────────────────
-    // int, float, complex, str, bytes, tuple, frozenset, bool, NoneType.
+    // int, float, complex, str, bytes, tuple, frozenset, bool, NoneType, range.
+    // Also: user-defined functions and bound methods (issue #1793) — they are
+    // hashable by identity in CPython.  The structural hook already returns
+    // Some(true) for instances, but `issubclass(type(f), Hashable)` goes through
+    // the extra_bases MRO path, so we must link the function/method class here.
     // (list, dict, set are NOT hashable)
     for cls in [
         &int_cls, &float_cls, &complex_cls, &str_cls, &bytes_cls,
         &tuple_cls, &frozenset_cls, &bool_cls, &none_cls,
+        &range_cls, &fn_type, &meth_type,
     ] {
         link(cls, &hashable);
     }
 
     // ── Callable ────────────────────────────────────────────────────────────
     // function, method, type.  BuiltinFunction and BuiltinObject bound methods
-    // are now handled via __instancecheck__ using the primitive protocol table.
-    let fn_type  = function_type_singleton();
-    let meth_type = method_type_singleton();
-    let type_cls = type_class_singleton();
-    let _obj_cls = object_class_singleton(); // ensure singleton initialised
+    // are handled via __instancecheck__ using the primitive protocol table.
     for cls in [&fn_type, &meth_type, &type_cls] {
         link(cls, &callable);
     }

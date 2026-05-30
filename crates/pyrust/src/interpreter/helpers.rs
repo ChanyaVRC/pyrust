@@ -383,6 +383,27 @@ thread_local! {
         metatype: None,
     }));
 
+    /// Per-thread `PyClass` singleton for the `range` type.  In CPython,
+    /// `range` is a proper class (`type(range(5)) is range`), not a builtin
+    /// function.  This singleton lets `type(range(5))` return a real `PyClass`
+    /// and enables `issubclass(range, Sequence)` via `extra_bases` registration
+    /// in `register_abc_extra_bases`.  Issues #1793, #1800.
+    static RANGE_CLASS: Rc<RefCell<PyClass>> = {
+        let obj = OBJECT_CLASS.with(|c| Rc::clone(c));
+        let cls = Rc::new(RefCell::new(PyClass {
+            name: "range".to_string(),
+            qualname: "range".to_string(),
+            base: Some(Rc::clone(&obj)),
+            extra_bases: vec![],
+            attrs: IndexMap::new(),
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+        }));
+        obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
+        cls
+    };
+
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
     /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
     /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
@@ -448,6 +469,16 @@ thread_local! {
         TYPE_CLASS.with(|t| {
             if let Some(dispatch) = crate::builtin_registry::lookup("type") {
                 cell.borrow_mut().insert(Rc::as_ptr(t), dispatch);
+            }
+        });
+        // Issues #1793, #1800: `range` is a proper class in CPython, so
+        // `range(1, 10)` is a constructor call on the range class.  Register
+        // it so `call_function_expanded`'s PyClass arm dispatches to the
+        // existing "range" registry fn instead of falling through to
+        // `call_class_expanded` which would allocate a bogus PyInstance.
+        RANGE_CLASS.with(|r| {
+            if let Some(dispatch) = crate::builtin_registry::lookup("range") {
+                cell.borrow_mut().insert(Rc::as_ptr(r), dispatch);
             }
         });
         cell
@@ -839,11 +870,24 @@ pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
     FUNCTION_TYPE.with(|c| Rc::clone(c))
 }
 
-/// Look up the per-primitive `PyClass` singleton for one of the 11 migrated
+/// Returns the singleton `range` class.  In CPython, `range` is a proper
+/// type (`type(range(5)) is range`), not a builtin function.  This singleton
+/// is registered in `PRIMITIVE_CLASS_DISPATCH` so that calling
+/// `range(start, stop)` still dispatches to the existing registry fn, and
+/// is linked into ABC `extra_bases` so `issubclass(range, Sequence)` works.
+/// Issues #1793, #1800.
+pub(crate) fn range_class_singleton() -> Rc<RefCell<PyClass>> {
+    RANGE_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Look up the per-primitive `PyClass` singleton for one of the migrated
 /// primitive type names (`int`, `str`, `list`, …).  Returns `None` for any
 /// other name — callers fall through to the legacy `BuiltinFunction(name)`
 /// path.  See [`PRIMITIVE_CLASSES`].
 pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    if name == "range" {
+        return Some(RANGE_CLASS.with(Rc::clone));
+    }
     PRIMITIVE_CLASSES.with(|c| {
         Some(Rc::clone(match name {
             "bool" => &c.bool_class,
@@ -867,10 +911,10 @@ pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
     })
 }
 
-/// Return the `PyClass` that `type(v)` should yield for any of the 11
-/// migrated primitive types.  Returns `None` for variants that aren't
-/// part of this migration (functions, modules, instances, …) — the
-/// caller falls back to its existing per-variant logic.
+/// Return the `PyClass` that `type(v)` should yield for primitive types.
+/// Returns `None` for variants that aren't part of this migration (functions,
+/// modules, instances, …) — the caller falls back to its existing per-variant
+/// logic.
 pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>>> {
     let name: &'static str = match v.kind() {
         ValueKind::Bool(_) => "bool",
@@ -886,6 +930,7 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
         ValueKind::None => "NoneType",
         ValueKind::NotImplemented => "NotImplementedType",
         ValueKind::Ellipsis => "ellipsis",
+        ValueKind::Range { .. } => return Some(RANGE_CLASS.with(Rc::clone)),
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "bytearray" => "bytearray",
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
         ValueKind::BuiltinObject { ops, .. }
@@ -1063,6 +1108,12 @@ pub(crate) fn non_subclassable_builtin_name(
     }
     if FUNCTION_TYPE.with(|f| ptr == Rc::as_ptr(f)) {
         return Some("function");
+    }
+    // Issues #1793, #1800: RANGE_CLASS is a proper PyClass singleton so that
+    // `issubclass(range, Sequence)` works, but `range` is not subclassable in
+    // CPython (`TypeError: type 'range' is not an acceptable base type`).
+    if RANGE_CLASS.with(|r| ptr == Rc::as_ptr(r)) {
+        return Some("range");
     }
     PRIMITIVE_CLASSES.with(|c| {
         if ptr == Rc::as_ptr(&c.none_class) {
