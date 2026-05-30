@@ -353,12 +353,12 @@ impl Interpreter {
     /// Converts lexer/parse errors into `SyntaxError` exceptions.
     pub(crate) fn parse_source_to_stmts(source: &str) -> Result<Vec<crate::ast::Stmt>> {
         let tokens = crate::lexer::Lexer::new(source)
-            .map_err(|e| PyError::named("SyntaxError", e.to_string()))?
+            .map_err(|e| PyError::named("SyntaxError", lex_parse_message(e)))?
             .into_tokens();
         let mut parser = crate::parser::Parser::new(tokens);
         parser
             .parse_program()
-            .map_err(|e| PyError::named("SyntaxError", e.to_string()))
+            .map_err(|e| PyError::named("SyntaxError", lex_parse_message(e)))
     }
 
     /// Execute a source string as statements, optionally in an explicit
@@ -820,5 +820,16 @@ impl Interpreter {
             }
         }
         Ok(exec_env)
+    }
+}
+
+/// Extract the raw message from a `PyError::Lex` or `PyError::Parse` error,
+/// stripping the `"Lex error: "` / `"Parse error: "` prefixes that `Display`
+/// would add.  Used by `parse_source_to_stmts` so that lex/parse failures
+/// raised as `SyntaxError` carry the same message text as CPython.
+fn lex_parse_message(e: PyError) -> String {
+    match e {
+        PyError::Lex(s) | PyError::Parse(s) => s,
+        other => other.to_string(),
     }
 }
