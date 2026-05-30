@@ -765,6 +765,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 
@@ -783,6 +784,7 @@ thread_local! {
                 mutation_version: std::cell::Cell::new(0),
                 subclasses: std::cell::RefCell::new(vec![]),
                 metatype: None,
+                slots: None,
             }));
             path_class.borrow().subclasses.borrow_mut().push(Rc::downgrade(&posix));
             posix

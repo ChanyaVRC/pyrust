@@ -4452,6 +4452,57 @@ impl Interpreter {
                             unreachable!()
                         }
                     }
+                    // Issue #1106: extract `__slots__` from the class attrs and
+                    // store the allowed slot names on the class so that
+                    // `assign_attr` can reject writes to undeclared attributes.
+                    // CPython accepts a string, iterable of strings, or tuple/list.
+                    // We extract before building PyClass so we can also remove the
+                    // `__dict__` sentinel that MakeClass would otherwise add
+                    // (instances of slotted classes have no `__dict__` in CPython).
+                    let slots: Option<indexmap::IndexSet<String>> =
+                        if let Some(slots_val) = attrs.get("__slots__") {
+                            let slot_names: Vec<String> = match slots_val.kind() {
+                                ValueKind::Str(s) => vec![s.to_string()],
+                                ValueKind::Tuple(items) => items
+                                    .iter()
+                                    .filter_map(|v| {
+                                        if let ValueKind::Str(s) = v.kind() {
+                                            Some(s.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect(),
+                                ValueKind::List(items) => items
+                                    .iter()
+                                    .filter_map(|v| {
+                                        if let ValueKind::Str(s) = v.kind() {
+                                            Some(s.to_string())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .collect(),
+                                _ => vec![],
+                            };
+                            // If `__dict__` is explicitly listed in __slots__, instances
+                            // get a __dict__ (CPython allows this).  We detect this below
+                            // when deciding whether to insert the __dict__ sentinel.
+                            let set: indexmap::IndexSet<String> =
+                                slot_names.into_iter().collect();
+                            Some(set)
+                        } else {
+                            None
+                        };
+                    // Remove the __dict__/__weakref__ sentinels when __slots__ is
+                    // declared and `__dict__` was not explicitly listed as a slot.
+                    // MakeClass would otherwise add them unconditionally (line ~4376).
+                    // We do this by overriding what was inserted above.
+                    if let Some(ref slot_set) = slots {
+                        if !slot_set.contains("__dict__") {
+                            attrs.insert("__dict__".to_string(), Value::none());
+                        }
+                    }
                     let class = Rc::new(RefCell::new(PyClass {
                         name: class_name,
                         qualname,
@@ -4461,6 +4512,7 @@ impl Interpreter {
                         mutation_version: std::cell::Cell::new(0),
                         subclasses: std::cell::RefCell::new(vec![]),
                         metatype: None,
+                        slots,
                     }));
                     // Issue #1233: validate C3 MRO at class construction time so
                     // that inconsistent base lists raise TypeError immediately,
@@ -6249,6 +6301,7 @@ thread_local! {
             mutation_version: Cell::new(0),
             subclasses: RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 }

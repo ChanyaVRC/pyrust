@@ -292,6 +292,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }))
     };
 
@@ -346,6 +347,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
@@ -365,6 +367,7 @@ thread_local! {
         mutation_version: std::cell::Cell::new(0),
         subclasses: std::cell::RefCell::new(vec![]),
         metatype: None,
+        slots: None,
     }));
 
     /// Per-thread `PyClass` singleton for the `function` type.  In CPython,
@@ -381,6 +384,7 @@ thread_local! {
         mutation_version: std::cell::Cell::new(0),
         subclasses: std::cell::RefCell::new(vec![]),
         metatype: None,
+        slots: None,
     }));
 
     /// Per-thread `PyClass` singleton for the `range` type.  In CPython,
@@ -399,6 +403,7 @@ thread_local! {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
@@ -541,6 +546,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
@@ -1577,6 +1583,35 @@ pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str
     extra_bases.iter().any(|b| class_chain_contains_name(b, name))
 }
 
+/// Return `true` if any class in the MRO of `class` (including `class`
+/// itself, excluding the implicit `object` root) has `slots: None`.
+///
+/// CPython rule: `__slots__` only prevents instance `__dict__` creation when
+/// *every* class in the MRO (between the leaf class and `object`) declares
+/// `__slots__`.  If any ancestor has no `__slots__`, it contributes a
+/// `__dict__` and slot enforcement is bypassed.  This covers both:
+/// - `class Child(SlottedParent): pass` — Child has `slots: None`
+/// - `class GrandChild(Child): __slots__ = ('x',)` — Child has `slots: None`
+pub(crate) fn mro_has_unslotted_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
+    // Stop at `object` (no explicit base = treated as object).
+    let (slots, base, extra_bases) = {
+        let borrowed = class.borrow();
+        (borrowed.slots.clone(), borrowed.base.clone(), borrowed.extra_bases.clone())
+    };
+    if slots.is_none() {
+        return true;
+    }
+    if let Some(ref b) = base {
+        if !Rc::ptr_eq(b, &object_class_singleton()) && mro_has_unslotted_ancestor(b) {
+            return true;
+        }
+    }
+    extra_bases
+        .iter()
+        .filter(|b| !Rc::ptr_eq(b, &object_class_singleton()))
+        .any(mro_has_unslotted_ancestor)
+}
+
 /// Return the errno-specific OSError subclass `Rc` for a given errno value,
 /// mirroring CPython 3.12's `_Py_errnomap` table in `Objects/exceptions.c`.
 /// Returns `None` when the errno has no mapped subclass (plain `OSError` is
@@ -2058,6 +2093,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
             metatype: None,
+            slots: None,
         }));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));

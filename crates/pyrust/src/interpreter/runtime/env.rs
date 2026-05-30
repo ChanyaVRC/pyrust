@@ -1406,6 +1406,31 @@ impl Interpreter {
                 _ => {}
             }
         }
+        // Issue #1106: if the class declares `__slots__`, only allow assignment
+        // to names in the slot set.  CPython raises AttributeError for names not
+        // listed in `__slots__` (when the class has no __dict__ slot).
+        // Skip enforcement when `__dict__` is itself one of the declared slots —
+        // that allows instances to have arbitrary attributes (CPython behaviour).
+        // Also skip when any ancestor class in the MRO has no `__slots__`:
+        // a single unslotted ancestor reintroduces `__dict__` for all subclasses
+        // (CPython rule).  This covers both non-slotted intermediate classes and
+        // exception bases (BaseException has tp_dictoffset in CPython, mirrored
+        // here by slots: None on the built-in exception classes).
+        {
+            let slots_opt = class.borrow().slots.clone();
+            if let Some(ref slot_set) = slots_opt {
+                if !slot_set.contains("__dict__")
+                    && !slot_set.contains(name)
+                    && !mro_has_unslotted_ancestor(&class)
+                {
+                    let class_name = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("'{class_name}' object has no attribute '{name}'"),
+                    ));
+                }
+            }
+        }
         instance.borrow_mut().attrs.insert(name.to_string(), value);
         Ok(())
     }
@@ -1561,6 +1586,28 @@ impl Interpreter {
                             }
                         }
                         _ => {}
+                    }
+                }
+                // Issue #1106: if the class declares `__slots__`, only allow
+                // assignment to names in the slot set.  When `__dict__` is
+                // explicitly listed as a slot, arbitrary attribute assignment
+                // is allowed (CPython behaviour).
+                // Also skip when any ancestor class in the MRO has no `__slots__`:
+                // a single unslotted ancestor reintroduces `__dict__` for all
+                // subclasses (CPython rule).
+                {
+                    let slots_opt = class.borrow().slots.clone();
+                    if let Some(ref slot_set) = slots_opt {
+                        if !slot_set.contains("__dict__")
+                            && !slot_set.contains(name)
+                            && !mro_has_unslotted_ancestor(&class)
+                        {
+                            let class_name = class.borrow().name.clone();
+                            return Err(PyError::named(
+                                "AttributeError",
+                                format!("'{class_name}' object has no attribute '{name}'"),
+                            ));
+                        }
                     }
                 }
                 instance.borrow_mut().attrs.insert(name.to_string(), value);

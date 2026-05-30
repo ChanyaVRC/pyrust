@@ -1539,6 +1539,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
                     mutation_version: std::cell::Cell::new(0),
                     subclasses: std::cell::RefCell::new(vec![]),
                     metatype: None,
+                    slots: None,
                 })))
             });
         });
