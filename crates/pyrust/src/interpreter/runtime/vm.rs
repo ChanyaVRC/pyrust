@@ -1242,18 +1242,61 @@ impl Interpreter {
                         // these registers change).
                         (v, cur_ver)
                     } else {
-                        let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
-                            PyError::name_error(
-                                "NameError",
-                                format!("name '{}' is not defined", name),
-                                Some(name.to_string()),
-                            )
-                        }));
-                        // Cache with the current global_env_version so that a
-                        // subsequent module-level assignment of the same name
-                        // (e.g. `len = my_fn`) bumps the version and invalidates
-                        // this entry, forcing a re-resolve on the next LoadGlobal.
-                        (v, cur_ver)
+                        // Issue #1810: if the current globals dict has
+                        // `__builtins__` set to an explicit dict (not a
+                        // module), restrict builtin lookups to that dict only.
+                        // CPython's PyEval_EvalCode applies the same check:
+                        // a caller that supplies `{"__builtins__": {}}` gets
+                        // an empty builtin namespace, not the full Rust table.
+                        let restricted = self
+                            .module_globals_dict
+                            .dict_with(|d| d.get(&StrKey("__builtins__")).cloned())
+                            .flatten();
+                        if let Some(builtins_val) = restricted {
+                            if let ValueKind::Dict(_) = builtins_val.kind() {
+                                // __builtins__ is a dict — look up name there only.
+                                // Do not cache: the dict can be mutated without
+                                // bumping global_env_version.
+                                let v = vm_try!(builtins_val
+                                    .dict_with(|d| d.get(&StrKey(name)).cloned())
+                                    .flatten()
+                                    .ok_or_else(|| {
+                                        PyError::name_error(
+                                            "NameError",
+                                            format!("name '{}' is not defined", name),
+                                            Some(name.to_string()),
+                                        )
+                                    }));
+                                (v, GLOBAL_CACHE_EMPTY)
+                            } else {
+                                // __builtins__ is a module or other object —
+                                // fall through to the hardcoded builtin table,
+                                // which matches the normal-execution path.
+                                let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
+                                    PyError::name_error(
+                                        "NameError",
+                                        format!("name '{}' is not defined", name),
+                                        Some(name.to_string()),
+                                    )
+                                }));
+                                (v, cur_ver)
+                            }
+                        } else {
+                            // No __builtins__ in the globals dict at all —
+                            // normal execution; use the hardcoded builtin table.
+                            let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
+                                PyError::name_error(
+                                    "NameError",
+                                    format!("name '{}' is not defined", name),
+                                    Some(name.to_string()),
+                                )
+                            }));
+                            // Cache with the current global_env_version so that a
+                            // subsequent module-level assignment of the same name
+                            // (e.g. `len = my_fn`) bumps the version and invalidates
+                            // this entry, forcing a re-resolve on the next LoadGlobal.
+                            (v, cur_ver)
+                        }
                     };
                     // Update the cache slot.
                     if cache_ver != GLOBAL_CACHE_EMPTY {
