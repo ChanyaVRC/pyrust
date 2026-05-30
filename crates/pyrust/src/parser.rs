@@ -395,11 +395,12 @@ impl Parser {
                 None
             };
             self.expect(&Token::Colon)?;
-            let body = self.parse_suite()?;
+            let (body, body_linenos) = self.parse_suite_with_linenos()?;
             arms.push(MatchArm {
                 pattern,
                 guard,
                 body,
+                body_linenos,
             });
             self.skip_newlines();
         }
@@ -1254,24 +1255,31 @@ impl Parser {
         self.expect(&Token::If)?;
         let cond = self.parse_expr()?;
         self.expect(&Token::Colon)?;
-        let body = self.parse_suite()?;
+        let (body, body_lns) = self.parse_suite_with_linenos()?;
         let mut branches = vec![(cond, body)];
+        let mut branch_linenos = vec![body_lns];
         let mut else_branch = None;
+        let mut else_linenos = Vec::new();
         while self.is(&Token::Elif) {
             self.bump();
             let c = self.parse_expr()?;
             self.expect(&Token::Colon)?;
-            let b = self.parse_suite()?;
+            let (b, b_lns) = self.parse_suite_with_linenos()?;
             branches.push((c, b));
+            branch_linenos.push(b_lns);
         }
         if self.is(&Token::Else) {
             self.bump();
             self.expect(&Token::Colon)?;
-            else_branch = Some(self.parse_suite()?);
+            let (else_stmts, else_lns) = self.parse_suite_with_linenos()?;
+            else_branch = Some(else_stmts);
+            else_linenos = else_lns;
         }
         Ok(Stmt::If {
             branches,
             else_branch,
+            branch_linenos,
+            else_linenos,
         })
     }
 
@@ -1279,12 +1287,14 @@ impl Parser {
         self.expect(&Token::While)?;
         let cond = self.parse_expr()?;
         self.expect(&Token::Colon)?;
-        let body = self.parse_suite()?;
-        let else_branch = self.parse_optional_else()?;
+        let (body, body_linenos) = self.parse_suite_with_linenos()?;
+        let (else_branch, else_linenos) = self.parse_optional_else_with_linenos()?;
         Ok(Stmt::While {
             cond,
             body,
             else_branch,
+            body_linenos,
+            else_linenos,
         })
     }
 
@@ -1295,13 +1305,15 @@ impl Parser {
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         self.expect(&Token::Colon)?;
-        let body = self.parse_suite()?;
-        let else_branch = self.parse_optional_else()?;
+        let (body, body_linenos) = self.parse_suite_with_linenos()?;
+        let (else_branch, else_linenos) = self.parse_optional_else_with_linenos()?;
         Ok(Stmt::For {
             target,
             iter,
             body,
             else_branch,
+            body_linenos,
+            else_linenos,
         })
     }
 
@@ -1379,12 +1391,17 @@ impl Parser {
     }
 
     fn parse_optional_else(&mut self) -> Result<Option<Vec<Stmt>>> {
+        Ok(self.parse_optional_else_with_linenos()?.0)
+    }
+
+    fn parse_optional_else_with_linenos(&mut self) -> Result<(Option<Vec<Stmt>>, Vec<u32>)> {
         if self.is(&Token::Else) {
             self.bump();
             self.expect(&Token::Colon)?;
-            Ok(Some(self.parse_suite()?))
+            let (stmts, linenos) = self.parse_suite_with_linenos()?;
+            Ok((Some(stmts), linenos))
         } else {
-            Ok(None)
+            Ok((None, Vec::new()))
         }
     }
 
@@ -1479,10 +1496,12 @@ impl Parser {
     fn parse_try(&mut self) -> Result<Stmt> {
         self.expect(&Token::Try)?;
         self.expect(&Token::Colon)?;
-        let body = self.parse_suite()?;
+        let (body, body_linenos) = self.parse_suite_with_linenos()?;
         let mut handlers = Vec::new();
         let mut else_branch = None;
+        let mut else_linenos = Vec::new();
         let mut finally_branch = None;
+        let mut finally_linenos = Vec::new();
         let mut saw_bare_except = false;
 
         while self.is(&Token::Except) {
@@ -1515,24 +1534,29 @@ impl Parser {
                 None
             };
             self.expect(&Token::Colon)?;
-            let handler_body = self.parse_suite()?;
+            let (handler_body, handler_linenos) = self.parse_suite_with_linenos()?;
             handlers.push(ExceptHandler {
                 kind,
                 name,
                 body: handler_body,
                 is_star,
+                body_linenos: handler_linenos,
             });
         }
 
         if self.is(&Token::Else) {
             self.bump();
             self.expect(&Token::Colon)?;
-            else_branch = Some(self.parse_suite()?);
+            let (stmts, lns) = self.parse_suite_with_linenos()?;
+            else_branch = Some(stmts);
+            else_linenos = lns;
         }
         if self.is(&Token::Finally) {
             self.bump();
             self.expect(&Token::Colon)?;
-            finally_branch = Some(self.parse_suite()?);
+            let (stmts, lns) = self.parse_suite_with_linenos()?;
+            finally_branch = Some(stmts);
+            finally_linenos = lns;
         }
         if handlers.is_empty() && finally_branch.is_none() {
             return Err(PyError::Parse(
@@ -1544,6 +1568,9 @@ impl Parser {
             handlers,
             else_branch,
             finally_branch,
+            body_linenos,
+            else_linenos,
+            finally_linenos,
         })
     }
 
@@ -1640,8 +1667,12 @@ impl Parser {
         }
 
         self.expect(&Token::Colon)?;
-        let body = self.parse_suite()?;
-        Ok(Stmt::With { items, body })
+        let (body, body_linenos) = self.parse_suite_with_linenos()?;
+        Ok(Stmt::With {
+            items,
+            body,
+            body_linenos,
+        })
     }
 
     /// Return `true` when the `(` at `self.pos` opens a PEP 617
@@ -1722,6 +1753,14 @@ impl Parser {
     }
 
     fn parse_suite(&mut self) -> Result<Vec<Stmt>> {
+        Ok(self.parse_suite_with_linenos()?.0)
+    }
+
+    /// Like `parse_suite` but also returns a parallel `Vec<u32>` of 1-based
+    /// source line numbers for each statement in the suite.  When no line
+    /// information is available (parser built without `new_with_lines`), all
+    /// entries will be 0.
+    fn parse_suite_with_linenos(&mut self) -> Result<(Vec<Stmt>, Vec<u32>)> {
         if self.is(&Token::Newline) {
             self.bump();
             // Skip blank / comment-only lines that the lexer folds into bare
@@ -1731,21 +1770,29 @@ impl Parser {
             self.skip_newlines();
             self.expect(&Token::Indent)?;
             let mut out = Vec::new();
+            let mut linenos: Vec<u32> = Vec::new();
             self.skip_newlines();
             while !self.is(&Token::Dedent) && !self.is(&Token::Eof) {
-                out.extend(self.parse_stmt_sequence()?);
+                let stmt_lineno = self.current_lineno();
+                let new_stmts = self.parse_stmt_sequence()?;
+                for _ in &new_stmts {
+                    linenos.push(stmt_lineno);
+                }
+                out.extend(new_stmts);
                 self.skip_newlines();
             }
             self.expect(&Token::Dedent)?;
-            Ok(out)
+            Ok((out, linenos))
         } else {
+            let stmt_lineno = self.current_lineno();
             let stmts = self.parse_stmt_sequence()?;
             // Consume the trailing newline (and any blank lines that follow) so
             // that callers can immediately check for continuation keywords such
             // as `except`, `elif`, `else`, and `finally` without needing their
             // own skip_newlines() calls after every parse_suite() invocation.
             self.skip_newlines();
-            Ok(stmts)
+            let linenos = vec![stmt_lineno; stmts.len()];
+            Ok((stmts, linenos))
         }
     }
 

@@ -68,3 +68,41 @@ except TypeError as e:
 print("section4 ok")
 
 print("all done")
+
+# ── Case 5: compound body line numbers (issue #1827) ─────────────────────────
+# Each compound statement body should report the line of the failing instruction,
+# not the line of the compound header.
+
+# if-body
+try:
+    exec("x = 5\nif x > 0:\n    y = 1/0", {})
+except ZeroDivisionError as e:
+    print("if-body caught:", type(e).__name__)
+
+# for-body
+try:
+    exec("for i in range(1):\n    z = 1/i", {})
+except ZeroDivisionError as e:
+    print("for-body caught:", type(e).__name__)
+
+# while-body
+try:
+    exec("while True:\n    raise RuntimeError('loop')\n", {})
+except RuntimeError as e:
+    print("while-body caught:", type(e).__name__, str(e))
+
+# with-body
+try:
+    src = "import contextlib\nwith contextlib.nullcontext():\n    raise ValueError('with')"
+    exec(src, {})
+except ValueError as e:
+    print("with-body caught:", type(e).__name__, str(e))
+
+# except-body
+try:
+    src = "try:\n    raise RuntimeError('inner')\nexcept RuntimeError:\n    raise TypeError('handler')"
+    exec(src, {})
+except TypeError as e:
+    print("except-body caught:", type(e).__name__, str(e))
+
+print("section5 ok")

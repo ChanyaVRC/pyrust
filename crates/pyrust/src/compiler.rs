@@ -344,6 +344,7 @@ fn collect_cell_vars_in(
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_cell_vars_in(b, local_index, is_class_scope, cells);
@@ -373,6 +374,7 @@ fn collect_cell_vars_in(
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_cell_vars_in(body, local_index, is_class_scope, cells);
                 for h in handlers {
@@ -421,6 +423,7 @@ fn collect_nonlocal_names_through_classes(body: &[Stmt], out: &mut HashSet<Strin
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_nonlocal_names_through_classes(b, out);
@@ -450,6 +453,7 @@ fn collect_nonlocal_names_through_classes(body: &[Stmt], out: &mut HashSet<Strin
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_nonlocal_names_through_classes(body, out);
                 for h in handlers {
@@ -498,6 +502,7 @@ fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_transitive_global_names(b, out);
@@ -527,6 +532,7 @@ fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_transitive_global_names(body, out);
                 for h in handlers {
@@ -579,6 +585,7 @@ fn collect_global_names_via_class_chain_into(body: &[Stmt], out: &mut HashSet<St
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_global_names_via_class_chain_into(b, out);
@@ -608,6 +615,7 @@ fn collect_global_names_via_class_chain_into(body: &[Stmt], out: &mut HashSet<St
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_global_names_via_class_chain_into(body, out);
                 for h in handlers {
@@ -701,6 +709,7 @@ fn lambda_captures_in_stmt(
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             for (cond, body) in branches {
                 lambda_captures_in_expr(cond, local_index, is_class_scope, cells);
@@ -714,6 +723,7 @@ fn lambda_captures_in_stmt(
             cond,
             body,
             else_branch,
+            ..
         } => {
             lambda_captures_in_expr(cond, local_index, is_class_scope, cells);
             collect_lambda_captures(body, local_index, is_class_scope, cells);
@@ -738,6 +748,7 @@ fn lambda_captures_in_stmt(
             handlers,
             else_branch,
             finally_branch,
+            ..
         } => {
             collect_lambda_captures(body, local_index, is_class_scope, cells);
             for h in handlers {
@@ -753,7 +764,7 @@ fn lambda_captures_in_stmt(
                 collect_lambda_captures(b, local_index, is_class_scope, cells);
             }
         }
-        Stmt::With { items, body } => {
+        Stmt::With { items, body, .. } => {
             for (e, _) in items {
                 lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
@@ -1231,6 +1242,7 @@ fn collect_class_body_names_textual(
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_class_body_names_textual(b, ordered, seen, body_local);
@@ -1247,6 +1259,7 @@ fn collect_class_body_names_textual(
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_class_body_names_textual(body, ordered, seen, body_local);
                 for h in handlers {
@@ -1415,6 +1428,7 @@ fn collect_class_method_outer_refs(
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
@@ -1444,6 +1458,7 @@ fn collect_class_method_outer_refs(
                 handlers,
                 else_branch,
                 finally_branch,
+                ..
             } => {
                 collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 for h in handlers {
@@ -1714,6 +1729,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             for (cond, body) in branches {
                 collect_free_var_reads_in_expr(cond, uses);
@@ -1727,6 +1743,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
             cond,
             body,
             else_branch,
+            ..
         } => {
             collect_free_var_reads_in_expr(cond, uses);
             collect_free_var_reads_in_stmts(body, uses);
@@ -1751,6 +1768,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
             handlers,
             else_branch,
             finally_branch,
+            ..
         } => {
             collect_free_var_reads_in_stmts(body, uses);
             for h in handlers {
@@ -1766,7 +1784,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_stmts(b, uses);
             }
         }
-        Stmt::With { items, body } => {
+        Stmt::With { items, body, .. } => {
             for (e, _) in items {
                 collect_free_var_reads_in_expr(e, uses);
             }
@@ -2092,6 +2110,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             for (cond, body) in branches {
                 collect_transitive_free_vars_in_expr(cond, uses);
@@ -2105,6 +2124,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             cond,
             body,
             else_branch,
+            ..
         } => {
             collect_transitive_free_vars_in_expr(cond, uses);
             collect_transitive_free_vars_in_stmts(body, uses);
@@ -2129,6 +2149,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             handlers,
             else_branch,
             finally_branch,
+            ..
         } => {
             collect_transitive_free_vars_in_stmts(body, uses);
             for h in handlers {
@@ -2144,7 +2165,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                 collect_transitive_free_vars_in_stmts(b, uses);
             }
         }
-        Stmt::With { items, body } => {
+        Stmt::With { items, body, .. } => {
             for (e, _) in items {
                 collect_transitive_free_vars_in_expr(e, uses);
             }
@@ -2583,6 +2604,7 @@ fn stmt_has_continue(s: &Stmt) -> bool {
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             branches.iter().any(|(_, b)| body_has_continue(b))
                 || else_branch.as_deref().is_some_and(body_has_continue)
@@ -2649,7 +2671,7 @@ fn rewrite_continue_top(body: Vec<Stmt>) -> Vec<Stmt> {
         // in Continue.
         let matches_pattern = matches!(
             &stmt,
-            Stmt::If { branches, else_branch: None }
+            Stmt::If { branches, else_branch: None, .. }
                 if branches.len() == 1
                     && branches[0].1.last().is_some_and(|s| matches!(s, Stmt::Continue))
         );
@@ -2696,18 +2718,24 @@ fn rewrite_continue_top(body: Vec<Stmt>) -> Vec<Stmt> {
                     b_body,
                 )],
                 else_branch: None,
+                branch_linenos: vec![],
+                else_linenos: vec![],
             });
         } else if b_body.is_empty() {
             // `if guard: A_pre` (the else is empty so don't emit it).
             out.push(Stmt::If {
                 branches: vec![(guard, a_body)],
                 else_branch: None,
+                branch_linenos: vec![],
+                else_linenos: vec![],
             });
         } else {
             // `if guard: A_pre else: B_pre`
             out.push(Stmt::If {
                 branches: vec![(guard, a_body)],
                 else_branch: Some(b_body),
+                branch_linenos: vec![],
+                else_linenos: vec![],
             });
         }
         out.extend(suffix);
@@ -2771,7 +2799,7 @@ fn expr_is_side_effect_free(expr: &Expr) -> bool {
 fn rewrite_break_top(body: Vec<Stmt>) -> Option<(Expr, Vec<Stmt>)> {
     let matches_pattern = matches!(
         body.first(),
-        Some(Stmt::If { branches, else_branch: None })
+        Some(Stmt::If { branches, else_branch: None, .. })
             if branches.len() == 1
                 && matches!(branches[0].1.as_slice(), [Stmt::Break])
     );
@@ -2846,6 +2874,7 @@ fn collect_written_in(body: &[Stmt], names: &mut HashSet<String>) {
             Stmt::If {
                 branches,
                 else_branch,
+                ..
             } => {
                 for (_, b) in branches {
                     collect_written_in(b, names);
@@ -2957,6 +2986,7 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
             cond,
             body,
             else_branch,
+            ..
         } => (cond, body, else_branch),
         _ => return None,
     };
@@ -3065,6 +3095,8 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
         iter: Expr::Var(c_name),
         body: new_body,
         else_branch: None,
+        body_linenos: vec![],
+        else_linenos: vec![],
     })
 }
 
@@ -3143,6 +3175,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             for (cond, b) in branches {
                 if !expr_safe(cond, i_name, c_name)
@@ -3159,6 +3192,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
             cond,
             body,
             else_branch,
+            ..
         } => {
             // Nested loop has its own `break`/`continue`, which don't target
             // the outer loop, so we don't need to bail on them here.
@@ -3173,6 +3207,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
             iter,
             body,
             else_branch,
+            ..
         } => {
             // Iterating with target `i` or `c` would rebind them.
             if target_assigns(target, i_name) || target_assigns(target, c_name) {
@@ -3405,6 +3440,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             branches
                 .iter()
@@ -3417,6 +3453,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
             cond,
             body,
             else_branch,
+            ..
         } => {
             expr_reads_var(cond, name)
                 || body.iter().any(|s| stmt_reads_var(s, name))
@@ -3441,6 +3478,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
             handlers,
             else_branch,
             finally_branch,
+            ..
         } => {
             body.iter().any(|s| stmt_reads_var(s, name))
                 || handlers.iter().any(|h| {
@@ -3454,7 +3492,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
                     .as_deref()
                     .is_some_and(|b| b.iter().any(|s| stmt_reads_var(s, name)))
         }
-        Stmt::With { items, body } => {
+        Stmt::With { items, body, .. } => {
             items.iter().any(|(e, _)| expr_reads_var(e, name))
                 || body.iter().any(|s| stmt_reads_var(s, name))
         }
@@ -3624,6 +3662,7 @@ fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             for (cond, b) in branches.iter_mut() {
                 rewrite_c_at_i_in_expr(cond, c_name, i_name);
@@ -3641,6 +3680,7 @@ fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
             cond,
             body,
             else_branch,
+            ..
         } => {
             rewrite_c_at_i_in_expr(cond, c_name, i_name);
             for s in body.iter_mut() {
@@ -3984,6 +4024,7 @@ fn class_body_has_annotations(body: &[Stmt]) -> bool {
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             branches.iter().any(|(_, b)| class_body_has_annotations(b))
                 || else_branch
@@ -4018,6 +4059,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
         Stmt::If {
             branches,
             else_branch,
+            ..
         } => {
             branches
                 .iter()
@@ -4028,6 +4070,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
             cond,
             body,
             else_branch,
+            ..
         } => {
             expr_contains_yield(cond)
                 || stmts_contain_yield(body)
@@ -4048,6 +4091,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
             handlers,
             else_branch,
             finally_branch,
+            ..
         } => {
             stmts_contain_yield(body)
                 || handlers.iter().any(|h| {
@@ -4056,7 +4100,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
                 || else_branch.as_deref().is_some_and(stmts_contain_yield)
                 || finally_branch.as_deref().is_some_and(stmts_contain_yield)
         }
-        Stmt::With { items, body } => {
+        Stmt::With { items, body, .. } => {
             items.iter().any(|(e, _)| expr_contains_yield(e)) || stmts_contain_yield(body)
         }
         Stmt::Assign(_, value) => expr_contains_yield(value),
@@ -5128,23 +5172,47 @@ impl Compiler {
             Stmt::If {
                 branches,
                 else_branch,
+                branch_linenos,
+                else_linenos,
             } => {
-                self.compile_if(branches, else_branch.as_deref());
+                self.compile_if(
+                    branches,
+                    else_branch.as_deref(),
+                    branch_linenos,
+                    else_linenos,
+                );
             }
             Stmt::While {
                 cond,
                 body,
                 else_branch,
+                body_linenos,
+                else_linenos,
             } => {
-                self.compile_while(cond, body, else_branch.as_deref());
+                self.compile_while(
+                    cond,
+                    body,
+                    else_branch.as_deref(),
+                    body_linenos,
+                    else_linenos,
+                );
             }
             Stmt::For {
                 target,
                 iter,
                 body,
                 else_branch,
+                body_linenos,
+                else_linenos,
             } => {
-                self.compile_for(target, iter, body, else_branch.as_deref());
+                self.compile_for(
+                    target,
+                    iter,
+                    body,
+                    else_branch.as_deref(),
+                    body_linenos,
+                    else_linenos,
+                );
             }
             Stmt::Global(_) => {
                 // Purely a compile-time declaration; no runtime effect.
@@ -5217,16 +5285,26 @@ impl Compiler {
                 handlers,
                 else_branch,
                 finally_branch,
+                body_linenos,
+                else_linenos,
+                finally_linenos,
             } => {
                 self.compile_try(
                     body,
                     handlers,
                     else_branch.as_deref(),
                     finally_branch.as_deref(),
+                    body_linenos,
+                    else_linenos,
+                    finally_linenos,
                 );
             }
-            Stmt::With { items, body } => {
-                self.compile_with(items, body);
+            Stmt::With {
+                items,
+                body,
+                body_linenos,
+            } => {
+                self.compile_with(items, body, body_linenos);
             }
             Stmt::Match { subject, arms } => {
                 self.compile_match(subject, arms);
@@ -5902,6 +5980,7 @@ impl Compiler {
                 Stmt::If {
                     branches,
                     else_branch,
+                    ..
                 } => {
                     for (_, body) in branches {
                         self.check_dead_block(body, in_loop);
@@ -5940,6 +6019,7 @@ impl Compiler {
                     handlers,
                     else_branch,
                     finally_branch,
+                    ..
                 } => {
                     self.check_dead_block(body, in_loop);
                     if self.failed {
@@ -6101,7 +6181,13 @@ impl Compiler {
 
     // ── Control flow ──────────────────────────────────────────────────────────
 
-    fn compile_if(&mut self, branches: &[(Expr, Vec<Stmt>)], else_branch: Option<&[Stmt]>) {
+    fn compile_if(
+        &mut self,
+        branches: &[(Expr, Vec<Stmt>)],
+        else_branch: Option<&[Stmt]>,
+        branch_linenos: &[Vec<u32>],
+        else_linenos: &[u32],
+    ) {
         let has_else = else_branch.is_some();
         let n = branches.len();
         let mut end_patches: Vec<usize> = Vec::new();
@@ -6111,11 +6197,12 @@ impl Compiler {
 
         for (bi, (cond, body)) in branches.iter().enumerate() {
             self.def_set = pre_def_set;
+            let body_lns: &[u32] = branch_linenos.get(bi).map(|v| v.as_slice()).unwrap_or(&[]);
             // Constant-condition optimisation: fold at compile time.
             if let Some(val) = fold_constant(cond) {
                 if val.truthy() {
                     // Always-true branch: compile body unconditionally; skip rest.
-                    self.compile_block(body);
+                    self.compile_block_with_linenos(body, body_lns);
                     if self.failed {
                         return;
                     }
@@ -6193,7 +6280,7 @@ impl Compiler {
             let cond_reg = self.compile_expr(cond);
             let jmp_false = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
-            self.compile_block(body);
+            self.compile_block_with_linenos(body, body_lns);
             if self.failed {
                 return;
             }
@@ -6206,7 +6293,7 @@ impl Compiler {
             self.patch_jump(jmp_false);
         }
         if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
+            self.compile_block_with_linenos(else_stmts, else_linenos);
             if self.failed {
                 return;
             }
@@ -6253,7 +6340,7 @@ impl Compiler {
                 next_arm_patches.push(jmp);
             }
             // Arm body
-            self.compile_block(&arm.body);
+            self.compile_block_with_linenos(&arm.body, &arm.body_linenos);
             if self.failed {
                 return;
             }
@@ -6721,7 +6808,14 @@ impl Compiler {
         }
     }
 
-    fn compile_while(&mut self, cond: &Expr, body: &[Stmt], else_branch: Option<&[Stmt]>) {
+    fn compile_while(
+        &mut self,
+        cond: &Expr,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
+    ) {
         if is_const_false_expr(cond) {
             // The while body is statically unreachable, but CPython still
             // validates context-sensitive syntax inside it.  The body counts
@@ -6737,7 +6831,7 @@ impl Compiler {
                 self.has_dead_yield = true;
             }
             if let Some(else_stmts) = else_branch {
-                self.compile_block(else_stmts);
+                self.compile_block_with_linenos(else_stmts, else_linenos);
             }
             return;
         }
@@ -6760,7 +6854,7 @@ impl Compiler {
             && else_branch.is_none()
             && matches!(
                 rewritten.first(),
-                Some(Stmt::If { branches, else_branch: None })
+                Some(Stmt::If { branches, else_branch: None, .. })
                     if branches.len() == 1
                         && matches!(branches[0].1.as_slice(), [Stmt::Break])
             );
@@ -6775,7 +6869,7 @@ impl Compiler {
 
         if !is_infinite
             && !body_has_continue(body)
-            && self.try_compile_while_range(cond, body, else_branch)
+            && self.try_compile_while_range(cond, body, else_branch, body_linenos, else_linenos)
         {
             return;
         }
@@ -6807,7 +6901,7 @@ impl Compiler {
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
-        self.compile_block(body);
+        self.compile_block_with_linenos(body, body_linenos);
         self.def_set = saved;
         if self.failed {
             return;
@@ -6824,7 +6918,7 @@ impl Compiler {
         // Skip the emit entirely — semantics-preserving, avoids dead bytecode.
         if !is_infinite {
             if let Some(else_stmts) = else_branch {
-                self.compile_block(else_stmts);
+                self.compile_block_with_linenos(else_stmts, else_linenos);
                 if self.failed {
                     return;
                 }
@@ -6849,6 +6943,8 @@ impl Compiler {
         cond: &Expr,
         body: &[Stmt],
         else_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
     ) -> bool {
         let (var_name, stop_expr, step, inclusive) = match detect_while_range(cond, body) {
             Some(x) => x,
@@ -6906,7 +7002,13 @@ impl Compiler {
         // Skip the last body statement (VAR += STEP): ForCount already manages
         // the counter increment, so VAR += STEP is a dead store.
         let body_without_inc = &body[..body.len() - 1];
-        self.compile_block(body_without_inc);
+        // body_linenos for body_without_inc: same prefix (last stmt is the inc).
+        let body_lns_without_inc = if body_linenos.len() > body_without_inc.len() {
+            &body_linenos[..body_without_inc.len()]
+        } else {
+            body_linenos
+        };
+        self.compile_block_with_linenos(body_without_inc, body_lns_without_inc);
         self.def_set = saved;
         if self.failed {
             return true;
@@ -6923,7 +7025,7 @@ impl Compiler {
             self.free_temp(t);
         }
         if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
+            self.compile_block_with_linenos(else_stmts, else_linenos);
             if self.failed {
                 return true;
             }
@@ -6944,6 +7046,8 @@ impl Compiler {
         iter_expr: &Expr,
         body: &[Stmt],
         else_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
     ) -> bool {
         // Target must be a Name with a fastlocal register.
         let var_name = match target {
@@ -7061,7 +7165,7 @@ impl Compiler {
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
-        self.compile_block(body);
+        self.compile_block_with_linenos(body, body_linenos);
         self.def_set = saved;
         if self.failed {
             return true;
@@ -7078,7 +7182,7 @@ impl Compiler {
         }
         let ctx = self.loops.pop().unwrap();
         if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
+            self.compile_block_with_linenos(else_stmts, else_linenos);
             if self.failed {
                 return true;
             }
@@ -7095,6 +7199,8 @@ impl Compiler {
         iter_expr: &Expr,
         body: &[Stmt],
         else_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
     ) {
         // Collapse the `if guard: continue; <rest>` trampoline (issue #287)
         // before dispatching: this also lets `try_compile_for_range` see the
@@ -7102,7 +7208,14 @@ impl Compiler {
         let rewritten = rewrite_continue_top(body.to_vec());
         let body: &[Stmt] = &rewritten;
 
-        if self.try_compile_for_range(target, iter_expr, body, else_branch) {
+        if self.try_compile_for_range(
+            target,
+            iter_expr,
+            body,
+            else_branch,
+            body_linenos,
+            else_linenos,
+        ) {
             return;
         }
         let iter_slot = self.alloc_iter();
@@ -7209,7 +7322,7 @@ impl Compiler {
         });
         let saved_def_set = self.def_set;
         self.mark_target_def(target);
-        self.compile_block(body);
+        self.compile_block_with_linenos(body, body_linenos);
         self.def_set = saved_def_set;
         if self.failed {
             return;
@@ -7221,7 +7334,7 @@ impl Compiler {
         let ctx = self.loops.pop().unwrap();
         self.free_iter();
         if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
+            self.compile_block_with_linenos(else_stmts, else_linenos);
             if self.failed {
                 return;
             }
@@ -8406,13 +8519,24 @@ impl Compiler {
         handlers: &[crate::ast::ExceptHandler],
         else_branch: Option<&[Stmt]>,
         finally_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
+        finally_linenos: &[u32],
     ) {
         // PEP 654: if any handler is `except*`, route to the star compilation path.
         // (Mixing `except` and `except*` is a SyntaxError in CPython, so we treat
         // all-star or all-non-star as the two cases.)
         let has_star_handlers = handlers.iter().any(|h| h.is_star);
         if has_star_handlers {
-            self.compile_try_star(body, handlers, else_branch, finally_branch);
+            self.compile_try_star(
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+                body_linenos,
+                else_linenos,
+                finally_linenos,
+            );
             return;
         }
 
@@ -8455,7 +8579,11 @@ impl Compiler {
         }
 
         // Compile try body
-        self.compile_block(body);
+        self.compile_block_with_linenos(body, body_linenos);
+        // Save the lineno after the try body so that the "no handler matched"
+        // RaiseReRaise instruction is attributed to the try-body, not to some
+        // handler body statement that happened to run last during dispatch.
+        let try_body_lineno = self.current_lineno;
 
         // Pop the try-body cleanup entries before emitting normal-exit cleanup.
         if inner_handler_patch.is_some() {
@@ -8475,7 +8603,7 @@ impl Compiler {
         }
         // Compile else branch (normal path only)
         if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
+            self.compile_block_with_linenos(else_stmts, else_linenos);
             if self.failed {
                 return;
             }
@@ -8484,7 +8612,7 @@ impl Compiler {
         if outer_finally_patch.is_some() {
             self.emit(Insn::PopExcept);
             let finally_stmts = finally_branch.unwrap();
-            self.compile_block(finally_stmts);
+            self.compile_block_with_linenos(finally_stmts, finally_linenos);
             if self.failed {
                 return;
             }
@@ -8553,7 +8681,7 @@ impl Compiler {
                     as_var_delete,
                 });
 
-                self.compile_block(&handler.body);
+                self.compile_block_with_linenos(&handler.body, &handler.body_linenos);
 
                 // Remove the except-body cleanup before emitting normal handler exit.
                 self.except_cleanups.pop();
@@ -8585,7 +8713,7 @@ impl Compiler {
 
                 // Run finally (inline) after successful handler
                 if let Some(finally_stmts) = finally_branch {
-                    self.compile_block(finally_stmts);
+                    self.compile_block_with_linenos(finally_stmts, finally_linenos);
                     if self.failed {
                         return;
                     }
@@ -8599,7 +8727,10 @@ impl Compiler {
                 }
             }
 
-            // No handler matched: re-raise (outer finally will catch it if present)
+            // No handler matched: re-raise (outer finally will catch it if present).
+            // Restore the try-body lineno so the re-raise is attributed to the
+            // failing statement in the try block, not to handler body code.
+            self.set_lineno(try_body_lineno);
             self.free_temp(exc_tmp);
             self.emit(Insn::RaiseReRaise);
         }
@@ -8621,10 +8752,13 @@ impl Compiler {
             let exc_tmp = self.alloc_temp();
             self.emit(Insn::LoadExc(exc_tmp));
             self.free_temp(exc_tmp);
-            self.compile_block(finally_stmts);
+            self.compile_block_with_linenos(finally_stmts, finally_linenos);
             if self.failed {
                 return;
             }
+            // Restore the try-body lineno so the re-raise is attributed to the
+            // failing statement in the try block, not to the finally body.
+            self.set_lineno(try_body_lineno);
             self.emit(Insn::RaiseReRaise);
         }
 
@@ -8650,6 +8784,9 @@ impl Compiler {
         handlers: &[crate::ast::ExceptHandler],
         else_branch: Option<&[Stmt]>,
         finally_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
+        finally_linenos: &[u32],
     ) {
         // Outer finally handler patch (only if finally_branch is Some)
         let outer_finally_patch: Option<usize> = if finally_branch.is_some() {
@@ -8671,7 +8808,11 @@ impl Compiler {
             finally_stmts: None,
         });
 
-        self.compile_block(body);
+        self.compile_block_with_linenos(body, body_linenos);
+        // Save the lineno after the try body so that the "no handler matched"
+        // RaiseValue instruction is attributed to the try-body, not to some
+        // handler body statement that happened to run last during dispatch.
+        let try_body_lineno_star = self.current_lineno;
 
         self.except_cleanups.pop();
         if outer_finally_patch.is_some() {
@@ -8685,7 +8826,7 @@ impl Compiler {
         // Normal exit from try body
         self.emit(Insn::PopExcept);
         if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
+            self.compile_block_with_linenos(else_stmts, else_linenos);
             if self.failed {
                 return;
             }
@@ -8693,7 +8834,7 @@ impl Compiler {
         if outer_finally_patch.is_some() {
             self.emit(Insn::PopExcept);
             let finally_stmts = finally_branch.unwrap();
-            self.compile_block(finally_stmts);
+            self.compile_block_with_linenos(finally_stmts, finally_linenos);
             if self.failed {
                 return;
             }
@@ -8746,7 +8887,7 @@ impl Compiler {
                     as_var_delete: var_bind_cleanup.clone(),
                 });
 
-                self.compile_block(&handler.body);
+                self.compile_block_with_linenos(&handler.body, &handler.body_linenos);
 
                 self.except_cleanups.pop();
 
@@ -8786,6 +8927,9 @@ impl Compiler {
         // If a handler matched but left some exceptions (partial match): the outer
         // SetupExcept was already popped, so the finally will NOT run here; this
         // is a known limitation (see follow-up issue for except*+finally+partial-match).
+        // Restore the try-body lineno so the re-raise is attributed to the
+        // failing statement in the try block, not to handler body code.
+        self.set_lineno(try_body_lineno_star);
         self.emit(Insn::RaiseValue(group_reg));
         self.patch_jump(remaining_check);
 
@@ -8794,7 +8938,7 @@ impl Compiler {
         self.emit(Insn::EndExcept);
 
         if let Some(finally_stmts) = finally_branch {
-            self.compile_block(finally_stmts);
+            self.compile_block_with_linenos(finally_stmts, finally_linenos);
             if self.failed {
                 return;
             }
@@ -8815,7 +8959,7 @@ impl Compiler {
             self.emit(Insn::LoadExc(exc_tmp));
             self.free_temp(exc_tmp);
             let finally_stmts = finally_branch.unwrap();
-            self.compile_block(finally_stmts);
+            self.compile_block_with_linenos(finally_stmts, finally_linenos);
             if self.failed {
                 return;
             }
@@ -8830,10 +8974,15 @@ impl Compiler {
         self.patch_jump(end_patch);
     }
 
-    fn compile_with(&mut self, items: &[(Expr, Option<AssignTarget>)], body: &[Stmt]) {
+    fn compile_with(
+        &mut self,
+        items: &[(Expr, Option<AssignTarget>)],
+        body: &[Stmt],
+        body_linenos: &[u32],
+    ) {
         // Compile nested with items recursively (outermost first).
         if items.is_empty() {
-            self.compile_block(body);
+            self.compile_block_with_linenos(body, body_linenos);
             return;
         }
         let (expr, alias) = &items[0];
@@ -8885,9 +9034,9 @@ impl Compiler {
 
         // Compile nested with items or body
         if rest.is_empty() {
-            self.compile_block(body);
+            self.compile_block_with_linenos(body, body_linenos);
         } else {
-            self.compile_with(rest, body);
+            self.compile_with(rest, body, body_linenos);
         }
         if self.failed {
             return;
@@ -9557,6 +9706,8 @@ impl Compiler {
                 body = vec![Stmt::If {
                     branches: vec![(cond.clone(), body)],
                     else_branch: None,
+                    branch_linenos: vec![],
+                    else_linenos: vec![],
                 }];
             }
             body = vec![Stmt::For {
@@ -9564,12 +9715,16 @@ impl Compiler {
                 iter: clause.iter.clone(),
                 body,
                 else_branch: None,
+                body_linenos: vec![],
+                else_linenos: vec![],
             }];
         }
         if let Some(cond) = &clauses[0].cond {
             body = vec![Stmt::If {
                 branches: vec![(cond.clone(), body)],
                 else_branch: None,
+                branch_linenos: vec![],
+                else_linenos: vec![],
             }];
         }
         body = vec![Stmt::For {
@@ -9577,6 +9732,8 @@ impl Compiler {
             iter: Expr::Var(IT_PARAM.to_string()),
             body,
             else_branch: None,
+            body_linenos: vec![],
+            else_linenos: vec![],
         }];
         body
     }
@@ -9699,6 +9856,7 @@ impl Compiler {
                 Stmt::If {
                     branches,
                     else_branch,
+                    ..
                 } => {
                     for (cond, body) in branches {
                         Self::collect_walrus_targets_in_expr(cond, out);
@@ -9724,6 +9882,7 @@ impl Compiler {
                     cond,
                     body,
                     else_branch,
+                    ..
                 } => {
                     Self::collect_walrus_targets_in_expr(cond, out);
                     Self::collect_walrus_targets_in_stmts(body, out);
@@ -10114,6 +10273,8 @@ impl Compiler {
                 body = vec![Stmt::If {
                     branches: vec![(cond.clone(), body)],
                     else_branch: None,
+                    branch_linenos: vec![],
+                    else_linenos: vec![],
                 }];
             }
             body = vec![Stmt::For {
@@ -10121,6 +10282,8 @@ impl Compiler {
                 iter: clause.iter.clone(),
                 body,
                 else_branch: None,
+                body_linenos: vec![],
+                else_linenos: vec![],
             }];
         }
         // Wrap the first clause's optional if-cond around the body.
@@ -10128,6 +10291,8 @@ impl Compiler {
             body = vec![Stmt::If {
                 branches: vec![(cond.clone(), body)],
                 else_branch: None,
+                branch_linenos: vec![],
+                else_linenos: vec![],
             }];
         }
         // Outermost loop: iterate over the parameter.
@@ -10136,6 +10301,8 @@ impl Compiler {
             iter: Expr::Var(IT_PARAM.to_string()),
             body,
             else_branch: None,
+            body_linenos: vec![],
+            else_linenos: vec![],
         }];
 
         // Parameter spec for the anonymous generator function.

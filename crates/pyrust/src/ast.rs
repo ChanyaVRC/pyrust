@@ -24,6 +24,9 @@ pub struct ExceptHandler {
     pub body: Vec<Stmt>,
     /// `true` for PEP 654 `except*` handlers; `false` for ordinary `except`.
     pub is_star: bool,
+    /// Per-statement 1-based line numbers for the handler body.
+    /// Empty when no line info is available.
+    pub body_linenos: Vec<u32>,
 }
 
 /// Assignment target (left-hand side of = or augmented =)
@@ -107,23 +110,44 @@ pub enum Stmt {
     If {
         branches: Vec<(Expr, Vec<Stmt>)>,
         else_branch: Option<Vec<Stmt>>,
+        /// Per-statement 1-based line numbers for each branch body, parallel to
+        /// `branches`.  `branch_linenos[i]` covers `branches[i].1`.
+        /// Empty (or shorter than `branches`) when no line info is available.
+        branch_linenos: Vec<Vec<u32>>,
+        /// Per-statement 1-based line numbers for the else body.
+        /// Empty when no line info is available or no else branch exists.
+        else_linenos: Vec<u32>,
     },
     While {
         cond: Expr,
         body: Vec<Stmt>,
         else_branch: Option<Vec<Stmt>>,
+        /// Per-statement 1-based line numbers for the while body.
+        body_linenos: Vec<u32>,
+        /// Per-statement 1-based line numbers for the else body.
+        else_linenos: Vec<u32>,
     },
     For {
         target: AssignTarget,
         iter: Expr,
         body: Vec<Stmt>,
         else_branch: Option<Vec<Stmt>>,
+        /// Per-statement 1-based line numbers for the for body.
+        body_linenos: Vec<u32>,
+        /// Per-statement 1-based line numbers for the else body.
+        else_linenos: Vec<u32>,
     },
     Try {
         body: Vec<Stmt>,
         handlers: Vec<ExceptHandler>,
         else_branch: Option<Vec<Stmt>>,
         finally_branch: Option<Vec<Stmt>>,
+        /// Per-statement 1-based line numbers for the try body.
+        body_linenos: Vec<u32>,
+        /// Per-statement 1-based line numbers for the else body.
+        else_linenos: Vec<u32>,
+        /// Per-statement 1-based line numbers for the finally body.
+        finally_linenos: Vec<u32>,
     },
     Raise {
         expr: Option<Expr>,
@@ -148,6 +172,8 @@ pub enum Stmt {
     With {
         items: Vec<(Expr, Option<AssignTarget>)>,
         body: Vec<Stmt>,
+        /// Per-statement 1-based line numbers for the with body.
+        body_linenos: Vec<u32>,
     },
     Match {
         subject: Expr,
@@ -171,6 +197,9 @@ pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
     pub body: Vec<Stmt>,
+    /// Per-statement 1-based line numbers for the arm body.
+    /// Empty when no line info is available.
+    pub body_linenos: Vec<u32>,
 }
 
 /// Pattern variants for structural pattern matching (PEP 634).
