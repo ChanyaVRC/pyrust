@@ -1615,6 +1615,14 @@ impl Interpreter {
             _ if pyrust_builtins::property::as_property_method(&function).is_some() => {
                 let (prop, kind) =
                     pyrust_builtins::property::as_property_method(&function).unwrap();
+                // CPython's descriptor slot wrappers are positional-only; a
+                // keyword argument raises TypeError rather than being bound.
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "this method takes no keyword arguments".to_string(),
+                    ));
+                }
                 let pos: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
                 dispatch_property_method(self, &prop, kind, &pos)
             }

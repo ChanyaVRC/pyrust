@@ -2903,11 +2903,32 @@ pub(crate) fn dispatch_property_method(
     args: &[Value],
 ) -> Result<Value> {
     use pyrust_builtins::property::PropertyMethodKind as K;
-    let obj = args.first().cloned().unwrap_or_else(Value::none);
+    // CPython's slot wrappers validate arity (and raise TypeError) before the
+    // missing-accessor AttributeError. __get__ takes obj + optional owner,
+    // __set__ takes obj + value, __delete__ takes obj.
     match kind {
         K::Get => {
-            // Class-level access (`obj is None`) returns the property itself.
+            if args.is_empty() || args.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                    "expected 1 or 2 arguments, got {}",
+                    args.len()
+                )));
+            }
+            // Class-level access (`obj is None`) returns the property itself,
+            // but only when an owner is supplied: CPython rejects
+            // `__get__(None)` / `__get__(None, None)` with
+            // `__get__(None, None) is invalid`.
+            let obj = args[0].clone();
             if obj.is_none() {
+                let owner = args.get(1).cloned().unwrap_or_else(Value::none);
+                if owner.is_none() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "__get__(None, None) is invalid".to_string(),
+                    ));
+                }
                 return Ok(prop.clone());
             }
             let fget = pyrust_builtins::property::with_property(prop, |s| (*s.fget).clone())
@@ -2918,7 +2939,16 @@ pub(crate) fn dispatch_property_method(
             interp.call_function_expanded(fget, &[ExpandedCallArg { name: None, value: obj }])
         }
         K::Set => {
-            let value = args.get(1).cloned().unwrap_or_else(Value::none);
+            if args.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                    "expected 2 arguments, got {}",
+                    args.len()
+                )));
+            }
+            let obj = args[0].clone();
+            let value = args[1].clone();
             let fset = pyrust_builtins::property::with_property(prop, |s| (*s.fset).clone())
                 .unwrap_or_else(Value::none);
             if fset.is_none() {
@@ -2933,6 +2963,15 @@ pub(crate) fn dispatch_property_method(
             )
         }
         K::Delete => {
+            if args.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                    "expected 1 argument, got {}",
+                    args.len()
+                )));
+            }
+            let obj = args[0].clone();
             let fdel = pyrust_builtins::property::with_property(prop, |s| (*s.fdel).clone())
                 .unwrap_or_else(Value::none);
             if fdel.is_none() {

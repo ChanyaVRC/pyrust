@@ -89,3 +89,21 @@ d = D()
 print(d.x)
 d.x = 9
 print(d.x)
+
+# Arity: descriptor dunders raise TypeError for wrong positional arg counts,
+# matching CPython slot-wrapper semantics (not AttributeError / silent return).
+def report(fn, *a):
+    try:
+        fn(*a)
+    except TypeError:
+        print("TypeError")
+    except AttributeError:
+        print("AttributeError")
+
+
+report(p.__get__)                 # 0 args -> TypeError
+report(p.__get__, obj, C, 1)      # 3 args -> TypeError
+report(p.__set__, obj)            # 1 arg  -> TypeError
+report(p.__set__, obj, 1, 2)      # 3 args -> TypeError
+report(p.__delete__)             # 0 args -> TypeError
+report(p.__delete__, obj, 1)      # 2 args -> TypeError
