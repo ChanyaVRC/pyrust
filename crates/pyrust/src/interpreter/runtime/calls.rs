@@ -7016,3 +7016,509 @@ fn format_missing_args(names: &[&str]) -> String {
         }
     }
 }
+
+impl Interpreter {
+    /// Build a user function value from a compiled `FnProto`.
+    ///
+    /// Extracted from the `MakeFunction` VM dispatch arm so that changes to
+    /// function-construction semantics (annotations, defaults, etc.) only
+    /// require touching this method rather than vm.rs.
+    pub(crate) fn exec_make_function(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        proto_idx: u8,
+        defs_base: crate::bytecode::Reg,
+        annots_base: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: fn_proto index {} out of range (pool size {})",
+                proto_idx,
+                code.fn_protos.len()
+            ))
+        })?;
+        let proto_code = Rc::clone(&proto.code);
+        let proto_name = proto.name.clone();
+        let proto_qualname = proto.qualname.clone();
+        let proto_local_index = Rc::clone(&proto.local_index);
+        let proto_local_names = Rc::clone(&proto.local_names);
+        let proto_global_names = Rc::clone(&proto.global_names);
+        let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
+        let param_spec = Rc::clone(&proto.param_spec);
+        let annotation_keys = proto.annotation_keys.clone();
+        let is_pure = proto.is_pure;
+        let proto_doc = proto.docstring.as_ref().map(|s| Value::string(s.clone()));
+
+        let mut params = Vec::with_capacity(param_spec.names.len());
+        let mut def_slot = 0u32;
+        for i in 0..param_spec.names.len() {
+            let default = if param_spec.has_default[i] {
+                let v = vm_read(regs, defs_base + def_slot, num_locals)?;
+                def_slot += 1;
+                Some(v)
+            } else {
+                None
+            };
+            params.push(UserFunctionParam {
+                name: param_spec.names[i].clone(),
+                default,
+                is_args: param_spec.is_args[i],
+                is_kwargs: param_spec.is_kwargs[i],
+                is_keyword_only: param_spec.is_keyword_only[i],
+                is_positional_only: param_spec.is_positional_only[i],
+            });
+        }
+        let mut annotations_map = indexmap::IndexMap::new();
+        for (i, key) in annotation_keys.iter().enumerate() {
+            let val = vm_read(regs, annots_base + i as u32, num_locals)?;
+            annotations_map.insert(PyKey::str_from(key.as_str()), val);
+        }
+        let annotations = Value::dict(annotations_map);
+        for name in proto_nonlocal_names.iter() {
+            if !has_local_binding_in_current_or_ancestor(&self.env, name) {
+                return Err(PyError::named(
+                    "SyntaxError",
+                    format!("no binding for nonlocal '{}' found", name),
+                ));
+            }
+        }
+        let func = Rc::new(UserFunction {
+            id: crate::value::next_fn_id(),
+            kind: crate::value::UserFunctionKind::Regular,
+            name: proto_name,
+            qualname: proto_qualname,
+            user_name: std::cell::RefCell::new(None),
+            user_qualname: std::cell::RefCell::new(None),
+            module: std::cell::RefCell::new(Value::string("__main__".to_string())),
+            doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
+            attrs: std::cell::RefCell::new(None),
+            annotations: std::cell::RefCell::new(annotations),
+            params,
+            local_names: proto_local_names,
+            local_index: proto_local_index,
+            global_names: proto_global_names,
+            nonlocal_names: proto_nonlocal_names,
+            env: Rc::clone(&self.env),
+            is_pure,
+            precompiled_code: Some(proto_code),
+            wrapped_func: None,
+        });
+        Ok(Value::user_function(func))
+    }
+
+    /// Construct a class value from a compiled `FnProto` body.
+    ///
+    /// Extracted from the `MakeClass` VM dispatch arm so that changes to
+    /// class-construction semantics (__slots__, PEP 487/695, etc.) only
+    /// require touching this method rather than vm.rs.  The per-phase work is
+    /// split into helpers below to keep this top-level flow readable:
+    /// seed regs -> run body -> collect attrs -> resolve bases -> build class
+    /// -> run PEP 487 hooks.
+    pub(crate) fn exec_make_class(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        proto_idx: u8,
+        bases_base: crate::bytecode::Reg,
+        bases_n: u8,
+        name_idx: u16,
+        kwarg_base: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let class_name = code
+            .names
+            .get(name_idx as usize)
+            .ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "bytecode error: name index {} out of range (pool size {})",
+                    name_idx,
+                    code.names.len()
+                ))
+            })?
+            .clone();
+        let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: fn_proto index {} out of range (pool size {})",
+                proto_idx,
+                code.fn_protos.len()
+            ))
+        })?;
+        let class_code = Rc::clone(&proto.code);
+        let local_index = Rc::clone(&proto.local_index);
+        let proto_qualname = proto.qualname.clone();
+        let proto_global_names = Rc::clone(&proto.global_names);
+        let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
+        let class_docstring = proto.docstring.clone();
+        let class_kwarg_names = proto.class_kwarg_names.clone();
+
+        // Run the class body, collecting the attrs dict it stores.
+        let (mut attrs, class_env_rc) = self.run_class_body(
+            &class_code,
+            &local_index,
+            &proto_qualname,
+            proto_global_names,
+            proto_nonlocal_names,
+        )?;
+
+        // Adjust the attrs dict per CPython's type_new rules, returning the
+        // resolved __qualname__.
+        let qualname =
+            make_class_finalize_attrs(&mut attrs, proto_qualname, class_docstring.as_deref())?;
+
+        // Resolve and validate the base classes.
+        let (base, extra_bases_vec) =
+            self.make_class_resolve_bases(regs, num_locals, bases_base, bases_n)?;
+
+        let slots = make_class_extract_slots(&mut attrs);
+        let class = Rc::new(RefCell::new(PyClass {
+            name: class_name,
+            qualname,
+            base: base.clone(),
+            extra_bases: extra_bases_vec.clone(),
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+            slots,
+        }));
+        class_mro_items(&class).map(|_| ())?;
+
+        // Register as a subclass of every base, and seed the __class__ cell.
+        if let Some(ref b) = base {
+            b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        for eb in &extra_bases_vec {
+            eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        class_env_rc
+            .borrow_mut()
+            .values
+            .insert("__class__".to_string(), Value::py_class(Rc::clone(&class)));
+
+        // PEP 487 hooks: __set_name__ on every descriptor, then
+        // __init_subclass__ on the base.
+        self.make_class_call_set_name(&class)?;
+        self.make_class_call_init_subclass(&class, regs, kwarg_base, &class_kwarg_names)?;
+        Ok(Value::py_class(class))
+    }
+
+    /// Run a class body and return its assembled attrs dict plus the class env
+    /// (so the caller can seed `__class__` after the class object exists).
+    fn run_class_body(
+        &mut self,
+        class_code: &Rc<crate::bytecode::FnCode>,
+        local_index: &Rc<HashMap<String, crate::bytecode::Reg>>,
+        proto_qualname: &str,
+        proto_global_names: Rc<HashSet<String>>,
+        proto_nonlocal_names: Rc<HashSet<String>>,
+    ) -> Result<(IndexMap<String, Value>, EnvRef)> {
+        let num_class_regs = class_code.num_regs as usize;
+        let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
+        // CPython pre-injects __qualname__ / __module__ / __annotations__ into
+        // the class namespace before the body runs; seed those register slots.
+        let qualname_slot = local_index.get("__qualname__").copied();
+        let module_slot = local_index.get("__module__").copied();
+        let annotations_slot = local_index.get("__annotations__").copied();
+        seed_class_reg(&mut class_regs, qualname_slot, || {
+            Value::string(proto_qualname.to_string())
+        });
+        seed_class_reg(&mut class_regs, module_slot, || {
+            Value::string("__main__".to_string())
+        });
+        seed_class_reg(&mut class_regs, annotations_slot, || {
+            Value::dict(indexmap::IndexMap::new())
+        });
+        // __module__ and __annotations__ always flow into the attrs dict;
+        // __qualname__ is intercepted in get_attr (issue #553) so it is not
+        // pre-ordered here.
+        let mut pre_order: Vec<crate::bytecode::Reg> = Vec::new();
+        pre_order.extend(module_slot);
+        pre_order.extend(annotations_slot);
+        self.class_store_order.push(pre_order);
+
+        // Push a class env so methods capture __class__ (zero-arg super), and a
+        // Class frame view so locals() inside the body sees the namespace.
+        let class_env = self.alloc_env(Some(Rc::clone(&self.env)));
+        {
+            let mut e = class_env.borrow_mut();
+            e.global_names = proto_global_names;
+            e.nonlocal_names = proto_nonlocal_names;
+        }
+        let class_env_rc = Rc::clone(&class_env);
+        let previous_env = std::mem::replace(&mut self.env, class_env);
+        let class_regs_ptr =
+            unsafe { std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr()) };
+        let class_regs_len = class_regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Class,
+            // SAFETY: SmallVec/Vec allocation is always non-null.  `class_regs`
+            // lives on this stack frame for the full duration of `run_bytecode`;
+            // the view is popped before `class_regs` is dropped.
+            regs_ptr: class_regs_ptr,
+            regs_len: class_regs_len,
+            local_index: Rc::clone(local_index),
+            nonlocal_names: None,
+            env: None,
+            is_class_method: false,
+        });
+        // SAFETY: class_regs_ptr is valid for class_regs_len Values for the
+        // lifetime of class_regs.  No &mut [Value] referencing class_regs is
+        // held while the dispatch loop runs (issue #547, PR #646).
+        let class_regs_slice =
+            unsafe { RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len) };
+        let body_result = self.run_bytecode(class_code, class_regs_slice);
+        // Always pop both stacks, even on error, to keep them balanced.
+        self.vm_frame_views.pop();
+        self.env = previous_env;
+        self.free_env(class_env_rc.clone());
+        let store_order = self
+            .class_store_order
+            .pop()
+            .expect("class_store_order stack popped to empty");
+        body_result?;
+
+        let attrs = collect_class_attrs(local_index, &class_regs, store_order, num_class_regs);
+        Ok((attrs, class_env_rc))
+    }
+
+    /// Resolve `R[bases_base .. bases_base+bases_n]` into (primary, extras),
+    /// rejecting non-class and non-subclassable bases, and incompatible layouts.
+    fn make_class_resolve_bases(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        bases_base: crate::bytecode::Reg,
+        bases_n: u8,
+    ) -> Result<(Option<Rc<RefCell<PyClass>>>, Vec<Rc<RefCell<PyClass>>>)> {
+        let mut classes: Vec<Rc<RefCell<PyClass>>> = Vec::with_capacity(bases_n as usize);
+        for i in 0..bases_n as usize {
+            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+            let base_val = vm_read(regs, reg, num_locals)?;
+            let ValueKind::PyClass(c) = base_val.kind() else {
+                return Err(PyError::Runtime("class base must be a class".to_string()));
+            };
+            let cls = Rc::clone(c);
+            if let Some(tname) = crate::interpreter::non_subclassable_builtin_name(&cls) {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("type '{tname}' is not an acceptable base type"),
+                ));
+            }
+            classes.push(cls);
+        }
+        let solid_count = classes
+            .iter()
+            .filter(|c| crate::interpreter::is_solid_primitive_class(c))
+            .count();
+        if solid_count >= 2 {
+            return Err(PyError::named(
+                "TypeError",
+                "multiple bases have instance lay-out conflict".to_string(),
+            ));
+        }
+        let mut iter = classes.into_iter();
+        let base = iter.next();
+        Ok((base, iter.collect()))
+    }
+
+    /// PEP 487 / CPython type_new_set_names: call `__set_name__(cls, name)` on
+    /// every namespace value whose *type* defines it.
+    fn make_class_call_set_name(&mut self, class: &Rc<RefCell<PyClass>>) -> Result<()> {
+        let cls_val = Value::py_class(Rc::clone(class));
+        let attrs_snapshot: Vec<(String, Value)> = class
+            .borrow()
+            .attrs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (attr_name, attr_val) in &attrs_snapshot {
+            let ValueKind::PyInstance(inst) = attr_val.kind() else {
+                // Issue #1846: `property` is a built-in descriptor (BuiltinObject,
+                // not PyInstance) with a native __set_name__ that records the
+                // attribute name so its __set__/__delete__ errors can name it.
+                pyrust_builtins::property::set_property_name(attr_val, attr_name);
+                continue;
+            };
+            let inst_class = Rc::clone(&inst.borrow().class);
+            let Some(set_name_fn) = lookup_class_attr(&inst_class, "__set_name__") else {
+                continue;
+            };
+            invoke_class_method(
+                self,
+                set_name_fn,
+                attr_val.clone(),
+                &[
+                    ExpandedCallArg { name: None, value: cls_val.clone() },
+                    ExpandedCallArg {
+                        name: None,
+                        value: Value::string(attr_name.clone()),
+                    },
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// PEP 487 / CPython type_new_init_subclass: call `base.__init_subclass__`
+    /// with the class keyword arguments after the class is fully constructed.
+    fn make_class_call_init_subclass(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        regs: &RegSlice,
+        kwarg_base: crate::bytecode::Reg,
+        class_kwarg_names: &[String],
+    ) -> Result<()> {
+        let lookup_base = class
+            .borrow()
+            .base
+            .clone()
+            .unwrap_or_else(object_class_singleton);
+        let Some(method_val) = lookup_class_attr(&lookup_base, "__init_subclass__") else {
+            return Ok(());
+        };
+        let new_cls = Value::py_class(Rc::clone(class));
+        let kwarg_args: ExpandedArgBuf = class_kwarg_names
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
+                ExpandedCallArg {
+                    name: Some(key.clone()),
+                    value: regs[reg as usize].clone(),
+                }
+            })
+            .collect();
+        invoke_class_method(self, method_val, new_cls, &kwarg_args)?;
+        Ok(())
+    }
+}
+
+/// Seed a class-body register slot with a value if the slot is allocated and
+/// in range.  Used by `run_class_body` to pre-inject __qualname__/__module__/
+/// __annotations__ before the body runs.
+fn seed_class_reg(regs: &mut RegsBuf, slot: Option<crate::bytecode::Reg>, value: impl FnOnce() -> Value) {
+    if let Some(slot) = slot {
+        let slot = slot as usize;
+        if slot < regs.len() {
+            regs[slot] = value();
+        }
+    }
+}
+
+/// Build the class attrs dict from the body's fastlocal registers, in the
+/// runtime store order recorded by RecordClassStore.
+fn collect_class_attrs(
+    local_index: &HashMap<String, crate::bytecode::Reg>,
+    class_regs: &RegsBuf,
+    store_order: Vec<crate::bytecode::Reg>,
+    num_class_regs: usize,
+) -> IndexMap<String, Value> {
+    let mut slot_to_name: Vec<Option<&String>> = vec![None; num_class_regs];
+    for (name, &slot) in local_index.iter() {
+        if (slot as usize) < slot_to_name.len() {
+            slot_to_name[slot as usize] = Some(name);
+        }
+    }
+    let mut attrs = IndexMap::new();
+    for slot in store_order {
+        let Some(name) = slot_to_name.get(slot as usize).and_then(|n| *n) else {
+            continue;
+        };
+        if let Some(v) = class_regs.get(slot as usize)
+            && !v.is_unset()
+        {
+            attrs.insert(name.clone(), v.clone());
+        }
+    }
+    attrs
+}
+
+/// Apply CPython's type_new attrs adjustments and return the resolved
+/// __qualname__: wrap a bare __init_subclass__ as a classmethod, pop and
+/// validate __qualname__, and seed __module__/__doc__/__hash__/__dict__/
+/// __weakref__.
+fn make_class_finalize_attrs(
+    attrs: &mut IndexMap<String, Value>,
+    proto_qualname: String,
+    class_docstring: Option<&str>,
+) -> Result<String> {
+    // A bare __init_subclass__ defined in the body is implicitly a classmethod
+    // (issue #1047) so super().__init_subclass__() binds cls correctly.
+    let isc_wrapped = attrs.get("__init_subclass__").and_then(|v| {
+        if let ValueKind::UserFunction(f) = v.kind()
+            && f.kind == pyrust_core::UserFunctionKind::Regular
+        {
+            Some(Value::class_method(Rc::clone(f)))
+        } else {
+            None
+        }
+    });
+    if let Some(wrapped) = isc_wrapped {
+        attrs.insert("__init_subclass__".to_string(), wrapped);
+    }
+    // __qualname__ lives on `type` as a descriptor, not in the attrs dict, so
+    // pop it; an explicit non-str assignment is a TypeError (issue #553).
+    let qualname = match attrs.shift_remove("__qualname__") {
+        None => proto_qualname,
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => {
+                let tname = pyrust_core::builtin_type_name(&v).into_owned();
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("type __qualname__ must be a str, not {tname}"),
+                ));
+            }
+        },
+    };
+    attrs
+        .entry("__module__".to_string())
+        .or_insert_with(|| Value::string("__main__".to_string()));
+    attrs.entry("__doc__".to_string()).or_insert_with(|| {
+        class_docstring
+            .map(|s| Value::string(s.to_string()))
+            .unwrap_or_else(Value::none)
+    });
+    // A class defining __eq__ but not __hash__ is unhashable (CPython rule).
+    if attrs.contains_key("__eq__") && !attrs.contains_key("__hash__") {
+        attrs.insert("__hash__".to_string(), Value::none());
+    }
+    attrs.entry("__dict__".to_string()).or_insert_with(Value::none);
+    attrs
+        .entry("__weakref__".to_string())
+        .or_insert_with(Value::none);
+    Ok(qualname)
+}
+
+/// Extract the declared `__slots__` names (string / tuple / list of strings)
+/// from the attrs dict.  Returns `None` when no `__slots__` is declared (the
+/// instance gets a full __dict__); `Some(set)` restricts instance attributes.
+/// When __slots__ is present without __dict__, the __dict__ sentinel is removed
+/// so slotted instances have no per-instance dict (CPython parity).
+fn make_class_extract_slots(
+    attrs: &mut IndexMap<String, Value>,
+) -> Option<indexmap::IndexSet<String>> {
+    let slots_val = attrs.get("__slots__")?;
+    let collect = |items: &[Value]| -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|v| match v.kind() {
+                ValueKind::Str(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let slot_names: Vec<String> = match slots_val.kind() {
+        ValueKind::Str(s) => vec![s.to_string()],
+        ValueKind::Tuple(items) => collect(&items),
+        ValueKind::List(items) => collect(&items),
+        _ => vec![],
+    };
+    let set: indexmap::IndexSet<String> = slot_names.into_iter().collect();
+    if !set.contains("__dict__") {
+        attrs.insert("__dict__".to_string(), Value::none());
+    }
+    Some(set)
+}
