@@ -101,6 +101,17 @@ pub enum Insn {
     BinOpImm(Reg, Reg, BinaryOp, i16),
     /// R[dst] = unary_op(R[src])
     UnaryOp(Reg, UnaryOp, Reg),
+    /// R[dst] = `isinstance(R[subj], (str, bytes, dict, set, frozenset))`
+    ///
+    /// PEP 634 §3: these five types are excluded from sequence-pattern
+    /// matching (str/bytes are text sequences; dict/set/frozenset support
+    /// `len()` but not integer indexing).  Emitted once per `Pattern::Sequence`
+    /// arm in place of the `5×LoadGlobal + BuildTuple + Call(isinstance)`
+    /// sequence so that a `match` inside a tight loop pays a single
+    /// allocation-free type check instead of rebuilding the exclusion tuple on
+    /// every iteration (issue #1789).  Subclasses are honoured (a `dict`
+    /// subclass instance is excluded; a `list` subclass instance is not).
+    MatchSeqExcluded(Reg, Reg),
     /// R[dst] = R[obj].names[name_idx]
     GetAttr(Reg, Reg, u16),
     /// Like GetAttr but converts AttributeError to TypeError for the context manager

@@ -1095,6 +1095,36 @@ pub(crate) fn primitive_class_isinstance_fast(
     })
 }
 
+/// `isinstance(v, (str, bytes, dict, set, frozenset))` — the set of types
+/// PEP 634 §3 excludes from sequence-pattern matching.
+///
+/// Replicates [`isinstance_single`]'s semantics for those five primitive
+/// classes (including subclass instances) without building a tuple of type
+/// objects or going through the generic `isinstance` call.  Backs the
+/// `MatchSeqExcluded` instruction so a `match` arm with a sequence pattern
+/// pays one allocation-free check per execution instead of rebuilding the
+/// exclusion tuple every time (issue #1789).
+pub(crate) fn value_is_seq_excluded(v: &Value) -> bool {
+    match v.kind() {
+        // Direct primitives — the common case, decided by the NaN-box tag.
+        ValueKind::Str(_) | ValueKind::Bytes(_) | ValueKind::Dict(_) | ValueKind::Set(_) => true,
+        ValueKind::BuiltinObject { ops, .. } => ops.type_name() == "frozenset",
+        // Subclass instances (`class MyDict(dict)`): walk the MRO against each
+        // excluded primitive singleton, matching `isinstance(_, dict)` etc.
+        ValueKind::PyInstance(inst) => {
+            let actual = Rc::clone(&inst.borrow().class);
+            PRIMITIVE_CLASSES.with(|c| {
+                class_is_subclass_of(&actual, &c.str_class)
+                    || class_is_subclass_of(&actual, &c.bytes_class)
+                    || class_is_subclass_of(&actual, &c.dict_class)
+                    || class_is_subclass_of(&actual, &c.set_class)
+                    || class_is_subclass_of(&actual, &c.frozenset_class)
+            })
+        }
+        _ => false,
+    }
+}
+
 /// Returns the type name if `class` is one of the builtin types that
 /// CPython marks as non-subclassable (i.e. lacks `Py_TPFLAGS_BASETYPE`):
 /// `NoneType`, `ellipsis`, `NotImplementedType`, `bool`, `method`, and
