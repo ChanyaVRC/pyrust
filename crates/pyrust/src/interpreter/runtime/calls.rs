@@ -1609,6 +1609,24 @@ impl Interpreter {
             // `format`, `classmethod`, `staticmethod` migrated to
             // `crate::builtin_modules::builtins`.
 
+            // Bound property descriptor-method (`f = p.__get__; f(obj, owner)`).
+            // Sits with the property arms, after the hot user-function arm, so
+            // the common call fast path is untouched.
+            _ if pyrust_builtins::property::as_property_method(&function).is_some() => {
+                let (prop, kind) =
+                    pyrust_builtins::property::as_property_method(&function).unwrap();
+                // CPython's descriptor slot wrappers are positional-only; a
+                // keyword argument raises TypeError rather than being bound.
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "this method takes no keyword arguments".to_string(),
+                    ));
+                }
+                let pos: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
+                dispatch_property_method(self, &prop, kind, &pos)
+            }
+
             // Calling prop.setter(fn), prop.deleter(fn), or prop.getter(fn).
             // Returns a new Property with the respective slot replaced.
             _ if pyrust_builtins::property::property_partial_slot(&function)
