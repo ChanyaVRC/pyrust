@@ -1526,335 +1526,16 @@ impl Interpreter {
     pub(crate) fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
-                let class = { Rc::clone(&instance.borrow().class) };
-                // Check for `__setattr__` first — CPython dispatches
-                // __setattr__ before the descriptor protocol (object.__setattr__
-                // is what does the descriptor lookup by default).
-                // Skip only the `object.__setattr__` builtin sentinel — it
-                // IS the default path below, so invoking it would be
-                // redundant and cause infinite recursion when called from
-                // inside a custom __setattr__ that delegates back to it.
-                if let Some(setattr_val) = lookup_class_attr(&class, "__setattr__") {
-                    let is_object_default = matches!(
-                        setattr_val.kind(),
-                        ValueKind::BuiltinFunction(n) if n == "object.__setattr__"
-                    );
-                    if !is_object_default {
-                        return invoke_class_method(
-                            self,
-                            setattr_val,
-                            Value::py_instance(Rc::clone(instance)),
-                            &[
-                                ExpandedCallArg {
-                                    name: None,
-                                    value: Value::string(name.to_string()),
-                                },
-                                ExpandedCallArg { name: None, value },
-                            ],
-                        )
-                        .map(|_| ());
-                    }
-                }
-                // General data descriptor protocol: if the class (or MRO) has
-                // a data descriptor (has __set__) for this name, call __set__.
-                if let Some(class_val) = lookup_class_attr(&class, name) {
-                    if let Some(result) =
-                        call_descriptor_set(self, &class_val, Value::py_instance(Rc::clone(instance)), value.clone(), name)?
-                    {
-                        return result;
-                    }
-                }
-                // Issue #1198: bare `object()` instances have no __dict__ in
-                // CPython.  Only the object singleton itself is blocked; any
-                // user-defined class (even `class Foo(object): pass`) gets its
-                // own PyClass Rc and is not ptr_eq to the singleton.
-                if Rc::ptr_eq(&class, &object_class_singleton()) {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("'object' object has no attribute '{name}'"),
-                    ));
-                }
-                // PEP 3134: __cause__ and __context__ must be None or a
-                // BaseException subclass instance.  __suppress_context__ must
-                // be a bool.  CPython enforces these in the C slot setters;
-                // not enforcing them makes pyrust silently accept bad values
-                // that CPython raises TypeError for (issue #1066 review).
-                if is_exception_class(&class) {
-                    match name {
-                        "__cause__" | "__context__" => {
-                            let ok = match value.kind() {
-                                ValueKind::None => true,
-                                ValueKind::PyInstance(inst) => {
-                                    is_exception_class(&inst.borrow().class)
-                                }
-                                _ => false,
-                            };
-                            if !ok {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "exception {} must be None or derive from BaseException",
-                                        if name == "__cause__" { "cause" } else { "context" }
-                                    ),
-                                ));
-                            }
-                        }
-                        "__suppress_context__" => {
-                            if !matches!(value.kind(), ValueKind::Bool(_)) {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "attribute value type must be bool",
-                                ));
-                            }
-                        }
-                        // Issue #1441: __traceback__ must be None or a traceback
-                        // object.  CPython raises TypeError for any other value.
-                        "__traceback__" => {
-                            let ok = match value.kind() {
-                                ValueKind::None => true,
-                                ValueKind::BuiltinObject { ops, .. } => {
-                                    ops.type_name() == pyrust_builtins::traceback::TYPE_NAME
-                                }
-                                _ => false,
-                            };
-                            if !ok {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "__traceback__ must be a traceback or None".to_string(),
-                                ));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                // Issue #1106: if the class declares `__slots__`, only allow
-                // assignment to names in the slot set.  When `__dict__` is
-                // explicitly listed as a slot, arbitrary attribute assignment
-                // is allowed (CPython behaviour).
-                // Also skip when any ancestor class in the MRO has no `__slots__`:
-                // a single unslotted ancestor reintroduces `__dict__` for all
-                // subclasses (CPython rule).
-                {
-                    let slots_opt = class.borrow().slots.clone();
-                    if let Some(ref slot_set) = slots_opt {
-                        if !slot_set.contains("__dict__")
-                            && !slot_set.contains(name)
-                            && !mro_has_unslotted_ancestor(&class)
-                        {
-                            let class_name = class.borrow().name.clone();
-                            return Err(PyError::named(
-                                "AttributeError",
-                                format!("'{class_name}' object has no attribute '{name}'"),
-                            ));
-                        }
-                    }
-                }
-                instance.borrow_mut().attrs.insert(name.to_string(), value);
-                Ok(())
+                let instance = Rc::clone(instance);
+                self.assign_attr_instance(&instance, name, value)
             }
             ValueKind::PyClass(class) => {
-                // Primitive class singletons are shared across every
-                // `Interpreter` on the same thread (per-thread
-                // `PRIMITIVE_CLASSES` thread_local), so mutating their
-                // attrs would leak state across runs.  Match CPython,
-                // which raises TypeError on `int.x = 1`.  Copilot
-                // review on #463.
-                if crate::interpreter::is_primitive_class(class) {
-                    let n = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "cannot set '{name}' attribute of immutable type '{n}'"
-                        ),
-                    ));
-                }
-                // __dict__ is a read-only descriptor on type objects — CPython
-                // raises AttributeError on direct assignment.
-                if name == "__dict__" {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        "attribute '__dict__' of 'type' objects is not writable".to_string(),
-                    ));
-                }
-                // Issue #553: __qualname__ is a type-level descriptor on `type`
-                // in CPython — assigning it updates the descriptor slot, not the
-                // class attrs dict.  CPython also requires the value to be a str.
-                if name == "__qualname__" {
-                    // Extract the string while the kind() Ref is alive, then
-                    // drop the borrow before taking the error path.
-                    let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
-                        Some(s.to_string())
-                    } else {
-                        None
-                    };
-                    match as_str {
-                        Some(s) => {
-                            class.borrow_mut().qualname = s;
-                            return Ok(());
-                        }
-                        None => {
-                            let type_name =
-                                pyrust_core::builtin_type_name(&value).into_owned();
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "can only assign string to {}.__qualname__, not '{}'",
-                                    class.borrow().name,
-                                    type_name,
-                                ),
-                            ));
-                        }
-                    }
-                }
-                {
-                    let mut cls = class.borrow_mut();
-                    cls.attrs.insert(name.to_string(), value);
-                    let v = cls.mutation_version.get().wrapping_add(1);
-                    cls.mutation_version.set(v);
-                }
-                // Bump the global epoch so that caches keyed on subclasses of
-                // this class (which only check their own mutation_version) also
-                // invalidate — the epoch guard catches ancestor mutations that
-                // the leaf-class version check would miss.
-                pyrust_core::bump_class_epoch();
-                Ok(())
+                let class = Rc::clone(class);
+                self.assign_attr_class(&class, name, value)
             }
             ValueKind::UserFunction(func) => {
-                // CPython allows assigning to __name__ and __qualname__ on
-                // functions — both must be set to a str, otherwise TypeError.
-                // __module__ and __doc__ accept any value (CPython imposes no
-                // type constraint on these).
-                // __dict__ must be set to a dict; any other name goes into
-                // the function's dynamic attrs dict.
-                match name {
-                    "__name__" | "__qualname__" => {
-                        let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
-                            Some(s.to_string())
-                        } else {
-                            None
-                        };
-                        match as_str {
-                            Some(s) => {
-                                if name == "__name__" {
-                                    *func.user_name.borrow_mut() = Some(s);
-                                } else {
-                                    *func.user_qualname.borrow_mut() = Some(s);
-                                }
-                                Ok(())
-                            }
-                            None => Err(PyError::named(
-                                "TypeError",
-                                format!("{name} must be set to a string object"),
-                            )),
-                        }
-                    }
-                    "__module__" => {
-                        *func.module.borrow_mut() = value;
-                        Ok(())
-                    }
-                    "__doc__" => {
-                        *func.doc.borrow_mut() = value;
-                        Ok(())
-                    }
-                    "__dict__" => {
-                        // CPython requires the replacement to be a dict.
-                        if matches!(value.kind(), ValueKind::Dict(_)) {
-                            // Replace the inner Value in place through the existing Rc so
-                            // that any Rc clones (bound methods, etc.) see the new dict.
-                            // If attrs was never initialised, just store a fresh Rc.
-                            let mut slot = func.attrs.borrow_mut();
-                            if let Some(rc) = slot.as_ref() {
-                                *rc.borrow_mut() = value;
-                            } else {
-                                *slot = Some(Rc::new(RefCell::new(value)));
-                            }
-                            Ok(())
-                        } else {
-                            let type_name = pyrust_core::builtin_type_name(&value);
-                            Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "__dict__ must be set to a dictionary, not a '{type_name}'"
-                                ),
-                            ))
-                        }
-                    }
-                    "__annotations__" => {
-                        // CPython accepts a dict or None; any other type raises TypeError.
-                        // Assigning None resets the annotations to an empty dict — CPython
-                        // stores None internally but the getter coerces it to {} on next
-                        // access.  We store the empty dict directly so that identity
-                        // semantics (`f.__annotations__ is f.__annotations__`) still hold.
-                        if matches!(value.kind(), ValueKind::Dict(_)) {
-                            *func.annotations.borrow_mut() = value;
-                            Ok(())
-                        } else if value.is_none() {
-                            *func.annotations.borrow_mut() =
-                                Value::dict(indexmap::IndexMap::new());
-                            Ok(())
-                        } else {
-                            Err(PyError::named(
-                                "TypeError",
-                                "__annotations__ must be set to a dict object".to_string(),
-                            ))
-                        }
-                    }
-                    // CPython validates these slots and rejects arbitrary values.
-                    // They are not yet implemented as real fields in pyrust, so
-                    // validate the type and silently succeed for accepted values
-                    // (pyrust is already in the "unset" state CPython would be
-                    // in after the assignment).
-                    "__code__" => Err(PyError::named(
-                        "TypeError",
-                        "__code__ must be set to a code object".to_string(),
-                    )),
-                    "__defaults__" => {
-                        // CPython accepts None or a tuple; anything else → TypeError.
-                        if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
-                            Ok(())
-                        } else {
-                            Err(PyError::named(
-                                "TypeError",
-                                "__defaults__ must be set to a tuple object".to_string(),
-                            ))
-                        }
-                    }
-                    "__kwdefaults__" => {
-                        // CPython accepts None or a dict; anything else → TypeError.
-                        if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
-                            Ok(())
-                        } else {
-                            Err(PyError::named(
-                                "TypeError",
-                                "__kwdefaults__ must be set to a dict object".to_string(),
-                            ))
-                        }
-                    }
-                    "__globals__" | "__closure__" => Err(PyError::named(
-                        "AttributeError",
-                        "readonly attribute".to_string(),
-                    )),
-                    "__func__"
-                        if matches!(
-                            func.kind,
-                            UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
-                        ) =>
-                    {
-                        Err(PyError::named(
-                            "AttributeError",
-                            "readonly attribute".to_string(),
-                        ))
-                    }
-                    _ => {
-                        // Arbitrary dynamic attribute — insert into the live dict,
-                        // initialising attrs lazily if this is the first write.
-                        let attrs_rc = func_attrs_rc(func);
-                        attrs_rc
-                            .borrow()
-                            .dict_insert(PyKey::str_from(name), value)
-                            .map(|_| ())
-                    }
-                }
+                let func = Rc::clone(func);
+                Self::assign_attr_function(&func, name, value)
             }
             ValueKind::BuiltinFunction(func_name) => {
                 // CPython distinguishes two cases:
@@ -2026,79 +1707,359 @@ impl Interpreter {
         }
     }
 
+    /// `obj.name = value` for a `PyInstance` target. Split out of `assign_attr`.
+    fn assign_attr_instance(
+        &mut self,
+        instance: &Rc<RefCell<PyInstance>>,
+        name: &str,
+        value: Value,
+    ) -> Result<()> {
+            let class = { Rc::clone(&instance.borrow().class) };
+            // Check for `__setattr__` first — CPython dispatches
+            // __setattr__ before the descriptor protocol (object.__setattr__
+            // is what does the descriptor lookup by default).
+            // Skip only the `object.__setattr__` builtin sentinel — it
+            // IS the default path below, so invoking it would be
+            // redundant and cause infinite recursion when called from
+            // inside a custom __setattr__ that delegates back to it.
+            if let Some(setattr_val) = lookup_class_attr(&class, "__setattr__") {
+                let is_object_default = matches!(
+                    setattr_val.kind(),
+                    ValueKind::BuiltinFunction(n) if n == "object.__setattr__"
+                );
+                if !is_object_default {
+                    return invoke_class_method(
+                        self,
+                        setattr_val,
+                        Value::py_instance(Rc::clone(instance)),
+                        &[
+                            ExpandedCallArg {
+                                name: None,
+                                value: Value::string(name.to_string()),
+                            },
+                            ExpandedCallArg { name: None, value },
+                        ],
+                    )
+                    .map(|_| ());
+                }
+            }
+            // General data descriptor protocol: if the class (or MRO) has
+            // a data descriptor (has __set__) for this name, call __set__.
+            if let Some(class_val) = lookup_class_attr(&class, name) {
+                if let Some(result) =
+                    call_descriptor_set(self, &class_val, Value::py_instance(Rc::clone(instance)), value.clone(), name)?
+                {
+                    return result;
+                }
+            }
+            // Issue #1198: bare `object()` instances have no __dict__ in
+            // CPython.  Only the object singleton itself is blocked; any
+            // user-defined class (even `class Foo(object): pass`) gets its
+            // own PyClass Rc and is not ptr_eq to the singleton.
+            if Rc::ptr_eq(&class, &object_class_singleton()) {
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'object' object has no attribute '{name}'"),
+                ));
+            }
+            // PEP 3134: __cause__ and __context__ must be None or a
+            // BaseException subclass instance.  __suppress_context__ must
+            // be a bool.  CPython enforces these in the C slot setters;
+            // not enforcing them makes pyrust silently accept bad values
+            // that CPython raises TypeError for (issue #1066 review).
+            if is_exception_class(&class) {
+                match name {
+                    "__cause__" | "__context__" => {
+                        let ok = match value.kind() {
+                            ValueKind::None => true,
+                            ValueKind::PyInstance(inst) => {
+                                is_exception_class(&inst.borrow().class)
+                            }
+                            _ => false,
+                        };
+                        if !ok {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "exception {} must be None or derive from BaseException",
+                                    if name == "__cause__" { "cause" } else { "context" }
+                                ),
+                            ));
+                        }
+                    }
+                    "__suppress_context__" => {
+                        if !matches!(value.kind(), ValueKind::Bool(_)) {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "attribute value type must be bool",
+                            ));
+                        }
+                    }
+                    // Issue #1441: __traceback__ must be None or a traceback
+                    // object.  CPython raises TypeError for any other value.
+                    "__traceback__" => {
+                        let ok = match value.kind() {
+                            ValueKind::None => true,
+                            ValueKind::BuiltinObject { ops, .. } => {
+                                ops.type_name() == pyrust_builtins::traceback::TYPE_NAME
+                            }
+                            _ => false,
+                        };
+                        if !ok {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "__traceback__ must be a traceback or None".to_string(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Issue #1106: if the class declares `__slots__`, only allow
+            // assignment to names in the slot set.  When `__dict__` is
+            // explicitly listed as a slot, arbitrary attribute assignment
+            // is allowed (CPython behaviour).
+            // Also skip when any ancestor class in the MRO has no `__slots__`:
+            // a single unslotted ancestor reintroduces `__dict__` for all
+            // subclasses (CPython rule).
+            {
+                let slots_opt = class.borrow().slots.clone();
+                if let Some(ref slot_set) = slots_opt {
+                    if !slot_set.contains("__dict__")
+                        && !slot_set.contains(name)
+                        && !mro_has_unslotted_ancestor(&class)
+                    {
+                        let class_name = class.borrow().name.clone();
+                        return Err(PyError::named(
+                            "AttributeError",
+                            format!("'{class_name}' object has no attribute '{name}'"),
+                        ));
+                    }
+                }
+            }
+            instance.borrow_mut().attrs.insert(name.to_string(), value);
+            Ok(())
+    }
+
+    /// `Cls.name = value` for a `PyClass` target. Split out of `assign_attr`.
+    fn assign_attr_class(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        name: &str,
+        value: Value,
+    ) -> Result<()> {
+            // Primitive class singletons are shared across every
+            // `Interpreter` on the same thread (per-thread
+            // `PRIMITIVE_CLASSES` thread_local), so mutating their
+            // attrs would leak state across runs.  Match CPython,
+            // which raises TypeError on `int.x = 1`.  Copilot
+            // review on #463.
+            if crate::interpreter::is_primitive_class(class) {
+                let n = class.borrow().name.clone();
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "cannot set '{name}' attribute of immutable type '{n}'"
+                    ),
+                ));
+            }
+            // __dict__ is a read-only descriptor on type objects — CPython
+            // raises AttributeError on direct assignment.
+            if name == "__dict__" {
+                return Err(PyError::named(
+                    "AttributeError",
+                    "attribute '__dict__' of 'type' objects is not writable".to_string(),
+                ));
+            }
+            // Issue #553: __qualname__ is a type-level descriptor on `type`
+            // in CPython — assigning it updates the descriptor slot, not the
+            // class attrs dict.  CPython also requires the value to be a str.
+            if name == "__qualname__" {
+                // Extract the string while the kind() Ref is alive, then
+                // drop the borrow before taking the error path.
+                let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
+                    Some(s.to_string())
+                } else {
+                    None
+                };
+                match as_str {
+                    Some(s) => {
+                        class.borrow_mut().qualname = s;
+                        return Ok(());
+                    }
+                    None => {
+                        let type_name =
+                            pyrust_core::builtin_type_name(&value).into_owned();
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "can only assign string to {}.__qualname__, not '{}'",
+                                class.borrow().name,
+                                type_name,
+                            ),
+                        ));
+                    }
+                }
+            }
+            {
+                let mut cls = class.borrow_mut();
+                cls.attrs.insert(name.to_string(), value);
+                let v = cls.mutation_version.get().wrapping_add(1);
+                cls.mutation_version.set(v);
+            }
+            // Bump the global epoch so that caches keyed on subclasses of
+            // this class (which only check their own mutation_version) also
+            // invalidate — the epoch guard catches ancestor mutations that
+            // the leaf-class version check would miss.
+            pyrust_core::bump_class_epoch();
+            Ok(())
+    }
+
+    /// `func.name = value` for a `UserFunction` target. Split out of `assign_attr`.
+    fn assign_attr_function(func: &Rc<UserFunction>, name: &str, value: Value) -> Result<()> {
+            // CPython allows assigning to __name__ and __qualname__ on
+            // functions — both must be set to a str, otherwise TypeError.
+            // __module__ and __doc__ accept any value (CPython imposes no
+            // type constraint on these).
+            // __dict__ must be set to a dict; any other name goes into
+            // the function's dynamic attrs dict.
+            match name {
+                "__name__" | "__qualname__" => {
+                    let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
+                        Some(s.to_string())
+                    } else {
+                        None
+                    };
+                    match as_str {
+                        Some(s) => {
+                            if name == "__name__" {
+                                *func.user_name.borrow_mut() = Some(s);
+                            } else {
+                                *func.user_qualname.borrow_mut() = Some(s);
+                            }
+                            Ok(())
+                        }
+                        None => Err(PyError::named(
+                            "TypeError",
+                            format!("{name} must be set to a string object"),
+                        )),
+                    }
+                }
+                "__module__" => {
+                    *func.module.borrow_mut() = value;
+                    Ok(())
+                }
+                "__doc__" => {
+                    *func.doc.borrow_mut() = value;
+                    Ok(())
+                }
+                "__dict__" => {
+                    // CPython requires the replacement to be a dict.
+                    if matches!(value.kind(), ValueKind::Dict(_)) {
+                        // Replace the inner Value in place through the existing Rc so
+                        // that any Rc clones (bound methods, etc.) see the new dict.
+                        // If attrs was never initialised, just store a fresh Rc.
+                        let mut slot = func.attrs.borrow_mut();
+                        if let Some(rc) = slot.as_ref() {
+                            *rc.borrow_mut() = value;
+                        } else {
+                            *slot = Some(Rc::new(RefCell::new(value)));
+                        }
+                        Ok(())
+                    } else {
+                        let type_name = pyrust_core::builtin_type_name(&value);
+                        Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "__dict__ must be set to a dictionary, not a '{type_name}'"
+                            ),
+                        ))
+                    }
+                }
+                "__annotations__" => {
+                    // CPython accepts a dict or None; any other type raises TypeError.
+                    // Assigning None resets the annotations to an empty dict — CPython
+                    // stores None internally but the getter coerces it to {} on next
+                    // access.  We store the empty dict directly so that identity
+                    // semantics (`f.__annotations__ is f.__annotations__`) still hold.
+                    if matches!(value.kind(), ValueKind::Dict(_)) {
+                        *func.annotations.borrow_mut() = value;
+                        Ok(())
+                    } else if value.is_none() {
+                        *func.annotations.borrow_mut() =
+                            Value::dict(indexmap::IndexMap::new());
+                        Ok(())
+                    } else {
+                        Err(PyError::named(
+                            "TypeError",
+                            "__annotations__ must be set to a dict object".to_string(),
+                        ))
+                    }
+                }
+                // CPython validates these slots and rejects arbitrary values.
+                // They are not yet implemented as real fields in pyrust, so
+                // validate the type and silently succeed for accepted values
+                // (pyrust is already in the "unset" state CPython would be
+                // in after the assignment).
+                "__code__" => Err(PyError::named(
+                    "TypeError",
+                    "__code__ must be set to a code object".to_string(),
+                )),
+                "__defaults__" => {
+                    // CPython accepts None or a tuple; anything else → TypeError.
+                    if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
+                        Ok(())
+                    } else {
+                        Err(PyError::named(
+                            "TypeError",
+                            "__defaults__ must be set to a tuple object".to_string(),
+                        ))
+                    }
+                }
+                "__kwdefaults__" => {
+                    // CPython accepts None or a dict; anything else → TypeError.
+                    if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
+                        Ok(())
+                    } else {
+                        Err(PyError::named(
+                            "TypeError",
+                            "__kwdefaults__ must be set to a dict object".to_string(),
+                        ))
+                    }
+                }
+                "__globals__" | "__closure__" => Err(PyError::named(
+                    "AttributeError",
+                    "readonly attribute".to_string(),
+                )),
+                "__func__"
+                    if matches!(
+                        func.kind,
+                        UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+                    ) =>
+                {
+                    Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    ))
+                }
+                _ => {
+                    // Arbitrary dynamic attribute — insert into the live dict,
+                    // initialising attrs lazily if this is the first write.
+                    let attrs_rc = func_attrs_rc(func);
+                    attrs_rc
+                        .borrow()
+                        .dict_insert(PyKey::str_from(name), value)
+                        .map(|_| ())
+                }
+            }
+    }
+
+
     pub(crate) fn delete_attr(&mut self, target: Value, name: &str) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
-                let class = { Rc::clone(&instance.borrow().class) };
-                // Check for `__delattr__` first — symmetric with __setattr__
-                // in assign_attr (issue #1174).  Skip only the
-                // `object.__delattr__` builtin sentinel.
-                if let Some(delattr_val) = lookup_class_attr(&class, "__delattr__") {
-                    let is_object_default = matches!(
-                        delattr_val.kind(),
-                        ValueKind::BuiltinFunction(n) if n == "object.__delattr__"
-                    );
-                    if !is_object_default {
-                        return invoke_class_method(
-                            self,
-                            delattr_val,
-                            Value::py_instance(Rc::clone(instance)),
-                            &[ExpandedCallArg {
-                                name: None,
-                                value: Value::string(name.to_string()),
-                            }],
-                        )
-                        .map(|_| ());
-                    }
-                }
-                // General data descriptor protocol: if the class (or MRO)
-                // has a descriptor with __delete__ for this name, call it.
-                if let Some(class_val) = lookup_class_attr(&class, name) {
-                    if let Some(result) =
-                        call_descriptor_delete(self, &class_val, Value::py_instance(Rc::clone(instance)), name)?
-                    {
-                        return result;
-                    }
-                }
-                // CPython 3.12: SyntaxError's structured slots are C-level
-                // member descriptors that reset to None on delete rather than
-                // removing the attribute entirely (issue #1588).  Mirror that
-                // here by storing None instead of removing the key.
-                if class_chain_contains_name(&class, "SyntaxError")
-                    && matches!(
-                        name,
-                        "msg"
-                            | "filename"
-                            | "lineno"
-                            | "offset"
-                            | "text"
-                            | "end_lineno"
-                            | "end_offset"
-                    )
-                {
-                    instance
-                        .borrow_mut()
-                        .attrs
-                        .insert(name.to_string(), Value::none());
-                    return Ok(());
-                }
-                // CPython 3.12: BaseException.args is a C-level member descriptor
-                // with no tp_delete slot; any deletion attempt raises TypeError.
-                if name == "args" && class_chain_contains_name(&class, "BaseException") {
-                    return Err(PyError::named("TypeError", "args may not be deleted"));
-                }
-                // `shift_remove` keeps the remaining entries in their
-                // original insertion order so `vars(obj)` after `del obj.x`
-                // still matches CPython's stable ordering contract.
-                // CPython raises AttributeError when the attribute is absent.
-                if instance.borrow_mut().attrs.shift_remove(name).is_none() {
-                    let class_name = instance.borrow().class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("'{class_name}' object has no attribute '{name}'"),
-                    ));
-                }
-                Ok(())
+                let instance = Rc::clone(instance);
+                self.delete_attr_kind_instance(&instance, name)
             }
             ValueKind::UserFunction(func) => {
                 // CPython raises TypeError for `del f.__name__` / `del f.__qualname__`
@@ -2185,52 +2146,8 @@ impl Interpreter {
                 }
             }
             ValueKind::PyClass(class) => {
-                // __dict__ is a read-only descriptor on type objects — CPython
-                // raises AttributeError on `del C.__dict__`.
-                if name == "__dict__" {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        "attribute '__dict__' of 'type' objects is not writable".to_string(),
-                    ));
-                }
-                // Issue #553: __qualname__ is a type-level descriptor on `type`
-                // in CPython — you cannot delete it.  CPython raises TypeError.
-                if name == "__qualname__" {
-                    let n = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("cannot delete '__qualname__' attribute of immutable type '{n}'"),
-                    ));
-                }
-                // Issue #737: `del Cls.__annotations__` must raise
-                // `AttributeError` when no annotations dict has been
-                // materialised yet — matching CPython's descriptor, which
-                // refuses to delete a slot that was never written.
-                if name == "__annotations__"
-                    && !class.borrow().attrs.contains_key("__annotations__")
-                {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        "__annotations__".to_string(),
-                    ));
-                }
-                // CPython raises AttributeError when the attribute is absent.
-                {
-                    let mut cls = class.borrow_mut();
-                    if cls.attrs.shift_remove(name).is_none() {
-                        let class_name = cls.name.clone();
-                        return Err(PyError::named(
-                            "AttributeError",
-                            format!("type object '{class_name}' has no attribute '{name}'"),
-                        ));
-                    }
-                    let v = cls.mutation_version.get().wrapping_add(1);
-                    cls.mutation_version.set(v);
-                }
-                // Bump the global epoch so that caches keyed on subclasses of
-                // this class also invalidate after a base-class deletion.
-                pyrust_core::bump_class_epoch();
-                Ok(())
+                let class = Rc::clone(class);
+                self.delete_attr_kind_class(&class, name)
             }
             ValueKind::BuiltinFunction(func_name) => {
                 // Mirror the assign_attr logic: method_descriptors and
@@ -2379,6 +2296,139 @@ impl Interpreter {
             }
         }
     }
+
+    /// `del obj.name` for a `PyInstance` target. Split out of `delete_attr`.
+    fn delete_attr_kind_instance(
+        &mut self,
+        instance: &Rc<RefCell<PyInstance>>,
+        name: &str,
+    ) -> Result<()> {
+            let class = { Rc::clone(&instance.borrow().class) };
+            // Check for `__delattr__` first — symmetric with __setattr__
+            // in assign_attr (issue #1174).  Skip only the
+            // `object.__delattr__` builtin sentinel.
+            if let Some(delattr_val) = lookup_class_attr(&class, "__delattr__") {
+                let is_object_default = matches!(
+                    delattr_val.kind(),
+                    ValueKind::BuiltinFunction(n) if n == "object.__delattr__"
+                );
+                if !is_object_default {
+                    return invoke_class_method(
+                        self,
+                        delattr_val,
+                        Value::py_instance(Rc::clone(instance)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: Value::string(name.to_string()),
+                        }],
+                    )
+                    .map(|_| ());
+                }
+            }
+            // General data descriptor protocol: if the class (or MRO)
+            // has a descriptor with __delete__ for this name, call it.
+            if let Some(class_val) = lookup_class_attr(&class, name) {
+                if let Some(result) =
+                    call_descriptor_delete(self, &class_val, Value::py_instance(Rc::clone(instance)), name)?
+                {
+                    return result;
+                }
+            }
+            // CPython 3.12: SyntaxError's structured slots are C-level
+            // member descriptors that reset to None on delete rather than
+            // removing the attribute entirely (issue #1588).  Mirror that
+            // here by storing None instead of removing the key.
+            if class_chain_contains_name(&class, "SyntaxError")
+                && matches!(
+                    name,
+                    "msg"
+                        | "filename"
+                        | "lineno"
+                        | "offset"
+                        | "text"
+                        | "end_lineno"
+                        | "end_offset"
+                )
+            {
+                instance
+                    .borrow_mut()
+                    .attrs
+                    .insert(name.to_string(), Value::none());
+                return Ok(());
+            }
+            // CPython 3.12: BaseException.args is a C-level member descriptor
+            // with no tp_delete slot; any deletion attempt raises TypeError.
+            if name == "args" && class_chain_contains_name(&class, "BaseException") {
+                return Err(PyError::named("TypeError", "args may not be deleted"));
+            }
+            // `shift_remove` keeps the remaining entries in their
+            // original insertion order so `vars(obj)` after `del obj.x`
+            // still matches CPython's stable ordering contract.
+            // CPython raises AttributeError when the attribute is absent.
+            if instance.borrow_mut().attrs.shift_remove(name).is_none() {
+                let class_name = instance.borrow().class.borrow().name.clone();
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'{class_name}' object has no attribute '{name}'"),
+                ));
+            }
+            Ok(())
+    }
+
+    /// `del Cls.name` for a `PyClass` target. Split out of `delete_attr`.
+    fn delete_attr_kind_class(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        name: &str,
+    ) -> Result<()> {
+            // __dict__ is a read-only descriptor on type objects — CPython
+            // raises AttributeError on `del C.__dict__`.
+            if name == "__dict__" {
+                return Err(PyError::named(
+                    "AttributeError",
+                    "attribute '__dict__' of 'type' objects is not writable".to_string(),
+                ));
+            }
+            // Issue #553: __qualname__ is a type-level descriptor on `type`
+            // in CPython — you cannot delete it.  CPython raises TypeError.
+            if name == "__qualname__" {
+                let n = class.borrow().name.clone();
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("cannot delete '__qualname__' attribute of immutable type '{n}'"),
+                ));
+            }
+            // Issue #737: `del Cls.__annotations__` must raise
+            // `AttributeError` when no annotations dict has been
+            // materialised yet — matching CPython's descriptor, which
+            // refuses to delete a slot that was never written.
+            if name == "__annotations__"
+                && !class.borrow().attrs.contains_key("__annotations__")
+            {
+                return Err(PyError::named(
+                    "AttributeError",
+                    "__annotations__".to_string(),
+                ));
+            }
+            // CPython raises AttributeError when the attribute is absent.
+            {
+                let mut cls = class.borrow_mut();
+                if cls.attrs.shift_remove(name).is_none() {
+                    let class_name = cls.name.clone();
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("type object '{class_name}' has no attribute '{name}'"),
+                    ));
+                }
+                let v = cls.mutation_version.get().wrapping_add(1);
+                cls.mutation_version.set(v);
+            }
+            // Bump the global epoch so that caches keyed on subclasses of
+            // this class also invalidate after a base-class deletion.
+            pyrust_core::bump_class_epoch();
+            Ok(())
+    }
+
 
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
         if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
