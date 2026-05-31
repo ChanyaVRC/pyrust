@@ -7689,16 +7689,19 @@ impl Compiler {
 
     // ── Def / Class ───────────────────────────────────────────────────────────
 
-    fn compile_def(
+    /// Build the inner-function scope metadata, validate global/nonlocal/
+    /// annotation rules, compile the body into a child compiler, and push the
+    /// resulting `FnProto`.  Returns `(proto_idx, is_pure, has_kwonly_params)`,
+    /// or `None` when a (syntax/limit) error was recorded and the caller must
+    /// bail out.
+    fn build_def_proto(
         &mut self,
         name: &str,
         params: &[FunctionParam],
         body: &[Stmt],
-        decorators: &[Expr],
         return_annotation: Option<&Expr>,
         is_async: bool,
-        type_params: &[String],
-    ) {
+    ) -> Option<(u8, bool, bool)> {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
         let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
@@ -7741,7 +7744,7 @@ impl Compiler {
             if self.error_msg.is_none() {
                 self.error_msg = Some(msg);
             }
-            return;
+            return None;
         }
 
         // Validate annotation targets against global/nonlocal declarations.
@@ -7751,11 +7754,11 @@ impl Compiler {
         for ann_name in &def_ann_targets {
             if inner_global.contains(ann_name) {
                 self.set_syntax_error(&format!("annotated name '{}' can't be global", ann_name));
-                return;
+                return None;
             }
             if inner_nonlocal.contains(ann_name) {
                 self.set_syntax_error(&format!("annotated name '{}' can't be nonlocal", ann_name));
-                return;
+                return None;
             }
         }
 
@@ -7782,7 +7785,7 @@ impl Compiler {
                     "no binding for nonlocal '{}' found",
                     nonlocal_name
                 ));
-                return;
+                return None;
             }
         }
 
@@ -7796,11 +7799,11 @@ impl Compiler {
         for ann_name in sorted_ann {
             if inner_global_rc.contains(ann_name) {
                 self.set_syntax_error(&format!("annotated name '{}' can't be global", ann_name));
-                return;
+                return None;
             }
             if inner_nonlocal_rc.contains(ann_name) {
                 self.set_syntax_error(&format!("annotated name '{}' can't be nonlocal", ann_name));
-                return;
+                return None;
             }
         }
 
@@ -7861,7 +7864,7 @@ impl Compiler {
                         other => other.to_string(),
                     });
                 }
-                return;
+                return None;
             }
         };
 
@@ -7871,7 +7874,7 @@ impl Compiler {
                 self.error_msg =
                     Some("too many nested functions in one scope (max 256)".to_string());
             }
-            return;
+            return None;
         }
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
@@ -7912,6 +7915,13 @@ impl Compiler {
             class_kwarg_names: SmallVec::new(),
         });
 
+        Some((proto_idx, is_pure, has_kwonly_params))
+    }
+
+    /// Compile a function's default-value expressions into a contiguous
+    /// register window.  Returns `(base, count)`, or `None` on register
+    /// overflow (error already recorded).
+    fn emit_def_default_values(&mut self, params: &[FunctionParam]) -> Option<(Reg, u8)> {
         // Compile default values (right-to-left in declaration, left-to-right in slots).
         let defaults: Vec<usize> = params
             .iter()
@@ -7928,7 +7938,7 @@ impl Compiler {
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many default-value registers".to_string());
                 }
-                return;
+                return None;
             }
             self.next_temp += Reg::from(defs_n);
             if self.next_temp - 1 > self.max_reg {
@@ -7944,7 +7954,18 @@ impl Compiler {
                 self.next_temp = saved;
             }
         }
+        Some((defs_base, defs_n))
+    }
 
+    /// Compile a function's parameter/return annotation expressions into a
+    /// contiguous register window (param annotations in declaration order, then
+    /// the return annotation).  Returns `(base, count)`, or `None` on register
+    /// overflow (error already recorded).
+    fn emit_def_annotation_values(
+        &mut self,
+        params: &[FunctionParam],
+        return_annotation: Option<&Expr>,
+    ) -> Option<(Reg, u8)> {
         // Compile annotation expressions (evaluated in enclosing scope, like defaults).
         // Under PEP 563 (`from __future__ import annotations`), emit the annotation
         // source text as a string literal instead of evaluating the expression.
@@ -7962,7 +7983,7 @@ impl Compiler {
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many annotation registers".to_string());
                 }
-                return;
+                return None;
             }
             self.next_temp += Reg::from(annots_n);
             if self.next_temp - 1 > self.max_reg {
@@ -7994,6 +8015,83 @@ impl Compiler {
                 self.next_temp = saved;
             }
         }
+        Some((annots_base, annots_n))
+    }
+
+    /// Apply a chain of decorators to the value in `dst`: evaluate each
+    /// decorator expression top-to-bottom, then apply innermost-first
+    /// (`fn = d1(d2(d3(fn)))`).  Returns the register holding the final
+    /// decorated value (`dst` when there are no decorators), or `None` on
+    /// register overflow (error already recorded).  Shared by `compile_def`
+    /// and `compile_class`.
+    fn emit_decorator_application(&mut self, decorators: &[Expr], dst: Reg) -> Option<Reg> {
+        // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
+        // CPython evaluates decorators in declaration order (top first) but applies
+        // them innermost-first (bottom first): fn = d1(d2(d3(fn))).
+        let mut val_reg = dst;
+        if !decorators.is_empty() {
+            let n = decorators.len() as u32;
+            let deco_base = self.next_temp;
+            // Need n slots for the callables plus 1 extra arg slot for the first call.
+            if deco_base.checked_add(n + 1).is_none() {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some("too many registers for decorator application".to_string());
+                }
+                return None;
+            }
+            // Reserve n + 1 registers (n callables + 1 arg slot for the first application).
+            self.next_temp = deco_base + n + 1;
+            if deco_base + n > self.max_reg {
+                self.max_reg = deco_base + n;
+            }
+            // Evaluate each decorator expression top-to-bottom into consecutive registers.
+            for (i, deco_expr) in decorators.iter().enumerate() {
+                let saved = self.next_temp;
+                self.compile_expr_into(deco_expr, deco_base + i as u32);
+                self.next_temp = saved;
+            }
+            // Apply decorators bottom-to-top (innermost first).
+            for i in (0..n).rev() {
+                let frame = deco_base + i;
+                // frame+1 is the argument slot; for i == n-1 this is deco_base+n
+                // (the extra slot reserved above); for smaller i it reuses the
+                // register freed by the previous application result.
+                self.emit(Insn::Move(frame + 1, val_reg));
+                self.emit(Insn::Call(frame, 1));
+                val_reg = frame;
+            }
+            self.next_temp = deco_base + 1;
+        }
+        Some(val_reg)
+    }
+
+    fn compile_def(
+        &mut self,
+        name: &str,
+        params: &[FunctionParam],
+        body: &[Stmt],
+        decorators: &[Expr],
+        return_annotation: Option<&Expr>,
+        is_async: bool,
+        type_params: &[String],
+    ) {
+        let (proto_idx, is_pure, has_kwonly_params) =
+            match self.build_def_proto(name, params, body, return_annotation, is_async) {
+                Some(v) => v,
+                None => return,
+            };
+
+        let (defs_base, defs_n) = match self.emit_def_default_values(params) {
+            Some(v) => v,
+            None => return,
+        };
+        let (annots_base, annots_n) =
+            match self.emit_def_annotation_values(params, return_annotation) {
+                Some(v) => v,
+                None => return,
+            };
 
         let dst = self.alloc_temp();
         self.emit(Insn::MakeFunction(
@@ -8028,45 +8126,10 @@ impl Compiler {
             self.emit_type_params_attr(dst, type_params);
         }
 
-        // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
-        // CPython evaluates decorators in declaration order (top first) but applies
-        // them innermost-first (bottom first): fn = d1(d2(d3(fn))).
-        let mut val_reg = dst;
-        if !decorators.is_empty() {
-            let n = decorators.len() as u32;
-            let deco_base = self.next_temp;
-            // Need n slots for the callables plus 1 extra arg slot for the first call.
-            if deco_base.checked_add(n + 1).is_none() {
-                self.failed = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some("too many registers for decorator application".to_string());
-                }
-                return;
-            }
-            // Reserve n + 1 registers (n callables + 1 arg slot for the first application).
-            self.next_temp = deco_base + n + 1;
-            if deco_base + n > self.max_reg {
-                self.max_reg = deco_base + n;
-            }
-            // Evaluate each decorator expression top-to-bottom into consecutive registers.
-            for (i, deco_expr) in decorators.iter().enumerate() {
-                let saved = self.next_temp;
-                self.compile_expr_into(deco_expr, deco_base + i as u32);
-                self.next_temp = saved;
-            }
-            // Apply decorators bottom-to-top (innermost first).
-            for i in (0..n).rev() {
-                let frame = deco_base + i;
-                // frame+1 is the argument slot; for i == n-1 this is deco_base+n
-                // (the extra slot reserved above); for smaller i it reuses the
-                // register freed by the previous application result.
-                self.emit(Insn::Move(frame + 1, val_reg));
-                self.emit(Insn::Call(frame, 1));
-                val_reg = frame;
-            }
-            self.next_temp = deco_base + 1;
-        }
+        let val_reg = match self.emit_decorator_application(decorators, dst) {
+            Some(r) => r,
+            None => return,
+        };
 
         self.compile_store_name(name, val_reg);
         if let Some(reg) = self.local_reg(name) {
