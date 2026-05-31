@@ -7775,6 +7775,224 @@ impl Interpreter {
             _ => unreachable!("str_template_method called with non-template method"),
         }
     }
+    /// Dispatch a method call on the backing primitive of a `list`/`dict`/`set`
+    /// subclass instance (#976).  The cached method is a
+    /// `BuiltinFunction("<type>.<method>")` and `backing` is its
+    /// `__builtin_data__` value; route to the same per-type path the bare
+    /// container would take.  `index`/`count` on a list backing may fire user
+    /// `__eq__`, so they go through the interpreter-aware sequence helpers.
+    fn dispatch_backing_primitive_method(
+        &mut self,
+        prim_type: &str,
+        prim_method: &str,
+        backing: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match prim_type {
+            "list" => {
+                if prim_method == "index" || prim_method == "count" {
+                    let needs_dispatch = args
+                        .first()
+                        .map(|t| {
+                            backing
+                                .list_with(|items| Self::seq_search_needs_dispatch(t, items))
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(false);
+                    let args = if prim_method == "index" {
+                        self.resolve_seq_index_pos(args)?
+                    } else {
+                        args
+                    };
+                    if needs_dispatch {
+                        let snapshot = backing.list_with(|items| items.clone()).ok_or_else(|| {
+                            PyError::named(
+                                "TypeError",
+                                "list.index receiver is not a list".to_string(),
+                            )
+                        })?;
+                        if prim_method == "index" {
+                            self.call_seq_index(snapshot, &args, "list")
+                        } else {
+                            self.call_seq_count(snapshot, &args, "list")
+                        }
+                    } else {
+                        let empty_kw = indexmap::IndexMap::new();
+                        pyrust_builtins::list::call(prim_method, &backing, args, &empty_kw)
+                    }
+                } else {
+                    let empty_kw = indexmap::IndexMap::new();
+                    pyrust_builtins::list::call(prim_method, &backing, args, &empty_kw)
+                }
+            }
+            "dict" => {
+                let empty_kw = indexmap::IndexMap::new();
+                self.call_dict_method(prim_method, backing, args, &empty_kw)
+            }
+            "set" => self.call_set_method(prim_method, backing, args),
+            _ => unreachable!("dispatch_backing_primitive_method: bad prim_type {prim_type}"),
+        }
+    }
+    /// Fill or update the `CallMethod` inline cache after a slow-path dispatch.
+    /// Mirrors the `GetAttr` cache policy: a different class at this site goes
+    /// `Megamorphic`; a stale `ClassAttr` resets to `Empty` for a refill; an
+    /// `Empty` slot caches the resolved unbound method when it is a cacheable
+    /// Regular `UserFunction` / `BuiltinFunction` with no instance shadow and no
+    /// user `__getattribute__` (#1254).
+    fn update_call_method_cache(
+        &self,
+        obj_val: &Value,
+        method: &str,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) {
+        use crate::bytecode::AttrCacheEntry;
+        use pyrust_core::UserFunctionKind;
+
+        let Some(inst_rc) = obj_val.as_py_instance_rc() else {
+            return;
+        };
+        let mut cache = code.attr_cache.borrow_mut();
+        match &cache[call_site_pc] {
+            AttrCacheEntry::Megamorphic => {}
+            AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
+                let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
+                if new_ptr != *existing_ptr {
+                    // Different class at this call site — go megamorphic.
+                    cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                } else {
+                    // Same class but version changed (or instance shadow exists).
+                    // Reset to Empty so the next slow-path execution refills
+                    // with the current class version and updated method value.
+                    cache[call_site_pc] = AttrCacheEntry::Empty;
+                }
+            }
+            AttrCacheEntry::Empty => {
+                let inst = inst_rc.borrow();
+                if inst.attrs.contains_key(method) {
+                    return;
+                }
+                // Don't cache when the class has a user-defined __getattribute__ —
+                // the CallMethod cache fast path bypasses get_attr entirely,
+                // skipping the dispatch (issue #1254, same as the GetAttr guard).
+                let has_custom_getattribute = lookup_class_attr(&inst.class, "__getattribute__")
+                    .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+                if has_custom_getattribute {
+                    return;
+                }
+                let Some(unbound_val) = lookup_class_attr(&inst.class, method) else {
+                    return;
+                };
+                // Only cache Regular UserFunctions and BuiltinFunctions.
+                // StaticMethod / ClassMethod need special receiver treatment —
+                // let them always go through get_attr + call_function_expanded.
+                let cacheable = match unbound_val.kind() {
+                    ValueKind::UserFunction(f) => matches!(f.kind, UserFunctionKind::Regular),
+                    ValueKind::BuiltinFunction(_) => true,
+                    _ => false,
+                };
+                if cacheable {
+                    cache[call_site_pc] = AttrCacheEntry::ClassAttr {
+                        class_ptr: Rc::as_ptr(&inst.class) as *const (),
+                        class_version: inst.class.borrow().mutation_version.get(),
+                        epoch: pyrust_core::class_epoch(),
+                        value: unbound_val,
+                    };
+                }
+            }
+        }
+    }
+    /// Inline-cache fast path for `obj.method(...)` on a user-defined
+    /// `PyInstance`.  Returns `Ok(Some(result))` on a cache hit (including the
+    /// #976 backing-primitive route), `Ok(None)` on a miss so the caller takes
+    /// the slow `get_attr` + `call_function_expanded` path.  Only Regular
+    /// `UserFunction`s and `BuiltinFunction`s are cached; the guard checks
+    /// class identity, instance-shadow, class version, and epoch.
+    fn try_call_method_cached(
+        &mut self,
+        regs: &RegSlice,
+        obj: crate::bytecode::Reg,
+        method: &str,
+        args: &[Value],
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) -> Result<Option<Value>> {
+        use crate::bytecode::AttrCacheEntry;
+
+        enum CallMethodFast {
+            Hit(Value),
+            Miss,
+        }
+                let fast = {
+                    let cache = code.attr_cache.borrow();
+                    if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
+                        &cache[call_site_pc]
+                    {
+                        if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                            let inst = inst_rc.borrow();
+                            let same_class =
+                                Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                            let no_shadow = !inst.attrs.contains_key(method);
+                            let version_ok = inst.class.borrow().mutation_version.get()
+                                == *class_version;
+                            let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                            if same_class && no_shadow && version_ok && epoch_ok {
+                                let unbound = unbound.clone();
+                                let inst_rc_clone = Rc::clone(inst_rc);
+                                drop(inst);
+                                // Issue #976: if the cached method is a primitive
+                                // builtin (list.X / dict.X / set.X) and the instance
+                                // has a __builtin_data__ backing value, dispatch
+                                // directly to the backing primitive.
+                                // invoke_class_method cannot handle BuiltinFunction
+                                // method names — it looks them up in the top-level
+                                // registry which has no "list.append" entry.
+                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind() {
+                                    if let Some((prim_type, prim_method)) =
+                                        fn_name.split_once('.')
+                                        .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
+                                    {
+                                        if let Some(backing) = instance_builtin_data(&inst_rc_clone) {
+                                            return self
+                                                .dispatch_backing_primitive_method(
+                                                    prim_type,
+                                                    prim_method,
+                                                    backing,
+                                                    args.to_vec(),
+                                                )
+                                                .map(Some);
+                                        }
+                                    }
+                                }
+                                let inst_val = Value::py_instance(inst_rc_clone);
+                                let mut buf = std::mem::take(&mut self.call_arg_buf);
+                                buf.clear();
+                                for arg in args.iter() {
+                                    buf.push(ExpandedCallArg { name: None, value: arg.clone() });
+                                }
+                                let r = invoke_class_method(self, unbound, inst_val, &buf);
+                                self.call_arg_buf = buf;
+                                CallMethodFast::Hit(r?)
+                            } else {
+                                CallMethodFast::Miss
+                            }
+                        } else {
+                            CallMethodFast::Miss
+                        }
+                    } else {
+                        CallMethodFast::Miss
+                    }
+                };
+        match fast {
+            CallMethodFast::Hit(result) => Ok(Some(result)),
+            CallMethodFast::Miss => Ok(None),
+        }
+    }
+
+
+
+
+
 
     #[allow(clippy::too_many_arguments)]
     fn exec_call_method(
@@ -7852,135 +8070,13 @@ impl Interpreter {
                     return self.call_generator_method(obj_val, method, args);
                 }
 
-                // Inline cache fast path for user-defined class methods on
-                // PyInstance objects.  Only works for Regular UserFunctions and
-                // BuiltinFunctions — StaticMethod and ClassMethod are too rare
-                // and need special receive-arg treatment not worth inlining.
-                enum CallMethodFast {
-                    Hit(Value),
-                    Miss,
-                }
-                let fast = {
-                    let cache = code.attr_cache.borrow();
-                    if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
-                        &cache[call_site_pc]
-                    {
-                        if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
-                            let inst = inst_rc.borrow();
-                            let same_class =
-                                Rc::as_ptr(&inst.class) as *const () == *class_ptr;
-                            let no_shadow = !inst.attrs.contains_key(method);
-                            let version_ok = inst.class.borrow().mutation_version.get()
-                                == *class_version;
-                            let epoch_ok = pyrust_core::class_epoch() == *epoch;
-                            if same_class && no_shadow && version_ok && epoch_ok {
-                                let unbound = unbound.clone();
-                                let inst_rc_clone = Rc::clone(inst_rc);
-                                drop(inst);
-                                // Issue #976: if the cached method is a primitive
-                                // builtin (list.X / dict.X / set.X) and the instance
-                                // has a __builtin_data__ backing value, dispatch
-                                // directly to the backing primitive.
-                                // invoke_class_method cannot handle BuiltinFunction
-                                // method names — it looks them up in the top-level
-                                // registry which has no "list.append" entry.
-                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind() {
-                                    if let Some((prim_type, prim_method)) =
-                                        fn_name.split_once('.')
-                                        .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
-                                    {
-                                        if let Some(backing) = instance_builtin_data(&inst_rc_clone) {
-                                            let result = match prim_type {
-                                                "list" => {
-                                                    if prim_method == "index"
-                                                        || prim_method == "count"
-                                                    {
-                                                        let needs_dispatch =
-                                                            args.first().map(|t| {
-                                                                backing
-                                                                    .list_with(|items| {
-                                                                        Self::seq_search_needs_dispatch(
-                                                                            t, items,
-                                                                        )
-                                                                    })
-                                                                    .unwrap_or(true)
-                                                            }).unwrap_or(false);
-                                                        let args = if prim_method == "index" {
-                                                            self.resolve_seq_index_pos(args)?
-                                                        } else {
-                                                            args
-                                                        };
-                                                        if needs_dispatch {
-                                                            let snapshot = backing
-                                                                .list_with(|items| items.clone())
-                                                                .ok_or_else(|| {
-                                                                    PyError::named(
-                                                                        "TypeError",
-                                                                        "list.index receiver is not a list"
-                                                                            .to_string(),
-                                                                    )
-                                                                })?;
-                                                            if prim_method == "index" {
-                                                                self.call_seq_index(
-                                                                    snapshot, &args, "list",
-                                                                )
-                                                            } else {
-                                                                self.call_seq_count(
-                                                                    snapshot, &args, "list",
-                                                                )
-                                                            }
-                                                        } else {
-                                                            let empty_kw = indexmap::IndexMap::new();
-                                                            pyrust_builtins::list::call(
-                                                                prim_method,
-                                                                &backing,
-                                                                args,
-                                                                &empty_kw,
-                                                            )
-                                                        }
-                                                    } else {
-                                                        let empty_kw = indexmap::IndexMap::new();
-                                                        pyrust_builtins::list::call(
-                                                            prim_method, &backing, args, &empty_kw,
-                                                        )
-                                                    }
-                                                }
-                                                "dict" => {
-                                                    let empty_kw = indexmap::IndexMap::new();
-                                                    self.call_dict_method(prim_method, backing, args, &empty_kw)
-                                                }
-                                                "set" => {
-                                                    self.call_set_method(prim_method, backing, args)
-                                                }
-                                                _ => unreachable!(),
-                                            };
-                                            return result;
-                                        }
-                                    }
-                                }
-                                let inst_val = Value::py_instance(inst_rc_clone);
-                                let mut buf = std::mem::take(&mut self.call_arg_buf);
-                                buf.clear();
-                                for arg in args.iter() {
-                                    buf.push(ExpandedCallArg { name: None, value: arg.clone() });
-                                }
-                                let r = invoke_class_method(self, unbound, inst_val, &buf);
-                                self.call_arg_buf = buf;
-                                CallMethodFast::Hit(r?)
-                            } else {
-                                CallMethodFast::Miss
-                            }
-                        } else {
-                            CallMethodFast::Miss
-                        }
-                    } else {
-                        CallMethodFast::Miss
-                    }
-                };
-                match fast {
-                    CallMethodFast::Hit(result) => return Ok(result),
-                    CallMethodFast::Miss => {}
-                }
+        // Inline cache fast path for user-defined class methods on PyInstance
+        // objects (Regular UserFunctions / BuiltinFunctions only).
+        if let Some(result) =
+            self.try_call_method_cached(regs, obj, method, &args, code, call_site_pc)?
+        {
+            return Ok(result);
+        }
 
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(&obj_val, method)?;
@@ -7992,67 +8088,8 @@ impl Interpreter {
                 let r = self.call_function_expanded(method_val, &buf);
                 self.call_arg_buf = buf;
 
-                // Fill or update the cache for this user-object call site.
-                if let Some(inst_rc) = obj_val.as_py_instance_rc() {
-                    let mut cache = code.attr_cache.borrow_mut();
-                    match &cache[call_site_pc] {
-                        AttrCacheEntry::Megamorphic => {}
-                        AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
-                            let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
-                            if new_ptr != *existing_ptr {
-                                // Different class at this call site — go megamorphic.
-                                cache[call_site_pc] = AttrCacheEntry::Megamorphic;
-                            } else {
-                                // Same class but version changed (or instance shadow exists).
-                                // Reset to Empty so the next slow-path execution refills
-                                // with the current class version and updated method value.
-                                cache[call_site_pc] = AttrCacheEntry::Empty;
-                            }
-                        }
-                        AttrCacheEntry::Empty => {
-                            let inst = inst_rc.borrow();
-                            if !inst.attrs.contains_key(method) {
-                                // Don't cache when the class has a user-defined
-                                // __getattribute__ — the CallMethod cache fast path
-                                // bypasses get_attr entirely, skipping the dispatch
-                                // (issue #1254, same as the GetAttr cache guard).
-                                let has_custom_getattribute =
-                                    lookup_class_attr(&inst.class, "__getattribute__")
-                                        .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
-                                if !has_custom_getattribute {
-                                    if let Some(unbound_val) = lookup_class_attr(&inst.class, method) {
-                                        // Only cache Regular UserFunctions and
-                                        // BuiltinFunctions.  StaticMethod / ClassMethod
-                                        // need special receiver treatment — let them always
-                                        // go through get_attr + call_function_expanded.
-                                        let cacheable = match unbound_val.kind() {
-                                            ValueKind::UserFunction(f) => matches!(
-                                                f.kind,
-                                                UserFunctionKind::Regular
-                                            ),
-                                            ValueKind::BuiltinFunction(_) => true,
-                                            _ => false,
-                                        };
-                                        if cacheable {
-                                            let class_ptr =
-                                                Rc::as_ptr(&inst.class) as *const ();
-                                            let class_version =
-                                                inst.class.borrow().mutation_version.get();
-                                            let epoch =
-                                                pyrust_core::class_epoch();
-                                            cache[call_site_pc] = AttrCacheEntry::ClassAttr {
-                                                class_ptr,
-                                                class_version,
-                                                epoch,
-                                                value: unbound_val,
-                                            };
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                // Fill or update the inline cache for this user-object call site.
+                self.update_call_method_cache(&obj_val, method, code, call_site_pc);
 
                 r
         }
