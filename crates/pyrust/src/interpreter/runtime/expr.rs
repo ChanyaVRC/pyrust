@@ -4431,212 +4431,21 @@ impl Interpreter {
         // will produce the correct TypeError.
         Ok(val)
     }
-
-    /// `str % args` — CPython-compatible printf-style string formatting (#1393).
-    ///
-    /// Handles positional (`%s`, `%d`, …) and named (`%(key)s`) format codes.
-    /// The right-hand side may be a single value (implicitly a one-element
-    /// positional tuple), a tuple (positional), or a dict (named lookup).
-    fn str_printf_format(&mut self, fmt_val: Value, args: Value) -> Result<Value> {
-        // Borrow the format string directly from the Value to avoid a heap allocation.
-        // fmt_val is held by value for the duration of this function, so the &str is valid.
-        let fmt: &str = match fmt_val.kind() {
-            ValueKind::Str(s) => s,
-            _ => unreachable!("str_printf_format called with non-str left"),
-        };
-
-        // CPython mapping mode is triggered by the format string, not by the RHS type.
-        // A dict RHS is only used as a mapping when the format string contains %(key) codes;
-        // if the format has only positional codes, the dict is treated as a single positional arg.
-        let has_named_key = {
-            let b = fmt.as_bytes();
-            let mut found = false;
-            let mut j = 0;
-            while j + 1 < b.len() {
-                if b[j] == b'%' && b[j + 1] == b'(' {
-                    found = true;
-                    break;
-                }
-                j += 1;
-            }
-            found
-        };
-        let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
-        // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
-        // Use &[Value] to avoid cloning the tuple's items upfront; borrow from
-        // args directly for the single-value case to avoid an extra clone.
-        let positional: Option<&[Value]> = if is_mapping {
-            None
-        } else {
-            match args.kind() {
-                ValueKind::Tuple(items) => Some(items),
-                _ => Some(std::slice::from_ref(&args)),
-            }
-        };
-        let mut pos_idx: usize = 0;
-
-        let mut out = String::with_capacity(fmt.len());
-        let bytes = fmt.as_bytes();
-        let len = bytes.len();
-        let mut i = 0;
-
-        while i < len {
-            if bytes[i] != b'%' {
-                let ch = fmt[i..].chars().next().unwrap();
-                out.push(ch);
-                i += ch.len_utf8();
-                continue;
-            }
-            i += 1; // consume '%'
-            if i >= len {
-                return Err(PyError::named(
-                    "ValueError",
-                    "incomplete format".to_string(),
-                ));
-            }
-
-            // Named key: %(key)s — borrow a slice of fmt directly to avoid allocating.
-            let named_key: Option<&str> = if bytes[i] == b'(' {
-                i += 1;
-                let start = i;
-                while i < len && bytes[i] != b')' {
-                    i += 1;
-                }
-                if i >= len {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "incomplete format key".to_string(),
-                    ));
-                }
-                let key = &fmt[start..i];
-                i += 1; // consume ')'
-                Some(key)
-            } else {
-                None
-            };
-
-            // Flags: -, +, space, #, 0
-            let mut flag_minus = false;
-            let mut flag_plus = false;
-            let mut flag_space = false;
-            let mut flag_zero = false;
-            let mut flag_hash = false;
-            while i < len {
-                match bytes[i] {
-                    b'-' => flag_minus = true,
-                    b'+' => flag_plus = true,
-                    b' ' => flag_space = true,
-                    b'0' => flag_zero = true,
-                    b'#' => flag_hash = true,
-                    _ => break,
-                }
-                i += 1;
-            }
-
-            // Width: integer or '*'
-            let width: Option<usize> = if i < len && bytes[i] == b'*' {
-                i += 1;
-                let w = str_printf_take_positional(&positional, &mut pos_idx)?;
-                match w.kind() {
-                    ValueKind::Int(n) if n >= 0 => Some(n as usize),
-                    ValueKind::Int(n) => {
-                        flag_minus = true;
-                        Some((-n) as usize)
-                    }
-                    _ => {
-                        return Err(PyError::named("TypeError", "* wants int".to_string()));
-                    }
-                }
-            } else if i < len && bytes[i].is_ascii_digit() {
-                let start = i;
-                while i < len && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                Some(fmt[start..i].parse::<usize>().unwrap())
-            } else {
-                None
-            };
-
-            // Precision: .integer or .*
-            let precision: Option<usize> = if i < len && bytes[i] == b'.' {
-                i += 1;
-                if i < len && bytes[i] == b'*' {
-                    i += 1;
-                    let p = str_printf_take_positional(&positional, &mut pos_idx)?;
-                    match p.kind() {
-                        ValueKind::Int(n) if n >= 0 => Some(n as usize),
-                        ValueKind::Int(_) => Some(0),
-                        _ => {
-                            return Err(PyError::named("TypeError", "* wants int".to_string()));
-                        }
-                    }
-                } else {
-                    let start = i;
-                    while i < len && bytes[i].is_ascii_digit() {
-                        i += 1;
-                    }
-                    if i == start {
-                        Some(0)
-                    } else {
-                        Some(fmt[start..i].parse::<usize>().unwrap())
-                    }
-                }
-            } else {
-                None
-            };
-
-            // Length modifier: h, l, L — ignored (CPython ignores them too).
-            if i < len && matches!(bytes[i], b'h' | b'l' | b'L') {
-                i += 1;
-            }
-
-            if i >= len {
-                return Err(PyError::named(
-                    "ValueError",
-                    "incomplete format".to_string(),
-                ));
-            }
-            let conv = bytes[i] as char;
-            i += 1;
-
-            // %% — literal percent, no argument consumed.
-            if conv == '%' {
-                out.push('%');
-                continue;
-            }
-
-            // Get the argument value.
-            let arg: Value = if let Some(key) = named_key {
-                if is_mapping {
-                    match args.kind() {
-                        ValueKind::Dict(d) => {
-                            let k = PyKey::Str(intern_string(key));
-                            match d.get(&k) {
-                                Some(v) => v.clone(),
-                                None => {
-                                    return Err(PyError::key_error(Value::string(key)));
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "format requires a mapping".to_string(),
-                            ));
-                        }
-                    }
-                } else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "format requires a mapping".to_string(),
-                    ));
-                }
-            } else {
-                str_printf_take_positional(&positional, &mut pos_idx)?
-            };
-
-            // Format the argument according to the conversion code.
-            let formatted: String = match conv {
+    /// Format one `%`-conversion argument — the `match conv` body lifted out
+    /// of `str_printf_format`.  `conv_index` is the 0-based source index of
+    /// `conv`, used only for the unsupported-conversion error message.
+    #[allow(clippy::too_many_arguments)]
+    fn str_printf_convert(
+        &mut self,
+        conv: char,
+        arg: Value,
+        precision: Option<usize>,
+        flag_plus: bool,
+        flag_space: bool,
+        flag_hash: bool,
+        conv_index: usize,
+    ) -> Result<String> {
+        Ok(match conv {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
@@ -4882,11 +4691,221 @@ impl Interpreter {
                             "unsupported format character '{}' (0x{:02x}) at index {}",
                             conv,
                             conv as u32,
-                            i - 1
+                            conv_index
                         ),
                     ));
                 }
+        })
+    }
+
+
+    /// `str % args` — CPython-compatible printf-style string formatting (#1393).
+    ///
+    /// Handles positional (`%s`, `%d`, …) and named (`%(key)s`) format codes.
+    /// The right-hand side may be a single value (implicitly a one-element
+    /// positional tuple), a tuple (positional), or a dict (named lookup).
+    fn str_printf_format(&mut self, fmt_val: Value, args: Value) -> Result<Value> {
+        // Borrow the format string directly from the Value to avoid a heap allocation.
+        // fmt_val is held by value for the duration of this function, so the &str is valid.
+        let fmt: &str = match fmt_val.kind() {
+            ValueKind::Str(s) => s,
+            _ => unreachable!("str_printf_format called with non-str left"),
+        };
+
+        // CPython mapping mode is triggered by the format string, not by the RHS type.
+        // A dict RHS is only used as a mapping when the format string contains %(key) codes;
+        // if the format has only positional codes, the dict is treated as a single positional arg.
+        let has_named_key = {
+            let b = fmt.as_bytes();
+            let mut found = false;
+            let mut j = 0;
+            while j + 1 < b.len() {
+                if b[j] == b'%' && b[j + 1] == b'(' {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            found
+        };
+        let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
+        // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
+        // Use &[Value] to avoid cloning the tuple's items upfront; borrow from
+        // args directly for the single-value case to avoid an extra clone.
+        let positional: Option<&[Value]> = if is_mapping {
+            None
+        } else {
+            match args.kind() {
+                ValueKind::Tuple(items) => Some(items),
+                _ => Some(std::slice::from_ref(&args)),
+            }
+        };
+        let mut pos_idx: usize = 0;
+
+        let mut out = String::with_capacity(fmt.len());
+        let bytes = fmt.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            if bytes[i] != b'%' {
+                let ch = fmt[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+                continue;
+            }
+            i += 1; // consume '%'
+            if i >= len {
+                return Err(PyError::named(
+                    "ValueError",
+                    "incomplete format".to_string(),
+                ));
+            }
+
+            // Named key: %(key)s — borrow a slice of fmt directly to avoid allocating.
+            let named_key: Option<&str> = if bytes[i] == b'(' {
+                i += 1;
+                let start = i;
+                while i < len && bytes[i] != b')' {
+                    i += 1;
+                }
+                if i >= len {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "incomplete format key".to_string(),
+                    ));
+                }
+                let key = &fmt[start..i];
+                i += 1; // consume ')'
+                Some(key)
+            } else {
+                None
             };
+
+            // Flags: -, +, space, #, 0
+            let mut flag_minus = false;
+            let mut flag_plus = false;
+            let mut flag_space = false;
+            let mut flag_zero = false;
+            let mut flag_hash = false;
+            while i < len {
+                match bytes[i] {
+                    b'-' => flag_minus = true,
+                    b'+' => flag_plus = true,
+                    b' ' => flag_space = true,
+                    b'0' => flag_zero = true,
+                    b'#' => flag_hash = true,
+                    _ => break,
+                }
+                i += 1;
+            }
+
+            // Width: integer or '*'
+            let width: Option<usize> = if i < len && bytes[i] == b'*' {
+                i += 1;
+                let w = str_printf_take_positional(&positional, &mut pos_idx)?;
+                match w.kind() {
+                    ValueKind::Int(n) if n >= 0 => Some(n as usize),
+                    ValueKind::Int(n) => {
+                        flag_minus = true;
+                        Some((-n) as usize)
+                    }
+                    _ => {
+                        return Err(PyError::named("TypeError", "* wants int".to_string()));
+                    }
+                }
+            } else if i < len && bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                Some(fmt[start..i].parse::<usize>().unwrap())
+            } else {
+                None
+            };
+
+            // Precision: .integer or .*
+            let precision: Option<usize> = if i < len && bytes[i] == b'.' {
+                i += 1;
+                if i < len && bytes[i] == b'*' {
+                    i += 1;
+                    let p = str_printf_take_positional(&positional, &mut pos_idx)?;
+                    match p.kind() {
+                        ValueKind::Int(n) if n >= 0 => Some(n as usize),
+                        ValueKind::Int(_) => Some(0),
+                        _ => {
+                            return Err(PyError::named("TypeError", "* wants int".to_string()));
+                        }
+                    }
+                } else {
+                    let start = i;
+                    while i < len && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i == start {
+                        Some(0)
+                    } else {
+                        Some(fmt[start..i].parse::<usize>().unwrap())
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Length modifier: h, l, L — ignored (CPython ignores them too).
+            if i < len && matches!(bytes[i], b'h' | b'l' | b'L') {
+                i += 1;
+            }
+
+            if i >= len {
+                return Err(PyError::named(
+                    "ValueError",
+                    "incomplete format".to_string(),
+                ));
+            }
+            let conv = bytes[i] as char;
+            i += 1;
+
+            // %% — literal percent, no argument consumed.
+            if conv == '%' {
+                out.push('%');
+                continue;
+            }
+
+            // Get the argument value.
+            let arg: Value = if let Some(key) = named_key {
+                if is_mapping {
+                    match args.kind() {
+                        ValueKind::Dict(d) => {
+                            let k = PyKey::Str(intern_string(key));
+                            match d.get(&k) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    return Err(PyError::key_error(Value::string(key)));
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "format requires a mapping".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "format requires a mapping".to_string(),
+                    ));
+                }
+            } else {
+                str_printf_take_positional(&positional, &mut pos_idx)?
+            };
+
+            // Format the argument according to the conversion code.
+            let formatted = self.str_printf_convert(
+                conv, arg, precision, flag_plus, flag_space, flag_hash, i - 1,
+            )?;
 
             // Apply width and alignment.
             let padded = apply_printf_width(formatted, width, flag_minus, flag_zero, conv);
