@@ -6062,85 +6062,7 @@ impl Interpreter {
                 });
             }
             2 => {
-                let key = self.value_to_pykey(&idx_val)?;
-                let globals_sync_name: Option<String> = if self.globals_accessed {
-                    if let PyKey::Str(name_val) = &key {
-                        let is_globals = regs[obj as usize]
-                            .get_dict_rc()
-                            .zip(self.module_globals_dict.get_dict_rc())
-                            .map(|(a, b)| Rc::ptr_eq(a, b))
-                            .unwrap_or(false);
-                        if is_globals {
-                            name_val.as_str().map(|s| s.to_owned())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let val_for_fastlocal: Option<Value> =
-                    globals_sync_name.as_ref().map(|_| val_val.clone());
-                let needs_dedup = match &key {
-                    PyKey::Object { .. } => true,
-                    PyKey::None => {
-                        let none_hash = pyrust_core::py_hash_none() as u64;
-                        regs[obj as usize]
-                            .as_dict()
-                            .map(|d| {
-                                d.keys().any(|k| {
-                                    matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
-                                })
-                            })
-                            .unwrap_or(false)
-                    }
-                    _ => false,
-                };
-                if needs_dedup {
-                    let dict_val = regs[obj as usize]
-                        .as_some()
-                        .cloned()
-                        .unwrap_or(Value::none());
-                    let existing = self.dict_lookup(&dict_val, &key)?;
-                    regs[obj as usize].dict_with_mut(|dict| {
-                        if let Some((idx, _)) = existing {
-                            let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
-                            if let Some(k) = existing_key {
-                                dict.insert(k, val_val);
-                            } else {
-                                dict.insert(key, val_val);
-                            }
-                        } else {
-                            dict.insert(key, val_val);
-                        }
-                    });
-                } else {
-                    regs[obj as usize].dict_with_mut(|dict| {
-                        dict.insert(key, val_val);
-                    });
-                }
-                if let (Some(name), Some(synced_val)) = (globals_sync_name, val_for_fastlocal) {
-                    bump_global_env_version(self);
-                    if let Some(script_view) = self
-                        .vm_frame_views
-                        .iter()
-                        .find(|v| v.kind == FrameKind::Script)
-                    {
-                        if let Some(&slot) = script_view.local_index.get(&name) {
-                            let slot = slot as usize;
-                            if slot < script_view.regs_len {
-                                // SAFETY: slot < regs_len; regs_ptr is the script frame's
-                                // register file.  RegSlice carries no `noalias`, so this
-                                // write does not violate aliasing rules (issue #547, PR #646).
-                                unsafe {
-                                    *script_view.regs_ptr.add(slot).as_mut() = synced_val;
-                                }
-                            }
-                        }
-                    }
-                }
+                self.set_item_into_dict(regs, obj, idx_val, val_val)?;
             }
             3 => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
@@ -6225,6 +6147,100 @@ impl Interpreter {
         }
         Ok(())
     }
+
+    /// Assign into a dict target for `obj[idx] = val`, including the
+    /// module-globals write-through (issue #970): when the dict is
+    /// `module_globals_dict`, mirror the write to the script frame's
+    /// fastlocal register and bump the LoadGlobal cache version.
+    fn set_item_into_dict(
+        &mut self,
+        regs: &mut RegSlice,
+        obj: crate::bytecode::Reg,
+        idx_val: Value,
+        val_val: Value,
+    ) -> Result<()> {
+        let key = self.value_to_pykey(&idx_val)?;
+        let globals_sync_name: Option<String> = if self.globals_accessed {
+            if let PyKey::Str(name_val) = &key {
+                let is_globals = regs[obj as usize]
+                    .get_dict_rc()
+                    .zip(self.module_globals_dict.get_dict_rc())
+                    .map(|(a, b)| Rc::ptr_eq(a, b))
+                    .unwrap_or(false);
+                if is_globals {
+                    name_val.as_str().map(|s| s.to_owned())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let val_for_fastlocal: Option<Value> =
+            globals_sync_name.as_ref().map(|_| val_val.clone());
+        let needs_dedup = match &key {
+            PyKey::Object { .. } => true,
+            PyKey::None => {
+                let none_hash = pyrust_core::py_hash_none() as u64;
+                regs[obj as usize]
+                    .as_dict()
+                    .map(|d| {
+                        d.keys().any(|k| {
+                            matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
+                        })
+                    })
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        if needs_dedup {
+            let dict_val = regs[obj as usize]
+                .as_some()
+                .cloned()
+                .unwrap_or(Value::none());
+            let existing = self.dict_lookup(&dict_val, &key)?;
+            regs[obj as usize].dict_with_mut(|dict| {
+                if let Some((idx, _)) = existing {
+                    let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
+                    if let Some(k) = existing_key {
+                        dict.insert(k, val_val);
+                    } else {
+                        dict.insert(key, val_val);
+                    }
+                } else {
+                    dict.insert(key, val_val);
+                }
+            });
+        } else {
+            regs[obj as usize].dict_with_mut(|dict| {
+                dict.insert(key, val_val);
+            });
+        }
+        if let (Some(name), Some(synced_val)) = (globals_sync_name, val_for_fastlocal) {
+            bump_global_env_version(self);
+            if let Some(script_view) = self
+                .vm_frame_views
+                .iter()
+                .find(|v| v.kind == FrameKind::Script)
+            {
+                if let Some(&slot) = script_view.local_index.get(&name) {
+                    let slot = slot as usize;
+                    if slot < script_view.regs_len {
+                        // SAFETY: slot < regs_len; regs_ptr is the script frame's
+                        // register file.  RegSlice carries no `noalias`, so this
+                        // write does not violate aliasing rules (issue #547, PR #646).
+                        unsafe {
+                            *script_view.regs_ptr.add(slot).as_mut() = synced_val;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
 
     /// Execute `del obj[idx]`.
     ///
