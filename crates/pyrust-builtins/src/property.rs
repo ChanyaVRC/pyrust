@@ -126,6 +126,75 @@ fn borrow_state(state: &BuiltinState) -> Option<std::cell::Ref<'_, PropertyState
     std::cell::Ref::filter_map(state.borrow(), |b| b.downcast_ref::<PropertyState>()).ok()
 }
 
+/// Which descriptor-protocol dunder a bound [`property`] method targets.
+/// Slot ordering matches elsewhere: 0=`__get__`, 1=`__set__`, 2=`__delete__`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PropertyMethodKind {
+    Get,
+    Set,
+    Delete,
+}
+
+impl PropertyMethodKind {
+    fn dunder(self) -> &'static str {
+        match self {
+            PropertyMethodKind::Get => "__get__",
+            PropertyMethodKind::Set => "__set__",
+            PropertyMethodKind::Delete => "__delete__",
+        }
+    }
+}
+
+/// State for a property descriptor dunder accessed as a value, e.g.
+/// `f = p.__get__; f(obj, owner)` or `hasattr(p, "__get__")`.  Holds the
+/// originating property and which dunder is bound.
+pub struct PropertyMethodState {
+    pub prop: Value,
+    pub kind: PropertyMethodKind,
+}
+
+pub struct PropertyMethodOps;
+pub const PROPERTY_METHOD_OPS: &PropertyMethodOps = &PropertyMethodOps;
+pub const METHOD_TYPE_NAME: &str = "property-method";
+
+impl BuiltinTypeOps for PropertyMethodOps {
+    fn type_name(&self) -> &'static str {
+        METHOD_TYPE_NAME
+    }
+
+    fn repr(&self, state: &BuiltinState) -> String {
+        let name =
+            std::cell::Ref::filter_map(state.borrow(), |b| b.downcast_ref::<PropertyMethodState>())
+                .ok()
+                .map(|s| s.kind.dunder())
+                .unwrap_or("__get__");
+        format!("<method-wrapper '{name}' of property object>")
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+}
+
+/// Construct a bound descriptor-method value for `prop`.
+pub fn property_method(prop: Value, kind: PropertyMethodKind) -> Value {
+    let state: Box<dyn Any> = Box::new(PropertyMethodState { prop, kind });
+    Value::builtin_object(PROPERTY_METHOD_OPS, state)
+}
+
+/// Return `(prop, kind)` if `value` is a bound property descriptor-method.
+pub fn as_property_method(value: &Value) -> Option<(Value, PropertyMethodKind)> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if ops.type_name() != METHOD_TYPE_NAME {
+        return None;
+    }
+    let borrow = state.borrow();
+    let s = borrow.downcast_ref::<PropertyMethodState>()?;
+    Some((s.prop.clone(), s.kind))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

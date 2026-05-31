@@ -525,6 +525,23 @@ impl Interpreter {
                     "fget" => Ok(fget_val),
                     "fset" => Ok(fset_val),
                     "fdel" => Ok(fdel_val),
+                    // Descriptor-protocol dunders.  Accessing `p.__get__` etc.
+                    // yields a bound method-wrapper (so `hasattr(p, "__get__")`
+                    // is True and `f = p.__get__; f(obj, owner)` works); the
+                    // actual dispatch happens when the wrapper is called (see
+                    // `calls.rs`).
+                    "__get__" => Ok(pyrust_builtins::property::property_method(
+                        target.clone(),
+                        pyrust_builtins::property::PropertyMethodKind::Get,
+                    )),
+                    "__set__" => Ok(pyrust_builtins::property::property_method(
+                        target.clone(),
+                        pyrust_builtins::property::PropertyMethodKind::Set,
+                    )),
+                    "__delete__" => Ok(pyrust_builtins::property::property_method(
+                        target.clone(),
+                        pyrust_builtins::property::PropertyMethodKind::Delete,
+                    )),
                     _ => Err(PyError::named(
                         "AttributeError",
                         format!("property object has no attribute '{name}'"),
@@ -799,6 +816,28 @@ impl Interpreter {
                             format!("type object 'str' has no attribute '{name}'"),
                         )),
                     }
+                } else if func_name == "property"
+                    && matches!(name, "__get__" | "__set__" | "__delete__")
+                {
+                    // Issue #1835: the `property` type token (a BuiltinFunction
+                    // in pyrust, since `property` is not yet a real PyClass)
+                    // exposes the descriptor protocol so that
+                    // `hasattr(property, "__get__")` is True like CPython.  The
+                    // wrapper is bound to an empty property; this serves
+                    // introspection (`hasattr`/`getattr`) — calling it unbound
+                    // from the type object is not a supported path.
+                    use pyrust_builtins::property::PropertyMethodKind as K;
+                    let kind = match name {
+                        "__get__" => K::Get,
+                        "__set__" => K::Set,
+                        _ => K::Delete,
+                    };
+                    let empty = pyrust_builtins::property::property(
+                        Value::none(),
+                        Value::none(),
+                        Value::none(),
+                    );
+                    Ok(pyrust_builtins::property::property_method(empty, kind))
                 } else {
                     Err(PyError::named(
                         "AttributeError",
@@ -2850,6 +2889,70 @@ fn is_non_data_descriptor(val: &Value) -> bool {
 
 /// Call `descriptor.__get__(instance, owner)` and return the result.
 ///
+/// Execute a directly-invoked property descriptor dunder bound via
+/// `p.__get__` / `p.__set__` / `p.__delete__`.
+///
+/// `prop` is the property object; `kind` selects the dunder; `args` are the
+/// call-site arguments.  pyrust properties carry no `__set_name__` name, so the
+/// "no setter/deleter/getter" errors use CPython's unnamed form
+/// (`property of '<owner>' object has no <which>`).
+pub(crate) fn dispatch_property_method(
+    interp: &mut Interpreter,
+    prop: &Value,
+    kind: pyrust_builtins::property::PropertyMethodKind,
+    args: &[Value],
+) -> Result<Value> {
+    use pyrust_builtins::property::PropertyMethodKind as K;
+    let obj = args.first().cloned().unwrap_or_else(Value::none);
+    match kind {
+        K::Get => {
+            // Class-level access (`obj is None`) returns the property itself.
+            if obj.is_none() {
+                return Ok(prop.clone());
+            }
+            let fget = pyrust_builtins::property::with_property(prop, |s| (*s.fget).clone())
+                .unwrap_or_else(Value::none);
+            if fget.is_none() {
+                return Err(property_accessor_error(&obj, "getter"));
+            }
+            interp.call_function_expanded(fget, &[ExpandedCallArg { name: None, value: obj }])
+        }
+        K::Set => {
+            let value = args.get(1).cloned().unwrap_or_else(Value::none);
+            let fset = pyrust_builtins::property::with_property(prop, |s| (*s.fset).clone())
+                .unwrap_or_else(Value::none);
+            if fset.is_none() {
+                return Err(property_accessor_error(&obj, "setter"));
+            }
+            interp.call_function_expanded(
+                fset,
+                &[
+                    ExpandedCallArg { name: None, value: obj },
+                    ExpandedCallArg { name: None, value },
+                ],
+            )
+        }
+        K::Delete => {
+            let fdel = pyrust_builtins::property::with_property(prop, |s| (*s.fdel).clone())
+                .unwrap_or_else(Value::none);
+            if fdel.is_none() {
+                return Err(property_accessor_error(&obj, "deleter"));
+            }
+            interp.call_function_expanded(fdel, &[ExpandedCallArg { name: None, value: obj }])
+        }
+    }
+}
+
+/// CPython's unnamed property-accessor error:
+/// `property of '<owner>' object has no <which>`.
+fn property_accessor_error(instance: &Value, which: &str) -> PyError {
+    let owner = value_type_name_str(instance);
+    PyError::named(
+        "AttributeError",
+        format!("property of '{owner}' object has no {which}"),
+    )
+}
+
 /// Handles both `property` (BuiltinObject with fget) and user-defined
 /// descriptors (PyInstance with a class `__get__` method).
 fn call_descriptor_get(
