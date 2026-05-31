@@ -4660,88 +4660,50 @@ fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
         .collect()
 }
 
-// ─── ForCountConstInline loop unrolling ───────────────────────────────────────
+/// Describe a single `ForCountConstInline` loop selected for unrolling.
+struct ForcountUnrollPlan {
+    h: usize,              // position of ForCountConstInline
+    off: usize,            // exit offset (body size = off-1, back-edge at h+off)
+    var: u32,              // loop variable register
+    val_indices: Vec<u16>, // const-pool indices for each iteration value
+}
 
-/// Unroll `ForCountConstInline` loops whose trip count is ≤ 4 and whose total
-/// unrolled body size (body_insns × trip) is ≤ 32 instructions.
-///
-/// For each qualifying loop at position `h` with exit-offset `off`:
-/// - The body occupies `[h+1, h+off-1]` (size = `off-1`).
-/// - The back-edge `Jump` is at `h+off`.
-/// - The post-loop code starts at `h+off+1`.
-///
-/// The loop is replaced with `trip` copies of:
-///   `LoadConst(var, iter_val)` + `[h+1 … h+off-1]`
-/// totalling `trip × off` instructions (vs. the original `off+1`).
-///
-/// Offset rewriting:
-/// - Intra-body jumps (target ∈ `[h+1, h+off-1]`) are unchanged because each
-///   copy is laid out with the same `off`-instruction stride.
-/// - Jumps from the body targeting the back-edge (`h+off`) also require no
-///   change: in copy k they resolve to `h + (k+1)*off` (= first instruction of
-///   the next copy's `LoadConst`), which is exactly the same relative offset.
-/// - External instructions (before or after the loop) whose jump targets cross
-///   the loop boundary are adjusted via an `old_to_new` table.
-///
-/// Safety guards:
-/// - Generator functions are skipped entirely (`is_generator == true`).
-/// - The preceding instruction must be `LoadConst(var, idx)` with a known
-///   integer value (gives the pre-initialised value `start - step`).
-/// - No body instruction is `Return`, `ReturnNone`, `Yield`, `YieldFrom`, or
-///   `SetupExcept`.
-/// - No body instruction has a jump target outside `[h+1, h+off]`.
-/// - No external instruction (position ∉ `[h, h+off]`) jumps into the loop
-///   body `[h, h+off]`.
-fn pass_forcount_unroll(
-    insns: Vec<Insn>,
+/// Extract the jump-offset field from an instruction, if any.
+fn insn_jump_off(insn: &Insn) -> Option<i32> {
+    match insn {
+        Insn::Jump(k) => Some(*k),
+        Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => Some(*k),
+        Insn::CmpJumpIfFalse(_, _, _, k)
+        | Insn::CmpJumpIfTrue(_, _, _, k)
+        | Insn::CmpJumpIfFalseConst(_, _, _, k)
+        | Insn::CmpJumpIfTrueConst(_, _, _, k) => Some(*k),
+        Insn::ForIter(_, _, k)
+        | Insn::ForCountReg(_, _, _, _, k)
+        | Insn::ForCountConst(_, _, _, _, k)
+        | Insn::ForCountConstInline(_, _, _, _, k) => Some(*k),
+        Insn::SetupExcept(k) | Insn::MatchExcept(_, k) | Insn::MatchExceptStar(_, _, _, k) => {
+            Some(*k)
+        }
+        _ => None,
+    }
+}
+
+/// Scan `insns` front-to-back for `ForCountConstInline` loops whose trip count
+/// is a small compile-time constant and whose body satisfies every safety
+/// condition required to unroll (see [`pass_forcount_unroll`]). Returns one
+/// non-overlapping [`ForcountUnrollPlan`] per loop selected, interning each
+/// loop's iteration values into `consts` as it goes.
+fn forcount_collect_unroll_plans(
+    insns: &[Insn],
     consts: &mut Vec<Value>,
-    is_generator: bool,
-) -> Vec<Insn> {
+) -> Vec<ForcountUnrollPlan> {
     use crate::ast::BinaryOp;
-
-    if is_generator {
-        return insns;
-    }
-
-    let n = insns.len();
-    if n < 3 {
-        return insns;
-    }
 
     const MAX_TRIP: usize = 4;
     const MAX_BUDGET: usize = 32;
 
-    // Extract the jump-offset field from an instruction, if any.
-    let insn_jump_off = |insn: &Insn| -> Option<i32> {
-        match insn {
-            Insn::Jump(k) => Some(*k),
-            Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => Some(*k),
-            Insn::CmpJumpIfFalse(_, _, _, k)
-            | Insn::CmpJumpIfTrue(_, _, _, k)
-            | Insn::CmpJumpIfFalseConst(_, _, _, k)
-            | Insn::CmpJumpIfTrueConst(_, _, _, k) => Some(*k),
-            Insn::ForIter(_, _, k)
-            | Insn::ForCountReg(_, _, _, _, k)
-            | Insn::ForCountConst(_, _, _, _, k)
-            | Insn::ForCountConstInline(_, _, _, _, k) => Some(*k),
-            Insn::SetupExcept(k) | Insn::MatchExcept(_, k) | Insn::MatchExceptStar(_, _, _, k) => {
-                Some(*k)
-            }
-            _ => None,
-        }
-    };
-
-    // Describe a single loop to unroll.
-    struct Plan {
-        h: usize,              // position of ForCountConstInline
-        off: usize,            // exit offset (body size = off-1, back-edge at h+off)
-        var: u32,              // loop variable register
-        val_indices: Vec<u16>, // const-pool indices for each iteration value
-    }
-
-    // Scan for unrollable loops. We process the instruction list front-to-back
-    // and skip past any loop we decide to unroll (to avoid overlapping plans).
-    let mut plans: Vec<Plan> = Vec::new();
+    let n = insns.len();
+    let mut plans: Vec<ForcountUnrollPlan> = Vec::new();
     let mut skip_until = 0usize;
 
     for h in 0..n {
@@ -4905,7 +4867,7 @@ fn pass_forcount_unroll(
             continue;
         }
 
-        plans.push(Plan {
+        plans.push(ForcountUnrollPlan {
             h,
             off,
             var,
@@ -4916,6 +4878,57 @@ fn pass_forcount_unroll(
         skip_until = back_edge + 1;
     }
 
+    plans
+}
+
+// ─── ForCountConstInline loop unrolling ───────────────────────────────────────
+
+/// Unroll `ForCountConstInline` loops whose trip count is ≤ 4 and whose total
+/// unrolled body size (body_insns × trip) is ≤ 32 instructions.
+///
+/// For each qualifying loop at position `h` with exit-offset `off`:
+/// - The body occupies `[h+1, h+off-1]` (size = `off-1`).
+/// - The back-edge `Jump` is at `h+off`.
+/// - The post-loop code starts at `h+off+1`.
+///
+/// The loop is replaced with `trip` copies of:
+///   `LoadConst(var, iter_val)` + `[h+1 … h+off-1]`
+/// totalling `trip × off` instructions (vs. the original `off+1`).
+///
+/// Offset rewriting:
+/// - Intra-body jumps (target ∈ `[h+1, h+off-1]`) are unchanged because each
+///   copy is laid out with the same `off`-instruction stride.
+/// - Jumps from the body targeting the back-edge (`h+off`) also require no
+///   change: in copy k they resolve to `h + (k+1)*off` (= first instruction of
+///   the next copy's `LoadConst`), which is exactly the same relative offset.
+/// - External instructions (before or after the loop) whose jump targets cross
+///   the loop boundary are adjusted via an `old_to_new` table.
+///
+/// Safety guards:
+/// - Generator functions are skipped entirely (`is_generator == true`).
+/// - The preceding instruction must be `LoadConst(var, idx)` with a known
+///   integer value (gives the pre-initialised value `start - step`).
+/// - No body instruction is `Return`, `ReturnNone`, `Yield`, `YieldFrom`, or
+///   `SetupExcept`.
+/// - No body instruction has a jump target outside `[h+1, h+off]`.
+/// - No external instruction (position ∉ `[h, h+off]`) jumps into the loop
+///   body `[h, h+off]`.
+fn pass_forcount_unroll(
+    insns: Vec<Insn>,
+    consts: &mut Vec<Value>,
+    is_generator: bool,
+) -> Vec<Insn> {
+    if is_generator {
+        return insns;
+    }
+
+    let n = insns.len();
+    if n < 3 {
+        return insns;
+    }
+
+    // Phase 1: eligibility analysis — find the non-overlapping loops to unroll.
+    let plans = forcount_collect_unroll_plans(&insns, consts);
     if plans.is_empty() {
         return insns;
     }
@@ -4944,7 +4957,7 @@ fn pass_forcount_unroll(
     // For post-loop positions (> h+off): shift by (trip-1)*off-1.
     let mut old_to_new: Vec<usize> = (0..=n).collect(); // identity by default
     for plan in &plans {
-        let Plan { h, off, .. } = *plan;
+        let ForcountUnrollPlan { h, off, .. } = *plan;
         let back_edge = h + off;
         let trip = plan.val_indices.len();
         // shift for positions after back_edge.
