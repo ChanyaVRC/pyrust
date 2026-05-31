@@ -8145,16 +8145,16 @@ impl Compiler {
         self.free_temp(dst);
     }
 
-    fn compile_class(
+    /// Validate the class body's global/nonlocal/annotation rules, build its
+    /// register index, compile the body as a zero-param function in a child
+    /// compiler, and push the resulting class `FnProto`.  Returns the proto
+    /// index, or `None` when an error was recorded and the caller must bail.
+    fn build_class_proto(
         &mut self,
         name: &str,
-        bases: &[Expr],
-        metaclass: Option<&Expr>,
         keywords: &[(String, Expr)],
         body: &[Stmt],
-        decorators: &[Expr],
-        type_params: &[String],
-    ) {
+    ) -> Option<u8> {
         // Class body: zero-param function that returns its locals as class dict.
         // Collect names explicitly declared `global` in the class body so they
         // are excluded from `body_local` and routed to `Insn::StoreGlobal`
@@ -8184,7 +8184,7 @@ impl Compiler {
                         "no binding for nonlocal '{}' found",
                         nonlocal_name
                     ));
-                    return;
+                    return None;
                 }
             }
         }
@@ -8198,11 +8198,11 @@ impl Compiler {
         for ann_name in &ann_targets {
             if body_global.contains(ann_name) {
                 self.set_syntax_error(&format!("annotated name '{}' can't be global", ann_name));
-                return;
+                return None;
             }
             if body_nonlocal.contains(ann_name) {
                 self.set_syntax_error(&format!("annotated name '{}' can't be nonlocal", ann_name));
-                return;
+                return None;
             }
         }
 
@@ -8214,7 +8214,7 @@ impl Compiler {
             if self.error_msg.is_none() {
                 self.error_msg = Some(msg);
             }
-            return;
+            return None;
         }
 
         let body_local =
@@ -8309,7 +8309,7 @@ impl Compiler {
                         other => other.to_string(),
                     });
                 }
-                return;
+                return None;
             }
         };
         if self.fn_protos.len() >= 256 {
@@ -8318,7 +8318,7 @@ impl Compiler {
                 self.error_msg =
                     Some("too many nested classes/functions in one scope (max 256)".to_string());
             }
-            return;
+            return None;
         }
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(body_index_rc.keys().cloned().collect::<HashSet<_>>());
@@ -8350,6 +8350,18 @@ impl Compiler {
             class_kwarg_names: keywords.iter().map(|(k, _)| k.clone()).collect(),
         });
 
+        Some(proto_idx)
+    }
+
+    /// Compile the base-class expressions and PEP 487 keyword-argument values
+    /// into two contiguous register windows.  Returns
+    /// `(bases_base, bases_n, kwarg_base, kwarg_n)`, or `None` on register
+    /// overflow (error already recorded).
+    fn emit_class_bases_and_keywords(
+        &mut self,
+        bases: &[Expr],
+        keywords: &[(String, Expr)],
+    ) -> Option<(Reg, u8, Reg, u8)> {
         // Compile base class expressions.
         let bases_n = bases.len() as u8;
         let bases_base = self.next_temp;
@@ -8359,7 +8371,7 @@ impl Compiler {
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many base class registers".to_string());
                 }
-                return;
+                return None;
             }
             self.next_temp += Reg::from(bases_n);
             if self.next_temp - 1 > self.max_reg {
@@ -8385,7 +8397,7 @@ impl Compiler {
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many class keyword registers".to_string());
                 }
-                return;
+                return None;
             }
             self.next_temp += Reg::from(kwarg_n);
             if self.next_temp - 1 > self.max_reg {
@@ -8401,6 +8413,130 @@ impl Compiler {
             }
         }
 
+        Some((bases_base, bases_n, kwarg_base, kwarg_n))
+    }
+
+    /// Emit the explicit-metaclass call that replaces `dst` with
+    /// `metaclass(name, bases_tuple, namespace_dict)`.  Returns `Some(())` on
+    /// success, or `None` on register overflow (error already recorded).
+    fn emit_metaclass_call(
+        &mut self,
+        meta_expr: &Expr,
+        bases: &[Expr],
+        bases_n: u8,
+        dst: Reg,
+        name: &str,
+    ) -> Option<()> {
+        // 1. Build the bases tuple from already-evaluated bases.
+        //    Since the bases registers may have been freed above, we recompile
+        //    them into a fresh contiguous region.
+        let tup_base = self.next_temp;
+        if self
+            .next_temp
+            .checked_add(Reg::from(bases_n.max(1)))
+            .is_none()
+        {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for metaclass call".to_string());
+            }
+            return None;
+        }
+        self.next_temp += Reg::from(bases_n);
+        if bases_n > 0 && self.next_temp - 1 > self.max_reg {
+            self.max_reg = self.next_temp - 1;
+        }
+        for (i, base_expr) in (0u32..).zip(bases.iter()) {
+            let saved = self.next_temp;
+            let r = self.compile_expr(base_expr);
+            if r != tup_base + i {
+                self.emit(Insn::Move(tup_base + i, r));
+            }
+            self.next_temp = saved;
+        }
+        let bases_tuple_reg = self.alloc_temp();
+        self.emit(Insn::BuildTuple(bases_tuple_reg, tup_base, bases_n));
+        // Note: we keep the [tup_base..bases_tuple_reg] region allocated so
+        // bases_tuple_reg isn't clobbered by subsequent temp allocations.
+
+        // 2. Call vars(dst) to get the class namespace proxy, then
+        //    dict(proxy) to convert to a mutable plain dict for the metaclass.
+        //    Register layout (3 slots):
+        //      vars_frame+0  -- function (vars / dict)
+        //      vars_frame+1  -- arg
+        //      vars_frame+2  -- stash proxy while loading dict fn
+        let vars_name_idx = self.intern_name("vars");
+        let dict_name_idx_meta = self.intern_name("dict");
+        let vars_frame = self.next_temp;
+        if vars_frame.checked_add(3).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for metaclass call".to_string());
+            }
+            return None;
+        }
+        self.next_temp = vars_frame + 3;
+        if vars_frame + 2 > self.max_reg {
+            self.max_reg = vars_frame + 2;
+        }
+        // vars(dst) -> proxy in vars_frame
+        self.emit(Insn::LoadGlobal(vars_frame, vars_name_idx));
+        self.emit(Insn::Move(vars_frame + 1, dst));
+        self.emit(Insn::Call(vars_frame, 1));
+        // dict(proxy) -> plain dict in vars_frame
+        self.emit(Insn::Move(vars_frame + 2, vars_frame));
+        self.emit(Insn::LoadGlobal(vars_frame, dict_name_idx_meta));
+        self.emit(Insn::Move(vars_frame + 1, vars_frame + 2));
+        self.emit(Insn::Call(vars_frame, 1));
+        let ns_reg = vars_frame; // result of dict(vars(dst))
+
+        // 3. Set up call frame for metaclass(name_str, bases_tuple, namespace).
+        let frame = self.next_temp;
+        if frame.checked_add(4).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for metaclass call".to_string());
+            }
+            return None;
+        }
+        self.next_temp = frame + 4;
+        if frame + 3 > self.max_reg {
+            self.max_reg = frame + 3;
+        }
+        let saved = self.next_temp;
+        self.compile_expr_into(meta_expr, frame);
+        self.next_temp = saved;
+        let name_const = self.intern_const(Value::string(name));
+        self.emit(Insn::LoadConst(frame + 1, name_const));
+        self.emit(Insn::Move(frame + 2, bases_tuple_reg));
+        self.emit(Insn::Move(frame + 3, ns_reg));
+        self.emit(Insn::Call(frame, 3));
+        self.emit(Insn::Move(dst, frame));
+        self.next_temp = dst + 1;
+        Some(())
+    }
+
+    fn compile_class(
+        &mut self,
+        name: &str,
+        bases: &[Expr],
+        metaclass: Option<&Expr>,
+        keywords: &[(String, Expr)],
+        body: &[Stmt],
+        decorators: &[Expr],
+        type_params: &[String],
+    ) {
+        let proto_idx = match self.build_class_proto(name, keywords, body) {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        let (bases_base, bases_n, kwarg_base, kwarg_n) =
+            match self.emit_class_bases_and_keywords(bases, keywords) {
+                Some(v) => v,
+                None => return,
+            };
+
         let name_idx = self.intern_name(name);
         let dst = self.alloc_temp();
         self.emit(Insn::MakeClass(
@@ -8415,92 +8551,12 @@ impl Compiler {
         // If a metaclass is provided, replace `dst` with the result of
         // `metaclass(name_str, bases_tuple, namespace_dict)`.
         if let Some(meta_expr) = metaclass {
-            // 1. Build the bases tuple from already-evaluated bases.
-            //    Since the bases registers may have been freed above, we recompile
-            //    them into a fresh contiguous region.
-            let tup_base = self.next_temp;
             if self
-                .next_temp
-                .checked_add(Reg::from(bases_n.max(1)))
+                .emit_metaclass_call(meta_expr, bases, bases_n, dst, name)
                 .is_none()
             {
-                self.failed = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some("too many registers for metaclass call".to_string());
-                }
                 return;
             }
-            self.next_temp += Reg::from(bases_n);
-            if bases_n > 0 && self.next_temp - 1 > self.max_reg {
-                self.max_reg = self.next_temp - 1;
-            }
-            for (i, base_expr) in (0u32..).zip(bases.iter()) {
-                let saved = self.next_temp;
-                let r = self.compile_expr(base_expr);
-                if r != tup_base + i {
-                    self.emit(Insn::Move(tup_base + i, r));
-                }
-                self.next_temp = saved;
-            }
-            let bases_tuple_reg = self.alloc_temp();
-            self.emit(Insn::BuildTuple(bases_tuple_reg, tup_base, bases_n));
-            // Note: we keep the [tup_base..bases_tuple_reg] region allocated so
-            // bases_tuple_reg isn't clobbered by subsequent temp allocations.
-
-            // 2. Call vars(dst) to get the class namespace proxy, then
-            //    dict(proxy) to convert to a mutable plain dict for the metaclass.
-            //    Register layout (3 slots):
-            //      vars_frame+0  -- function (vars / dict)
-            //      vars_frame+1  -- arg
-            //      vars_frame+2  -- stash proxy while loading dict fn
-            let vars_name_idx = self.intern_name("vars");
-            let dict_name_idx_meta = self.intern_name("dict");
-            let vars_frame = self.next_temp;
-            if vars_frame.checked_add(3).is_none() {
-                self.failed = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some("too many registers for metaclass call".to_string());
-                }
-                return;
-            }
-            self.next_temp = vars_frame + 3;
-            if vars_frame + 2 > self.max_reg {
-                self.max_reg = vars_frame + 2;
-            }
-            // vars(dst) -> proxy in vars_frame
-            self.emit(Insn::LoadGlobal(vars_frame, vars_name_idx));
-            self.emit(Insn::Move(vars_frame + 1, dst));
-            self.emit(Insn::Call(vars_frame, 1));
-            // dict(proxy) -> plain dict in vars_frame
-            self.emit(Insn::Move(vars_frame + 2, vars_frame));
-            self.emit(Insn::LoadGlobal(vars_frame, dict_name_idx_meta));
-            self.emit(Insn::Move(vars_frame + 1, vars_frame + 2));
-            self.emit(Insn::Call(vars_frame, 1));
-            let ns_reg = vars_frame; // result of dict(vars(dst))
-
-            // 3. Set up call frame for metaclass(name_str, bases_tuple, namespace).
-            let frame = self.next_temp;
-            if frame.checked_add(4).is_none() {
-                self.failed = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some("too many registers for metaclass call".to_string());
-                }
-                return;
-            }
-            self.next_temp = frame + 4;
-            if frame + 3 > self.max_reg {
-                self.max_reg = frame + 3;
-            }
-            let saved = self.next_temp;
-            self.compile_expr_into(meta_expr, frame);
-            self.next_temp = saved;
-            let name_const = self.intern_const(Value::string(name));
-            self.emit(Insn::LoadConst(frame + 1, name_const));
-            self.emit(Insn::Move(frame + 2, bases_tuple_reg));
-            self.emit(Insn::Move(frame + 3, ns_reg));
-            self.emit(Insn::Call(frame, 3));
-            self.emit(Insn::Move(dst, frame));
-            self.next_temp = dst + 1;
         }
 
         // PEP 695: if this is a generic class, build the __type_params__ tuple
