@@ -15,6 +15,17 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
+/// Returns `true` if `method` may need mutable interpreter access — i.e. it
+/// can fire user-defined dunder methods (`__eq__` for `index`/`count`, the
+/// `key=` callable for `sort`).  The VM dispatcher queries this predicate to
+/// decide whether to take the interpreter-aware slow path (`call_seq_index` /
+/// `call_seq_count` / precomputed-key sort) or hand off directly to the
+/// interpreter-free `call` below.  Single source of truth for the carve-out
+/// (see `crates/pyrust-builtins/README.md`).
+pub fn requires_interpreter(method: &str) -> bool {
+    matches!(method, "sort" | "index" | "count")
+}
+
 pub fn call(
     method: &str,
     receiver: &Value,

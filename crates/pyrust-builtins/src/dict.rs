@@ -31,6 +31,19 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
+/// Returns `true` if `method` produces a *lazy view* (`keys` / `values` /
+/// `items`) that must share the source dict's backing storage.
+///
+/// These three cannot go through `call` below — the interpreter-free
+/// signature only sees a `Vec<Value>` snapshot, whereas a live view needs the
+/// `Rc<RefCell<IndexMap>>`.  The VM dispatcher queries this predicate and
+/// routes matching methods to `dict_views::dict_{keys,values,items}` instead.
+/// Single source of truth for the carve-out (see
+/// `crates/pyrust-builtins/README.md`).
+pub fn needs_rc(method: &str) -> bool {
+    matches!(method, "keys" | "values" | "items")
+}
+
 /// Dispatch a `dict` method.  Receiver is `&Value`; each branch
 /// opens a scoped `dict_with` / `dict_with_mut` borrow.  Iterating
 /// methods (`update`) snapshot the mapping arg via the receiver's

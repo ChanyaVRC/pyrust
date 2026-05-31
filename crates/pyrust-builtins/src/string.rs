@@ -89,6 +89,21 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
+/// Returns `true` if `method` must be evaluated directly by the VM dispatcher
+/// rather than delegated to `call_str_method` / `call` below.
+///
+/// `format` needs keyword arguments and the interpreter's
+/// `format_str_template`; `format_map` routes through
+/// `format_str_template_map`; `maketrans` is a staticmethod whose receiver is
+/// discarded and forwarded to `str_maketrans`.  The interpreter-free `call`
+/// arm for `format`/`format_map` is a drift-guard stub that is never reached
+/// at runtime.  The VM dispatcher queries this predicate to route them
+/// upstream.  Single source of truth for the carve-out (see
+/// `crates/pyrust-builtins/README.md`).
+pub fn requires_vm_template(method: &str) -> bool {
+    matches!(method, "format" | "format_map" | "maketrans")
+}
+
 pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
     let s: &str = src.as_str().unwrap();
     let args = args.as_slice();
