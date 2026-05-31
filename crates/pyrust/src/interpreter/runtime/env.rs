@@ -701,59 +701,15 @@ impl Interpreter {
                     }
                     _ => {}
                 }
-                // Complex .real / .imag attribute access.
-                if let ValueKind::Complex(re, im) = target.kind() {
-                    match name {
-                        "real" => return Ok(Value::float(re)),
-                        "imag" => return Ok(Value::float(im)),
-                        "conjugate" => {
-                            return Ok(pyrust_builtins::bound_method::bound_method(
-                                name,
-                                target.clone(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                // int / bool / BigInt numeric-tower read-only properties:
-                // real, imag, numerator, denominator.  These are properties
-                // (attribute access returns the value directly, not a bound
-                // method), matching CPython's int abstract-number-tower
-                // protocol (issue #1341).  bool is a subclass of int and
-                // inherits the same behaviour.
-                match target.kind() {
-                    // bool.real / bool.numerator: CPython returns an int, not a
-                    // bool (True.real == 1, type(True.real) is int).
-                    ValueKind::Bool(b) => match name {
-                        "real" | "numerator" => return Ok(Value::int(b as i64)),
-                        "imag" => return Ok(Value::int(0)),
-                        "denominator" => return Ok(Value::int(1)),
-                        _ => {}
-                    },
-                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
-                        "real" => return Ok(target.clone()),
-                        "imag" => return Ok(Value::int(0)),
-                        "numerator" => return Ok(target.clone()),
-                        "denominator" => return Ok(Value::int(1)),
-                        _ => {}
-                    },
-                    ValueKind::Float(_) => match name {
-                        "real" => return Ok(target.clone()),
-                        "imag" => return Ok(Value::float(0.0)),
-                        _ => {}
-                    },
-                    _ => {}
-                }
-                // Range read-only properties: start, stop, step (issue #1807).
-                // These are stored directly on the value; return them as plain ints.
-                // count / index / __len__ fall through to builtin_has_method below.
-                if let ValueKind::Range { start, stop, step } = target.kind() {
-                    match name {
-                        "start" => return Ok(Value::int(start)),
-                        "stop" => return Ok(Value::int(stop)),
-                        "step" => return Ok(Value::int(step)),
-                        _ => {}
-                    }
+                // Type-specific read-only attributes (complex .real/.imag and
+                // .conjugate, numeric-tower real/imag/numerator/denominator,
+                // range start/stop/step) live in pyrust-builtins so this
+                // dispatcher holds no per-type knowledge.
+                if let Some(v) = pyrust_builtins::numeric_attrs_descriptor::complex_attr(&target, name)
+                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&target, name))
+                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::range_attr(&target, name))
+                {
+                    return Ok(v);
                 }
                 // `BuiltinObject` types can expose arbitrary attributes via
                 // `BuiltinTypeOps::getattr` (e.g. `GenericAlias.__origin__`,
@@ -1168,27 +1124,9 @@ impl Interpreter {
         // descriptors on the primitive class (issue #1341).
         if matches!(name, "real" | "imag" | "numerator" | "denominator") {
             if let Some(backing) = instance_builtin_data(&instance) {
-                let result = match backing.kind() {
-                    ValueKind::Bool(b) => match name {
-                        "real" | "numerator" => Some(Value::int(b as i64)),
-                        "imag" => Some(Value::int(0)),
-                        "denominator" => Some(Value::int(1)),
-                        _ => None,
-                    },
-                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
-                        "real" | "numerator" => Some(backing.clone()),
-                        "imag" => Some(Value::int(0)),
-                        "denominator" => Some(Value::int(1)),
-                        _ => None,
-                    },
-                    ValueKind::Float(_) => match name {
-                        "real" => Some(backing.clone()),
-                        "imag" => Some(Value::float(0.0)),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(v) = result {
+                if let Some(v) =
+                    pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&backing, name)
+                {
                     return Ok(v);
                 }
             }
