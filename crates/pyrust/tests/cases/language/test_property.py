@@ -44,7 +44,34 @@ assert r.area == 12
 try:
     r.area = 10
     assert False, "should have raised AttributeError"
-except AttributeError:
-    pass
+except AttributeError as e:
+    # CPython 3.12 names the property and owner class (issue #1845).
+    assert str(e) == "property 'area' of 'Rect' object has no setter", str(e)
+# A getter-only property is a data descriptor: the failed assignment must NOT
+# fall through to a silent instance-dict write.
+assert "area" not in r.__dict__
+
+# Deleting a getter-only property raises with the matching message.
+try:
+    del r.area
+    assert False, "should have raised AttributeError"
+except AttributeError as e:
+    assert str(e) == "property 'area' of 'Rect' object has no deleter", str(e)
+
+
+# property() built without the decorator carries the attribute name too.
+class Named:
+    def _get(self):
+        return 1
+
+    y = property(_get)
+
+
+n = Named()
+try:
+    n.y = 9
+    assert False, "should have raised AttributeError"
+except AttributeError as e:
+    assert str(e) == "property 'y' of 'Named' object has no setter", str(e)
 
 print("property OK")

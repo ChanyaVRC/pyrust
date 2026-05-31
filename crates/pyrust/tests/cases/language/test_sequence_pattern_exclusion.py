@@ -1,8 +1,8 @@
 # PEP 634 sequence-pattern type exclusion (issue #1789).
 #
-# str, bytes, dict, set, and frozenset are NOT matched by sequence patterns,
-# even though they support len().  list/tuple/range and list/tuple subclasses
-# ARE matched.  The compiler lowers this exclusion to a single
+# str, bytes, bytearray, dict, set, and frozenset are NOT matched by sequence
+# patterns, even though they support len().  list/tuple/range and list/tuple
+# subclasses ARE matched.  The compiler lowers this exclusion to a single
 # `MatchSeqExcluded` instruction; this fixture pins the observable behaviour
 # (and its subclass handling) byte-for-byte against CPython.
 
@@ -29,10 +29,12 @@ print(classify([1, 2, 3]))
 print(classify([]))
 print(classify(range(2)))
 
-# Excluded: str / bytes / dict / set / frozenset.
+# Excluded: str / bytes / bytearray / dict / set / frozenset.
 print(classify("ab"))
 print(classify("a"))
 print(classify(b"ab"))
+print(classify(bytearray(b"ab")))  # issue #1844: bytearray is excluded
+print(classify(bytearray()))
 print(classify({1: 10, 2: 20}))
 print(classify({1, 2}))
 print(classify(frozenset({1, 2})))
@@ -67,12 +69,17 @@ class MyFrozen(frozenset):
     pass
 
 
+class MyBytearray(bytearray):
+    pass
+
+
 print(classify(MyList([1, 2])))
 print(classify(MyTuple((1, 2))))
 print(classify(MyDict({1: 2, 3: 4})))
 print(classify(MyStr("ab")))
 print(classify(MySet({1, 2})))
 print(classify(MyFrozen({1, 2})))
+print(classify(MyBytearray(b"ab")))  # issue #1844: subclass excluded too
 
 
 # Exclusion still applies inside nested patterns.
