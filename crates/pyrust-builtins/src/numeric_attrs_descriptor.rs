@@ -16,7 +16,81 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
+
+// ── scalar / range read-only attribute values ───────────────────────────────
+//
+// Single source of truth for the *value* returned by the numeric-tower
+// read-only properties (`real`/`imag`/`numerator`/`denominator`), `complex`
+// `.real`/`.imag`, and `range` `.start`/`.stop`/`.step`.  `get_attr` (and the
+// int/float-subclass path) delegate here instead of inlining per-type `match`
+// arms, so the type-specific knowledge lives next to the rest of the numeric
+// builtin logic rather than in the interpreter's attribute dispatcher.
+
+/// `int` / `bool` / `BigInt` / `float` numeric-tower read-only properties:
+/// `real`, `imag`, `numerator`, `denominator`.  Returns `None` when `value` is
+/// not one of those numeric kinds or `name` is not such a property.
+///
+/// `bool` follows CPython: `True.real == 1` is a plain `int`, not a `bool`.
+/// `float` exposes only `real`/`imag` (no `numerator`/`denominator`).
+pub fn numeric_tower_attr(value: &Value, name: &str) -> Option<Value> {
+    match value.kind() {
+        ValueKind::Bool(b) => match name {
+            "real" | "numerator" => Some(Value::int(b as i64)),
+            "imag" => Some(Value::int(0)),
+            "denominator" => Some(Value::int(1)),
+            _ => None,
+        },
+        ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
+            "real" | "numerator" => Some(value.clone()),
+            "imag" => Some(Value::int(0)),
+            "denominator" => Some(Value::int(1)),
+            _ => None,
+        },
+        ValueKind::Float(_) => match name {
+            "real" => Some(value.clone()),
+            "imag" => Some(Value::float(0.0)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `complex` attribute access: the `.real` / `.imag` read-only properties and
+/// the `.conjugate` method.  Returns `None` when `value` is not a `complex` or
+/// `name` is not one of those attributes.
+///
+/// `conjugate` yields a *bound* method (not a value); it is handled here rather
+/// than via the generic `has_method` path because the latter resolves it to an
+/// unbound `method_descriptor` for `complex`.
+pub fn complex_attr(value: &Value, name: &str) -> Option<Value> {
+    let ValueKind::Complex(re, im) = value.kind() else {
+        return None;
+    };
+    match name {
+        "real" => Some(Value::float(re)),
+        "imag" => Some(Value::float(im)),
+        "conjugate" => Some(crate::bound_method::bound_method(
+            "conjugate",
+            value.clone(),
+        )),
+        _ => None,
+    }
+}
+
+/// `range` `.start` / `.stop` / `.step` read-only properties (issue #1807).
+/// Returns `None` when `value` is not a `range` or `name` is not one of them.
+pub fn range_attr(value: &Value, name: &str) -> Option<Value> {
+    let ValueKind::Range { start, stop, step } = value.kind() else {
+        return None;
+    };
+    match name {
+        "start" => Some(Value::int(start)),
+        "stop" => Some(Value::int(stop)),
+        "step" => Some(Value::int(step)),
+        _ => None,
+    }
+}
 
 // ── getset_descriptor ────────────────────────────────────────────────────────
 

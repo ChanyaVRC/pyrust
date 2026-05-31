@@ -52,296 +52,7 @@ impl Interpreter {
                 }
                 self.get_attr_instance_raw(instance, name)
             }
-            ValueKind::PyClass(class) => {
-                let class = Rc::clone(class);
-                if name == "__name__" {
-                    return Ok(Value::string(class.borrow().name.clone()));
-                }
-                if name == "__qualname__" {
-                    // __qualname__ is a type-level descriptor on `type` in CPython,
-                    // not stored in the class attrs dict.  Intercept here so that
-                    // C.__qualname__ works without polluting vars(C) (issue #553).
-                    return Ok(Value::string(class.borrow().qualname.clone()));
-                }
-                if name == "__dict__" {
-                    // Return a live mappingproxy wrapping the class's attrs dict —
-                    // matching CPython 3.12's `type.__dict__` descriptor, which
-                    // returns `types.MappingProxyType`.  Reads see the current
-                    // attrs (live reference); mutation raises TypeError (issue #726).
-                    return Ok(pyrust_builtins::mapping_proxy::mapping_proxy(
-                        Rc::clone(&class),
-                    ));
-                }
-                if name == "__bases__" {
-                    // `__bases__` reports all immediate parents in declaration
-                    // order.  If no explicit base was given, CPython reports
-                    // `(object,)`.
-                    let (base, extra_bases) = {
-                        let borrowed = class.borrow();
-                        (borrowed.base.clone(), borrowed.extra_bases.clone())
-                    };
-                    let mut items: Vec<Value> = Vec::new();
-                    match base {
-                        None => items.push(Value::py_class(object_class_singleton())),
-                        Some(b) => {
-                            items.push(Value::py_class(b));
-                            for eb in extra_bases {
-                                items.push(Value::py_class(eb));
-                            }
-                        }
-                    }
-                    return Ok(Value::tuple(items));
-                }
-                if name == "__mro__" {
-                    return Ok(Value::tuple(class_mro_items(&class)?));
-                }
-                if name == "mro" {
-                    return Ok(pyrust_builtins::bound_method::bound_method(
-                        "mro",
-                        Value::py_class(Rc::clone(&class)),
-                    ));
-                }
-                if name == "__subclasses__" {
-                    return Ok(pyrust_builtins::bound_method::bound_method(
-                        "__subclasses__",
-                        Value::py_class(Rc::clone(&class)),
-                    ));
-                }
-                if name == "__annotations__" {
-                    // `type.__annotations__` in CPython is a data descriptor on
-                    // `type` itself.  On first access it synthesises an empty dict,
-                    // writes it back into the class's own `__dict__`, and returns
-                    // that same dict.  Subsequent accesses hit the own-attrs check
-                    // and return the stored (potentially mutated) dict — so
-                    // `Foo.__annotations__ is Foo.__annotations__` is `True` and
-                    // mutations via subscript-assignment persist (issue #737).
-                    //
-                    // CPython does NOT inherit __annotations__ from base classes:
-                    // `B.__annotations__` is always B's own dict, never A's.
-                    // Use a direct own-attrs lookup (not lookup_class_attr) here.
-                    if let Some(stored) = class.borrow().attrs.get("__annotations__").cloned() {
-                        return Ok(stored);
-                    }
-                    let empty = Value::dict(IndexMap::new());
-                    class
-                        .borrow_mut()
-                        .attrs
-                        .insert("__annotations__".to_string(), empty.clone());
-                    return Ok(empty);
-                }
-                // Issue #1563: `dict.fromkeys` is a classmethod that must return
-                // an instance of `cls`, not always a plain `dict`.  When called
-                // on a dict subclass, bind the class as the receiver so that the
-                // bound-method dispatch in calls.rs can call `cls()` instead of
-                // hard-coding `Value::dict(map)`.
-                if name == "fromkeys"
-                    && !is_primitive_class(&class)
-                    && class_chain_contains_name(&class, "dict")
-                {
-                    return Ok(pyrust_builtins::bound_method::bound_method(
-                        "fromkeys",
-                        Value::py_class(Rc::clone(&class)),
-                    ));
-                }
-                // Issue #1617: numeric-tower read-only properties and conjugate
-                // are exposed on the `int` and `float` class objects as descriptors
-                // (matching CPython 3.12's `getset_descriptor` / `method_descriptor`).
-                // `bool` and any other int subclass inherit from `int` and expose
-                // the same descriptors with class_name "int" (CPython: `bool.real`
-                // says "of 'int' objects").  Use class_chain_contains_name so that
-                // user-defined subclasses (`class MyInt(int): pass`) also get the
-                // descriptors, matching CPython MRO-based lookup.
-                //
-                // Check int chain before float chain: int (and bool) takes priority.
-                // The attr_name literals must be `'static` — use explicit match arms
-                // rather than passing `name` directly.
-                {
-                    let descriptor = if class_chain_contains_name(&class, "int") {
-                        match name {
-                            "real" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    "real", "int",
-                                ),
-                            ),
-                            "imag" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    "imag", "int",
-                                ),
-                            ),
-                            "numerator" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    "numerator", "int",
-                                ),
-                            ),
-                            "denominator" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    "denominator", "int",
-                                ),
-                            ),
-                            "conjugate" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
-                                    "conjugate", "int",
-                                ),
-                            ),
-                            _ => None,
-                        }
-                    } else if class_chain_contains_name(&class, "float") {
-                        match name {
-                            "real" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    "real", "float",
-                                ),
-                            ),
-                            "imag" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    "imag", "float",
-                                ),
-                            ),
-                            "conjugate" => Some(
-                                pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
-                                    "conjugate", "float",
-                                ),
-                            ),
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(d) = descriptor {
-                        return Ok(d);
-                    }
-                }
-                if let Some(value) = lookup_class_attr(&class, name) {
-                    // Descriptor protocol for class-level access: if the class
-                    // attribute is a user-defined descriptor (PyInstance with
-                    // __get__), call __get__(None, cls) — CPython Data Model
-                    // §3.3.2.  property is handled by its own match arm (above
-                    // this ValueKind::PyClass arm) and returns itself on class
-                    // access, so we only check PyInstance here.
-                    if let ValueKind::PyInstance(desc_inst) = value.kind() {
-                        let desc_class = Rc::clone(&desc_inst.borrow().class);
-                        if lookup_class_attr(&desc_class, "__get__").is_some() {
-                            return call_descriptor_get(
-                                self,
-                                &value,
-                                Value::none(),
-                                Value::py_class(Rc::clone(&class)),
-                                name,
-                            );
-                        }
-                    }
-                    // Drop the kind() Ref before the `_ => value` arm
-                    // may move `value` (#450).
-                    enum ClassDescTag {
-                        UserFunction(Rc<UserFunction>),
-                        ClassMethodAny(Value),
-                        StaticMethodAny(Value),
-                        Other,
-                    }
-                    let tag = match value.kind() {
-                        ValueKind::UserFunction(f) => ClassDescTag::UserFunction(Rc::clone(f)),
-                        _ => {
-                            if let Some(w) =
-                                pyrust_builtins::classmethod::as_class_method_any(&value)
-                            {
-                                ClassDescTag::ClassMethodAny(w)
-                            } else if let Some(w) =
-                                pyrust_builtins::classmethod::as_static_method_any(&value)
-                            {
-                                ClassDescTag::StaticMethodAny(w)
-                            } else {
-                                ClassDescTag::Other
-                            }
-                        }
-                    };
-                    return Ok(match tag {
-                        ClassDescTag::UserFunction(f) => match f.kind {
-                            UserFunctionKind::ClassMethod => {
-                                Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
-                            }
-                            UserFunctionKind::StaticMethod => {
-                                // CPython __get__ returns the underlying function directly.
-                                // Prefer `wrapped_func` to preserve object identity
-                                // (`sm.__get__(None, C) is fn` when `sm = staticmethod(fn)`).
-                                if let Some(inner) = f.wrapped_func.as_ref() {
-                                    Value::user_function(Rc::clone(inner))
-                                } else {
-                                    Value::with_function_kind(
-                                        Rc::clone(&f),
-                                        UserFunctionKind::Regular,
-                                    )
-                                }
-                            }
-                            UserFunctionKind::Regular => value,
-                            UserFunctionKind::Builtin(_) => value,
-                        },
-                        // classmethod(non_fn): CPython returns a method object bound to
-                        // the class; pyrust returns the wrapped value (no new Value
-                        // variant for non-UserFunction class-bound values).
-                        ClassDescTag::ClassMethodAny(w) => w,
-                        // staticmethod(non_fn): returns the wrapped value directly,
-                        // matching CPython (`C.s` where `s = staticmethod(42)` → 42).
-                        ClassDescTag::StaticMethodAny(w) => w,
-                        // Issue #1080: builtin classmethods (e.g. `object.__init_subclass__`)
-                        // must be bound to `cls` when accessed on a class, just like
-                        // user-defined classmethods are bound via ClassBoundMethod.
-                        // CPython's classmethod_descriptor.__get__ returns a bound
-                        // builtin_function_or_method with __self__ = cls.
-                        ClassDescTag::Other => {
-                            let builtin_cm_name = match value.kind() {
-                                ValueKind::BuiltinFunction(fn_name)
-                                    if is_builtin_classmethod(fn_name) =>
-                                {
-                                    Some(fn_name.to_string())
-                                }
-                                _ => None,
-                            };
-                            match builtin_cm_name {
-                                Some(fn_name) => {
-                                    pyrust_builtins::super_bound_builtin::super_bound_builtin(
-                                        fn_name,
-                                        Value::py_class(Rc::clone(&class)),
-                                    )
-                                }
-                                None => value,
-                            }
-                        }
-                    });
-                }
-                // Issue #1275: __module__ and __doc__ on built-in type objects.
-                // Primitive classes (int, str, …) are immutable and cannot store
-                // attrs like user-defined classes do.  Exception classes and the
-                // object singleton share the same gap.  CPython exposes both
-                // attributes on every type object; provide the fallback here so
-                // that builtin and exception classes behave like their CPython
-                // counterparts.
-                //
-                // User-defined classes always have __module__ and __doc__ in their
-                // own attrs dict (set by the VM's MakeClass instruction), so they
-                // are handled by the lookup_class_attr path above and never reach
-                // this fallback.
-                let is_builtin_class = crate::interpreter::is_primitive_class(&class)
-                    || is_exception_class(&class)
-                    || Rc::ptr_eq(&class, &object_class_singleton())
-                    || Rc::ptr_eq(&class, &crate::interpreter::method_type_singleton())
-                    || Rc::ptr_eq(&class, &crate::interpreter::function_type_singleton());
-                if name == "__module__" && is_builtin_class {
-                    return Ok(Value::string("builtins".to_string()));
-                }
-                if name == "__doc__" && is_builtin_class {
-                    let class_name = class.borrow().name.clone();
-                    return Ok(match builtin_class_doc(&class_name) {
-                        Some(doc) => Value::string(doc.to_string()),
-                        None => Value::none(),
-                    });
-                }
-                let class_name = class.borrow().name.clone();
-                Err(PyError::attribute_error(
-                    format!("type object '{}' has no attribute '{}'", class_name, name),
-                    Some(name.to_string()),
-                    Some(Value::py_class(Rc::clone(&class))),
-                ))
-            }
+            ValueKind::PyClass(class) => self.get_attr_class(Rc::clone(class), name),
             ValueKind::SuperProxy { class, instance } => {
                 let class = Rc::clone(class);
                 let instance = Rc::clone(instance);
@@ -990,59 +701,15 @@ impl Interpreter {
                     }
                     _ => {}
                 }
-                // Complex .real / .imag attribute access.
-                if let ValueKind::Complex(re, im) = target.kind() {
-                    match name {
-                        "real" => return Ok(Value::float(re)),
-                        "imag" => return Ok(Value::float(im)),
-                        "conjugate" => {
-                            return Ok(pyrust_builtins::bound_method::bound_method(
-                                name,
-                                target.clone(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-                // int / bool / BigInt numeric-tower read-only properties:
-                // real, imag, numerator, denominator.  These are properties
-                // (attribute access returns the value directly, not a bound
-                // method), matching CPython's int abstract-number-tower
-                // protocol (issue #1341).  bool is a subclass of int and
-                // inherits the same behaviour.
-                match target.kind() {
-                    // bool.real / bool.numerator: CPython returns an int, not a
-                    // bool (True.real == 1, type(True.real) is int).
-                    ValueKind::Bool(b) => match name {
-                        "real" | "numerator" => return Ok(Value::int(b as i64)),
-                        "imag" => return Ok(Value::int(0)),
-                        "denominator" => return Ok(Value::int(1)),
-                        _ => {}
-                    },
-                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
-                        "real" => return Ok(target.clone()),
-                        "imag" => return Ok(Value::int(0)),
-                        "numerator" => return Ok(target.clone()),
-                        "denominator" => return Ok(Value::int(1)),
-                        _ => {}
-                    },
-                    ValueKind::Float(_) => match name {
-                        "real" => return Ok(target.clone()),
-                        "imag" => return Ok(Value::float(0.0)),
-                        _ => {}
-                    },
-                    _ => {}
-                }
-                // Range read-only properties: start, stop, step (issue #1807).
-                // These are stored directly on the value; return them as plain ints.
-                // count / index / __len__ fall through to builtin_has_method below.
-                if let ValueKind::Range { start, stop, step } = target.kind() {
-                    match name {
-                        "start" => return Ok(Value::int(start)),
-                        "stop" => return Ok(Value::int(stop)),
-                        "step" => return Ok(Value::int(step)),
-                        _ => {}
-                    }
+                // Type-specific read-only attributes (complex .real/.imag and
+                // .conjugate, numeric-tower real/imag/numerator/denominator,
+                // range start/stop/step) live in pyrust-builtins so this
+                // dispatcher holds no per-type knowledge.
+                if let Some(v) = pyrust_builtins::numeric_attrs_descriptor::complex_attr(&target, name)
+                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&target, name))
+                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::range_attr(&target, name))
+                {
+                    return Ok(v);
                 }
                 // `BuiltinObject` types can expose arbitrary attributes via
                 // `BuiltinTypeOps::getattr` (e.g. `GenericAlias.__origin__`,
@@ -1075,6 +742,304 @@ impl Interpreter {
                 ))
             }
         }
+    }
+
+    /// `Cls.name` attribute access (the `ValueKind::PyClass` arm of
+    /// `get_attr`).  Handles `__name__`/`__qualname__`/`__mro__`/`__bases__`,
+    /// MRO attribute lookup, classmethod/staticmethod binding, metaclass
+    /// descriptors, and the AttributeError fallback.
+    fn get_attr_class(
+        &mut self,
+        class: Rc<RefCell<PyClass>>,
+        name: &str,
+    ) -> Result<Value> {
+        if name == "__name__" {
+            return Ok(Value::string(class.borrow().name.clone()));
+        }
+        if name == "__qualname__" {
+            // __qualname__ is a type-level descriptor on `type` in CPython,
+            // not stored in the class attrs dict.  Intercept here so that
+            // C.__qualname__ works without polluting vars(C) (issue #553).
+            return Ok(Value::string(class.borrow().qualname.clone()));
+        }
+        if name == "__dict__" {
+            // Return a live mappingproxy wrapping the class's attrs dict —
+            // matching CPython 3.12's `type.__dict__` descriptor, which
+            // returns `types.MappingProxyType`.  Reads see the current
+            // attrs (live reference); mutation raises TypeError (issue #726).
+            return Ok(pyrust_builtins::mapping_proxy::mapping_proxy(
+                Rc::clone(&class),
+            ));
+        }
+        if name == "__bases__" {
+            // `__bases__` reports all immediate parents in declaration
+            // order.  If no explicit base was given, CPython reports
+            // `(object,)`.
+            let (base, extra_bases) = {
+                let borrowed = class.borrow();
+                (borrowed.base.clone(), borrowed.extra_bases.clone())
+            };
+            let mut items: Vec<Value> = Vec::new();
+            match base {
+                None => items.push(Value::py_class(object_class_singleton())),
+                Some(b) => {
+                    items.push(Value::py_class(b));
+                    for eb in extra_bases {
+                        items.push(Value::py_class(eb));
+                    }
+                }
+            }
+            return Ok(Value::tuple(items));
+        }
+        if name == "__mro__" {
+            return Ok(Value::tuple(class_mro_items(&class)?));
+        }
+        if name == "mro" {
+            return Ok(pyrust_builtins::bound_method::bound_method(
+                "mro",
+                Value::py_class(Rc::clone(&class)),
+            ));
+        }
+        if name == "__subclasses__" {
+            return Ok(pyrust_builtins::bound_method::bound_method(
+                "__subclasses__",
+                Value::py_class(Rc::clone(&class)),
+            ));
+        }
+        if name == "__annotations__" {
+            // `type.__annotations__` in CPython is a data descriptor on
+            // `type` itself.  On first access it synthesises an empty dict,
+            // writes it back into the class's own `__dict__`, and returns
+            // that same dict.  Subsequent accesses hit the own-attrs check
+            // and return the stored (potentially mutated) dict — so
+            // `Foo.__annotations__ is Foo.__annotations__` is `True` and
+            // mutations via subscript-assignment persist (issue #737).
+            //
+            // CPython does NOT inherit __annotations__ from base classes:
+            // `B.__annotations__` is always B's own dict, never A's.
+            // Use a direct own-attrs lookup (not lookup_class_attr) here.
+            if let Some(stored) = class.borrow().attrs.get("__annotations__").cloned() {
+                return Ok(stored);
+            }
+            let empty = Value::dict(IndexMap::new());
+            class
+                .borrow_mut()
+                .attrs
+                .insert("__annotations__".to_string(), empty.clone());
+            return Ok(empty);
+        }
+        // Issue #1563: `dict.fromkeys` is a classmethod that must return
+        // an instance of `cls`, not always a plain `dict`.  When called
+        // on a dict subclass, bind the class as the receiver so that the
+        // bound-method dispatch in calls.rs can call `cls()` instead of
+        // hard-coding `Value::dict(map)`.
+        if name == "fromkeys"
+            && !is_primitive_class(&class)
+            && class_chain_contains_name(&class, "dict")
+        {
+            return Ok(pyrust_builtins::bound_method::bound_method(
+                "fromkeys",
+                Value::py_class(Rc::clone(&class)),
+            ));
+        }
+        // Issue #1617: numeric-tower read-only properties and conjugate
+        // are exposed on the `int` and `float` class objects as descriptors
+        // (matching CPython 3.12's `getset_descriptor` / `method_descriptor`).
+        // `bool` and any other int subclass inherit from `int` and expose
+        // the same descriptors with class_name "int" (CPython: `bool.real`
+        // says "of 'int' objects").  Use class_chain_contains_name so that
+        // user-defined subclasses (`class MyInt(int): pass`) also get the
+        // descriptors, matching CPython MRO-based lookup.
+        //
+        // Check int chain before float chain: int (and bool) takes priority.
+        // The attr_name literals must be `'static` — use explicit match arms
+        // rather than passing `name` directly.
+        {
+            let descriptor = if class_chain_contains_name(&class, "int") {
+                match name {
+                    "real" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                            "real", "int",
+                        ),
+                    ),
+                    "imag" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                            "imag", "int",
+                        ),
+                    ),
+                    "numerator" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                            "numerator", "int",
+                        ),
+                    ),
+                    "denominator" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                            "denominator", "int",
+                        ),
+                    ),
+                    "conjugate" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
+                            "conjugate", "int",
+                        ),
+                    ),
+                    _ => None,
+                }
+            } else if class_chain_contains_name(&class, "float") {
+                match name {
+                    "real" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                            "real", "float",
+                        ),
+                    ),
+                    "imag" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                            "imag", "float",
+                        ),
+                    ),
+                    "conjugate" => Some(
+                        pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
+                            "conjugate", "float",
+                        ),
+                    ),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(d) = descriptor {
+                return Ok(d);
+            }
+        }
+        if let Some(value) = lookup_class_attr(&class, name) {
+            // Descriptor protocol for class-level access: if the class
+            // attribute is a user-defined descriptor (PyInstance with
+            // __get__), call __get__(None, cls) — CPython Data Model
+            // §3.3.2.  property is handled by its own match arm (above
+            // this ValueKind::PyClass arm) and returns itself on class
+            // access, so we only check PyInstance here.
+            if let ValueKind::PyInstance(desc_inst) = value.kind() {
+                let desc_class = Rc::clone(&desc_inst.borrow().class);
+                if lookup_class_attr(&desc_class, "__get__").is_some() {
+                    return call_descriptor_get(
+                        self,
+                        &value,
+                        Value::none(),
+                        Value::py_class(Rc::clone(&class)),
+                        name,
+                    );
+                }
+            }
+            // Drop the kind() Ref before the `_ => value` arm
+            // may move `value` (#450).
+            enum ClassDescTag {
+                UserFunction(Rc<UserFunction>),
+                ClassMethodAny(Value),
+                StaticMethodAny(Value),
+                Other,
+            }
+            let tag = match value.kind() {
+                ValueKind::UserFunction(f) => ClassDescTag::UserFunction(Rc::clone(f)),
+                _ => {
+                    if let Some(w) =
+                        pyrust_builtins::classmethod::as_class_method_any(&value)
+                    {
+                        ClassDescTag::ClassMethodAny(w)
+                    } else if let Some(w) =
+                        pyrust_builtins::classmethod::as_static_method_any(&value)
+                    {
+                        ClassDescTag::StaticMethodAny(w)
+                    } else {
+                        ClassDescTag::Other
+                    }
+                }
+            };
+            return Ok(match tag {
+                ClassDescTag::UserFunction(f) => match f.kind {
+                    UserFunctionKind::ClassMethod => {
+                        Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
+                    }
+                    UserFunctionKind::StaticMethod => {
+                        // CPython __get__ returns the underlying function directly.
+                        // Prefer `wrapped_func` to preserve object identity
+                        // (`sm.__get__(None, C) is fn` when `sm = staticmethod(fn)`).
+                        if let Some(inner) = f.wrapped_func.as_ref() {
+                            Value::user_function(Rc::clone(inner))
+                        } else {
+                            Value::with_function_kind(
+                                Rc::clone(&f),
+                                UserFunctionKind::Regular,
+                            )
+                        }
+                    }
+                    UserFunctionKind::Regular => value,
+                    UserFunctionKind::Builtin(_) => value,
+                },
+                // classmethod(non_fn): CPython returns a method object bound to
+                // the class; pyrust returns the wrapped value (no new Value
+                // variant for non-UserFunction class-bound values).
+                ClassDescTag::ClassMethodAny(w) => w,
+                // staticmethod(non_fn): returns the wrapped value directly,
+                // matching CPython (`C.s` where `s = staticmethod(42)` → 42).
+                ClassDescTag::StaticMethodAny(w) => w,
+                // Issue #1080: builtin classmethods (e.g. `object.__init_subclass__`)
+                // must be bound to `cls` when accessed on a class, just like
+                // user-defined classmethods are bound via ClassBoundMethod.
+                // CPython's classmethod_descriptor.__get__ returns a bound
+                // builtin_function_or_method with __self__ = cls.
+                ClassDescTag::Other => {
+                    let builtin_cm_name = match value.kind() {
+                        ValueKind::BuiltinFunction(fn_name)
+                            if is_builtin_classmethod(fn_name) =>
+                        {
+                            Some(fn_name.to_string())
+                        }
+                        _ => None,
+                    };
+                    match builtin_cm_name {
+                        Some(fn_name) => {
+                            pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                                fn_name,
+                                Value::py_class(Rc::clone(&class)),
+                            )
+                        }
+                        None => value,
+                    }
+                }
+            });
+        }
+        // Issue #1275: __module__ and __doc__ on built-in type objects.
+        // Primitive classes (int, str, …) are immutable and cannot store
+        // attrs like user-defined classes do.  Exception classes and the
+        // object singleton share the same gap.  CPython exposes both
+        // attributes on every type object; provide the fallback here so
+        // that builtin and exception classes behave like their CPython
+        // counterparts.
+        //
+        // User-defined classes always have __module__ and __doc__ in their
+        // own attrs dict (set by the VM's MakeClass instruction), so they
+        // are handled by the lookup_class_attr path above and never reach
+        // this fallback.
+        let is_builtin_class = crate::interpreter::is_primitive_class(&class)
+            || is_exception_class(&class)
+            || Rc::ptr_eq(&class, &object_class_singleton())
+            || Rc::ptr_eq(&class, &crate::interpreter::method_type_singleton())
+            || Rc::ptr_eq(&class, &crate::interpreter::function_type_singleton());
+        if name == "__module__" && is_builtin_class {
+            return Ok(Value::string("builtins".to_string()));
+        }
+        if name == "__doc__" && is_builtin_class {
+            let class_name = class.borrow().name.clone();
+            return Ok(match builtin_class_doc(&class_name) {
+                Some(doc) => Value::string(doc.to_string()),
+                None => Value::none(),
+            });
+        }
+        let class_name = class.borrow().name.clone();
+        Err(PyError::attribute_error(
+            format!("type object '{}' has no attribute '{}'", class_name, name),
+            Some(name.to_string()),
+            Some(Value::py_class(Rc::clone(&class))),
+        ))
     }
 
     /// Standard attribute lookup for a `PyInstance` — the body of
@@ -1158,27 +1123,9 @@ impl Interpreter {
         // descriptors on the primitive class (issue #1341).
         if matches!(name, "real" | "imag" | "numerator" | "denominator") {
             if let Some(backing) = instance_builtin_data(&instance) {
-                let result = match backing.kind() {
-                    ValueKind::Bool(b) => match name {
-                        "real" | "numerator" => Some(Value::int(b as i64)),
-                        "imag" => Some(Value::int(0)),
-                        "denominator" => Some(Value::int(1)),
-                        _ => None,
-                    },
-                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
-                        "real" | "numerator" => Some(backing.clone()),
-                        "imag" => Some(Value::int(0)),
-                        "denominator" => Some(Value::int(1)),
-                        _ => None,
-                    },
-                    ValueKind::Float(_) => match name {
-                        "real" => Some(backing.clone()),
-                        "imag" => Some(Value::float(0.0)),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                if let Some(v) = result {
+                if let Some(v) =
+                    pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&backing, name)
+                {
                     return Ok(v);
                 }
             }
