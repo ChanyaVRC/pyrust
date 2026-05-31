@@ -13,7 +13,8 @@ use crate::bytecode::{
     Insn, Reg,
 };
 use crate::error::PyError;
-use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
+use crate::interpreter::dispatch_numeric_binop;
+use crate::value::{PyBigInt, Value, ValueKind};
 
 /// Compile a top-level script body.  All script-level names are locals.
 ///
@@ -2477,94 +2478,61 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
 }
 
 pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
-    match (l.kind(), op, r.kind()) {
-        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => Some(match a.checked_add(b) {
-            Some(r) => Value::int(r),
-            None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
-        }),
-        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => Some(match a.checked_sub(b) {
-            Some(r) => Value::int(r),
-            None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
-        }),
-        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => Some(match a.checked_mul(b) {
-            Some(r) => Value::int(r),
-            None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
-        }),
-        (ValueKind::Int(a), BinaryOp::Div, ValueKind::Int(b)) if b != 0 => {
-            Some(Value::float(a as f64 / b as f64))
-        }
-        (ValueKind::Int(a), BinaryOp::FloorDiv, ValueKind::Int(b)) if b != 0 => {
-            let q = a.wrapping_div(b);
-            let r = a.wrapping_rem(b);
-            Some(Value::int(if (r != 0) && ((r < 0) != (b < 0)) {
-                q - 1
-            } else {
-                q
-            }))
-        }
-        (ValueKind::Int(a), BinaryOp::Mod, ValueKind::Int(b)) if b != 0 => {
-            let r = a.wrapping_rem(b);
-            Some(Value::int(if (r != 0) && ((r < 0) != (b < 0)) {
-                r + b
-            } else {
-                r
-            }))
-        }
-        (ValueKind::Int(a), BinaryOp::Pow, ValueKind::Int(b)) if b >= 0 => {
-            // Limit folded exponents to u32::MAX; larger ones (extremely rare
-            // at compile time) fall through and are computed at runtime.
-            let exp = u32::try_from(b).ok()?;
-            Some(match a.checked_pow(exp) {
-                Some(r) => Value::int(r),
-                None => Value::bigint(PyPow::pow(PyBigInt::from(a), exp)),
-            })
-        }
-        (ValueKind::Int(a), BinaryOp::BitAnd, ValueKind::Int(b)) => Some(Value::int(a & b)),
-        (ValueKind::Int(a), BinaryOp::BitOr, ValueKind::Int(b)) => Some(Value::int(a | b)),
-        (ValueKind::Int(a), BinaryOp::BitXor, ValueKind::Int(b)) => Some(Value::int(a ^ b)),
-        (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if b >= 0 => {
-            // Promote to BigInt when the shift overflows i64 — identical to
-            // the runtime path in eval_binary.
-            // Cap at 1_000_000 bits: astronomically large shifts (e.g.
-            // `1 << i64::MAX`) would exhaust memory during compilation.
-            // Values above the cap are left for the runtime to handle
-            // (which will raise OverflowError for non-zero LHS).
-            if b > 1_000_000 {
+    use BinaryOp::*;
+    // Int/int arithmetic, shifts, and bitwise route through the single
+    // canonical numeric implementation shared with `eval_binary` (issue
+    // #458): one definition of overflow promotion, CPython floored `//` /
+    // `%`, and shift/bitwise semantics.  A runtime error (e.g.
+    // ZeroDivisionError on `x / 0`) returns `None` so the BinOp stays in
+    // the bytecode and raises at runtime, never at compile time.
+    if matches!((l.kind(), r.kind()), (ValueKind::Int(_), ValueKind::Int(_))) {
+        match op {
+            Add | Sub | Mul | Div | FloorDiv | Mod | BitAnd | BitOr | BitXor => {
+                return dispatch_numeric_binop(op, l, r)?.ok();
+            }
+            // `**` and shifts can produce arbitrarily large constants
+            // (`2 ** 1_000_000`, `1 << i64::MAX`).  Cap the magnitude here
+            // so a hostile literal can't bloat the constant pool during
+            // compilation; oversized cases fall through to the runtime
+            // (which shares the same slot).
+            Pow => {
+                if let ValueKind::Int(b) = r.kind() {
+                    if (0..=u32::MAX as i64).contains(&b) {
+                        return dispatch_numeric_binop(op, l, r)?.ok();
+                    }
+                }
                 return None;
             }
-            let n = b as usize;
-            let big = PyBigInt::from(a) << n;
-            Some(match big.to_i64() {
-                Some(r) => Value::int(r),
-                None => Value::bigint(big),
-            })
-        }
-        (ValueKind::Int(a), BinaryOp::RShift, ValueKind::Int(b)) if b >= 0 => {
-            // Right-shift by ≥ 64 saturates to the sign bit (0 or -1).
-            if b >= 64 {
-                Some(Value::int(if a < 0 { -1 } else { 0 }))
-            } else {
-                Some(Value::int(a >> b))
+            LShift | RShift => {
+                if let ValueKind::Int(b) = r.kind() {
+                    if (0..=1_000_000).contains(&b) {
+                        return dispatch_numeric_binop(op, l, r)?.ok();
+                    }
+                }
+                return None;
             }
+            _ => {}
         }
-        (ValueKind::Float(a), BinaryOp::Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
-        (ValueKind::Float(a), BinaryOp::Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
-        (ValueKind::Float(a), BinaryOp::Mul, ValueKind::Float(b)) => Some(Value::float(a * b)),
-        (ValueKind::Float(a), BinaryOp::Div, ValueKind::Float(b)) if b != 0.0 => {
-            Some(Value::float(a / b))
-        }
-        (ValueKind::Str(a), BinaryOp::Add, ValueKind::Str(b)) => {
-            Some(Value::string(a.to_string() + b))
-        }
-        (ValueKind::Int(a), BinaryOp::Eq, ValueKind::Int(b)) => Some(Value::bool_(a == b)),
-        (ValueKind::Int(a), BinaryOp::Ne, ValueKind::Int(b)) => Some(Value::bool_(a != b)),
-        (ValueKind::Int(a), BinaryOp::Lt, ValueKind::Int(b)) => Some(Value::bool_(a < b)),
-        (ValueKind::Int(a), BinaryOp::Le, ValueKind::Int(b)) => Some(Value::bool_(a <= b)),
-        (ValueKind::Int(a), BinaryOp::Gt, ValueKind::Int(b)) => Some(Value::bool_(a > b)),
-        (ValueKind::Int(a), BinaryOp::Ge, ValueKind::Int(b)) => Some(Value::bool_(a >= b)),
-        (ValueKind::Str(a), BinaryOp::Eq, ValueKind::Str(b)) => Some(Value::bool_(a == b)),
-        (ValueKind::Str(a), BinaryOp::Ne, ValueKind::Str(b)) => Some(Value::bool_(a != b)),
-        (ValueKind::Bool(a), BinaryOp::Eq, ValueKind::Bool(b)) => Some(Value::bool_(a == b)),
+    }
+    // Non-int-arithmetic folds the optimizer has always done: float
+    // arithmetic, string concatenation, and constant comparisons.  These
+    // are not numeric-slot arithmetic (comparisons) or involve non-int
+    // operands, so they stay as explicit arms.
+    match (l.kind(), op, r.kind()) {
+        (ValueKind::Float(a), Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
+        (ValueKind::Float(a), Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
+        (ValueKind::Float(a), Mul, ValueKind::Float(b)) => Some(Value::float(a * b)),
+        (ValueKind::Float(a), Div, ValueKind::Float(b)) if b != 0.0 => Some(Value::float(a / b)),
+        (ValueKind::Str(a), Add, ValueKind::Str(b)) => Some(Value::string(a.to_string() + b)),
+        (ValueKind::Int(a), Eq, ValueKind::Int(b)) => Some(Value::bool_(a == b)),
+        (ValueKind::Int(a), Ne, ValueKind::Int(b)) => Some(Value::bool_(a != b)),
+        (ValueKind::Int(a), Lt, ValueKind::Int(b)) => Some(Value::bool_(a < b)),
+        (ValueKind::Int(a), Le, ValueKind::Int(b)) => Some(Value::bool_(a <= b)),
+        (ValueKind::Int(a), Gt, ValueKind::Int(b)) => Some(Value::bool_(a > b)),
+        (ValueKind::Int(a), Ge, ValueKind::Int(b)) => Some(Value::bool_(a >= b)),
+        (ValueKind::Str(a), Eq, ValueKind::Str(b)) => Some(Value::bool_(a == b)),
+        (ValueKind::Str(a), Ne, ValueKind::Str(b)) => Some(Value::bool_(a != b)),
+        (ValueKind::Bool(a), Eq, ValueKind::Bool(b)) => Some(Value::bool_(a == b)),
         _ => None,
     }
 }
