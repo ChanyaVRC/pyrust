@@ -289,10 +289,12 @@ fn seq_repeat_tuple(items: &[Value], n: i64) -> Result<Value> {
 ///
 /// The goal is a single canonical site per `(op)` covering all numeric
 /// type pairs, so that adding a numeric type means extending this slot
-/// table once rather than touching every `match (lhs, rhs)` arm.  The
-/// pure-`Int`/`Int` and `Float`/`Float` VM hot paths
-/// (`vm.rs::int_int_fast`, `float_float_fast`) are intentionally left
-/// untouched — they short-circuit before any slot lookup.
+/// table once rather than touching every `match (lhs, rhs)` arm.  All
+/// binary numeric operators route here — arithmetic (`+ - * / // % **`),
+/// shifts (`<< >>`), and bitwise (`& | ^`).  The pure-`Int`/`Int` and
+/// `Float`/`Float` VM hot paths (`vm.rs::int_int_fast`,
+/// `float_float_fast`) are intentionally left untouched — they
+/// short-circuit before any slot lookup.
 ///
 /// Dispatch is a flat `match value.kind()` (see `numeric_slot`), never a
 /// `Box<dyn NumericOps>`, so there is no heap allocation or virtual call
@@ -301,6 +303,15 @@ trait NumericOps {
     fn nb_add(&self, rhs: &Value) -> Option<Result<Value>>;
     fn nb_sub(&self, rhs: &Value) -> Option<Result<Value>>;
     fn nb_mul(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_div(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_floordiv(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_mod(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_pow(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_lshift(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_rshift(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_and(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_or(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_xor(&self, rhs: &Value) -> Option<Result<Value>>;
 }
 
 /// One numeric operand, classified by kind so a single canonical slot
@@ -403,6 +414,304 @@ impl NumericOps for NumericSlot {
             }
         })
     }
+
+    fn nb_div(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        // CPython true division always yields a float.  The
+        // ZeroDivisionError wording differs by operand types: `int / int`
+        // says "division by zero"; anything involving a float says
+        // "float division by zero".
+        let both_int = matches!(self, NumericSlot::Int(_) | NumericSlot::BigInt(_))
+            && matches!(r, NumericSlot::Int(_) | NumericSlot::BigInt(_));
+        Some((|| {
+            let a = slot_to_float(self)?;
+            let b = slot_to_float(&r)?;
+            if b == 0.0 {
+                return Err(PyError::named(
+                    "ZeroDivisionError",
+                    if both_int {
+                        "division by zero".to_string()
+                    } else {
+                        "float division by zero".to_string()
+                    },
+                ));
+            }
+            Ok(Value::float(a / b))
+        })())
+    }
+
+    fn nb_floordiv(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        Some(match (self, &r) {
+            (NumericSlot::Int(a), NumericSlot::Int(b)) => {
+                if *b == 0 {
+                    Err(zero_div("integer division or modulo by zero"))
+                } else {
+                    let modulo = py_mod_i64(*a, *b);
+                    // `a - modulo` / `a_adj / b` can overflow near i64::MIN;
+                    // promote to BigInt for exact floor division (#485).
+                    if let Some(q) = a.checked_sub(modulo).and_then(|a_adj| a_adj.checked_div(*b)) {
+                        Ok(Value::int(q))
+                    } else {
+                        let (q, _) = bigint_divmod_floor(&PyBigInt::from(*a), &PyBigInt::from(*b));
+                        Ok(Value::bigint(q))
+                    }
+                }
+            }
+            // Any BigInt operand (with int/bigint partner): exact floor div.
+            (NumericSlot::BigInt(_), NumericSlot::Int(_) | NumericSlot::BigInt(_))
+            | (NumericSlot::Int(_), NumericSlot::BigInt(_)) => {
+                let a = slot_to_bigint(self);
+                let b = slot_to_bigint(&r);
+                if b.is_zero() {
+                    Err(zero_div("integer division or modulo by zero"))
+                } else {
+                    let (q, _) = bigint_divmod_floor(&a, &b);
+                    Ok(Value::bigint(q))
+                }
+            }
+            // At least one Float operand: float floor division.
+            _ => (|| {
+                let a = slot_to_float(self)?;
+                let b = slot_to_float(&r)?;
+                if b == 0.0 {
+                    return Err(zero_div("float floor division by zero"));
+                }
+                Ok(Value::float((a / b).floor()))
+            })(),
+        })
+    }
+
+    fn nb_mod(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        Some(match (self, &r) {
+            (NumericSlot::Int(a), NumericSlot::Int(b)) => {
+                if *b == 0 {
+                    Err(zero_div("integer modulo by zero"))
+                } else {
+                    Ok(Value::int(py_mod_i64(*a, *b)))
+                }
+            }
+            (NumericSlot::BigInt(_), NumericSlot::Int(_) | NumericSlot::BigInt(_))
+            | (NumericSlot::Int(_), NumericSlot::BigInt(_)) => {
+                let a = slot_to_bigint(self);
+                let b = slot_to_bigint(&r);
+                if b.is_zero() {
+                    Err(zero_div("integer modulo by zero"))
+                } else {
+                    let (_, rem) = bigint_divmod_floor(&a, &b);
+                    Ok(Value::bigint(rem))
+                }
+            }
+            _ => (|| {
+                let a = slot_to_float(self)?;
+                let b = slot_to_float(&r)?;
+                if b == 0.0 {
+                    return Err(zero_div("float modulo"));
+                }
+                let mut rem = a % b;
+                if rem == 0.0 {
+                    // CPython float_rem: zero result copies sign of divisor.
+                    rem = rem.copysign(b);
+                } else if rem.signum() != b.signum() {
+                    rem += b;
+                }
+                Ok(Value::float(rem))
+            })(),
+        })
+    }
+
+    fn nb_pow(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        Some(match (self, &r) {
+            // Integer ** non-negative integer stays in the int domain
+            // (BigInt promotion on overflow, #421).
+            (NumericSlot::Int(a), NumericSlot::Int(b)) if *b >= 0 => Ok(int_pow_promoting(*a, *b)),
+            (NumericSlot::BigInt(a), NumericSlot::Int(b)) if *b >= 0 => {
+                Ok(Value::bigint(PyPow::pow(a.clone(), *b as u64)))
+            }
+            (NumericSlot::Int(a), NumericSlot::BigInt(b)) if *b >= PyBigInt::from(0) => {
+                // BigInt exponent: astronomically large for |a| > 1.
+                match b.to_u64_digits().1.as_slice() {
+                    [exp] => Ok(Value::bigint(PyPow::pow(PyBigInt::from(*a), *exp))),
+                    [] => Ok(Value::int(1)), // a ** 0
+                    _ => Err(PyError::named(
+                        "OverflowError",
+                        "exponent too large for ** to compute".to_string(),
+                    )),
+                }
+            }
+            (NumericSlot::BigInt(a), NumericSlot::BigInt(b)) if *b >= PyBigInt::from(0) => {
+                match b.to_u64_digits().1.as_slice() {
+                    [exp] => Ok(Value::bigint(PyPow::pow(a.clone(), *exp))),
+                    [] => Ok(Value::int(1)),
+                    _ => Err(PyError::named(
+                        "OverflowError",
+                        "exponent too large for ** to compute".to_string(),
+                    )),
+                }
+            }
+            // Float base/exponent, or integer with a negative exponent:
+            // float exponentiation (with CPython's negative-real → complex
+            // promotion and the 0.0 ** negative ZeroDivisionError).
+            _ => (|| {
+                let a = slot_to_float(self)?;
+                let b = slot_to_float(&r)?;
+                if a == 0.0 && b < 0.0 && b.is_finite() {
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "0.0 cannot be raised to a negative power".to_string(),
+                    ));
+                }
+                let result = a.powf(b);
+                if a < 0.0 && result.is_nan() {
+                    let abs_val = a.abs().powf(b);
+                    let angle = std::f64::consts::PI * b;
+                    Ok(Value::complex(abs_val * angle.cos(), abs_val * angle.sin()))
+                } else {
+                    Ok(Value::float(result))
+                }
+            })(),
+        })
+    }
+
+    fn nb_lshift(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        // Shift operands must both be integers; a Float operand is not a
+        // valid shift operand, so return None to fall through to the
+        // operand-type TypeError raised by the caller.
+        if matches!(self, NumericSlot::Float(_)) || matches!(r, NumericSlot::Float(_)) {
+            return None;
+        }
+        Some(slot_lshift(self, rhs))
+    }
+
+    fn nb_rshift(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        if matches!(self, NumericSlot::Float(_)) || matches!(r, NumericSlot::Float(_)) {
+            return None;
+        }
+        Some(slot_rshift(self, rhs))
+    }
+
+    fn nb_and(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        if matches!(self, NumericSlot::Float(_)) || matches!(r, NumericSlot::Float(_)) {
+            return None;
+        }
+        Some(Ok(collapse_bigint(Value::bigint(
+            slot_to_bigint(self) & slot_to_bigint(&r),
+        ))))
+    }
+
+    fn nb_or(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        if matches!(self, NumericSlot::Float(_)) || matches!(r, NumericSlot::Float(_)) {
+            return None;
+        }
+        Some(Ok(collapse_bigint(Value::bigint(
+            slot_to_bigint(self) | slot_to_bigint(&r),
+        ))))
+    }
+
+    fn nb_xor(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        if matches!(self, NumericSlot::Float(_)) || matches!(r, NumericSlot::Float(_)) {
+            return None;
+        }
+        Some(Ok(collapse_bigint(Value::bigint(
+            slot_to_bigint(self) ^ slot_to_bigint(&r),
+        ))))
+    }
+}
+
+/// Coerce a classified numeric slot to f64, raising `OverflowError` for
+/// a `BigInt` too large to represent (CPython parity).
+fn slot_to_float(s: &NumericSlot) -> Result<f64> {
+    match s {
+        NumericSlot::Int(n) => Ok(*n as f64),
+        NumericSlot::Float(f) => Ok(*f),
+        NumericSlot::BigInt(b) => bigint_to_float_or_overflow(b),
+    }
+}
+
+/// Coerce a classified `Int` / `BigInt` slot to `PyBigInt`.  Caller must
+/// guarantee the slot is not `Float` (shift / bitwise paths gate on that).
+fn slot_to_bigint(s: &NumericSlot) -> PyBigInt {
+    match s {
+        NumericSlot::Int(n) => PyBigInt::from(*n),
+        NumericSlot::BigInt(b) => b.clone(),
+        NumericSlot::Float(_) => unreachable!("slot_to_bigint on Float"),
+    }
+}
+
+/// Collapse a `BigInt` result back to a small `Int` when it fits, so that
+/// `7 & 3` yields `int` rather than a BigInt-tagged value (CPython has no
+/// such distinction, but pyrust's fast paths key off the `Int` tag).
+fn collapse_bigint(v: Value) -> Value {
+    if let ValueKind::BigInt(b) = v.kind() {
+        if let Some(n) = b.to_i64() {
+            return Value::int(n);
+        }
+    }
+    v
+}
+
+/// `ZeroDivisionError` with the given message.
+fn zero_div(msg: &str) -> PyError {
+    PyError::named("ZeroDivisionError", msg.to_string())
+}
+
+/// Canonical `<<` for two integer slots (Int / BigInt), promoting to
+/// BigInt and collapsing back to Int when the result fits.  Mirrors the
+/// CPython overflow / saturation behaviour from `eval_binary`.
+fn slot_lshift(lhs: &NumericSlot, rhs: &Value) -> Result<Value> {
+    let a = slot_to_bigint(lhs);
+    match shift_count(rhs)? {
+        ShiftCount::Fits(n) => {
+            if n > MAX_SHIFT && !a.is_zero() {
+                return Err(PyError::named(
+                    "OverflowError",
+                    "too many digits in integer".to_string(),
+                ));
+            }
+            Ok(collapse_bigint(Value::bigint(a << n)))
+        }
+        ShiftCount::Saturated => {
+            if a.is_zero() {
+                Ok(Value::int(0))
+            } else {
+                Err(PyError::named(
+                    "OverflowError",
+                    "too many digits in integer".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Canonical `>>` for two integer slots.  Right shift never overflows;
+/// a count larger than the value's bit length collapses to the sign.
+fn slot_rshift(lhs: &NumericSlot, rhs: &Value) -> Result<Value> {
+    let a = slot_to_bigint(lhs);
+    match shift_count(rhs)? {
+        ShiftCount::Fits(n) => Ok(collapse_bigint(Value::bigint(a >> n))),
+        ShiftCount::Saturated => Ok(Value::int(if a < PyBigInt::from(0) { -1 } else { 0 })),
+    }
+}
+
+/// Build the CPython operand-type `TypeError` for a binary numeric op when
+/// at least one operand is non-numeric:
+/// `unsupported operand type(s) for OP: 'lt' and 'rt'`.  `op_sym` is the
+/// operator token CPython uses in the message (e.g. `/`, `//`, `%`,
+/// `** or pow()`).
+fn unsupported_operand(op_sym: &str, left: &Value, right: &Value) -> PyError {
+    let lt = value_type_name_str(left);
+    let rt = value_type_name_str(right);
+    PyError::named(
+        "TypeError",
+        format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
+    )
 }
 
 /// Dispatch a numeric binary op through the LHS's slot table.  Returns
@@ -415,12 +724,25 @@ impl NumericOps for NumericSlot {
 /// type pair, so this is the single canonical site for `Add` / `Sub` /
 /// `Mul` numeric arithmetic.  Adding a numeric type means extending
 /// `NumericSlot` / `numeric_slot` and the slot `match` arms in one place.
-fn dispatch_numeric_binop(op: BinaryOp, lhs: &Value, rhs: &Value) -> Option<Result<Value>> {
+pub(crate) fn dispatch_numeric_binop(
+    op: BinaryOp,
+    lhs: &Value,
+    rhs: &Value,
+) -> Option<Result<Value>> {
     let l = numeric_slot(lhs)?;
     match op {
         BinaryOp::Add => l.nb_add(rhs),
         BinaryOp::Sub => l.nb_sub(rhs),
         BinaryOp::Mul => l.nb_mul(rhs),
+        BinaryOp::Div => l.nb_div(rhs),
+        BinaryOp::FloorDiv => l.nb_floordiv(rhs),
+        BinaryOp::Mod => l.nb_mod(rhs),
+        BinaryOp::Pow => l.nb_pow(rhs),
+        BinaryOp::LShift => l.nb_lshift(rhs),
+        BinaryOp::RShift => l.nb_rshift(rhs),
+        BinaryOp::BitAnd => l.nb_and(rhs),
+        BinaryOp::BitOr => l.nb_or(rhs),
+        BinaryOp::BitXor => l.nb_xor(rhs),
         _ => None,
     }
 }
@@ -2594,85 +2916,23 @@ impl Interpreter {
                 // `MyInt(42) ** 2` works identically to `42 ** 2`.
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
-                // Integer ** non-negative integer stays in the int domain
-                // (BigInt promotion when the result overflows i64).  Once
-                // overflow promotes (#421), `(2**64) ** 2` arrives here as
-                // `BigInt ** Int`; the dedicated arms below handle those
-                // cross-type cases.  Negative exponent on an int LHS
-                // returns Float (CPython parity).  See PR #484 Copilot
-                // review.
-                match (left.kind(), right.kind()) {
-                    (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
-                        Ok(int_pow_promoting(a, b))
-                    }
-                    (ValueKind::BigInt(a), ValueKind::Int(b)) if b >= 0 => {
-                        Ok(Value::bigint(PyPow::pow(a.clone(), b as u64)))
-                    }
-                    (ValueKind::Int(a), ValueKind::BigInt(b)) if *b >= PyBigInt::from(0) => {
-                        // BigInt exponent: astronomically large for |a| > 1.
-                        // Promote a to BigInt and delegate to BigInt::pow
-                        // if the exponent fits in u64; otherwise raise
-                        // OverflowError (CPython parity at the
-                        // "exponentiation cannot produce a result that
-                        // fits in memory" boundary).
-                        match b.to_u64_digits().1.as_slice() {
-                            [exp] => Ok(Value::bigint(PyPow::pow(PyBigInt::from(a), *exp))),
-                            [] => Ok(Value::int(1)), // a ** 0
-                            _ => Err(PyError::named(
-                                "OverflowError",
-                                "exponent too large for ** to compute".to_string(),
-                            )),
-                        }
-                    }
-                    (ValueKind::BigInt(a), ValueKind::BigInt(b)) if *b >= PyBigInt::from(0) => {
-                        match b.to_u64_digits().1.as_slice() {
-                            [exp] => Ok(Value::bigint(PyPow::pow(a.clone(), *exp))),
-                            [] => Ok(Value::int(1)),
-                            _ => Err(PyError::named(
-                                "OverflowError",
-                                "exponent too large for ** to compute".to_string(),
-                            )),
-                        }
-                    }
-                    _ => {
-                        // When either operand is complex, use complex
-                        // exponentiation: z^w = exp(w * ln(z)).
-                        // `both_as_complex` returns Ok(Some) only when at
-                        // least one operand is already a Complex value, so
-                        // pure int/float paths continue to use `powf` below.
-                        // The BigInt arm in `as_complex_pair` now handles
-                        // BigInt coercion (including OverflowError) uniformly.
-                        if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right)? {
-                            return Ok(complex_pow(zr, zi, wr, wi)?);
-                        }
-                        let a = value_to_float(&left, "**")?;
-                        let b = value_to_float(&right, "**")?;
-                        // CPython `float_pow` (Objects/floatobject.c) checks
-                        // `iv == 0.0 && iw < 0.0` before delegating to pow().
-                        // IEEE 754 equality treats +0.0 and -0.0 as equal, so
-                        // this guard covers both signs with the same message.
-                        // The exponent must be finite: 0.0 ** -inf = inf per
-                        // IEEE 754 (|0| < 1, so |0|^(-inf) = inf), which
-                        // CPython's C pow() returns correctly.
-                        if a == 0.0 && b < 0.0 && b.is_finite() {
-                            return Err(PyError::named(
-                                "ZeroDivisionError",
-                                "0.0 cannot be raised to a negative power".to_string(),
-                            ));
-                        }
-                        let result = a.powf(b);
-                        // CPython promotes negative_real ** non-integer_float to
-                        // complex when the real result would be NaN (principal
-                        // log branch: a^b = |a|^b * e^(i*π*b)).
-                        if a < 0.0 && result.is_nan() {
-                            let abs_val = a.abs().powf(b);
-                            let angle = std::f64::consts::PI * b;
-                            Ok(Value::complex(abs_val * angle.cos(), abs_val * angle.sin()))
-                        } else {
-                            Ok(Value::float(result))
-                        }
-                    }
+                // When either operand is complex, use complex
+                // exponentiation: z^w = exp(w * ln(z)).  `both_as_complex`
+                // returns Ok(Some) only when at least one operand is
+                // already a Complex value; pure int/float/bigint pairs
+                // route through the canonical NumericOps slot below.
+                if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right)? {
+                    return Ok(complex_pow(zr, zi, wr, wi)?);
                 }
+                // Canonical numeric `**` via the NumericOps slot table
+                // (#458): int**int (BigInt promotion on overflow, #421/#484),
+                // the BigInt-exponent OverflowError arms, and the float
+                // power path (negative-real → complex, 0.0 ** negative
+                // ZeroDivisionError).
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, &left, &right) {
+                    return result;
+                }
+                Err(unsupported_operand("** or pow()", &left, &right))
             }
             BinaryOp::BitAnd => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__and__", "__rand__") {
@@ -2686,25 +2946,17 @@ impl Interpreter {
                 let rt = value_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
-                // BigInt × int / int × BigInt / BigInt × BigInt all flow
-                // through the BigInt path; int × int stays on the fast
-                // path inside `bitwise_op`.  See issue #485.
-                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
-                    let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for &: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    let b = value_to_bigint(&right).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for &: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    return Ok(Value::bigint(a & b));
+                // Canonical numeric `&` via the NumericOps slot table (#458):
+                // int×int, BigInt cross-type arms (#485), and Bool coercion
+                // all in one site.  Float / non-numeric operands return None
+                // → operand-type TypeError below.
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::BitAnd, &left, &right) {
+                    return result;
                 }
-                self.bitwise_op(&left, &right, |a, b| Ok(a & b), "&", &lt, &rt)
+                Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for &: '{lt}' and '{rt}'"),
+                ))
             }
             BinaryOp::BitOr => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
@@ -2762,22 +3014,14 @@ impl Interpreter {
                 let rt = value_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
-                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
-                    let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    let b = value_to_bigint(&right).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    return Ok(Value::bigint(a | b));
+                // Canonical numeric `|` via the NumericOps slot table (#458).
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::BitOr, &left, &right) {
+                    return result;
                 }
-                self.bitwise_op(&left, &right, |a, b| Ok(a | b), "|", &lt, &rt)
+                Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
+                ))
             }
             BinaryOp::BitXor => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
@@ -2791,22 +3035,14 @@ impl Interpreter {
                 let rt = value_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
-                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
-                    let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    let b = value_to_bigint(&right).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    return Ok(Value::bigint(a ^ b));
+                // Canonical numeric `^` via the NumericOps slot table (#458).
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::BitXor, &left, &right) {
+                    return result;
                 }
-                self.bitwise_op(&left, &right, |a, b| Ok(a ^ b), "^", &lt, &rt)
+                Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"),
+                ))
             }
             BinaryOp::LShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lshift__", "__rlshift__") {
@@ -2817,91 +3053,18 @@ impl Interpreter {
                 let rt = value_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
-                // BigInt LHS: shift exactly, no `& 63` truncation.
-                // Int LHS with a BigInt RHS: the shift count is
-                // astronomically large.  See #485.
-                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
-                    let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    let sc = shift_count(&right).map_err(|e| match e {
-                        PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
-                        ),
-                        other => other,
-                    })?;
-                    return match sc {
-                        ShiftCount::Fits(n) => {
-                            if n > MAX_SHIFT && !a.is_zero() {
-                                return Err(PyError::named(
-                                    "OverflowError",
-                                    "too many digits in integer".to_string(),
-                                ));
-                            }
-                            Ok(Value::bigint(a << n))
-                        }
-                        // CPython: `0 << huge == 0` (no allocation
-                        // needed), otherwise OverflowError because the
-                        // result would not fit in memory.
-                        ShiftCount::Saturated => {
-                            if a.is_zero() {
-                                Ok(Value::bigint(a))
-                            } else {
-                                Err(PyError::named(
-                                    "OverflowError",
-                                    "too many digits in integer".to_string(),
-                                ))
-                            }
-                        }
-                    };
+                // Canonical numeric `<<` via the NumericOps slot table (#458):
+                // BigInt-exact shift, Int→BigInt promotion, the
+                // OverflowError / "0 << huge" saturation, and the
+                // ValueError("negative shift count").  A Float / non-int
+                // operand returns None → operand-type TypeError below.
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::LShift, &left, &right) {
+                    return result;
                 }
-                // Int LHS, Int (or Bool) RHS — must validate and may promote to BigInt.
-                let a = match left.kind() {
-                    ValueKind::Int(v) => v,
-                    ValueKind::Bool(b) => if b { 1 } else { 0 },
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
-                        ))
-                    }
-                };
-                match shift_count(&right).map_err(|e| match e {
-                    PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
-                        "TypeError",
-                        format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
-                    ),
-                    other => other,
-                })? {
-                    ShiftCount::Fits(n) => {
-                        if n > MAX_SHIFT && a != 0 {
-                            return Err(PyError::named(
-                                "OverflowError",
-                                "too many digits in integer".to_string(),
-                            ));
-                        }
-                        // Shift left, promoting to BigInt when bits are lost.
-                        let big = PyBigInt::from(a) << n;
-                        Ok(match big.to_i64() {
-                            Some(r) => Value::int(r),
-                            None => Value::bigint(big),
-                        })
-                    }
-                    ShiftCount::Saturated => {
-                        if a == 0 {
-                            Ok(Value::int(0))
-                        } else {
-                            Err(PyError::named(
-                                "OverflowError",
-                                "too many digits in integer".to_string(),
-                            ))
-                        }
-                    }
-                }
+                Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
+                ))
             }
             BinaryOp::RShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__rshift__", "__rrshift__") {
@@ -2912,61 +3075,16 @@ impl Interpreter {
                 let rt = value_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
-                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
-                    let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
-                        )
-                    })?;
-                    let sc = shift_count(&right).map_err(|e| match e {
-                        PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
-                        ),
-                        other => other,
-                    })?;
-                    return match sc {
-                        ShiftCount::Fits(n) => Ok(Value::bigint(a >> n)),
-                        // CPython: `>>` by a count larger than the
-                        // value's bit length collapses to the sign
-                        // (`0` for non-negative, `-1` for negative) —
-                        // never raises.
-                        ShiftCount::Saturated => Ok(Value::bigint(match a.sign() {
-                            PyBigIntSign::Minus => PyBigInt::from(-1i64),
-                            _ => PyBigInt::from(0i64),
-                        })),
-                    };
+                // Canonical numeric `>>` via the NumericOps slot table (#458):
+                // BigInt-exact shift, sign-collapse on huge counts, and the
+                // ValueError("negative shift count").
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::RShift, &left, &right) {
+                    return result;
                 }
-                // Int LHS, Int (or Bool) RHS.
-                let a = match left.kind() {
-                    ValueKind::Int(v) => v,
-                    ValueKind::Bool(b) => if b { 1 } else { 0 },
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
-                        ))
-                    }
-                };
-                match shift_count(&right).map_err(|e| match e {
-                    PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
-                        "TypeError",
-                        format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
-                    ),
-                    other => other,
-                })? {
-                    ShiftCount::Fits(n) => {
-                        // Arithmetic right shift: always fits in i64.
-                        if n >= 64 {
-                            Ok(Value::int(if a < 0 { -1 } else { 0 }))
-                        } else {
-                            Ok(Value::int(a >> n))
-                        }
-                    }
-                    // Saturate to sign bit — matches CPython, no error.
-                    ShiftCount::Saturated => Ok(Value::int(if a < 0 { -1 } else { 0 })),
-                }
+                Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
+                ))
             }
             BinaryOp::In => self.eval_in(right, left),
             BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy())),
@@ -3666,131 +3784,31 @@ impl Interpreter {
                 (a.1 * b.0 - a.0 * b.1) / denom,
             ));
         }
-        // CPython distinguishes wording by operand types: `int / int` says
-        // "division by zero"; anything involving a float says "float
-        // division by zero".  Decide *before* `to_pair_number` coerces
-        // both operands to f64.
-        let both_int = matches!(
-            (left.kind(), right.kind()),
-            (
-                ValueKind::Int(_) | ValueKind::Bool(_),
-                ValueKind::Int(_) | ValueKind::Bool(_),
-            ),
-        );
-        let (a, b) = self.to_pair_number(left, right)?;
-        if b == 0.0 {
-            return Err(PyError::named(
-                "ZeroDivisionError",
-                if both_int {
-                    "division by zero".to_string()
-                } else {
-                    "float division by zero".to_string()
-                },
-            ));
+        // Canonical numeric true division via the NumericOps slot table
+        // (#458).  Non-numeric operands return None → TypeError.
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Div, &left, &right) {
+            return result;
         }
-        Ok(Value::float(a / b))
+        Err(unsupported_operand("/", &left, &right))
     }
 
     fn floor_div(&self, left: Value, right: Value) -> Result<Value> {
-        // Extract the int/int fast-path values in a scoped block so the
-        // `kind()` Ref guards drop before we may need to move
-        // `left`/`right` into `to_pair_number` (#450).
-        let int_pair: Option<(i64, i64)> = match (left.kind(), right.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => Some((a, b)),
-            _ => None,
-        };
-        if let Some((a, b)) = int_pair {
-            if b == 0 {
-                return Err(PyError::named(
-                    "ZeroDivisionError",
-                    "integer division or modulo by zero".to_string(),
-                ));
-            }
-            let modulo = py_mod_i64(a, b);
-            // `a - modulo` can overflow i64 when `a` is near `i64::MIN` and
-            // `modulo > 0` (e.g. `(-2**63) // 3` → modulo=1, a-modulo wraps).
-            // `a_adj / b` can overflow when `a = i64::MIN` and `b = -1`
-            // (quotient = 2^63, which exceeds i64::MAX).
-            // Promote to BigInt for exact floor division in either case.
-            if let Some(q) = a.checked_sub(modulo).and_then(|a_adj| a_adj.checked_div(b)) {
-                return Ok(Value::int(q));
-            }
-            let (q, _) = bigint_divmod_floor(&PyBigInt::from(a), &PyBigInt::from(b));
-            return Ok(Value::bigint(q));
+        // Canonical numeric floor division via the NumericOps slot table
+        // (#458): one site handles int/int (with BigInt promotion on
+        // i64::MIN overflow, #485), BigInt cross-type arms, and float
+        // floor division, plus the ZeroDivisionError wording.
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::FloorDiv, &left, &right) {
+            return result;
         }
-        // BigInt cross-type arms (#485): once #421 promotes overflow to
-        // BigInt, `(2**64) // 2` arrives here with a BigInt operand.
-        // Bool coerces to int so `big // True` works.  Float operands
-        // fall through to the float path below.
-        if matches!(left.kind(), ValueKind::BigInt(_))
-            || matches!(right.kind(), ValueKind::BigInt(_))
-        {
-            if let (Some(a), Some(b)) = (value_to_bigint(&left), value_to_bigint(&right)) {
-                if b.is_zero() {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "integer division or modulo by zero".to_string(),
-                    ));
-                }
-                let (q, _) = bigint_divmod_floor(&a, &b);
-                return Ok(Value::bigint(q));
-            }
-        }
-        let (a, b) = self.to_pair_number(left, right)?;
-        if b == 0.0 {
-            return Err(PyError::named(
-                "ZeroDivisionError",
-                "float floor division by zero".to_string(),
-            ));
-        }
-        Ok(Value::float((a / b).floor()))
+        Err(unsupported_operand("//", &left, &right))
     }
 
     fn modulo(&self, left: Value, right: Value) -> Result<Value> {
-        // Same #450 scoping rationale as `floor_div`.
-        let int_pair: Option<(i64, i64)> = match (left.kind(), right.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => Some((a, b)),
-            _ => None,
-        };
-        if let Some((a, b)) = int_pair {
-            if b == 0 {
-                return Err(PyError::named(
-                    "ZeroDivisionError",
-                    "integer modulo by zero".to_string(),
-                ));
-            }
-            return Ok(Value::int(py_mod_i64(a, b)));
+        // Canonical numeric modulo via the NumericOps slot table (#458).
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mod, &left, &right) {
+            return result;
         }
-        // BigInt cross-type arms (#485) — see `floor_div` for rationale.
-        if matches!(left.kind(), ValueKind::BigInt(_))
-            || matches!(right.kind(), ValueKind::BigInt(_))
-        {
-            if let (Some(a), Some(b)) = (value_to_bigint(&left), value_to_bigint(&right)) {
-                if b.is_zero() {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "integer modulo by zero".to_string(),
-                    ));
-                }
-                let (_, r) = bigint_divmod_floor(&a, &b);
-                return Ok(Value::bigint(r));
-            }
-        }
-        let (a, b) = self.to_pair_number(left, right)?;
-        if b == 0.0 {
-            return Err(PyError::named(
-                "ZeroDivisionError",
-                "float modulo".to_string(),
-            ));
-        }
-        let mut r = a % b;
-        if r == 0.0 {
-            // Match CPython float_rem: zero result copies sign of divisor.
-            r = r.copysign(b);
-        } else if r.signum() != b.signum() {
-            r += b;
-        }
-        Ok(Value::float(r))
+        Err(unsupported_operand("%", &left, &right))
     }
 
     fn compare(
@@ -3810,19 +3828,6 @@ impl Interpreter {
             return Ok(Value::bool_(false));
         }
         Ok(Value::bool_(cmp(compare_values_with_op(&left, &right, op_name)?)))
-    }
-
-    fn to_pair_number(&self, left: Value, right: Value) -> Result<(f64, f64)> {
-        Ok((self.to_number(&left)?, self.to_number(&right)?))
-    }
-
-    fn to_number(&self, value: &Value) -> Result<f64> {
-        match value.kind() {
-            ValueKind::Int(v) => Ok(v as f64),
-            ValueKind::Float(v) => Ok(v),
-            ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-            _ => Err(PyError::named("TypeError", "expected number".to_string())),
-        }
     }
 
     /// Resolve one slice bound through the `__index__` protocol if needed.
@@ -3983,37 +3988,6 @@ impl Interpreter {
         }
     }
 
-    fn bitwise_op(
-        &self,
-        left: &Value,
-        right: &Value,
-        op: impl Fn(i64, i64) -> Result<i64>,
-        op_sym: &str,
-        left_type: &str,
-        right_type: &str,
-    ) -> Result<Value> {
-        let a = match left.kind() {
-            ValueKind::Int(v) => v,
-            ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for {op_sym}: '{left_type}' and '{right_type}'"),
-                ))
-            }
-        };
-        let b = match right.kind() {
-            ValueKind::Int(v) => v,
-            ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for {op_sym}: '{left_type}' and '{right_type}'"),
-                ))
-            }
-        };
-        Ok(Value::int(op(a, b)?))
-    }
     fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
         // Handle Dict/Set separately so the temporary `&IndexMap`/`&IndexSet`
         // from `container.kind()` doesn't outlive the call into
