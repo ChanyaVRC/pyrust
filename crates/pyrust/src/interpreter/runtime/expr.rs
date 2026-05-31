@@ -280,6 +280,151 @@ fn seq_repeat_tuple(items: &[Value], n: i64) -> Result<Value> {
     Ok(Value::tuple(out))
 }
 
+/// Numeric protocol slots, analogous to CPython's `PyNumberMethods`
+/// (issue #458).  Each numeric kind (`Int`, `Float`, `BigInt`, `Bool`)
+/// is handled by one canonical slot implementation; binary dispatch
+/// (`dispatch_numeric_binop`) routes through the LHS slot and treats a
+/// `None` return as CPython's `NotImplemented` — the caller then falls
+/// through to sequence / container handling and finally `TypeError`.
+///
+/// The goal is a single canonical site per `(op)` covering all numeric
+/// type pairs, so that adding a numeric type means extending this slot
+/// table once rather than touching every `match (lhs, rhs)` arm.  The
+/// pure-`Int`/`Int` and `Float`/`Float` VM hot paths
+/// (`vm.rs::int_int_fast`, `float_float_fast`) are intentionally left
+/// untouched — they short-circuit before any slot lookup.
+///
+/// Dispatch is a flat `match value.kind()` (see `numeric_slot`), never a
+/// `Box<dyn NumericOps>`, so there is no heap allocation or virtual call
+/// on the arithmetic path.
+trait NumericOps {
+    fn nb_add(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_sub(&self, rhs: &Value) -> Option<Result<Value>>;
+    fn nb_mul(&self, rhs: &Value) -> Option<Result<Value>>;
+}
+
+/// One numeric operand, classified by kind so a single canonical slot
+/// implementation can be selected without virtual dispatch.
+enum NumericSlot {
+    Int(i64),
+    Float(f64),
+    BigInt(PyBigInt),
+}
+
+/// Classify a value as a numeric operand, or `None` for non-numeric
+/// kinds (which dispatch through the sequence / container / dunder paths
+/// instead).  `Bool` coerces to `Int`, exactly as CPython treats `bool`
+/// as a subtype of `int` in arithmetic.
+fn numeric_slot(v: &Value) -> Option<NumericSlot> {
+    match v.kind() {
+        ValueKind::Int(n) => Some(NumericSlot::Int(n)),
+        ValueKind::Bool(b) => Some(NumericSlot::Int(b as i64)),
+        ValueKind::Float(f) => Some(NumericSlot::Float(f)),
+        ValueKind::BigInt(b) => Some(NumericSlot::BigInt(b.clone())),
+        _ => None,
+    }
+}
+
+impl NumericOps for NumericSlot {
+    fn nb_add(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        Some(match (self, &r) {
+            (NumericSlot::Int(a), NumericSlot::Int(b)) => Ok(match a.checked_add(*b) {
+                Some(s) => Value::int(s),
+                None => Value::bigint(PyBigInt::from(*a) + PyBigInt::from(*b)),
+            }),
+            (NumericSlot::Int(a), NumericSlot::Float(b)) => Ok(Value::float((*a as f64) + b)),
+            (NumericSlot::Float(a), NumericSlot::Int(b)) => Ok(Value::float(a + (*b as f64))),
+            (NumericSlot::Float(a), NumericSlot::Float(b)) => Ok(Value::float(a + b)),
+            (NumericSlot::BigInt(a), NumericSlot::BigInt(b)) => Ok(Value::bigint(a + b)),
+            (NumericSlot::BigInt(a), NumericSlot::Int(b)) => {
+                Ok(Value::bigint(a + PyBigInt::from(*b)))
+            }
+            (NumericSlot::Int(a), NumericSlot::BigInt(b)) => {
+                Ok(Value::bigint(PyBigInt::from(*a) + b))
+            }
+            (NumericSlot::BigInt(a), NumericSlot::Float(b)) => {
+                bigint_to_float_or_overflow(a).map(|a| Value::float(a + b))
+            }
+            (NumericSlot::Float(a), NumericSlot::BigInt(b)) => {
+                bigint_to_float_or_overflow(b).map(|b| Value::float(a + b))
+            }
+        })
+    }
+
+    fn nb_sub(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        Some(match (self, &r) {
+            (NumericSlot::Int(a), NumericSlot::Int(b)) => Ok(match a.checked_sub(*b) {
+                Some(s) => Value::int(s),
+                None => Value::bigint(PyBigInt::from(*a) - PyBigInt::from(*b)),
+            }),
+            (NumericSlot::Int(a), NumericSlot::Float(b)) => Ok(Value::float((*a as f64) - b)),
+            (NumericSlot::Float(a), NumericSlot::Int(b)) => Ok(Value::float(a - (*b as f64))),
+            (NumericSlot::Float(a), NumericSlot::Float(b)) => Ok(Value::float(a - b)),
+            (NumericSlot::BigInt(a), NumericSlot::BigInt(b)) => Ok(Value::bigint(a - b)),
+            (NumericSlot::BigInt(a), NumericSlot::Int(b)) => {
+                Ok(Value::bigint(a - PyBigInt::from(*b)))
+            }
+            (NumericSlot::Int(a), NumericSlot::BigInt(b)) => {
+                Ok(Value::bigint(PyBigInt::from(*a) - b))
+            }
+            (NumericSlot::BigInt(a), NumericSlot::Float(b)) => {
+                bigint_to_float_or_overflow(a).map(|a| Value::float(a - b))
+            }
+            (NumericSlot::Float(a), NumericSlot::BigInt(b)) => {
+                bigint_to_float_or_overflow(b).map(|b| Value::float(a - b))
+            }
+        })
+    }
+
+    fn nb_mul(&self, rhs: &Value) -> Option<Result<Value>> {
+        let r = numeric_slot(rhs)?;
+        Some(match (self, &r) {
+            (NumericSlot::Int(a), NumericSlot::Int(b)) => Ok(match a.checked_mul(*b) {
+                Some(s) => Value::int(s),
+                None => Value::bigint(PyBigInt::from(*a) * PyBigInt::from(*b)),
+            }),
+            (NumericSlot::Int(a), NumericSlot::Float(b)) => Ok(Value::float((*a as f64) * b)),
+            (NumericSlot::Float(a), NumericSlot::Int(b)) => Ok(Value::float(a * (*b as f64))),
+            (NumericSlot::Float(a), NumericSlot::Float(b)) => Ok(Value::float(a * b)),
+            (NumericSlot::BigInt(a), NumericSlot::BigInt(b)) => Ok(Value::bigint(a * b)),
+            (NumericSlot::BigInt(a), NumericSlot::Int(b)) => {
+                Ok(Value::bigint(a * PyBigInt::from(*b)))
+            }
+            (NumericSlot::Int(a), NumericSlot::BigInt(b)) => {
+                Ok(Value::bigint(PyBigInt::from(*a) * b))
+            }
+            (NumericSlot::BigInt(a), NumericSlot::Float(b)) => {
+                bigint_to_float_or_overflow(a).map(|a| Value::float(a * b))
+            }
+            (NumericSlot::Float(a), NumericSlot::BigInt(b)) => {
+                bigint_to_float_or_overflow(b).map(|b| Value::float(a * b))
+            }
+        })
+    }
+}
+
+/// Dispatch a numeric binary op through the LHS's slot table.  Returns
+/// `Some(result)` when both operands are numeric (the canonical numeric
+/// arithmetic applies), or `None` (CPython `NotImplemented`) when either
+/// operand is non-numeric — the caller then handles sequence repetition,
+/// container concatenation, and `TypeError`.
+///
+/// Both operands are classified once; the slot impl handles every numeric
+/// type pair, so this is the single canonical site for `Add` / `Sub` /
+/// `Mul` numeric arithmetic.  Adding a numeric type means extending
+/// `NumericSlot` / `numeric_slot` and the slot `match` arms in one place.
+fn dispatch_numeric_binop(op: BinaryOp, lhs: &Value, rhs: &Value) -> Option<Result<Value>> {
+    let l = numeric_slot(lhs)?;
+    match op {
+        BinaryOp::Add => l.nb_add(rhs),
+        BinaryOp::Sub => l.nb_sub(rhs),
+        BinaryOp::Mul => l.nb_mul(rhs),
+        _ => None,
+    }
+}
+
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
@@ -2888,23 +3033,14 @@ impl Interpreter {
             }
         }
         let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
+        // Canonical numeric arithmetic via the NumericOps slot table
+        // (issue #458): handles every numeric type pair in one site.
+        // Non-numeric operands return None and fall through to the
+        // container / concatenation arms below.
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Add, &l, &r) {
+            return result;
+        }
         match (l.kind(), r.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
-                    Some(r) => Value::int(r),
-                    None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
-                }),
-                (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) + b)),
-                (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a + (b as f64))),
-                (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a + b)),
-                (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(Value::bigint(a + b)),
-                (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a + PyBigInt::from(b))),
-                (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) + b)),
-                (ValueKind::BigInt(a), ValueKind::Float(b)) => {
-                    Ok(Value::float(bigint_to_float_or_overflow(&a)? + b))
-                }
-                (ValueKind::Float(a), ValueKind::BigInt(b)) => {
-                    Ok(Value::float(a + bigint_to_float_or_overflow(&b)?))
-                }
                 (ValueKind::Str(a), ValueKind::Str(b)) => Ok(Value::string(format!("{a}{b}"))),
                 (ValueKind::List(a), ValueKind::List(b)) => {
                     let mut out = a.to_vec();
@@ -2937,25 +3073,11 @@ impl Interpreter {
             return Ok(Value::complex(a.0 - b.0, a.1 - b.1));
         }
         let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
-        match (l.kind(), r.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
-                Some(r) => Value::int(r),
-                None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
-            }),
-            (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) - b)),
-            (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a - (b as f64))),
-            (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a - b)),
-            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(Value::bigint(a - b)),
-            (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a - PyBigInt::from(b))),
-            (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) - b)),
-            (ValueKind::BigInt(a), ValueKind::Float(b)) => {
-                Ok(Value::float(bigint_to_float_or_overflow(&a)? - b))
-            }
-            (ValueKind::Float(a), ValueKind::BigInt(b)) => {
-                Ok(Value::float(a - bigint_to_float_or_overflow(&b)?))
-            }
-            _ => Err(Self::unsupported_binary_operand("-")),
+        // Canonical numeric arithmetic via the NumericOps slot table (#458).
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Sub, &l, &r) {
+            return result;
         }
+        Err(Self::unsupported_binary_operand("-"))
     }
 
     /// Resolve a sequence repetition count through `__index__` when the value
@@ -3080,23 +3202,14 @@ impl Interpreter {
             return seq_repeat_bytearray(&data, n);
         }
         let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
+        // Canonical numeric arithmetic via the NumericOps slot table
+        // (#458).  Sequence repetition (Str/List/Tuple/Bytes × Int) and
+        // the TypeError diagnostics stay below: at least one operand is a
+        // sequence there, so `dispatch_numeric_binop` returns None.
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mul, &l, &r) {
+            return result;
+        }
         match (l.kind(), r.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
-                Some(r) => Value::int(r),
-                None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
-            }),
-            (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) * b)),
-            (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a * (b as f64))),
-            (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a * b)),
-            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(Value::bigint(a * b)),
-            (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a * PyBigInt::from(b))),
-            (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) * b)),
-            (ValueKind::BigInt(a), ValueKind::Float(b)) => {
-                Ok(Value::float(bigint_to_float_or_overflow(&a)? * b))
-            }
-            (ValueKind::Float(a), ValueKind::BigInt(b)) => {
-                Ok(Value::float(a * bigint_to_float_or_overflow(&b)?))
-            }
             (ValueKind::Str(text), ValueKind::Int(n)) => {
                 seq_repeat_str(text, n)
             }
