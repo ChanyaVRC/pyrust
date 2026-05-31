@@ -1095,20 +1095,27 @@ pub(crate) fn primitive_class_isinstance_fast(
     })
 }
 
-/// `isinstance(v, (str, bytes, dict, set, frozenset))` — the set of types
-/// PEP 634 §3 excludes from sequence-pattern matching.
+/// `isinstance(v, (str, bytes, bytearray, dict, set, frozenset))` — the set of
+/// types PEP 634 §3 excludes from sequence-pattern matching.
 ///
-/// Replicates [`isinstance_single`]'s semantics for those five primitive
-/// classes (including subclass instances) without building a tuple of type
-/// objects or going through the generic `isinstance` call.  Backs the
-/// `MatchSeqExcluded` instruction so a `match` arm with a sequence pattern
-/// pays one allocation-free check per execution instead of rebuilding the
-/// exclusion tuple every time (issue #1789).
+/// Replicates [`isinstance_single`]'s semantics for those primitive classes
+/// (including subclass instances) without building a tuple of type objects or
+/// going through the generic `isinstance` call.  Backs the `MatchSeqExcluded`
+/// instruction so a `match` arm with a sequence pattern pays one
+/// allocation-free check per execution instead of rebuilding the exclusion
+/// tuple every time (issue #1789).
+///
+/// `bytearray` is excluded (issue #1844): although it is a mutable byte buffer,
+/// CPython does not set `Py_TPFLAGS_SEQUENCE` on it, so `match bytearray(b"ab")`
+/// against `case [a, b]` is a no-match.
 pub(crate) fn value_is_seq_excluded(v: &Value) -> bool {
     match v.kind() {
         // Direct primitives — the common case, decided by the NaN-box tag.
         ValueKind::Str(_) | ValueKind::Bytes(_) | ValueKind::Dict(_) | ValueKind::Set(_) => true,
-        ValueKind::BuiltinObject { ops, .. } => ops.type_name() == "frozenset",
+        ValueKind::BuiltinObject { ops, .. } => {
+            let name = ops.type_name();
+            name == "frozenset" || name == pyrust_builtins::bytearray::TYPE_NAME
+        }
         // Subclass instances (`class MyDict(dict)`): walk the MRO against each
         // excluded primitive singleton, matching `isinstance(_, dict)` etc.
         ValueKind::PyInstance(inst) => {
@@ -1116,6 +1123,7 @@ pub(crate) fn value_is_seq_excluded(v: &Value) -> bool {
             PRIMITIVE_CLASSES.with(|c| {
                 class_is_subclass_of(&actual, &c.str_class)
                     || class_is_subclass_of(&actual, &c.bytes_class)
+                    || class_is_subclass_of(&actual, &c.bytearray_class)
                     || class_is_subclass_of(&actual, &c.dict_class)
                     || class_is_subclass_of(&actual, &c.set_class)
                     || class_is_subclass_of(&actual, &c.frozenset_class)

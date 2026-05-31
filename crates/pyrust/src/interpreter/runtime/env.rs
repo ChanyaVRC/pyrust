@@ -3009,9 +3009,11 @@ fn call_descriptor_get(
         && partial_slot.is_none()
     {
         return if fget.is_none() {
+            // CPython 3.12: `property 'x' of 'C' object has no getter` (issue #1845).
+            let owner = value_type_name_str(&instance);
             Err(PyError::named(
                 "AttributeError",
-                format!("property '{}' has no getter", attr_name),
+                format!("property '{attr_name}' of '{owner}' object has no getter"),
             ))
         } else {
             let getter = (*fget).clone();
@@ -3070,9 +3072,11 @@ fn call_descriptor_set(
         && partial_slot.is_none()
     {
         return Ok(Some(if fset.is_none() {
+            // CPython 3.12: `property 'x' of 'C' object has no setter` (issue #1845).
+            let owner = value_type_name_str(&instance);
             Err(PyError::named(
                 "AttributeError",
-                format!("property '{}' has no setter", attr_name),
+                format!("property '{attr_name}' of '{owner}' object has no setter"),
             ))
         } else {
             let setter = (*fset).clone();
@@ -3136,9 +3140,11 @@ fn call_descriptor_delete(
         && partial_slot.is_none()
     {
         return Ok(Some(if fdel.is_none() {
+            // CPython 3.12: `property 'x' of 'C' object has no deleter` (issue #1845).
+            let owner = value_type_name_str(&instance);
             Err(PyError::named(
                 "AttributeError",
-                format!("property '{}' has no deleter", attr_name),
+                format!("property '{attr_name}' of '{owner}' object has no deleter"),
             ))
         } else {
             let deleter = (*fdel).clone();
