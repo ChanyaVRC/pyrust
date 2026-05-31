@@ -3360,3 +3360,199 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         _ => false,
     }
 }
+
+impl Interpreter {
+    /// Execute `from module import *`.
+    ///
+    /// Extracted from the `ImportStar` VM dispatch arm so that changes to
+    /// star-import semantics (__all__ handling, filtering, etc.) only require
+    /// touching this method rather than vm.rs.
+    pub(crate) fn exec_import_star(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        mod_reg: crate::bytecode::Reg,
+    ) -> Result<()> {
+        let mod_val = vm_read(regs, mod_reg, num_locals)?;
+        if !matches!(mod_val.kind(), ValueKind::PyModule(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "import * requires a module, got {}",
+                    pyrust_core::builtin_type_name(&mod_val),
+                ),
+            ));
+        }
+        let ValueKind::PyModule(m) = mod_val.kind() else {
+            unreachable!()
+        };
+        let pairs: Vec<(String, Value)> = {
+            let borrowed = m.borrow();
+            if let Some(all_val) = borrowed.attrs.get("__all__") {
+                let items: Option<&[Value]> =
+                    all_val.as_list().or_else(|| all_val.as_tuple());
+                let mod_name = borrowed.name.clone();
+                let mut names: Vec<String> = Vec::new();
+                let mut err: Option<PyError> = None;
+                match items {
+                    Some(items) => {
+                        for item in items {
+                            match item.as_str() {
+                                Some(s) => names.push(s.to_string()),
+                                None => {
+                                    err = Some(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "Item in {}.__all__ must be str, not {}",
+                                            mod_name,
+                                            pyrust_core::builtin_type_name(item),
+                                        ),
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        err = Some(PyError::named(
+                            "TypeError",
+                            format!(
+                                "'{}' object does not support indexing",
+                                pyrust_core::builtin_type_name(all_val),
+                            ),
+                        ));
+                    }
+                }
+                drop(borrowed);
+                if let Some(e) = err {
+                    return Err(e);
+                }
+                let borrowed2 = m.borrow();
+                let mut out = Vec::with_capacity(names.len());
+                let mut attr_err: Option<(String, String)> = None;
+                for name in &names {
+                    match borrowed2.attrs.get(name) {
+                        Some(v) => out.push((name.clone(), v.clone())),
+                        None => {
+                            attr_err = Some((
+                                format!(
+                                    "module '{}' has no attribute '{}'",
+                                    mod_name, name,
+                                ),
+                                name.clone(),
+                            ));
+                            break;
+                        }
+                    }
+                }
+                drop(borrowed2);
+                if let Some((attr_err_msg, attr_err_name)) = attr_err {
+                    return Err(PyError::attribute_error(
+                        attr_err_msg,
+                        Some(attr_err_name),
+                        None,
+                    ));
+                }
+                out
+            } else {
+                borrowed
+                    .attrs
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            }
+        };
+        for (name, val) in pairs {
+            self.assign_name(&name, val);
+        }
+        Ok(())
+    }
+
+    /// Execute `del name` for module-scope and `global`-declared names.
+    ///
+    /// Extracted from the `DeleteName` VM dispatch arm so that changes to
+    /// name-deletion semantics only require touching this method rather than
+    /// vm.rs.
+    pub(crate) fn exec_delete_name(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        name_idx: u16,
+    ) -> Result<()> {
+        let name = code.names.get(name_idx as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: name index {} out of range (pool size {})",
+                name_idx,
+                code.names.len()
+            ))
+        })?;
+        let is_global = self.env.borrow().global_names.contains(name.as_str());
+        if is_global {
+            let me = module_env(&self.env);
+            let from_env = me.borrow_mut().values.remove(name.as_str());
+            let in_env = from_env.is_some();
+            let from_dict = self
+                .module_globals_dict
+                .dict_shift_remove(&PyKey::str_from(name.as_str()))
+                .ok()
+                .flatten();
+            let in_dict = from_dict.is_some();
+            if !in_env && !in_dict {
+                return Err(PyError::name_error(
+                    "NameError",
+                    format!("name '{}' is not defined", name),
+                    Some(name.to_string()),
+                ));
+            }
+            bump_global_env_version(self);
+            // SAFETY: same as SetItem / DeleteItem (issue #547, PR #646).
+            if let Some(script_view) = self
+                .vm_frame_views
+                .iter()
+                .find(|v| v.kind == FrameKind::Script)
+            {
+                if let Some(&slot) = script_view.local_index.get(name.as_str()) {
+                    let slot = slot as usize;
+                    if slot < script_view.regs_len {
+                        unsafe {
+                            *script_view.regs_ptr.add(slot).as_mut() = Value::unset();
+                        }
+                    }
+                }
+            }
+            let del_candidate = from_env.or(from_dict);
+            if let Some(val) = del_candidate {
+                call_del_if_last_binding(self, val, regs, code.num_locals as usize);
+            }
+        } else {
+            let from_env = self.env.borrow_mut().values.remove(name.as_str());
+            let in_env = from_env.is_some();
+            let is_module_scope = self.env.borrow().parent.is_none();
+            let from_dict = if is_module_scope {
+                self.module_globals_dict
+                    .dict_shift_remove(&PyKey::str_from(name.as_str()))
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            let in_dict = from_dict.is_some();
+            if !in_env && !in_dict {
+                return Err(PyError::name_error(
+                    "NameError",
+                    format!("name '{}' is not defined", name),
+                    Some(name.to_string()),
+                ));
+            }
+            if is_module_scope {
+                bump_global_env_version(self);
+            }
+            let del_candidate = from_env.or(from_dict);
+            if let Some(val) = del_candidate {
+                call_del_if_last_binding(self, val, regs, code.num_locals as usize);
+            }
+        }
+        Ok(())
+    }
+}

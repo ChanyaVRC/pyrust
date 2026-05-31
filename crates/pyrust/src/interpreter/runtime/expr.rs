@@ -5854,3 +5854,528 @@ fn coerce_none_to_nonetype(v: Value) -> Value {
         v
     }
 }
+
+impl Interpreter {
+    /// Evaluate `obj[idx]` and return the result.
+    ///
+    /// Extracted from the `GetItem` VM dispatch arm so that changes to
+    /// subscript-access semantics (__getitem__, slice handling, etc.) only
+    /// require touching this method rather than vm.rs.
+    pub(crate) fn exec_get_item(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        idx: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let fast_int_idx = regs[idx as usize].as_int();
+        if let Some(raw_i) = fast_int_idx {
+            enum Got {
+                Item(Value),
+                ListOOR,
+                TupleOOR,
+                None,
+            }
+            let got = match regs[obj as usize].as_some().map(|v| v.kind()) {
+                Some(ValueKind::List(items)) => {
+                    let len = items.len() as i64;
+                    let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                    if j >= 0 && (j as usize) < items.len() {
+                        Got::Item(items[j as usize].clone())
+                    } else {
+                        Got::ListOOR
+                    }
+                }
+                Some(ValueKind::Tuple(items)) => {
+                    let len = items.len() as i64;
+                    let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                    if j >= 0 && (j as usize) < items.len() {
+                        Got::Item(items[j as usize].clone())
+                    } else {
+                        Got::TupleOOR
+                    }
+                }
+                _ => Got::None,
+            };
+            match got {
+                Got::Item(v) => return Ok(v),
+                Got::ListOOR => {
+                    return Err(PyError::named("IndexError", "list index out of range"));
+                }
+                Got::TupleOOR => {
+                    return Err(PyError::named("IndexError", "tuple index out of range"));
+                }
+                Got::None => {}
+            }
+        }
+
+        let idx_val = vm_read(regs, idx, num_locals)?;
+        let obj_is_mapping = matches!(
+            regs[obj as usize].as_some().map(|v| v.kind()),
+            Some(ValueKind::Dict(_) | ValueKind::BuiltinObject { .. })
+        );
+        if !obj_is_mapping {
+            if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                return self.eval_slice(&obj_val, lo, hi, st);
+            }
+        }
+        enum FastResult {
+            Value(Value),
+            DictLookup(Value),
+            Miss,
+        }
+        let fast = if let Some(ov) = regs[obj as usize].as_some() {
+            match ov.kind() {
+                ValueKind::List(items) => {
+                    if !matches!(
+                        idx_val.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    ) {
+                        FastResult::Miss
+                    } else {
+                        let i = normalize_index(&idx_val, items.len(), "list")?;
+                        FastResult::Value(items[i].clone())
+                    }
+                }
+                ValueKind::Tuple(items) => {
+                    if !matches!(
+                        idx_val.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    ) {
+                        FastResult::Miss
+                    } else {
+                        let i = normalize_index(&idx_val, items.len(), "tuple")?;
+                        FastResult::Value(items[i].clone())
+                    }
+                }
+                ValueKind::Dict(_) => FastResult::DictLookup(ov.clone()),
+                _ => FastResult::Miss,
+            }
+        } else {
+            FastResult::Miss
+        };
+        match fast {
+            FastResult::Value(r) => Ok(r),
+            FastResult::DictLookup(dict_val) => {
+                let lookup = if let Some(s) = idx_val.as_str() {
+                    self.dict_str_lookup(&dict_val, s)?
+                } else {
+                    let key = self.value_to_pykey(&idx_val)?;
+                    self.dict_lookup(&dict_val, &key)?
+                };
+                lookup
+                    .map(|(_, v)| v)
+                    .ok_or_else(|| PyError::key_error(idx_val.clone()))
+            }
+            FastResult::Miss => {
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                self.eval_index(&obj_val, idx_val)
+            }
+        }
+    }
+
+    /// Execute `obj[idx] = val`.
+    ///
+    /// Extracted from the `SetItem` VM dispatch arm so that changes to
+    /// subscript-assignment semantics (__setitem__, slice assignment, etc.)
+    /// only require touching this method rather than vm.rs.
+    pub(crate) fn exec_set_item(
+        &mut self,
+        regs: &mut RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        idx: crate::bytecode::Reg,
+        val: crate::bytecode::Reg,
+    ) -> Result<()> {
+        if let Some(raw_i) = regs[idx as usize].as_int() {
+            if let Some(len) = regs[obj as usize].list_len() {
+                let j = if raw_i < 0 { raw_i + len as i64 } else { raw_i };
+                if j >= 0 && (j as usize) < len {
+                    let v = regs[val as usize].clone();
+                    regs[obj as usize].list_with_mut(|items| {
+                        items[j as usize] = v;
+                    });
+                } else {
+                    return Err(PyError::named(
+                        "IndexError",
+                        "list assignment index out of range",
+                    ));
+                }
+                return Ok(());
+            }
+        }
+        let idx_val = vm_read(regs, idx, num_locals)?;
+        let val_val = vm_read(regs, val, num_locals)?;
+        let is_list_target = regs[obj as usize].list_len().is_some();
+        if is_list_target {
+            if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                let lo = self.resolve_slice_bound_val(lo)?;
+                let hi = self.resolve_slice_bound_val(hi)?;
+                let st = self.resolve_slice_bound_val(st)?;
+                let new_items: Vec<Value> = match val_val.kind() {
+                    ValueKind::List(v) => Some(v.to_vec()),
+                    _ => None,
+                }
+                .unwrap_or_else(Vec::new);
+                let new_items = if !new_items.is_empty()
+                    || matches!(val_val.kind(), ValueKind::List(_))
+                {
+                    new_items
+                } else {
+                    self.collect_iterable(&val_val).map_err(|_| {
+                        PyError::named("TypeError", "can only assign an iterable".to_string())
+                    })?
+                };
+                let updated = regs[obj as usize].list_with_mut(|items| {
+                    Self::slice_setitem(items, lo.as_ref(), hi.as_ref(), st.as_ref(), new_items)
+                });
+                return match updated {
+                    Some(r) => r,
+                    None => {
+                        let tname = value_type_name_str(&regs[obj as usize]);
+                        Err(PyError::named(
+                            "TypeError",
+                            format!("'{}' object does not support item assignment", tname),
+                        ))
+                    }
+                };
+            }
+        }
+        let target_kind = regs[obj as usize]
+            .as_some()
+            .map(|v| match v.kind() {
+                ValueKind::List(_) => 1u8,
+                ValueKind::Dict(_) => 2u8,
+                ValueKind::PyInstance(_) => 3u8,
+                ValueKind::BuiltinObject { .. } => 4u8,
+                _ => 0u8,
+            })
+            .unwrap_or(0);
+        match target_kind {
+            1 => {
+                let len = regs[obj as usize].list_len().unwrap_or(0);
+                let idx_resolved = self.call_index_protocol(&idx_val, "list")?;
+                let i = normalize_index_write(&idx_resolved, len, "list")?;
+                regs[obj as usize].list_with_mut(|items| {
+                    items[i] = val_val;
+                });
+            }
+            2 => {
+                let key = self.value_to_pykey(&idx_val)?;
+                let globals_sync_name: Option<String> = if self.globals_accessed {
+                    if let PyKey::Str(name_val) = &key {
+                        let is_globals = regs[obj as usize]
+                            .get_dict_rc()
+                            .zip(self.module_globals_dict.get_dict_rc())
+                            .map(|(a, b)| Rc::ptr_eq(a, b))
+                            .unwrap_or(false);
+                        if is_globals {
+                            name_val.as_str().map(|s| s.to_owned())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let val_for_fastlocal: Option<Value> =
+                    globals_sync_name.as_ref().map(|_| val_val.clone());
+                let needs_dedup = match &key {
+                    PyKey::Object { .. } => true,
+                    PyKey::None => {
+                        let none_hash = pyrust_core::py_hash_none() as u64;
+                        regs[obj as usize]
+                            .as_dict()
+                            .map(|d| {
+                                d.keys().any(|k| {
+                                    matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
+                                })
+                            })
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                };
+                if needs_dedup {
+                    let dict_val = regs[obj as usize]
+                        .as_some()
+                        .cloned()
+                        .unwrap_or(Value::none());
+                    let existing = self.dict_lookup(&dict_val, &key)?;
+                    regs[obj as usize].dict_with_mut(|dict| {
+                        if let Some((idx, _)) = existing {
+                            let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
+                            if let Some(k) = existing_key {
+                                dict.insert(k, val_val);
+                            } else {
+                                dict.insert(key, val_val);
+                            }
+                        } else {
+                            dict.insert(key, val_val);
+                        }
+                    });
+                } else {
+                    regs[obj as usize].dict_with_mut(|dict| {
+                        dict.insert(key, val_val);
+                    });
+                }
+                if let (Some(name), Some(synced_val)) = (globals_sync_name, val_for_fastlocal) {
+                    bump_global_env_version(self);
+                    if let Some(script_view) = self
+                        .vm_frame_views
+                        .iter()
+                        .find(|v| v.kind == FrameKind::Script)
+                    {
+                        if let Some(&slot) = script_view.local_index.get(&name) {
+                            let slot = slot as usize;
+                            if slot < script_view.regs_len {
+                                // SAFETY: slot < regs_len; regs_ptr is the script frame's
+                                // register file.  RegSlice carries no `noalias`, so this
+                                // write does not violate aliasing rules (issue #547, PR #646).
+                                unsafe {
+                                    *script_view.regs_ptr.add(slot).as_mut() = synced_val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            3 => {
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                if let ValueKind::PyInstance(inst) = obj_val.kind() {
+                    let inst_rc = Rc::clone(inst);
+                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                        enum BkKind {
+                            Dict,
+                            List,
+                            Other,
+                        }
+                        let bk_kind = match backing.kind() {
+                            ValueKind::Dict(_) => BkKind::Dict,
+                            ValueKind::List(_) => BkKind::List,
+                            _ => BkKind::Other,
+                        };
+                        match bk_kind {
+                            BkKind::Dict => {
+                                let key = self.value_to_pykey(&idx_val)?;
+                                backing.dict_with_mut(|dict| {
+                                    dict.insert(key, val_val);
+                                });
+                                return Ok(());
+                            }
+                            BkKind::List => {
+                                let len = backing.list_len().unwrap_or(0);
+                                let idx_resolved =
+                                    self.call_index_protocol(&idx_val, "list")?;
+                                let i = normalize_index_write(&idx_resolved, len, "list")?;
+                                backing.list_with_mut(|items| {
+                                    items[i] = val_val;
+                                });
+                                return Ok(());
+                            }
+                            BkKind::Other => {}
+                        }
+                    }
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    if let Some(method_val) = lookup_class_attr(&class, "__setitem__") {
+                        invoke_class_method(
+                            self,
+                            method_val,
+                            Value::py_instance(inst_rc),
+                            &[
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: idx_val,
+                                },
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: val_val,
+                                },
+                            ],
+                        )?;
+                        return Ok(());
+                    }
+                    let class_name = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' object does not support item assignment", class_name),
+                    ));
+                }
+                let tname = value_type_name_str(&regs[obj as usize]);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{}' object does not support item assignment", tname),
+                ));
+            }
+            4 => {
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
+                    ops.set_item(state, &idx_val, val_val)?;
+                }
+            }
+            _ => {
+                let tname = value_type_name_str(&regs[obj as usize]);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{}' object does not support item assignment", tname),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute `del obj[idx]`.
+    ///
+    /// Extracted from the `DeleteItem` VM dispatch arm so that changes to
+    /// subscript-deletion semantics (__delitem__, slice deletion, etc.) only
+    /// require touching this method rather than vm.rs.
+    pub(crate) fn exec_delete_item(
+        &mut self,
+        regs: &mut RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        idx: crate::bytecode::Reg,
+    ) -> Result<()> {
+        let idx_val = vm_read(regs, idx, num_locals)?;
+        let is_list_target = regs[obj as usize].list_len().is_some();
+        if is_list_target {
+            if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                let lo = self.resolve_slice_bound_val(lo)?;
+                let hi = self.resolve_slice_bound_val(hi)?;
+                let st = self.resolve_slice_bound_val(st)?;
+                let updated = regs[obj as usize].list_with_mut(|items| {
+                    Self::slice_delitem(items, lo.as_ref(), hi.as_ref(), st.as_ref())
+                });
+                return match updated {
+                    Some(r) => r,
+                    None => {
+                        let tname = value_type_name_str(&regs[obj as usize]);
+                        Err(PyError::named(
+                            "TypeError",
+                            format!("'{}' object does not support item deletion", tname),
+                        ))
+                    }
+                };
+            }
+        }
+        let target_kind = regs[obj as usize]
+            .as_some()
+            .map(|v| match v.kind() {
+                ValueKind::List(_) => 1u8,
+                ValueKind::Dict(_) => 2u8,
+                ValueKind::BuiltinObject { .. } => 3u8,
+                _ => 0u8,
+            })
+            .unwrap_or(0);
+        if target_kind == 1 {
+            let len = regs[obj as usize].list_len().unwrap_or(0);
+            let idx_resolved = self.call_index_protocol(&idx_val, "list")?;
+            let i = normalize_index_write(&idx_resolved, len, "list")?;
+            regs[obj as usize].list_with_mut(|items| {
+                if i + 1 == items.len() {
+                    items.pop();
+                } else {
+                    items.remove(i);
+                }
+            });
+            return Ok(());
+        }
+        if target_kind == 2 {
+            let key = self.value_to_pykey(&idx_val)?;
+            let globals_del_name: Option<String> = if self.globals_accessed {
+                if let PyKey::Str(name_val) = &key {
+                    let is_globals = regs[obj as usize]
+                        .get_dict_rc()
+                        .zip(self.module_globals_dict.get_dict_rc())
+                        .map(|(a, b)| Rc::ptr_eq(a, b))
+                        .unwrap_or(false);
+                    if is_globals {
+                        name_val.as_str().map(|s| s.to_owned())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let PyKey::Object { .. } = &key {
+                let dict_val = regs[obj as usize]
+                    .as_some()
+                    .cloned()
+                    .unwrap_or(Value::none());
+                let found = self.dict_lookup(&dict_val, &key)?;
+                if let Some((idx, _)) = found {
+                    regs[obj as usize].dict_with_mut(|dict| {
+                        dict.shift_remove_index(idx);
+                    });
+                } else {
+                    return Err(PyError::key_error(idx_val.clone()));
+                }
+            } else {
+                let removed = regs[obj as usize].dict_with_mut(|dict| dict.shift_remove(&key));
+                if !matches!(removed, Some(Some(_))) {
+                    return Err(PyError::key_error(idx_val.clone()));
+                }
+            }
+            if let Some(name) = globals_del_name {
+                bump_global_env_version(self);
+                if let Some(script_view) = self
+                    .vm_frame_views
+                    .iter()
+                    .find(|v| v.kind == FrameKind::Script)
+                {
+                    if let Some(&slot) = script_view.local_index.get(&name) {
+                        let slot = slot as usize;
+                        if slot < script_view.regs_len {
+                            // SAFETY: same as SetItem (issue #547, PR #646).
+                            unsafe {
+                                *script_view.regs_ptr.add(slot).as_mut() = Value::unset();
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if target_kind == 3 {
+            let obj_val = vm_read(regs, obj, num_locals)?;
+            if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
+                ops.delete_item(state, &idx_val)?;
+            }
+            return Ok(());
+        }
+        let obj_val = vm_read(regs, obj, num_locals)?;
+        if let ValueKind::PyInstance(inst) = obj_val.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__delitem__") {
+                invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(inst_rc),
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: idx_val,
+                    }],
+                )?;
+                return Ok(());
+            }
+            let class_name = class.borrow().name.clone();
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{class_name}' object does not support item deletion"),
+            ));
+        }
+        let tname = value_type_name_str(&regs[obj as usize]);
+        let msg = if Self::unpack_slice_key(&idx_val).is_some() {
+            format!("'{}' object does not support item deletion", tname)
+        } else {
+            format!("'{}' object doesn't support item deletion", tname)
+        };
+        Err(PyError::named("TypeError", msg))
+    }
+}

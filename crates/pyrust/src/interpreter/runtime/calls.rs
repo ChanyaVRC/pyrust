@@ -7016,3 +7016,453 @@ fn format_missing_args(names: &[&str]) -> String {
         }
     }
 }
+
+impl Interpreter {
+    /// Build a user function value from a compiled `FnProto`.
+    ///
+    /// Extracted from the `MakeFunction` VM dispatch arm so that changes to
+    /// function-construction semantics (annotations, defaults, etc.) only
+    /// require touching this method rather than vm.rs.
+    pub(crate) fn exec_make_function(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        proto_idx: u8,
+        defs_base: crate::bytecode::Reg,
+        annots_base: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: fn_proto index {} out of range (pool size {})",
+                proto_idx,
+                code.fn_protos.len()
+            ))
+        })?;
+        let proto_code = Rc::clone(&proto.code);
+        let proto_name = proto.name.clone();
+        let proto_qualname = proto.qualname.clone();
+        let proto_local_index = Rc::clone(&proto.local_index);
+        let proto_local_names = Rc::clone(&proto.local_names);
+        let proto_global_names = Rc::clone(&proto.global_names);
+        let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
+        let param_spec = Rc::clone(&proto.param_spec);
+        let annotation_keys = proto.annotation_keys.clone();
+        let is_pure = proto.is_pure;
+        let proto_doc = proto.docstring.as_ref().map(|s| Value::string(s.clone()));
+
+        let mut params = Vec::with_capacity(param_spec.names.len());
+        let mut def_slot = 0u32;
+        for i in 0..param_spec.names.len() {
+            let default = if param_spec.has_default[i] {
+                let v = vm_read(regs, defs_base + def_slot, num_locals)?;
+                def_slot += 1;
+                Some(v)
+            } else {
+                None
+            };
+            params.push(UserFunctionParam {
+                name: param_spec.names[i].clone(),
+                default,
+                is_args: param_spec.is_args[i],
+                is_kwargs: param_spec.is_kwargs[i],
+                is_keyword_only: param_spec.is_keyword_only[i],
+                is_positional_only: param_spec.is_positional_only[i],
+            });
+        }
+        let mut annotations_map = indexmap::IndexMap::new();
+        for (i, key) in annotation_keys.iter().enumerate() {
+            let val = vm_read(regs, annots_base + i as u32, num_locals)?;
+            annotations_map.insert(PyKey::str_from(key.as_str()), val);
+        }
+        let annotations = Value::dict(annotations_map);
+        for name in proto_nonlocal_names.iter() {
+            if !has_local_binding_in_current_or_ancestor(&self.env, name) {
+                return Err(PyError::named(
+                    "SyntaxError",
+                    format!("no binding for nonlocal '{}' found", name),
+                ));
+            }
+        }
+        let func = Rc::new(UserFunction {
+            id: crate::value::next_fn_id(),
+            kind: crate::value::UserFunctionKind::Regular,
+            name: proto_name,
+            qualname: proto_qualname,
+            user_name: std::cell::RefCell::new(None),
+            user_qualname: std::cell::RefCell::new(None),
+            module: std::cell::RefCell::new(Value::string("__main__".to_string())),
+            doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
+            attrs: std::cell::RefCell::new(None),
+            annotations: std::cell::RefCell::new(annotations),
+            params,
+            local_names: proto_local_names,
+            local_index: proto_local_index,
+            global_names: proto_global_names,
+            nonlocal_names: proto_nonlocal_names,
+            env: Rc::clone(&self.env),
+            is_pure,
+            precompiled_code: Some(proto_code),
+            wrapped_func: None,
+        });
+        Ok(Value::user_function(func))
+    }
+
+    /// Construct a class value from a compiled `FnProto` body.
+    ///
+    /// Extracted from the `MakeClass` VM dispatch arm so that changes to
+    /// class-construction semantics (__slots__, PEP 487/695, etc.) only
+    /// require touching this method rather than vm.rs.
+    pub(crate) fn exec_make_class(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        proto_idx: u8,
+        bases_base: crate::bytecode::Reg,
+        bases_n: u8,
+        name_idx: u16,
+        kwarg_base: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        use indexmap::IndexMap;
+
+        let class_name = code
+            .names
+            .get(name_idx as usize)
+            .ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "bytecode error: name index {} out of range (pool size {})",
+                    name_idx,
+                    code.names.len()
+                ))
+            })?
+            .clone();
+        let (class_code, local_index, proto_qualname, proto_global_names, proto_nonlocal_names, class_docstring, class_kwarg_names) = {
+            let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "bytecode error: fn_proto index {} out of range (pool size {})",
+                    proto_idx,
+                    code.fn_protos.len()
+                ))
+            })?;
+            (
+                Rc::clone(&proto.code),
+                Rc::clone(&proto.local_index),
+                proto.qualname.clone(),
+                Rc::clone(&proto.global_names),
+                Rc::clone(&proto.nonlocal_names),
+                proto.docstring.clone(),
+                proto.class_kwarg_names.clone(),
+            )
+        };
+        let num_class_regs = class_code.num_regs as usize;
+        let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
+        let qualname_slot = local_index.get("__qualname__").copied();
+        let module_slot = local_index.get("__module__").copied();
+        if let Some(slot) = qualname_slot {
+            let slot = slot as usize;
+            if slot < class_regs.len() {
+                class_regs[slot] = Value::string(proto_qualname.clone());
+            }
+        }
+        if let Some(slot) = module_slot {
+            let slot = slot as usize;
+            if slot < class_regs.len() {
+                class_regs[slot] = Value::string("__main__".to_string());
+            }
+        }
+        let annotations_slot = local_index.get("__annotations__").copied();
+        if let Some(slot) = annotations_slot {
+            let slot = slot as usize;
+            if slot < class_regs.len() {
+                class_regs[slot] = Value::dict(indexmap::IndexMap::new());
+            }
+        }
+        let mut pre_order: Vec<crate::bytecode::Reg> = Vec::new();
+        if let Some(slot) = module_slot {
+            pre_order.push(slot);
+        }
+        if let Some(slot) = annotations_slot {
+            pre_order.push(slot as crate::bytecode::Reg);
+        }
+        self.class_store_order.push(pre_order);
+        let parent = Rc::clone(&self.env);
+        let class_env = self.alloc_env(Some(parent));
+        {
+            let mut e = class_env.borrow_mut();
+            e.global_names = proto_global_names;
+            e.nonlocal_names = proto_nonlocal_names;
+        }
+        let class_env_rc = Rc::clone(&class_env);
+        let previous_env = Some(std::mem::replace(&mut self.env, class_env));
+        let class_regs_ptr =
+            unsafe { std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr()) };
+        let class_regs_len = class_regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Class,
+            // SAFETY: SmallVec/Vec allocation is always non-null.  `class_regs`
+            // lives on this stack frame for the full duration of `run_bytecode`;
+            // the view is popped before `class_regs` is dropped.
+            regs_ptr: class_regs_ptr,
+            regs_len: class_regs_len,
+            local_index: Rc::clone(&local_index),
+            nonlocal_names: None,
+            env: None,
+            is_class_method: false,
+        });
+        // SAFETY: class_regs_ptr is valid for class_regs_len Values for the
+        // lifetime of class_regs.  No &mut [Value] referencing class_regs is
+        // held while the dispatch loop runs (issue #547, PR #646).
+        let class_regs_slice =
+            unsafe { RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len) };
+        let body_result = self.run_bytecode(&class_code, class_regs_slice);
+        // Always pop both stacks, even on error, to keep them balanced.
+        self.vm_frame_views.pop();
+        {
+            let used_class_env = std::mem::replace(
+                &mut self.env,
+                previous_env.expect("class_env always pushed"),
+            );
+            self.free_env(used_class_env);
+        }
+        let mut store_order = self
+            .class_store_order
+            .pop()
+            .expect("class_store_order stack popped to empty");
+        body_result?;
+        let mut slot_to_name: Vec<Option<&String>> = vec![None; num_class_regs];
+        for (name, &slot) in local_index.iter() {
+            if (slot as usize) < slot_to_name.len() {
+                slot_to_name[slot as usize] = Some(name);
+            }
+        }
+        let mut attrs = IndexMap::new();
+        for slot in store_order.drain(..) {
+            let Some(name) = slot_to_name.get(slot as usize).and_then(|n| *n) else {
+                continue;
+            };
+            if let Some(v) = class_regs.get(slot as usize)
+                && !v.is_unset()
+            {
+                attrs.insert(name.clone(), v.clone());
+            }
+        }
+        let isc_wrapped = attrs.get("__init_subclass__").and_then(|v| {
+            if let ValueKind::UserFunction(f) = v.kind()
+                && f.kind == pyrust_core::UserFunctionKind::Regular
+            {
+                Some(Value::class_method(Rc::clone(f)))
+            } else {
+                None
+            }
+        });
+        if let Some(wrapped) = isc_wrapped {
+            attrs.insert("__init_subclass__".to_string(), wrapped);
+        }
+        let qualname = match attrs.shift_remove("__qualname__") {
+            None => proto_qualname,
+            Some(v) => {
+                let as_str: Option<String> = if let ValueKind::Str(s) = v.kind() {
+                    Some(s.to_string())
+                } else {
+                    None
+                };
+                match as_str {
+                    Some(s) => s,
+                    None => {
+                        let tname = pyrust_core::builtin_type_name(&v).into_owned();
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("type __qualname__ must be a str, not {tname}"),
+                        ));
+                    }
+                }
+            }
+        };
+        attrs
+            .entry("__module__".to_string())
+            .or_insert_with(|| Value::string("__main__".to_string()));
+        attrs.entry("__doc__".to_string()).or_insert_with(|| {
+            class_docstring
+                .as_ref()
+                .map(|s| Value::string(s.clone()))
+                .unwrap_or_else(Value::none)
+        });
+        if attrs.contains_key("__eq__") && !attrs.contains_key("__hash__") {
+            attrs.insert("__hash__".to_string(), Value::none());
+        }
+        attrs
+            .entry("__dict__".to_string())
+            .or_insert_with(Value::none);
+        attrs
+            .entry("__weakref__".to_string())
+            .or_insert_with(Value::none);
+        let (base, extra_bases_vec) = if bases_n > 0 {
+            let base_val = vm_read(regs, bases_base, num_locals)?;
+            let first = match base_val.kind() {
+                ValueKind::PyClass(c) => Rc::clone(c),
+                _ => {
+                    return Err(PyError::Runtime("class base must be a class".to_string()));
+                }
+            };
+            if let Some(tname) = crate::interpreter::non_subclassable_builtin_name(&first) {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("type '{tname}' is not an acceptable base type"),
+                ));
+            }
+            let mut extras: Vec<Rc<RefCell<PyClass>>> = Vec::new();
+            for i in 1..bases_n as usize {
+                let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+                let base_val = vm_read(regs, reg, num_locals)?;
+                match base_val.kind() {
+                    ValueKind::PyClass(c) => {
+                        let cls = Rc::clone(c);
+                        if let Some(tname) =
+                            crate::interpreter::non_subclassable_builtin_name(&cls)
+                        {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("type '{tname}' is not an acceptable base type"),
+                            ));
+                        }
+                        extras.push(cls);
+                    }
+                    _ => {
+                        return Err(PyError::Runtime(
+                            "class base must be a class".to_string(),
+                        ));
+                    }
+                }
+            }
+            (Some(first), extras)
+        } else {
+            (None, vec![])
+        };
+        {
+            let all_bases = base.iter().chain(extra_bases_vec.iter());
+            let solid_count = all_bases
+                .filter(|c| crate::interpreter::is_solid_primitive_class(c))
+                .count();
+            if solid_count >= 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    "multiple bases have instance lay-out conflict".to_string(),
+                ));
+            }
+        }
+        let slots: Option<indexmap::IndexSet<String>> =
+            if let Some(slots_val) = attrs.get("__slots__") {
+                let slot_names: Vec<String> = match slots_val.kind() {
+                    ValueKind::Str(s) => vec![s.to_string()],
+                    ValueKind::Tuple(items) => items
+                        .iter()
+                        .filter_map(|v| {
+                            if let ValueKind::Str(s) = v.kind() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    ValueKind::List(items) => items
+                        .iter()
+                        .filter_map(|v| {
+                            if let ValueKind::Str(s) = v.kind() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+                let set: indexmap::IndexSet<String> = slot_names.into_iter().collect();
+                Some(set)
+            } else {
+                None
+            };
+        if let Some(ref slot_set) = slots {
+            if !slot_set.contains("__dict__") {
+                attrs.insert("__dict__".to_string(), Value::none());
+            }
+        }
+        let class = Rc::new(RefCell::new(PyClass {
+            name: class_name,
+            qualname,
+            base: base.clone(),
+            extra_bases: extra_bases_vec.clone(),
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+            slots,
+        }));
+        class_mro_items(&class).map(|_| ())?;
+        if let Some(ref b) = base {
+            b.borrow()
+                .subclasses
+                .borrow_mut()
+                .push(Rc::downgrade(&class));
+        }
+        for eb in &extra_bases_vec {
+            eb.borrow()
+                .subclasses
+                .borrow_mut()
+                .push(Rc::downgrade(&class));
+        }
+        class_env_rc
+            .borrow_mut()
+            .values
+            .insert("__class__".to_string(), Value::py_class(Rc::clone(&class)));
+        {
+            let cls_val = Value::py_class(Rc::clone(&class));
+            let attrs_snapshot: Vec<(String, Value)> = class
+                .borrow()
+                .attrs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for (attr_name, attr_val) in &attrs_snapshot {
+                if let ValueKind::PyInstance(inst) = attr_val.kind() {
+                    let inst_class = Rc::clone(&inst.borrow().class);
+                    if let Some(set_name_fn) = lookup_class_attr(&inst_class, "__set_name__") {
+                        invoke_class_method(
+                            self,
+                            set_name_fn,
+                            attr_val.clone(),
+                            &[
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: cls_val.clone(),
+                                },
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: Value::string(attr_name.clone()),
+                                },
+                            ],
+                        )?;
+                    }
+                }
+            }
+        }
+        let maybe_base = class.borrow().base.clone();
+        let lookup_base = maybe_base.unwrap_or_else(|| object_class_singleton());
+        if let Some(method_val) = lookup_class_attr(&lookup_base, "__init_subclass__") {
+            let new_cls = Value::py_class(Rc::clone(&class));
+            let kwarg_args: ExpandedArgBuf = class_kwarg_names
+                .iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
+                    ExpandedCallArg {
+                        name: Some(key.clone()),
+                        value: regs[reg as usize].clone(),
+                    }
+                })
+                .collect();
+            invoke_class_method(self, method_val, new_cls, &kwarg_args)?;
+        }
+        Ok(Value::py_class(class))
+    }
+}
