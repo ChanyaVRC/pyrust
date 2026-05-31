@@ -20,6 +20,12 @@ pub struct PropertyState {
     /// function returns a new Property with that slot replaced.
     /// `slot` is 0=fget, 1=fset, 2=fdel.
     pub partial_slot: Option<u8>,
+    /// Attribute name recorded via `__set_name__` when the property is bound in
+    /// a class body (issue #1846).  `None` for properties never assigned in a
+    /// class body (e.g. `C.x = property(...)` after creation); their
+    /// `__set__`/`__delete__` errors then use the unnamed `property of '...'`
+    /// form, matching CPython.
+    pub name: Option<String>,
 }
 
 pub struct PropertyOps;
@@ -52,6 +58,7 @@ pub fn property(fget: Value, fset: Value, fdel: Value) -> Value {
         fset: Rc::new(fset),
         fdel: Rc::new(fdel),
         partial_slot: None,
+        name: None,
     });
     Value::builtin_object(PROPERTY_OPS, state)
 }
@@ -77,6 +84,7 @@ fn accessor_partial(slot: u8, fget: Value, fset: Value, fdel: Value) -> Value {
         fset: Rc::new(fset),
         fdel: Rc::new(fdel),
         partial_slot: Some(slot),
+        name: None,
     });
     Value::builtin_object(PROPERTY_OPS, state)
 }
@@ -112,6 +120,21 @@ pub fn with_property<R>(value: &Value, f: impl FnOnce(&PropertyState) -> R) -> O
     let borrow = state.borrow();
     let s = borrow.downcast_ref::<PropertyState>()?;
     Some(f(s))
+}
+
+/// Record the attribute `name` on a `property` via the `__set_name__` protocol
+/// (issue #1846).  No-op if `value` is not a property.  Called during class
+/// creation so `__set__`/`__delete__` errors can name the property.
+pub fn set_property_name(value: &Value, name: &str) {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return;
+    };
+    if ops.type_name() != TYPE_NAME {
+        return;
+    }
+    if let Some(s) = state.borrow_mut().downcast_mut::<PropertyState>() {
+        s.name = Some(name.to_string());
+    }
 }
 
 /// Return `Some(partial_slot)` if `value` is a `property`, or `None`.

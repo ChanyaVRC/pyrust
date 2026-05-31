@@ -4617,6 +4617,14 @@ impl Interpreter {
                                         ],
                                     ));
                                 }
+                            } else {
+                                // Issue #1846: `property` is a built-in descriptor
+                                // (BuiltinObject, not PyInstance) with a native
+                                // __set_name__ that records the attribute name so
+                                // its __set__/__delete__ errors can name it.
+                                pyrust_builtins::property::set_property_name(
+                                    attr_val, attr_name,
+                                );
                             }
                         }
                     }

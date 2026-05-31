@@ -2893,9 +2893,9 @@ fn is_non_data_descriptor(val: &Value) -> bool {
 /// `p.__get__` / `p.__set__` / `p.__delete__`.
 ///
 /// `prop` is the property object; `kind` selects the dunder; `args` are the
-/// call-site arguments.  pyrust properties carry no `__set_name__` name, so the
-/// "no setter/deleter/getter" errors use CPython's unnamed form
-/// (`property of '<owner>' object has no <which>`).
+/// call-site arguments.  The "no setter/deleter/getter" errors name the
+/// property when it recorded one via `__set_name__` (issue #1846), else use
+/// CPython's unnamed form (`property of '<owner>' object has no <which>`).
 pub(crate) fn dispatch_property_method(
     interp: &mut Interpreter,
     prop: &Value,
@@ -2934,7 +2934,7 @@ pub(crate) fn dispatch_property_method(
             let fget = pyrust_builtins::property::with_property(prop, |s| (*s.fget).clone())
                 .unwrap_or_else(Value::none);
             if fget.is_none() {
-                return Err(property_accessor_error(&obj, "getter"));
+                return Err(property_accessor_error(prop, &obj, "getter"));
             }
             interp.call_function_expanded(fget, &[ExpandedCallArg { name: None, value: obj }])
         }
@@ -2952,7 +2952,7 @@ pub(crate) fn dispatch_property_method(
             let fset = pyrust_builtins::property::with_property(prop, |s| (*s.fset).clone())
                 .unwrap_or_else(Value::none);
             if fset.is_none() {
-                return Err(property_accessor_error(&obj, "setter"));
+                return Err(property_accessor_error(prop, &obj, "setter"));
             }
             interp.call_function_expanded(
                 fset,
@@ -2975,20 +2975,28 @@ pub(crate) fn dispatch_property_method(
             let fdel = pyrust_builtins::property::with_property(prop, |s| (*s.fdel).clone())
                 .unwrap_or_else(Value::none);
             if fdel.is_none() {
-                return Err(property_accessor_error(&obj, "deleter"));
+                return Err(property_accessor_error(prop, &obj, "deleter"));
             }
             interp.call_function_expanded(fdel, &[ExpandedCallArg { name: None, value: obj }])
         }
     }
 }
 
-/// CPython's unnamed property-accessor error:
-/// `property of '<owner>' object has no <which>`.
-fn property_accessor_error(instance: &Value, which: &str) -> PyError {
+/// CPython's property-accessor error:
+/// `property '<name>' of '<owner>' object has no <which>`, or the unnamed
+/// `property of '<owner>' object has no <which>` when the property was never
+/// bound in a class body (no `__set_name__`; issue #1846).
+fn property_accessor_error(prop: &Value, instance: &Value, which: &str) -> PyError {
     let owner = value_type_name_str(instance);
+    let prop_desc = match pyrust_builtins::property::with_property(prop, |s| s.name.clone())
+        .flatten()
+    {
+        Some(n) => format!("property '{n}'"),
+        None => "property".to_string(),
+    };
     PyError::named(
         "AttributeError",
-        format!("property of '{owner}' object has no {which}"),
+        format!("{prop_desc} of '{owner}' object has no {which}"),
     )
 }
 
@@ -3002,18 +3010,24 @@ fn call_descriptor_get(
     attr_name: &str,
 ) -> Result<Value> {
     // property special-case: use the stored fget directly.
-    if let Some((fget, partial_slot)) =
+    if let Some((fget, partial_slot, prop_name)) =
         pyrust_builtins::property::with_property(descriptor, |s| {
-            (Rc::clone(&s.fget), s.partial_slot)
+            (Rc::clone(&s.fget), s.partial_slot, s.name.clone())
         })
         && partial_slot.is_none()
     {
         return if fget.is_none() {
             // CPython 3.12: `property 'x' of 'C' object has no getter` (issue #1845).
+            // The name comes from __set_name__ (issue #1846); anonymous
+            // properties (never bound in a class body) use the unnamed form.
             let owner = value_type_name_str(&instance);
+            let prop_desc = match &prop_name {
+                Some(n) => format!("property '{n}'"),
+                None => "property".to_string(),
+            };
             Err(PyError::named(
                 "AttributeError",
-                format!("property '{attr_name}' of '{owner}' object has no getter"),
+                format!("{prop_desc} of '{owner}' object has no getter"),
             ))
         } else {
             let getter = (*fget).clone();
@@ -3065,18 +3079,24 @@ fn call_descriptor_set(
     attr_name: &str,
 ) -> Result<Option<Result<()>>> {
     // property special-case.
-    if let Some((fset, partial_slot)) =
+    if let Some((fset, partial_slot, prop_name)) =
         pyrust_builtins::property::with_property(class_val, |s| {
-            (Rc::clone(&s.fset), s.partial_slot)
+            (Rc::clone(&s.fset), s.partial_slot, s.name.clone())
         })
         && partial_slot.is_none()
     {
         return Ok(Some(if fset.is_none() {
             // CPython 3.12: `property 'x' of 'C' object has no setter` (issue #1845).
+            // The name comes from __set_name__ (issue #1846); anonymous
+            // properties (never bound in a class body) use the unnamed form.
             let owner = value_type_name_str(&instance);
+            let prop_desc = match &prop_name {
+                Some(n) => format!("property '{n}'"),
+                None => "property".to_string(),
+            };
             Err(PyError::named(
                 "AttributeError",
-                format!("property '{attr_name}' of '{owner}' object has no setter"),
+                format!("{prop_desc} of '{owner}' object has no setter"),
             ))
         } else {
             let setter = (*fset).clone();
@@ -3133,18 +3153,24 @@ fn call_descriptor_delete(
     attr_name: &str,
 ) -> Result<Option<Result<()>>> {
     // property special-case.
-    if let Some((fdel, partial_slot)) =
+    if let Some((fdel, partial_slot, prop_name)) =
         pyrust_builtins::property::with_property(class_val, |s| {
-            (Rc::clone(&s.fdel), s.partial_slot)
+            (Rc::clone(&s.fdel), s.partial_slot, s.name.clone())
         })
         && partial_slot.is_none()
     {
         return Ok(Some(if fdel.is_none() {
             // CPython 3.12: `property 'x' of 'C' object has no deleter` (issue #1845).
+            // The name comes from __set_name__ (issue #1846); anonymous
+            // properties (never bound in a class body) use the unnamed form.
             let owner = value_type_name_str(&instance);
+            let prop_desc = match &prop_name {
+                Some(n) => format!("property '{n}'"),
+                None => "property".to_string(),
+            };
             Err(PyError::named(
                 "AttributeError",
-                format!("property '{attr_name}' of '{owner}' object has no deleter"),
+                format!("{prop_desc} of '{owner}' object has no deleter"),
             ))
         } else {
             let deleter = (*fdel).clone();
