@@ -395,233 +395,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             };
             Ok(Value::int(pos as i64))
         }
-        "seek" => {
-            let offset = args
-                .first()
-                .and_then(|v| match v.kind() {
-                    ValueKind::Int(n) => Some(n),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    PyError::named("TypeError", "seek() argument must be int".to_string())
-                })?;
-            let whence = args
-                .get(1)
-                .and_then(|v| match v.kind() {
-                    ValueKind::Int(n) => Some(n),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            let mut borrow = state.borrow_mut();
-            let s = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if s.closed {
-                return Err(PyError::named(
-                    "ValueError",
-                    "I/O operation on closed file.".to_string(),
-                ));
-            }
-            if s.is_readable() {
-                let content_len = if s.is_binary {
-                    s.content_bytes.len()
-                } else {
-                    s.content.len()
-                };
-                let new_pos = if s.is_binary {
-                    // Binary mode allows all seek forms with nonzero offsets
-                    match whence {
-                        0 => {
-                            if offset < 0 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!("negative seek position {offset}"),
-                                ));
-                            }
-                            (offset as usize).min(content_len)
-                        }
-                        1 => {
-                            let new = s.pos as i64 + offset;
-                            if new < 0 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!("negative seek position {new}"),
-                                ));
-                            }
-                            (new as usize).min(content_len)
-                        }
-                        2 => {
-                            let new = content_len as i64 + offset;
-                            if new < 0 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!("negative seek position {new}"),
-                                ));
-                            }
-                            (new as usize).min(content_len)
-                        }
-                        _ => {
-                            return Err(PyError::named(
-                                "ValueError",
-                                format!("invalid whence ({whence}, should be 0, 1 or 2)"),
-                            ));
-                        }
-                    }
-                } else {
-                    match whence {
-                        0 => {
-                            if offset < 0 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!("negative seek position {offset}"),
-                                ));
-                            }
-                            (offset as usize).min(content_len)
-                        }
-                        1 => {
-                            // Text mode only allows seek(0, 1)
-                            if offset != 0 {
-                                return Err(PyError::named(
-                                    "io.UnsupportedOperation",
-                                    "can't do nonzero cur-relative seeks".to_string(),
-                                ));
-                            }
-                            s.pos
-                        }
-                        2 => {
-                            // Text mode only allows seek(0, 2)
-                            if offset != 0 {
-                                return Err(PyError::named(
-                                    "io.UnsupportedOperation",
-                                    "can't do nonzero end-relative seeks".to_string(),
-                                ));
-                            }
-                            content_len
-                        }
-                        _ => {
-                            return Err(PyError::named(
-                                "ValueError",
-                                format!("invalid whence ({whence}, should be 0, 1 or 2)"),
-                            ));
-                        }
-                    }
-                };
-                s.pos = new_pos;
-                Ok(Value::int(new_pos as i64))
-            } else {
-                // Write / append mode: track position in write_buf
-                let buf_len = if s.is_binary {
-                    s.write_buf_bytes.len()
-                } else {
-                    s.write_buf.len()
-                };
-                let new_pos = match whence {
-                    0 => {
-                        if offset < 0 {
-                            return Err(PyError::named(
-                                "ValueError",
-                                format!("negative seek position {offset}"),
-                            ));
-                        }
-                        (offset as usize).min(buf_len)
-                    }
-                    1 => {
-                        if offset != 0 {
-                            return Err(PyError::named(
-                                "io.UnsupportedOperation",
-                                "can't do nonzero cur-relative seeks".to_string(),
-                            ));
-                        }
-                        buf_len
-                    }
-                    2 => {
-                        if offset != 0 {
-                            return Err(PyError::named(
-                                "io.UnsupportedOperation",
-                                "can't do nonzero end-relative seeks".to_string(),
-                            ));
-                        }
-                        buf_len
-                    }
-                    _ => {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("invalid whence ({whence}, should be 0, 1 or 2)"),
-                        ));
-                    }
-                };
-                // Truncate write buffer to new_pos (seek in write mode discards future bytes)
-                if s.is_binary {
-                    s.write_buf_bytes.truncate(new_pos);
-                } else {
-                    s.write_buf.truncate(new_pos);
-                }
-                Ok(Value::int(new_pos as i64))
-            }
-        }
-        "read" => {
-            let n = args.first().and_then(|v| match v.kind() {
-                ValueKind::Int(n) => Some(n),
-                _ => None,
-            });
-            let mut borrow = state.borrow_mut();
-            let s = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if s.closed {
-                return Err(PyError::named(
-                    "ValueError",
-                    "I/O operation on closed file.".to_string(),
-                ));
-            }
-            if !s.is_readable() {
-                return Err(PyError::named(
-                    "io.UnsupportedOperation",
-                    "not readable".to_string(),
-                ));
-            }
-            if s.is_binary {
-                let remaining = &s.content_bytes[s.pos..];
-                let take = match n {
-                    Some(n) if n >= 0 => remaining.len().min(n as usize),
-                    _ => remaining.len(),
-                };
-                let out = remaining[..take].to_vec();
-                s.pos += take;
-                return Ok(Value::bytes(out));
-            }
-            let bytes = s.content.as_bytes();
-            let remaining = &bytes[s.pos..];
-            let to_take = match n {
-                Some(n) if n >= 0 => remaining.len().min(n as usize),
-                _ => remaining.len(),
-            };
-            let mut take = 0usize;
-            let mut chars = 0usize;
-            let want_chars = match n {
-                Some(n) if n >= 0 => n as usize,
-                _ => usize::MAX,
-            };
-            for (i, _) in s.content[s.pos..].char_indices() {
-                if chars >= want_chars {
-                    take = i;
-                    break;
-                }
-                chars += 1;
-                take = i + s.content[s.pos + i..].chars().next().unwrap().len_utf8();
-                if chars >= want_chars {
-                    break;
-                }
-            }
-            let take = if n.is_some_and(|n| n >= 0) {
-                take
-            } else {
-                to_take
-            };
-            let out = s.content[s.pos..s.pos + take].to_string();
-            s.pos += take;
-            Ok(Value::string(out))
-        }
+        "seek" => file_seek(state, args),
+        "read" => file_read(state, args),
         "readline" => {
             let v = read_line_value(state)?;
             Ok(v.unwrap_or_else(|| {
@@ -642,114 +417,342 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             }
             Ok(Value::list(out))
         }
-        "write" => {
-            let mut borrow = state.borrow_mut();
-            let st = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if st.closed {
-                return Err(PyError::named(
-                    "ValueError",
-                    "I/O operation on closed file.".to_string(),
-                ));
-            }
-            if !st.is_write && !st.is_append {
-                return Err(PyError::named(
-                    "io.UnsupportedOperation",
-                    "not writable".to_string(),
-                ));
-            }
-            if st.is_binary {
-                // Binary mode: accept bytes, reject str
-                match args.first().map(|v| v.kind()) {
-                    Some(ValueKind::Bytes(rc)) => {
-                        let data = rc.as_slice().to_vec();
-                        let len = data.len() as i64;
-                        st.write_buf_bytes.extend_from_slice(&data);
-                        Ok(Value::int(len))
-                    }
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        "a bytes-like object is required, not 'str'".to_string(),
-                    )),
-                }
-            } else {
-                // Text mode: accept str, reject bytes
-                let arg = args.first();
-                match arg.map(|v| v.kind()) {
-                    Some(ValueKind::Bytes(_)) => Err(PyError::named(
-                        "TypeError",
-                        "write() argument must be str, not bytes".to_string(),
-                    )),
-                    _ => {
-                        let s = arg
-                            .and_then(|v| v.as_str().map(|s| s.to_string()))
-                            .ok_or_else(|| {
-                                PyError::named(
-                                    "TypeError",
-                                    "write() argument must be str".to_string(),
-                                )
-                            })?;
-                        let len = s.chars().count() as i64;
-                        st.write_buf.push_str(&s);
-                        Ok(Value::int(len))
-                    }
-                }
-            }
-        }
-        "writelines" => {
-            let lines = match args.first().map(|v| v.kind()) {
-                Some(ValueKind::List(items)) => items.clone(),
-                Some(ValueKind::Tuple(items)) => items.to_vec(),
-                _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "writelines() argument must be a list or tuple of str".to_string(),
-                    ));
-                }
-            };
-            let mut borrow = state.borrow_mut();
-            let st = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if st.closed {
-                return Err(PyError::named(
-                    "ValueError",
-                    "I/O operation on closed file.".to_string(),
-                ));
-            }
-            if st.is_binary {
-                for v in lines {
-                    match v.kind() {
-                        ValueKind::Bytes(rc) => st.write_buf_bytes.extend_from_slice(rc.as_slice()),
-                        _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "a bytes-like object is required, not 'str'".to_string(),
-                            ));
-                        }
-                    }
-                }
-            } else {
-                for v in lines {
-                    match v.kind() {
-                        ValueKind::Str(s) => st.write_buf.push_str(s),
-                        _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "writelines() requires str items".to_string(),
-                            ));
-                        }
-                    }
-                }
-            }
-            Ok(Value::none())
-        }
+        "write" => file_write(state, args),
+        "writelines" => file_writelines(state, args),
         _ => Err(PyError::named(
             "AttributeError",
             format!("'{TYPE_NAME}' object has no attribute '{method}'"),
         )),
     }
+}
+
+fn file_seek(state: &BuiltinState, args: &[Value]) -> Result<Value> {
+    let offset = args
+        .first()
+        .and_then(|v| match v.kind() {
+            ValueKind::Int(n) => Some(n),
+            _ => None,
+        })
+        .ok_or_else(|| PyError::named("TypeError", "seek() argument must be int".to_string()))?;
+    let whence = args
+        .get(1)
+        .and_then(|v| match v.kind() {
+            ValueKind::Int(n) => Some(n),
+            _ => None,
+        })
+        .unwrap_or(0);
+    let mut borrow = state.borrow_mut();
+    let s = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Err(PyError::named(
+            "ValueError",
+            "I/O operation on closed file.".to_string(),
+        ));
+    }
+    if s.is_readable() {
+        let content_len = if s.is_binary {
+            s.content_bytes.len()
+        } else {
+            s.content.len()
+        };
+        let new_pos = if s.is_binary {
+            // Binary mode allows all seek forms with nonzero offsets
+            match whence {
+                0 => {
+                    if offset < 0 {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("negative seek position {offset}"),
+                        ));
+                    }
+                    (offset as usize).min(content_len)
+                }
+                1 => {
+                    let new = s.pos as i64 + offset;
+                    if new < 0 {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("negative seek position {new}"),
+                        ));
+                    }
+                    (new as usize).min(content_len)
+                }
+                2 => {
+                    let new = content_len as i64 + offset;
+                    if new < 0 {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("negative seek position {new}"),
+                        ));
+                    }
+                    (new as usize).min(content_len)
+                }
+                _ => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!("invalid whence ({whence}, should be 0, 1 or 2)"),
+                    ));
+                }
+            }
+        } else {
+            match whence {
+                0 => {
+                    if offset < 0 {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("negative seek position {offset}"),
+                        ));
+                    }
+                    (offset as usize).min(content_len)
+                }
+                1 => {
+                    // Text mode only allows seek(0, 1)
+                    if offset != 0 {
+                        return Err(PyError::named(
+                            "io.UnsupportedOperation",
+                            "can't do nonzero cur-relative seeks".to_string(),
+                        ));
+                    }
+                    s.pos
+                }
+                2 => {
+                    // Text mode only allows seek(0, 2)
+                    if offset != 0 {
+                        return Err(PyError::named(
+                            "io.UnsupportedOperation",
+                            "can't do nonzero end-relative seeks".to_string(),
+                        ));
+                    }
+                    content_len
+                }
+                _ => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!("invalid whence ({whence}, should be 0, 1 or 2)"),
+                    ));
+                }
+            }
+        };
+        s.pos = new_pos;
+        Ok(Value::int(new_pos as i64))
+    } else {
+        // Write / append mode: track position in write_buf
+        let buf_len = if s.is_binary {
+            s.write_buf_bytes.len()
+        } else {
+            s.write_buf.len()
+        };
+        let new_pos = match whence {
+            0 => {
+                if offset < 0 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!("negative seek position {offset}"),
+                    ));
+                }
+                (offset as usize).min(buf_len)
+            }
+            1 => {
+                if offset != 0 {
+                    return Err(PyError::named(
+                        "io.UnsupportedOperation",
+                        "can't do nonzero cur-relative seeks".to_string(),
+                    ));
+                }
+                buf_len
+            }
+            2 => {
+                if offset != 0 {
+                    return Err(PyError::named(
+                        "io.UnsupportedOperation",
+                        "can't do nonzero end-relative seeks".to_string(),
+                    ));
+                }
+                buf_len
+            }
+            _ => {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!("invalid whence ({whence}, should be 0, 1 or 2)"),
+                ));
+            }
+        };
+        // Truncate write buffer to new_pos (seek in write mode discards future bytes)
+        if s.is_binary {
+            s.write_buf_bytes.truncate(new_pos);
+        } else {
+            s.write_buf.truncate(new_pos);
+        }
+        Ok(Value::int(new_pos as i64))
+    }
+}
+
+fn file_read(state: &BuiltinState, args: &[Value]) -> Result<Value> {
+    let n = args.first().and_then(|v| match v.kind() {
+        ValueKind::Int(n) => Some(n),
+        _ => None,
+    });
+    let mut borrow = state.borrow_mut();
+    let s = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Err(PyError::named(
+            "ValueError",
+            "I/O operation on closed file.".to_string(),
+        ));
+    }
+    if !s.is_readable() {
+        return Err(PyError::named(
+            "io.UnsupportedOperation",
+            "not readable".to_string(),
+        ));
+    }
+    if s.is_binary {
+        let remaining = &s.content_bytes[s.pos..];
+        let take = match n {
+            Some(n) if n >= 0 => remaining.len().min(n as usize),
+            _ => remaining.len(),
+        };
+        let out = remaining[..take].to_vec();
+        s.pos += take;
+        return Ok(Value::bytes(out));
+    }
+    let bytes = s.content.as_bytes();
+    let remaining = &bytes[s.pos..];
+    let to_take = match n {
+        Some(n) if n >= 0 => remaining.len().min(n as usize),
+        _ => remaining.len(),
+    };
+    let mut take = 0usize;
+    let mut chars = 0usize;
+    let want_chars = match n {
+        Some(n) if n >= 0 => n as usize,
+        _ => usize::MAX,
+    };
+    for (i, _) in s.content[s.pos..].char_indices() {
+        if chars >= want_chars {
+            take = i;
+            break;
+        }
+        chars += 1;
+        take = i + s.content[s.pos + i..].chars().next().unwrap().len_utf8();
+        if chars >= want_chars {
+            break;
+        }
+    }
+    let take = if n.is_some_and(|n| n >= 0) {
+        take
+    } else {
+        to_take
+    };
+    let out = s.content[s.pos..s.pos + take].to_string();
+    s.pos += take;
+    Ok(Value::string(out))
+}
+
+fn file_write(state: &BuiltinState, args: &[Value]) -> Result<Value> {
+    let mut borrow = state.borrow_mut();
+    let st = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+    if st.closed {
+        return Err(PyError::named(
+            "ValueError",
+            "I/O operation on closed file.".to_string(),
+        ));
+    }
+    if !st.is_write && !st.is_append {
+        return Err(PyError::named(
+            "io.UnsupportedOperation",
+            "not writable".to_string(),
+        ));
+    }
+    if st.is_binary {
+        // Binary mode: accept bytes, reject str
+        match args.first().map(|v| v.kind()) {
+            Some(ValueKind::Bytes(rc)) => {
+                let data = rc.as_slice().to_vec();
+                let len = data.len() as i64;
+                st.write_buf_bytes.extend_from_slice(&data);
+                Ok(Value::int(len))
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                "a bytes-like object is required, not 'str'".to_string(),
+            )),
+        }
+    } else {
+        // Text mode: accept str, reject bytes
+        let arg = args.first();
+        match arg.map(|v| v.kind()) {
+            Some(ValueKind::Bytes(_)) => Err(PyError::named(
+                "TypeError",
+                "write() argument must be str, not bytes".to_string(),
+            )),
+            _ => {
+                let s = arg
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+                    .ok_or_else(|| {
+                        PyError::named("TypeError", "write() argument must be str".to_string())
+                    })?;
+                let len = s.chars().count() as i64;
+                st.write_buf.push_str(&s);
+                Ok(Value::int(len))
+            }
+        }
+    }
+}
+
+fn file_writelines(state: &BuiltinState, args: &[Value]) -> Result<Value> {
+    let lines = match args.first().map(|v| v.kind()) {
+        Some(ValueKind::List(items)) => items.clone(),
+        Some(ValueKind::Tuple(items)) => items.to_vec(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "writelines() argument must be a list or tuple of str".to_string(),
+            ));
+        }
+    };
+    let mut borrow = state.borrow_mut();
+    let st = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+    if st.closed {
+        return Err(PyError::named(
+            "ValueError",
+            "I/O operation on closed file.".to_string(),
+        ));
+    }
+    if st.is_binary {
+        for v in lines {
+            match v.kind() {
+                ValueKind::Bytes(rc) => st.write_buf_bytes.extend_from_slice(rc.as_slice()),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "a bytes-like object is required, not 'str'".to_string(),
+                    ));
+                }
+            }
+        }
+    } else {
+        for v in lines {
+            match v.kind() {
+                ValueKind::Str(s) => st.write_buf.push_str(s),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "writelines() requires str items".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(Value::none())
 }
 
 /// Read the next line from a file and return it as the appropriate Value type
