@@ -1533,6 +1533,14 @@ impl Interpreter {
                     };
                     regs[*dst as usize] = result;
                 }
+                Insn::MatchSeqExcluded(dst, subj) => {
+                    // isinstance(subj, (str, bytes, dict, set, frozenset)) —
+                    // the sequence-pattern type exclusion (issue #1789).  No
+                    // global lookups, no tuple build, no isinstance call.
+                    let subj_val = vm_try!(vm_read(&regs, *subj, num_locals));
+                    let excluded = crate::interpreter::value_is_seq_excluded(&subj_val);
+                    regs[*dst as usize] = Value::bool_(excluded);
+                }
 
                 // ── String concat (single allocation) ────────────────────
                 Insn::Concat { dst, base, count } => {

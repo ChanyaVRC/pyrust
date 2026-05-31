@@ -6439,50 +6439,17 @@ impl Compiler {
                 // PEP 634 §3: str, bytes, dict, set, and frozenset are excluded
                 // from sequence pattern matching. str/bytes are text sequences;
                 // dict/set/frozenset support len() but not integer indexing.
-                // Emit isinstance(subj, (str, bytes, dict, set, frozenset)) and
-                // jump to the fail label if true.
+                // A single `MatchSeqExcluded` instruction computes
+                // `isinstance(subj, (str, bytes, dict, set, frozenset))` directly
+                // — no per-arm `LoadGlobal`/`BuildTuple`/`Call` to rebuild the
+                // exclusion tuple on every match execution (issue #1789).  If
+                // subj IS one of the excluded types, jump to the fail label.
                 {
-                    let isinstance_name_idx = self.intern_name("isinstance");
-                    let isinstance_fn = self.alloc_temp();
-                    self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
-                    let arg0 = self.alloc_temp();
-                    self.emit(Insn::Move(arg0, subj));
-                    // Build a (str, bytes, dict, set, frozenset) tuple in consecutive
-                    // slots right after arg0.  PEP 634 §3 excludes str/bytes as text
-                    // sequences; dict/set/frozenset are excluded because they are
-                    // mapping or unordered collection types that support len() but not
-                    // integer indexing — d[0] raises KeyError, s[0] raises TypeError.
-                    // CPython distinguishes these via the tp_as_sequence slot.
-                    let str_slot = self.alloc_temp();
-                    let str_name_idx = self.intern_name("str");
-                    self.emit(Insn::LoadGlobal(str_slot, str_name_idx));
-                    let bytes_slot = self.alloc_temp();
-                    let bytes_name_idx = self.intern_name("bytes");
-                    self.emit(Insn::LoadGlobal(bytes_slot, bytes_name_idx));
-                    let dict_slot = self.alloc_temp();
-                    let dict_name_idx = self.intern_name("dict");
-                    self.emit(Insn::LoadGlobal(dict_slot, dict_name_idx));
-                    let set_slot = self.alloc_temp();
-                    let set_name_idx = self.intern_name("set");
-                    self.emit(Insn::LoadGlobal(set_slot, set_name_idx));
-                    let frozenset_slot = self.alloc_temp();
-                    let frozenset_name_idx = self.intern_name("frozenset");
-                    self.emit(Insn::LoadGlobal(frozenset_slot, frozenset_name_idx));
-                    // Collapse all five consecutive slots into a single tuple at str_slot.
-                    self.emit(Insn::BuildTuple(str_slot, str_slot, 5));
-                    // str_slot is now arg1 = (str, bytes, dict, set, frozenset); free
-                    // the remaining allocated slots LIFO before the call.
-                    self.free_temp(frozenset_slot);
-                    self.free_temp(set_slot);
-                    self.free_temp(dict_slot);
-                    self.free_temp(bytes_slot);
-                    self.emit(Insn::Call(isinstance_fn, 2));
-                    self.free_temp(str_slot);
-                    self.free_temp(arg0);
-                    // If subj IS one of the excluded types, jump to the fail label.
-                    let jmp = self.emit(Insn::JumpIfTrue(isinstance_fn, 0));
+                    let excluded = self.alloc_temp();
+                    self.emit(Insn::MatchSeqExcluded(excluded, subj));
+                    let jmp = self.emit(Insn::JumpIfTrue(excluded, 0));
                     fail_patches.push(jmp);
-                    self.free_temp(isinstance_fn);
+                    self.free_temp(excluded);
                 }
 
                 // Check that subject has exactly `fixed_count` elements
