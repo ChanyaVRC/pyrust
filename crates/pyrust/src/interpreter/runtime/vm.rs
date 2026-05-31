@@ -3367,6 +3367,258 @@ impl Interpreter {
         }
     }
 
+    /// Tag for a receiver that the `CallMethod*` opcodes dispatch through the
+    /// unified builtin-container path (`dispatch_builtin_container_method`).
+    ///
+    /// `1=List 2=Dict 3=Tuple 4=Str 5=Set`, `0` = anything else (PyInstance,
+    /// generator, BuiltinObject, …) which is handled by each opcode's own
+    /// fall-through arm (those arms differ: only the no-kwargs opcode carries
+    /// the attr inline cache + #976 backing-primitive fast path).
+    #[inline(always)]
+    fn builtin_container_tag(v: Option<&Value>) -> u8 {
+        v.map(|v| match v.kind() {
+            ValueKind::List(_) => 1u8,
+            ValueKind::Dict(_) => 2u8,
+            ValueKind::Tuple(_) => 3u8,
+            ValueKind::Str(_) => 4u8,
+            ValueKind::Set(_) => 5u8,
+            _ => 0u8,
+        })
+        .unwrap_or(0)
+    }
+
+    /// Shared dispatch body for method calls on the five tagged builtin
+    /// container types (`list` / `dict` / `tuple` / `str` / `set`).  Both
+    /// `Insn::CallMethod` (no kwargs) and `Insn::CallMethodExpanded`
+    /// (kwargs / unpacking) route here once they have materialised the
+    /// receiver, positional args, and keyword map — so the dispatch decision
+    /// lives in exactly one place (#431).
+    ///
+    /// Caller guarantees `obj_kind_tag` is `1..=5` and `receiver`'s kind
+    /// matches the tag.  `__iter__` is handled by the callers before this
+    /// point (it needs no kwargs and is identical on both opcodes).
+    ///
+    /// The "needs interpreter" vs "needs Rc backing" vs "pure builtin"
+    /// decision is predicate-driven via the `pyrust-builtins::<type>` modules
+    /// (`list::requires_interpreter`, `dict::needs_rc`,
+    /// `string::requires_vm_template`) — the single source of truth documented
+    /// in `crates/pyrust-builtins/README.md`.
+    fn dispatch_builtin_container_method(
+        &mut self,
+        obj_kind_tag: u8,
+        receiver: Value,
+        method: &str,
+        pos: Vec<Value>,
+        kw: &IndexMap<PyKey, Value>,
+    ) -> Result<Value> {
+        match obj_kind_tag {
+            1 => {
+                if pyrust_builtins::list::requires_interpreter(method) {
+                    // `index` / `count` may fire user `__eq__`; `sort(key=)`
+                    // runs a user callable.  The interpreter-free `call` cannot
+                    // reach user code, so take the interpreter-aware path.
+                    if method == "sort" {
+                        return self.list_sort_with_kwargs(&receiver, pos, kw);
+                    }
+                    // index / count: peek to decide whether values_user_eq
+                    // dispatch is needed (resolve_seq_index_pos only touches
+                    // pos[1..], so pos[0] (the target) is stable).
+                    let needs_dispatch = pos
+                        .first()
+                        .map(|t| {
+                            receiver
+                                .list_with(|items| Self::seq_search_needs_dispatch(t, items))
+                                .unwrap_or(true)
+                        })
+                        .unwrap_or(false);
+                    let pos = if method == "index" {
+                        self.resolve_seq_index_pos(pos)?
+                    } else {
+                        pos
+                    };
+                    if needs_dispatch {
+                        let snapshot: Vec<Value> =
+                            receiver.list_with(|items| items.to_vec()).ok_or_else(|| {
+                                PyError::named(
+                                    "TypeError",
+                                    "list.index receiver is not a list".to_string(),
+                                )
+                            })?;
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &pos, "list")
+                        } else {
+                            self.call_seq_count(snapshot, &pos, "list")
+                        }
+                    } else {
+                        pyrust_builtins::list::call(method, &receiver, pos, kw)
+                    }
+                } else {
+                    pyrust_builtins::list::call(method, &receiver, pos, kw)
+                }
+            }
+            2 => {
+                if pyrust_builtins::dict::needs_rc(method) {
+                    // Lazy views need the Rc to share storage with the source
+                    // dict — the regular dispatch path only sees a Vec snapshot.
+                    let rc = receiver
+                        .get_dict_rc()
+                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
+                        .clone();
+                    return match method {
+                        "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
+                        "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
+                        "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
+                        _ => unreachable!(),
+                    };
+                }
+                self.call_dict_method(method, receiver, pos, kw)
+            }
+            3 => {
+                // Snapshot the tuple's items once so the `&[Value]` borrow does
+                // not straddle the `&mut self` calls below.  Tuples are
+                // immutable, so the snapshot is exact.
+                let items: Vec<Value> = match receiver.kind() {
+                    ValueKind::Tuple(items) => items.to_vec(),
+                    _ => return Err(PyError::Runtime("internal: expected tuple".to_string())),
+                };
+                if method == "index" || method == "count" {
+                    let needs_dispatch = pos
+                        .first()
+                        .map(|t| Self::seq_search_needs_dispatch(t, &items))
+                        .unwrap_or(false);
+                    let pos = if method == "index" {
+                        self.resolve_seq_index_pos(pos)?
+                    } else {
+                        pos
+                    };
+                    if needs_dispatch {
+                        if method == "index" {
+                            self.call_seq_index(items, &pos, "tuple")
+                        } else {
+                            self.call_seq_count(items, &pos, "tuple")
+                        }
+                    } else {
+                        pyrust_builtins::tuple::call(method, &items, pos)
+                    }
+                } else {
+                    pyrust_builtins::tuple::call(method, &items, pos)
+                }
+            }
+            4 => {
+                if pyrust_builtins::string::requires_vm_template(method) {
+                    return self.str_template_method(&receiver, method, pos, kw);
+                }
+                if kw.is_empty() {
+                    self.call_str_method(method, receiver, pos)
+                } else {
+                    let mut pos = pos;
+                    str_merge_kwargs(method, &mut pos, kw.clone())?;
+                    self.call_str_method(method, receiver, pos)
+                }
+            }
+            5 => self.call_set_method(method, receiver, pos),
+            _ => Err(PyError::Runtime(
+                "dispatch_builtin_container_method called with non-container tag".to_string(),
+            )),
+        }
+    }
+
+    /// `list.sort(...)` with possible `key=` / `reverse=` kwargs.  Both opcodes
+    /// share this (#431).  The no-kwargs opcode passes an empty `kw`, reducing
+    /// this to a plain `pyrust_builtins::list::call("sort", …)`.
+    fn list_sort_with_kwargs(
+        &mut self,
+        receiver: &Value,
+        pos: Vec<Value>,
+        kw: &IndexMap<PyKey, Value>,
+    ) -> Result<Value> {
+        // StrKey probes (issue #506): zero-alloc borrowed-str lookup — no
+        // PyKey::Str(Value) RC bump on every sort call.
+        for k in kw.keys() {
+            if let PyKey::Str(s) = k {
+                let s = s.as_str().unwrap_or("");
+                if s != "key" && s != "reverse" {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("sort() got an unexpected keyword argument '{s}'"),
+                    ));
+                }
+            }
+        }
+        let key_fn = kw.get(&StrKey("key")).cloned();
+        let reverse = kw.get(&StrKey("reverse")).map(|v| v.truthy()).unwrap_or(false);
+        if let Some(key_fn_val) = key_fn {
+            // Compute keys via the interpreter, then delegate sorting to builtins.
+            let items_snapshot: Vec<Value> = receiver
+                .list_with(|items| items.to_vec())
+                .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+            let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
+            for item in &items_snapshot {
+                let key_val = {
+                    let mut buf = std::mem::take(&mut self.call_arg_buf);
+                    buf.clear();
+                    buf.push(ExpandedCallArg { name: None, value: item.clone() });
+                    let r = self.call_function_expanded(key_fn_val.clone(), &buf);
+                    self.call_arg_buf = buf;
+                    r?
+                };
+                keys.push(key_val);
+            }
+            return pyrust_builtins::list::sort_with_precomputed_keys(receiver, keys, reverse);
+        }
+        // No key: delegate to builtins (handles reverse kwarg).
+        pyrust_builtins::list::call("sort", receiver, pos, kw)
+    }
+
+    /// `str.format` / `str.format_map` / `str.maketrans` — the templating
+    /// methods that must run in the interpreter rather than
+    /// `pyrust_builtins::string::call`.  Both opcodes share this (#431).
+    /// Caller guarantees `string::requires_vm_template(method)`.
+    fn str_template_method(
+        &mut self,
+        receiver: &Value,
+        method: &str,
+        pos: Vec<Value>,
+        kw: &IndexMap<PyKey, Value>,
+    ) -> Result<Value> {
+        match method {
+            "format" => {
+                let mut keyword: Vec<(String, Value)> = Vec::with_capacity(kw.len());
+                for (k, v) in kw {
+                    if let PyKey::Str(name) = k {
+                        keyword.push((name.as_str().unwrap_or("").to_owned(), v.clone()));
+                    }
+                }
+                let template = receiver
+                    .as_str()
+                    .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
+                self.format_str_template(template, &pos, &keyword)
+            }
+            "format_map" => {
+                if pos.len() != 1 || !kw.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "str.format_map() takes exactly one argument ({} given)",
+                            pos.len() + kw.len()
+                        ),
+                    ));
+                }
+                let mapping = pos.into_iter().next().unwrap();
+                let template = receiver
+                    .as_str()
+                    .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
+                    .to_string();
+                self.format_str_template_map(&template, mapping)
+            }
+            // `maketrans` is a staticmethod on str: the receiver is discarded
+            // and the call is forwarded to str_maketrans exactly like
+            // `str.maketrans(...)` would be.
+            "maketrans" => pyrust_builtins::string::str_maketrans(&pos),
+            _ => unreachable!("str_template_method called with non-template method"),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn exec_call_method(
         &mut self,
@@ -3388,14 +3640,7 @@ impl Interpreter {
             args.push(vm_read(regs, args_base + i, num_locals)?);
         }
         // Check if obj is a List, Dict, Tuple, Str, or Set via kind()
-        let obj_kind_tag = regs[obj as usize].as_some().map(|v| match v.kind() {
-            ValueKind::List(_) => 1u8,
-            ValueKind::Dict(_) => 2u8,
-            ValueKind::Tuple(_) => 3u8,
-            ValueKind::Str(_) => 4u8,
-            ValueKind::Set(_) => 5u8,
-            _ => 0u8,
-        }).unwrap_or(0);
+        let obj_kind_tag = Self::builtin_container_tag(regs[obj as usize].as_some());
 
         // No upfront unalias needed (#448): each builtin scopes its
         // own `RefCell::borrow_mut()` and snapshots iterable args
@@ -3418,134 +3663,25 @@ impl Interpreter {
             return dispatch(self, &[iter_arg]);
         }
 
-        match obj_kind_tag {
-            1 => {
-                let receiver = regs[obj as usize].clone();
-                let empty_kw = indexmap::IndexMap::new();
-                if method == "index" || method == "count" {
-                    // Peek at target + items without cloning to decide if
-                    // values_user_eq dispatch is needed. resolve_seq_index_pos
-                    // only touches args[1..] so args[0] (target) is stable.
-                    let needs_dispatch = args.first().map(|t| {
-                        receiver
-                            .list_with(|items| Self::seq_search_needs_dispatch(t, items))
-                            .unwrap_or(true)
-                    }).unwrap_or(false);
-                    let args = if method == "index" {
-                        self.resolve_seq_index_pos(args)?
-                    } else {
-                        args
-                    };
-                    if needs_dispatch {
-                        let snapshot = receiver
-                            .list_with(|items| items.clone())
-                            .ok_or_else(|| {
-                                PyError::named(
-                                    "TypeError",
-                                    "list.index receiver is not a list".to_string(),
-                                )
-                            })?;
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &args, "list")
-                        } else {
-                            self.call_seq_count(snapshot, &args, "list")
-                        }
-                    } else {
-                        pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
-                    }
-                } else {
-                    pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
-                }
-            }
-            2 => {
-                if matches!(method, "keys" | "values" | "items") {
-                    // Lazy views need the Rc to share storage with the
-                    // source dict — separate from the regular method
-                    // dispatch path, which only sees the Vec<Value> form.
-                    let rc = regs[obj as usize]
-                        .get_dict_rc()
-                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
-                        .clone();
-                    return match method {
-                        "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
-                        "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
-                        "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
-                        _ => unreachable!(),
-                    };
-                }
-                let receiver = vm_read(regs, obj, num_locals)?;
-                let empty_kw = indexmap::IndexMap::new();
-                self.call_dict_method(method, receiver, args, &empty_kw)
-            }
-            3 => {
-                if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
-                    if method == "index" || method == "count" {
-                        let needs_dispatch = args
-                            .first()
-                            .map(|t| Self::seq_search_needs_dispatch(t, &items))
-                            .unwrap_or(false);
-                        let args = if method == "index" {
-                            self.resolve_seq_index_pos(args)?
-                        } else {
-                            args
-                        };
-                        if needs_dispatch {
-                            let snapshot = items.to_vec();
-                            if method == "index" {
-                                self.call_seq_index(snapshot, &args, "tuple")
-                            } else {
-                                self.call_seq_count(snapshot, &args, "tuple")
-                            }
-                        } else {
-                            pyrust_builtins::tuple::call(method, items, args)
-                        }
-                    } else {
-                        pyrust_builtins::tuple::call(method, items, args)
-                    }
-                } else {
-                    unreachable!()
-                }
-            }
-            4 => {
-                if method == "format" {
-                    let template = regs[obj as usize]
-                        .as_str()
-                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
-                    return self.format_str_template(template, &args, &[]);
-                }
-                if method == "format_map" {
-                    if args.len() != 1 {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "str.format_map() takes exactly one argument ({} given)",
-                                args.len()
-                            ),
-                        ));
-                    }
-                    let mapping = args.into_iter().next().unwrap();
-                    let template = regs[obj as usize]
-                        .as_str()
-                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
-                        .to_string();
-                    return self.format_str_template_map(&template, mapping);
-                }
-                // `maketrans` is a staticmethod on str: the receiver is discarded
-                // and the call is forwarded to str_maketrans exactly like
-                // `str.maketrans(...)` would be.
-                if method == "maketrans" {
-                    return pyrust_builtins::string::str_maketrans(&args);
-                }
-                let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_str_method(method, receiver, args)
-            }
-            5 => {
-                let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_set_method(method, receiver, args)
-            }
-            _ => {
-                use pyrust_core::UserFunctionKind;
-                use crate::bytecode::AttrCacheEntry;
+        // Tagged builtin containers share their dispatch body with the
+        // expanded opcode (#431).  The no-kwargs path passes an empty kwargs
+        // map; `IndexMap::new()` does not allocate until the first insert, so
+        // the hot path stays cheap.
+        if obj_kind_tag != 0 {
+            let receiver = regs[obj as usize].clone();
+            let empty_kw = IndexMap::new();
+            return self.dispatch_builtin_container_method(
+                obj_kind_tag,
+                receiver,
+                method,
+                args,
+                &empty_kw,
+            );
+        }
+
+        {
+            use pyrust_core::UserFunctionKind;
+            use crate::bytecode::AttrCacheEntry;
 
                 // Generator methods (close, throw, __next__, __iter__) are
                 // dispatched directly here — they need access to the VM/frame
@@ -3762,7 +3898,6 @@ impl Interpreter {
                 }
 
                 r
-            }
         }
     }
 
@@ -3792,14 +3927,7 @@ impl Interpreter {
             _ => return Err(PyError::Runtime("CallMethodExpanded: kw_dict must be a dict".to_string())),
         };
 
-        let obj_kind_tag = regs[obj as usize].as_some().map(|v| match v.kind() {
-            ValueKind::List(_) => 1u8,
-            ValueKind::Dict(_) => 2u8,
-            ValueKind::Tuple(_) => 3u8,
-            ValueKind::Str(_) => 4u8,
-            ValueKind::Set(_) => 5u8,
-            _ => 0u8,
-        }).unwrap_or(0);
+        let obj_kind_tag = Self::builtin_container_tag(regs[obj as usize].as_some());
 
         // No upfront unalias needed (#448): each builtin scopes its
         // own `borrow_mut()` and snapshots iterables before opening
@@ -3826,183 +3954,20 @@ impl Interpreter {
             return dispatch(self, &[iter_arg]);
         }
 
-        match obj_kind_tag {
-            1 => {
-                let receiver = regs[obj as usize].clone();
-                // Intercept list.sort here to support key= (needs interpreter access).
-                if method == "sort" {
-                    // StrKey probes (issue #506): zero-alloc borrowed-str lookup
-                    // — no PyKey::Str(Value) RC bump on every sort call,
-                    // superseding the prior LazyLock approach (which still paid
-                    // a one-time String allocation per static).
-                    for k in kw_map.keys() {
-                        if let PyKey::Str(s) = k {
-                            let s = s.as_str().unwrap_or("");
-                            if s != "key" && s != "reverse" {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!("sort() got an unexpected keyword argument '{s}'"),
-                                ));
-                            }
-                        }
-                    }
-                    let key_fn = kw_map.get(&StrKey("key")).cloned();
-                    let reverse = kw_map
-                        .get(&StrKey("reverse"))
-                        .map(|v| v.truthy())
-                        .unwrap_or(false);
-                    if let Some(key_fn_val) = key_fn {
-                        // Compute keys via the interpreter, then delegate sorting to builtins.
-                        let items_snapshot = receiver
-                            .list_with(|items| items.clone())
-                            .ok_or_else(|| {
-                                PyError::Runtime("internal: expected list".to_string())
-                            })?;
-                        let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
-                        for item in &items_snapshot {
-                            let key_val = {
-                                let mut buf = std::mem::take(&mut self.call_arg_buf);
-                                buf.clear();
-                                buf.push(ExpandedCallArg {
-                                    name: None,
-                                    value: item.clone(),
-                                });
-                                let r = self.call_function_expanded(key_fn_val.clone(), &buf);
-                                self.call_arg_buf = buf;
-                                r?
-                            };
-                            keys.push(key_val);
-                        }
-                        return pyrust_builtins::list::sort_with_precomputed_keys(
-                            &receiver, keys, reverse,
-                        );
-                    }
-                    // No key: delegate to builtins (handles reverse kwarg)
-                    return pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map);
-                }
-                if method == "index" || method == "count" {
-                    let needs_dispatch = pos_items.first().map(|t| {
-                        receiver
-                            .list_with(|items| Self::seq_search_needs_dispatch(t, items))
-                            .unwrap_or(true)
-                    }).unwrap_or(false);
-                    let pos_items = if method == "index" {
-                        self.resolve_seq_index_pos(pos_items)?
-                    } else {
-                        pos_items
-                    };
-                    if needs_dispatch {
-                        let snapshot = receiver
-                            .list_with(|items| items.clone())
-                            .ok_or_else(|| {
-                                PyError::named(
-                                    "TypeError",
-                                    "list.index receiver is not a list".to_string(),
-                                )
-                            })?;
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &pos_items, "list")
-                        } else {
-                            self.call_seq_count(snapshot, &pos_items, "list")
-                        }
-                    } else {
-                        pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
-                    }
-                } else {
-                    pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
-                }
-            }
-            2 => {
-                if matches!(method, "keys" | "values" | "items") {
-                    // Lazy views need the Rc to share storage with the
-                    // source dict — see `exec_call_method`.
-                    let rc = regs[obj as usize]
-                        .get_dict_rc()
-                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
-                        .clone();
-                    return match method {
-                        "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
-                        "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
-                        "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
-                        _ => unreachable!(),
-                    };
-                }
-                let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_dict_method(method, receiver, pos_items, &kw_map)
-            }
-            3 => {
-                if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
-                    if method == "index" || method == "count" {
-                        let needs_dispatch = pos_items
-                            .first()
-                            .map(|t| Self::seq_search_needs_dispatch(t, &items))
-                            .unwrap_or(false);
-                        let pos_items = if method == "index" {
-                            self.resolve_seq_index_pos(pos_items)?
-                        } else {
-                            pos_items
-                        };
-                        if needs_dispatch {
-                            let snapshot = items.to_vec();
-                            if method == "index" {
-                                self.call_seq_index(snapshot, &pos_items, "tuple")
-                            } else {
-                                self.call_seq_count(snapshot, &pos_items, "tuple")
-                            }
-                        } else {
-                            pyrust_builtins::tuple::call(method, items, pos_items)
-                        }
-                    } else {
-                        pyrust_builtins::tuple::call(method, items, pos_items)
-                    }
-                } else {
-                    Err(PyError::Runtime("internal: expected tuple".to_string()))
-                }
-            }
-            4 => {
-                if method == "format" {
-                    let mut keyword: Vec<(String, Value)> = Vec::with_capacity(kw_map.len());
-                    for (k, v) in &kw_map {
-                        if let PyKey::Str(name) = k {
-                            keyword.push((name.as_str().unwrap_or("").to_owned(), v.clone()));
-                        }
-                    }
-                    let template = regs[obj as usize]
-                        .as_str()
-                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
-                    return self.format_str_template(template, &pos_items, &keyword);
-                }
-                if method == "format_map" {
-                    if pos_items.len() != 1 || !kw_map.is_empty() {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "str.format_map() takes exactly one argument ({} given)",
-                                pos_items.len() + kw_map.len()
-                            ),
-                        ));
-                    }
-                    let mapping = pos_items.into_iter().next().unwrap();
-                    let template = regs[obj as usize]
-                        .as_str()
-                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
-                        .to_string();
-                    return self.format_str_template_map(&template, mapping);
-                }
-                let receiver = vm_read(regs, obj, num_locals)?;
-                if kw_map.is_empty() {
-                    self.call_str_method(method, receiver, pos_items)
-                } else {
-                    let mut pos = pos_items;
-                    str_merge_kwargs(method, &mut pos, kw_map)?;
-                    self.call_str_method(method, receiver, pos)
-                }
-            }
-            5 => {
-                let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_set_method(method, receiver, pos_items)
-            }
-            _ => {
+        // Tagged builtin containers share their dispatch body with the
+        // no-kwargs opcode (#431).
+        if obj_kind_tag != 0 {
+            let receiver = regs[obj as usize].clone();
+            return self.dispatch_builtin_container_method(
+                obj_kind_tag,
+                receiver,
+                method,
+                pos_items,
+                &kw_map,
+            );
+        }
+
+        {
                 // Generator methods — see `exec_call_method` for context.
                 let is_generator = matches!(
                     regs[obj as usize].as_some().map(|v| v.kind()),
@@ -4036,7 +4001,6 @@ impl Interpreter {
                 let r = self.call_function_expanded(method_val, &buf);
                 self.call_arg_buf = buf;
                 r
-            }
         }
     }
 
