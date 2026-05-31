@@ -6340,6 +6340,388 @@ impl Compiler {
     /// On mismatch, jumps via newly-pushed entries in `fail_patches`
     /// (caller will patch them all to the next arm).
     /// On match, binds any capture variables and falls through.
+    /// Compile an OR pattern (`a | b | c`): validate alternatives bind the same
+    /// names, then try each in turn, jumping to success on the first match.
+    fn compile_or_pattern(
+        &mut self,
+        subj: Reg,
+        alternatives: &[Pattern],
+        fail_patches: &mut Vec<usize>,
+    ) {
+        // Validate that every alternative binds the same set of names
+        // (PEP 634; CPython 3.12 raises SyntaxError if they differ).
+        //
+        // Check first: a bare name capture or wildcard in a non-last
+        // position makes every subsequent alternative unreachable —
+        // CPython 3.12 emits a dedicated message for each case,
+        // distinct from the generic "bind different names" error.
+        let non_last = alternatives.len().saturating_sub(1);
+        for alt in alternatives.iter().take(non_last) {
+            // Recurse into the leading edge of nested OR patterns so that
+            // `case (x | 1) | z:` is caught the same way as `case x | z:`.
+            if let Some(name) = or_leading_capture(alt) {
+                self.set_syntax_error(&format!(
+                    "name capture '{}' makes remaining patterns unreachable",
+                    name
+                ));
+                return;
+            }
+            if or_leading_is_wildcard(alt) {
+                self.set_syntax_error("wildcard makes remaining patterns unreachable");
+                return;
+            }
+        }
+        if let Some(first) = alternatives.first() {
+            let first_names = pattern_bound_names(first);
+            for alt in alternatives.iter().skip(1) {
+                if pattern_bound_names(alt) != first_names {
+                    self.set_syntax_error("alternative patterns bind different names");
+                    return;
+                }
+            }
+        }
+        // Try each alternative; if one matches, jump to success.
+        // If all fail, fall through to after (which will be patched to next arm).
+        let mut success_patches: Vec<usize> = Vec::new();
+        let n = alternatives.len();
+        for (i, alt) in alternatives.iter().enumerate() {
+            let mut alt_fail: Vec<usize> = Vec::new();
+            self.compile_pattern_match(subj, alt, &mut alt_fail);
+            if self.failed {
+                return;
+            }
+            if i < n - 1 {
+                // This alternative matched — jump to success.
+                let jmp_ok = self.emit(Insn::Jump(0));
+                success_patches.push(jmp_ok);
+                // Patch the fail of this alternative to try the next one.
+                for idx in alt_fail {
+                    self.patch_jump(idx);
+                }
+            } else {
+                // Last alternative: its failures propagate to caller.
+                fail_patches.extend(alt_fail);
+            }
+        }
+        for idx in success_patches {
+            self.patch_jump(idx);
+        }
+    }
+
+    /// Compile a sequence pattern (`[a, b, *rest]`): exclude non-sequence types,
+    /// length-check the subject, then destructure each element (and the star).
+    fn compile_sequence_pattern(
+        &mut self,
+        subj: Reg,
+        elements: &[(Pattern, bool)],
+        fail_patches: &mut Vec<usize>,
+    ) {
+        // PEP 634 §3: str, bytes, dict, set, and frozenset are excluded
+        // from sequence pattern matching. str/bytes are text sequences;
+        // dict/set/frozenset support len() but not integer indexing.
+        // A single `MatchSeqExcluded` instruction computes
+        // `isinstance(subj, (str, bytes, dict, set, frozenset))` directly
+        // — no per-arm `LoadGlobal`/`BuildTuple`/`Call` to rebuild the
+        // exclusion tuple on every match execution (issue #1789).  If
+        // subj IS one of the excluded types, jump to the fail label.
+        {
+            let excluded = self.alloc_temp();
+            self.emit(Insn::MatchSeqExcluded(excluded, subj));
+            let jmp = self.emit(Insn::JumpIfTrue(excluded, 0));
+            fail_patches.push(jmp);
+            self.free_temp(excluded);
+        }
+
+        // Check that subject has exactly `fixed_count` elements
+        // (unless there's a star element, then >= fixed_count).
+        let has_star = elements.iter().any(|(_, is_star)| *is_star);
+        let fixed_count = elements.iter().filter(|(_, s)| !s).count();
+
+        // R_len = len(subj).  Wrap the call in try/except so that a
+        // TypeError (subject has no __len__) is treated as a sequence
+        // mismatch rather than a propagated error — matching CPython's
+        // behaviour for non-sequence types inside OR patterns.
+        let len_name_idx = self.intern_name("len");
+        let setup_idx = self.emit(Insn::SetupExcept(0));
+        let len_fn = self.alloc_temp();
+        self.emit(Insn::LoadGlobal(len_fn, len_name_idx));
+        let len_arg = self.alloc_temp();
+        self.emit(Insn::Move(len_arg, subj));
+        self.emit(Insn::Call(len_fn, 1));
+        let r_len = len_fn; // result in len_fn after call
+        self.free_temp(len_arg);
+        // Success path: remove the exception handler.
+        self.emit(Insn::PopExcept);
+        let jmp_over_handler = self.emit(Insn::Jump(0));
+        // Exception handler: any error from len() means the subject is
+        // not a sequence — treat as match failure.
+        self.patch_jump(setup_idx);
+        self.emit(Insn::EndExcept);
+        let len_err_jmp = self.emit(Insn::Jump(0));
+        fail_patches.push(len_err_jmp);
+        self.patch_jump(jmp_over_handler);
+
+        // Check length
+        let count_val = self.intern_const(Value::int(fixed_count as i64));
+        let len_jmp = if has_star {
+            self.emit(Insn::CmpJumpIfFalseConst(r_len, BinaryOp::Ge, count_val, 0))
+        } else {
+            self.emit(Insn::CmpJumpIfFalseConst(r_len, BinaryOp::Eq, count_val, 0))
+        };
+        fail_patches.push(len_jmp);
+        self.free_temp(r_len);
+
+        // Destructure each element.
+        let mut fixed_idx: i64 = 0;
+        let mut star_seen = false;
+        let total = elements.len();
+        for (elem_i, (elem_pat, is_star)) in elements.iter().enumerate() {
+            if *is_star {
+                star_seen = true;
+                // Star element captures subj[fixed_idx:]
+                // i.e., subj[fixed_idx : len - (total - elem_i - 1)]
+                let trailing = (total - elem_i - 1) as i64;
+                if let Pattern::Capture(name) = elem_pat {
+                    // Compute start index
+                    let start_c = self.intern_const(Value::int(fixed_idx));
+                    let start_r = self.alloc_temp();
+                    self.emit(Insn::LoadConst(start_r, start_c));
+                    // Compute stop index: re-compute len
+                    let len2_fn = self.alloc_temp();
+                    self.emit(Insn::LoadGlobal(len2_fn, len_name_idx));
+                    let arg2 = self.alloc_temp();
+                    self.emit(Insn::Move(arg2, subj));
+                    self.emit(Insn::Call(len2_fn, 1));
+                    self.free_temp(arg2);
+                    let r_len2 = len2_fn;
+                    let stop_r = if trailing > 0 {
+                        let trail_c = self.intern_const(Value::int(trailing));
+                        let trail_r = self.alloc_temp();
+                        self.emit(Insn::LoadConst(trail_r, trail_c));
+                        let stop = self.alloc_temp();
+                        self.emit(Insn::BinOp(stop, r_len2, BinaryOp::Sub, trail_r));
+                        self.free_temp(trail_r);
+                        self.free_temp(r_len2);
+                        stop
+                    } else {
+                        r_len2
+                    };
+                    // Build slice subj[start:stop] via BuildSlice (issue #931).
+                    // Arrange the three bounds in consecutive registers and emit
+                    // BuildSlice so the VM unambiguously identifies it as a slice
+                    // (not a user 3-tuple).
+                    let base = self.alloc_temp();
+                    self.emit(Insn::Move(base, start_r));
+                    let base1 = self.alloc_temp();
+                    self.emit(Insn::Move(base1, stop_r));
+                    let base2 = self.alloc_temp();
+                    self.emit(Insn::LoadNone(base2));
+                    let slice_key = self.alloc_temp();
+                    self.emit(Insn::BuildSlice(slice_key, base));
+                    self.free_temp(base2);
+                    self.free_temp(base1);
+                    self.free_temp(base);
+                    self.free_temp(stop_r);
+                    self.free_temp(start_r);
+                    // Get the slice: subj[start:stop] via GetItem with a slice key.
+                    // The slice result preserves the subject's type (e.g. tuple →
+                    // tuple). CPython guarantees *rest is always a list regardless
+                    // of the subject's type, so convert via BuildList + ListExtend.
+                    let saved_next = self.next_temp;
+                    let slice_r = self.alloc_temp();
+                    self.emit(Insn::GetItem(slice_r, subj, slice_key));
+                    self.free_temp(slice_key);
+                    let list_r = self.alloc_temp();
+                    let empty_base = self.next_temp;
+                    self.next_temp = empty_base + 1;
+                    if empty_base > self.max_reg {
+                        self.max_reg = empty_base;
+                    }
+                    self.emit(Insn::BuildList(list_r, empty_base, 0));
+                    self.emit(Insn::ListExtend(list_r, slice_r));
+                    // Store into capture name
+                    self.compile_store_name(name, list_r);
+                    if let Some(reg) = self.local_reg(name) {
+                        self.mark_def(reg);
+                    }
+                    // slice_r / list_r / empty_base cannot be freed in LIFO
+                    // order because the phantom empty_base slot sits above
+                    // list_r. All three are dead after the store, so restore
+                    // next_temp explicitly; max_reg already reflects peak
+                    // usage from the empty_base bump above.
+                    self.next_temp = saved_next;
+                }
+                // Don't increment fixed_idx for the star element itself.
+                continue;
+            }
+            // Compute index: if we haven't seen the star yet, use fixed_idx from left.
+            // After the star, index from the right.
+            let idx_val = if !star_seen {
+                fixed_idx
+            } else {
+                // Negative index (from end): -(fixed_count after star) + offset
+                let after_star = elements[elem_i..].iter().filter(|(_, s)| !s).count() as i64;
+                -(after_star)
+            };
+            if !star_seen {
+                fixed_idx += 1;
+            }
+
+            let idx_c = self.intern_const(Value::int(idx_val));
+            let idx_r = self.alloc_temp();
+            self.emit(Insn::LoadConst(idx_r, idx_c));
+            let elem_r = self.alloc_temp();
+            self.emit(Insn::GetItem(elem_r, subj, idx_r));
+            self.free_temp(idx_r);
+            self.compile_pattern_match(elem_r, elem_pat, fail_patches);
+            self.free_temp(elem_r);
+            if self.failed {
+                return;
+            }
+        }
+    }
+
+    /// Compile a mapping pattern (`{k: p, **rest}`): for each key check
+    /// membership and match the value sub-pattern, then bind any `**rest`.
+    fn compile_mapping_pattern(
+        &mut self,
+        subj: Reg,
+        pairs: &[(Expr, Pattern)],
+        rest_name: Option<&str>,
+        fail_patches: &mut Vec<usize>,
+    ) {
+        // For each key-pattern pair: check key in subject, then match pattern.
+        let in_name_idx = self.intern_name("__contains__");
+        let _ = in_name_idx; // used indirectly via BinaryOp::In
+
+        for (key_expr, val_pat) in pairs {
+            let key_r = self.compile_expr(key_expr);
+            // Check: key in subj
+            let check_r = self.alloc_temp();
+            self.emit(Insn::BinOp(check_r, key_r, BinaryOp::In, subj));
+            let jmp = self.emit(Insn::JumpIfFalse(check_r, 0));
+            self.free_temp(check_r);
+            fail_patches.push(jmp);
+            // Get the value: subj[key]
+            let val_r = self.alloc_temp();
+            self.emit(Insn::GetItem(val_r, subj, key_r));
+            self.free_temp(key_r);
+            // Match sub-pattern against the value
+            self.compile_pattern_match(val_r, val_pat, fail_patches);
+            self.free_temp(val_r);
+            if self.failed {
+                return;
+            }
+        }
+        // If there's a **rest, bind it to subj minus matched keys.
+        if let Some(rest) = rest_name {
+            // Build a copy of subj and remove matched keys.
+            // Simplest: call dict(subj) then del keys.
+            let dict_name_idx = self.intern_name("dict");
+            let dict_fn = self.alloc_temp();
+            self.emit(Insn::LoadGlobal(dict_fn, dict_name_idx));
+            let arg = self.alloc_temp();
+            self.emit(Insn::Move(arg, subj));
+            self.emit(Insn::Call(dict_fn, 1));
+            self.free_temp(arg);
+            let rest_r = dict_fn; // result in dict_fn
+            for (key_expr, _) in pairs {
+                let k = self.compile_expr(key_expr);
+                self.emit(Insn::DeleteItem(rest_r, k));
+                self.free_temp(k);
+            }
+            self.compile_store_name(rest, rest_r);
+            if let Some(reg) = self.local_reg(rest) {
+                self.mark_def(reg);
+            }
+            self.free_temp(rest_r);
+        }
+    }
+
+    /// Compile a class pattern (`C(p, ..., attr=p)`): isinstance-check the
+    /// subject, then match positional (via `__match_args__`) and keyword attrs.
+    fn compile_class_pattern(
+        &mut self,
+        subj: Reg,
+        cls: &Expr,
+        positional: &[Pattern],
+        kwargs: &[(String, Pattern)],
+        fail_patches: &mut Vec<usize>,
+    ) {
+        // isinstance(subj, cls) check must come FIRST so that attribute
+        // access is never attempted on a subject of the wrong type.
+        let isinstance_name_idx = self.intern_name("isinstance");
+        let isinstance_fn = self.alloc_temp();
+        self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
+        let arg0 = self.alloc_temp();
+        self.emit(Insn::Move(arg0, subj));
+        let cls_r = self.compile_expr(cls);
+        let arg1 = self.alloc_temp();
+        self.emit(Insn::Move(arg1, cls_r));
+        // Keep cls_r alive when we have positional sub-patterns: the
+        // MatchClassPositional instruction needs the class to load
+        // __match_args__ from it.
+        let cls_for_pos = if !positional.is_empty() {
+            let saved = self.alloc_temp();
+            self.emit(Insn::Move(saved, cls_r));
+            self.free_temp(cls_r);
+            Some(saved)
+        } else {
+            self.free_temp(cls_r);
+            None
+        };
+        self.emit(Insn::Call(isinstance_fn, 2));
+        self.free_temp(arg1);
+        self.free_temp(arg0);
+        let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
+        fail_patches.push(jmp);
+        self.free_temp(isinstance_fn);
+        // Positional sub-patterns: resolved via __match_args__.
+        if !positional.is_empty() {
+            let cls_reg = cls_for_pos.expect("set above when positional non-empty");
+            let n = positional.len() as u8;
+            // Allocate a contiguous block of n temporaries for the
+            // attribute values loaded by MatchClassPositional.
+            let dst_base = self.alloc_temp();
+            for _ in 1..positional.len() {
+                self.alloc_temp();
+            }
+            self.emit(Insn::MatchClassPositional {
+                dst_base,
+                subj,
+                cls: cls_reg,
+                n,
+            });
+            self.free_temp(cls_reg);
+            // Match each positional attribute value against its sub-pattern.
+            for (i, pat) in positional.iter().enumerate() {
+                let attr_r = dst_base + i as u32;
+                self.compile_pattern_match(attr_r, pat, fail_patches);
+                if self.failed {
+                    // Free remaining allocated registers before returning.
+                    for j in i..positional.len() {
+                        self.free_temp(dst_base + j as u32);
+                    }
+                    return;
+                }
+                self.free_temp(attr_r);
+            }
+        } else if let Some(cls_reg) = cls_for_pos {
+            self.free_temp(cls_reg);
+        }
+        // Keyword sub-patterns: matched directly against named attributes.
+        for (attr_name, attr_pat) in kwargs {
+            let name_idx = self.intern_name(attr_name);
+            let attr_r = self.alloc_temp();
+            self.emit(Insn::GetAttr(attr_r, subj, name_idx));
+            self.compile_pattern_match(attr_r, attr_pat, fail_patches);
+            self.free_temp(attr_r);
+            if self.failed {
+                return;
+            }
+        }
+    }
+
     fn compile_pattern_match(
         &mut self,
         subj: Reg,
@@ -6376,356 +6758,20 @@ impl Compiler {
                 fail_patches.push(jmp);
             }
             Pattern::Or(alternatives) => {
-                // Validate that every alternative binds the same set of names
-                // (PEP 634; CPython 3.12 raises SyntaxError if they differ).
-                //
-                // Check first: a bare name capture or wildcard in a non-last
-                // position makes every subsequent alternative unreachable —
-                // CPython 3.12 emits a dedicated message for each case,
-                // distinct from the generic "bind different names" error.
-                let non_last = alternatives.len().saturating_sub(1);
-                for alt in alternatives.iter().take(non_last) {
-                    // Recurse into the leading edge of nested OR patterns so that
-                    // `case (x | 1) | z:` is caught the same way as `case x | z:`.
-                    if let Some(name) = or_leading_capture(alt) {
-                        self.set_syntax_error(&format!(
-                            "name capture '{}' makes remaining patterns unreachable",
-                            name
-                        ));
-                        return;
-                    }
-                    if or_leading_is_wildcard(alt) {
-                        self.set_syntax_error("wildcard makes remaining patterns unreachable");
-                        return;
-                    }
-                }
-                if let Some(first) = alternatives.first() {
-                    let first_names = pattern_bound_names(first);
-                    for alt in alternatives.iter().skip(1) {
-                        if pattern_bound_names(alt) != first_names {
-                            self.set_syntax_error("alternative patterns bind different names");
-                            return;
-                        }
-                    }
-                }
-                // Try each alternative; if one matches, jump to success.
-                // If all fail, fall through to after (which will be patched to next arm).
-                let mut success_patches: Vec<usize> = Vec::new();
-                let n = alternatives.len();
-                for (i, alt) in alternatives.iter().enumerate() {
-                    let mut alt_fail: Vec<usize> = Vec::new();
-                    self.compile_pattern_match(subj, alt, &mut alt_fail);
-                    if self.failed {
-                        return;
-                    }
-                    if i < n - 1 {
-                        // This alternative matched — jump to success.
-                        let jmp_ok = self.emit(Insn::Jump(0));
-                        success_patches.push(jmp_ok);
-                        // Patch the fail of this alternative to try the next one.
-                        for idx in alt_fail {
-                            self.patch_jump(idx);
-                        }
-                    } else {
-                        // Last alternative: its failures propagate to caller.
-                        fail_patches.extend(alt_fail);
-                    }
-                }
-                for idx in success_patches {
-                    self.patch_jump(idx);
-                }
+                self.compile_or_pattern(subj, alternatives, fail_patches);
             }
             Pattern::Sequence(elements) => {
-                // PEP 634 §3: str, bytes, dict, set, and frozenset are excluded
-                // from sequence pattern matching. str/bytes are text sequences;
-                // dict/set/frozenset support len() but not integer indexing.
-                // A single `MatchSeqExcluded` instruction computes
-                // `isinstance(subj, (str, bytes, dict, set, frozenset))` directly
-                // — no per-arm `LoadGlobal`/`BuildTuple`/`Call` to rebuild the
-                // exclusion tuple on every match execution (issue #1789).  If
-                // subj IS one of the excluded types, jump to the fail label.
-                {
-                    let excluded = self.alloc_temp();
-                    self.emit(Insn::MatchSeqExcluded(excluded, subj));
-                    let jmp = self.emit(Insn::JumpIfTrue(excluded, 0));
-                    fail_patches.push(jmp);
-                    self.free_temp(excluded);
-                }
-
-                // Check that subject has exactly `fixed_count` elements
-                // (unless there's a star element, then >= fixed_count).
-                let has_star = elements.iter().any(|(_, is_star)| *is_star);
-                let fixed_count = elements.iter().filter(|(_, s)| !s).count();
-
-                // R_len = len(subj).  Wrap the call in try/except so that a
-                // TypeError (subject has no __len__) is treated as a sequence
-                // mismatch rather than a propagated error — matching CPython's
-                // behaviour for non-sequence types inside OR patterns.
-                let len_name_idx = self.intern_name("len");
-                let setup_idx = self.emit(Insn::SetupExcept(0));
-                let len_fn = self.alloc_temp();
-                self.emit(Insn::LoadGlobal(len_fn, len_name_idx));
-                let len_arg = self.alloc_temp();
-                self.emit(Insn::Move(len_arg, subj));
-                self.emit(Insn::Call(len_fn, 1));
-                let r_len = len_fn; // result in len_fn after call
-                self.free_temp(len_arg);
-                // Success path: remove the exception handler.
-                self.emit(Insn::PopExcept);
-                let jmp_over_handler = self.emit(Insn::Jump(0));
-                // Exception handler: any error from len() means the subject is
-                // not a sequence — treat as match failure.
-                self.patch_jump(setup_idx);
-                self.emit(Insn::EndExcept);
-                let len_err_jmp = self.emit(Insn::Jump(0));
-                fail_patches.push(len_err_jmp);
-                self.patch_jump(jmp_over_handler);
-
-                // Check length
-                let count_val = self.intern_const(Value::int(fixed_count as i64));
-                let len_jmp = if has_star {
-                    self.emit(Insn::CmpJumpIfFalseConst(r_len, BinaryOp::Ge, count_val, 0))
-                } else {
-                    self.emit(Insn::CmpJumpIfFalseConst(r_len, BinaryOp::Eq, count_val, 0))
-                };
-                fail_patches.push(len_jmp);
-                self.free_temp(r_len);
-
-                // Destructure each element.
-                let mut fixed_idx: i64 = 0;
-                let mut star_seen = false;
-                let total = elements.len();
-                for (elem_i, (elem_pat, is_star)) in elements.iter().enumerate() {
-                    if *is_star {
-                        star_seen = true;
-                        // Star element captures subj[fixed_idx:]
-                        // i.e., subj[fixed_idx : len - (total - elem_i - 1)]
-                        let trailing = (total - elem_i - 1) as i64;
-                        if let Pattern::Capture(name) = elem_pat {
-                            // Compute start index
-                            let start_c = self.intern_const(Value::int(fixed_idx));
-                            let start_r = self.alloc_temp();
-                            self.emit(Insn::LoadConst(start_r, start_c));
-                            // Compute stop index: re-compute len
-                            let len2_fn = self.alloc_temp();
-                            self.emit(Insn::LoadGlobal(len2_fn, len_name_idx));
-                            let arg2 = self.alloc_temp();
-                            self.emit(Insn::Move(arg2, subj));
-                            self.emit(Insn::Call(len2_fn, 1));
-                            self.free_temp(arg2);
-                            let r_len2 = len2_fn;
-                            let stop_r = if trailing > 0 {
-                                let trail_c = self.intern_const(Value::int(trailing));
-                                let trail_r = self.alloc_temp();
-                                self.emit(Insn::LoadConst(trail_r, trail_c));
-                                let stop = self.alloc_temp();
-                                self.emit(Insn::BinOp(stop, r_len2, BinaryOp::Sub, trail_r));
-                                self.free_temp(trail_r);
-                                self.free_temp(r_len2);
-                                stop
-                            } else {
-                                r_len2
-                            };
-                            // Build slice subj[start:stop] via BuildSlice (issue #931).
-                            // Arrange the three bounds in consecutive registers and emit
-                            // BuildSlice so the VM unambiguously identifies it as a slice
-                            // (not a user 3-tuple).
-                            let base = self.alloc_temp();
-                            self.emit(Insn::Move(base, start_r));
-                            let base1 = self.alloc_temp();
-                            self.emit(Insn::Move(base1, stop_r));
-                            let base2 = self.alloc_temp();
-                            self.emit(Insn::LoadNone(base2));
-                            let slice_key = self.alloc_temp();
-                            self.emit(Insn::BuildSlice(slice_key, base));
-                            self.free_temp(base2);
-                            self.free_temp(base1);
-                            self.free_temp(base);
-                            self.free_temp(stop_r);
-                            self.free_temp(start_r);
-                            // Get the slice: subj[start:stop] via GetItem with a slice key.
-                            // The slice result preserves the subject's type (e.g. tuple →
-                            // tuple). CPython guarantees *rest is always a list regardless
-                            // of the subject's type, so convert via BuildList + ListExtend.
-                            let saved_next = self.next_temp;
-                            let slice_r = self.alloc_temp();
-                            self.emit(Insn::GetItem(slice_r, subj, slice_key));
-                            self.free_temp(slice_key);
-                            let list_r = self.alloc_temp();
-                            let empty_base = self.next_temp;
-                            self.next_temp = empty_base + 1;
-                            if empty_base > self.max_reg {
-                                self.max_reg = empty_base;
-                            }
-                            self.emit(Insn::BuildList(list_r, empty_base, 0));
-                            self.emit(Insn::ListExtend(list_r, slice_r));
-                            // Store into capture name
-                            self.compile_store_name(name, list_r);
-                            if let Some(reg) = self.local_reg(name) {
-                                self.mark_def(reg);
-                            }
-                            // slice_r / list_r / empty_base cannot be freed in LIFO
-                            // order because the phantom empty_base slot sits above
-                            // list_r. All three are dead after the store, so restore
-                            // next_temp explicitly; max_reg already reflects peak
-                            // usage from the empty_base bump above.
-                            self.next_temp = saved_next;
-                        }
-                        // Don't increment fixed_idx for the star element itself.
-                        continue;
-                    }
-                    // Compute index: if we haven't seen the star yet, use fixed_idx from left.
-                    // After the star, index from the right.
-                    let idx_val = if !star_seen {
-                        fixed_idx
-                    } else {
-                        // Negative index (from end): -(fixed_count after star) + offset
-                        let after_star =
-                            elements[elem_i..].iter().filter(|(_, s)| !s).count() as i64;
-                        -(after_star)
-                    };
-                    if !star_seen {
-                        fixed_idx += 1;
-                    }
-
-                    let idx_c = self.intern_const(Value::int(idx_val));
-                    let idx_r = self.alloc_temp();
-                    self.emit(Insn::LoadConst(idx_r, idx_c));
-                    let elem_r = self.alloc_temp();
-                    self.emit(Insn::GetItem(elem_r, subj, idx_r));
-                    self.free_temp(idx_r);
-                    self.compile_pattern_match(elem_r, elem_pat, fail_patches);
-                    self.free_temp(elem_r);
-                    if self.failed {
-                        return;
-                    }
-                }
+                self.compile_sequence_pattern(subj, elements, fail_patches);
             }
             Pattern::Mapping(pairs, rest_name) => {
-                // For each key-pattern pair: check key in subject, then match pattern.
-                let in_name_idx = self.intern_name("__contains__");
-                let _ = in_name_idx; // used indirectly via BinaryOp::In
-
-                for (key_expr, val_pat) in pairs {
-                    let key_r = self.compile_expr(key_expr);
-                    // Check: key in subj
-                    let check_r = self.alloc_temp();
-                    self.emit(Insn::BinOp(check_r, key_r, BinaryOp::In, subj));
-                    let jmp = self.emit(Insn::JumpIfFalse(check_r, 0));
-                    self.free_temp(check_r);
-                    fail_patches.push(jmp);
-                    // Get the value: subj[key]
-                    let val_r = self.alloc_temp();
-                    self.emit(Insn::GetItem(val_r, subj, key_r));
-                    self.free_temp(key_r);
-                    // Match sub-pattern against the value
-                    self.compile_pattern_match(val_r, val_pat, fail_patches);
-                    self.free_temp(val_r);
-                    if self.failed {
-                        return;
-                    }
-                }
-                // If there's a **rest, bind it to subj minus matched keys.
-                if let Some(rest) = rest_name {
-                    // Build a copy of subj and remove matched keys.
-                    // Simplest: call dict(subj) then del keys.
-                    let dict_name_idx = self.intern_name("dict");
-                    let dict_fn = self.alloc_temp();
-                    self.emit(Insn::LoadGlobal(dict_fn, dict_name_idx));
-                    let arg = self.alloc_temp();
-                    self.emit(Insn::Move(arg, subj));
-                    self.emit(Insn::Call(dict_fn, 1));
-                    self.free_temp(arg);
-                    let rest_r = dict_fn; // result in dict_fn
-                    for (key_expr, _) in pairs {
-                        let k = self.compile_expr(key_expr);
-                        self.emit(Insn::DeleteItem(rest_r, k));
-                        self.free_temp(k);
-                    }
-                    self.compile_store_name(rest, rest_r);
-                    if let Some(reg) = self.local_reg(rest) {
-                        self.mark_def(reg);
-                    }
-                    self.free_temp(rest_r);
-                }
+                self.compile_mapping_pattern(subj, pairs, rest_name.as_deref(), fail_patches);
             }
             Pattern::Class {
                 cls,
                 positional,
                 kwargs,
             } => {
-                // isinstance(subj, cls) check must come FIRST so that attribute
-                // access is never attempted on a subject of the wrong type.
-                let isinstance_name_idx = self.intern_name("isinstance");
-                let isinstance_fn = self.alloc_temp();
-                self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
-                let arg0 = self.alloc_temp();
-                self.emit(Insn::Move(arg0, subj));
-                let cls_r = self.compile_expr(cls);
-                let arg1 = self.alloc_temp();
-                self.emit(Insn::Move(arg1, cls_r));
-                // Keep cls_r alive when we have positional sub-patterns: the
-                // MatchClassPositional instruction needs the class to load
-                // __match_args__ from it.
-                let cls_for_pos = if !positional.is_empty() {
-                    let saved = self.alloc_temp();
-                    self.emit(Insn::Move(saved, cls_r));
-                    self.free_temp(cls_r);
-                    Some(saved)
-                } else {
-                    self.free_temp(cls_r);
-                    None
-                };
-                self.emit(Insn::Call(isinstance_fn, 2));
-                self.free_temp(arg1);
-                self.free_temp(arg0);
-                let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
-                fail_patches.push(jmp);
-                self.free_temp(isinstance_fn);
-                // Positional sub-patterns: resolved via __match_args__.
-                if !positional.is_empty() {
-                    let cls_reg = cls_for_pos.expect("set above when positional non-empty");
-                    let n = positional.len() as u8;
-                    // Allocate a contiguous block of n temporaries for the
-                    // attribute values loaded by MatchClassPositional.
-                    let dst_base = self.alloc_temp();
-                    for _ in 1..positional.len() {
-                        self.alloc_temp();
-                    }
-                    self.emit(Insn::MatchClassPositional {
-                        dst_base,
-                        subj,
-                        cls: cls_reg,
-                        n,
-                    });
-                    self.free_temp(cls_reg);
-                    // Match each positional attribute value against its sub-pattern.
-                    for (i, pat) in positional.iter().enumerate() {
-                        let attr_r = dst_base + i as u32;
-                        self.compile_pattern_match(attr_r, pat, fail_patches);
-                        if self.failed {
-                            // Free remaining allocated registers before returning.
-                            for j in i..positional.len() {
-                                self.free_temp(dst_base + j as u32);
-                            }
-                            return;
-                        }
-                        self.free_temp(attr_r);
-                    }
-                } else if let Some(cls_reg) = cls_for_pos {
-                    self.free_temp(cls_reg);
-                }
-                // Keyword sub-patterns: matched directly against named attributes.
-                for (attr_name, attr_pat) in kwargs {
-                    let name_idx = self.intern_name(attr_name);
-                    let attr_r = self.alloc_temp();
-                    self.emit(Insn::GetAttr(attr_r, subj, name_idx));
-                    self.compile_pattern_match(attr_r, attr_pat, fail_patches);
-                    self.free_temp(attr_r);
-                    if self.failed {
-                        return;
-                    }
-                }
+                self.compile_class_pattern(subj, cls, positional, kwargs, fail_patches);
             }
             Pattern::As { pattern, name } => {
                 // Compile the inner pattern first (may add to fail_patches).
