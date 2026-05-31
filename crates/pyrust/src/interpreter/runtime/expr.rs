@@ -2941,6 +2941,14 @@ impl Interpreter {
                 if let Some(r) = set_binary_op(&left, &right, SetOp::And, "&") {
                     return r;
                 }
+                // CPython keeps the `bool` type for `bool & bool` (only `&`,
+                // `|`, `^`; arithmetic like `True + True` yields `int`).  Catch
+                // this before `coerce_numeric` collapses Bool → Int below.  A
+                // single int operand makes the result `int`, so mixed
+                // bool/int falls through to the int path.
+                if let (ValueKind::Bool(a), ValueKind::Bool(b)) = (left.kind(), right.kind()) {
+                    return Ok(Value::bool_(a & b));
+                }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
@@ -3009,6 +3017,12 @@ impl Interpreter {
                         format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
                     ));
                 }
+                // CPython keeps the `bool` type for `bool | bool`.  Catch this
+                // before `coerce_numeric` collapses Bool → Int below; mixed
+                // bool/int falls through to the int path.
+                if let (ValueKind::Bool(a), ValueKind::Bool(b)) = (left.kind(), right.kind()) {
+                    return Ok(Value::bool_(a | b));
+                }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
@@ -3029,6 +3043,12 @@ impl Interpreter {
                 }
                 if let Some(r) = set_binary_op(&left, &right, SetOp::Xor, "^") {
                     return r;
+                }
+                // CPython keeps the `bool` type for `bool ^ bool`.  Catch this
+                // before `coerce_numeric` collapses Bool → Int below; mixed
+                // bool/int falls through to the int path.
+                if let (ValueKind::Bool(a), ValueKind::Bool(b)) = (left.kind(), right.kind()) {
+                    return Ok(Value::bool_(a ^ b));
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
