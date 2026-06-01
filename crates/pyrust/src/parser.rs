@@ -1390,10 +1390,6 @@ impl Parser {
         Ok((AssignTarget::Name(name), false))
     }
 
-    fn parse_optional_else(&mut self) -> Result<Option<Vec<Stmt>>> {
-        Ok(self.parse_optional_else_with_linenos()?.0)
-    }
-
     fn parse_optional_else_with_linenos(&mut self) -> Result<(Option<Vec<Stmt>>, Vec<u32>)> {
         if self.is(&Token::Else) {
             self.bump();

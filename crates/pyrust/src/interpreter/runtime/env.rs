@@ -2722,7 +2722,9 @@ fn call_descriptor_get(
     descriptor: &Value,
     instance: Value,
     owner: Value,
-    attr_name: &str,
+    // Retained for call-site clarity; messages use the property's __set_name__
+    // name (`prop_name`) rather than the lookup name.
+    _attr_name: &str,
 ) -> Result<Value> {
     // property special-case: use the stored fget directly.
     if let Some((fget, partial_slot, prop_name)) =
@@ -2788,7 +2790,9 @@ fn call_descriptor_set(
     class_val: &Value,
     instance: Value,
     value: Value,
-    attr_name: &str,
+    // Retained for call-site clarity; messages use the property's __set_name__
+    // name (`prop_name`) rather than the lookup name.
+    _attr_name: &str,
 ) -> Result<Option<Result<()>>> {
     // property special-case.
     if let Some((fset, partial_slot, prop_name)) =
@@ -2859,7 +2863,9 @@ fn call_descriptor_delete(
     interp: &mut Interpreter,
     class_val: &Value,
     instance: Value,
-    attr_name: &str,
+    // Retained for call-site clarity; messages use the property's __set_name__
+    // name (`prop_name`) rather than the lookup name.
+    _attr_name: &str,
 ) -> Result<Option<Result<()>>> {
     // property special-case.
     if let Some((fdel, partial_slot, prop_name)) =
