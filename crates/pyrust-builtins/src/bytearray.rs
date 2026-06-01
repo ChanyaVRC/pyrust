@@ -427,8 +427,17 @@ impl BuiltinTypeOps for ByteArrayOps {
             // These delegate to the shared bytes impl with the same method name and
             // wrap the resulting bytes object as a new bytearray.
             "replace" | "strip" | "lstrip" | "rstrip" | "removeprefix" | "removesuffix"
-            | "center" | "ljust" | "rjust" | "zfill" | "translate" | "expandtabs" => {
+            | "center" | "ljust" | "rjust" | "zfill" | "translate" => {
                 let result = crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?;
+                return Ok(bytes_val_to_bytearray(result));
+            }
+            // expandtabs accepts `tabsize` by keyword; merge it into the
+            // positional slot before delegating.
+            "expandtabs" => {
+                let merged =
+                    crate::bytes::merge_single_kwarg_str(method, "tabsize", &args, kwargs)?;
+                let result =
+                    crate::bytes::call_on_slice(method, &data_snapshot, &merged, &empty_kw)?;
                 return Ok(bytes_val_to_bytearray(result));
             }
             // partition / rpartition return tuples of bytearray elements.
@@ -438,9 +447,9 @@ impl BuiltinTypeOps for ByteArrayOps {
             "rpartition" => {
                 return bytearray_partition(&data_snapshot, &args, true);
             }
-            // split / rsplit accept `sep`/`maxsplit` by keyword; merge them into
-            // positional slots before delegating.  splitlines (keepends) keeps
-            // the positional-only path.
+            // split / rsplit accept `sep`/`maxsplit` by keyword; splitlines
+            // accepts `keepends` by keyword. Merge them into positional slots
+            // before delegating.
             "split" | "rsplit" => {
                 let merged = crate::bytes::merge_split_kwargs_str(method, &args, kwargs)?;
                 let result =
@@ -448,7 +457,10 @@ impl BuiltinTypeOps for ByteArrayOps {
                 return Ok(bytes_list_to_bytearray_list(result));
             }
             "splitlines" => {
-                let result = crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?;
+                let merged =
+                    crate::bytes::merge_single_kwarg_str(method, "keepends", &args, kwargs)?;
+                let result =
+                    crate::bytes::call_on_slice(method, &data_snapshot, &merged, &empty_kw)?;
                 return Ok(bytes_list_to_bytearray_list(result));
             }
             // join: like bytes.join but accepts bytearray as separator and elements.
