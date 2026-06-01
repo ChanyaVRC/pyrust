@@ -1301,7 +1301,7 @@ fn collect_assign_target_textual(
         AssignTarget::Starred(inner) => {
             collect_assign_target_textual(inner, ordered, seen, body_local);
         }
-        AssignTarget::Attr(..) | AssignTarget::Index(..) => {}
+        AssignTarget::Attr(..) | AssignTarget::Index(..) | AssignTarget::Slice { .. } => {}
     }
 }
 
@@ -3363,6 +3363,21 @@ fn target_safe_for_rewrite(target: &AssignTarget, i_name: &str, c_name: &str) ->
             // only see this via `IndexAssign`/`SliceAssign` containers — never
             // reached in practice, but keep it sound.
             expr_safe(t, i_name, c_name) && expr_safe(idx, i_name, c_name)
+        }
+        AssignTarget::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_safe(target, i_name, c_name)
+                && lower
+                    .as_deref()
+                    .is_none_or(|e| expr_safe(e, i_name, c_name))
+                && upper
+                    .as_deref()
+                    .is_none_or(|e| expr_safe(e, i_name, c_name))
+                && step.as_deref().is_none_or(|e| expr_safe(e, i_name, c_name))
         }
         AssignTarget::Tuple(ts) => ts
             .iter()
@@ -5642,6 +5657,22 @@ impl Compiler {
                             self.free_temp(idx);
                             self.free_temp(obj);
                         }
+                        AssignTarget::Slice {
+                            target: obj_expr,
+                            lower,
+                            upper,
+                            step,
+                        } => {
+                            let obj = self.compile_expr(obj_expr);
+                            let slice_r = self.compile_slice_key(
+                                lower.as_deref(),
+                                upper.as_deref(),
+                                step.as_deref(),
+                            );
+                            self.emit(Insn::SetItem(obj, slice_r, base + i));
+                            self.free_temp(slice_r);
+                            self.free_temp(obj);
+                        }
                         AssignTarget::Tuple(_) => {
                             // Nested tuple unpack — compile recursively from the temp register
                             self.compile_store_unpack_target(t, base + i);
@@ -5674,6 +5705,24 @@ impl Compiler {
                 self.emit(Insn::SetItem(obj, idx, val));
                 self.free_temp(val);
                 self.free_temp(idx);
+                self.free_temp(obj);
+            }
+            AssignTarget::Slice {
+                target: obj_expr,
+                lower,
+                upper,
+                step,
+            } => {
+                // Plain `l[a:b] = rhs` normally lowers to `Stmt::SliceAssign`;
+                // this arm covers an `AssignTarget::Slice` reaching the generic
+                // assignment path (e.g. as a single target group), mirroring it.
+                let obj = self.compile_expr(obj_expr);
+                let slice_r =
+                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
+                let val = self.compile_expr(expr);
+                self.emit(Insn::SetItem(obj, slice_r, val));
+                self.free_temp(val);
+                self.free_temp(slice_r);
                 self.free_temp(obj);
             }
             AssignTarget::Starred(_) => {
@@ -5766,6 +5815,19 @@ impl Compiler {
                 let idx = self.compile_expr(idx_expr);
                 self.emit(Insn::SetItem(obj, idx, src_reg));
                 self.free_temp(idx);
+                self.free_temp(obj);
+            }
+            AssignTarget::Slice {
+                target: obj_expr,
+                lower,
+                upper,
+                step,
+            } => {
+                let obj = self.compile_expr(obj_expr);
+                let slice_r =
+                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
+                self.emit(Insn::SetItem(obj, slice_r, src_reg));
+                self.free_temp(slice_r);
                 self.free_temp(obj);
             }
             AssignTarget::Tuple(targets) => {
@@ -5910,6 +5972,29 @@ impl Compiler {
                 self.writeback_container_if_global(obj_expr, obj);
                 self.free_temp(lhs);
                 self.free_temp(idx);
+                self.free_temp(obj);
+            }
+            AssignTarget::Slice {
+                target: obj_expr,
+                lower,
+                upper,
+                step,
+            } => {
+                // `l[a:b] OP= rhs` lowers to: read the slice (a fresh copy),
+                // apply the in-place op against rhs, then store the result back
+                // into the slice. The container is evaluated exactly once, and
+                // a single slice-key register is shared between the GetItem read
+                // and the SetItem write so bounds are evaluated once too.
+                let obj = self.compile_expr(obj_expr);
+                let slice_r =
+                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
+                let lhs = self.alloc_temp();
+                self.emit(Insn::GetItem(lhs, obj, slice_r));
+                self.emit_aug_binop(lhs, op, expr);
+                self.emit(Insn::SetItem(obj, slice_r, lhs));
+                self.writeback_container_if_global(obj_expr, obj);
+                self.free_temp(lhs);
+                self.free_temp(slice_r);
                 self.free_temp(obj);
             }
             AssignTarget::Tuple(_) | AssignTarget::Starred(_) => {

@@ -3115,6 +3115,17 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         Expr::Var(name) => Ok(AssignTarget::Name(name.clone())),
         Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
         Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => Ok(AssignTarget::Slice {
+            target: target.clone(),
+            lower: lower.clone(),
+            upper: upper.clone(),
+            step: step.clone(),
+        }),
         Expr::Tuple(items) | Expr::List(items) => {
             // Items that were parsed as `*expr` inside a parenthesised/bracketed
             // tuple or list literal come in as `Expr::Starred`; lift them into

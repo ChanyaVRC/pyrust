@@ -35,6 +35,14 @@ pub enum AssignTarget {
     Name(String),
     Attr(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
+    /// Slice target: a[lower:upper:step] — only valid for augmented assignment
+    /// (plain slice assignment goes through `Stmt::SliceAssign`).
+    Slice {
+        target: Box<Expr>,
+        lower: Option<Box<Expr>>,
+        upper: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
     /// Unpack: a, b, c = ...
     Tuple(Vec<AssignTarget>),
     /// Starred target inside a Tuple: *name or *_ — only valid inside Tuple

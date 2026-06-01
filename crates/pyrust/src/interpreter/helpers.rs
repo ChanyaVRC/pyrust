@@ -3802,7 +3802,7 @@ fn collect_assign_target_bound_names(target: &AssignTarget, assigned: &mut HashS
         AssignTarget::Starred(inner) => {
             collect_assign_target_bound_names(inner, assigned);
         }
-        AssignTarget::Attr(..) | AssignTarget::Index(..) => {}
+        AssignTarget::Attr(..) | AssignTarget::Index(..) | AssignTarget::Slice { .. } => {}
     }
 }
 
@@ -4075,7 +4075,7 @@ fn collect_assign_target_names(
                 collect_assign_target_names(t, names, global_names, nonlocal_names);
             }
         }
-        AssignTarget::Attr(..) | AssignTarget::Index(..) => {}
+        AssignTarget::Attr(..) | AssignTarget::Index(..) | AssignTarget::Slice { .. } => {}
         AssignTarget::Starred(inner) => {
             collect_assign_target_names(inner, names, global_names, nonlocal_names);
         }
