@@ -1654,11 +1654,8 @@ impl Interpreter {
                     .is_some();
                 if is_getitem_iter {
                     let mut items = Vec::new();
-                    loop {
-                        match self.step_getitem_iter(&state_rc)? {
-                            Some(v) => items.push(v),
-                            None => break,
-                        }
+                    while let Some(v) = self.step_getitem_iter(&state_rc)? {
+                        items.push(v);
                     }
                     return Ok(items);
                 }
@@ -1669,11 +1666,8 @@ impl Interpreter {
                 let is_map_iter = state_rc.borrow().downcast_ref::<MapIter>().is_some();
                 if is_map_iter {
                     let mut items = Vec::new();
-                    loop {
-                        match self.step_map_iter(&state_rc)? {
-                            Some(v) => items.push(v),
-                            None => break,
-                        }
+                    while let Some(v) = self.step_map_iter(&state_rc)? {
+                        items.push(v);
                     }
                     return Ok(items);
                 }
@@ -1684,11 +1678,8 @@ impl Interpreter {
                 let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
                 if is_filter_iter {
                     let mut items = Vec::new();
-                    loop {
-                        match self.step_filter_iter(&state_rc)? {
-                            Some(v) => items.push(v),
-                            None => break,
-                        }
+                    while let Some(v) = self.step_filter_iter(&state_rc)? {
+                        items.push(v);
                     }
                     return Ok(items);
                 }
@@ -1700,11 +1691,8 @@ impl Interpreter {
                     state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
                 if is_enumerate_iter {
                     let mut items = Vec::new();
-                    loop {
-                        match self.step_enumerate_iter(&state_rc)? {
-                            Some(v) => items.push(v),
-                            None => break,
-                        }
+                    while let Some(v) = self.step_enumerate_iter(&state_rc)? {
+                        items.push(v);
                     }
                     return Ok(items);
                 }
@@ -1715,11 +1703,8 @@ impl Interpreter {
                 let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
                 if is_zip_iter {
                     let mut items = Vec::new();
-                    loop {
-                        match self.step_zip_iter(&state_rc)? {
-                            Some(v) => items.push(v),
-                            None => break,
-                        }
+                    while let Some(v) = self.step_zip_iter(&state_rc)? {
+                        items.push(v);
                     }
                     return Ok(items);
                 }
