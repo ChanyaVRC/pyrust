@@ -927,6 +927,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | BinOpImm(r, _, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
+        | FormatValue(r, _)
         | MatchSeqExcluded(r, _)
         | MatchMapping(r, _)
         | GetAttr(r, _, _)
@@ -937,6 +938,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | CallMemo(r, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
+        | BuildString(r, _, _)
         | BuildSlice(r, _)
         | BuildDict(r, _, _)
         | MakeFunction(r, _, _, _, _, _)
@@ -1677,6 +1679,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | Move(_, s)
         | CopyReg(_, s)
         | UnaryOp(_, _, s)
+        | FormatValue(_, s)
         | MatchSeqExcluded(_, s)
         | MatchMapping(_, s)
         | Return(s)
@@ -1729,7 +1732,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         TailCall { args_base, nargs } => {
             r == *args_base - 1 || (r >= *args_base && r < *args_base + *nargs as u32)
         }
-        BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n as u32,
+        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildString(_, base, n) => {
+            r >= *base && r < *base + *n as u32
+        }
         // BuildSlice always reads exactly 3 registers: start, stop, step.
         BuildSlice(_, base) => r >= *base && r < *base + 3,
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
@@ -1812,6 +1817,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | Move(_, s)
         | CopyReg(_, s)
         | UnaryOp(_, _, s)
+        | FormatValue(_, s)
         | MatchSeqExcluded(_, s)
         | MatchMapping(_, s)
         | Return(s)
@@ -1883,7 +1889,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
                 reads.insert(r);
             }
         }
-        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildString(_, base, n) => {
             for r in *base..*base + *n as u32 {
                 reads.insert(r);
             }
@@ -2514,6 +2520,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | MakeTypeVar(r, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
+        | BuildString(r, _, _)
         | BuildSlice(r, _)
         | BuildDict(r, _, _)
         | BinOp(r, _, _, _)
@@ -2521,6 +2528,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BinOpConst(r, _, _, _, _)
         | BinOpImm(r, _, _, _, _)
         | UnaryOp(r, _, _)
+        | FormatValue(r, _)
         | MatchSeqExcluded(r, _)
         | MatchMapping(r, _)
         | GetAttr(r, _, _)
@@ -5842,6 +5850,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | Move(_, s)
         | CopyReg(_, s)
         | UnaryOp(_, _, s)
+        | FormatValue(_, s)
         | MatchSeqExcluded(_, s)
         | MatchMapping(_, s)
         | Return(s)
@@ -5905,7 +5914,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
         }
-        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildString(_, base, n) => {
             for r in *base..*base + *n as u32 {
                 f(r);
             }
