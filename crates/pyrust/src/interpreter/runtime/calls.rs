@@ -3036,6 +3036,22 @@ impl Interpreter {
             return Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)));
         }
 
+        // Variadic path (*args / **kwargs) lives in a helper to keep this
+        // function focused on the common no-variadic fast path above.
+        self.call_user_function_variadic(function, args, bound_prefix, has_args_param)
+    }
+
+    /// Variadic argument-binding + execution path for
+    /// `call_user_function_expanded` — the `*args` / `**kwargs` case.
+    /// Extracted verbatim (size reduction); the fast no-variadic path stays
+    /// inline in the caller and returns before reaching this helper.
+    fn call_user_function_variadic(
+        &mut self,
+        function: Rc<UserFunction>,
+        args: &[ExpandedCallArg],
+        bound_prefix: &[Value],
+        has_args_param: bool,
+    ) -> Result<Value> {
         // Variadic path: handle *args and **kwargs
         // Gather positional and keyword args
         let mut positional_vals: Vec<Value> = bound_prefix.to_vec();
