@@ -8578,9 +8578,19 @@ impl Compiler {
             dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n,
         ));
         if bases_n > 0 && metaclass.is_none() {
-            // Without metaclass, the base registers are dead after MakeClass.
-            // (With metaclass, dst sits at bases_base + bases_n and must stay live.)
-            self.next_temp = bases_base + 1;
+            // Without metaclass, the base registers are dead after MakeClass,
+            // but `dst` (the freshly built class object) must stay live for the
+            // decorator / type-params / store steps below.  `dst` was allocated
+            // immediately after the bases, so `dst == bases_base + bases_n`; the
+            // correct watermark is therefore `dst + 1`, which preserves the
+            // class object and releases every slot above it.
+            //
+            // The previous formula (`bases_base + 1`) overwrote `dst` whenever a
+            // base was present: with one base, `bases_base + 1 == dst`, so the
+            // subsequent decorator base allocated the same register as `dst` and
+            // the decorator value clobbered the class object (issue #1889). The
+            // class decorator then received the decorator function itself.
+            self.next_temp = dst + 1;
         }
 
         // If a metaclass is provided, replace `dst` with the result of
