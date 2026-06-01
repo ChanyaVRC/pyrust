@@ -593,7 +593,9 @@ impl Interpreter {
                         }
                     }
                     "list" => {
-                        if method == "index" || method == "count" {
+                        if method == "remove" {
+                            self.call_seq_remove(&self_val, pos)
+                        } else if method == "index" || method == "count" {
                             let needs_dispatch = pos.first().map(|t| {
                                 self_val
                                     .list_with(|items| Self::seq_search_needs_dispatch(t, items))
@@ -1062,7 +1064,9 @@ impl Interpreter {
             }
             Kind::List => {
                 let args_vec: Vec<Value> = std::mem::take(pos);
-                if method == "index" || method == "count" {
+                if method == "remove" {
+                    self.call_seq_remove(&receiver, args_vec)
+                } else if method == "index" || method == "count" {
                     let needs_dispatch = args_vec.first().map(|t| {
                         receiver
                             .list_with(|items| Self::seq_search_needs_dispatch(t, items))
@@ -1246,7 +1250,9 @@ impl Interpreter {
                                     self.call_dict_method(method, backing, args_vec, &kw)
                                 }
                                 BkKind::List => {
-                                    if method == "index" || method == "count" {
+                                    if method == "remove" {
+                                        self.call_seq_remove(&backing, args_vec)
+                                    } else if method == "index" || method == "count" {
                                         let needs_dispatch =
                                             args_vec.first().map(|t| {
                                                 backing
@@ -4072,6 +4078,124 @@ impl Interpreter {
         }
     }
 
+    /// `list.remove(target)` with correct `__eq__` dispatch.
+    ///
+    /// Mirrors CPython's `list_remove`: walk the live list by index and remove
+    /// the **first** element equal to `target`, in place, on a no match raise
+    /// `ValueError` with CPython's fixed wording.
+    ///
+    /// The per-element comparison fuses two cases in a single scan so the common
+    /// all-primitive case never pays for user-dispatch machinery (no second
+    /// pass, no `values_user_eq` call):
+    ///
+    /// - When neither `target` nor the element can fire user `__eq__`
+    ///   (`value_search_dispatches` is false for both), compare with
+    ///   `Value::eq` — the same primitive equality the interpreter-free fast
+    ///   path uses.
+    /// - Otherwise dispatch through `values_user_eq`, which checks identity
+    ///   before `__eq__` (matching `PyObject_RichCompareBool(item, x, Py_EQ)`)
+    ///   and may re-enter user code.
+    ///
+    /// The element is read fresh from the receiver each iteration and the length
+    /// is rechecked before removal, so a user `__eq__` that mutates the list
+    /// mid-search cannot index out of range.
+    fn call_seq_remove(&mut self, receiver: &Value, args: Vec<Value>) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "list.remove() takes exactly one argument ({} given)",
+                args.len()
+            ));
+        }
+        // Outcome of the single-borrow primitive fast scan below.
+        enum SeqRemoveScan {
+            Found(usize),
+            NotFound,
+            NeedsDispatch,
+        }
+
+        let target = &args[0];
+        // Whether `target` itself can fire user `__eq__` (container / instance).
+        // Cheap, kind-only check — does not scan the list.
+        let target_dispatches = Self::value_search_dispatches(target);
+
+        // Fast path: when `target` is primitive, attempt a single-borrow scan
+        // using `Value::eq` (no re-entry into user code).  We can resolve the
+        // whole search this way *only* while every element seen is also
+        // primitive — a dispatching element (PyInstance / container) might
+        // match `target` through its own `__eq__`, so as soon as we reach one
+        // we abandon the fast scan and restart the slow per-index walk from the
+        // front (preserving first-match semantics).  When no dispatching
+        // element exists, this is one borrow and one pass — matching the
+        // interpreter-free `ms::remove` cost.
+        if !target_dispatches {
+            let outcome = receiver.list_with(|items| {
+                for (i, item) in items.iter().enumerate() {
+                    // `cannot_user_eq` resolves scalar elements (the common
+                    // all-int/str list) from `top16` alone — a single tag
+                    // compare, no `ValueKind` build and no `RefCell` borrow —
+                    // so the hot scan pays only this plus the `Value::eq`
+                    // below, matching the interpreter-free `ms::remove` cost.
+                    // A non-scalar element might match `target` through its own
+                    // `__eq__`, so we abandon the fast scan and restart the slow
+                    // per-index walk from the front (preserving first-match).
+                    if !item.cannot_user_eq() {
+                        return SeqRemoveScan::NeedsDispatch;
+                    }
+                    if item == target {
+                        return SeqRemoveScan::Found(i);
+                    }
+                }
+                SeqRemoveScan::NotFound
+            });
+            match outcome {
+                Some(SeqRemoveScan::Found(i)) => {
+                    receiver.list_pop_at(i)?;
+                    return Ok(Value::none());
+                }
+                Some(SeqRemoveScan::NotFound) => {
+                    return Err(pyrust_core::value_err!("list.remove(x): x not in list"));
+                }
+                // NeedsDispatch, or receiver is no longer a list — fall through
+                // to the slow per-index walk below.
+                _ => {}
+            }
+        }
+
+        // Slow path: at least one operand can fire user `__eq__`.  Read each
+        // element fresh and recheck length before removal so a user `__eq__`
+        // that mutates the list mid-search cannot index out of range.
+        let mut i = 0usize;
+        loop {
+            let item = match receiver.list_with(|items| items.get(i).cloned()) {
+                Some(Some(item)) => item,
+                _ => break,
+            };
+            if self.values_user_eq(&item, target)? {
+                if receiver.list_with(|items| i < items.len()).unwrap_or(false) {
+                    receiver.list_pop_at(i)?;
+                }
+                return Ok(Value::none());
+            }
+            i += 1;
+        }
+        Err(pyrust_core::value_err!("list.remove(x): x not in list"))
+    }
+
+    /// `true` if a single value can fire user `__eq__` during a membership
+    /// search (a `PyInstance`, or a container that may transitively hold one).
+    /// The per-value half of `seq_search_needs_dispatch`.
+    fn value_search_dispatches(v: &Value) -> bool {
+        matches!(
+            v.kind(),
+            ValueKind::PyInstance(_)
+                | ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Dict(_)
+                | ValueKind::Set(_)
+                | ValueKind::BuiltinObject { .. }
+        )
+    }
+
     /// Resolve an index argument for **sequence item access** (`a[i]`, `a[i] = v`,
     /// `del a[i]`) through the `__index__` protocol, matching CPython 3.12.
     ///
@@ -6812,6 +6936,9 @@ impl Interpreter {
                     if method == "sort" {
                         return self.list_sort_with_kwargs(&receiver, pos, kw);
                     }
+                    if method == "remove" {
+                        return self.call_seq_remove(&receiver, pos);
+                    }
                     // index / count: peek to decide whether values_user_eq
                     // dispatch is needed (resolve_seq_index_pos only touches
                     // pos[1..], so pos[0] (the target) is stable).
@@ -7014,7 +7141,9 @@ impl Interpreter {
     ) -> Result<Value> {
         match prim_type {
             "list" => {
-                if prim_method == "index" || prim_method == "count" {
+                if prim_method == "remove" {
+                    self.call_seq_remove(&backing, args)
+                } else if prim_method == "index" || prim_method == "count" {
                     let needs_dispatch = args
                         .first()
                         .map(|t| {
