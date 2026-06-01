@@ -226,8 +226,16 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             Ok(str_expandtabs(s, tabsize))
         }
         // Case
-        "upper" => Ok(Value::string(s.to_uppercase())),
-        "lower" => Ok(Value::string(s.to_lowercase())),
+        "upper" => Ok(Value::string(if s.is_ascii() {
+            s.to_ascii_uppercase()
+        } else {
+            s.to_uppercase()
+        })),
+        "lower" => Ok(Value::string(if s.is_ascii() {
+            s.to_ascii_lowercase()
+        } else {
+            s.to_lowercase()
+        })),
         "casefold" => Ok(Value::string(unicode_casefold(s))),
         "capitalize" => Ok(Value::string(capitalize(s))),
         "swapcase" => Ok(Value::string(swapcase(s))),
