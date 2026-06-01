@@ -424,65 +424,11 @@ impl BuiltinTypeOps for ByteArrayOps {
             "capitalize" => {
                 return Ok(bytearray(bytes_capitalize(&data_snapshot)));
             }
-            "replace" => {
-                // bytes_replace returns Value::bytes; wrap as bytearray.
-                let result =
-                    crate::bytes::call_on_slice("replace", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "strip" => {
-                let result =
-                    crate::bytes::call_on_slice("strip", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "lstrip" => {
-                let result =
-                    crate::bytes::call_on_slice("lstrip", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "rstrip" => {
-                let result =
-                    crate::bytes::call_on_slice("rstrip", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "removeprefix" => {
-                let result =
-                    crate::bytes::call_on_slice("removeprefix", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "removesuffix" => {
-                let result =
-                    crate::bytes::call_on_slice("removesuffix", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "center" => {
-                let result =
-                    crate::bytes::call_on_slice("center", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "ljust" => {
-                let result =
-                    crate::bytes::call_on_slice("ljust", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "rjust" => {
-                let result =
-                    crate::bytes::call_on_slice("rjust", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "zfill" => {
-                let result =
-                    crate::bytes::call_on_slice("zfill", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "translate" => {
-                let result =
-                    crate::bytes::call_on_slice("translate", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_val_to_bytearray(result));
-            }
-            "expandtabs" => {
-                let result =
-                    crate::bytes::call_on_slice("expandtabs", &data_snapshot, &args, &empty_kw)?;
+            // These delegate to the shared bytes impl with the same method name and
+            // wrap the resulting bytes object as a new bytearray.
+            "replace" | "strip" | "lstrip" | "rstrip" | "removeprefix" | "removesuffix"
+            | "center" | "ljust" | "rjust" | "zfill" | "translate" | "expandtabs" => {
+                let result = crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?;
                 return Ok(bytes_val_to_bytearray(result));
             }
             // partition / rpartition return tuples of bytearray elements.
@@ -493,19 +439,8 @@ impl BuiltinTypeOps for ByteArrayOps {
                 return bytearray_partition(&data_snapshot, &args, true);
             }
             // split / rsplit / splitlines return lists of bytearray.
-            "split" => {
-                let result =
-                    crate::bytes::call_on_slice("split", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_list_to_bytearray_list(result));
-            }
-            "rsplit" => {
-                let result =
-                    crate::bytes::call_on_slice("rsplit", &data_snapshot, &args, &empty_kw)?;
-                return Ok(bytes_list_to_bytearray_list(result));
-            }
-            "splitlines" => {
-                let result =
-                    crate::bytes::call_on_slice("splitlines", &data_snapshot, &args, &empty_kw)?;
+            "split" | "rsplit" | "splitlines" => {
+                let result = crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?;
                 return Ok(bytes_list_to_bytearray_list(result));
             }
             // join: like bytes.join but accepts bytearray as separator and elements.
