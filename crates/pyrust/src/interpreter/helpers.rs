@@ -1678,6 +1678,34 @@ pub(crate) fn mro_has_unslotted_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
         .any(mro_has_unslotted_ancestor)
 }
 
+/// Return `true` if `name` is listed in the `__slots__` of `class` or any of
+/// its ancestors (excluding the implicit `object` root).
+///
+/// CPython allocates a slot descriptor for every name in `__slots__` along the
+/// MRO, so the set of allowed slot names on an instance is the *union* of all
+/// `__slots__` across the chain — not just the leaf class's.  This mirrors the
+/// traversal of `mro_has_unslotted_ancestor`.
+pub(crate) fn mro_slot_allows(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
+    let (slots, base, extra_bases) = {
+        let borrowed = class.borrow();
+        (borrowed.slots.clone(), borrowed.base.clone(), borrowed.extra_bases.clone())
+    };
+    if let Some(ref slot_set) = slots {
+        if slot_set.contains(name) {
+            return true;
+        }
+    }
+    if let Some(ref b) = base {
+        if !Rc::ptr_eq(b, &object_class_singleton()) && mro_slot_allows(b, name) {
+            return true;
+        }
+    }
+    extra_bases
+        .iter()
+        .filter(|b| !Rc::ptr_eq(b, &object_class_singleton()))
+        .any(|b| mro_slot_allows(b, name))
+}
+
 /// Return the errno-specific OSError subclass `Rc` for a given errno value,
 /// mirroring CPython 3.12's `_Py_errnomap` table in `Objects/exceptions.c`.
 /// Returns `None` when the errno has no mapped subclass (plain `OSError` is
