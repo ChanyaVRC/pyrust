@@ -1144,6 +1144,13 @@ pub(crate) fn value_is_seq_excluded(v: &Value) -> bool {
 pub(crate) fn value_is_mapping(v: &Value) -> bool {
     match v.kind() {
         ValueKind::Dict(_) => true,
+        // `mappingproxy` (e.g. `type(C).__dict__`) is registered as a
+        // `collections.abc.Mapping` in CPython, so it matches a mapping
+        // pattern (issue #1879).  Like the `BuiltinObject` arm in
+        // `value_is_seq_excluded`, decide on the type name.
+        ValueKind::BuiltinObject { ops, .. } => {
+            ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME
+        }
         // Subclass instances (`class MyDict(dict)`): walk the MRO against the
         // dict singleton, matching `isinstance(_, dict)`.
         ValueKind::PyInstance(inst) => {

@@ -77,6 +77,27 @@ print(classify(MyDict({0: "sub"})))
 print(is_mapping(MyDict()))
 
 
+# A mappingproxy (`type(C).__dict__`) is registered as collections.abc.Mapping
+# in CPython, so it matches a mapping pattern (key bind and empty pattern).
+class WithAttr:
+    a = 10
+    b = 20
+
+
+print(is_mapping(WithAttr.__dict__))
+
+
+def proxy_bind(x):
+    match x:
+        case {"a": v}:
+            return ("a", v)
+        case _:
+            return "other"
+
+
+print(proxy_bind(WithAttr.__dict__))
+
+
 # **rest capture still works on real mappings.
 def rest(x):
     match x:
