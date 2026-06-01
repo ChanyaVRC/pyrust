@@ -585,11 +585,20 @@ impl BuiltinTypeOps for ByteArrayOps {
         // Read-only methods that return scalars or bytes objects unchanged.
         // Delegate to the shared bytes implementation.
         match method {
-            "hex" | "decode" | "startswith" | "endswith" | "find" | "rfind" | "index"
-            | "rindex" | "count" | "isdigit" | "isalpha" | "isalnum" | "isupper" | "islower"
-            | "isspace" | "isascii" | "istitle" => {
-                crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)
+            // `decode` honours `encoding`/`errors` keyword arguments, so the
+            // caller's kwargs must be threaded through to the shared bytes impl
+            // (mirroring `bytes.decode`). The other delegated methods below take
+            // only positional arguments.
+            "decode" => {
+                let pk_kwargs: IndexMap<PyKey, Value> = kwargs
+                    .iter()
+                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                    .collect();
+                crate::bytes::call_on_slice(method, &data_snapshot, &args, &pk_kwargs)
             }
+            "hex" | "startswith" | "endswith" | "find" | "rfind" | "index" | "rindex" | "count"
+            | "isdigit" | "isalpha" | "isalnum" | "isupper" | "islower" | "isspace" | "isascii"
+            | "istitle" => crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw),
             _ => Err(PyError::named(
                 "AttributeError",
                 format!("'bytearray' object has no attribute '{method}'"),
