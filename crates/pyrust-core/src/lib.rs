@@ -408,6 +408,23 @@ fn float_bits_as_exact_i64(bits: u64) -> Option<i64> {
     }
 }
 
+/// Identity-before-equality comparison for two `f64` key components, matching
+/// CPython's `startkey IS key || RichCompareBool(startkey, key, Py_EQ)` for
+/// `float`/`complex` set/dict keys (issue #1868).
+///
+/// `RichCompareBool` short-circuits identity (`v is w → equal`) before calling
+/// `__eq__`, which is why `{nan, nan, nan}` (the *same* NaN object) collapses
+/// to one entry even though `nan == nan` is `False`.  pyrust floats are
+/// NaN-boxed value types with no per-object identity, so we use bit equality as
+/// the identity proxy: identical bit patterns are "the same value".  Bit
+/// equality first (so a NaN deduplicates against itself), then IEEE `==` (so
+/// `0.0` and `-0.0`, which have distinct bit patterns, still compare and hash
+/// equal).
+#[inline]
+fn float_key_eq(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits() || a == b
+}
+
 /// CPython's `Py_HASH_MODULUS = 2^61 - 1` (Mersenne prime).
 ///
 /// Duplicated from `interpreter::helpers::PY_HASH_MODULUS` — pyrust-core
@@ -519,7 +536,11 @@ impl PartialEq for PyKey {
             (PyKey::Int(a), PyKey::Int(b)) => a == b,
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
             (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
-            (PyKey::Float(a), PyKey::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
+            // Identity-before-equality (see `float_key_eq`): the same NaN value
+            // deduplicates against itself, while `0.0`/`-0.0` still compare equal.
+            (PyKey::Float(a), PyKey::Float(b)) => {
+                float_key_eq(f64::from_bits(*a), f64::from_bits(*b))
+            }
             // Cross-type: Float vs Int (and Bool, since Bool is a subtype of int).
             // A float equals an int key iff the float is finite, has no
             // fractional part, and its value equals the integer exactly.
@@ -551,9 +572,13 @@ impl PartialEq for PyKey {
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
             (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
             (PyKey::Bytes(a), PyKey::Bytes(b)) => a.as_ref() == b.as_ref(),
-            // Complex equality: two complex keys are equal iff both components match.
-            // -0.0 == 0.0 in IEEE 754, which matches CPython's `==` for complex.
-            (PyKey::Complex(ar, ai), PyKey::Complex(br, bi)) => ar == br && ai == bi,
+            // Complex equality: two complex keys are equal iff both components
+            // match.  Uses identity-before-equality per component (see
+            // `float_key_eq`) so a complex key with a NaN component deduplicates
+            // against itself, while `-0.0`/`0.0` components still compare equal.
+            (PyKey::Complex(ar, ai), PyKey::Complex(br, bi)) => {
+                float_key_eq(*ar, *br) && float_key_eq(*ai, *bi)
+            }
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
