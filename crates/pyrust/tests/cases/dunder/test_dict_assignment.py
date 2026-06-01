@@ -69,3 +69,28 @@ w6 = W()
 w6.q = 42
 w6.__dict__ = w6.__dict__
 print(w6.q, w6.__dict__)
+
+
+# A slotted class with no `__dict__` slot has no instance dict to replace.
+class S:
+    __slots__ = ("x",)
+
+
+s = S()
+try:
+    s.__dict__ = {"y": 1}
+except AttributeError as e:
+    print("AttributeError:", e)
+
+# A slotted subclass of an unslotted base regains a `__dict__`.
+class B:
+    pass
+
+
+class SB(B):
+    __slots__ = ("x",)
+
+
+sb = SB()
+sb.__dict__ = {"y": 2}
+print(sb.y, sb.__dict__)

@@ -1308,11 +1308,6 @@ impl Interpreter {
         if Rc::ptr_eq(&class, &object_class_singleton()) {
             return Err(pyrust_core::py_err!("AttributeError", "'object' object has no attribute '{name}'"));
         }
-        // Issue #1942: `instance.__dict__ = {...}` replaces the backing attrs
-        // map wholesale rather than storing an attribute named "__dict__".
-        if name == "__dict__" {
-            return replace_instance_dict(&instance, &value);
-        }
         // PEP 3134 / issue #1066: validate exception-slot types.
         if is_exception_class(&class) {
             match name {
@@ -1367,6 +1362,13 @@ impl Interpreter {
                 let class_name = class.borrow().name.clone();
                 return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
             }
+        }
+        // Issue #1942: `instance.__dict__ = {...}` replaces the backing attrs
+        // map wholesale rather than storing an attribute named "__dict__".
+        // Placed after slots enforcement so a slotted class without a
+        // `__dict__` slot still raises AttributeError (CPython parity).
+        if name == "__dict__" {
+            return replace_instance_dict(&instance, &value);
         }
         instance.borrow_mut().attrs.insert(name.to_string(), value);
         Ok(())
@@ -1606,12 +1608,6 @@ impl Interpreter {
             if Rc::ptr_eq(&class, &object_class_singleton()) {
                 return Err(pyrust_core::py_err!("AttributeError", "'object' object has no attribute '{name}'"));
             }
-            // Issue #1942: `instance.__dict__ = {...}` replaces the backing
-            // attrs map wholesale rather than storing an attribute named
-            // "__dict__".
-            if name == "__dict__" {
-                return replace_instance_dict(instance, &value);
-            }
             // PEP 3134: __cause__ and __context__ must be None or a
             // BaseException subclass instance.  __suppress_context__ must
             // be a bool.  CPython enforces these in the C slot setters;
@@ -1671,6 +1667,13 @@ impl Interpreter {
                     let class_name = class.borrow().name.clone();
                     return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
                 }
+            }
+            // Issue #1942: `instance.__dict__ = {...}` replaces the backing
+            // attrs map wholesale rather than storing an attribute named
+            // "__dict__".  Placed after slots enforcement so a slotted class
+            // without a `__dict__` slot still raises AttributeError.
+            if name == "__dict__" {
+                return replace_instance_dict(instance, &value);
             }
             instance.borrow_mut().attrs.insert(name.to_string(), value);
             Ok(())
