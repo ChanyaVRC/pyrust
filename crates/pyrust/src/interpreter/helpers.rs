@@ -1133,6 +1133,27 @@ pub(crate) fn value_is_seq_excluded(v: &Value) -> bool {
     }
 }
 
+/// True if `v` is a mapping for the purposes of `match` mapping patterns
+/// (`case {k: p}`).  PEP 634 §3 gates the whole mapping pattern on
+/// `isinstance(subject, collections.abc.Mapping)`; a non-mapping subject
+/// silently fails to match instead of raising.  In pyrust the only built-in
+/// mapping is `dict` (and its subclasses), so this is `isinstance(v, dict)`
+/// without building a tuple or invoking the generic `isinstance` path.
+/// Backs the `MatchMapping` instruction (issue #1879), mirroring how
+/// `value_is_seq_excluded` backs `MatchSeqExcluded` for sequence patterns.
+pub(crate) fn value_is_mapping(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::Dict(_) => true,
+        // Subclass instances (`class MyDict(dict)`): walk the MRO against the
+        // dict singleton, matching `isinstance(_, dict)`.
+        ValueKind::PyInstance(inst) => {
+            let actual = Rc::clone(&inst.borrow().class);
+            PRIMITIVE_CLASSES.with(|c| class_is_subclass_of(&actual, &c.dict_class))
+        }
+        _ => false,
+    }
+}
+
 /// Returns the type name if `class` is one of the builtin types that
 /// CPython marks as non-subclassable (i.e. lacks `Py_TPFLAGS_BASETYPE`):
 /// `NoneType`, `ellipsis`, `NotImplementedType`, `bool`, `method`, and

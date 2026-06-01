@@ -1542,6 +1542,15 @@ impl Interpreter {
                     regs[*dst as usize] = Value::bool_(excluded);
                 }
 
+                Insn::MatchMapping(dst, subj) => {
+                    // isinstance(subj, collections.abc.Mapping) — the
+                    // mapping-pattern type gate (issue #1879).  In pyrust the
+                    // only built-in mapping is dict (and subclasses).
+                    let subj_val = vm_try!(vm_read(&regs, *subj, num_locals));
+                    let is_mapping = crate::interpreter::value_is_mapping(&subj_val);
+                    regs[*dst as usize] = Value::bool_(is_mapping);
+                }
+
                 // ── String concat (single allocation) ────────────────────
                 Insn::Concat { dst, base, count } => {
                     let base_idx = *base as usize;
