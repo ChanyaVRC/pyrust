@@ -67,6 +67,13 @@ show_int("0x_", 16)
 show_int("0x_", 0)
 show_int("0_x1", 0)
 
+# --- int(): error message reprs the ORIGINAL string, surrounding
+#     whitespace included (not the trimmed/stripped form) ---
+show_int(" 0x_ ", 16)
+show_int(" zz_ ", 16)
+show_int(" 0x_ ", 0)
+show_int(" 5_ ", 10)
+
 # --- int(): BigInt-magnitude values with underscores ---
 show_int1("123_456_789_012_345_678_901_234_567_890")
 show_int("0x_FFFF_FFFF_FFFF_FFFF_FFFF", 16)

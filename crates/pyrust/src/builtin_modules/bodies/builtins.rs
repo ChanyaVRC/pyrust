@@ -3691,7 +3691,7 @@ pyrust_module! {
                             let (base, digits) = int_parse_base_zero(trimmed).ok_or_else(|| {
                                 PyError::named(
                                     "ValueError",
-                                    format!("invalid literal for int() with base 0: '{trimmed}'"),
+                                    format!("invalid literal for int() with base 0: '{s}'"),
                                 )
                             })?;
                             match i64::from_str_radix(&digits, base) {
@@ -3703,7 +3703,7 @@ pyrust_module! {
                                         .map(Value::bigint)
                                         .map_err(|_| PyError::named(
                                             "ValueError",
-                                            format!("invalid literal for int() with base 0: '{trimmed}'"),
+                                            format!("invalid literal for int() with base 0: '{s}'"),
                                         ))
                                 }
                             }
@@ -3712,7 +3712,7 @@ pyrust_module! {
                             let stripped = int_strip_explicit_base(trimmed, base).ok_or_else(|| {
                                 PyError::named(
                                     "ValueError",
-                                    format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
+                                    format!("invalid literal for int() with base {base_arg}: '{s}'"),
                                 )
                             })?;
                             match i64::from_str_radix(&stripped, base) {
@@ -3724,7 +3724,7 @@ pyrust_module! {
                                         .map(Value::bigint)
                                         .map_err(|_| PyError::named(
                                             "ValueError",
-                                            format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
+                                            format!("invalid literal for int() with base {base_arg}: '{s}'"),
                                         ))
                                 }
                             }
