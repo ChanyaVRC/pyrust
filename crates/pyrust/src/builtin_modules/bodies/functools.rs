@@ -709,10 +709,28 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
 /// seed private state without going through a public constructor.
 fn make_instance(name: &str, attrs: IndexMap<String, Value>) -> Value {
     match module_class(name) {
-        Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class,
-            attrs,
-        }))),
+        Some(class) => {
+            // CPython's `cmp_to_key` wrapper (`functools.K`) is unhashable: it
+            // defines the rich-comparison dunders but no `__hash__`, and any
+            // class that overrides `__eq__` without `__hash__` is unhashable
+            // (the pure-Python version uses `__slots__`; the C version sets
+            // `tp_hash = PyObject_HashNotImplemented`).  pyrust applies the
+            // same `__eq__`-implies-unhashable rule to user `class` statements,
+            // but `pyrust_module!` `class` blocks don't get the automatic
+            // `__hash__ = None`, so graft it on (idempotently) here.
+            if name == "_cmp_key"
+                && !class.borrow().attrs.contains_key("__hash__")
+            {
+                class
+                    .borrow_mut()
+                    .attrs
+                    .insert("__hash__".to_string(), Value::none());
+            }
+            Value::py_instance(Rc::new(RefCell::new(PyInstance {
+                class,
+                attrs,
+            })))
+        }
         // "Shouldn't happen" really means "would indicate a macro/build
         // bug": every class name passed here is declared in this very
         // module via `class { … }`, which the `pyrust_module!` macro

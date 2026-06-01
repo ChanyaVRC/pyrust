@@ -32,6 +32,14 @@ print("max", max([3, 1, 2], key=functools.cmp_to_key(lambda a, b: a - b)))
 # Stability: equal comparator results preserve input order.
 pairs = [(1, "a"), (1, "b"), (0, "c"), (1, "d")]
 print("stable", sorted(pairs, key=functools.cmp_to_key(lambda x, y: x[0] - y[0])))
+# Direct comparison + key objects are unhashable (CPython's functools.K).
+_k = functools.cmp_to_key(lambda a, b: a - b)
+print("direct-cmp", _k(1) < _k(2), _k(2) <= _k(1), _k(1) != _k(2))
+try:
+    hash(_k(1))
+    print("hashable")
+except TypeError:
+    print("unhashable-key")
 
 
 # --- functools.total_ordering: derive missing ordering ops ---
