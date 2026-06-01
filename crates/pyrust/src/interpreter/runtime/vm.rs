@@ -3630,7 +3630,10 @@ pub(crate) fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Int(v) => Ok(Value::int(!v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
             ValueKind::BigInt(v) => Ok(Value::bigint(!v)),
-            _ => Err(pyrust_core::type_err!("bad operand type for unary ~: use integer")),
+            _ => Err(pyrust_core::type_err!(
+                "bad operand type for unary ~: '{}'",
+                value_type_name_str(&val)
+            )),
         },
         UnaryOp::Pos => {
             if matches!(val.kind(), ValueKind::BigInt(_)) {
