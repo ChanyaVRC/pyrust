@@ -3990,6 +3990,12 @@ struct Compiler {
     /// of a full attribute-lookup + method-call dispatch, mirroring CPython's
     /// dedicated `SET_ADD` opcode (issue #1861).
     is_set_comp: bool,
+    /// True when this Compiler is producing the implicit function body of a
+    /// **list comprehension**.  In that mode the synthesized accumulator append
+    /// `.acc.append(elt)` is lowered directly to `Insn::ListAppend(acc, elt)`
+    /// instead of a full attribute-lookup + method-call dispatch, mirroring
+    /// CPython's dedicated `LIST_APPEND` opcode (issue #1862).
+    is_list_comp: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -4420,6 +4426,7 @@ impl Compiler {
             future_annotations: false,
             has_dead_yield: false,
             is_set_comp: false,
+            is_list_comp: false,
         }
     }
 
@@ -5071,6 +5078,9 @@ impl Compiler {
             }
             Stmt::Expr(expr) => {
                 if self.try_emit_set_comp_add(expr) {
+                    return;
+                }
+                if self.try_emit_list_comp_append(expr) {
                     return;
                 }
                 let r = self.compile_expr(expr);
@@ -10139,6 +10149,8 @@ impl Compiler {
         sub.future_annotations = self.future_annotations;
         // Set comprehensions lower `.acc.add(elt)` to `Insn::SetAdd` (issue #1861).
         sub.is_set_comp = comp_name == "setcomp";
+        // List comprehensions lower `.acc.append(elt)` to `Insn::ListAppend` (issue #1862).
+        sub.is_list_comp = comp_name == "listcomp";
         sub.compile_block(&fn_body);
         let inner_code = match sub.finish() {
             Ok(c) => c,
@@ -10320,6 +10332,44 @@ impl Compiler {
         let acc_reg = self.compile_expr(target);
         let elt_reg = self.compile_expr(&arg.value);
         self.emit(Insn::SetAdd(acc_reg, elt_reg));
+        self.free_temp(elt_reg);
+        self.free_temp(acc_reg);
+        true
+    }
+
+    /// When compiling the implicit function body of a list comprehension
+    /// (`self.is_list_comp`), recognize the synthesized accumulator append
+    /// `.acc.append(elt)` and lower it directly to `Insn::ListAppend(acc, elt)`,
+    /// skipping attribute resolution + method-call dispatch (issue #1862).
+    ///
+    /// Returns `true` when it handled `expr` (matching the exact synthesized
+    /// shape: a positional-only one-arg call to `.append` on the reserved
+    /// `.acc` accumulator name). The `.acc` name is compiler-internal and
+    /// cannot appear in user source, so this never intercepts a user
+    /// `x.append(y)`.
+    fn try_emit_list_comp_append(&mut self, expr: &Expr) -> bool {
+        if !self.is_list_comp {
+            return false;
+        }
+        let Expr::Call { func, args } = expr else {
+            return false;
+        };
+        let Expr::Attr { target, name } = func.as_ref() else {
+            return false;
+        };
+        if name != "append" || !matches!(target.as_ref(), Expr::Var(v) if v == ".acc") {
+            return false;
+        }
+        if args.len() != 1 {
+            return false;
+        }
+        let arg = &args[0];
+        if arg.name.is_some() || arg.splat || arg.double_splat {
+            return false;
+        }
+        let acc_reg = self.compile_expr(target);
+        let elt_reg = self.compile_expr(&arg.value);
+        self.emit(Insn::ListAppend(acc_reg, elt_reg));
         self.free_temp(elt_reg);
         self.free_temp(acc_reg);
         true
