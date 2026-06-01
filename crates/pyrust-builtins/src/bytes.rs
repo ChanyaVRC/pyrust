@@ -121,7 +121,10 @@ pub fn call_on_slice(
             let merged = merge_split_kwargs("rsplit", args, kwargs)?;
             bytes_rsplit(bytes, &merged)
         }
-        "splitlines" => bytes_splitlines(bytes, args),
+        "splitlines" => {
+            let merged = merge_single_kwarg("splitlines", "keepends", args, kwargs)?;
+            bytes_splitlines(bytes, &merged)
+        }
         "join" => bytes_join(bytes, args),
         "title" => Ok(Value::bytes(bytes_title(bytes))),
         "capitalize" => Ok(Value::bytes(bytes_capitalize(bytes))),
@@ -164,7 +167,10 @@ pub fn call_on_slice(
         "isascii" => Ok(Value::bool_(bytes.iter().all(|&b| b < 128))),
         "istitle" => Ok(Value::bool_(bytes_istitle(bytes))),
         // Added in #1170
-        "expandtabs" => bytes_expandtabs(bytes, args),
+        "expandtabs" => {
+            let merged = merge_single_kwarg("expandtabs", "tabsize", args, kwargs)?;
+            bytes_expandtabs(bytes, &merged)
+        }
         _ => Err(PyError::named(
             "AttributeError",
             format!("'bytes' object has no attribute '{method}'"),
@@ -1894,6 +1900,97 @@ fn merge_split_kwargs_iter<'a>(
         }
     }
     Ok(pos)
+}
+
+/// Normalise a single-keyword method (`expandtabs(tabsize=…)`,
+/// `splitlines(keepends=…)`) into a `[value]` positional slot.
+///
+/// CPython 3.12 accepts the sole argument by keyword as well as position for
+/// these `bytes`/`bytearray` methods. Passing it both ways, supplying more
+/// than one positional, or using an unknown keyword all raise `TypeError`.
+/// CPython's arg parser checks the total argument count against the
+/// one-positional limit before resolving the name/position clash, so both
+/// `m(x, kw=y)` and `m(x, y)` report `takes at most 1 argument (2 given)`.
+fn merge_single_kwarg(
+    method: &str,
+    keyword: &str,
+    args: &[Value],
+    kwargs: &IndexMap<PyKey, Value>,
+) -> Result<Vec<Value>> {
+    merge_single_kwarg_iter(
+        method,
+        keyword,
+        args,
+        kwargs.len(),
+        kwargs.iter().map(|(k, v)| {
+            let key = match k {
+                PyKey::Str(s) => s.as_str().unwrap_or(""),
+                _ => "",
+            };
+            (key, v)
+        }),
+    )
+}
+
+/// `bytearray` keeps its kwargs in a `String`-keyed map; this shim threads them
+/// through the same single-keyword merge logic as `bytes`.
+pub fn merge_single_kwarg_str(
+    method: &str,
+    keyword: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<Vec<Value>> {
+    merge_single_kwarg_iter(
+        method,
+        keyword,
+        args,
+        kwargs.len(),
+        kwargs.iter().map(|(k, v)| (k.as_str(), v)),
+    )
+}
+
+/// Shared core for [`merge_single_kwarg`] / [`merge_single_kwarg_str`].
+fn merge_single_kwarg_iter<'a>(
+    method: &str,
+    keyword: &str,
+    args: &[Value],
+    kwargs_len: usize,
+    kwargs: impl Iterator<Item = (&'a str, &'a Value)>,
+) -> Result<Vec<Value>> {
+    if kwargs_len == 0 {
+        if args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{method}() takes at most 1 argument ({} given)", args.len()),
+            ));
+        }
+        return Ok(args.to_vec());
+    }
+
+    let total = args.len() + kwargs_len;
+    if total > 1 {
+        // CPython distinguishes the all-keyword overflow ("keyword argument")
+        // from the mixed/positional overflow ("argument").
+        let noun = if args.is_empty() {
+            "keyword argument"
+        } else {
+            "argument"
+        };
+        return Err(PyError::named(
+            "TypeError",
+            format!("{method}() takes at most 1 {noun} ({total} given)"),
+        ));
+    }
+
+    // total == 1 here, so args is empty and there is exactly one keyword.
+    let (key_str, v) = kwargs.into_iter().next().expect("one keyword");
+    if key_str != keyword {
+        return Err(PyError::named(
+            "TypeError",
+            format!("'{key_str}' is an invalid keyword argument for {method}()"),
+        ));
+    }
+    Ok(vec![v.clone()])
 }
 
 fn bytes_split(bytes: &[u8], args: &[Value]) -> Result<Value> {
