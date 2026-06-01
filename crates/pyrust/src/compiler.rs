@@ -4498,10 +4498,10 @@ impl Compiler {
     /// or `BinOpConst` with a pool entry otherwise.
     fn emit_int_binop(&mut self, dst: Reg, lhs: Reg, op: BinaryOp, n: i64) {
         if n >= i16::MIN as i64 && n <= i16::MAX as i64 {
-            self.emit(Insn::BinOpImm(dst, lhs, op, n as i16));
+            self.emit(Insn::BinOpImm(dst, lhs, op, n as i16, false));
         } else {
             let idx = self.intern_const(Value::int(n));
-            self.emit(Insn::BinOpConst(dst, lhs, op, idx));
+            self.emit(Insn::BinOpConst(dst, lhs, op, idx, false));
         }
     }
 
@@ -9313,14 +9313,16 @@ impl Compiler {
 
     fn emit_aug_binop(&mut self, reg: Reg, op: BinaryOp, expr: &Expr) {
         if let Some(imm) = Self::try_imm_i16(expr) {
-            self.emit(Insn::BinOpImm(reg, reg, op, imm));
+            self.emit(Insn::BinOpImm(reg, reg, op, imm, true));
         } else if let Some(val) = fold_constant(expr) {
             // BinOpConst is safe for augmented assignment: the VM's BinOpConst
-            // handler now calls try_inplace_op before eval_binary, so mutable
+            // handler calls try_inplace_op before eval_binary, so mutable
             // containers (list *= / list += / set |= etc.) still get the
-            // in-place fast path even when the RHS is a folded constant.
+            // in-place fast path even when the RHS is a folded constant.  The
+            // `is_aug = true` flag tells the VM this fused op carries in-place
+            // semantics (issue #1874).
             let idx = self.intern_const(val);
-            self.emit(Insn::BinOpConst(reg, reg, op, idx));
+            self.emit(Insn::BinOpConst(reg, reg, op, idx, true));
         } else {
             let rhs = self.compile_expr(expr);
             self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));

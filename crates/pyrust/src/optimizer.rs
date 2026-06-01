@@ -257,7 +257,8 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
             {
                 keep[i] = false;
-                transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx);
+                // Fusing a plain BinOp (never augmented) → is_aug = false.
+                transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx, false);
                 i += 2;
                 continue;
             }
@@ -369,12 +370,12 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let mut i = 0;
     while i + 1 < n {
         let fused: Option<Insn> = match (&transformed[i], &transformed[i + 1]) {
-            (Insn::BinOpConst(r, lhs, op, c), Insn::JumpIfFalse(cond, k))
+            (Insn::BinOpConst(r, lhs, op, c, _), Insn::JumpIfFalse(cond, k))
                 if *r == *cond && *r >= num_locals =>
             {
                 Some(Insn::CmpJumpIfFalseConst(*lhs, *op, *c, *k))
             }
-            (Insn::BinOpConst(r, lhs, op, c), Insn::JumpIfTrue(cond, k))
+            (Insn::BinOpConst(r, lhs, op, c, _), Insn::JumpIfTrue(cond, k))
                 if *r == *cond && *r >= num_locals =>
             {
                 Some(Insn::CmpJumpIfTrueConst(*lhs, *op, *c, *k))
@@ -553,7 +554,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                 out.push(Insn::LoadConst(dst, c_idx));
             }
 
-            Insn::BinOpConst(dst, lhs, op, c_idx) => {
+            Insn::BinOpConst(dst, lhs, op, c_idx, is_aug) => {
                 // Try to reassociate: if `lhs` was produced by "lhs = inner_src op c2"
                 // (same op, lhs is a temp), rewrite to `dst = inner_src op (c2 op c1)`.
                 //
@@ -588,7 +589,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                                         load_const_val.remove(&dst);
                                         // dst is Int since inner_src is Int and op is int-preserving.
                                         int_regs.insert(dst);
-                                        out.push(Insn::BinOpConst(dst, inner_src, op, ci));
+                                        out.push(Insn::BinOpConst(dst, inner_src, op, ci, is_aug));
                                         rewritten = true;
                                     }
                                 }
@@ -617,7 +618,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     int_regs.remove(&dst);
                 }
                 if !rewritten {
-                    out.push(Insn::BinOpConst(dst, lhs, op, c_idx));
+                    out.push(Insn::BinOpConst(dst, lhs, op, c_idx, is_aug));
                 }
             }
 
@@ -800,7 +801,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                     Insn::BinOp(dst, lhs, op, rhs),
                 );
             }
-            Insn::BinOpConst(dst, lhs, op, c) => {
+            Insn::BinOpConst(dst, lhs, op, c, is_aug) => {
                 let folded = known.get(&lhs).and_then(|&cl| {
                     crate::compiler::fold_binop(&consts[cl as usize], op, &consts[c as usize])
                         .and_then(|v| intern_const_in_pool(consts, v))
@@ -810,10 +811,10 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                     &mut out,
                     dst,
                     folded,
-                    Insn::BinOpConst(dst, lhs, op, c),
+                    Insn::BinOpConst(dst, lhs, op, c, is_aug),
                 );
             }
-            Insn::BinOpImm(dst, lhs, op, imm) => {
+            Insn::BinOpImm(dst, lhs, op, imm, is_aug) => {
                 let folded = known.get(&lhs).and_then(|&cl| {
                     let rhs_val = Value::int(imm as i64);
                     crate::compiler::fold_binop(&consts[cl as usize], op, &rhs_val)
@@ -824,7 +825,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                     &mut out,
                     dst,
                     folded,
-                    Insn::BinOpImm(dst, lhs, op, imm),
+                    Insn::BinOpImm(dst, lhs, op, imm, is_aug),
                 );
             }
             // Branch/loop/raise/suspend: clear the map — values may differ per
@@ -922,8 +923,8 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | LoadNone(r)
         | DeleteLocal(r, _)
         | BinOp(r, _, _, _)
-        | BinOpConst(r, _, _, _)
-        | BinOpImm(r, _, _, _)
+        | BinOpConst(r, _, _, _, _)
+        | BinOpImm(r, _, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
         | MatchSeqExcluded(r, _)
@@ -1218,7 +1219,7 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 int_regs.insert(var);
                 out.push(insn);
             }
-            Insn::BinOpConst(dst, lhs, op, c) => {
+            Insn::BinOpConst(dst, lhs, op, c, is_aug) => {
                 let lhs_int = int_regs.contains(&lhs);
                 let c_int = is_int_const(c, consts);
                 if lhs_int && c_int {
@@ -1235,9 +1236,9 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 } else {
                     int_regs.remove(&dst);
                 }
-                out.push(Insn::BinOpConst(dst, lhs, op, c));
+                out.push(Insn::BinOpConst(dst, lhs, op, c, is_aug));
             }
-            Insn::BinOpImm(dst, lhs, op, imm) => {
+            Insn::BinOpImm(dst, lhs, op, imm, is_aug) => {
                 // The immediate is always an integer; apply the same algebraic
                 // identity rewrites as BinOpConst when lhs is known to be Int.
                 let lhs_int = int_regs.contains(&lhs);
@@ -1254,7 +1255,7 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 } else {
                     int_regs.remove(&dst);
                 }
-                out.push(Insn::BinOpImm(dst, lhs, op, imm));
+                out.push(Insn::BinOpImm(dst, lhs, op, imm, is_aug));
             }
             Insn::BinOp(dst, lhs, op, rhs) => {
                 // First: try the identity rewrite when `rhs` is an immutable
@@ -1707,8 +1708,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | GetAttrForWith(_, s, _, _)
         | ImportFromAttr(_, s, _)
         | DeleteAttr(s, _)
-        | BinOpConst(_, s, _, _)
-        | BinOpImm(_, s, _, _)
+        | BinOpConst(_, s, _, _, _)
+        | BinOpImm(_, s, _, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
@@ -1841,8 +1842,8 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | GetAttrForWith(_, s, _, _)
         | ImportFromAttr(_, s, _)
         | DeleteAttr(s, _)
-        | BinOpConst(_, s, _, _)
-        | BinOpImm(_, s, _, _)
+        | BinOpConst(_, s, _, _, _)
+        | BinOpImm(_, s, _, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
@@ -2069,7 +2070,8 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
                     if rhs >= num_locals {
                         converted_regs.insert(rhs);
                     }
-                    Insn::BinOpConst(dst, lhs, op, idx)
+                    // Plain BinOp is never augmented → is_aug = false.
+                    Insn::BinOpConst(dst, lhs, op, idx, false)
                 } else {
                     Insn::BinOp(dst, lhs, op, rhs)
                 }
@@ -2099,12 +2101,13 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
                     // The constant value fits in i16: embed it directly as BinOpImm.
                     // BinOpImm's slow path still invokes try_inplace_op, so __iadd__
                     // and friends are preserved for user-defined types on the LHS.
+                    // BinOpInPlace is always augmented → is_aug = true.
                     if let Some(int_val) = consts[idx as usize].as_int() {
                         if let Ok(imm) = i16::try_from(int_val) {
                             if rhs >= num_locals {
                                 converted_regs.insert(rhs);
                             }
-                            return Insn::BinOpImm(dst, lhs, op, imm);
+                            return Insn::BinOpImm(dst, lhs, op, imm, true);
                         }
                     }
                     // Constant does not fit in i16.  Only safe to use BinOpConst
@@ -2114,7 +2117,7 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
                         if rhs >= num_locals {
                             converted_regs.insert(rhs);
                         }
-                        return Insn::BinOpConst(dst, lhs, op, idx);
+                        return Insn::BinOpConst(dst, lhs, op, idx, true);
                     }
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs)
@@ -2530,8 +2533,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BuildDict(r, _, _)
         | BinOp(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
-        | BinOpConst(r, _, _, _)
-        | BinOpImm(r, _, _, _)
+        | BinOpConst(r, _, _, _, _)
+        | BinOpImm(r, _, _, _, _)
         | UnaryOp(r, _, _)
         | MatchSeqExcluded(r, _)
         | GetAttr(r, _, _)
@@ -2685,7 +2688,7 @@ fn is_loop_invariant(
         Insn::LoadConst(dst, _) => is_temp(*dst) && sole_writer(*dst),
         // BinOpConst reads `src`; invariant when `src` is not written, dst is a
         // temp, this is the sole write of dst, and the operator cannot raise.
-        Insn::BinOpConst(dst, src, op, _) | Insn::BinOpImm(dst, src, op, _) => {
+        Insn::BinOpConst(dst, src, op, _, _) | Insn::BinOpImm(dst, src, op, _, _) => {
             let op_is_safe = matches!(
                 op,
                 BinaryOp::Add
@@ -3073,10 +3076,15 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // Build the CSE key for this instruction, if it is a tracked pure form.
         let key: Option<(CseKey, u32)> = match &insn {
             Insn::LoadConst(dst, idx) => Some((CseKey::LoadConst(*idx), *dst)),
-            Insn::BinOpConst(dst, src, op, idx) => {
+            // Only non-augmented fused ops are CSE candidates.  An augmented op
+            // (is_aug == true) may mutate a container in place, so it is not pure
+            // and must never be deduplicated.
+            Insn::BinOpConst(dst, src, op, idx, false) => {
                 Some((CseKey::BinOpConst(*src, *op, *idx), *dst))
             }
-            Insn::BinOpImm(dst, src, op, imm) => Some((CseKey::BinOpImm(*src, *op, *imm), *dst)),
+            Insn::BinOpImm(dst, src, op, imm, false) => {
+                Some((CseKey::BinOpImm(*src, *op, *imm), *dst))
+            }
             Insn::UnaryOp(dst, op, src) => Some((CseKey::UnaryOp(*op, *src), *dst)),
             _ => None,
         };
@@ -3402,7 +3410,7 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 
         // Find the first BinOpConst(r_dst, iv, Mul, c_K) in the body
         let (b, r_dst, c_k) = match (h + 1..latch).find_map(|i| match &insns[i] {
-            Insn::BinOpConst(dst, src, BinaryOp::Mul, ck) if *src == iv && *dst != iv => {
+            Insn::BinOpConst(dst, src, BinaryOp::Mul, ck, _) if *src == iv && *dst != iv => {
                 Some((i, *dst, *ck))
             }
             _ => None,
@@ -3465,7 +3473,8 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
             }
             // Insert accumulator increment before the back-edge jump
             if i == latch {
-                new_insns.push(Insn::BinOpConst(r_acc, r_acc, BinaryOp::Add, c_k));
+                // Synthetic int accumulator add — not an augmented assignment.
+                new_insns.push(Insn::BinOpConst(r_acc, r_acc, BinaryOp::Add, c_k, false));
             }
             // Replace the multiplication or rewrite offsets for everything else
             let insn = if i == b {
@@ -4043,19 +4052,18 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::BinOpInPlace(dst, lhs, op, rhs) => {
                 Insn::BinOpInPlace(dst, s(&copies, lhs), op, s(&copies, rhs))
             }
-            // For BinOpConst/BinOpImm the compiler emits `dst == lhs` for
-            // augmented assignments (emit_aug_binop).  The VM uses `dst == lhs`
-            // as a signal to pass `is_augmented_assign = true` to try_inplace_op.
-            // Do NOT copy-propagate lhs when dst == lhs, because doing so would
-            // silently break that signal and cause dict/set |= to fall through
-            // to eval_binary, producing wrong TypeErrors.
-            Insn::BinOpConst(dst, lhs, op, c) => {
-                let new_lhs = if dst == lhs { lhs } else { s(&copies, lhs) };
-                Insn::BinOpConst(dst, new_lhs, op, c)
+            // For an augmented BinOpConst/BinOpImm (is_aug == true) the `lhs`
+            // register is the in-place target (`x op= c`); do NOT copy-propagate
+            // it, since the mutation must apply to that exact register.  Plain
+            // (is_aug == false) fused ops are pure and may have lhs substituted.
+            // The `is_aug` flag is carried through unchanged (issue #1874).
+            Insn::BinOpConst(dst, lhs, op, c, is_aug) => {
+                let new_lhs = if is_aug { lhs } else { s(&copies, lhs) };
+                Insn::BinOpConst(dst, new_lhs, op, c, is_aug)
             }
-            Insn::BinOpImm(dst, lhs, op, imm) => {
-                let new_lhs = if dst == lhs { lhs } else { s(&copies, lhs) };
-                Insn::BinOpImm(dst, new_lhs, op, imm)
+            Insn::BinOpImm(dst, lhs, op, imm, is_aug) => {
+                let new_lhs = if is_aug { lhs } else { s(&copies, lhs) };
+                Insn::BinOpImm(dst, new_lhs, op, imm, is_aug)
             }
             Insn::CmpJumpIfFalse(lhs, op, rhs, k) => {
                 Insn::CmpJumpIfFalse(s(&copies, lhs), op, s(&copies, rhs), k)
@@ -5163,7 +5171,7 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
 
         // [h+1]: BinOpImm(acc, acc, Add/Sub, imm) — acc != iv, iv not read
         let (acc, acc_op, imm) = match transformed[h + 1] {
-            Insn::BinOpImm(dst, src, op, imm)
+            Insn::BinOpImm(dst, src, op, imm, _)
                 if dst == src && dst != iv && matches!(op, BinaryOp::Add | BinaryOp::Sub) =>
             {
                 (dst, op, imm as i64)
@@ -5425,7 +5433,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
     for insn in &insns {
         match insn {
             Insn::LoadConst(_, c) => mark(&mut used, *c),
-            Insn::BinOpConst(_, _, _, c) => mark(&mut used, *c),
+            Insn::BinOpConst(_, _, _, c, _) => mark(&mut used, *c),
             Insn::CmpJumpIfFalseConst(_, _, c, _) => mark(&mut used, *c),
             Insn::CmpJumpIfTrueConst(_, _, c, _) => mark(&mut used, *c),
             Insn::ForCountConst(_, _, stop, step, _) => {
@@ -5460,7 +5468,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
         .into_iter()
         .map(|insn| match insn {
             Insn::LoadConst(r, c) => Insn::LoadConst(r, remap(c)),
-            Insn::BinOpConst(d, l, op, c) => Insn::BinOpConst(d, l, op, remap(c)),
+            Insn::BinOpConst(d, l, op, c, ia) => Insn::BinOpConst(d, l, op, remap(c), ia),
             Insn::CmpJumpIfFalseConst(r, op, c, k) => Insn::CmpJumpIfFalseConst(r, op, remap(c), k),
             Insn::CmpJumpIfTrueConst(r, op, c, k) => Insn::CmpJumpIfTrueConst(r, op, remap(c), k),
             Insn::ForCountConst(v, op, stop, step, k) => {
@@ -5841,7 +5849,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*stop);
         }
 
-        BinOpImm(_, a, _, _) | SyncModuleGlobal(a, _) => f(*a),
+        BinOpImm(_, a, _, _, _) | SyncModuleGlobal(a, _) => f(*a),
 
         StoreGlobal(_, s)
         | ImportStar(s)
@@ -5862,7 +5870,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | GetAttrForWith(_, s, _, _)
         | ImportFromAttr(_, s, _)
         | DeleteAttr(s, _)
-        | BinOpConst(_, s, _, _)
+        | BinOpConst(_, s, _, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
@@ -6324,7 +6332,7 @@ mod tests {
         let out = pass_binop_const_fusion(insns, 2);
         assert_eq!(out.len(), 2, "LoadConst should be removed");
         assert!(
-            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0)),
+            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0, ..)),
             "BinOp should become BinOpConst"
         );
     }
@@ -6360,7 +6368,7 @@ mod tests {
             "fusion is safe when dst == lc_reg (result overwrites it)"
         );
         assert!(
-            matches!(out[0], Insn::BinOpConst(5, 0, BinaryOp::Add, 0)),
+            matches!(out[0], Insn::BinOpConst(5, 0, BinaryOp::Add, 0, ..)),
             "should fuse to BinOpConst"
         );
     }
@@ -6604,7 +6612,7 @@ mod tests {
         // The loop body should NOT contain `BinOpConst(..., Add, 0)` —
         // it must have collapsed via algebraic + downstream passes.
         let loop_binopconst_add0 = optimized.fn_protos[0].code.insns.iter().any(|i| {
-            matches!(i, Insn::BinOpConst(_, _, crate::ast::BinaryOp::Add, c_idx)
+            matches!(i, Insn::BinOpConst(_, _, crate::ast::BinaryOp::Add, c_idx, ..)
                 if matches!(optimized.fn_protos[0].code.consts[*c_idx as usize].kind(),
                             crate::value::ValueKind::Int(0)))
         });
@@ -6690,8 +6698,8 @@ mod tests {
         // → LoadConst(r1, 2)  [consts[2]=8]
         let mut consts = vec![Value::int(5), Value::int(3)];
         let insns = vec![
-            Insn::LoadConst(0, 0),                    // r0 = 5
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // r1 = r0 + 3
+            Insn::LoadConst(0, 0),                           // r0 = 5
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false), // r1 = r0 + 3
             Insn::Return(1),
         ];
         let out = pass_const_fold(insns, &mut consts, 0);
@@ -6743,9 +6751,9 @@ mod tests {
         // After propagation: known[x]=idx_5, fold BinOpConst to LoadConst(y, idx_8)
         let mut consts = vec![Value::int(5), Value::int(3)];
         let insns = vec![
-            Insn::LoadConst(5, 0),                    // temp=5 (reg 5)
-            Insn::Move(0, 5),                         // x = temp
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // y = x + 3
+            Insn::LoadConst(5, 0),                           // temp=5 (reg 5)
+            Insn::Move(0, 5),                                // x = temp
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false), // y = x + 3
             Insn::Return(1),
         ];
         let out = pass_const_fold(insns, &mut consts, 0);
@@ -6765,12 +6773,12 @@ mod tests {
         let insns = vec![
             Insn::LoadConst(0, 0),
             Insn::JumpIfFalse(0, 0),
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 1),
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false),
             Insn::Return(1),
         ];
         let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
-            matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1)),
+            matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1, ..)),
             "no folding after a branch clears known map"
         );
     }
@@ -6815,12 +6823,12 @@ mod tests {
             Insn::LoadConst(2, 0),
             Insn::Jump(1),
             Insn::LoadConst(2, 1),
-            Insn::BinOpConst(3, 2, BinaryOp::Add, 2),
+            Insn::BinOpConst(3, 2, BinaryOp::Add, 2, false),
             Insn::Return(3),
         ];
         let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
-            matches!(out[4], Insn::BinOpConst(3, 2, BinaryOp::Add, 2)),
+            matches!(out[4], Insn::BinOpConst(3, 2, BinaryOp::Add, 2, ..)),
             "merge point must clear known map; BinOpConst on a phi'd value must not fold",
         );
     }
@@ -6840,16 +6848,16 @@ mod tests {
         let mut consts = vec![Value::int(3), Value::int(0), Value::int(1)];
         let insns = vec![
             Insn::LoadConst(0, 0),
-            Insn::BinOpConst(1, 0, BinaryOp::Gt, 1),
+            Insn::BinOpConst(1, 0, BinaryOp::Gt, 1, false),
             Insn::JumpIfFalse(1, 2),
-            Insn::BinOpConst(0, 0, BinaryOp::Sub, 2),
+            Insn::BinOpConst(0, 0, BinaryOp::Sub, 2, false),
             Insn::Jump(-4),
             Insn::Return(0),
         ];
         let out = pass_const_fold(insns, &mut consts, 0);
         // [1] must NOT fold to LoadConst(True) — the loop would become infinite.
         assert!(
-            matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1)),
+            matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1, ..)),
             "loop condition must not be folded; known map must clear at loop header"
         );
     }
@@ -6872,16 +6880,16 @@ mod tests {
         //   known[r5] must survive     → BinOpConst at [4] folds to LoadConst
         let mut consts = vec![Value::int(10), Value::int(3)];
         let insns = vec![
-            Insn::LoadConst(0, 0),                    // r0 = 10 (named local)
-            Insn::LoadConst(5, 1),                    // r5 = 3  (temp)
-            Insn::Call(2, 0),                         // call — may clobber r0
-            Insn::BinOpConst(3, 0, BinaryOp::Add, 1), // r3 = r0 + 3
-            Insn::BinOpConst(4, 5, BinaryOp::Add, 1), // r4 = r5 + 3
+            Insn::LoadConst(0, 0),                           // r0 = 10 (named local)
+            Insn::LoadConst(5, 1),                           // r5 = 3  (temp)
+            Insn::Call(2, 0),                                // call — may clobber r0
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 1, false), // r3 = r0 + 3
+            Insn::BinOpConst(4, 5, BinaryOp::Add, 1, false), // r4 = r5 + 3
             Insn::Return(3),
         ];
         let out = pass_const_fold(insns, &mut consts, 2);
         assert!(
-            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 1)),
+            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 1, ..)),
             "named-local r0 must not be folded after Call: found {:?}",
             out[3]
         );
@@ -6969,7 +6977,7 @@ mod tests {
         // After fusion+compaction: CmpJumpIfFalseConst at new_pos 0, Return at new_pos 1.
         // Rewritten offset: to_new[2]-to_new[1]-1 = 1-0-1 = 0 → same k=0.
         let insns = vec![
-            Insn::BinOpConst(5, 0, BinaryOp::Gt, 0),
+            Insn::BinOpConst(5, 0, BinaryOp::Gt, 0, false),
             Insn::JumpIfFalse(5, 0),
             Insn::Return(0),
         ];
@@ -7004,7 +7012,7 @@ mod tests {
         use crate::ast::BinaryOp;
         // r=1 < num_locals=3 → no fusion
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Gt, 0),
+            Insn::BinOpConst(1, 0, BinaryOp::Gt, 0, false),
             Insn::JumpIfFalse(1, 1),
             Insn::Return(0),
         ];
@@ -7571,10 +7579,10 @@ mod tests {
         // with r5 in [3], producing BinOpConst(r3, r5, Add, 0), which would
         // compute the pre-call value of r5 rather than the updated r0.
         let insns = vec![
-            Insn::LoadConst(5, 0),                    // r5 = consts[0]
-            Insn::Move(0, 5),                         // r0 (named local) = r5
-            Insn::Call(8, 0),                         // call — may clobber r0
-            Insn::BinOpConst(3, 0, BinaryOp::Add, 0), // r3 = r0 + consts[0]
+            Insn::LoadConst(5, 0),                           // r5 = consts[0]
+            Insn::Move(0, 5),                                // r0 (named local) = r5
+            Insn::Call(8, 0),                                // call — may clobber r0
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 0, false), // r3 = r0 + consts[0]
             Insn::Return(3),
         ];
         // num_locals=2: r0 and r1 are named locals; r2+ are temps.
@@ -7582,7 +7590,7 @@ mod tests {
         // After Call, copies[r0 → r5] must be evicted. The BinOpConst at [3]
         // must still use r0, not the aliased r5.
         assert!(
-            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 0)),
+            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 0, ..)),
             "named-local alias r0→r5 must not be propagated past Call: found {:?}",
             out[3]
         );
@@ -8120,18 +8128,18 @@ mod tests {
         //
         // r0 is written by ForCountConst; r1 by BinOp; r2 is untouched.
         let insns = vec![
-            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3), // [0]
-            Insn::BinOpConst(5, 2, BinaryOp::Add, 0),      // [1] r2 not in write set → hoist
-            Insn::BinOp(1, 1, BinaryOp::Add, 0),           // [2] r0 written → keep
-            Insn::Jump(-4),                                // [3]
-            Insn::Return(1),                               // [4]
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3),   // [0]
+            Insn::BinOpConst(5, 2, BinaryOp::Add, 0, false), // [1] r2 not in write set → hoist
+            Insn::BinOp(1, 1, BinaryOp::Add, 0),             // [2] r0 written → keep
+            Insn::Jump(-4),                                  // [3]
+            Insn::Return(1),                                 // [4]
         ];
         // r0..r4 are named locals; r5 is a temp (>= num_locals=5) → BinOpConst(r5) hoistable.
         let out = pass_licm(insns, 5);
 
         assert_eq!(out.len(), 5);
         assert!(
-            matches!(out[0], Insn::BinOpConst(5, 2, BinaryOp::Add, 0)),
+            matches!(out[0], Insn::BinOpConst(5, 2, BinaryOp::Add, 0, ..)),
             "BinOpConst with invariant src should be hoisted before header; got {:?}",
             out[0]
         );
@@ -8190,10 +8198,10 @@ mod tests {
         //  [2] Jump(-3)                          — back edge → [0]
         //  [3] Return(r1)
         let insns = vec![
-            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 2), // [0]
-            Insn::BinOpConst(1, 2, BinaryOp::Add, 0),      // [1] dst=r1 < 5 → keep
-            Insn::Jump(-3),                                // [2]
-            Insn::Return(1),                               // [3]
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 2),   // [0]
+            Insn::BinOpConst(1, 2, BinaryOp::Add, 0, false), // [1] dst=r1 < 5 → keep
+            Insn::Jump(-3),                                  // [2]
+            Insn::Return(1),                                 // [3]
         ];
         let before = insns.clone();
         let out = pass_licm(insns, 5);
@@ -8204,7 +8212,7 @@ mod tests {
             "loop header must remain at position 0"
         );
         assert!(
-            matches!(out[1], Insn::BinOpConst(1, 2, BinaryOp::Add, 0)),
+            matches!(out[1], Insn::BinOpConst(1, 2, BinaryOp::Add, 0, ..)),
             "BinOpConst to named local must stay in loop body"
         );
     }
@@ -8222,11 +8230,11 @@ mod tests {
         //  [3] Jump(-4)
         //  [4] Return(r1)
         let insns = vec![
-            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3), // [0]
-            Insn::BinOpConst(5, 0, BinaryOp::Add, 0),      // [1] r0 in write set → keep
-            Insn::BinOp(1, 1, BinaryOp::Add, 5),           // [2]
-            Insn::Jump(-4),                                // [3]
-            Insn::Return(1),                               // [4]
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3),   // [0]
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 0, false), // [1] r0 in write set → keep
+            Insn::BinOp(1, 1, BinaryOp::Add, 5),             // [2]
+            Insn::Jump(-4),                                  // [3]
+            Insn::Return(1),                                 // [4]
         ];
         let before = insns.clone();
         // r5 is a temp but r0 (src) IS written by ForCountConst → still not hoisted.
@@ -8243,7 +8251,7 @@ mod tests {
             "loop header must remain at position 0 (nothing hoisted)"
         );
         assert!(
-            matches!(out[1], Insn::BinOpConst(5, 0, BinaryOp::Add, 0)),
+            matches!(out[1], Insn::BinOpConst(5, 0, BinaryOp::Add, 0, ..)),
             "variant BinOpConst must stay in loop body"
         );
     }
@@ -8356,14 +8364,14 @@ mod tests {
         // BinOpConst(r4, r0, Add, 1)  …  BinOpConst(r5, r0, Add, 1)
         // The second should become CopyReg(r5, r4).
         let insns = vec![
-            Insn::BinOpConst(4, 0, BinaryOp::Add, 1),
-            Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // duplicate
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1, false),
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1, false), // duplicate
             Insn::Return(4),
         ];
         let out = pass_cse(insns, 0); // num_locals=0: r0 is a temp, CSE valid
         assert_eq!(out.len(), 3);
         assert!(
-            matches!(out[0], Insn::BinOpConst(4, 0, BinaryOp::Add, 1)),
+            matches!(out[0], Insn::BinOpConst(4, 0, BinaryOp::Add, 1, ..)),
             "first BinOpConst must be kept"
         );
         assert!(
@@ -8379,15 +8387,15 @@ mod tests {
         // LoadConst(r0, 2)        ← writes r0, the input of the BinOpConst
         // BinOpConst(r5, r0, Add, 1)   ← r0 is now a different value; NOT a duplicate
         let insns = vec![
-            Insn::BinOpConst(4, 0, BinaryOp::Add, 1),
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1, false),
             Insn::LoadConst(0, 2), // clobbers r0
-            Insn::BinOpConst(5, 0, BinaryOp::Add, 1),
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1, false),
             Insn::Return(4),
         ];
         let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 4, "no elimination when input clobbered");
         assert!(
-            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
+            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1, ..)),
             "second BinOpConst must not be replaced after input clobber"
         );
     }
@@ -8474,16 +8482,16 @@ mod tests {
         //   [3] Return(r5)
         // num_locals=1: r0 is a named local; r4, r5, r9 are temps.
         let insns = vec![
-            Insn::BinOpConst(4, 0, BinaryOp::Add, 1), // r4 = r0 + c1
-            Insn::Call(9, 2),                         // call; writes r9 (temp), may clobber r0
-            Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // r5 = r0 + c1 (same expr)
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1, false), // r4 = r0 + c1
+            Insn::Call(9, 2), // call; writes r9 (temp), may clobber r0
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1, false), // r5 = r0 + c1 (same expr)
             Insn::Return(5),
         ];
         let out = pass_cse(insns, 1); // r0 < num_locals: named local, must not be CSE'd across call
         // The second BinOpConst MUST NOT be replaced by CopyReg(r5, r4)
         // because r0 may have been mutated by the Call.
         assert!(
-            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
+            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1, ..)),
             "BinOpConst after Call must not be CSE-replaced when src is a named local: {:?}",
             out[2]
         );
@@ -8567,7 +8575,7 @@ mod tests {
         let insns = vec![
             Insn::LoadConst(2, 0),
             Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 2),
-            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3, false),
             Insn::Jump(-3),
             Insn::Return(3),
         ];
@@ -8594,7 +8602,7 @@ mod tests {
         );
         // [4] = BinOpConst(r_acc, r_acc, Add, c_K)
         assert!(
-            matches!(out[4], Insn::BinOpConst(4, 4, BinaryOp::Add, 3)),
+            matches!(out[4], Insn::BinOpConst(4, 4, BinaryOp::Add, 3, ..)),
             "accumulator increment inserted before back-edge"
         );
         // [5] = Jump — back-edge: old offset -3 (h=1, latch=3), new = h+1 - (latch+2) - 1 = 2-5-1 = -4
@@ -8619,7 +8627,7 @@ mod tests {
         let insns = vec![
             Insn::LoadConst(2, 0),
             Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 2), // step_c=2 → consts[2]=2 ≠ 1
-            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3, false),
             Insn::Jump(-3),
             Insn::Return(3),
         ];
@@ -8637,7 +8645,7 @@ mod tests {
         let insns = vec![
             Insn::LoadConst(2, 0),
             Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 2),
-            Insn::BinOpConst(3, 5, BinaryOp::Mul, 3), // r_src=5 ≠ iv=2
+            Insn::BinOpConst(3, 5, BinaryOp::Mul, 3, false), // r_src=5 ≠ iv=2
             Insn::Jump(-3),
             Insn::Return(3),
         ];
@@ -8751,7 +8759,7 @@ mod tests {
         let out = pass_const_reg_prop(insns, 2, &[]);
         assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
-            matches!(out[0], Insn::BinOpConst(2, 0, BinaryOp::Add, 0)),
+            matches!(out[0], Insn::BinOpConst(2, 0, BinaryOp::Add, 0, ..)),
             "BinOp with write-once const rhs should become BinOpConst: {:?}",
             out[0]
         );
@@ -8834,7 +8842,7 @@ mod tests {
         let out = pass_const_reg_prop(insns, 2, &consts);
         assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
-            matches!(out[0], Insn::BinOpImm(0, 0, BinaryOp::Add, 42)),
+            matches!(out[0], Insn::BinOpImm(0, 0, BinaryOp::Add, 42, ..)),
             "BinOpInPlace with i16-range const should become BinOpImm: {:?}",
             out[0]
         );
@@ -8855,7 +8863,7 @@ mod tests {
         let out = pass_const_reg_prop(insns, 2, &consts);
         assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
-            matches!(out[0], Insn::BinOpConst(2, 3, BinaryOp::Add, 0)),
+            matches!(out[0], Insn::BinOpConst(2, 3, BinaryOp::Add, 0, ..)),
             "BinOpInPlace with large const and temp lhs should become BinOpConst: {:?}",
             out[0]
         );
@@ -8895,7 +8903,7 @@ mod tests {
         // (k=3 means: target = 0+1+3 = 4, which is past latch=3 → exit=4)
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 3),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::SyncModuleGlobal(0, 0),
             Insn::Jump(-4),
         ];
@@ -8939,7 +8947,7 @@ mod tests {
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 4),
             Insn::Call(1, 0),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::SyncModuleGlobal(0, 0),
             Insn::Jump(-5),
         ];
@@ -8969,7 +8977,7 @@ mod tests {
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 4),
             Insn::LoadGlobal(2, 0),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::SyncModuleGlobal(0, 0),
             Insn::Jump(-5),
         ];
@@ -9009,7 +9017,7 @@ mod tests {
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 5),
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 1, 3),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::SyncModuleGlobal(0, 0),
             Insn::Jump(-5),
             Insn::ReturnNone,
@@ -9053,7 +9061,7 @@ mod tests {
         let insns = vec![
             Insn::Call(1, 0),
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 3),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::SyncModuleGlobal(0, 0),
             Insn::Jump(-4),
         ];
@@ -9089,11 +9097,11 @@ mod tests {
         // SyncModuleGlobal at pos 2 should be removed and sunk to exit at 7.
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 6),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::SyncModuleGlobal(0, 0),
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 1, 1),
             Insn::Jump(-5),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::Jump(-7),
             Insn::ReturnNone,
         ];
@@ -9287,15 +9295,15 @@ elif x == 2:
         let mut consts = vec![Value::int(5), Value::int(1), Value::int(2)];
         let num_locals = 0u32; // no named locals; r0/t1/t2 are all temps
         let insns = vec![
-            Insn::LoadConst(0, 0),                    // r0 = 5  → int_regs
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // t1 = r0 + 1
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 2), // t2 = t1 + 2
+            Insn::LoadConst(0, 0),                           // r0 = 5  → int_regs
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false), // t1 = r0 + 1
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 2, false), // t2 = t1 + 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // t2 should now use r0 (reg 0) directly instead of t1 (reg 1).
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _, ..)),
             "reassoc should rewrite t2's lhs from t1 to r0 when r0 is a known int: {:?}",
             out[2]
         );
@@ -9315,18 +9323,18 @@ elif x == 2:
         let mut consts = vec![Value::int(5), Value::int(2), Value::int(5)];
         let num_locals = 0u32;
         let insns = vec![
-            Insn::LoadConst(0, 0),                    // r0 = 5  → int_regs
-            Insn::BinOpConst(1, 0, BinaryOp::Mul, 1), // t1 = r0 * 2
-            Insn::BinOpConst(2, 1, BinaryOp::Mul, 2), // t2 = t1 * 5
+            Insn::LoadConst(0, 0),                           // r0 = 5  → int_regs
+            Insn::BinOpConst(1, 0, BinaryOp::Mul, 1, false), // t1 = r0 * 2
+            Insn::BinOpConst(2, 1, BinaryOp::Mul, 2, false), // t2 = t1 * 5
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Mul, _)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Mul, _, ..)),
             "reassoc should rewrite t2 to use r0 (reg 0) directly"
         );
         let ci = match out[2] {
-            Insn::BinOpConst(_, _, _, ci) => ci,
+            Insn::BinOpConst(_, _, _, ci, ..) => ci,
             _ => panic!(),
         };
         assert!(
@@ -9368,18 +9376,18 @@ elif x == 2:
         let mut consts = vec![Value::int(0b1010), Value::int(1), Value::int(2)];
         let num_locals = 0u32;
         let insns = vec![
-            Insn::LoadConst(0, 0),                      // r0 = 0b1010  → int_regs
-            Insn::BinOpConst(1, 0, BinaryOp::BitOr, 1), // t1 = r0 | 1
-            Insn::BinOpConst(2, 1, BinaryOp::BitOr, 2), // t2 = t1 | 2
+            Insn::LoadConst(0, 0),                             // r0 = 0b1010  → int_regs
+            Insn::BinOpConst(1, 0, BinaryOp::BitOr, 1, false), // t1 = r0 | 1
+            Insn::BinOpConst(2, 1, BinaryOp::BitOr, 2, false), // t2 = t1 | 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::BitOr, _)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::BitOr, _, ..)),
             "BitOr chain should be reassociated when source is known-int"
         );
         let ci = match out[2] {
-            Insn::BinOpConst(_, _, _, ci) => ci,
+            Insn::BinOpConst(_, _, _, ci, ..) => ci,
             _ => panic!(),
         };
         assert!(
@@ -9396,14 +9404,14 @@ elif x == 2:
         let mut consts = vec![Value::int(2), Value::int(3)];
         let num_locals = 1u32;
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1 = x + 2
-            Insn::BinOpConst(2, 1, BinaryOp::Mul, 1), // t2 = t1 * 3
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0, false), // t1 = x + 2
+            Insn::BinOpConst(2, 1, BinaryOp::Mul, 1, false), // t2 = t1 * 3
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // t2's lhs must remain t1 (reg 1).
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Mul, 1)),
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Mul, 1, ..)),
             "mixed ops must not be reassociated: {:?}",
             out[1]
         );
@@ -9417,13 +9425,13 @@ elif x == 2:
         let mut consts = vec![Value::int(2), Value::int(3)];
         let num_locals = 1u32;
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Sub, 0), // t1 = x - 2
-            Insn::BinOpConst(2, 1, BinaryOp::Sub, 1), // t2 = t1 - 3
+            Insn::BinOpConst(1, 0, BinaryOp::Sub, 0, false), // t1 = x - 2
+            Insn::BinOpConst(2, 1, BinaryOp::Sub, 1, false), // t2 = t1 - 3
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Sub, 1)),
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Sub, 1, ..)),
             "Sub must not be reassociated"
         );
     }
@@ -9437,14 +9445,14 @@ elif x == 2:
         let mut consts = vec![Value::int(1), Value::int(2)];
         let num_locals = 3u32; // r0, r1, r2 are all named locals
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1=r1 = x + 1  (r1 < num_locals!)
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // t2=r2 = t1 + 2 (r2 < num_locals!)
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0, false), // t1=r1 = x + 1  (r1 < num_locals!)
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 1, false), // t2=r2 = t1 + 2 (r2 < num_locals!)
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // No reassociation — r1 and r2 are named locals.
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1, ..)),
             "named-local intermediate must not be reassociated"
         );
     }
@@ -9492,15 +9500,15 @@ elif x == 2:
         //   [1] Jump(0)                      → [2]        (makes [2] a bb_start)
         //   [2] BinOpConst(2, 1, Add, 1)    t2 = t1 + 2  ← defined_as CLEARED → no reassoc
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // [0]
-            Insn::Jump(0),                            // [1] → [2]
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // [2] — bb_start → map cleared
-            Insn::Return(2),                          // [3]
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0, false), // [0]
+            Insn::Jump(0),                                   // [1] → [2]
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 1, false), // [2] — bb_start → map cleared
+            Insn::Return(2),                                 // [3]
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // [2] must NOT be reassociated because defined_as was cleared at BB boundary.
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
+            matches!(out[2], Insn::BinOpConst(2, 1, BinaryOp::Add, 1, ..)),
             "reassoc must not fire across a basic-block boundary"
         );
     }
@@ -9547,14 +9555,14 @@ elif x == 2:
         let mut consts = vec![Value::int(1), Value::int(2)];
         let num_locals = 1u32; // r0 is a local of unknown type
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1 = r0 + 1
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // t2 = t1 + 2
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0, false), // t1 = r0 + 1
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 1, false), // t2 = t1 + 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // t2 must still use t1 (reg 1), not r0 (reg 0) — r0 is unknown type.
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1, ..)),
             "reassoc must not fire when inner_src is of unknown type: {:?}",
             out[1]
         );
@@ -9573,20 +9581,20 @@ elif x == 2:
         let mut consts = vec![Value::int(5), Value::int(1), Value::int(2)];
         let num_locals = 0u32; // no named locals; r0/t1/t2 are all temps
         let insns = vec![
-            Insn::LoadConst(0, 0),                    // r0 = 5
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // t1 = r0 + 1
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 2), // t2 = t1 + 2
+            Insn::LoadConst(0, 0),                           // r0 = 5
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1, false), // t1 = r0 + 1
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 2, false), // t2 = t1 + 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // t2 should be rewritten to use r0 directly with combined constant 3.
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _, ..)),
             "reassoc must fire when inner_src (r0) is a known-int register: {:?}",
             out[2]
         );
         let ci = match out[2] {
-            Insn::BinOpConst(_, _, _, ci) => ci,
+            Insn::BinOpConst(_, _, _, ci, ..) => ci,
             _ => panic!(),
         };
         assert!(
@@ -9613,15 +9621,15 @@ elif x == 2:
         let mut consts = vec![Value::int(1), Value::int(2)];
         let num_locals = 1u32;
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1 = x + 1  (x unknown type)
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // t2 = t1 + 2
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0, false), // t1 = x + 1  (x unknown type)
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 1, false), // t2 = t1 + 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // pass_reassoc must NOT have rewritten t2 to use x (reg 0) directly,
         // because x is of unknown type and the intermediate __add__ must fire.
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1, ..)),
             "pass_reassoc must not fire when inner_src (x) is of unknown type: {:?}",
             out[1]
         );
@@ -9746,10 +9754,10 @@ elif x == 2:
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 0, 3), // [0] → [4]
             Insn::LoadConst(5, 1),                            // [1] x=10
-            Insn::BinOpConst(6, 5, BinaryOp::Add, 2),         // [2] x+1
+            Insn::BinOpConst(6, 5, BinaryOp::Add, 2, false),  // [2] x+1
             Insn::Return(6),                                  // [3] ← survivor end
             Insn::LoadConst(5, 3),                            // [4] x=20
-            Insn::BinOpConst(6, 5, BinaryOp::Add, 2),         // [5] duplicate
+            Insn::BinOpConst(6, 5, BinaryOp::Add, 2, false),  // [5] duplicate
             Insn::Return(6),                                  // [6] duplicate end
         ];
 
@@ -9920,16 +9928,16 @@ elif x == 2:
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 0, 4), // [0] -> [5]
             Insn::LoadConst(5, 1),                            // [1]  arm1 unique
             Insn::BinOp(6, 5, BinaryOp::Add, 5),              // [2] \
-            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2),         // [3]  survivor tail
+            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2, false),  // [3]  survivor tail
             Insn::Return(7),                                  // [4] /
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 3, 4), // [5] -> [10]
             Insn::LoadConst(5, 10),                           // [6]  arm2 unique
             Insn::BinOp(6, 5, BinaryOp::Add, 5),              // [7] \
-            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2),         // [8]  dup1 tail
+            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2, false),  // [8]  dup1 tail
             Insn::Return(7),                                  // [9] /
             Insn::LoadConst(5, 20),                           // [10] arm3 unique (jump target)
             Insn::BinOp(6, 5, BinaryOp::Add, 5),              // [11] \
-            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2),         // [12]  dup2 tail
+            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2, false),  // [12]  dup2 tail
             Insn::Return(7),                                  // [13] /
         ];
         let before_count = insns.len();
@@ -10072,7 +10080,7 @@ elif x == 2:
         // jump_pc!(-(2+1)) at i=2: 2 + 1 + (-3) = 0. ✓ targets [0].
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::Jump(-3),
             Insn::Return(0),
         ];
@@ -10103,7 +10111,7 @@ elif x == 2:
         //   [3] Return(0)
         let insns = vec![
             Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 2),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::Jump(-3),
             Insn::Return(0),
         ];
@@ -10148,7 +10156,7 @@ elif x == 2:
         //   [3] Return(0)
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::Jump(0), // forward jump, not -(k+1) = -3
             Insn::Return(0),
         ];
@@ -10166,7 +10174,7 @@ elif x == 2:
         //   [3] Return(0)
         let insns = vec![
             Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2),
-            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, false),
             Insn::Return(0),
             Insn::Return(0),
         ];
@@ -10222,7 +10230,7 @@ elif x == 2:
         // Arithmetic check: jump_pc!(-(2+1)) at i=2: 2+1+(-3) = 0. ✓ targets [0].
         let insns = vec![
             Insn::CmpJumpIfTrueConst(0, BinaryOp::Eq, 0, 2),
-            Insn::BinOpImm(0, 0, BinaryOp::Sub, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Sub, 1, false),
             Insn::Jump(-3),
             Insn::Return(0),
         ];
@@ -10252,7 +10260,7 @@ elif x == 2:
         //   [3] Return(0)
         let insns = vec![
             Insn::CmpJumpIfTrue(0, BinaryOp::Eq, 1, 2),
-            Insn::BinOpImm(0, 0, BinaryOp::Sub, 1),
+            Insn::BinOpImm(0, 0, BinaryOp::Sub, 1, false),
             Insn::Jump(-3),
             Insn::Return(0),
         ];
