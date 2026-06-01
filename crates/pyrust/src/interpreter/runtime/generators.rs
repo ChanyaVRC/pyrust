@@ -24,37 +24,25 @@ impl Interpreter {
         match method {
             "__iter__" => {
                 if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "generator.__iter__() takes no arguments".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("generator.__iter__() takes no arguments"));
                 }
                 Ok(receiver)
             }
             "__next__" => {
                 if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "generator.__next__() takes no arguments".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("generator.__next__() takes no arguments"));
                 }
                 self.call_next(&receiver, None)
             }
             "close" => {
                 if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "generator.close() takes no arguments".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("generator.close() takes no arguments"));
                 }
                 self.generator_close(receiver)
             }
             "throw" => {
                 if args.is_empty() || args.len() > 3 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "generator.throw() takes 1 to 3 arguments".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("generator.throw() takes 1 to 3 arguments"));
                 }
                 // CPython's throw(typ, val=None, tb=None) semantics (3.12):
                 //   - 1 arg:  pass through to generator_throw (handles both
@@ -110,10 +98,7 @@ impl Interpreter {
                         // TypeError ("instance exception may not have a
                         // separate value").
                         if !val.is_none() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "instance exception may not have a separate value".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("instance exception may not have a separate value"));
                         }
                         typ
                     }
@@ -122,13 +107,8 @@ impl Interpreter {
             }
             "send" => {
                 if args.len() != 1 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "generator.send() takes exactly one argument ({} given)",
-                            args.len()
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("generator.send() takes exactly one argument ({} given)",
+                            args.len()));
                 }
                 let sent_value = args.into_iter().next().unwrap();
                 self.generator_send(receiver, sent_value)
@@ -152,10 +132,7 @@ impl Interpreter {
         let state_rc = match receiver.kind() {
             ValueKind::Generator(rc) => Rc::clone(rc),
             _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    "generator.close() called on non-generator".to_string(),
-                ));
+                return Err(pyrust_core::type_err!("generator.close() called on non-generator"));
             }
         };
 
@@ -167,10 +144,7 @@ impl Interpreter {
             let mut borrow = match state_rc.try_borrow_mut() {
                 Ok(b) => b,
                 Err(_) => {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "generator already executing".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("generator already executing"));
                 }
             };
             // NativeIterFrame (returned by `iter()` on a built-in): close is a
@@ -190,10 +164,7 @@ impl Interpreter {
         let mut borrow = match state_rc.try_borrow_mut() {
             Ok(b) => b,
             Err(_) => {
-                return Err(PyError::named(
-                    "ValueError",
-                    "generator already executing".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("generator already executing"));
             }
         };
         let frame = borrow
@@ -203,17 +174,14 @@ impl Interpreter {
             return Ok(Value::none());
         }
 
-        let inject = PyError::named("GeneratorExit", String::new());
+        let inject = pyrust_core::py_err!("GeneratorExit", String::new());
         match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator yielded again instead of returning/re-raising — that's
             // an error in CPython.
             Ok(_yielded) => {
                 // Mark as done so subsequent calls don't re-execute.
                 frame.done = true;
-                Err(PyError::named(
-                    "RuntimeError",
-                    "generator ignored GeneratorExit".to_string(),
-                ))
+                Err(pyrust_core::runtime_err!("generator ignored GeneratorExit"))
             }
             // Generator returned normally (StopIteration synthesised).
             // class_name_is walks the hierarchy so StopIteration subclasses are
@@ -236,10 +204,7 @@ impl Interpreter {
         let state_rc = match receiver.kind() {
             ValueKind::Generator(rc) => Rc::clone(rc),
             _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    "generator.throw() called on non-generator".to_string(),
-                ));
+                return Err(pyrust_core::type_err!("generator.throw() called on non-generator"));
             }
         };
 
@@ -255,10 +220,7 @@ impl Interpreter {
             let mut borrow = match state_rc.try_borrow_mut() {
                 Ok(b) => b,
                 Err(_) => {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "generator already executing".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("generator already executing"));
                 }
             };
             // NativeIterFrame: throw at a built-in iterator simply propagates
@@ -277,10 +239,7 @@ impl Interpreter {
         let mut borrow = match state_rc.try_borrow_mut() {
             Ok(b) => b,
             Err(_) => {
-                return Err(PyError::named(
-                    "ValueError",
-                    "generator already executing".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("generator already executing"));
             }
         };
         let frame = borrow
@@ -319,20 +278,14 @@ impl Interpreter {
         let state_rc = match receiver.kind() {
             ValueKind::Generator(rc) => Rc::clone(rc),
             _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    "generator.send() called on non-generator".to_string(),
-                ));
+                return Err(pyrust_core::type_err!("generator.send() called on non-generator"));
             }
         };
 
         let mut borrow = match state_rc.try_borrow_mut() {
             Ok(b) => b,
             Err(_) => {
-                return Err(PyError::named(
-                    "ValueError",
-                    "generator already executing".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("generator already executing"));
             }
         };
 
@@ -356,7 +309,7 @@ impl Interpreter {
             let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                 PyError::Raised(instantiate_exception(cls, vec![]))
             } else {
-                PyError::named("StopIteration", String::new())
+                pyrust_core::py_err!("StopIteration", String::new())
             };
             return Err(exc);
         }
@@ -364,10 +317,7 @@ impl Interpreter {
         // CPython: sending a non-None value to a just-started generator is an
         // error.  A just-started generator has pc == 0 (never been resumed).
         if frame.pc == 0 && !sent_value.is_none() {
-            return Err(PyError::named(
-                "TypeError",
-                "can't send non-None value to a just-started generator".to_string(),
-            ));
+            return Err(pyrust_core::type_err!("can't send non-None value to a just-started generator"));
         }
 
         match self.resume_generator_with_exc(frame, None, sent_value) {

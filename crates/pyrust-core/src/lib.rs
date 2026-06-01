@@ -29,6 +29,62 @@ pub fn next_fn_id() -> u64 {
     FN_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Construct a [`PyError::Named`] with a static class literal and a message.
+///
+/// Collapses the ubiquitous four-line
+/// `PyError::named("TypeError", format!("…", …))` shape into one expression.
+/// It evaluates to a `PyError` *value* (not an early return), so it works in
+/// every position the constructor did — `Err(py_err!(...))`,
+/// `.ok_or_else(|| py_err!(...))`, a match arm, etc.
+///
+/// Two arms, one rule: **a string-literal message is run through `format!`**
+/// (so inline captures `{x}` and explicit `"…{}", arg` both work, matching the
+/// original `format!(…)` sites); **any other expression is taken verbatim** as
+/// an `impl Into<String>` (a `String`/`&str` variable, or a literal that must
+/// not be formatted — pass it as `"text".to_string()`).
+///
+/// The message is only built on evaluation (the error path).  Prefer the
+/// per-exception sugar ([`type_err!`], [`value_err!`], …); this is the escape
+/// hatch for the rarer classes.
+#[macro_export]
+macro_rules! py_err {
+    ($cls:literal, $fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::PyError::named($cls, format!($fmt $(, $($arg)*)?))
+    };
+    ($cls:literal, $msg:expr $(,)?) => {
+        $crate::PyError::named($cls, $msg)
+    };
+}
+
+/// Per-exception sugar over [`py_err!`], so call sites read
+/// `type_err!("…", x)` instead of `py_err!("TypeError", "…", x)`.  Each forwards
+/// to `py_err!` with the class baked in, preserving the literal / format / expr
+/// arms (and the lazy `format!`).
+#[macro_export]
+macro_rules! type_err {
+    ($($t:tt)+) => { $crate::py_err!("TypeError", $($t)+) };
+}
+#[macro_export]
+macro_rules! value_err {
+    ($($t:tt)+) => { $crate::py_err!("ValueError", $($t)+) };
+}
+#[macro_export]
+macro_rules! index_err {
+    ($($t:tt)+) => { $crate::py_err!("IndexError", $($t)+) };
+}
+#[macro_export]
+macro_rules! overflow_err {
+    ($($t:tt)+) => { $crate::py_err!("OverflowError", $($t)+) };
+}
+#[macro_export]
+macro_rules! zerodiv_err {
+    ($($t:tt)+) => { $crate::py_err!("ZeroDivisionError", $($t)+) };
+}
+#[macro_export]
+macro_rules! runtime_err {
+    ($($t:tt)+) => { $crate::py_err!("RuntimeError", $($t)+) };
+}
+
 // Global class-mutation epoch counter.  Bumped on every PyClass attribute write
 // or delete, regardless of which class was mutated.  Inline attribute caches
 // store the epoch at fill time and re-validate it on each hit; a mismatch means

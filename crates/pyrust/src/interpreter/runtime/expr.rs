@@ -8,10 +8,7 @@ fn bigint_to_float_or_overflow(b: &PyBigInt) -> Result<f64> {
     b.to_f64()
         .filter(|f| f.is_finite())
         .ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "int too large to convert to float".to_string(),
-            )
+            pyrust_core::overflow_err!("int too large to convert to float")
         })
 }
 
@@ -33,26 +30,23 @@ fn seq_repeat_str(text: &str, n: i64) -> Result<Value> {
     // pay for chars().count() when byte_total itself already approaches the limit.
     let byte_total = match text.len().checked_mul(n) {
         Some(b) => b,
-        None => return Err(PyError::named("MemoryError", String::new())),
+        None => return Err(pyrust_core::py_err!("MemoryError", String::new())),
     };
     if byte_total > isize::MAX as usize {
         // Only compute char_count here; CPython raises OverflowError when
         // char_count * n > Py_ssize_t_MAX, MemoryError otherwise.
         let char_count = text.chars().count();
         if char_count.checked_mul(n).map_or(true, |t| t > isize::MAX as usize) {
-            return Err(PyError::named(
-                "OverflowError",
-                "repeated string is too long".to_string(),
-            ));
+            return Err(pyrust_core::overflow_err!("repeated string is too long"));
         }
         // char_count * n fits, but byte_total doesn't — OOM.
-        return Err(PyError::named("MemoryError", String::new()));
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
     // Use try_reserve to catch OOM rather than letting the allocator abort,
     // then delegate to str::repeat for its O(log n) doubling strategy.
     let mut probe = String::new();
     if probe.try_reserve(byte_total).is_err() {
-        return Err(PyError::named("MemoryError", String::new()));
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
     Ok(Value::string(text.repeat(n)))
 }
@@ -64,11 +58,11 @@ fn seq_repeat_list(items: &[Value], n: i64) -> Result<Value> {
     let n = n as usize;
     let total = match items.len().checked_mul(n) {
         Some(t) => t,
-        None => return Err(PyError::named("MemoryError", String::new())),
+        None => return Err(pyrust_core::py_err!("MemoryError", String::new())),
     };
     let mut out: Vec<Value> = Vec::new();
     if out.try_reserve(total).is_err() {
-        return Err(PyError::named("MemoryError", String::new()));
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
     for _ in 0..n {
         out.extend_from_slice(items);
@@ -83,11 +77,11 @@ fn seq_repeat_bytes(data: &[u8], n: i64) -> Result<Value> {
     let n = n as usize;
     let total = match data.len().checked_mul(n) {
         Some(t) => t,
-        None => return Err(PyError::named("MemoryError", String::new())),
+        None => return Err(pyrust_core::py_err!("MemoryError", String::new())),
     };
     let mut out: Vec<u8> = Vec::new();
     if out.try_reserve(total).is_err() {
-        return Err(PyError::named("MemoryError", String::new()));
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
     for _ in 0..n {
         out.extend_from_slice(data);
@@ -102,11 +96,11 @@ fn seq_repeat_bytearray(data: &[u8], n: i64) -> Result<Value> {
     let n = n as usize;
     let total = match data.len().checked_mul(n) {
         Some(t) => t,
-        None => return Err(PyError::named("MemoryError", String::new())),
+        None => return Err(pyrust_core::py_err!("MemoryError", String::new())),
     };
     let mut out: Vec<u8> = Vec::new();
     if out.try_reserve(total).is_err() {
-        return Err(PyError::named("MemoryError", String::new()));
+        return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
     for _ in 0..n {
         out.extend_from_slice(data);
@@ -242,13 +236,10 @@ const MAX_SHIFT: usize = 1 << 30;
 fn shift_count(v: &Value) -> Result<ShiftCount> {
     let big = value_to_bigint(v).ok_or_else(|| {
         // Caller replaces this message via map_err; see LShift / RShift arms.
-        PyError::named("TypeError", String::new())
+        pyrust_core::type_err!(String::new())
     })?;
     match big.sign() {
-        PyBigIntSign::Minus => Err(PyError::named(
-            "ValueError",
-            "negative shift count".to_string(),
-        )),
+        PyBigIntSign::Minus => Err(pyrust_core::value_err!("negative shift count")),
         PyBigIntSign::NoSign => Ok(ShiftCount::Fits(0)),
         PyBigIntSign::Plus => Ok(match big.to_usize() {
             Some(n) => ShiftCount::Fits(n),
@@ -270,10 +261,10 @@ fn seq_repeat_tuple(items: &[Value], n: i64) -> Result<Value> {
     }
     let n = n as usize;
     let total = items.len().checked_mul(n).filter(|&t| t <= isize::MAX as usize);
-    let total = total.ok_or_else(|| PyError::named("MemoryError", String::new()))?;
+    let total = total.ok_or_else(|| pyrust_core::py_err!("MemoryError", String::new()))?;
     let mut out: Vec<Value> = Vec::new();
     out.try_reserve(total)
-        .map_err(|_| PyError::named("MemoryError", String::new()))?;
+        .map_err(|_| pyrust_core::py_err!("MemoryError", String::new()))?;
     for _ in 0..n {
         out.extend_from_slice(items);
     }
@@ -427,14 +418,11 @@ impl NumericOps for NumericSlot {
             let a = slot_to_float(self)?;
             let b = slot_to_float(&r)?;
             if b == 0.0 {
-                return Err(PyError::named(
-                    "ZeroDivisionError",
-                    if both_int {
+                return Err(pyrust_core::zerodiv_err!(if both_int {
                         "division by zero".to_string()
                     } else {
                         "float division by zero".to_string()
-                    },
-                ));
+                    }));
             }
             Ok(Value::float(a / b))
         })())
@@ -535,20 +523,14 @@ impl NumericOps for NumericSlot {
                 match b.to_u64_digits().1.as_slice() {
                     [exp] => Ok(Value::bigint(PyPow::pow(PyBigInt::from(*a), *exp))),
                     [] => Ok(Value::int(1)), // a ** 0
-                    _ => Err(PyError::named(
-                        "OverflowError",
-                        "exponent too large for ** to compute".to_string(),
-                    )),
+                    _ => Err(pyrust_core::overflow_err!("exponent too large for ** to compute")),
                 }
             }
             (NumericSlot::BigInt(a), NumericSlot::BigInt(b)) if *b >= PyBigInt::from(0) => {
                 match b.to_u64_digits().1.as_slice() {
                     [exp] => Ok(Value::bigint(PyPow::pow(a.clone(), *exp))),
                     [] => Ok(Value::int(1)),
-                    _ => Err(PyError::named(
-                        "OverflowError",
-                        "exponent too large for ** to compute".to_string(),
-                    )),
+                    _ => Err(pyrust_core::overflow_err!("exponent too large for ** to compute")),
                 }
             }
             // Float base/exponent, or integer with a negative exponent:
@@ -558,10 +540,7 @@ impl NumericOps for NumericSlot {
                 let a = slot_to_float(self)?;
                 let b = slot_to_float(&r)?;
                 if a == 0.0 && b < 0.0 && b.is_finite() {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "0.0 cannot be raised to a negative power".to_string(),
-                    ));
+                    return Err(pyrust_core::zerodiv_err!("0.0 cannot be raised to a negative power"));
                 }
                 let result = a.powf(b);
                 if a < 0.0 && result.is_nan() {
@@ -659,7 +638,7 @@ fn collapse_bigint(v: Value) -> Value {
 
 /// `ZeroDivisionError` with the given message.
 fn zero_div(msg: &str) -> PyError {
-    PyError::named("ZeroDivisionError", msg.to_string())
+    pyrust_core::zerodiv_err!(msg.to_string())
 }
 
 /// Canonical `<<` for two integer slots (Int / BigInt), promoting to
@@ -670,10 +649,7 @@ fn slot_lshift(lhs: &NumericSlot, rhs: &Value) -> Result<Value> {
     match shift_count(rhs)? {
         ShiftCount::Fits(n) => {
             if n > MAX_SHIFT && !a.is_zero() {
-                return Err(PyError::named(
-                    "OverflowError",
-                    "too many digits in integer".to_string(),
-                ));
+                return Err(pyrust_core::overflow_err!("too many digits in integer"));
             }
             Ok(collapse_bigint(Value::bigint(a << n)))
         }
@@ -681,10 +657,7 @@ fn slot_lshift(lhs: &NumericSlot, rhs: &Value) -> Result<Value> {
             if a.is_zero() {
                 Ok(Value::int(0))
             } else {
-                Err(PyError::named(
-                    "OverflowError",
-                    "too many digits in integer".to_string(),
-                ))
+                Err(pyrust_core::overflow_err!("too many digits in integer"))
             }
         }
     }
@@ -708,10 +681,7 @@ fn slot_rshift(lhs: &NumericSlot, rhs: &Value) -> Result<Value> {
 fn unsupported_operand(op_sym: &str, left: &Value, right: &Value) -> PyError {
     let lt = value_type_name_str(left);
     let rt = value_type_name_str(right);
-    PyError::named(
-        "TypeError",
-        format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
-    )
+    pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")
 }
 
 /// Dispatch a numeric binary op through the LHS's slot table.  Returns
@@ -749,7 +719,7 @@ pub(crate) fn dispatch_numeric_binop(
 
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
-        PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
+        pyrust_core::type_err!("unsupported operand type(s) for {op}")
     }
     pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
@@ -854,7 +824,7 @@ impl Interpreter {
                     // BigInt is a valid integer but will always be out of range
                     // for any realistic range length.
                     ValueKind::BigInt(_) => {
-                        return Err(PyError::named("IndexError", "range object index out of range".to_string()));
+                        return Err(pyrust_core::index_err!("range object index out of range"));
                     }
                     _ => unreachable!("call_index_protocol guarantees an integer"),
                 };
@@ -862,7 +832,7 @@ impl Interpreter {
                     i += len;
                 }
                 if i < 0 || i >= len {
-                    return Err(PyError::named("IndexError", "range object index out of range".to_string()));
+                    return Err(pyrust_core::index_err!("range object index out of range"));
                 }
                 Ok(Value::int(start + i * step))
             }
@@ -924,10 +894,7 @@ impl Interpreter {
                         )
                     }
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        format!("type '{}' is not subscriptable", class.borrow().name),
-                    ))
+                    Err(pyrust_core::type_err!("type '{}' is not subscriptable", class.borrow().name))
                 }
             }
             ValueKind::PyInstance(inst) => {
@@ -998,18 +965,10 @@ impl Interpreter {
                     }
                     return self.eval_index(&backing, index);
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("'{}' object is not subscriptable", class.borrow().name),
-                ))
+                Err(pyrust_core::type_err!("'{}' object is not subscriptable", class.borrow().name))
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object is not subscriptable",
-                    pyrust_core::builtin_type_name(target)
-                ),
-            )),
+            _ => Err(pyrust_core::type_err!("'{}' object is not subscriptable",
+                    pyrust_core::builtin_type_name(target))),
         }
     }
 
@@ -1257,27 +1216,17 @@ impl Interpreter {
                     Some(Err(e)) => return Err(e),
                     // No reverse dunder found: incomparable pair — raise
                     // TypeError just as CPython does for max().
-                    None => return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'>' not supported between instances of '{}' and '{}'",
+                    None => return Err(pyrust_core::type_err!("'>' not supported between instances of '{}' and '{}'",
                             value_type_name_str(a),
-                            value_type_name_str(b),
-                        ),
-                    )),
+                            value_type_name_str(b),)),
                 }
             }
             Some(Err(e)) => return Err(e),
             // No __gt__/__lt__ on either operand; emit '>' error matching
             // CPython's max() TypeError wording.
-            None => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'>' not supported between instances of '{}' and '{}'",
+            None => Err(pyrust_core::type_err!("'>' not supported between instances of '{}' and '{}'",
                     value_type_name_str(a),
-                    value_type_name_str(b),
-                ),
-            )),
+                    value_type_name_str(b),)),
         }
     }
 
@@ -1347,10 +1296,7 @@ impl Interpreter {
                 };
                 drop(borrow);
                 if let Some(component_name) = unhashable_component {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("unhashable type: '{component_name}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("unhashable type: '{component_name}'"));
                 }
                 // All slices (instance or primitive components) go through
                 // hash_value_with_interp to get the CPython-compatible slice hash
@@ -1387,10 +1333,7 @@ impl Interpreter {
             if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
                 if matches!(hash_method.kind(), ValueKind::None) {
                     let class_name = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("unhashable type: '{class_name}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
                 }
                 if is_callable_method(&hash_method) {
                     let result = invoke_class_method(
@@ -1419,10 +1362,7 @@ impl Interpreter {
                         ValueKind::Bool(b) => b as i64,
                         ValueKind::BigInt(n) => py_hash_bigint(n),
                         _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "__hash__ method should return an integer".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("__hash__ method should return an integer"));
                         }
                     };
                     return Ok(PyKey::Object {
@@ -1493,10 +1433,7 @@ impl Interpreter {
             });
         }
         let type_name = value_type_name_str(value);
-        Err(PyError::named(
-            "TypeError",
-            format!("unhashable type: '{type_name}'"),
-        ))
+        Err(pyrust_core::type_err!("unhashable type: '{type_name}'"))
     }
 
     /// Look up a key in a dict where the key may be a `PyKey::Object`.
@@ -2271,10 +2208,7 @@ impl Interpreter {
             // snapshot logic in snapshot_update_arg).
             "update" => {
                 if args.len() > 1 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("update expected at most 1 argument, got {}", args.len()),
-                    ));
+                    return Err(pyrust_core::type_err!("update expected at most 1 argument, got {}", args.len()));
                 }
                 // Check whether we need to intercept.  If the single positional
                 // arg is a primitive type that pyrust_builtins::dict::call already
@@ -2317,24 +2251,14 @@ impl Interpreter {
                         ValueKind::List(items) => {
                             let len = items.len();
                             if len != 2 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!(
-                                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
-                                    ),
-                                ));
+                                return Err(pyrust_core::value_err!("dictionary update sequence element #{idx} has length {len}; 2 is required"));
                             }
                             (items[0].clone(), items[1].clone())
                         }
                         ValueKind::Tuple(items) => {
                             let len = items.len();
                             if len != 2 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!(
-                                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
-                                    ),
-                                ));
+                                return Err(pyrust_core::value_err!("dictionary update sequence element #{idx} has length {len}; 2 is required"));
                             }
                             (items[0].clone(), items[1].clone())
                         }
@@ -2342,12 +2266,7 @@ impl Interpreter {
                             let chars: Vec<char> = s.chars().collect();
                             let len = chars.len();
                             if len != 2 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    format!(
-                                        "dictionary update sequence element #{idx} has length {len}; 2 is required"
-                                    ),
-                                ));
+                                return Err(pyrust_core::value_err!("dictionary update sequence element #{idx} has length {len}; 2 is required"));
                             }
                             (
                                 Value::string(chars[0].to_string()),
@@ -2355,12 +2274,7 @@ impl Interpreter {
                             )
                         }
                         _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "cannot convert dictionary update sequence element #{idx} to a sequence"
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("cannot convert dictionary update sequence element #{idx} to a sequence"));
                         }
                     };
                     let pk = self.value_to_pykey(&k_val)?;
@@ -2524,23 +2438,15 @@ impl Interpreter {
     ) -> Result<Value> {
         if method == "format_map" {
             if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "str.format_map() takes exactly one argument ({} given)",
-                        args.len()
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("str.format_map() takes exactly one argument ({} given)",
+                        args.len()));
             }
             // Borrow template as &str from the receiver to avoid a heap allocation.
             // receiver is held by value for the lifetime of this block.
             let template: &str = match receiver.kind() {
                 ValueKind::Str(s) => s,
                 _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "descriptor 'format_map' requires a 'str' object".to_string(),
-                    ))
+                    return Err(pyrust_core::type_err!("descriptor 'format_map' requires a 'str' object"))
                 }
             };
             let mapping = args.into_iter().next().unwrap();
@@ -2548,13 +2454,8 @@ impl Interpreter {
         }
         if method == "join" {
             if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "str.join() takes exactly one argument ({} given)",
-                        args.len()
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("str.join() takes exactly one argument ({} given)",
+                        args.len()));
             }
             let iterable = args.into_iter().next().unwrap();
             // Fast paths: types already handled directly by the builtins join fn.
@@ -2579,7 +2480,7 @@ impl Interpreter {
                             PyError::Named(_, msg) | PyError::Class(_, msg)
                                 if msg.contains("is not iterable"));
                     if is_not_iterable {
-                        PyError::named("TypeError", "can only join an iterable".to_string())
+                        pyrust_core::type_err!("can only join an iterable")
                     } else {
                         e
                     }
@@ -2594,13 +2495,8 @@ impl Interpreter {
             // Dict fast path: delegate to pyrust-builtins which handles the
             // common `str.maketrans`-produced dict without needing the interpreter.
             if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "str.translate() takes exactly one argument ({} given)",
-                        args.len()
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("str.translate() takes exactly one argument ({} given)",
+                        args.len()));
             }
             let is_dict = matches!(args[0].kind(), ValueKind::Dict(_));
             if is_dict {
@@ -2615,10 +2511,7 @@ impl Interpreter {
             let (chars, out_capacity) = match receiver.kind() {
                 ValueKind::Str(s) => (s.chars().collect::<Vec<char>>(), s.len()),
                 _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "descriptor 'translate' requires a 'str' object".to_string(),
-                    ))
+                    return Err(pyrust_core::type_err!("descriptor 'translate' requires a 'str' object"))
                 }
             };
             let table = args.into_iter().next().unwrap();
@@ -2648,18 +2541,12 @@ impl Interpreter {
                             ValueKind::None => { /* delete */ }
                             ValueKind::Int(n) => {
                                 if n < 0 || n > 0x10FFFF {
-                                    return Err(PyError::named(
-                                        "ValueError",
-                                        "character mapping must be in range(0x110000)"
-                                            .to_string(),
-                                    ));
+                                    return Err(pyrust_core::value_err!("character mapping must be in range(0x110000)"
+                                            .to_string()));
                                 }
                                 let replacement = char::from_u32(n as u32).ok_or_else(|| {
-                                    PyError::named(
-                                        "ValueError",
-                                        "character mapping must be in range(0x110000)"
-                                            .to_string(),
-                                    )
+                                    pyrust_core::value_err!("character mapping must be in range(0x110000)"
+                                            .to_string())
                                 })?;
                                 out.push(replacement);
                             }
@@ -2677,11 +2564,8 @@ impl Interpreter {
                                 use crate::value::PyToPrimitive;
                                 let replacement =
                                     n.to_u32().and_then(char::from_u32).ok_or_else(|| {
-                                        PyError::named(
-                                            "ValueError",
-                                            "character mapping must be in range(0x110000)"
-                                                .to_string(),
-                                        )
+                                        pyrust_core::value_err!("character mapping must be in range(0x110000)"
+                                                .to_string())
                                     })?;
                                 out.push(replacement);
                             }
@@ -2689,11 +2573,8 @@ impl Interpreter {
                                 out.push_str(&repl.to_string());
                             }
                             _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "character mapping must return integer, None or str"
-                                        .to_string(),
-                                ));
+                                return Err(pyrust_core::type_err!("character mapping must return integer, None or str"
+                                        .to_string()));
                             }
                         }
                     }
@@ -2720,13 +2601,8 @@ impl Interpreter {
         args: Vec<Value>,
     ) -> Result<Value> {
         if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "bytes.join() takes exactly one argument ({} given)",
-                    args.len()
-                ),
-            ));
+            return Err(pyrust_core::type_err!("bytes.join() takes exactly one argument ({} given)",
+                    args.len()));
         }
         let iterable = args.into_iter().next().unwrap();
         let needs_collect = !matches!(
@@ -2740,7 +2616,7 @@ impl Interpreter {
                         PyError::Named(_, msg) | PyError::Class(_, msg)
                             if msg.contains("is not iterable"));
                 if is_not_iterable {
-                    PyError::named("TypeError", "can only join an iterable".to_string())
+                    pyrust_core::type_err!("can only join an iterable")
                 } else {
                     e
                 }
@@ -2961,10 +2837,7 @@ impl Interpreter {
                 if let Some(result) = dispatch_numeric_binop(BinaryOp::BitAnd, &left, &right) {
                     return result;
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for &: '{lt}' and '{rt}'"),
-                ))
+                Err(pyrust_core::type_err!("unsupported operand type(s) for &: '{lt}' and '{rt}'"))
             }
             BinaryOp::BitOr => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
@@ -2977,12 +2850,7 @@ impl Interpreter {
                     let left_type = value_type_name_str(&left);
                     let right_type = value_type_name_str(&right);
                     let Some(rhs_entries) = dict_entries_from_value(&right) else {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "unsupported operand type(s) for |: '{left_type}' and '{right_type}'"
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("unsupported operand type(s) for |: '{left_type}' and '{right_type}'"));
                     };
                     let mut merged: IndexMap<PyKey, Value> = lhs_entries.into_iter().collect();
                     for (k, v) in rhs_entries {
@@ -3012,10 +2880,7 @@ impl Interpreter {
                 if is_union_operand(&left) && is_union_operand(&right) {
                     let lt = value_type_name_str(&left);
                     let rt = value_type_name_str(&right);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("unsupported operand type(s) for |: '{lt}' and '{rt}'"));
                 }
                 // CPython keeps the `bool` type for `bool | bool`.  Catch this
                 // before `coerce_numeric` collapses Bool → Int below; mixed
@@ -3032,10 +2897,7 @@ impl Interpreter {
                 if let Some(result) = dispatch_numeric_binop(BinaryOp::BitOr, &left, &right) {
                     return result;
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
-                ))
+                Err(pyrust_core::type_err!("unsupported operand type(s) for |: '{lt}' and '{rt}'"))
             }
             BinaryOp::BitXor => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
@@ -3059,10 +2921,7 @@ impl Interpreter {
                 if let Some(result) = dispatch_numeric_binop(BinaryOp::BitXor, &left, &right) {
                     return result;
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"),
-                ))
+                Err(pyrust_core::type_err!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"))
             }
             BinaryOp::LShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lshift__", "__rlshift__") {
@@ -3081,10 +2940,7 @@ impl Interpreter {
                 if let Some(result) = dispatch_numeric_binop(BinaryOp::LShift, &left, &right) {
                     return result;
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
-                ))
+                Err(pyrust_core::type_err!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"))
             }
             BinaryOp::RShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__rshift__", "__rrshift__") {
@@ -3101,10 +2957,7 @@ impl Interpreter {
                 if let Some(result) = dispatch_numeric_binop(BinaryOp::RShift, &left, &right) {
                     return result;
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
-                ))
+                Err(pyrust_core::type_err!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"))
             }
             BinaryOp::In => self.eval_in(right, left),
             BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy())),
@@ -3139,13 +2992,8 @@ impl Interpreter {
                         out.extend_from_slice(&rc);
                         return Ok(pyrust_builtins::bytearray::bytearray(out));
                     }
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "can't concat {} to bytearray",
-                            pyrust_core::builtin_type_name(&right)
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("can't concat {} to bytearray",
+                            pyrust_core::builtin_type_name(&right)));
                 }
                 (None, Some(b)) => {
                     // bytes + bytearray → bytes (CPython 3.12 parity)
@@ -3165,7 +3013,7 @@ impl Interpreter {
                             "unsupported operand type(s) for +: '{lt}' and 'bytearray'"
                         ),
                     };
-                    return Err(PyError::named("TypeError", err_msg));
+                    return Err(pyrust_core::type_err!(err_msg));
                 }
                 (None, None) => unreachable!(),
             }
@@ -3195,13 +3043,8 @@ impl Interpreter {
                     out.extend_from_slice(b);
                     Ok(Value::bytes(out))
                 }
-                (ValueKind::Bytes(_), _) => Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "can't concat {} to bytes",
-                        pyrust_core::builtin_type_name(&r)
-                    ),
-                )),
+                (ValueKind::Bytes(_), _) => Err(pyrust_core::type_err!("can't concat {} to bytes",
+                        pyrust_core::builtin_type_name(&r))),
                 _ => Err(Self::unsupported_binary_operand("+")),
         }
     }
@@ -3238,19 +3081,11 @@ impl Interpreter {
         };
         match tag {
             Tag::Int => Ok(val),
-            Tag::Other => Err(PyError::named(
-                "TypeError",
-                format!("can't multiply sequence by non-int of type '{type_name_for_err}'"),
-            )),
+            Tag::Other => Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'")),
             Tag::Instance(inst_rc) => {
                 let class = Rc::clone(&inst_rc.borrow().class);
                 let Some(method_val) = lookup_class_attr(&class, "__index__") else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "can't multiply sequence by non-int of type '{type_name_for_err}'"
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'"));
                 };
                 let result = invoke_class_method(
                     self,
@@ -3276,17 +3111,9 @@ impl Interpreter {
                     ResultTag::BigInt => {
                         // CPython's PyNumber_AsSsize_t raises OverflowError using
                         // the *original* object's type name, not "int".
-                        Err(PyError::named(
-                            "OverflowError",
-                            format!(
-                                "cannot fit '{type_name_for_err}' into an index-sized integer"
-                            ),
-                        ))
+                        Err(pyrust_core::overflow_err!("cannot fit '{type_name_for_err}' into an index-sized integer"))
                     }
-                    ResultTag::Other => Err(PyError::named(
-                        "TypeError",
-                        format!("__index__ returned non-int (type {result_type_name})"),
-                    )),
+                    ResultTag::Other => Err(pyrust_core::type_err!("__index__ returned non-int (type {result_type_name})")),
                 }
             }
         }
@@ -3304,17 +3131,11 @@ impl Interpreter {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
                 ValueKind::BigInt(_) => {
-                    return Err(PyError::named(
-                        "OverflowError",
-                        "cannot fit 'int' into an index-sized integer".to_string(),
-                    ));
+                    return Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer"));
                 }
                 _ => {
                     let type_name = value_type_name_str(&right);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("can't multiply sequence by non-int of type '{type_name}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name}'"));
                 }
             };
             return seq_repeat_bytearray(&data, n);
@@ -3324,17 +3145,11 @@ impl Interpreter {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
                 ValueKind::BigInt(_) => {
-                    return Err(PyError::named(
-                        "OverflowError",
-                        "cannot fit 'int' into an index-sized integer".to_string(),
-                    ));
+                    return Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer"));
                 }
                 _ => {
                     let type_name = value_type_name_str(&left);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("can't multiply sequence by non-int of type '{type_name}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name}'"));
                 }
             };
             return seq_repeat_bytearray(&data, n);
@@ -3355,24 +3170,15 @@ impl Interpreter {
                 seq_repeat_str(text, n)
             }
             (ValueKind::Str(_), ValueKind::BigInt(_))
-            | (ValueKind::BigInt(_), ValueKind::Str(_)) => Err(PyError::named(
-                "OverflowError",
-                "cannot fit 'int' into an index-sized integer".to_string(),
-            )),
+            | (ValueKind::BigInt(_), ValueKind::Str(_)) => Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer")),
             (ValueKind::List(items), ValueKind::Int(n)) => seq_repeat_list(&items, n),
             (ValueKind::Int(n), ValueKind::List(items)) => seq_repeat_list(&items, n),
             (ValueKind::List(_), ValueKind::BigInt(_))
-            | (ValueKind::BigInt(_), ValueKind::List(_)) => Err(PyError::named(
-                "OverflowError",
-                "cannot fit 'int' into an index-sized integer".to_string(),
-            )),
+            | (ValueKind::BigInt(_), ValueKind::List(_)) => Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer")),
             (ValueKind::Bytes(data), ValueKind::Int(n)) => seq_repeat_bytes(&data, n),
             (ValueKind::Int(n), ValueKind::Bytes(data)) => seq_repeat_bytes(&data, n),
             (ValueKind::Bytes(_), ValueKind::BigInt(_))
-            | (ValueKind::BigInt(_), ValueKind::Bytes(_)) => Err(PyError::named(
-                "OverflowError",
-                "cannot fit 'int' into an index-sized integer".to_string(),
-            )),
+            | (ValueKind::BigInt(_), ValueKind::Bytes(_)) => Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer")),
             // Tuple * Int / Int * Tuple — checked repeat, MemoryError on
             // overflow (matches CPython 3.12 `tuplerepeat` behaviour).
             (ValueKind::Tuple(items), ValueKind::Int(n)) => {
@@ -3385,10 +3191,7 @@ impl Interpreter {
             // fit in a platform index; CPython raises OverflowError for both
             // positive and negative BigInt values.
             (ValueKind::Tuple(_), ValueKind::BigInt(_))
-            | (ValueKind::BigInt(_), ValueKind::Tuple(_)) => Err(PyError::named(
-                "OverflowError",
-                "cannot fit 'int' into an index-sized integer".to_string(),
-            )),
+            | (ValueKind::BigInt(_), ValueKind::Tuple(_)) => Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer")),
             _ => {
                 let is_sequence = |v: &Value| {
                     matches!(
@@ -3404,17 +3207,11 @@ impl Interpreter {
                 };
                 if is_sequence(&l) && !is_int_like(&r) {
                     let type_name = value_type_name_str(&r);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("can't multiply sequence by non-int of type '{type_name}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name}'"));
                 }
                 if is_sequence(&r) && !is_int_like(&l) {
                     let type_name = value_type_name_str(&l);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("can't multiply sequence by non-int of type '{type_name}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name}'"));
                 }
                 Err(Self::unsupported_binary_operand("*"))
             }
@@ -3537,12 +3334,7 @@ impl Interpreter {
                             };
                             let lt = value_type_name_str(&left);
                             let rt = value_type_name_str(&right);
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                         }
                     };
                     left.set_with_mut(|lhs| match op {
@@ -3591,10 +3383,7 @@ impl Interpreter {
                         rc.as_slice().to_vec()
                     } else {
                         let type_name = value_type_name_str(right);
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("can't concat {type_name} to bytearray"),
-                        ));
+                        return Err(pyrust_core::type_err!("can't concat {type_name} to bytearray"));
                     };
                     data_rc.borrow_mut().extend_from_slice(&rhs);
                     return Ok(Some(left.clone()));
@@ -3604,17 +3393,11 @@ impl Interpreter {
                         ValueKind::Int(n) => n,
                         ValueKind::Bool(b) => b as i64,
                         ValueKind::BigInt(_) => {
-                            return Err(PyError::named(
-                                "OverflowError",
-                                "cannot fit 'int' into an index-sized integer".to_string(),
-                            ));
+                            return Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer"));
                         }
                         _ => {
                             let type_name = value_type_name_str(right);
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("can't multiply sequence by non-int of type '{type_name}'"),
-                            ));
+                            return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name}'"));
                         }
                     };
                     let mut data = data_rc.borrow_mut();
@@ -3714,12 +3497,7 @@ impl Interpreter {
                             None => {
                                 let lt = value_type_name_str(&left);
                                 let rt = value_type_name_str(&right);
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
-                                    ),
-                                ));
+                                return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                             }
                         };
                         backing.set_with_mut(|lhs| match op {
@@ -3767,10 +3545,7 @@ impl Interpreter {
                     };
                     let lt = value_type_name_str(&left);
                     let rt = value_type_name_str(&right);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                 }
             }
         }
@@ -3794,10 +3569,7 @@ impl Interpreter {
             // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
             let denom = b.0 * b.0 + b.1 * b.1;
             if denom == 0.0 {
-                return Err(PyError::named(
-                    "ZeroDivisionError",
-                    "complex division by zero".to_string(),
-                ));
+                return Err(pyrust_core::zerodiv_err!("complex division by zero"));
             }
             return Ok(Value::complex(
                 (a.0 * b.0 + a.1 * b.1) / denom,
@@ -3928,10 +3700,7 @@ impl Interpreter {
             if let Some(backing) = instance_builtin_data(&inst_rc) {
                 return self.eval_slice(&backing, lo, hi, st);
             }
-            return Err(PyError::named(
-                "TypeError",
-                format!("'{}' object is not subscriptable", class.borrow().name),
-            ));
+            return Err(pyrust_core::type_err!("'{}' object is not subscriptable", class.borrow().name));
         }
 
         // BuiltinObject: delegate to ops.get_item with a slice value (issue #847).
@@ -3978,13 +3747,8 @@ impl Interpreter {
             ValueKind::Str(s) => s.chars().count() as i64,
             ValueKind::Bytes(rc) => rc.len() as i64,
             _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object is not subscriptable",
-                        pyrust_core::builtin_type_name(&target)
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("'{}' object is not subscriptable",
+                        pyrust_core::builtin_type_name(&target)));
             }
         };
         let (start, end, step) = Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
@@ -4134,32 +3898,19 @@ impl Interpreter {
                     // bool is a subclass of int in Python; True==1 and False==0 are
                     // valid byte values, so treat them as their integer equivalents.
                     ValueKind::Bool(b) => Ok(Value::bool_(rc.contains(&(if b { 1u8 } else { 0u8 })))),
-                    ValueKind::Int(_) | ValueKind::BigInt(_) => Err(PyError::named(
-                        "ValueError",
-                        "byte must be in range(0, 256)".to_string(),
-                    )),
+                    ValueKind::Int(_) | ValueKind::BigInt(_) => Err(pyrust_core::value_err!("byte must be in range(0, 256)")),
                     ValueKind::Bytes(sub) => Ok(Value::bool_(
                         sub.is_empty() || rc.windows(sub.len()).any(|w| w == sub.as_ref().as_slice())
                     )),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "a bytes-like object is required, not '{}'",
-                            value_type_name_str(&item)
-                        ),
-                    )),
+                    _ => Err(pyrust_core::type_err!("a bytes-like object is required, not '{}'",
+                            value_type_name_str(&item))),
                 }
             }
             ValueKind::Str(s) => {
                 match item.kind() {
                     ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub))),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'in <string>' requires string as left operand, not {}",
-                            value_type_name_str(&item)
-                        ),
-                    )),
+                    _ => Err(pyrust_core::type_err!("'in <string>' requires string as left operand, not {}",
+                            value_type_name_str(&item))),
                 }
             }
             ValueKind::Dict(_) => unreachable!("handled above"),
@@ -4293,10 +4044,7 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("argument of type '{}' is not iterable", class.borrow().name),
-                ))
+                Err(pyrust_core::type_err!("argument of type '{}' is not iterable", class.borrow().name))
             }
             _ => Err(PyError::Runtime("argument of type is not iterable".to_string())),
         }
@@ -4400,10 +4148,7 @@ impl Interpreter {
             };
             return match ftag {
                 FloatTag::Ok => Ok(result),
-                FloatTag::Err { class_name, type_name } => Err(PyError::named(
-                    "TypeError",
-                    format!("{class_name}.__float__ returned non-float (type {type_name})"),
-                )),
+                FloatTag::Err { class_name, type_name } => Err(pyrust_core::type_err!("{class_name}.__float__ returned non-float (type {type_name})")),
             };
         }
         // Try __index__ as fallback (CPython accepts integer-like objects for %f).
@@ -4421,10 +4166,7 @@ impl Interpreter {
             };
             return match itag {
                 IdxTag::Ok => Ok(result),
-                IdxTag::Err(type_name) => Err(PyError::named(
-                    "TypeError",
-                    format!("__index__ returned non-int (type {type_name})"),
-                )),
+                IdxTag::Err(type_name) => Err(pyrust_core::type_err!("__index__ returned non-int (type {type_name})")),
             };
         }
         // No __float__, no __index__: return original; str_printf_to_float
@@ -4636,30 +4378,21 @@ impl Interpreter {
                         ValueKind::Str(s) => {
                             let mut cs = s.chars();
                             let c = cs.next().ok_or_else(|| {
-                                PyError::named("TypeError", "%c requires int or char".to_string())
+                                pyrust_core::type_err!("%c requires int or char")
                             })?;
                             if cs.next().is_some() {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "%c requires a single character".to_string(),
-                                ));
+                                return Err(pyrust_core::type_err!("%c requires a single character"));
                             }
                             c.to_string()
                         }
                         ValueKind::Int(n) => char::from_u32(n as u32)
                             .ok_or_else(|| {
-                                PyError::named(
-                                    "OverflowError",
-                                    "%c arg not in range(0x110000)".to_string(),
-                                )
+                                pyrust_core::overflow_err!("%c arg not in range(0x110000)")
                             })?
                             .to_string(),
                         ValueKind::Bool(b) => char::from_u32(b as u32)
                             .ok_or_else(|| {
-                                PyError::named(
-                                    "OverflowError",
-                                    "%c arg not in range(0x110000)".to_string(),
-                                )
+                                pyrust_core::overflow_err!("%c arg not in range(0x110000)")
                             })?
                             .to_string(),
                         ValueKind::BigInt(b) => {
@@ -4669,31 +4402,20 @@ impl Interpreter {
                             let c = n
                                 .and_then(char::from_u32)
                                 .ok_or_else(|| {
-                                    PyError::named(
-                                        "OverflowError",
-                                        "%c arg not in range(0x110000)".to_string(),
-                                    )
+                                    pyrust_core::overflow_err!("%c arg not in range(0x110000)")
                                 })?;
                             c.to_string()
                         }
                         _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "%c requires int or char".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("%c requires int or char"));
                         }
                     }
                 }
                 _ => {
-                    return Err(PyError::named(
-                        "ValueError",
-                        format!(
-                            "unsupported format character '{}' (0x{:02x}) at index {}",
+                    return Err(pyrust_core::value_err!("unsupported format character '{}' (0x{:02x}) at index {}",
                             conv,
                             conv as u32,
-                            conv_index
-                        ),
-                    ));
+                            conv_index));
                 }
         })
     }
@@ -4756,10 +4478,7 @@ impl Interpreter {
             }
             i += 1; // consume '%'
             if i >= len {
-                return Err(PyError::named(
-                    "ValueError",
-                    "incomplete format".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("incomplete format"));
             }
 
             // Named key: %(key)s — borrow a slice of fmt directly to avoid allocating.
@@ -4770,10 +4489,7 @@ impl Interpreter {
                     i += 1;
                 }
                 if i >= len {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "incomplete format key".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("incomplete format key"));
                 }
                 let key = &fmt[start..i];
                 i += 1; // consume ')'
@@ -4811,7 +4527,7 @@ impl Interpreter {
                         Some((-n) as usize)
                     }
                     _ => {
-                        return Err(PyError::named("TypeError", "* wants int".to_string()));
+                        return Err(pyrust_core::type_err!("* wants int"));
                     }
                 }
             } else if i < len && bytes[i].is_ascii_digit() {
@@ -4834,7 +4550,7 @@ impl Interpreter {
                         ValueKind::Int(n) if n >= 0 => Some(n as usize),
                         ValueKind::Int(_) => Some(0),
                         _ => {
-                            return Err(PyError::named("TypeError", "* wants int".to_string()));
+                            return Err(pyrust_core::type_err!("* wants int"));
                         }
                     }
                 } else {
@@ -4858,10 +4574,7 @@ impl Interpreter {
             }
 
             if i >= len {
-                return Err(PyError::named(
-                    "ValueError",
-                    "incomplete format".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("incomplete format"));
             }
             let conv = bytes[i] as char;
             i += 1;
@@ -4886,17 +4599,11 @@ impl Interpreter {
                             }
                         }
                         _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "format requires a mapping".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("format requires a mapping"));
                         }
                     }
                 } else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "format requires a mapping".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("format requires a mapping"));
                 }
             } else {
                 str_printf_take_positional(&positional, &mut pos_idx)?
@@ -4915,10 +4622,7 @@ impl Interpreter {
         // Unconsumed positional arguments: raise TypeError.
         if let Some(pos) = positional {
             if pos_idx < pos.len() {
-                return Err(PyError::named(
-                    "TypeError",
-                    "not all arguments converted during string formatting".to_string(),
-                ));
+                return Err(pyrust_core::type_err!("not all arguments converted during string formatting"));
             }
         }
 
@@ -4930,16 +4634,10 @@ impl Interpreter {
 /// Take the next positional argument for printf-style formatting.
 fn str_printf_take_positional(positional: &Option<&[Value]>, idx: &mut usize) -> Result<Value> {
     match positional {
-        None => Err(PyError::named(
-            "TypeError",
-            "not enough arguments for format string".to_string(),
-        )),
+        None => Err(pyrust_core::type_err!("not enough arguments for format string")),
         Some(items) => {
             if *idx >= items.len() {
-                Err(PyError::named(
-                    "TypeError",
-                    "not enough arguments for format string".to_string(),
-                ))
+                Err(pyrust_core::type_err!("not enough arguments for format string"))
             } else {
                 let v = items[*idx].clone();
                 *idx += 1;
@@ -4977,12 +4675,7 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<PrintfInt> {
         ValueKind::Float(_) if matches!(conv, 'o' | 'x' | 'X') => {
             // CPython 3.12: %o/%x/%X reject float with "an integer is required".
             // %d/%i/%u accept float (truncating toward zero) for historical reasons.
-            Err(PyError::named(
-                "TypeError",
-                format!(
-                    "%{conv} format: an integer is required, not float"
-                ),
-            ))
+            Err(pyrust_core::type_err!("%{conv} format: an integer is required, not float"))
         }
         ValueKind::Float(f) => {
             // CPython converts via PyLong_FromDouble: NaN → ValueError,
@@ -5011,7 +4704,7 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<PrintfInt> {
                     pyrust_core::builtin_type_name(v)
                 )
             };
-            Err(PyError::named("TypeError", msg))
+            Err(pyrust_core::type_err!(msg))
         }
     }
 }
@@ -5073,13 +4766,8 @@ fn str_printf_to_float(v: &Value, _conv: char) -> Result<f64> {
         ValueKind::Int(n) => Ok(n as f64),
         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
         ValueKind::BigInt(b) => bigint_to_float_or_overflow(b),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "must be real number, not {}",
-                pyrust_core::builtin_type_name(v)
-            ),
-        )),
+        _ => Err(pyrust_core::type_err!("must be real number, not {}",
+                pyrust_core::builtin_type_name(v))),
     }
 }
 
@@ -5340,10 +5028,7 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                 // catch it (the only way to reach this is a misregistered
                 // ops table, which is a type-mismatch error).
                 let rc = pyrust_builtins::dict_views::as_dict_rc(&value).ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "dict-view state type mismatch".to_string(),
-                    )
+                    pyrust_core::type_err!("dict-view state type mismatch")
                 })?;
                 let map = rc.borrow();
                 return Ok(match kind {
@@ -5368,10 +5053,7 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                 unreachable!();
             };
             if !ops.is_iterable() {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("'{}' object is not iterable", ops.type_name()),
-                ));
+                return Err(pyrust_core::type_err!("'{}' object is not iterable", ops.type_name()));
             }
             while let Some(v) = ops.iter_next(state)? {
                 out.push(v);
@@ -5406,16 +5088,10 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                 native.pos = native.items.len();
                 Ok(remaining)
             } else {
-                Err(PyError::named(
-                    "TypeError",
-                    "object is not iterable".to_string(),
-                ))
+                Err(pyrust_core::type_err!("object is not iterable"))
             }
         }
-        _ => Err(PyError::named(
-            "TypeError",
-            format!("'{}' object is not iterable", value_type_name_str(&value)),
-        )),
+        _ => Err(pyrust_core::type_err!("'{}' object is not iterable", value_type_name_str(&value))),
     }
 }
 
@@ -5612,10 +5288,7 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp, op_sym: &str) -> Option
     let Some(rhs_items) = set_items_from_value(right) else {
         let lt = value_type_name_str(left);
         let rt = value_type_name_str(right);
-        return Some(Err(PyError::named(
-            "TypeError",
-            format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
-        )));
+        return Some(Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")));
     };
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
@@ -5760,10 +5433,7 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
         // CPython raises ZeroDivisionError when the exponent has a nonzero
         // imaginary part or a negative real part.
         if wi != 0.0 || wr < 0.0 {
-            return Err(PyError::named(
-                "ZeroDivisionError",
-                "0.0 to a negative or complex power".to_string(),
-            ));
+            return Err(pyrust_core::zerodiv_err!("0.0 to a negative or complex power"));
         }
         // wr > 0, wi == 0: 0j ** positive_real = 0j.
         return Ok(Value::complex(0.0, 0.0));
@@ -5825,10 +5495,7 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
         // CPython's _Py_c_pow sets errno = ERANGE when `len` overflows to
         // infinity and the caller raises OverflowError (e.g.
         // `(1+1j) ** 10**20` → `OverflowError: complex exponentiation`).
-        return Err(PyError::named(
-            "OverflowError",
-            "complex exponentiation".to_string(),
-        ));
+        return Err(pyrust_core::overflow_err!("complex exponentiation"));
     }
     let at = wr * t + wi * ln_r;
     Ok(Value::complex(len * at.cos(), len * at.sin()))
@@ -5919,10 +5586,10 @@ impl Interpreter {
             match got {
                 Got::Item(v) => return Ok(v),
                 Got::ListOOR => {
-                    return Err(PyError::named("IndexError", "list index out of range"));
+                    return Err(pyrust_core::index_err!("list index out of range"));
                 }
                 Got::TupleOOR => {
-                    return Err(PyError::named("IndexError", "tuple index out of range"));
+                    return Err(pyrust_core::index_err!("tuple index out of range"));
                 }
                 Got::None => {}
             }
@@ -6016,10 +5683,7 @@ impl Interpreter {
                         items[j as usize] = v;
                     });
                 } else {
-                    return Err(PyError::named(
-                        "IndexError",
-                        "list assignment index out of range",
-                    ));
+                    return Err(pyrust_core::index_err!("list assignment index out of range"));
                 }
                 return Ok(());
             }
@@ -6043,7 +5707,7 @@ impl Interpreter {
                     new_items
                 } else {
                     self.collect_iterable(&val_val).map_err(|_| {
-                        PyError::named("TypeError", "can only assign an iterable".to_string())
+                        pyrust_core::type_err!("can only assign an iterable")
                     })?
                 };
                 let updated = regs[obj as usize].list_with_mut(|items| {
@@ -6053,10 +5717,7 @@ impl Interpreter {
                     Some(r) => r,
                     None => {
                         let tname = value_type_name_str(&regs[obj as usize]);
-                        Err(PyError::named(
-                            "TypeError",
-                            format!("'{}' object does not support item assignment", tname),
-                        ))
+                        Err(pyrust_core::type_err!("'{}' object does not support item assignment", tname))
                     }
                 };
             }
@@ -6139,16 +5800,10 @@ impl Interpreter {
                         return Ok(());
                     }
                     let class_name = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' object does not support item assignment", class_name),
-                    ));
+                    return Err(pyrust_core::type_err!("'{}' object does not support item assignment", class_name));
                 }
                 let tname = value_type_name_str(&regs[obj as usize]);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("'{}' object does not support item assignment", tname),
-                ));
+                return Err(pyrust_core::type_err!("'{}' object does not support item assignment", tname));
             }
             4 => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
@@ -6158,10 +5813,7 @@ impl Interpreter {
             }
             _ => {
                 let tname = value_type_name_str(&regs[obj as usize]);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("'{}' object does not support item assignment", tname),
-                ));
+                return Err(pyrust_core::type_err!("'{}' object does not support item assignment", tname));
             }
         }
         Ok(())
@@ -6287,10 +5939,7 @@ impl Interpreter {
                     Some(r) => r,
                     None => {
                         let tname = value_type_name_str(&regs[obj as usize]);
-                        Err(PyError::named(
-                            "TypeError",
-                            format!("'{}' object does not support item deletion", tname),
-                        ))
+                        Err(pyrust_core::type_err!("'{}' object does not support item deletion", tname))
                     }
                 };
             }
@@ -6400,10 +6049,7 @@ impl Interpreter {
                 return Ok(());
             }
             let class_name = class.borrow().name.clone();
-            return Err(PyError::named(
-                "TypeError",
-                format!("'{class_name}' object does not support item deletion"),
-            ));
+            return Err(pyrust_core::type_err!("'{class_name}' object does not support item deletion"));
         }
         let tname = value_type_name_str(&regs[obj as usize]);
         let msg = if Self::unpack_slice_key(&idx_val).is_some() {
@@ -6411,6 +6057,6 @@ impl Interpreter {
         } else {
             format!("'{}' object doesn't support item deletion", tname)
         };
-        Err(PyError::named("TypeError", msg))
+        Err(pyrust_core::type_err!(msg))
     }
 }

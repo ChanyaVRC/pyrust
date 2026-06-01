@@ -582,7 +582,7 @@ impl Interpreter {
             let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                 PyError::Raised(instantiate_exception(cls, vec![]))
             } else {
-                PyError::named("StopIteration", String::new())
+                pyrust_core::py_err!("StopIteration", String::new())
             };
             return Err(exc);
         }
@@ -768,7 +768,7 @@ impl Interpreter {
                 let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                     PyError::Raised(instantiate_exception(cls, vec![ret_val]))
                 } else {
-                    PyError::named("StopIteration", String::new())
+                    pyrust_core::py_err!("StopIteration", String::new())
                 };
                 Err(exc)
             }
@@ -1799,7 +1799,7 @@ impl Interpreter {
                                     type_name
                                 )
                             };
-                            vm_try!(Err(PyError::named("TypeError", msg)));
+                            vm_try!(Err(pyrust_core::type_err!(msg)));
                         }
                     }
                 }
@@ -2256,12 +2256,7 @@ impl Interpreter {
                     let match_args = match self.get_attr(&cls_val, "__match_args__") {
                         Ok(v) => v,
                         Err(e) if e.class_name_is("AttributeError") => {
-                            vm_try!(Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{cls_name}() accepts 0 positional sub-patterns ({n} given)"
-                                ),
-                            )));
+                            vm_try!(Err(pyrust_core::type_err!("{cls_name}() accepts 0 positional sub-patterns ({n} given)")));
                             unreachable!()
                         }
                         Err(e) => {
@@ -2277,12 +2272,7 @@ impl Interpreter {
                         Some(items) => items.len(),
                         None => {
                             let type_name = value_type_name_str(&match_args);
-                            vm_try!(Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{cls_name}.__match_args__ must be a tuple (got {type_name})"
-                                ),
-                            )));
+                            vm_try!(Err(pyrust_core::type_err!("{cls_name}.__match_args__ must be a tuple (got {type_name})")));
                             unreachable!()
                         }
                     };
@@ -2290,13 +2280,8 @@ impl Interpreter {
                     // Length must be >= n.
                     if match_args_len < n {
                         let plural = if match_args_len == 1 { "" } else { "s" };
-                        vm_try!(Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{cls_name}() accepts {} positional sub-pattern{plural} ({n} given)",
-                                match_args_len
-                            ),
-                        )));
+                        vm_try!(Err(pyrust_core::type_err!("{cls_name}() accepts {} positional sub-pattern{plural} ({n} given)",
+                                match_args_len)));
                     }
 
                     // For each positional index, get the attribute name from
@@ -2312,12 +2297,7 @@ impl Interpreter {
                                 Some(s) => s.to_string(),
                                 None => {
                                     let type_name = value_type_name_str(name_val);
-                                    vm_try!(Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "__match_args__ elements must be strings (got {type_name})"
-                                        ),
-                                    )));
+                                    vm_try!(Err(pyrust_core::type_err!("__match_args__ elements must be strings (got {type_name})")));
                                     unreachable!()
                                 }
                             }
@@ -2657,13 +2637,8 @@ impl Interpreter {
                                 )))
                             }
                         }
-                        _ => vm_try!(Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "'{}' object is not a mapping",
-                                value_type_name_str(&src_val)
-                            ),
-                        ))),
+                        _ => vm_try!(Err(pyrust_core::type_err!("'{}' object is not a mapping",
+                                value_type_name_str(&src_val)))),
                     };
                     vm_try!(regs[*dict_reg as usize].dict_extend(pairs));
                 }
@@ -2773,19 +2748,11 @@ impl Interpreter {
                     let src_val = vm_try!(vm_read(&regs, *src, num_locals));
                     let items = vm_try!(self.collect_iterable(&src_val));
                     if items.len() < *n as usize {
-                        vm_try!(Err::<(), _>(PyError::named(
-                            "ValueError",
-                            format!(
-                                "not enough values to unpack (expected {}, got {})",
+                        vm_try!(Err::<(), _>(pyrust_core::value_err!("not enough values to unpack (expected {}, got {})",
                                 n,
-                                items.len()
-                            ),
-                        )));
+                                items.len())));
                     } else if items.len() > *n as usize {
-                        vm_try!(Err::<(), _>(PyError::named(
-                            "ValueError",
-                            format!("too many values to unpack (expected {})", n),
-                        )));
+                        vm_try!(Err::<(), _>(pyrust_core::value_err!("too many values to unpack (expected {})", n)));
                     }
                     for (i, v) in items.into_iter().enumerate() {
                         let dst = *base as usize + i;
@@ -2805,14 +2772,9 @@ impl Interpreter {
                     let after = *after as usize;
                     let min_len = before + after;
                     if items.len() < min_len {
-                        vm_try!(Err::<(), _>(PyError::named(
-                            "ValueError",
-                            format!(
-                                "not enough values to unpack (expected at least {}, got {})",
+                        vm_try!(Err::<(), _>(pyrust_core::value_err!("not enough values to unpack (expected at least {}, got {})",
                                 min_len,
-                                items.len()
-                            ),
-                        )));
+                                items.len())));
                     }
                     let base = *dst_base as usize;
                     // First `before` elements
@@ -2889,10 +2851,7 @@ impl Interpreter {
                         match tag {
                             IterTag::Range(start, stop, step) => {
                                 if step == 0 {
-                                    vm_try!(Err(PyError::named(
-                                        "ValueError",
-                                        "range() arg 3 must not be zero".to_string(),
-                                    )));
+                                    vm_try!(Err(pyrust_core::value_err!("range() arg 3 must not be zero")));
                                 }
                                 IterState::Range { cur: start, stop, step }
                             }
@@ -2923,13 +2882,8 @@ impl Interpreter {
                                         _ => false,
                                     };
                                     if !is_valid_iter {
-                                        vm_try!(Err(PyError::named(
-                                            "TypeError",
-                                            format!(
-                                                "iter() returned non-iterator of type '{}'",
-                                                value_type_name_str(&iter_obj),
-                                            ),
-                                        )));
+                                        vm_try!(Err(pyrust_core::type_err!("iter() returned non-iterator of type '{}'",
+                                                value_type_name_str(&iter_obj),)));
                                     }
                                     IterState::UserDefined(iter_obj)
                                 } else if let Some(backing) = instance_builtin_data(&inst_rc) {
@@ -3043,10 +2997,7 @@ impl Interpreter {
                                     if is_getitem_iter {
                                         Some(match self.step_getitem_iter(&state_rc) {
                                             Ok(Some(v)) => Ok(v),
-                                            Ok(None) => Err(PyError::named(
-                                                "StopIteration",
-                                                String::new(),
-                                            )),
+                                            Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                                             Err(e) => Err(e),
                                         })
                                     } else {
@@ -3057,10 +3008,7 @@ impl Interpreter {
                                         if is_callable_iter {
                                             Some(match self.step_callable_iter(&state_rc) {
                                                 Ok(Some(v)) => Ok(v),
-                                                Ok(None) => Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                                                 Err(e) => Err(e),
                                             })
                                         } else {
@@ -3071,10 +3019,7 @@ impl Interpreter {
                                         if is_map_iter {
                                             Some(match self.step_map_iter(&state_rc) {
                                                 Ok(Some(v)) => Ok(v),
-                                                Ok(None) => Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                                                 Err(e) => Err(e),
                                             })
                                         } else {
@@ -3085,10 +3030,7 @@ impl Interpreter {
                                         if is_filter_iter {
                                             Some(match self.step_filter_iter(&state_rc) {
                                                 Ok(Some(v)) => Ok(v),
-                                                Ok(None) => Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                                                 Err(e) => Err(e),
                                             })
                                         } else {
@@ -3099,10 +3041,7 @@ impl Interpreter {
                                         if is_enumerate_iter {
                                             Some(match self.step_enumerate_iter(&state_rc) {
                                                 Ok(Some(v)) => Ok(v),
-                                                Ok(None) => Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                                                 Err(e) => Err(e),
                                             })
                                         } else {
@@ -3113,10 +3052,7 @@ impl Interpreter {
                                         if is_zip_iter {
                                             Some(match self.step_zip_iter(&state_rc) {
                                                 Ok(Some(v)) => Ok(v),
-                                                Ok(None) => Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                                                 Err(e) => Err(e),
                                             })
                                         } else {
@@ -3124,10 +3060,7 @@ impl Interpreter {
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
                                             if native.pos >= native.items.len() {
-                                                Some(Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )))
+                                                Some(Err(pyrust_core::py_err!("StopIteration", String::new())))
                                             } else {
                                                 let item = native.items[native.pos].clone();
                                                 native.pos += 1;
@@ -3136,10 +3069,7 @@ impl Interpreter {
                                         } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                                             // Resume the generator.
                                             if frame.done {
-                                                Some(Err(PyError::named(
-                                                    "StopIteration",
-                                                    String::new(),
-                                                )))
+                                                Some(Err(pyrust_core::py_err!("StopIteration", String::new())))
                                             } else {
                                                 Some(self.resume_generator(frame))
                                             }
@@ -3180,10 +3110,7 @@ impl Interpreter {
                                 {
                                     Some(ops.iter_next(state).and_then(|opt| {
                                         opt.ok_or_else(|| {
-                                            PyError::named(
-                                                "StopIteration",
-                                                String::new(),
-                                            )
+                                            pyrust_core::py_err!("StopIteration", String::new())
                                         })
                                     }))
                                 } else { None };
@@ -3198,13 +3125,8 @@ impl Interpreter {
                                 }
                                 Some(Err(e)) => { vm_try!(Err(e)); }
                                 None => {
-                                    vm_try!(Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "iter() returned non-iterator of type '{}'",
-                                            value_type_name_str(&iter_val),
-                                        ),
-                                    )));
+                                    vm_try!(Err(pyrust_core::type_err!("iter() returned non-iterator of type '{}'",
+                                            value_type_name_str(&iter_val),)));
                                 }
                             }
                         }
@@ -3386,19 +3308,19 @@ impl Interpreter {
                     // GetItemIter doesn't support send; treat as next().
                     return match self.step_getitem_iter(&state_rc) {
                         Ok(Some(v)) => Ok(v),
-                        Ok(None) => Err(PyError::named("StopIteration", String::new())),
+                        Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
                         Err(e) => Err(e),
                     };
                 }
 
                 let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
-                    PyError::named("ValueError", "generator already executing".to_string())
+                    pyrust_core::value_err!("generator already executing")
                 })?;
 
                 if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                     // Built-in iterator: no send support, just advance.
                     if native.pos >= native.items.len() {
-                        return Err(PyError::named("StopIteration", String::new()));
+                        return Err(pyrust_core::py_err!("StopIteration", String::new()));
                     }
                     let item = native.items[native.pos].clone();
                     native.pos += 1;
@@ -3407,7 +3329,7 @@ impl Interpreter {
 
                 if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                     if frame.done {
-                        return Err(PyError::named("StopIteration", String::new()));
+                        return Err(pyrust_core::py_err!("StopIteration", String::new()));
                     }
                     // `yield from` bypasses CPython's "can't send non-None to a
                     // just-started generator" check — the compiler initialises
@@ -3462,22 +3384,16 @@ impl Interpreter {
                 if let Some(next_method) = lookup_class_attr(&class, "__next__") {
                     invoke_class_method(self, next_method, Value::py_instance(inst_rc), &[])
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        "object is not an iterator".to_string(),
-                    ))
+                    Err(pyrust_core::type_err!("object is not an iterator"))
                 }
             }
             ValueKind::BuiltinObject { ops, state } => {
                 let state = state.clone();
                 ops.iter_next(&state).and_then(|opt| {
-                    opt.ok_or_else(|| PyError::named("StopIteration", String::new()))
+                    opt.ok_or_else(|| pyrust_core::py_err!("StopIteration", String::new()))
                 })
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                "object is not iterable".to_string(),
-            )),
+            _ => Err(pyrust_core::type_err!("object is not iterable")),
         }
     }
 
@@ -3498,7 +3414,7 @@ impl Interpreter {
                 }
 
                 let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
-                    PyError::named("ValueError", "generator already executing".to_string())
+                    pyrust_core::value_err!("generator already executing")
                 })?;
 
                 if borrow.downcast_mut::<NativeIterFrame>().is_some() {
@@ -3623,13 +3539,8 @@ fn resolve_global_via_builtins(
                 // __builtins__ is a non-dict, non-module value (e.g. None,
                 // int).  CPython 3.12 raises TypeError when it tries to
                 // subscript the value to look up a builtin name.
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object is not subscriptable",
-                        value_type_name_str(&builtins_val),
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("'{}' object is not subscriptable",
+                        value_type_name_str(&builtins_val),));
             }
         }
     }
@@ -3652,9 +3563,9 @@ fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecod
     let v = &regs[reg as usize];
     if v.is_unset() {
         if reg < num_locals {
-            return Err(crate::error::PyError::named(
+            return Err(pyrust_core::py_err!(
                 "NameError",
-                "local variable referenced before assignment".to_string(),
+                "local variable referenced before assignment"
             ));
         } else {
             return Err(crate::error::PyError::Runtime(
@@ -3676,17 +3587,14 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
             ValueKind::BigInt(v) => Ok(Value::bigint(-v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -1 } else { 0 })),
-            _ => Err(PyError::named("TypeError", "bad operand type for unary -".to_string())),
+            _ => Err(pyrust_core::type_err!("bad operand type for unary -")),
         },
         UnaryOp::Not => Ok(Value::bool_(!val.truthy())),
         UnaryOp::BitNot => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(!v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
             ValueKind::BigInt(v) => Ok(Value::bigint(!v)),
-            _ => Err(PyError::named(
-                "TypeError",
-                "bad operand type for unary ~: use integer".to_string(),
-            )),
+            _ => Err(pyrust_core::type_err!("bad operand type for unary ~: use integer")),
         },
         UnaryOp::Pos => {
             if matches!(val.kind(), ValueKind::BigInt(_)) {
@@ -3696,7 +3604,7 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
                 ValueKind::Int(v) => Ok(Value::int(v)),
                 ValueKind::Float(v) => Ok(Value::float(v)),
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-                _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
+                _ => Err(pyrust_core::type_err!("bad operand type for unary +")),
             }
         }
     }
@@ -3887,7 +3795,7 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
     }
 
     // Fallback: builtins not yet installed (startup) or materialisation failed.
-    PyError::named("RuntimeError", "generator raised StopIteration")
+    pyrust_core::runtime_err!("generator raised StopIteration")
 }
 
 // ── PEP 695 TypeAliasType / TypeVar support ──────────────────────────────────
