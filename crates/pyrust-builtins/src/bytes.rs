@@ -1656,16 +1656,28 @@ fn is_ascii_whitespace(b: u8) -> bool {
 }
 
 fn bytes_strip(bytes: &[u8], args: &[Value], left: bool, right: bool) -> Result<Value> {
-    let chars_arg: Option<&[u8]> = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Bytes(rc)) => Some(rc.as_slice()),
-        Some(ValueKind::None) | None => None,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                "strip argument must be a bytes or None".to_string(),
-            ));
-        }
+    let chars_owned: Option<std::borrow::Cow<'_, [u8]>> = match args.first() {
+        None => None,
+        Some(v) => match v.kind() {
+            ValueKind::None => None,
+            ValueKind::Bytes(rc) => Some(std::borrow::Cow::Borrowed(rc.as_slice())),
+            // Accept any bytes-like object (bytearray, ...) per CPython; reject
+            // genuinely-wrong types (str, int, ...) with CPython's message.
+            _ => match crate::bytearray::as_bytearray_snapshot(v) {
+                Some(data) => Some(std::borrow::Cow::Owned(data)),
+                None => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "a bytes-like object is required, not '{}'",
+                            pyrust_core::builtin_type_name(v)
+                        ),
+                    ));
+                }
+            },
+        },
     };
+    let chars_arg: Option<&[u8]> = chars_owned.as_deref();
     let mut start = 0;
     let mut end = bytes.len();
     match chars_arg {
