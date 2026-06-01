@@ -1150,9 +1150,20 @@ impl Interpreter {
             }
             ValueKind::BuiltinObject { ops, state } => {
                 let args_vec: Vec<Value> = std::mem::take(pos);
-                let empty_kw: indexmap::IndexMap<String, Value> =
-                    indexmap::IndexMap::new();
-                ops.call_method(state, method, args_vec, &empty_kw)
+                // Thread any keyword arguments through to the builtin object
+                // (e.g. `bytearray.split(maxsplit=1)`); `call_method` keeps its
+                // kwargs `String`-keyed.
+                let kw_str: indexmap::IndexMap<String, Value> = kw
+                    .iter()
+                    .map(|(k, v)| {
+                        let key = match k {
+                            PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                            _ => String::new(),
+                        };
+                        (key, v.clone())
+                    })
+                    .collect();
+                ops.call_method(state, method, args_vec, &kw_str)
             }
             ValueKind::PyInstance(inst) => {
                 // Class method backed by a `BuiltinFunction` — emitted
