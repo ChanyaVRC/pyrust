@@ -4528,6 +4528,13 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
         return Err(pyrust_core::value_err!("Unknown format code '{t}' for object of type 'complex'"));
     }
     match t {
+        // 'n' is locale-aware and supported on both integer and float values.
+        // Route it by the value's type: int/bool to the integer formatter,
+        // float to the float formatter (which treats 'n' as 'g' since pyrust
+        // has no locale, matching CPython's C-locale behavior where n == g).
+        'n' if matches!(value.kind(), ValueKind::Float(_)) => {
+            format_float_value(value, fs, Some('n'))
+        }
         'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t)),
         'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => format_float_value(value, fs, Some(t)),
         's' => format_as_string(value, fs),
@@ -4659,6 +4666,15 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         return Ok(pad_value(&raw, fs, '<', fs.fill));
     }
 
+    // 'n' already implies locale-aware grouping, so CPython rejects an
+    // explicit ',' / '_' combined with it (reported against the original 'n'
+    // type, not the effective 'd' it maps to).
+    if let Some(g) = fs.grouping {
+        if t == 'n' {
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
+        }
+    }
+
     // 'n' = same as 'd' for now (no locale-aware grouping).
     let effective_t = if t == 'n' { 'd' } else { t };
 
@@ -4730,6 +4746,15 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
         // rather than the "%c arg not in range(0x110000)" it uses for
         // in-range negative integers.
         return Err(pyrust_core::overflow_err!("Python int too large to convert to C long"));
+    }
+
+    // 'n' already implies locale-aware grouping, so CPython rejects an
+    // explicit ',' / '_' combined with it (reported against the original 'n'
+    // type, not the effective 'd' it maps to).
+    if let Some(g) = fs.grouping {
+        if t == 'n' {
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
+        }
     }
 
     // 'n' = same as 'd' for now (no locale-aware grouping).
@@ -4819,8 +4844,15 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
     }
 
-    // Validate grouping vs type.  Comma allowed on all float types; '_'
-    // similarly per CPython.
+    // Validate grouping vs type.  Comma and '_' are allowed on all float
+    // types except 'n', which already implies locale-aware grouping and so
+    // CPython rejects an explicit ',' / '_' combined with it.
+    if let Some(g) = fs.grouping {
+        if t == 'n' {
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
+        }
+    }
+
     let (mut body, alt_prefix) = match t {
         'f' | 'F' => {
             let prec = fs.precision.unwrap_or(6);
@@ -4838,13 +4870,18 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
             let s = normalise_exp_digits(s);
             (ensure_alt_float(s, fs.alt, fs.precision), "")
         }
-        'g' | 'G' => {
+        // 'g'/'G' general format and 'n' (locale-aware general format). In
+        // pyrust's locale-free C-locale behavior, 'n' is identical to 'g':
+        // same default precision, same trailing-zero stripping, same exponent
+        // threshold, and lowercase output (no uppercase 'N' variant exists).
+        'g' | 'G' | 'n' => {
+            let upper = t == 'G';
             let prec = fs.precision.unwrap_or(6);
             let prec = if prec == 0 { 1 } else { prec };
-            let s = format_g(abs_f, prec, t == 'G');
+            let s = format_g(abs_f, prec, upper);
             // Alternate '#': keep trailing zeros / decimal point.
             let s = if fs.alt {
-                ensure_g_trailing_zeros(s, prec, t == 'G', abs_f)
+                ensure_g_trailing_zeros(s, prec, upper, abs_f)
             } else {
                 s
             };
