@@ -308,7 +308,11 @@ pub enum Insn {
     MakeTypeAlias(Reg, u16, Reg, Reg),
     /// Print R[src] if not None (REPL expression output).
     PrintExpr(Reg),
-    /// R[set].insert(R[val])  — in-place add for set comprehension construction
+    /// R[set].insert(R[val])  — in-place add for set comprehension construction.
+    /// Currently not emitted by the compiler (set comprehensions build via a
+    /// different path), but kept wired through the VM and optimizer so the
+    /// codegen can switch to it without re-plumbing.
+    #[allow(dead_code)]
     SetAdd(Reg, Reg),
     /// R[list].push(R[val])  — in-place append for variadic call construction
     ListAppend(Reg, Reg),

@@ -7269,9 +7269,6 @@ impl Interpreter {
         }
 
         {
-            use pyrust_core::UserFunctionKind;
-            use crate::bytecode::AttrCacheEntry;
-
                 // Generator methods (close, throw, __next__, __iter__) are
                 // dispatched directly here — they need access to the VM/frame
                 // and are not regular attributes on the Generator value.
