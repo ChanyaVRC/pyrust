@@ -4288,9 +4288,36 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
         return Ok(Value::string(value.to_py_str()));
     }
 
+    // Types that inherit the default `object.__format__` (None, list, tuple,
+    // dict, set, bytes, function, module, …) reject any non-empty format spec
+    // with a TypeError, mirroring CPython 3.12.  Only the value kinds that
+    // provide a real `__format__` (str / int / bool / float / complex) accept
+    // a spec; everything else is rejected here.
+    if !value_has_real_format(value) {
+        return Err(pyrust_core::type_err!(
+            "unsupported format string passed to {}.__format__",
+            pyrust_core::builtin_type_name(value)
+        ));
+    }
+
     let parsed = parse_format_spec(spec)?;
     let formatted = render_format_spec(value, &parsed)?;
     Ok(Value::string(formatted))
+}
+
+/// True when `value`'s type provides a real `__format__` that honours a format
+/// spec (`str`, `int`/`bool`/`BigInt`, `float`, `complex`).  Every other type
+/// inherits the default `object.__format__`, which rejects non-empty specs.
+fn value_has_real_format(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::Str(_)
+            | ValueKind::Int(_)
+            | ValueKind::BigInt(_)
+            | ValueKind::Bool(_)
+            | ValueKind::Float(_)
+            | ValueKind::Complex(_, _)
+    )
 }
 
 #[derive(Debug, Clone)]
