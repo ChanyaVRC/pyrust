@@ -1706,6 +1706,59 @@ pub(crate) fn mro_slot_allows(class: &Rc<RefCell<PyClass>>, name: &str) -> bool 
         .any(|b| mro_slot_allows(b, name))
 }
 
+/// Handle `instance.__dict__ = value` (issue #1942).
+///
+/// CPython's `tp_setattro` routes assignment to the `__dict__` slot through a
+/// dedicated setter that *replaces* the instance dict wholesale (rather than
+/// storing an attribute literally named `__dict__`).  The value must be a
+/// `dict`; anything else raises `TypeError`.
+///
+/// pyrust's instance attrs map is `IndexMap<String, Value>`, so only string
+/// keys are representable as attributes.  CPython accepts a dict with non-str
+/// keys here (they're simply never accessible as attributes); we mirror the
+/// observable attribute behaviour by keeping only the string-keyed entries.
+///
+/// `other.__dict__` evaluates to an `instance_dict` proxy in pyrust (CPython
+/// returns the backing dict itself), so we also accept a proxy here and copy
+/// its visible entries.  Live aliasing (`w.__dict__ is other.__dict__`) is not
+/// reproduced — that needs first-class dict-backed instance storage (#1942
+/// follow-up).
+pub(crate) fn replace_instance_dict(
+    instance: &Rc<RefCell<PyInstance>>,
+    value: &Value,
+) -> Result<()> {
+    let entries = match value.as_dict() {
+        Some(map) => map
+            .iter()
+            .filter_map(|(k, v)| match k {
+                PyKey::Str(s) => s.as_str().map(|s| (s.to_string(), v.clone())),
+                _ => None,
+            })
+            .collect::<Vec<(String, Value)>>(),
+        None => match pyrust_builtins::instance_dict::as_instance_dict_items(value) {
+            Some(items) => items
+                .into_iter()
+                .filter_map(|(k, v)| match k {
+                    PyKey::Str(s) => s.as_str().map(|s| (s.to_string(), v)),
+                    _ => None,
+                })
+                .collect::<Vec<(String, Value)>>(),
+            None => {
+                let type_name = pyrust_core::builtin_type_name(value);
+                return Err(pyrust_core::type_err!(
+                    "__dict__ must be set to a dictionary, not a '{type_name}'"
+                ));
+            }
+        },
+    };
+    let mut borrow = instance.borrow_mut();
+    borrow.attrs.clear();
+    for (k, v) in entries {
+        borrow.attrs.insert(k, v);
+    }
+    Ok(())
+}
+
 /// Return the errno-specific OSError subclass `Rc` for a given errno value,
 /// mirroring CPython 3.12's `_Py_errnomap` table in `Objects/exceptions.c`.
 /// Returns `None` when the errno has no mapped subclass (plain `OSError` is

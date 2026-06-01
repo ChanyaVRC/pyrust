@@ -1363,6 +1363,13 @@ impl Interpreter {
                 return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
             }
         }
+        // Issue #1942: `instance.__dict__ = {...}` replaces the backing attrs
+        // map wholesale rather than storing an attribute named "__dict__".
+        // Placed after slots enforcement so a slotted class without a
+        // `__dict__` slot still raises AttributeError (CPython parity).
+        if name == "__dict__" {
+            return replace_instance_dict(&instance, &value);
+        }
         instance.borrow_mut().attrs.insert(name.to_string(), value);
         Ok(())
     }
@@ -1660,6 +1667,13 @@ impl Interpreter {
                     let class_name = class.borrow().name.clone();
                     return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
                 }
+            }
+            // Issue #1942: `instance.__dict__ = {...}` replaces the backing
+            // attrs map wholesale rather than storing an attribute named
+            // "__dict__".  Placed after slots enforcement so a slotted class
+            // without a `__dict__` slot still raises AttributeError.
+            if name == "__dict__" {
+                return replace_instance_dict(instance, &value);
             }
             instance.borrow_mut().attrs.insert(name.to_string(), value);
             Ok(())
