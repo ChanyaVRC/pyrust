@@ -43,6 +43,25 @@ try:
 except ValueError as e:
     print("atanh(2): ValueError:", e)
 
+# Overflow direction: sinh/cosh/expm1/exp2 overflowing (incl. to -inf for the
+# odd functions) is a *range* error (OverflowError), not a domain error.
+try:
+    math.sinh(1000)
+except OverflowError as e:
+    print("sinh(1000): OverflowError:", e)
+try:
+    math.sinh(-1000)
+except OverflowError as e:
+    print("sinh(-1000): OverflowError:", e)
+try:
+    math.cosh(1000)
+except OverflowError as e:
+    print("cosh(1000): OverflowError:", e)
+try:
+    math.expm1(1000)
+except OverflowError as e:
+    print("expm1(1000): OverflowError:", e)
+
 # ── expm1 / log1p / exp2 ────────────────────────────────────────────────────
 print(math.expm1(0))                # 0.0
 print(math.expm1(1))

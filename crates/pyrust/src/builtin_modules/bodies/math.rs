@@ -640,7 +640,7 @@ pyrust_module! {
     #[pure]
     fn sinh(args) -> Result<Value> {
         let x = single_float(FN_NAME, args)?;
-        Ok(Value::float(check_math_result(x, x.sinh())?))
+        Ok(Value::float(check_math_overflow(x, x.sinh())?))
     }
 
     /// CPython: math.cosh(x) → float.  Hyperbolic cosine.
@@ -648,7 +648,7 @@ pyrust_module! {
     #[pure]
     fn cosh(args) -> Result<Value> {
         let x = single_float(FN_NAME, args)?;
-        Ok(Value::float(check_math_result(x, x.cosh())?))
+        Ok(Value::float(check_math_overflow(x, x.cosh())?))
     }
 
     /// CPython: math.tanh(x) → float.  Hyperbolic tangent.
@@ -696,7 +696,7 @@ pyrust_module! {
     #[pure]
     fn expm1(args) -> Result<Value> {
         let x = single_float(FN_NAME, args)?;
-        Ok(Value::float(check_math_result(x, x.exp_m1())?))
+        Ok(Value::float(check_math_overflow(x, x.exp_m1())?))
     }
 
     /// CPython: math.log1p(x) → float.  Compute ln(1+x) accurately for small x.
@@ -713,7 +713,7 @@ pyrust_module! {
     #[pure]
     fn exp2(args) -> Result<Value> {
         let x = single_float(FN_NAME, args)?;
-        Ok(Value::float(check_math_result(x, x.exp2())?))
+        Ok(Value::float(check_math_overflow(x, x.exp2())?))
     }
 
     /// CPython: math.cbrt(x) → float.  Cube root (defined for negative x).
@@ -956,6 +956,29 @@ fn check_math_result(arg: f64, result: f64) -> Result<f64> {
         return Err(PyError::named(
             "ValueError",
             "math domain error".to_string(),
+        ));
+    }
+    if result.is_nan() && !arg.is_nan() {
+        return Err(PyError::named(
+            "ValueError",
+            "math domain error".to_string(),
+        ));
+    }
+    Ok(result)
+}
+
+/// Result-checker for functions whose only way to produce an infinite result
+/// from a finite argument is *overflow* (the exponential / hyperbolic-growth
+/// family: exp2, expm1, sinh, cosh).  Unlike `check_math_result`, a `-inf`
+/// result here is a range error, not a domain error: `sinh(-1000)` overflows
+/// to `-inf` and CPython reports `OverflowError` ("math range error"), whereas
+/// `check_math_result` maps every `-inf` to `ValueError` (correct only for the
+/// logarithmic pole at `log(0)` / `log1p(-1)`).
+fn check_math_overflow(arg: f64, result: f64) -> Result<f64> {
+    if result.is_infinite() && arg.is_finite() {
+        return Err(PyError::named(
+            "OverflowError",
+            "math range error".to_string(),
         ));
     }
     if result.is_nan() && !arg.is_nan() {
