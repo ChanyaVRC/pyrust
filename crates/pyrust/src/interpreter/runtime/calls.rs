@@ -593,7 +593,11 @@ impl Interpreter {
                         }
                     }
                     "list" => {
-                        if method == "remove" {
+                        if method == "sort" {
+                            // Interpreter-aware sort so user `key=` and no-key
+                            // user `__lt__` dispatch correctly (#1925).
+                            self.list_sort_with_kwargs(&self_val, pos, &kw)
+                        } else if method == "remove" {
                             self.call_seq_remove(&self_val, pos)
                         } else if method == "index" || method == "count" {
                             let needs_dispatch = pos.first().map(|t| {
@@ -1064,7 +1068,13 @@ impl Interpreter {
             }
             Kind::List => {
                 let args_vec: Vec<Value> = std::mem::take(pos);
-                if method == "remove" {
+                if method == "sort" {
+                    // Route through the interpreter-aware sort so a user
+                    // `key=` callable and user `__lt__` (no-key) both dispatch
+                    // correctly — `pyrust_builtins::list::call` can reach
+                    // neither (#1925).
+                    self.list_sort_with_kwargs(&receiver, args_vec, &kw)
+                } else if method == "remove" {
                     self.call_seq_remove(&receiver, args_vec)
                 } else if method == "index" || method == "count" {
                     let needs_dispatch = args_vec.first().map(|t| {
@@ -1261,7 +1271,14 @@ impl Interpreter {
                                     self.call_dict_method(method, backing, args_vec, &kw)
                                 }
                                 BkKind::List => {
-                                    if method == "remove" {
+                                    if method == "sort" {
+                                        // Interpreter-aware sort so user `key=`
+                                        // and no-key user `__lt__` dispatch
+                                        // (#1925).
+                                        self.list_sort_with_kwargs(
+                                            &backing, args_vec, &kw,
+                                        )
+                                    } else if method == "remove" {
                                         self.call_seq_remove(&backing, args_vec)
                                     } else if method == "index" || method == "count" {
                                         let needs_dispatch =
@@ -7237,8 +7254,46 @@ impl Interpreter {
             }
             return pyrust_builtins::list::sort_with_precomputed_keys(receiver, keys, reverse);
         }
-        // No key: delegate to builtins (handles reverse kwarg).
-        pyrust_builtins::list::call("sort", receiver, pos, kw)
+        // No key.  Pre-scan: if any element is a user instance, comparisons
+        // may dispatch `__lt__` (and the reflected `__gt__`), which the
+        // interpreter-free `pyrust_builtins::list::call("sort", …)` cannot
+        // reach — it would raise a spurious TypeError (#1925).  Route those
+        // through the interpreter-aware `richcmp_order`, exactly as `sorted()`
+        // does.  All-primitive lists keep the in-crate fast sort: no perf
+        // regression on the common int/str/float case.
+        let has_instance = receiver
+            .list_with(|items| items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_))))
+            .unwrap_or(false);
+        if !has_instance {
+            // Primitive fast path: delegate to builtins (handles reverse kwarg).
+            return pyrust_builtins::list::call("sort", receiver, pos, kw);
+        }
+        // Snapshot the items so the comparator (which may re-enter the same
+        // list via user `__lt__`) does not straddle the receiver's borrow.
+        // Write the sorted result back inside a `list_with_mut` window, mirroring
+        // `pyrust_builtins::list::sort_by_cmp`.
+        let mut snapshot: Vec<Value> = receiver
+            .list_with(|items| items.clone())
+            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+        let mut sort_err: Option<PyError> = None;
+        snapshot.sort_by(|a, b| {
+            if sort_err.is_some() {
+                return std::cmp::Ordering::Equal;
+            }
+            let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+            match self.richcmp_order(lhs, rhs) {
+                Ok(ord) => ord,
+                Err(e) => {
+                    sort_err = Some(e);
+                    std::cmp::Ordering::Equal
+                }
+            }
+        });
+        if let Some(e) = sort_err {
+            return Err(e);
+        }
+        receiver.list_with_mut(|items| *items = snapshot);
+        Ok(Value::none())
     }
 
     /// `str.format` / `str.format_map` / `str.maketrans` — the templating
