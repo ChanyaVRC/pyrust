@@ -6610,6 +6610,21 @@ impl Compiler {
         rest_name: Option<&str>,
         fail_patches: &mut Vec<usize>,
     ) {
+        // PEP 634 §3: a mapping pattern matches only if the subject is a
+        // mapping (`isinstance(subject, collections.abc.Mapping)`).  Guard on
+        // that first so a non-mapping subject (int, str, list, set, None, …)
+        // fails the match rather than raising on the per-key `in` test below
+        // (issue #1879).  Mirrors the `MatchSeqExcluded` gate in
+        // `compile_sequence_pattern`; in pyrust the only built-in mapping is
+        // `dict` (and its subclasses).
+        {
+            let is_map = self.alloc_temp();
+            self.emit(Insn::MatchMapping(is_map, subj));
+            let jmp = self.emit(Insn::JumpIfFalse(is_map, 0));
+            fail_patches.push(jmp);
+            self.free_temp(is_map);
+        }
+
         // For each key-pattern pair: check key in subject, then match pattern.
         let in_name_idx = self.intern_name("__contains__");
         let _ = in_name_idx; // used indirectly via BinaryOp::In

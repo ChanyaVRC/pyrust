@@ -121,6 +121,15 @@ pub enum Insn {
     /// every iteration (issue #1789).  Subclasses are honoured (a `dict`
     /// subclass instance is excluded; a `list` subclass instance is not).
     MatchSeqExcluded(Reg, Reg),
+    /// R[dst] = `isinstance(R[subj], collections.abc.Mapping)` — the
+    /// mapping-pattern type gate (PEP 634 §3).  Emitted once per
+    /// `Pattern::Mapping` arm before any per-key membership test so that a
+    /// non-mapping subject (int, str, list, set, …) fails the match instead of
+    /// raising on `key in subj` (issue #1879).  In pyrust the only built-in
+    /// mapping is `dict`; subclasses are honoured (a `dict` subclass instance
+    /// matches).  Mirrors `MatchSeqExcluded` but with inverted polarity (true
+    /// means "is a mapping", so codegen jumps to fail on false).
+    MatchMapping(Reg, Reg),
     /// R[dst] = R[obj].names[name_idx]
     GetAttr(Reg, Reg, u16),
     /// Like GetAttr but converts AttributeError to TypeError for the context manager
