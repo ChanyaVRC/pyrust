@@ -61,3 +61,23 @@ except ValueError as e:
 
 # ── nested in a comprehension (join the chars of each run) ─────────────
 print("join", [(k, "".join(g)) for k, g in groupby("aaabbbcccd")])
+
+
+# ── lazy pull timing: the source iterator is advanced only on demand, ──
+# not eagerly read one element ahead.  Observable via a side-effecting
+# generator: after yielding one value from a group, exactly that many
+# elements have been pulled from the source (CPython advances lazily).
+def logged(seq, log):
+    for x in seq:
+        log.append(x)
+        yield x
+
+
+log = []
+gb = groupby(logged([10, 10, 11], log), key=lambda _: 0)
+_, g = next(gb)
+print("pull-after-outer", list(log))
+print("pull-val", next(g))
+print("pull-after-1", list(log))
+print("pull-val", next(g))
+print("pull-after-2", list(log))

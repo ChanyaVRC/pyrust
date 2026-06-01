@@ -1163,25 +1163,31 @@ pyrust_module! {
                 next
             };
             // Skip past any unconsumed items of the previous group: keep
-            // advancing the shared cursor while the current key still
+            // consuming the shared cursor while the current key still
             // matches the previous target key (or until we pull the very
-            // first element).  This is CPython's
-            //   `while (currkey == tgtkey) { advance }`.
+            // first element).  This mirrors CPython's `groupby_next`:
+            //   while (currkey == tgtkey) { fetch-next }
+            // The fetch is *lazy* — we only pull a new element when the
+            // cursor is empty (`_has_curr == false`), so a side-effecting
+            // source iterator is advanced exactly when CPython advances it.
             loop {
-                let (has_curr, currkey, has_tgt, tgtkey) = read_groupby_curr(&inst, FN_NAME)?;
-                if has_curr {
-                    // We have a live lookahead element.  Stop as soon as its
-                    // key differs from the previous group's target (or there
-                    // is no previous group yet — the very first element).
-                    if !has_tgt || !keys_equal(_interp, &currkey, &tgtkey)? {
-                        break;
-                    }
-                }
-                // Advance the shared cursor.
-                if !groupby_advance(_interp, &inst, FN_NAME)? {
+                // Make sure the cursor holds an element to inspect.
+                if !groupby_ensure_curr(_interp, &inst, FN_NAME)? {
                     // Source exhausted while skipping — no more groups.
                     return Err(PyError::named("StopIteration", String::new()));
                 }
+                let (_, currkey, has_tgt, tgtkey) = read_groupby_curr(&inst, FN_NAME)?;
+                // Stop as soon as the key differs from the previous group's
+                // target (or there is no previous group yet — the very first
+                // element).  In that case the cursor stays loaded with the
+                // first element of the new group.
+                if !has_tgt || !keys_equal(_interp, &currkey, &tgtkey)? {
+                    break;
+                }
+                // Same key: this element belongs to the prior group, skip it
+                // by marking the cursor consumed so the next iteration pulls
+                // a fresh element.
+                groupby_clear_curr(&inst);
             }
             // The cursor now sits on the first element of the new group.
             let currkey = {
@@ -1233,9 +1239,9 @@ pyrust_module! {
             let ValueKind::PyInstance(parent) = parent_val.kind() else {
                 return Err(internal(FN_NAME));
             };
-            // Staleness: the parent advanced to a new group (id moved on)
-            // or there is no live cursor element to yield.
-            let (has_curr, currkey, currvalue) = {
+            // Staleness: the parent advanced to a new group (id moved on).
+            // CPython's `_grouper_next` checks `gbo->id != igo->id` first.
+            {
                 let a = parent.borrow();
                 let parent_id = match a.attrs.get("_id").map(|v| v.kind()) {
                     Some(ValueKind::Int(n)) => n,
@@ -1244,22 +1250,29 @@ pyrust_module! {
                 if parent_id != my_id {
                     return Err(PyError::named("StopIteration", String::new()));
                 }
-                let has_curr = matches!(
-                    a.attrs.get("_has_curr").map(|v| v.kind()),
-                    Some(ValueKind::Bool(true))
-                );
-                (
-                    has_curr,
-                    a.attrs.get("_currkey").cloned().ok_or_else(|| internal(FN_NAME))?,
-                    a.attrs.get("_currvalue").cloned().ok_or_else(|| internal(FN_NAME))?,
-                )
-            };
-            if !has_curr || !keys_equal(_interp, &currkey, &my_tgtkey)? {
+            }
+            // Lazily fetch the next element only if the shared cursor was
+            // consumed — matching CPython, where `_grouper_next` pulls from
+            // the source iterator only when `gbo->currvalue == NULL`.
+            if !groupby_ensure_curr(_interp, &parent, FN_NAME)? {
                 return Err(PyError::named("StopIteration", String::new()));
             }
-            // Yield the current value, then advance the shared cursor so the
-            // next call sees the following element (or exhaustion).
-            groupby_advance(_interp, &parent, FN_NAME)?;
+            let currkey = {
+                let a = parent.borrow();
+                a.attrs.get("_currkey").cloned().ok_or_else(|| internal(FN_NAME))?
+            };
+            if !keys_equal(_interp, &currkey, &my_tgtkey)? {
+                // Key no longer matches this grouper's target: group is done.
+                // Leave the cursor loaded so the parent's next group sees it.
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            // Consume the current value (clear the cursor so the next call —
+            // whether from this grouper or the parent — pulls a fresh one).
+            let currvalue = {
+                let a = parent.borrow();
+                a.attrs.get("_currvalue").cloned().ok_or_else(|| internal(FN_NAME))?
+            };
+            groupby_clear_curr(&parent);
             Ok(currvalue)
         }
     }
@@ -1899,23 +1912,36 @@ fn read_groupby_curr(
     Ok((has_curr, currkey, has_tgt, tgtkey))
 }
 
-/// Advance a `groupby`'s shared cursor by one element.  Pulls the next
-/// item from the source iterator, computes its key, and stores both as the
-/// new `_currvalue`/`_currkey` lookahead.  Returns `Ok(true)` on success,
-/// `Ok(false)` if the source iterator is exhausted (in which case the
-/// lookahead is cleared so any live grouper goes stale).
-fn groupby_advance(
+/// Ensure a `groupby`'s shared cursor holds an element.  If the cursor is
+/// already loaded (`_has_curr == true`) this is a no-op.  Otherwise it
+/// pulls the next item from the source iterator, computes its key, and
+/// stores both as the new `_currvalue`/`_currkey` lookahead.  Returns
+/// `Ok(true)` if the cursor now holds an element, `Ok(false)` if the source
+/// iterator is exhausted.
+///
+/// The fetch is lazy on purpose: CPython only advances the underlying
+/// iterator when its `currvalue` slot is empty, so a side-effecting source
+/// is consumed exactly when CPython consumes it.
+fn groupby_ensure_curr(
     interp: &mut crate::Interpreter,
     inst: &Rc<RefCell<PyInstance>>,
     fn_name: &str,
 ) -> Result<bool> {
-    let (iter, key_fn) = {
+    let (has_curr, iter, key_fn) = {
         let a = inst.borrow();
+        let has_curr = matches!(
+            a.attrs.get("_has_curr").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
         (
+            has_curr,
             a.attrs.get("_iter").cloned().ok_or_else(|| internal(fn_name))?,
             a.attrs.get("_keyfn").cloned().ok_or_else(|| internal(fn_name))?,
         )
     };
+    if has_curr {
+        return Ok(true);
+    }
     let item = match interp.call_next(&iter, None) {
         Ok(v) => v,
         Err(e) if is_stop_iteration(&e) => {
@@ -1932,6 +1958,14 @@ fn groupby_advance(
     a.attrs.insert("_currkey".to_string(), key);
     a.attrs.insert("_has_curr".to_string(), Value::bool_(true));
     Ok(true)
+}
+
+/// Mark a `groupby`'s shared cursor as consumed, so the next
+/// `groupby_ensure_curr` pulls a fresh element.  Mirrors CPython clearing
+/// `gbo->currvalue`/`gbo->currkey` after a value is handed out.
+fn groupby_clear_curr(inst: &Rc<RefCell<PyInstance>>) {
+    let mut a = inst.borrow_mut();
+    a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
 }
 
 /// Pull the `itertools` class named `name` out of this module's `module()`
