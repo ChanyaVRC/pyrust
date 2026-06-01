@@ -2153,11 +2153,65 @@ pyrust_module! {
                 format!("{FN_NAME}() takes at most 1 argument"),
             ));
         }
-        let mut names: Vec<String> = if args.is_empty() {
-            _interp.env.borrow().values.keys().cloned().collect()
-        } else {
-            dir_names(&args[0].value)
-        };
+        if args.is_empty() {
+            let mut names: Vec<String> =
+                _interp.env.borrow().values.keys().cloned().collect();
+            names.sort();
+            names.dedup();
+            return Ok(Value::list(names.into_iter().map(Value::string).collect()));
+        }
+        // Honour a user-defined `__dir__` override.  CPython's `dir(obj)` is
+        // `sorted(type(obj).__dir__(obj))`: it accepts any iterable result,
+        // sorts it via the elements' own comparison (so a non-str element only
+        // errors if the `<` comparison fails), and does NOT dedup the custom
+        // result.  Only `PyInstance` values can carry an overridden `__dir__`;
+        // primitives use the default `dir_names` path (issue #1941).
+        if let ValueKind::PyInstance(inst) = args[0].value.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__dir__") {
+                let result =
+                    invoke_class_method(_interp, method_val, args[0].value.clone(), &[])?;
+                let mut items = _interp.collect_iterable(&result)?;
+                // Sort the collected values exactly as `sorted()` would,
+                // surfacing the element comparison error verbatim.
+                let mut sort_err: Option<PyError> = None;
+                let has_instance = items
+                    .iter()
+                    .any(|v| matches!(v.kind(), ValueKind::PyInstance(_)));
+                if has_instance {
+                    items.sort_by(|a, b| {
+                        if sort_err.is_some() {
+                            return std::cmp::Ordering::Equal;
+                        }
+                        match _interp.richcmp_order(a, b) {
+                            Ok(ord) => ord,
+                            Err(e) => {
+                                sort_err = Some(e);
+                                std::cmp::Ordering::Equal
+                            }
+                        }
+                    });
+                } else {
+                    items.sort_by(|a, b| {
+                        if sort_err.is_some() {
+                            return std::cmp::Ordering::Equal;
+                        }
+                        match compare_values(a, b) {
+                            Ok(ord) => ord,
+                            Err(e) => {
+                                sort_err = Some(e);
+                                std::cmp::Ordering::Equal
+                            }
+                        }
+                    });
+                }
+                if let Some(e) = sort_err {
+                    return Err(e);
+                }
+                return Ok(Value::list(items));
+            }
+        }
+        let mut names: Vec<String> = dir_names(&args[0].value);
         names.sort();
         names.dedup();
         Ok(Value::list(names.into_iter().map(Value::string).collect()))
