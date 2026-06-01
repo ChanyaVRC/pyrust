@@ -113,8 +113,14 @@ pub fn call_on_slice(
         "rstrip" => bytes_strip(bytes, args, false, true),
         "removeprefix" => bytes_removeprefix(bytes, args),
         "removesuffix" => bytes_removesuffix(bytes, args),
-        "split" => bytes_split(bytes, args),
-        "rsplit" => bytes_rsplit(bytes, args),
+        "split" => {
+            let merged = merge_split_kwargs("split", args, kwargs)?;
+            bytes_split(bytes, &merged)
+        }
+        "rsplit" => {
+            let merged = merge_split_kwargs("rsplit", args, kwargs)?;
+            bytes_rsplit(bytes, &merged)
+        }
         "splitlines" => bytes_splitlines(bytes, args),
         "join" => bytes_join(bytes, args),
         "title" => Ok(Value::bytes(bytes_title(bytes))),
@@ -1768,6 +1774,127 @@ fn bytes_removesuffix(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // ---------------------------------------------------------------------------
 // split / rsplit
 // ---------------------------------------------------------------------------
+
+/// Normalise `split`/`rsplit` keyword arguments (`sep`, `maxsplit`) into the
+/// positional slots `[sep, maxsplit]` that `bytes_split_args` expects.
+///
+/// CPython 3.12 accepts both `sep` and `maxsplit` by keyword for
+/// `bytes`/`bytearray` `split`/`rsplit`; passing the same value by both name
+/// and position, an unknown keyword, or more than two positionals all raise
+/// `TypeError`.  Error messages use the bare method name (`split()` /
+/// `rsplit()`), matching CPython's `Objects/bytesobject.c`.
+fn merge_split_kwargs(
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<PyKey, Value>,
+) -> Result<Vec<Value>> {
+    merge_split_kwargs_iter(
+        method,
+        args,
+        kwargs.len(),
+        kwargs.iter().map(|(k, v)| {
+            let key = match k {
+                PyKey::Str(s) => s.as_str().unwrap_or(""),
+                _ => "",
+            };
+            (key, v)
+        }),
+    )
+}
+
+/// `bytearray.split`/`rsplit` keep their kwargs in a `String`-keyed map; this
+/// shim threads them through the same merge logic as `bytes`.
+pub fn merge_split_kwargs_str(
+    method: &str,
+    args: &[Value],
+    kwargs: &IndexMap<String, Value>,
+) -> Result<Vec<Value>> {
+    merge_split_kwargs_iter(
+        method,
+        args,
+        kwargs.len(),
+        kwargs.iter().map(|(k, v)| (k.as_str(), v)),
+    )
+}
+
+/// Shared core: normalise `split`/`rsplit` `sep`/`maxsplit` keywords into the
+/// positional slots `[sep, maxsplit]`, generic over the keyword key type.
+fn merge_split_kwargs_iter<'a>(
+    method: &str,
+    args: &[Value],
+    kwargs_len: usize,
+    kwargs: impl Iterator<Item = (&'a str, &'a Value)>,
+) -> Result<Vec<Value>> {
+    if kwargs_len == 0 {
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{method}() takes at most 2 arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        return Ok(args.to_vec());
+    }
+
+    // CPython's argument parser checks the total argument count against the
+    // two-positional limit before resolving per-keyword position conflicts, so
+    // `split(b" ", 1, maxsplit=1)` reports "takes at most 2 arguments" rather
+    // than a name/position clash.
+    let total = args.len() + kwargs_len;
+    if total > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{method}() takes at most 2 arguments ({total} given)"),
+        ));
+    }
+
+    let mut pos = args.to_vec();
+    let mut sep: Option<Value> = None;
+    let mut maxsplit: Option<Value> = None;
+    for (key_str, v) in kwargs {
+        match key_str {
+            "sep" => {
+                if !pos.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("argument for {method}() given by name ('sep') and position (1)"),
+                    ));
+                }
+                sep = Some(v.clone());
+            }
+            "maxsplit" => {
+                maxsplit = Some(v.clone());
+            }
+            other => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{other}' is an invalid keyword argument for {method}()"),
+                ));
+            }
+        }
+    }
+
+    // Fill positional slots: pos[0] = sep, pos[1] = maxsplit.
+    if let Some(ms) = maxsplit {
+        if pos.is_empty() {
+            pos.push(sep.unwrap_or_else(Value::none));
+        } else if let Some(sep_val) = sep {
+            pos[0] = sep_val;
+        }
+        if pos.len() < 2 {
+            pos.push(ms);
+        }
+    } else if let Some(sep_val) = sep {
+        if pos.is_empty() {
+            pos.push(sep_val);
+        } else {
+            pos[0] = sep_val;
+        }
+    }
+    Ok(pos)
+}
 
 fn bytes_split(bytes: &[u8], args: &[Value]) -> Result<Value> {
     let (sep_opt, maxsplit) = bytes_split_args(args)?;

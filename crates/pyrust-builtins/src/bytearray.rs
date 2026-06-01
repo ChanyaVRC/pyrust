@@ -365,7 +365,7 @@ impl BuiltinTypeOps for ByteArrayOps {
         state: &BuiltinState,
         method: &str,
         args: Vec<Value>,
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         // Extract the byte slice; needed for read methods.
         let data_snapshot: Vec<u8> = {
@@ -438,8 +438,16 @@ impl BuiltinTypeOps for ByteArrayOps {
             "rpartition" => {
                 return bytearray_partition(&data_snapshot, &args, true);
             }
-            // split / rsplit / splitlines return lists of bytearray.
-            "split" | "rsplit" | "splitlines" => {
+            // split / rsplit accept `sep`/`maxsplit` by keyword; merge them into
+            // positional slots before delegating.  splitlines (keepends) keeps
+            // the positional-only path.
+            "split" | "rsplit" => {
+                let merged = crate::bytes::merge_split_kwargs_str(method, &args, kwargs)?;
+                let result =
+                    crate::bytes::call_on_slice(method, &data_snapshot, &merged, &empty_kw)?;
+                return Ok(bytes_list_to_bytearray_list(result));
+            }
+            "splitlines" => {
                 let result = crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?;
                 return Ok(bytes_list_to_bytearray_list(result));
             }
