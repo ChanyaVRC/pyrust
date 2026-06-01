@@ -23,9 +23,10 @@ use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
+    dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
-    int_pow_promoting, invoke_class_method,
+    invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, round_float_ndigits,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
@@ -1069,31 +1070,28 @@ pyrust_module! {
                 }
             }
 
-            // Fall through to built-in numeric pow.
-            match (base_val.kind(), exp_val.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
-                    Ok(int_pow_promoting(a, b))
-                }
-                (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
-                    Ok(int_pow_promoting(a as i64, b))
-                }
-                _ if base_class.is_some() || exp_class.is_some() => {
-                    // At least one PyInstance — neither __pow__ nor __rpow__ succeeded.
-                    Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "unsupported operand type(s) for ** or pow(): '{}' and '{}'",
-                            value_type_name_str(base_val),
-                            value_type_name_str(exp_val),
-                        ),
-                    ))
-                }
-                _ => {
-                    let a = value_to_float(base_val, FN_NAME)?;
-                    let b = value_to_float(exp_val, FN_NAME)?;
-                    Ok(Value::float(a.powf(b)))
-                }
+            // Fall through to built-in numeric pow.  Route through the same
+            // NumericOps slot dispatch the `**` operator uses (#458) so that
+            // bool operands are treated as int (bool ⊆ int): a non-negative
+            // bool/int exponent yields an int, while a negative or float
+            // exponent yields a float — matching the operator path exactly.
+            if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, base_val, exp_val) {
+                return result;
             }
+            if base_class.is_some() || exp_class.is_some() {
+                // At least one PyInstance — neither __pow__ nor __rpow__ succeeded.
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "unsupported operand type(s) for ** or pow(): '{}' and '{}'",
+                        value_type_name_str(base_val),
+                        value_type_name_str(exp_val),
+                    ),
+                ));
+            }
+            let a = value_to_float(base_val, FN_NAME)?;
+            let b = value_to_float(exp_val, FN_NAME)?;
+            Ok(Value::float(a.powf(b)))
         }
     }
 
