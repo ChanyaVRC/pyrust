@@ -8301,10 +8301,16 @@ fn bytes_count_via_index(interp: &mut crate::Interpreter, val: &Value) -> Result
         ValueKind::Bool(b) => b as i64,
         ValueKind::Int(n) => n,
         ValueKind::BigInt(_) => {
+            // CPython names the *original* object here, not the int the
+            // __index__ returned: `bytes(obj)` -> "cannot fit 'obj-type' into
+            // an index-sized integer" (#1908).
             return Err(PyError::named(
                 "OverflowError",
-                "cannot fit 'int' into an index-sized integer".to_string(),
-            ))
+                format!(
+                    "cannot fit '{}' into an index-sized integer",
+                    value_type_name_str(val),
+                ),
+            ));
         }
         _ => {
             return Err(PyError::named(

@@ -5904,18 +5904,24 @@ impl Interpreter {
                 return Err(pyrust_core::type_err!("'{}' object does not support item assignment", tname));
             }
             4 => {
-                let obj_val = vm_read(regs, obj, num_locals)?;
                 // bytearray item assignment honors the __index__ protocol on
                 // both the index and the assigned value (#1908). bytearray's
                 // receiver-only set_item can't reach user dunders, so resolve
-                // here before delegating. Slice assignment (idx is a slice
-                // object) passes through unchanged.
-                let is_bytearray = matches!(
-                    obj_val.kind(),
-                    ValueKind::BuiltinObject { ops, .. }
-                        if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
-                );
-                let (idx_val, val_val) = if is_bytearray {
+                // here before delegating. The hot `ba[i] = v` int/bool path is
+                // untouched: protocol resolution only runs when the index is a
+                // PyInstance / slice object or the value is a PyInstance — a
+                // plain-int index with a plain-int/bool value skips it entirely
+                // and goes straight to set_item, matching master.
+                let needs_resolve = matches!(
+                    idx_val.kind(),
+                    ValueKind::PyInstance(_) | ValueKind::BuiltinObject { .. }
+                ) || matches!(val_val.kind(), ValueKind::PyInstance(_));
+                let (idx_val, val_val) = if needs_resolve
+                    && matches!(
+                        vm_read(regs, obj, num_locals)?.kind(),
+                        ValueKind::BuiltinObject { ops, .. }
+                            if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+                    ) {
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         // Slice assignment: resolve the __index__ bounds and
                         // rebuild the slice; element resolution stays in
