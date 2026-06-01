@@ -26,7 +26,9 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::value_type_name_str;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::value::{PyInstance, Value, ValueKind};
+use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 pyrust_module! {
@@ -1072,11 +1074,13 @@ pyrust_module! {
     }
 
     /// CPython: itertools.groupby(iterable, key=None) — group
-    /// *consecutive* equal elements.  Each yield is `(key, group_iter)`.
-    /// The group iterator is a list (eagerly materialised on yield) —
-    /// CPython returns a lazy view, but materialising is simpler and
-    /// the typical idiom `for k, g in groupby(data, key): list(g)`
-    /// uses the group fully anyway.
+    /// *consecutive* equal elements.  Each yield is `(key, group)` where
+    /// `group` is a lazy `_grouper` sub-iterator that shares the single
+    /// underlying cursor with the parent `groupby` (mirroring CPython's
+    /// `itertools._grouper`).  Because the cursor is shared, advancing the
+    /// parent (asking for the next `(key, group)`) makes any previously
+    /// yielded group stale — it stops yielding.  See the `_grouper` class
+    /// below for the staleness mechanism.
     /// <https://docs.python.org/3/library/itertools.html#itertools.groupby>
     class groupby {
         fn __init__(args) -> Result<Value> {
@@ -1123,11 +1127,18 @@ pyrust_module! {
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter".to_string(), iter);
             a.attrs.insert("_keyfn".to_string(), key_fn);
-            // `_pending` holds the next element + its key, lookahead
-            // style.  Empty until first __next__ pulls.
-            a.attrs.insert("_pending".to_string(), Value::none());
-            a.attrs.insert("_pending_key".to_string(), Value::none());
-            a.attrs.insert("_has_pending".to_string(), Value::bool_(false));
+            // Shared-cursor state, mirroring CPython's `groupbyobject`:
+            //   `_currkey`/`_currvalue` — the lookahead element and its key;
+            //   `_has_curr` — whether that lookahead is valid;
+            //   `_tgtkey`/`_has_tgt` — key of the group currently handed out;
+            //   `_id` — monotonic group counter (staleness token);
+            //   `_exhausted` — source iterator is drained.
+            a.attrs.insert("_currkey".to_string(), Value::none());
+            a.attrs.insert("_currvalue".to_string(), Value::none());
+            a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
+            a.attrs.insert("_tgtkey".to_string(), Value::none());
+            a.attrs.insert("_has_tgt".to_string(), Value::bool_(false));
+            a.attrs.insert("_id".to_string(), Value::int(0));
             a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
             Ok(Value::none())
         }
@@ -1138,81 +1149,131 @@ pyrust_module! {
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            if matches!(
-                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            ) {
-                return Err(PyError::named("StopIteration", String::new()));
+            let parent = args[0].value.clone();
+            // Bump the group id: this invalidates any grouper handed out
+            // for the previous group (CPython's `gbo->id` token).
+            let new_id = {
+                let mut a = inst.borrow_mut();
+                let cur = match a.attrs.get("_id").map(|v| v.kind()) {
+                    Some(ValueKind::Int(n)) => n,
+                    _ => return Err(internal(FN_NAME)),
+                };
+                let next = cur + 1;
+                a.attrs.insert("_id".to_string(), Value::int(next));
+                next
+            };
+            // Skip past any unconsumed items of the previous group: keep
+            // consuming the shared cursor while the current key still
+            // matches the previous target key (or until we pull the very
+            // first element).  This mirrors CPython's `groupby_next`:
+            //   while (currkey == tgtkey) { fetch-next }
+            // The fetch is *lazy* — we only pull a new element when the
+            // cursor is empty (`_has_curr == false`), so a side-effecting
+            // source iterator is advanced exactly when CPython advances it.
+            loop {
+                // Make sure the cursor holds an element to inspect.
+                if !groupby_ensure_curr(_interp, &inst, FN_NAME)? {
+                    // Source exhausted while skipping — no more groups.
+                    return Err(PyError::named("StopIteration", String::new()));
+                }
+                let (_, currkey, has_tgt, tgtkey) = read_groupby_curr(&inst, FN_NAME)?;
+                // Stop as soon as the key differs from the previous group's
+                // target (or there is no previous group yet — the very first
+                // element).  In that case the cursor stays loaded with the
+                // first element of the new group.
+                if !has_tgt || !keys_equal(_interp, &currkey, &tgtkey)? {
+                    break;
+                }
+                // Same key: this element belongs to the prior group, skip it
+                // by marking the cursor consumed so the next iteration pulls
+                // a fresh element.
+                groupby_clear_curr(&inst);
             }
-            // Read state.
-            let (iter, key_fn, has_pending, pending, pending_key) = {
+            // The cursor now sits on the first element of the new group.
+            let currkey = {
+                let a = inst.borrow();
+                a.attrs.get("_currkey").cloned().ok_or_else(|| internal(FN_NAME))?
+            };
+            {
+                let mut a = inst.borrow_mut();
+                a.attrs.insert("_tgtkey".to_string(), currkey.clone());
+                a.attrs.insert("_has_tgt".to_string(), Value::bool_(true));
+            }
+            // Hand out a lazy grouper bound to this group id + key.
+            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            attrs.insert("_parent".to_string(), parent);
+            attrs.insert("_tgtkey".to_string(), currkey.clone());
+            attrs.insert("_id".to_string(), Value::int(new_id));
+            let grouper = make_itertools_instance("_grouper", attrs)?;
+            Ok(Value::tuple(vec![currkey, grouper]))
+        }
+    }
+
+    /// CPython: `itertools._grouper` — the lazy sub-iterator yielded by
+    /// `groupby`.  It does not own any data; it reads through its parent
+    /// `groupby`'s shared cursor.  It yields `_currvalue` while two
+    /// conditions hold: the parent's group id still equals the id this
+    /// grouper was created with (`_id`), and the parent's current key still
+    /// equals this grouper's target key (`_tgtkey`).  As soon as the parent
+    /// is advanced to the next group its id changes, so a stale grouper
+    /// immediately raises `StopIteration` — matching CPython's documented
+    /// "previous group is no longer visible" behaviour.
+    class _grouper {
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let (parent_val, my_tgtkey, my_id) = {
                 let a = inst.borrow();
                 (
-                    a.attrs.get("_iter").cloned().ok_or_else(|| internal(FN_NAME))?,
-                    a.attrs.get("_keyfn").cloned().ok_or_else(|| internal(FN_NAME))?,
-                    matches!(
-                        a.attrs.get("_has_pending").map(|v| v.kind()),
-                        Some(ValueKind::Bool(true))
-                    ),
-                    a.attrs.get("_pending").cloned().unwrap_or_else(Value::none),
-                    a.attrs.get("_pending_key").cloned().unwrap_or_else(Value::none),
+                    a.attrs.get("_parent").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    a.attrs.get("_tgtkey").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    match a.attrs.get("_id").map(|v| v.kind()) {
+                        Some(ValueKind::Int(n)) => n,
+                        _ => return Err(internal(FN_NAME)),
+                    },
                 )
             };
-            // Get the first element of this group.  If we have a
-            // pending element from the previous group's lookahead, use
-            // it; otherwise pull a new one.
-            let (first, first_key) = if has_pending {
-                (pending, pending_key)
-            } else {
-                let item = match _interp.call_next(&iter, None) {
-                    Ok(v) => v,
-                    Err(e) if is_stop_iteration(&e) => {
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_exhausted".to_string(), Value::bool_(true));
-                        return Err(PyError::named("StopIteration", String::new()));
-                    }
-                    Err(e) => return Err(e),
-                };
-                let k = compute_key(_interp, &key_fn, &item)?;
-                (item, k)
+            let ValueKind::PyInstance(parent) = parent_val.kind() else {
+                return Err(internal(FN_NAME));
             };
-            // Collect everything else with the same key.
-            let mut group: Vec<Value> = vec![first.clone()];
-            loop {
-                let item = match _interp.call_next(&iter, None) {
-                    Ok(v) => v,
-                    Err(e) if is_stop_iteration(&e) => {
-                        // End-of-iter — stash that we have no more pending.
-                        let mut a = inst.borrow_mut();
-                        a.attrs.insert("_has_pending".to_string(), Value::bool_(false));
-                        a.attrs.insert("_exhausted".to_string(), Value::bool_(true));
-                        return Ok(Value::tuple(vec![first_key, Value::list(group)]));
-                    }
-                    Err(e) => return Err(e),
+            // Staleness: the parent advanced to a new group (id moved on).
+            // CPython's `_grouper_next` checks `gbo->id != igo->id` first.
+            {
+                let a = parent.borrow();
+                let parent_id = match a.attrs.get("_id").map(|v| v.kind()) {
+                    Some(ValueKind::Int(n)) => n,
+                    _ => return Err(internal(FN_NAME)),
                 };
-                let k = compute_key(_interp, &key_fn, &item)?;
-                // `==` on Rust-side `Value` is identity-based for
-                // PyInstance, so we must go through `eval_binary(Eq)` to
-                // dispatch `__eq__` — otherwise `groupby(items, key=K)`
-                // would treat every `K(v)` instance as its own group.
-                // The result must then go through `truthy_value` so a
-                // user `__eq__` returning a PyInstance routes through
-                // `__bool__`/`__len__`.
-                let eq_val =
-                    _interp.eval_binary(k.clone(), crate::ast::BinaryOp::Eq, first_key.clone())?;
-                let eq = _interp.truthy_value(&eq_val)?;
-                if eq {
-                    group.push(item);
-                } else {
-                    // Stash as pending for the next group.
-                    let mut a = inst.borrow_mut();
-                    a.attrs.insert("_pending".to_string(), item);
-                    a.attrs.insert("_pending_key".to_string(), k);
-                    a.attrs.insert("_has_pending".to_string(), Value::bool_(true));
-                    return Ok(Value::tuple(vec![first_key, Value::list(group)]));
+                if parent_id != my_id {
+                    return Err(PyError::named("StopIteration", String::new()));
                 }
             }
+            // Lazily fetch the next element only if the shared cursor was
+            // consumed — matching CPython, where `_grouper_next` pulls from
+            // the source iterator only when `gbo->currvalue == NULL`.
+            if !groupby_ensure_curr(_interp, &parent, FN_NAME)? {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            let currkey = {
+                let a = parent.borrow();
+                a.attrs.get("_currkey").cloned().ok_or_else(|| internal(FN_NAME))?
+            };
+            if !keys_equal(_interp, &currkey, &my_tgtkey)? {
+                // Key no longer matches this grouper's target: group is done.
+                // Leave the cursor loaded so the parent's next group sees it.
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            // Consume the current value (clear the cursor so the next call —
+            // whether from this grouper or the parent — pulls a fresh one).
+            let currvalue = {
+                let a = parent.borrow();
+                a.attrs.get("_currvalue").cloned().ok_or_else(|| internal(FN_NAME))?
+            };
+            groupby_clear_curr(&parent);
+            Ok(currvalue)
         }
     }
 
@@ -1811,6 +1872,128 @@ fn compute_key(interp: &mut crate::Interpreter, key_fn: &Value, item: &Value) ->
 /// it means an attr was wiped externally or never written by `__init__`.
 fn internal(fn_name: &str) -> PyError {
     PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
+}
+
+/// Compare two group keys for `groupby`/`_grouper` equality.  Goes through
+/// `eval_binary(Eq)` + `truthy_value` rather than Rust `==`: Rust-side `==`
+/// is identity-based for `PyInstance`, but `groupby(items, key=K)` keys may
+/// be user objects whose `__eq__` defines grouping (and may itself return a
+/// `PyInstance` routed through `__bool__`/`__len__`).
+fn keys_equal(interp: &mut crate::Interpreter, a: &Value, b: &Value) -> Result<bool> {
+    let eq_val = interp.eval_binary(a.clone(), crate::ast::BinaryOp::Eq, b.clone())?;
+    interp.truthy_value(&eq_val)
+}
+
+/// Read the `groupby` shared-cursor lookahead: `(has_curr, currkey,
+/// has_tgt, tgtkey)`.
+fn read_groupby_curr(
+    inst: &Rc<RefCell<PyInstance>>,
+    fn_name: &str,
+) -> Result<(bool, Value, bool, Value)> {
+    let a = inst.borrow();
+    let has_curr = matches!(
+        a.attrs.get("_has_curr").map(|v| v.kind()),
+        Some(ValueKind::Bool(true))
+    );
+    let has_tgt = matches!(
+        a.attrs.get("_has_tgt").map(|v| v.kind()),
+        Some(ValueKind::Bool(true))
+    );
+    let currkey = a
+        .attrs
+        .get("_currkey")
+        .cloned()
+        .ok_or_else(|| internal(fn_name))?;
+    let tgtkey = a
+        .attrs
+        .get("_tgtkey")
+        .cloned()
+        .ok_or_else(|| internal(fn_name))?;
+    Ok((has_curr, currkey, has_tgt, tgtkey))
+}
+
+/// Ensure a `groupby`'s shared cursor holds an element.  If the cursor is
+/// already loaded (`_has_curr == true`) this is a no-op.  Otherwise it
+/// pulls the next item from the source iterator, computes its key, and
+/// stores both as the new `_currvalue`/`_currkey` lookahead.  Returns
+/// `Ok(true)` if the cursor now holds an element, `Ok(false)` if the source
+/// iterator is exhausted.
+///
+/// The fetch is lazy on purpose: CPython only advances the underlying
+/// iterator when its `currvalue` slot is empty, so a side-effecting source
+/// is consumed exactly when CPython consumes it.
+fn groupby_ensure_curr(
+    interp: &mut crate::Interpreter,
+    inst: &Rc<RefCell<PyInstance>>,
+    fn_name: &str,
+) -> Result<bool> {
+    let (has_curr, iter, key_fn) = {
+        let a = inst.borrow();
+        let has_curr = matches!(
+            a.attrs.get("_has_curr").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        (
+            has_curr,
+            a.attrs.get("_iter").cloned().ok_or_else(|| internal(fn_name))?,
+            a.attrs.get("_keyfn").cloned().ok_or_else(|| internal(fn_name))?,
+        )
+    };
+    if has_curr {
+        return Ok(true);
+    }
+    let item = match interp.call_next(&iter, None) {
+        Ok(v) => v,
+        Err(e) if is_stop_iteration(&e) => {
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
+            a.attrs.insert("_exhausted".to_string(), Value::bool_(true));
+            return Ok(false);
+        }
+        Err(e) => return Err(e),
+    };
+    let key = compute_key(interp, &key_fn, &item)?;
+    let mut a = inst.borrow_mut();
+    a.attrs.insert("_currvalue".to_string(), item);
+    a.attrs.insert("_currkey".to_string(), key);
+    a.attrs.insert("_has_curr".to_string(), Value::bool_(true));
+    Ok(true)
+}
+
+/// Mark a `groupby`'s shared cursor as consumed, so the next
+/// `groupby_ensure_curr` pulls a fresh element.  Mirrors CPython clearing
+/// `gbo->currvalue`/`gbo->currkey` after a value is handed out.
+fn groupby_clear_curr(inst: &Rc<RefCell<PyInstance>>) {
+    let mut a = inst.borrow_mut();
+    a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
+}
+
+/// Pull the `itertools` class named `name` out of this module's `module()`
+/// and build a `PyInstance` of it carrying `attrs`, bypassing `__init__`.
+/// Used by `groupby.__next__` to mint a `_grouper` seeded with private
+/// state (parent back-reference, target key, group id).
+fn make_itertools_instance(name: &str, attrs: IndexMap<String, Value>) -> Result<Value> {
+    let module_val = module();
+    let ValueKind::PyModule(m) = module_val.kind() else {
+        return Err(PyError::Runtime(
+            "internal: itertools module() did not return a PyModule".to_string(),
+        ));
+    };
+    let class_val = m
+        .borrow()
+        .attrs
+        .get(name)
+        .cloned()
+        .ok_or_else(|| PyError::Runtime(format!("internal: itertools class {name} missing")))?;
+    let ValueKind::PyClass(class) = class_val.kind() else {
+        return Err(PyError::Runtime(format!(
+            "internal: itertools {name} is not a PyClass"
+        )));
+    };
+    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class: Rc::clone(&class),
+        attrs,
+    }))))
 }
 
 /// Read an `_indices`/`_cycles` attribute back as `Vec<usize>`.
