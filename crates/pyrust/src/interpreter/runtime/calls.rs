@@ -990,10 +990,14 @@ impl Interpreter {
         }
         // Arms that accept `&[Value]` (Int, Float, Bytes) borrow `pos`
         // directly — the buf's capacity is fully preserved on return.
-        // Arms that need `Vec<Value>` ownership drain `pos` into a
-        // fresh allocation so the (now-empty) buf can be returned to
-        // `bound_method_pos_buf` below, retaining its capacity for the
-        // next call.  Early-return error paths also restore the buf.
+        // Arms that need `Vec<Value>` ownership hand the buffer to the
+        // callee via `std::mem::take(pos)` (issue #1863): a single
+        // pointer swap — no allocation and no element move (vs the old
+        // `pos.drain(..).collect()`, which allocated a fresh Vec and
+        // copied every element).  `pos` is left as an empty zero-cap Vec
+        // and re-grows from the next call's `pos.push(...)`; either way
+        // exactly one allocation happens per call.  The buf is restored
+        // to `bound_method_pos_buf` below.  Error paths also restore it.
         let result = match kind_tag {
             Kind::Int => {
                 pyrust_builtins::int::call(method, &receiver, &pos, &kw)
@@ -1008,7 +1012,7 @@ impl Interpreter {
             Kind::Bytes => {
                 if method == "join" {
                     reject_kwargs!(kw, "bytes.join");
-                    let args_vec: Vec<Value> = pos.drain(..).collect();
+                    let args_vec: Vec<Value> = std::mem::take(pos);
                     self.call_bytes_join(receiver, args_vec)
                 } else {
                     pyrust_builtins::bytes::call(method, &receiver, &pos, &kw)
@@ -1042,7 +1046,7 @@ impl Interpreter {
                     // call_str_method, which only accepts positional args.
                     match str_merge_kwargs(method, pos, kw) {
                         Ok(()) => {
-                            let args_vec: Vec<Value> = pos.drain(..).collect();
+                            let args_vec: Vec<Value> = std::mem::take(pos);
                             self.call_str_method(method, receiver, args_vec)
                         }
                         Err(e) => {
@@ -1050,14 +1054,14 @@ impl Interpreter {
                         }
                     }
                 } else {
-                    // call_str_method takes Vec<Value> by value; drain
-                    // so pos retains its capacity for the next call.
-                    let args_vec: Vec<Value> = pos.drain(..).collect();
+                    // call_str_method takes Vec<Value> by value; hand
+                    // the buffer over with mem::take (see #1863).
+                    let args_vec: Vec<Value> = std::mem::take(pos);
                     self.call_str_method(method, receiver, args_vec)
                 }
             }
             Kind::List => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 if method == "index" || method == "count" {
                     let needs_dispatch = args_vec.first().map(|t| {
                         receiver
@@ -1095,16 +1099,16 @@ impl Interpreter {
                 }
             }
             Kind::Dict => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 self.call_dict_method(method, receiver, args_vec, &kw)
             }
             Kind::Set => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 self.call_set_method(method, receiver, args_vec)
             }
             Kind::Other => match receiver.kind() {
             ValueKind::Tuple(items) => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 if method == "index" || method == "count" {
                     let needs_dispatch = args_vec
                         .first()
@@ -1137,11 +1141,11 @@ impl Interpreter {
                 }
             }
             ValueKind::Complex(_, _) => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 pyrust_builtins::complex::call(method, &receiver, args_vec)
             }
             ValueKind::BuiltinObject { ops, state } => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 let empty_kw: indexmap::IndexMap<String, Value> =
                     indexmap::IndexMap::new();
                 ops.call_method(state, method, args_vec, &empty_kw)
@@ -1201,7 +1205,7 @@ impl Interpreter {
                                 ValueKind::Bytes(_) => BkKind::Bytes,
                                 _ => BkKind::Other,
                             };
-                            let args_vec: Vec<Value> = pos.drain(..).collect();
+                            let args_vec: Vec<Value> = std::mem::take(pos);
                             return match bk_kind {
                                 BkKind::Dict => {
                                     // Issue #1563: `fromkeys` is a classmethod; when
@@ -1518,7 +1522,7 @@ impl Interpreter {
             // These are dispatched directly here rather than through
             // pyrust_builtins because range is not a BuiltinObject.
             ValueKind::Range { start, stop, step } => {
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 match method {
                     "__len__" => {
                         let extra = args_vec.len() + kw.len();
@@ -1595,7 +1599,7 @@ impl Interpreter {
             // the borrow held by the outer `match receiver.kind()`.
             ValueKind::Generator(_) => {
                 let gen_val = receiver.clone();
-                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let args_vec: Vec<Value> = std::mem::take(pos);
                 self.call_generator_method(gen_val, method, args_vec)
             }
             _ => Err(pyrust_core::type_err!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver))),
@@ -1603,8 +1607,8 @@ impl Interpreter {
         };
         // Restore the positional-args buffer.  For borrow arms (Int,
         // Float, Bytes, Str::format) pos still holds all elements with
-        // full capacity.  For drain arms pos is empty but retains the
-        // grown capacity, avoiding a re-allocation on the next call.
+        // full capacity.  For mem::take arms pos is an empty zero-cap Vec
+        // (its old buffer went to the callee); it re-grows on next call.
         result
     }
 
