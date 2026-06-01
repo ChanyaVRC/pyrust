@@ -1,4 +1,4 @@
-# Lone-surrogate \u/\U string-literal escapes (U+D800–U+DFFF).
+# Lone-surrogate \u/\U string-literal escapes (U+D800-U+DFFF).
 #
 # CPython's str stores lone surrogates freely; a value buildable with chr()
 # must also be writable as a literal escape (issue #1893).  We avoid printing
@@ -19,11 +19,13 @@ print(ord("\ud800"))
 print("\udc80" == chr(0xdc80))
 print("\U0000d800" == chr(0xd800))
 
-# Two surrogate escapes stay two separate code points; they do NOT combine
-# into the astral character (Python escapes are not UTF-16 surrogate pairs).
-pair = "😀"
+# Two adjacent surrogate ESCAPES stay two separate code points; they do NOT
+# combine into the astral character (Python escapes are not UTF-16 surrogate
+# pairs, unlike some other languages).
+pair = "\ud83d\ude00"
 print(len(pair), [hex(ord(c)) for c in pair])
 print(pair == chr(0xd83d) + chr(0xde00))
+print(pair == "\U0001F600")
 
 # Mixed with ASCII keeps each surrogate as one code point.
 print(len("a\udc80b"))
@@ -32,7 +34,7 @@ print(len("a\udc80b"))
 print(len(r"\udc80"))
 
 # Non-surrogate \u / \U still decode normally.
-print(ord("é"), ord("\U0001F600"))
+print(ord("\u00e9"), ord("\U0001F600"))
 
 # \x and \N are unaffected.
 print(ord("\x41"))
