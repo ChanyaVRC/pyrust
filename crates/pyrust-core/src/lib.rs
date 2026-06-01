@@ -2347,6 +2347,28 @@ impl Value {
         top16(self.0) == TAG_LIST
     }
 
+    /// Fast, allocation-/borrow-free check used by membership-search hot loops
+    /// (`list.remove` / `index` / `count`): returns `true` when this value
+    /// definitely **cannot** fire a user `__eq__` and so can be compared with
+    /// the primitive `Value::eq` fast path.
+    ///
+    /// Only the scalar NaN-box tags (`Float`/`None`/`Bool`/`Int`/`Str`) are
+    /// recognised here — they classify from `top16` alone with no pointer
+    /// deref.  Everything else (`List`/`Tuple`, and every `TAG_OPAQUE` payload,
+    /// which may be a `PyInstance`/`Dict`/`Set`/small-tuple/`BuiltinObject`)
+    /// conservatively returns `false`, deferring to the full `kind()`-based
+    /// classification.  `BigInt` is opaque so it falls into the conservative
+    /// arm — correct, just not the very fastest path for big-int searches.
+    pub fn cannot_user_eq(&self) -> bool {
+        if self.0 == NOT_IMPLEMENTED_BITS || self.0 == UNSET_BITS || self.0 == ELLIPSIS_BITS {
+            return false;
+        }
+        matches!(
+            top16(self.0),
+            t if t <= TAG_FLOAT_MAX
+        ) || matches!(top16(self.0), TAG_NONE | TAG_BOOL | TAG_INT | TAG_STR)
+    }
+
     /// Returns a stable identity value for pool-allocated and Rc-shared types:
     /// - tuple: reads the monotonic obj_id stored at hdr+24
     /// - list: reads `obj_id` from the shared [`ListInner`]; aliased clones

@@ -4130,7 +4130,15 @@ impl Interpreter {
         if !target_dispatches {
             let outcome = receiver.list_with(|items| {
                 for (i, item) in items.iter().enumerate() {
-                    if Self::value_search_dispatches(item) {
+                    // `cannot_user_eq` resolves scalar elements (the common
+                    // all-int/str list) from `top16` alone — a single tag
+                    // compare, no `ValueKind` build and no `RefCell` borrow —
+                    // so the hot scan pays only this plus the `Value::eq`
+                    // below, matching the interpreter-free `ms::remove` cost.
+                    // A non-scalar element might match `target` through its own
+                    // `__eq__`, so we abandon the fast scan and restart the slow
+                    // per-index walk from the front (preserving first-match).
+                    if !item.cannot_user_eq() {
                         return SeqRemoveScan::NeedsDispatch;
                     }
                     if item == target {
