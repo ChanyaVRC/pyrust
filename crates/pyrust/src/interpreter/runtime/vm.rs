@@ -3615,6 +3615,7 @@ pub(crate) fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             match val.kind() {
                 ValueKind::Int(v) => Ok(Value::int(v)),
                 ValueKind::Float(v) => Ok(Value::float(v)),
+                ValueKind::Complex(re, im) => Ok(Value::complex(re, im)),
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                 _ => Err(pyrust_core::type_err!("bad operand type for unary +")),
             }
