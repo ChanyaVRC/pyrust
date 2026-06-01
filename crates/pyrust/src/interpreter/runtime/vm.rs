@@ -3580,7 +3580,15 @@ fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecod
     Ok(v.clone())
 }
 
-fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
+/// Canonical unary `-`/`+`/`~`/`not` evaluation for built-in operands.
+///
+/// The single definition of unary-op semantics (i64::MIN negation promoting to
+/// BigInt, `~` rejecting Float, `+big` preserving object identity, the
+/// `complex` arms).  The optimizer's constant-fold pass calls this directly
+/// rather than re-implementing the per-kind arms, so the two cannot drift
+/// (issue #458).  Kept as a plain `match` — no trait/slot indirection — because
+/// this is a VM hot path.
+pub(crate) fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
     match op {
         UnaryOp::Neg => match val.kind() {
             ValueKind::Int(v) => Ok(match v.checked_neg() {

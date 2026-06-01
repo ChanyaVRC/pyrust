@@ -1302,8 +1302,6 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
 ///
 /// Handles `Neg`, `Not`, and `BitNot` applied to integer or float constants.
 fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -> Vec<Insn> {
-    use crate::ast::UnaryOp;
-
     let n = insns.len();
     let mut transformed = insns;
     let mut keep = vec![true; n];
@@ -1321,29 +1319,13 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                     && (*dst == *lc_reg || !reg_is_read_in(&transformed[i + 2..], *lc_reg)) =>
             {
                 let c = &consts[*c_idx as usize];
-                let result = match op {
-                    UnaryOp::Neg => match c.kind() {
-                        ValueKind::Int(n) => Some(match n.checked_neg() {
-                            Some(r) => Value::int(r),
-                            None => Value::bigint(-crate::value::PyBigInt::from(n)),
-                        }),
-                        ValueKind::Float(f) => Some(Value::float(-f)),
-                        ValueKind::BigInt(b) => Some(Value::bigint(-b)),
-                        _ => None,
-                    },
-                    UnaryOp::Not => Some(Value::bool_(!c.truthy())),
-                    UnaryOp::BitNot => match c.kind() {
-                        ValueKind::Int(n) => Some(Value::int(!n)),
-                        ValueKind::BigInt(b) => Some(Value::bigint(!b)),
-                        _ => None,
-                    },
-                    UnaryOp::Pos => match c.kind() {
-                        ValueKind::Int(n) => Some(Value::int(n)),
-                        ValueKind::Float(f) => Some(Value::float(f)),
-                        ValueKind::BigInt(b) => Some(Value::bigint(b.clone())),
-                        _ => None,
-                    },
-                };
+                // Fold through the VM's canonical `vm_eval_unary` rather than
+                // re-implementing the per-kind arms here, so the compile-time
+                // constant can never drift from the runtime result (issue
+                // #458).  A runtime error (e.g. `~1.5` → TypeError) returns
+                // `None`, leaving the UnaryOp in the bytecode to raise at
+                // runtime — never at compile time.
+                let result = crate::interpreter::vm_eval_unary(*op, c.clone()).ok();
                 result.map(|v| (*dst, v))
             }
             _ => None,
