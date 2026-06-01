@@ -138,8 +138,10 @@ impl Interpreter {
         } else {
             let indices = Self::slice_target_indices(len, start, end, step);
             if indices.len() != new_items.len() {
-                return Err(PyError::Runtime(
-                    "attempt to assign sequence of wrong size".to_string(),
+                return Err(pyrust_core::value_err!(
+                    "attempt to assign sequence of size {} to extended slice of size {}",
+                    new_items.len(),
+                    indices.len()
                 ));
             }
             for (ix, val) in indices.into_iter().zip(new_items) {
