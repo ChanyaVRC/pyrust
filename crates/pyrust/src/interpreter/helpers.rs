@@ -2749,6 +2749,67 @@ pub(crate) fn snapshot_current_locals(
     dict
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Name resolution — the env-lookup rule (issue #452)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `Environment` (pyrust-core) carries TWO parallel stores for the same
+// conceptual entity (a scope's bindings):
+//
+//   * `values: HashMap<String, Value>` — the name-keyed slow path. Holds
+//     module/class-body bindings, closure/`nonlocal` cells, and any function
+//     local the compiler chose NOT to put in a register.
+//   * fastlocals (register file) — index-keyed fast path. NOT a field of
+//     `Environment`; it lives in the active VM frame (`VmFrameView` /
+//     `regs_ptr`). The compiler assigns each fastlocal a slot via
+//     scope analysis (`local_index`). Most function locals live here.
+//
+// The compiler decides at compile time which store each name uses; the
+// runtime never has to guess. The dispatch is keyed by the per-scope name
+// sets on `Environment` (`global_names`, `nonlocal_names`, `local_names`)
+// plus whether the env is the module/root env (`parent.is_none()`).
+//
+// THE RULE (single source of truth — keep this and `Interpreter::lookup_name`
+// / `Interpreter::assign_name` in env.rs in agreement):
+//
+//   1. Name in `global_names` (a `global x` declaration in scope):
+//        read  -> `lookup_name_in_module`: module-env HashMap, then builtin
+//                 exception classes.
+//        write -> module-env HashMap (+ live globals dict / module fastlocal
+//                 register mirror). See `assign_name`'s `is_global` arm.
+//
+//   2. Name in `nonlocal_names` (a `nonlocal x` declaration in scope):
+//        read  -> `lookup_name_in_enclosing_local_env`: walk to the nearest
+//                 ENCLOSING function scope that declares `x` local, read there.
+//        write -> `env_assign_local` into that same enclosing env.
+//
+//   3. Otherwise (ordinary local / free-variable read):
+//        read  -> `lookup_name_in_env`: this env's HashMap, raising
+//                 `UnboundLocalError` if `x` is a declared local of THIS scope
+//                 but currently unset, otherwise recursing into parents
+//                 (free-variable capture), bottoming out at the module env.
+//        write -> `env_assign_local` into the current env (module-scope writes
+//                 also mirror into the globals dict / bump the LoadGlobal
+//                 inline-cache version).
+//
+// The fastlocal register path is orthogonal: when a name HAS a fastlocal slot
+// in the active frame, the compiler addresses it directly as a register
+// operand (`Insn::Move`, `Insn::BinOp`, … with the slot index) and never
+// reaches these helpers at all. These helpers are the env-HashMap (slow) side
+// of the duality; the name-keyed opcodes `Insn::LoadGlobal` / `Insn::StoreGlobal`
+// fall through to them only for names without a register slot.
+//
+// Parent-chain scanning for rules 2 and 3 shares one body,
+// `find_function_scope_with_local` (below); the `nonlocal` path skips the
+// current env (`include_self == false`) while the synthetic-`__class__` cell
+// check includes it.
+//
+// #384 (class body cannot resolve module-scope names) would integrate here:
+// a class-body env currently follows rule 3 and bottoms out at the module env,
+// but class bodies should resolve FREE names directly against module scope
+// (skipping intervening function locals). That fix belongs in
+// `lookup_name_in_env`'s parent-walk / a class-body-specific arm; it is OUT OF
+// SCOPE for #452 and intentionally not changed here.
 pub(crate) fn module_env(env: &EnvRef) -> EnvRef {
     let mut current = Rc::clone(env);
     loop {
@@ -2813,27 +2874,27 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
     }
 }
 
-fn has_local_binding_in_current_or_ancestor(env: &EnvRef, name: &str) -> bool {
-    let mut current = Some(Rc::clone(env));
-    while let Some(candidate) = current {
-        let (is_function_scope, has_name, next) = {
-            let borrowed = candidate.borrow();
-            (
-                borrowed.parent.is_some(),
-                borrowed.local_names.contains(name),
-                borrowed.parent.clone(),
-            )
-        };
-        if is_function_scope && has_name {
-            return true;
-        }
-        current = next;
-    }
-    false
-}
-
-fn find_enclosing_local_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
-    let mut current = env.borrow().parent.clone();
+/// Walk the env parent chain for the first **function scope**
+/// (`parent.is_some()`, i.e. not the module/root env) that declares `name`
+/// as one of its locals (`local_names.contains(name)`), and return that env.
+///
+/// `include_self` controls the start point: `true` begins the scan at `env`
+/// itself, `false` begins at `env`'s parent.  The module/root env can never
+/// match because it has no parent — module-scope names live in the module-env
+/// HashMap and are reached via [`lookup_name_in_module`], not this walk.
+///
+/// This is the single shared scan body for both the `nonlocal`-resolution
+/// path ([`find_enclosing_local_env_for_name`], `include_self == false`) and
+/// the synthetic-`__class__` cell check
+/// ([`has_local_binding_in_current_or_ancestor`], `include_self == true`).
+/// The two callers differ only in start point and return shape; the matching
+/// predicate (`parent.is_some() && local_names.contains(name)`) is identical.
+fn find_function_scope_with_local(env: &EnvRef, name: &str, include_self: bool) -> Option<EnvRef> {
+    let mut current = if include_self {
+        Some(Rc::clone(env))
+    } else {
+        env.borrow().parent.clone()
+    };
     while let Some(candidate) = current {
         let (is_function_scope, has_name, next) = {
             let borrowed = candidate.borrow();
@@ -2849,6 +2910,14 @@ fn find_enclosing_local_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef>
         current = next;
     }
     None
+}
+
+fn has_local_binding_in_current_or_ancestor(env: &EnvRef, name: &str) -> bool {
+    find_function_scope_with_local(env, name, true).is_some()
+}
+
+fn find_enclosing_local_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
+    find_function_scope_with_local(env, name, false)
 }
 
 fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
