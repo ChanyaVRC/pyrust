@@ -6,10 +6,13 @@
 # Options:
 #   --release              use target/release/pyrust  (default: debug)
 #   --base-bin PATH        also time a base-branch binary (PR-vs-base comparison)
-#   --top N                rows shown in each table (default: 15)
+#   --top N                rows shown in each PR-comment table (default: 15)
 #   --measure-memory       also measure peak RSS via /usr/bin/time -v (Linux only)
 #   --config PATH          bench.toml path (default: tools/bench.toml)
-#   --pr-comment-out PATH  write Markdown PR comment to PATH
+#   --pr-comment-out PATH  write Markdown PR comment (timing, top-N) to PATH
+#   --pr-full-out PATH     write the complete (untruncated) timing report to PATH
+#   --memory-comment-out PATH  write Markdown memory comment (top-N) to PATH
+#   --memory-full-out PATH     write the complete (untruncated) memory report to PATH
 #   --benchmark-action-out PATH
 #   --svg-out PATH
 #   --markdown-out PATH
@@ -29,7 +32,9 @@ BASE_BIN=""
 TOP=15
 CONFIG="$SCRIPT_DIR/bench.toml"
 PR_COMMENT_OUT=""
+PR_FULL_OUT=""
 MEMORY_COMMENT_OUT=""
+MEMORY_FULL_OUT=""
 BENCHMARK_ACTION_OUT=""
 SVG_OUT=""
 MARKDOWN_OUT=""
@@ -43,7 +48,9 @@ while [[ $# -gt 0 ]]; do
     --top)                  TOP="$2";                   shift ;;
     --config)               CONFIG="$2";                shift ;;
     --pr-comment-out)       PR_COMMENT_OUT="$2";        shift ;;
+    --pr-full-out)          PR_FULL_OUT="$2";           shift ;;
     --memory-comment-out)   MEMORY_COMMENT_OUT="$2";    shift ;;
+    --memory-full-out)      MEMORY_FULL_OUT="$2";       shift ;;
     --benchmark-action-out) BENCHMARK_ACTION_OUT="$2";  shift ;;
     --svg-out)              SVG_OUT="$2";               shift ;;
     --markdown-out)         MARKDOWN_OUT="$2";          shift ;;
@@ -196,7 +203,9 @@ REPORT_ARGS=(
 )
 [[ -n "$MEMORY_DIR" ]] && REPORT_ARGS+=(--memory-dir "$MEMORY_DIR")
 [[ -n "$PR_COMMENT_OUT"       ]] && REPORT_ARGS+=(--pr-comment-out       "$PR_COMMENT_OUT")
+[[ -n "$PR_FULL_OUT"          ]] && REPORT_ARGS+=(--pr-full-out          "$PR_FULL_OUT")
 [[ -n "$MEMORY_COMMENT_OUT"   ]] && REPORT_ARGS+=(--memory-comment-out   "$MEMORY_COMMENT_OUT")
+[[ -n "$MEMORY_FULL_OUT"      ]] && REPORT_ARGS+=(--memory-full-out      "$MEMORY_FULL_OUT")
 [[ -n "$BENCHMARK_ACTION_OUT" ]] && REPORT_ARGS+=(--benchmark-action-out "$BENCHMARK_ACTION_OUT")
 [[ -n "$SVG_OUT"              ]] && REPORT_ARGS+=(--svg-out              "$SVG_OUT")
 [[ -n "$MARKDOWN_OUT"         ]] && REPORT_ARGS+=(--markdown-out         "$MARKDOWN_OUT")

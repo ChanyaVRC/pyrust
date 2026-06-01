@@ -41,27 +41,48 @@ jobs:
           bash tools/bench.sh \
             --release \
             --measure-memory \
+            --top 15 \
             --base-bin /tmp/pyrust-base/target/release/pyrust \
             --pr-comment-out /tmp/benchmark_body.md \
-            --memory-comment-out /tmp/memory_body.md
+            --pr-full-out /tmp/benchmark_full.md \
+            --memory-comment-out /tmp/memory_body.md \
+            --memory-full-out /tmp/memory_full.md
+
+      - name: Upload full benchmark reports
+        id: upload-reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-reports
+          path: |
+            /tmp/benchmark_full.md
+            /tmp/memory_full.md
+          if-no-files-found: ignore
 
       - name: Prepend timing comment marker
+        env:
+          REPORTS_URL: ${{ steps.upload-reports.outputs.artifact-url }}
         run: |
           {
             echo "<!-- pyrust-benchmark-comment -->"
             echo "## :bar_chart: Benchmark Results"
             echo ""
             cat /tmp/benchmark_body.md
+            echo ""
+            echo ":paperclip: Showing the 15 slowest scripts. Full results for all scripts: [\`benchmark-reports\` artifact](${REPORTS_URL})."
           } > /tmp/benchmark_comment.md
 
       - name: Prepend memory comment marker
         if: hashFiles('/tmp/memory_body.md') != ''
+        env:
+          REPORTS_URL: ${{ steps.upload-reports.outputs.artifact-url }}
         run: |
           {
             echo "<!-- pyrust-memory-comment -->"
             echo "## :brain: Memory Usage"
             echo ""
             cat /tmp/memory_body.md
+            echo ""
+            echo ":paperclip: Showing the 15 slowest scripts. Full results for all scripts: [\`benchmark-reports\` artifact](${REPORTS_URL})."
           } > /tmp/memory_comment.md
 
       - name: Find existing benchmark comment
