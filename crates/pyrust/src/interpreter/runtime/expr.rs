@@ -718,9 +718,6 @@ pub(crate) fn dispatch_numeric_binop(
 }
 
 impl Interpreter {
-    fn unsupported_binary_operand(op: &str) -> PyError {
-        pyrust_core::type_err!("unsupported operand type(s) for {op}")
-    }
     pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
         // into a `__getitem__` call, which then subscripts a built-in sequence
@@ -3044,7 +3041,7 @@ impl Interpreter {
                     Ok(Value::bytes(out))
                 }
                 (ValueKind::Bytes(_), _) => Err(pyrust_core::type_err!("can't concat {} to bytes",
-                        pyrust_core::builtin_type_name(&r))),
+                        pyrust_core::builtin_type_name(&right))),
                 // CPython sequences (str / list / tuple) report a dedicated
                 // "can only concatenate X (not "Y") to X" message when the RHS is
                 // not the same sequence type, rather than the generic
@@ -3052,13 +3049,18 @@ impl Interpreter {
                 (ValueKind::Str(_), _)
                 | (ValueKind::List(_), _)
                 | (ValueKind::Tuple(_), _) => {
+                    // LHS name comes from the coerced sequence (`str` / `list`
+                    // / `tuple`, even for subclasses — CPython names the base
+                    // sequence type whose concat slot ran); RHS name comes from
+                    // the original operand so subclass names are preserved
+                    // (e.g. `not "MyInt"`).
                     let lt = value_type_name_str(&l);
-                    let rt = value_type_name_str(&r);
+                    let rt = value_type_name_str(&right);
                     Err(pyrust_core::type_err!(
                         "can only concatenate {lt} (not \"{rt}\") to {lt}"
                     ))
                 }
-                _ => Err(Self::unsupported_binary_operand("+")),
+                _ => Err(unsupported_operand("+", &left, &right)),
         }
     }
 
@@ -3071,7 +3073,7 @@ impl Interpreter {
         if let Some(result) = dispatch_numeric_binop(BinaryOp::Sub, &l, &r) {
             return result;
         }
-        Err(Self::unsupported_binary_operand("-"))
+        Err(unsupported_operand("-", &left, &right))
     }
 
     /// Resolve a sequence repetition count through `__index__` when the value
@@ -3226,7 +3228,7 @@ impl Interpreter {
                     let type_name = value_type_name_str(&l);
                     return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name}'"));
                 }
-                Err(Self::unsupported_binary_operand("*"))
+                Err(unsupported_operand("*", &left, &right))
             }
         }
     }
@@ -3576,13 +3578,17 @@ impl Interpreter {
     }
 
     fn matmul(&mut self, left: Value, right: Value) -> Result<Value> {
+        // Capture the operand type names before `left` is moved into the
+        // reflected-dispatch call below, so the fall-through TypeError can
+        // still report them (`@` has no built-in implementation).
+        let err = unsupported_operand("@", &left, &right);
         if let Some(value) = self.try_call_binary_method(&left, "__matmul__", right.clone())? {
             return Ok(value);
         }
         if let Some(value) = self.try_call_binary_method(&right, "__rmatmul__", left)? {
             return Ok(value);
         }
-        Err(Self::unsupported_binary_operand("@"))
+        Err(err)
     }
 
 
