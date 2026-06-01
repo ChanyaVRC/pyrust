@@ -33,10 +33,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
-use crate::value::{PyInstance, PyKey, StrKey, Value, ValueKind};
+use crate::interpreter::{Interpreter, lookup_class_attr, object_class_singleton};
+use crate::value::{PyClass, PyInstance, PyKey, StrKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -512,6 +514,153 @@ pyrust_module! {
             func, attr_name,
         ))
     }
+
+    /// CPython: functools.cache(user_function).
+    /// Simple lightweight unbounded function cache — exactly equivalent to
+    /// `lru_cache(maxsize=None)`.  Bare-callable form only (CPython's `cache`
+    /// takes a single positional function and no configuration).
+    /// <https://docs.python.org/3/library/functools.html#functools.cache>
+    fn cache(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+            ));
+        }
+        let func = args[0].value.clone();
+        let _ = _interp;
+        // Unbounded memo == lru_cache with maxsize=None, typed=False.
+        Ok(make_lru_wrapper(func, None, false))
+    }
+
+    /// CPython: functools.cmp_to_key(mycmp).
+    /// Converts an old-style comparison function (`mycmp(a, b) -> int`, where
+    /// the sign of the result orders `a` relative to `b`) into a key function
+    /// for use with `sorted`, `min`, `max`, etc.  Returns a callable that wraps
+    /// each value in a comparison object whose rich-comparison dunders call
+    /// `mycmp` and test its result against zero.
+    /// <https://docs.python.org/3/library/functools.html#functools.cmp_to_key>
+    fn cmp_to_key(args) -> Result<Value> {
+        if args.len() != 1 || args[0].name.is_some() {
+            // CPython's C `cmp_to_key` is `cmp_to_key(mycmp)` — a single
+            // positional argument.
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 1 argument, got {}", args.len()),
+            ));
+        }
+        let _ = _interp;
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert("_cmp".to_string(), args[0].value.clone());
+        Ok(make_instance("_cmp_to_key", attrs))
+    }
+
+    /// The callable returned by `cmp_to_key(mycmp)`.  Calling it with a value
+    /// `obj` produces a `_cmp_key` object that wraps `obj` together with the
+    /// comparison function.
+    class _cmp_to_key {
+        fn __init__(args) -> Result<Value> {
+            let _ = _interp;
+            // Private constructor — `cmp_to_key()` seeds `_cmp` directly via
+            // `make_instance`.  Reject user args so a stray
+            // `_cmp_to_key(...)` call fails loudly.
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
+                ));
+            }
+            Ok(Value::none())
+        }
+
+        fn __call__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            if user.len() != 1 || user[0].name.is_some() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME} expected 1 argument, got {}", user.len()),
+                ));
+            }
+            let cmp = inst
+                .borrow()
+                .attrs
+                .get("_cmp")
+                .cloned()
+                .ok_or_else(|| internal(FN_NAME))?;
+            let _ = _interp;
+            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            attrs.insert("obj".to_string(), user[0].value.clone());
+            attrs.insert("_cmp".to_string(), cmp);
+            Ok(make_instance("_cmp_key", attrs))
+        }
+    }
+
+    /// The comparison wrapper produced by `cmp_to_key(mycmp)(obj)`.  Each rich
+    /// comparison calls `mycmp(self.obj, other.obj)` and tests the sign of the
+    /// result, mirroring CPython's `functools.K`.
+    class _cmp_key {
+        fn __init__(args) -> Result<Value> {
+            let _ = _interp;
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
+                ));
+            }
+            Ok(Value::none())
+        }
+
+        fn __lt__(args) -> Result<Value> {
+            cmp_key_compare(_interp, args, BinaryOp::Lt, FN_NAME)
+        }
+
+        fn __gt__(args) -> Result<Value> {
+            cmp_key_compare(_interp, args, BinaryOp::Gt, FN_NAME)
+        }
+
+        fn __eq__(args) -> Result<Value> {
+            cmp_key_compare(_interp, args, BinaryOp::Eq, FN_NAME)
+        }
+
+        fn __le__(args) -> Result<Value> {
+            cmp_key_compare(_interp, args, BinaryOp::Le, FN_NAME)
+        }
+
+        fn __ge__(args) -> Result<Value> {
+            cmp_key_compare(_interp, args, BinaryOp::Ge, FN_NAME)
+        }
+    }
+
+    /// CPython: functools.total_ordering(cls).
+    /// Class decorator that fills in the missing rich-comparison methods given
+    /// at least one of `__lt__` / `__le__` / `__gt__` / `__ge__`.  Raises
+    /// `ValueError` if no ordering operation is defined.  The derived methods
+    /// are compiled from the same formulas CPython uses (see
+    /// `derivation_source`).
+    /// <https://docs.python.org/3/library/functools.html#functools.total_ordering>
+    fn total_ordering(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+            ));
+        }
+        let cls_val = args[0].value.clone();
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => c,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument must be a class"),
+                ));
+            }
+        };
+        apply_total_ordering(_interp, &class)?;
+        Ok(cls_val)
+    }
 }
 
 // ── shared helpers ───────────────────────────────────────────────────────────
@@ -812,4 +961,238 @@ fn function_name(v: &Value) -> Option<String> {
 /// when the wrapped function has no docstring.
 fn function_doc(_v: &Value) -> Value {
     Value::none()
+}
+
+// ── cmp_to_key helpers ───────────────────────────────────────────────────────
+
+/// Shared body for `_cmp_key.__lt__/__gt__/__eq__/__le__/__ge__`.
+/// `args[0]` is `self` (a `_cmp_key`), `args[1]` is `other`.  Calls the wrapped
+/// comparison function on the two `obj`s and tests its result against `0` with
+/// `op` (e.g. `__lt__` → `cmp(self.obj, other.obj) < 0`), mirroring CPython's
+/// `functools.K`.
+fn cmp_key_compare(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    op: BinaryOp,
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let user = &args[1..];
+    if user.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name} expected 1 argument, got {}", user.len()),
+        ));
+    }
+    // The right operand must also be a `_cmp_key` (as produced by the same
+    // `cmp_to_key` call).  When it isn't, defer to Python's reflected-operand
+    // machinery by returning `NotImplemented` — matching CPython, which only
+    // ever compares two key objects during a sort.
+    let other_obj = match user[0].value.kind() {
+        ValueKind::PyInstance(other) => other.borrow().attrs.get("obj").cloned(),
+        _ => None,
+    };
+    let Some(other_obj) = other_obj else {
+        return Ok(Value::not_implemented());
+    };
+    let (cmp, self_obj) = {
+        let borrow = inst.borrow();
+        (
+            borrow
+                .attrs
+                .get("_cmp")
+                .cloned()
+                .ok_or_else(|| internal(fn_name))?,
+            borrow
+                .attrs
+                .get("obj")
+                .cloned()
+                .ok_or_else(|| internal(fn_name))?,
+        )
+    };
+    let result = interp.call_function_expanded(
+        cmp,
+        &[
+            ExpandedCallArg { name: None, value: self_obj },
+            ExpandedCallArg { name: None, value: other_obj },
+        ],
+    )?;
+    let cmp_bool = interp.eval_binary(result, op, Value::int(0))?;
+    Ok(Value::bool_(cmp_bool.truthy()))
+}
+
+// ── total_ordering helpers ───────────────────────────────────────────────────
+
+/// The four ordering operations in CPython's `max(roots)` priority order.
+/// CPython picks `root = max(roots)` over the *string* names, and
+/// `'__lt__' > '__le__' > '__gt__' > '__ge__'` lexicographically — so the
+/// first present op in this list is the chosen root.
+const ORDERING_OPS: [&str; 4] = ["__lt__", "__le__", "__gt__", "__ge__"];
+
+/// Is `op` defined on `class` to something other than the inherited
+/// `object.<op>` default?  Mirrors CPython's
+/// `getattr(cls, op, None) is not getattr(object, op, None)`.
+fn ordering_op_is_root(class: &Rc<RefCell<PyClass>>, op: &str) -> bool {
+    match lookup_class_attr(class, op) {
+        None => false,
+        // Inherited straight from `object` (the builtin slot) → not a root.
+        Some(v) => !matches!(
+            v.kind(),
+            ValueKind::BuiltinFunction(n) if n == format!("object.{op}")
+        ),
+    }
+}
+
+/// Apply `@total_ordering` to `class`: derive the missing ordering operators
+/// from the highest-priority present one, compiling the derived methods from
+/// the same formulas CPython uses.
+fn apply_total_ordering(
+    interp: &mut Interpreter,
+    class: &Rc<RefCell<PyClass>>,
+) -> Result<()> {
+    // Guard against the bare `object` singleton — its ordering slots are the
+    // builtin defaults, so it would never count as a root anyway, but a stray
+    // `total_ordering(object)` shouldn't mutate the shared singleton.
+    if Rc::ptr_eq(class, &object_class_singleton()) {
+        return Err(PyError::named(
+            "ValueError",
+            "must define at least one ordering operation: < > <= >=".to_string(),
+        ));
+    }
+    // `root = max(roots)` over the op names; ORDERING_OPS is in descending
+    // string order, so the first present op is the chosen root.
+    let root = ORDERING_OPS
+        .into_iter()
+        .find(|op| ordering_op_is_root(class, op));
+    let Some(root) = root else {
+        return Err(PyError::named(
+            "ValueError",
+            "must define at least one ordering operation: < > <= >=".to_string(),
+        ));
+    };
+    // Compile the derivation functions once into a fresh namespace, then graft
+    // the ones not already defined directly onto the class (CPython's
+    // `setattr(cls, opname, opfunc)`).
+    let source = derivation_source(root);
+    let ns = Value::dict(IndexMap::new());
+    interp.exec_source(source, Some(ns.clone()), None)?;
+    for (opname, _) in convert_table(root) {
+        if !ordering_op_is_root(class, opname) {
+            let func = ns
+                .as_dict()
+                .and_then(|d| d.get(&PyKey::str_from(opname)).cloned())
+                .ok_or_else(|| internal("total_ordering"))?;
+            class.borrow_mut().attrs.insert(opname.to_string(), func);
+        }
+    }
+    class.borrow().mutation_version.set(
+        class.borrow().mutation_version.get().wrapping_add(1),
+    );
+    Ok(())
+}
+
+/// CPython's `_convert[root]` — the ordered list of `(opname, derived-from)`
+/// pairs for a given root operator.
+fn convert_table(root: &str) -> &'static [(&'static str, &'static str)] {
+    match root {
+        "__lt__" => &[
+            ("__gt__", "__lt__"),
+            ("__le__", "__lt__"),
+            ("__ge__", "__lt__"),
+        ],
+        "__le__" => &[
+            ("__ge__", "__le__"),
+            ("__lt__", "__le__"),
+            ("__gt__", "__le__"),
+        ],
+        "__gt__" => &[
+            ("__lt__", "__gt__"),
+            ("__ge__", "__gt__"),
+            ("__le__", "__gt__"),
+        ],
+        // "__ge__"
+        _ => &[
+            ("__le__", "__ge__"),
+            ("__gt__", "__ge__"),
+            ("__lt__", "__ge__"),
+        ],
+    }
+}
+
+/// Python source defining the three derived ordering methods for `root`,
+/// transcribed from CPython's `functools._<op>_from_<root>` helpers (the
+/// `NotImplemented` short-circuit included).  Executing this in a fresh
+/// namespace yields `UserFunction` values keyed by op name.
+fn derivation_source(root: &str) -> &'static str {
+    match root {
+        "__lt__" => "\
+def __gt__(self, other):
+    op_result = type(self).__lt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result and self != other
+def __le__(self, other):
+    op_result = type(self).__lt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return op_result or self == other
+def __ge__(self, other):
+    op_result = type(self).__lt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result
+",
+        "__le__" => "\
+def __ge__(self, other):
+    op_result = type(self).__le__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result or self == other
+def __lt__(self, other):
+    op_result = type(self).__le__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return op_result and self != other
+def __gt__(self, other):
+    op_result = type(self).__le__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result
+",
+        "__gt__" => "\
+def __lt__(self, other):
+    op_result = type(self).__gt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result and self != other
+def __ge__(self, other):
+    op_result = type(self).__gt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return op_result or self == other
+def __le__(self, other):
+    op_result = type(self).__gt__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result
+",
+        // "__ge__"
+        _ => "\
+def __le__(self, other):
+    op_result = type(self).__ge__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result or self == other
+def __gt__(self, other):
+    op_result = type(self).__ge__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return op_result and self != other
+def __lt__(self, other):
+    op_result = type(self).__ge__(self, other)
+    if op_result is NotImplemented:
+        return op_result
+    return not op_result
+",
+    }
 }
