@@ -1354,18 +1354,16 @@ result = fact(10)
 
     #[test]
     fn chr_type_error_message_substitutes_type_name() {
-        // Assign the result so it is not treated as a dead call by the
-        // builtin DCE pass (which correctly drops pure-builtin calls whose
-        // result is never used).  The TypeError still propagates because the
-        // call itself is not eliminated when its result register is live.
+        // CPython 3.12: chr() with a non-int / non-__index__ argument raises
+        // `TypeError: 'X' object cannot be interpreted as an integer` (#1908).
         let err = run_program_expect_error("_x = chr('not an int')\n");
         let msg = err.to_string();
         assert!(
-            msg.contains("got type str"),
+            msg.contains("'str' object cannot be interpreted as an integer"),
             "expected substituted type name, got: {msg}"
         );
         assert!(
-            !msg.contains("got type {}"),
+            !msg.contains("'{}' object"),
             "literal `{{}}` placeholder still present in: {msg}"
         );
     }
