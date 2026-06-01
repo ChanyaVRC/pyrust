@@ -4463,6 +4463,15 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
     }
 
     let t = fs.type_char.unwrap();
+    // Complex supports the float presentation types f/F/e/E/g/G plus 'n'
+    // (locale-as-'g'), applying the spec to both components.  It does NOT
+    // support '%' or any integer/string code.
+    if matches!(value.kind(), ValueKind::Complex(_, _)) {
+        if matches!(t, 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'n') {
+            return format_complex_value(value, fs);
+        }
+        return Err(pyrust_core::value_err!("Unknown format code '{t}' for object of type 'complex'"));
+    }
     match t {
         'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t)),
         'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => format_float_value(value, fs, Some(t)),
@@ -4742,7 +4751,9 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         } else {
             "nan".to_string()
         };
-        return Ok(assemble_numeric("", "", body, fs, '>', 3));
+        // nan has no sign, but the explicit sign flag ('+' / ' ') still applies
+        // (CPython: format(nan, '+') -> '+nan').
+        return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
     }
     if f.is_infinite() {
         let body = if matches!(t, 'F' | 'G' | 'E') {
@@ -4835,15 +4846,21 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
     Ok(assemble_numeric(sign_prefix, alt_prefix, body, fs, '>', 3))
 }
 
-/// Format a Complex value when no explicit numeric type code was given.
+/// Format a Complex value.
 ///
-/// CPython's `format(1+2j)` returns `"(1+2j)"` and applying width / align /
-/// fill (e.g. `format(1+2j, ">10")` -> `"    (1+2j)"`) pads that string.
+/// CPython applies the float format mini-language to both the real and the
+/// imaginary part, joining them as `<re><signed-im>j`.  The imaginary part
+/// always carries an explicit sign; the real part follows the spec's sign
+/// flag.  Width / fill / alignment then apply to the assembled string.
 ///
-/// This handles only the bare-spec case (fill / align / width); full Complex
-/// formatting with type codes (`e`, `f`, `g`) is not yet implemented and
-/// would be a larger feature.  Zero-padding and `=` alignment are rejected
-/// because the leading `(` makes them ill-defined for Complex.
+/// When no presentation type code is given, the components use the repr-style
+/// float format (with the spec's precision, if any) and the result is wrapped
+/// in parentheses unless the real part is positive zero — matching CPython's
+/// `format(1+2j)` -> `"(1+2j)"` and `format(2j)` -> `"2j"`.  A presentation
+/// type code (f/F/e/E/g/G/n) suppresses the parentheses.
+///
+/// Zero-padding and `=` alignment are always rejected for complex (the `j`
+/// suffix / optional parens make interior padding ill-defined).
 fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
     if fs.zero_pad && !fs.fill_explicit {
         return Err(pyrust_core::value_err!("Zero padding is not allowed in complex format specifier"));
@@ -4851,22 +4868,93 @@ fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
     if matches!(fs.align, Some('=')) {
         return Err(pyrust_core::value_err!("'=' alignment flag is not allowed in complex format specifier"));
     }
-    // Sign / precision / grouping / alt with no type code would require
-    // re-rendering the components; not supported here.  Reject explicitly so
-    // the user gets a clear error instead of silently dropping the flag.
-    if fs.sign.is_some()
-        || fs.alt
-        || fs.precision.is_some()
-        || fs.grouping.is_some()
-    {
-        return Err(pyrust_core::value_err!("Format specifier missing precision"));
-    }
 
-    // Use the canonical Complex repr (mirrors CPython's `format(c)`).
-    let raw = value.to_py_str();
-    // CPython right-aligns Complex on width (numeric default), matching the
-    // behavior of the bare format spec.
-    Ok(pad_value(&raw, fs, '>', fs.fill))
+    let (re, im) = match value.kind() {
+        ValueKind::Complex(re, im) => (re, im),
+        // Non-complex values never reach this routine.
+        _ => unreachable!("format_complex_value called on non-complex value"),
+    };
+
+    // The complex 'n' type maps to 'g' for the components (no locale grouping
+    // here).  With no explicit type CPython uses a repr-style component: when
+    // a precision is supplied it behaves like 'g' with that precision;
+    // otherwise it is the shortest round-trip repr with integer-valued floats
+    // rendered without the trailing `.0` (e.g. `3` not `3.0`).
+    let no_type = fs.type_char.is_none();
+    let component_type = match fs.type_char {
+        Some('n') => Some('g'),
+        None if fs.precision.is_some() => Some('g'),
+        other => other,
+    };
+
+    // Per-component sub-spec: keep sign / alt / precision / grouping / type,
+    // but strip width / zero-pad / fill / align (those apply to the whole
+    // assembled string, not the individual components).
+    let make_component = |part: f64, sign: Option<char>| -> Result<String> {
+        let sub = FormatSpec {
+            fill: ' ',
+            align: None,
+            fill_explicit: false,
+            sign,
+            alt: fs.alt,
+            zero_pad: false,
+            width: 0,
+            grouping: fs.grouping,
+            precision: fs.precision,
+            type_char: component_type,
+        };
+        let mut s = format_float_value(&Value::float(part), &sub, component_type)?;
+        // Repr-style (no type, no precision): drop the trailing `.0` that the
+        // float formatter emits for integer-valued floats.  With the alternate
+        // form the decimal point is retained (`3.` not `3.0`); CPython keeps
+        // the point but not the zero.
+        if no_type && component_type.is_none() {
+            if let Some(stripped) = s.strip_suffix(".0") {
+                s = if fs.alt {
+                    format!("{stripped}.")
+                } else {
+                    stripped.to_string()
+                };
+            }
+        }
+        Ok(s)
+    };
+
+    // The imaginary part always carries an explicit sign separator.  The float
+    // formatter drops the forced `+` for nan / inf (its special-value branch
+    // ignores the sign flag), so re-assert it here to match CPython's
+    // `inf+nanj` form.
+    let imag_component = |part: f64| -> Result<String> {
+        let s = make_component(part, Some('+'))?;
+        if s.starts_with('+') || s.starts_with('-') {
+            Ok(s)
+        } else {
+            Ok(format!("+{s}"))
+        }
+    };
+
+    let body = if no_type {
+        // No presentation type: repr-style components, parenthesised unless the
+        // real part is positive zero (then only the imaginary part is shown).
+        if re == 0.0 && (1.0_f64).copysign(re) > 0.0 {
+            // Pure-imaginary form: the imaginary part follows the spec's sign
+            // flag (no forced `+` separator, since no real part precedes it).
+            let im_str = make_component(im, fs.sign)?;
+            format!("{im_str}j")
+        } else {
+            let re_str = make_component(re, fs.sign)?;
+            let im_str = imag_component(im)?;
+            format!("({re_str}{im_str}j)")
+        }
+    } else {
+        // Presentation type given: format both parts, no parentheses.
+        let re_str = make_component(re, fs.sign)?;
+        let im_str = imag_component(im)?;
+        format!("{re_str}{im_str}j")
+    };
+
+    // CPython right-aligns complex on width (numeric default).
+    Ok(pad_value(&body, fs, '>', fs.fill))
 }
 
 fn sign_prefix_for(negative: bool, sign: Option<char>) -> &'static str {
