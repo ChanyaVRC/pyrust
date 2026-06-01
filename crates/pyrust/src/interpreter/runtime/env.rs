@@ -1346,15 +1346,14 @@ impl Interpreter {
         // exception bases (BaseException has tp_dictoffset in CPython, mirrored
         // here by slots: None on the built-in exception classes).
         {
-            let slots_opt = class.borrow().slots.clone();
-            if let Some(ref slot_set) = slots_opt {
-                if !slot_set.contains("__dict__")
-                    && !slot_set.contains(name)
-                    && !mro_has_unslotted_ancestor(&class)
-                {
-                    let class_name = class.borrow().name.clone();
-                    return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
-                }
+            let has_slots = class.borrow().slots.is_some();
+            if has_slots
+                && !mro_slot_allows(&class, "__dict__")
+                && !mro_slot_allows(&class, name)
+                && !mro_has_unslotted_ancestor(&class)
+            {
+                let class_name = class.borrow().name.clone();
+                return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
             }
         }
         instance.borrow_mut().attrs.insert(name.to_string(), value);
@@ -1645,15 +1644,14 @@ impl Interpreter {
             // a single unslotted ancestor reintroduces `__dict__` for all
             // subclasses (CPython rule).
             {
-                let slots_opt = class.borrow().slots.clone();
-                if let Some(ref slot_set) = slots_opt {
-                    if !slot_set.contains("__dict__")
-                        && !slot_set.contains(name)
-                        && !mro_has_unslotted_ancestor(&class)
-                    {
-                        let class_name = class.borrow().name.clone();
-                        return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
-                    }
+                let has_slots = class.borrow().slots.is_some();
+                if has_slots
+                    && !mro_slot_allows(&class, "__dict__")
+                    && !mro_slot_allows(&class, name)
+                    && !mro_has_unslotted_ancestor(&class)
+                {
+                    let class_name = class.borrow().name.clone();
+                    return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
                 }
             }
             instance.borrow_mut().attrs.insert(name.to_string(), value);
