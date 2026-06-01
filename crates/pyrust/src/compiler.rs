@@ -3984,6 +3984,12 @@ struct Compiler {
     /// where the presence of `yield` in the source — even in dead code — makes
     /// the enclosing function a generator function (issue #1758).
     has_dead_yield: bool,
+    /// True when this Compiler is producing the implicit function body of a
+    /// **set comprehension**.  In that mode the synthesized accumulator add
+    /// `.acc.add(elt)` is lowered directly to `Insn::SetAdd(acc, elt)` instead
+    /// of a full attribute-lookup + method-call dispatch, mirroring CPython's
+    /// dedicated `SET_ADD` opcode (issue #1861).
+    is_set_comp: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -4413,6 +4419,7 @@ impl Compiler {
             past_future_zone: false,
             future_annotations: false,
             has_dead_yield: false,
+            is_set_comp: false,
         }
     }
 
@@ -5063,6 +5070,9 @@ impl Compiler {
                 self.free_temp(r);
             }
             Stmt::Expr(expr) => {
+                if self.try_emit_set_comp_add(expr) {
+                    return;
+                }
                 let r = self.compile_expr(expr);
                 self.free_temp(r);
             }
@@ -10127,6 +10137,8 @@ impl Compiler {
         }
         sub.is_function_scope = true;
         sub.future_annotations = self.future_annotations;
+        // Set comprehensions lower `.acc.add(elt)` to `Insn::SetAdd` (issue #1861).
+        sub.is_set_comp = comp_name == "setcomp";
         sub.compile_block(&fn_body);
         let inner_code = match sub.finish() {
             Ok(c) => c,
@@ -10274,6 +10286,43 @@ impl Compiler {
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
 
         self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp")
+    }
+
+    /// When compiling the implicit function body of a set comprehension
+    /// (`self.is_set_comp`), recognize the synthesized accumulator add
+    /// `.acc.add(elt)` and lower it directly to `Insn::SetAdd(acc, elt)`,
+    /// skipping attribute resolution + method-call dispatch (issue #1861).
+    ///
+    /// Returns `true` when it handled `expr` (matching the exact synthesized
+    /// shape: a positional-only one-arg call to `.add` on the reserved `.acc`
+    /// accumulator name). The `.acc` name is compiler-internal and cannot
+    /// appear in user source, so this never intercepts a user `x.add(y)`.
+    fn try_emit_set_comp_add(&mut self, expr: &Expr) -> bool {
+        if !self.is_set_comp {
+            return false;
+        }
+        let Expr::Call { func, args } = expr else {
+            return false;
+        };
+        let Expr::Attr { target, name } = func.as_ref() else {
+            return false;
+        };
+        if name != "add" || !matches!(target.as_ref(), Expr::Var(v) if v == ".acc") {
+            return false;
+        }
+        if args.len() != 1 {
+            return false;
+        }
+        let arg = &args[0];
+        if arg.name.is_some() || arg.splat || arg.double_splat {
+            return false;
+        }
+        let acc_reg = self.compile_expr(target);
+        let elt_reg = self.compile_expr(&arg.value);
+        self.emit(Insn::SetAdd(acc_reg, elt_reg));
+        self.free_temp(elt_reg);
+        self.free_temp(acc_reg);
+        true
     }
 
     fn compile_set_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
