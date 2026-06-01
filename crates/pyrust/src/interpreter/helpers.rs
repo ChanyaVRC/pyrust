@@ -2799,10 +2799,13 @@ pub(crate) fn snapshot_current_locals(
 // of the duality; the name-keyed opcodes `Insn::LoadGlobal` / `Insn::StoreGlobal`
 // fall through to them only for names without a register slot.
 //
-// Parent-chain scanning for rules 2 and 3 shares one body,
-// `find_function_scope_with_local` (below); the `nonlocal` path skips the
-// current env (`include_self == false`) while the synthetic-`__class__` cell
-// check includes it.
+// Parent-chain scanning for rule 2 shares one body,
+// `find_function_scope_with_local` (below). The `nonlocal` READ path
+// (`lookup_name_in_enclosing_local_env`) skips the current env
+// (`include_self == false`), while the `nonlocal` binding-existence CHECK
+// performed at function-definition time (`has_local_binding_in_current_or_ancestor`,
+// rejecting `nonlocal x` with no enclosing binding) includes it
+// (`include_self == true`), since the defining env may itself be the binding scope.
 //
 // #384 (class body cannot resolve module-scope names) would integrate here:
 // a class-body env currently follows rule 3 and bottoms out at the module env,
@@ -2884,9 +2887,11 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
 /// HashMap and are reached via [`lookup_name_in_module`], not this walk.
 ///
 /// This is the single shared scan body for both the `nonlocal`-resolution
-/// path ([`find_enclosing_local_env_for_name`], `include_self == false`) and
-/// the synthetic-`__class__` cell check
-/// ([`has_local_binding_in_current_or_ancestor`], `include_self == true`).
+/// READ path ([`find_enclosing_local_env_for_name`], `include_self == false`,
+/// skips the current env to find the enclosing binding scope) and the
+/// `nonlocal` binding-existence CHECK at function-definition time
+/// ([`has_local_binding_in_current_or_ancestor`], `include_self == true`,
+/// since the defining env may itself declare the binding).
 /// The two callers differ only in start point and return shape; the matching
 /// predicate (`parent.is_some() && local_names.contains(name)`) is identical.
 fn find_function_scope_with_local(env: &EnvRef, name: &str, include_self: bool) -> Option<EnvRef> {
