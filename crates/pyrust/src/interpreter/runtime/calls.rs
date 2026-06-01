@@ -45,6 +45,25 @@ impl Drop for CallDepthGuard {
     }
 }
 
+/// Reject keyword arguments on a builtin method that accepts none, raising the
+/// CPython-matching `"<label>() takes no keyword arguments"` `TypeError`.
+///
+/// `label` is the method's display name and may be a literal or a `format!`
+/// pattern (e.g. `reject_kwargs!(kw, "{}.fromkeys", class_name)`).  The label
+/// is only built when `kw` is non-empty, so the empty-kw fast path (the common
+/// case) pays no allocation.  Expands to an early `return Err(...)`, so call it
+/// from a function returning `Result<_>`.
+macro_rules! reject_kwargs {
+    ($kw:expr, $($label:tt)+) => {
+        if !$kw.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{}() takes no keyword arguments", format_args!($($label)+)),
+            ));
+        }
+    };
+}
+
 /// Build the per-type `TypeError` message for sequence item access with a
 /// non-integer non-`__index__` index, matching CPython 3.12.
 ///
@@ -976,11 +995,30 @@ impl Interpreter {
     /// caller has already confirmed `function` is a bound method and passes the
     /// unwrapped `(name, receiver)` pair so this helper holds no `function`
     /// coupling.
+    /// Dispatch a call on a bound-method value (`x.append(...)`, `s.upper()`,
+    /// …).  Thin wrapper that borrows the interpreter's reusable
+    /// positional-args buffer and hands it back on every exit path, so the
+    /// inner method has a single owner-restore point instead of ~20 scattered
+    /// `self.bound_method_pos_buf = pos;` lines.
     fn call_bound_method_dispatch(
         &mut self,
         name_rc: std::rc::Rc<String>,
         receiver_owned: Value,
         args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
+        let result =
+            self.bound_method_dispatch_inner(name_rc, receiver_owned, args, &mut pos);
+        self.bound_method_pos_buf = pos;
+        result
+    }
+
+    fn bound_method_dispatch_inner(
+        &mut self,
+        name_rc: std::rc::Rc<String>,
+        receiver_owned: Value,
+        args: &[ExpandedCallArg],
+        pos: &mut Vec<Value>,
     ) -> Result<Value> {
         // Borrow the method name as `&str` from the `Rc<String>` rather
         // than cloning into a fresh `String` — the dispatch helpers
@@ -993,7 +1031,6 @@ impl Interpreter {
         // #276 item #3).  The buffer is taken with `std::mem::take` so
         // no borrow-checker split is needed; it is restored at the end
         // of this arm (via `bound_method_pos_buf = pos` after the match).
-        let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
         pos.clear();
         // Keyword-args fast path (issue #276 item #4): skip IndexMap
         // construction entirely when all arguments are positional —
@@ -1066,16 +1103,9 @@ impl Interpreter {
             ) || matches!(receiver.kind(), ValueKind::BuiltinObject { ops, .. }
                 if ops.has_method("__iter__"));
             if is_iterable_builtin {
-                if !kw.is_empty() {
-                    self.bound_method_pos_buf = pos;
-                    return Err(PyError::named(
-                        "TypeError",
-                        "wrapper __iter__() takes no keyword arguments".to_string(),
-                    ));
-                }
+                reject_kwargs!(kw, "wrapper __iter__");
                 if !pos.is_empty() {
                     let n = pos.len();
-                    self.bound_method_pos_buf = pos;
                     return Err(PyError::named(
                         "TypeError",
                         format!("expected 0 arguments, got {n}"),
@@ -1085,7 +1115,6 @@ impl Interpreter {
                     name: None,
                     value: receiver,
                 };
-                self.bound_method_pos_buf = pos;
                 let dispatch = crate::builtin_registry::lookup("iter")
                     .expect("iter must be in the registry");
                 return dispatch(self, &[iter_arg]);
@@ -1110,12 +1139,7 @@ impl Interpreter {
             }
             Kind::Bytes => {
                 if method == "join" {
-                    if !kw.is_empty() {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "bytes.join() takes no keyword arguments".to_string(),
-                        ));
-                    }
+                    reject_kwargs!(kw, "bytes.join");
                     let args_vec: Vec<Value> = pos.drain(..).collect();
                     self.call_bytes_join(receiver, args_vec)
                 } else {
@@ -1130,7 +1154,6 @@ impl Interpreter {
                     let template = match receiver.kind() {
                         ValueKind::Str(s) => s.to_string(),
                         _ => {
-                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 "descriptor 'format' requires a 'str' object".to_string(),
@@ -1152,13 +1175,12 @@ impl Interpreter {
                 } else if !kw.is_empty() {
                     // Resolve kwargs for str methods before passing to
                     // call_str_method, which only accepts positional args.
-                    match str_merge_kwargs(method, &mut pos, kw) {
+                    match str_merge_kwargs(method, pos, kw) {
                         Ok(()) => {
                             let args_vec: Vec<Value> = pos.drain(..).collect();
                             self.call_str_method(method, receiver, args_vec)
                         }
                         Err(e) => {
-                            self.bound_method_pos_buf = pos;
                             return Err(e);
                         }
                     }
@@ -1181,7 +1203,6 @@ impl Interpreter {
                         match self.resolve_seq_index_pos(args_vec) {
                             Ok(v) => v,
                             Err(e) => {
-                                self.bound_method_pos_buf = pos;
                                 return Err(e);
                             }
                         }
@@ -1231,7 +1252,6 @@ impl Interpreter {
                         match self.resolve_seq_index_pos(args_vec) {
                             Ok(v) => v,
                             Err(e) => {
-                                self.bound_method_pos_buf = pos;
                                 return Err(e);
                             }
                         }
@@ -1275,7 +1295,6 @@ impl Interpreter {
                 let method_val = match lookup_class_attr(&class, method) {
                     Some(v) => v,
                     None => {
-                        self.bound_method_pos_buf = pos;
                         let class_name = class.borrow().name.clone();
                         return Err(PyError::attribute_error(
                             format!("'{class_name}' object has no attribute '{method}'"),
@@ -1321,7 +1340,6 @@ impl Interpreter {
                                 _ => BkKind::Other,
                             };
                             let args_vec: Vec<Value> = pos.drain(..).collect();
-                            self.bound_method_pos_buf = pos;
                             return match bk_kind {
                                 BkKind::Dict => {
                                     // Issue #1563: `fromkeys` is a classmethod; when
@@ -1537,7 +1555,6 @@ impl Interpreter {
                             // Requires exactly one positional arg that is a type,
                             // with no extra positional or keyword arguments.
                             if pos.is_empty() {
-                                self.bound_method_pos_buf = pos;
                                 return Err(PyError::named(
                                     "TypeError",
                                     "unbound method type.mro() needs an argument".to_string(),
@@ -1552,7 +1569,6 @@ impl Interpreter {
                                 Some(c) => c,
                                 None => {
                                     let type_name = pyrust_core::builtin_type_name(&pos[0]).to_string();
-                                    self.bound_method_pos_buf = pos;
                                     return Err(PyError::named(
                                         "TypeError",
                                         format!(
@@ -1562,16 +1578,9 @@ impl Interpreter {
                                 }
                             };
                             // After resolving self, no extra positional args or kwargs allowed.
-                            if !kw.is_empty() {
-                                self.bound_method_pos_buf = pos;
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "type.mro() takes no keyword arguments".to_string(),
-                                ));
-                            }
+                            reject_kwargs!(kw, "type.mro");
                             if pos.len() > 1 {
                                 let extra = pos.len() - 1;
-                                self.bound_method_pos_buf = pos;
                                 return Err(PyError::named(
                                     "TypeError",
                                     format!(
@@ -1586,7 +1595,6 @@ impl Interpreter {
                         } else if !kw.is_empty() {
                             // Keyword arguments are never accepted.
                             let class_name = class.borrow().name.clone();
-                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 format!("{class_name}.mro() takes no keyword arguments"),
@@ -1595,7 +1603,6 @@ impl Interpreter {
                             // Too many positional arguments.
                             let n = pos.len();
                             let class_name = class.borrow().name.clone();
-                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 format!(
@@ -1613,18 +1620,9 @@ impl Interpreter {
                         //   A.__subclasses__(x=1)     → "takes no keyword arguments"
                         //   A.__subclasses__(1, x=2)  → "takes no keyword arguments"
                         let class_name = class.borrow().name.clone();
-                        if !kw.is_empty() {
-                            self.bound_method_pos_buf = pos;
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{class_name}.__subclasses__() takes no keyword arguments",
-                                ),
-                            ));
-                        }
+                        reject_kwargs!(kw, "{class_name}.__subclasses__");
                         let n_pos = pos.len();
                         if n_pos > 0 {
-                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 format!(
@@ -1640,18 +1638,8 @@ impl Interpreter {
                     // and optional default, call `cls()` to construct an empty instance,
                     // then replace its `__builtin_data__` with the populated dict.
                     "fromkeys" => {
-                        if !kw.is_empty() {
-                            let class_name = class.borrow().name.clone();
-                            self.bound_method_pos_buf = pos;
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{class_name}.fromkeys() takes no keyword arguments",
-                                ),
-                            ));
-                        }
+                        reject_kwargs!(kw, "{}.fromkeys", class.borrow().name);
                         if pos.is_empty() {
-                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 "fromkeys expected at least 1 argument, got 0".to_string(),
@@ -1659,7 +1647,6 @@ impl Interpreter {
                         }
                         if pos.len() > 2 {
                             let n = pos.len();
-                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 format!(
@@ -1672,7 +1659,6 @@ impl Interpreter {
                         // Collect keys before moving pos into bound_method_pos_buf
                         // so we can borrow &pos[0] without an extra clone.
                         let keys = self.collect_iterable(&pos[0])?;
-                        self.bound_method_pos_buf = pos;
                         let mut map: indexmap::IndexMap<PyKey, Value> =
                             indexmap::IndexMap::with_capacity(keys.len());
                         for key in &keys {
@@ -1694,7 +1680,6 @@ impl Interpreter {
                         return Ok(instance);
                     }
                     _ => {
-                        self.bound_method_pos_buf = pos;
                         let class_name = class.borrow().name.clone();
                         return Err(PyError::attribute_error(
                             format!("type object '{class_name}' has no attribute '{method}'"),
@@ -1820,7 +1805,6 @@ impl Interpreter {
         // Float, Bytes, Str::format) pos still holds all elements with
         // full capacity.  For drain arms pos is empty but retains the
         // grown capacity, avoiding a re-allocation on the next call.
-        self.bound_method_pos_buf = pos;
         result
     }
 
