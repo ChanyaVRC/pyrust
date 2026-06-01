@@ -3045,6 +3045,19 @@ impl Interpreter {
                 }
                 (ValueKind::Bytes(_), _) => Err(pyrust_core::type_err!("can't concat {} to bytes",
                         pyrust_core::builtin_type_name(&r))),
+                // CPython sequences (str / list / tuple) report a dedicated
+                // "can only concatenate X (not "Y") to X" message when the RHS is
+                // not the same sequence type, rather than the generic
+                // "unsupported operand type(s)" used for numeric operands.
+                (ValueKind::Str(_), _)
+                | (ValueKind::List(_), _)
+                | (ValueKind::Tuple(_), _) => {
+                    let lt = value_type_name_str(&l);
+                    let rt = value_type_name_str(&r);
+                    Err(pyrust_core::type_err!(
+                        "can only concatenate {lt} (not \"{rt}\") to {lt}"
+                    ))
+                }
                 _ => Err(Self::unsupported_binary_operand("+")),
         }
     }
@@ -3283,6 +3296,16 @@ impl Interpreter {
                 | ValueKind::Range { .. }
                 | ValueKind::NotImplemented
         ) {
+            return Ok(None);
+        }
+        // In-place mutation / `__iadd__`-style semantics only apply to a genuine
+        // augmented assignment (`a += b`).  A plain binary `+`/`*`/… that the
+        // optimizer fused into a const/imm opcode arrives here with
+        // `is_augmented_assign == false` (dst != lhs); it must NOT mutate the LHS
+        // or extend it.  Bail out so the caller falls through to eval_binary, which
+        // applies the correct non-mutating `__add__` semantics (e.g.
+        // `list + non-list` raises TypeError instead of extending).  See issue #1874.
+        if !is_augmented_assign {
             return Ok(None);
         }
         let is_list = matches!(left.kind(), ValueKind::List(_));

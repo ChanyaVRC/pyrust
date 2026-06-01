@@ -1445,7 +1445,7 @@ impl Interpreter {
                     };
                     regs[*dst as usize] = result;
                 }
-                Insn::BinOpConst(dst, lhs, op, const_idx) => {
+                Insn::BinOpConst(dst, lhs, op, const_idx, is_aug) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
                     if let (Some(a), Some(b)) = (
                         regs[*lhs as usize].as_int(),
@@ -1457,20 +1457,19 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
-                    // dst == lhs means the compiler emitted this as an augmented
-                    // assign (emit_aug_binop); dst != lhs means the optimizer fused
-                    // a LoadConst + BinOp from a regular binary expression.
-                    // pass_copy_prop preserves this invariant by not substituting
-                    // lhs when dst == lhs.
-                    let is_aug = *dst == *lhs;
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, is_aug)) {
+                    // `is_aug` is carried in the opcode: true when this fused op came
+                    // from an augmented assignment (emit_aug_binop), false when it
+                    // was const-folded from a plain binary expression.  The old
+                    // `dst == lhs` heuristic mis-fired because `ensure_dst` reuses
+                    // the lhs temp for plain binary ops too (issue #1874).
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, *is_aug)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
                     };
                     regs[*dst as usize] = result;
                 }
-                Insn::BinOpImm(dst, lhs, op, imm) => {
+                Insn::BinOpImm(dst, lhs, op, imm, is_aug) => {
                     let imm_i64 = *imm as i64;
                     if let Some(a) = regs[*lhs as usize].as_int()
                         && let Some(result) = int_int_fast(a, imm_i64, *op)
@@ -1480,13 +1479,9 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = Value::int(imm_i64);
-                    // dst == lhs means the compiler emitted this as an augmented
-                    // assign (emit_aug_binop); dst != lhs means the optimizer fused
-                    // a LoadConst + BinOp from a regular binary expression.
-                    // pass_copy_prop preserves this invariant by not substituting
-                    // lhs when dst == lhs.
-                    let is_aug = *dst == *lhs;
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, is_aug)) {
+                    // See BinOpConst above: `is_aug` distinguishes augmented assign
+                    // from a const-folded plain binary expression (issue #1874).
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, *is_aug)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))

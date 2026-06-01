@@ -95,10 +95,19 @@ pub enum Insn {
     /// R[dst] = R[lhs] op= R[rhs]  (tries __i<op>__ before __<op>__)
     BinOpInPlace(Reg, Reg, BinaryOp, Reg),
     /// R[dst] = R[lhs] op consts[const_idx]  (fuses LoadConst + BinOp)
-    BinOpConst(Reg, Reg, BinaryOp, u16),
+    ///
+    /// The trailing `bool` is `is_aug`: `true` when this fused op originated from
+    /// an augmented assignment (`x op= c`), in which case the VM applies in-place
+    /// `__i<op>__` / mutable-container semantics; `false` for a plain binary
+    /// expression that was const-folded, in which case it must behave exactly like
+    /// `BinOp` (non-mutating `__<op>__`).  This flag replaces the old `dst == lhs`
+    /// heuristic, which mis-fired because `ensure_dst` reuses the lhs temp for
+    /// plain binary ops too (issue #1874).
+    BinOpConst(Reg, Reg, BinaryOp, u16, bool),
     /// R[dst] = R[lhs] op imm  (carries a small signed integer directly, no const-pool lookup)
     /// Emitted instead of BinOpConst when the constant fits in i16::MIN..=i16::MAX.
-    BinOpImm(Reg, Reg, BinaryOp, i16),
+    /// The trailing `bool` is `is_aug`; see `BinOpConst`.
+    BinOpImm(Reg, Reg, BinaryOp, i16, bool),
     /// R[dst] = unary_op(R[src])
     UnaryOp(Reg, UnaryOp, Reg),
     /// R[dst] = `isinstance(R[subj], (str, bytes, dict, set, frozenset))`
