@@ -620,6 +620,316 @@ pyrust_module! {
         }
         Ok(acc)
     }
+
+    /// CPython: math.degrees(x) → float.  Convert radians to degrees.
+    /// <https://docs.python.org/3/library/math.html#math.degrees>
+    #[pure]
+    fn degrees(args) -> Result<Value> {
+        Ok(Value::float(single_float(FN_NAME, args)?.to_degrees()))
+    }
+
+    /// CPython: math.radians(x) → float.  Convert degrees to radians.
+    /// <https://docs.python.org/3/library/math.html#math.radians>
+    #[pure]
+    fn radians(args) -> Result<Value> {
+        Ok(Value::float(single_float(FN_NAME, args)?.to_radians()))
+    }
+
+    /// CPython: math.sinh(x) → float.  Hyperbolic sine.
+    /// <https://docs.python.org/3/library/math.html#math.sinh>
+    #[pure]
+    fn sinh(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.sinh())?))
+    }
+
+    /// CPython: math.cosh(x) → float.  Hyperbolic cosine.
+    /// <https://docs.python.org/3/library/math.html#math.cosh>
+    #[pure]
+    fn cosh(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.cosh())?))
+    }
+
+    /// CPython: math.tanh(x) → float.  Hyperbolic tangent.
+    /// <https://docs.python.org/3/library/math.html#math.tanh>
+    #[pure]
+    fn tanh(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.tanh())?))
+    }
+
+    /// CPython: math.asinh(x) → float.  Inverse hyperbolic sine.
+    /// <https://docs.python.org/3/library/math.html#math.asinh>
+    #[pure]
+    fn asinh(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.asinh())?))
+    }
+
+    /// CPython: math.acosh(x) → float.  Inverse hyperbolic cosine.
+    /// Domain: x >= 1; acosh(x<1) → ValueError ("math domain error").
+    /// <https://docs.python.org/3/library/math.html#math.acosh>
+    #[pure]
+    fn acosh(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.acosh())?))
+    }
+
+    /// CPython: math.atanh(x) → float.  Inverse hyperbolic tangent.
+    /// Domain: -1 < x < 1; atanh(±1) → ValueError, |x|>1 → ValueError.
+    /// <https://docs.python.org/3/library/math.html#math.atanh>
+    #[pure]
+    fn atanh(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        // atanh(±1) → ±inf in C, but CPython reports it as a *domain* error
+        // (EDOM), not a range error.  Handle it before the generic
+        // check_math_result (which would map +inf to OverflowError).
+        if x.abs() == 1.0 {
+            return Err(PyError::named("ValueError", "math domain error".to_string()));
+        }
+        Ok(Value::float(check_math_result(x, x.atanh())?))
+    }
+
+    /// CPython: math.expm1(x) → float.  Compute e**x - 1 accurately for small x.
+    /// <https://docs.python.org/3/library/math.html#math.expm1>
+    #[pure]
+    fn expm1(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.exp_m1())?))
+    }
+
+    /// CPython: math.log1p(x) → float.  Compute ln(1+x) accurately for small x.
+    /// Domain: x > -1; log1p(-1) → ValueError, log1p(x<-1) → ValueError.
+    /// <https://docs.python.org/3/library/math.html#math.log1p>
+    #[pure]
+    fn log1p(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.ln_1p())?))
+    }
+
+    /// CPython: math.exp2(x) → float.  Compute 2**x.
+    /// <https://docs.python.org/3/library/math.html#math.exp2>
+    #[pure]
+    fn exp2(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.exp2())?))
+    }
+
+    /// CPython: math.cbrt(x) → float.  Cube root (defined for negative x).
+    /// Note: results can differ from CPython by one ULP for non-perfect-cube
+    /// inputs (e.g. cbrt(27)) because Rust's `f64::cbrt` and the cbrt CPython
+    /// 3.12 links round the last bit differently.  Exact cubes, 0, ±inf and NaN
+    /// agree.  <https://docs.python.org/3/library/math.html#math.cbrt>
+    #[pure]
+    fn cbrt(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.cbrt())?))
+    }
+
+    /// CPython: math.fmod(x, y) → float.  C library fmod: result has the sign of
+    /// x.  fmod(x, 0) and fmod(±inf, y) raise ValueError ("math domain error").
+    /// <https://docs.python.org/3/library/math.html#math.fmod>
+    #[pure]
+    fn fmod(args) -> Result<Value> {
+        let (x, y) = two_floats(FN_NAME, args)?;
+        // Rust's `%` on f64 implements C fmod semantics (truncated remainder,
+        // sign of the dividend).
+        let r = x % y;
+        // CPython raises "math domain error" when the C result is NaN but
+        // neither input was NaN (covers fmod(x, 0), fmod(inf, y), fmod(inf,inf)).
+        if r.is_nan() && !x.is_nan() && !y.is_nan() {
+            return Err(PyError::named("ValueError", "math domain error".to_string()));
+        }
+        Ok(Value::float(r))
+    }
+
+    /// CPython: math.remainder(x, y) → float.  IEEE 754 remainder: x - n*y where
+    /// n is the integer nearest x/y (ties to even).  Degenerate finite inputs
+    /// (e.g. remainder(inf, 1), remainder(1, 0)) raise ValueError.
+    /// <https://docs.python.org/3/library/math.html#math.remainder>
+    #[pure]
+    fn remainder(args) -> Result<Value> {
+        let (x, y) = two_floats(FN_NAME, args)?;
+        let r = ieee_remainder(x, y);
+        if r.is_nan() && !x.is_nan() && !y.is_nan() {
+            return Err(PyError::named("ValueError", "math domain error".to_string()));
+        }
+        Ok(Value::float(r))
+    }
+
+    /// CPython: math.modf(x) → (frac, int).  Fractional and integer parts, both
+    /// floats, each carrying the sign of x.
+    /// <https://docs.python.org/3/library/math.html#math.modf>
+    #[pure]
+    fn modf(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        // CPython returns (frac, intpart). For ±inf the integer part is ±inf and
+        // the fractional part is ±0.0 with the sign of x; f64::fract() yields NaN
+        // for inf, so handle it explicitly.
+        let (frac, intpart) = if x.is_infinite() {
+            (0.0_f64.copysign(x), x)
+        } else {
+            // f64::fract() drops the sign on a zero fractional part (e.g.
+            // (-0.0).fract() == 0.0), but CPython's modf keeps the sign of x.
+            (x.fract().copysign(x), x.trunc())
+        };
+        Ok(Value::tuple(vec![Value::float(frac), Value::float(intpart)]))
+    }
+
+    /// CPython: math.frexp(x) → (m, e).  Decompose x into m * 2**e with
+    /// 0.5 <= |m| < 1 (or m == 0).  For 0/±inf/NaN, e == 0 and m == x.
+    /// <https://docs.python.org/3/library/math.html#math.frexp>
+    #[pure]
+    fn frexp(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        let (m, e) = frexp_f64(x);
+        Ok(Value::tuple(vec![Value::float(m), Value::int(e as i64)]))
+    }
+
+    /// CPython: math.ldexp(x, i) → float.  Compute x * 2**i.  Overflow raises
+    /// OverflowError ("math range error").  `i` must be an integer.
+    /// <https://docs.python.org/3/library/math.html#math.ldexp>
+    #[pure]
+    fn ldexp(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two arguments"),
+            ));
+        }
+        let x = value_to_float(&args[0].value, FN_NAME)?;
+        let exp = value_to_exp_int(FN_NAME, &args[1].value)?;
+        let r = ldexp_f64(x, exp);
+        // ldexp of a finite non-zero x that overflows to ±inf is a range error.
+        if r.is_infinite() && x.is_finite() && x != 0.0 {
+            return Err(PyError::named("OverflowError", "math range error".to_string()));
+        }
+        Ok(Value::float(r))
+    }
+
+    /// CPython: math.nextafter(x, y, *, steps=1) → float.  The float `steps`
+    /// representable values after x in the direction of y.
+    /// <https://docs.python.org/3/library/math.html#math.nextafter>
+    #[pure]
+    fn nextafter(args) -> Result<Value> {
+        let positional: Vec<&ExpandedCallArg> = args.iter().filter(|a| a.name.is_none()).collect();
+        for kw in args.iter().filter(|a| a.name.is_some()) {
+            let name = kw.name.as_deref().unwrap_or("");
+            if name != "steps" {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() got an unexpected keyword argument '{name}'"),
+                ));
+            }
+        }
+        if positional.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two positional arguments"),
+            ));
+        }
+        let x = value_to_float(&positional[0].value, FN_NAME)?;
+        let y = value_to_float(&positional[1].value, FN_NAME)?;
+        let steps = match args.iter().find(|a| a.name.as_deref() == Some("steps")) {
+            Some(a) => {
+                let s = value_to_steps_int(FN_NAME, &a.value)?;
+                if s < 0 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "steps must be a non-negative integer".to_string(),
+                    ));
+                }
+                s
+            }
+            None => 1,
+        };
+        Ok(Value::float(nextafter_f64(x, y, steps)))
+    }
+
+    /// CPython: math.ulp(x) → float.  Value of the least significant bit of x.
+    /// ulp(nan)=nan, ulp(±inf)=inf, ulp(0)=smallest subnormal.
+    /// <https://docs.python.org/3/library/math.html#math.ulp>
+    #[pure]
+    fn ulp(args) -> Result<Value> {
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(ulp_f64(x)))
+    }
+
+    /// CPython: math.isqrt(n) → int.  Integer square root (floor of the exact
+    /// square root).  Works on arbitrary-precision ints.  Negative n raises
+    /// ValueError; non-integers raise TypeError.
+    /// <https://docs.python.org/3/library/math.html#math.isqrt>
+    #[pure]
+    fn isqrt(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument"),
+            ));
+        }
+        let n = value_to_bigint_int(FN_NAME, &args[0].value)?;
+        use num_traits::Signed;
+        if n.is_negative() {
+            return Err(PyError::named(
+                "ValueError",
+                "isqrt() argument must be nonnegative".to_string(),
+            ));
+        }
+        // num-bigint's exact integer sqrt (floor) — no float rounding error.
+        bigint_to_int_value(n.sqrt())
+    }
+
+    /// CPython: math.isclose(a, b, *, rel_tol=1e-09, abs_tol=0.0) → bool.
+    /// <https://docs.python.org/3/library/math.html#math.isclose>
+    #[pure]
+    fn isclose(args) -> Result<Value> {
+        let positional: Vec<&ExpandedCallArg> = args.iter().filter(|a| a.name.is_none()).collect();
+        for kw in args.iter().filter(|a| a.name.is_some()) {
+            let name = kw.name.as_deref().unwrap_or("");
+            if name != "rel_tol" && name != "abs_tol" {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() got an unexpected keyword argument '{name}'"),
+                ));
+            }
+        }
+        if positional.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two positional arguments"),
+            ));
+        }
+        let a = value_to_float(&positional[0].value, FN_NAME)?;
+        let b = value_to_float(&positional[1].value, FN_NAME)?;
+        let rel_tol = match args.iter().find(|arg| arg.name.as_deref() == Some("rel_tol")) {
+            Some(arg) => value_to_float(&arg.value, FN_NAME)?,
+            None => 1e-9,
+        };
+        let abs_tol = match args.iter().find(|arg| arg.name.as_deref() == Some("abs_tol")) {
+            Some(arg) => value_to_float(&arg.value, FN_NAME)?,
+            None => 0.0,
+        };
+        if rel_tol < 0.0 || abs_tol < 0.0 {
+            return Err(PyError::named(
+                "ValueError",
+                "tolerances must be non-negative".to_string(),
+            ));
+        }
+        // CPython's algorithm (Modules/mathmodule.c, math_isclose_impl).
+        let result = if a == b {
+            true
+        } else if a.is_infinite() || b.is_infinite() {
+            // ±inf is only "close" to an identical infinity (handled by a == b).
+            false
+        } else {
+            let diff = (b - a).abs();
+            diff <= (rel_tol * b).abs() || diff <= (rel_tol * a).abs() || diff <= abs_tol
+        };
+        Ok(Value::bool_(result))
+    }
 }
 
 // ── Helpers used by the macro-generated bodies ───────────────────────────────
@@ -682,6 +992,213 @@ fn single_float(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> {
         ));
     }
     value_to_float(&args[0].value, fn_name)
+}
+
+/// Reject kwargs and demand exactly two positional float-coercible args.
+fn two_floats(fn_name: &str, args: &[ExpandedCallArg]) -> Result<(f64, f64)> {
+    reject_keyword_args_expanded(fn_name, args)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly two arguments"),
+        ));
+    }
+    let x = value_to_float(&args[0].value, fn_name)?;
+    let y = value_to_float(&args[1].value, fn_name)?;
+    Ok((x, y))
+}
+
+/// Coerce an integer argument (the exponent of `ldexp` / `steps` of
+/// `nextafter`) to `i32`, clamping to `i32::MIN/MAX` so an overflowing
+/// magnitude saturates `ldexp` to ±inf (caught as a range error) or to 0.
+/// Rejects floats with CPython's exact `ldexp` wording; accepts bool.
+fn value_to_exp_int(_fn_name: &str, val: &Value) -> Result<i32> {
+    match val.kind() {
+        ValueKind::Int(n) => Ok(n.clamp(i32::MIN as i64, i32::MAX as i64) as i32),
+        ValueKind::Bool(b) => Ok(b as i32),
+        ValueKind::BigInt(b) => {
+            use num_traits::Signed;
+            Ok(b.to_i32()
+                .unwrap_or(if b.is_negative() { i32::MIN } else { i32::MAX }))
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            "Expected an int as second argument to ldexp.".to_string(),
+        )),
+    }
+}
+
+/// Coerce the `steps` argument of `nextafter` to `i64`, saturating an
+/// out-of-range magnitude (the result is bounded by the distance to `y`
+/// anyway, so a saturated huge value still lands exactly on `y`).
+/// Rejects floats with TypeError; accepts bool (int subclass).
+fn value_to_steps_int(_fn_name: &str, val: &Value) -> Result<i64> {
+    match val.kind() {
+        ValueKind::Int(n) => Ok(n),
+        ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::BigInt(b) => {
+            use num_traits::Signed;
+            Ok(b.to_i64()
+                .unwrap_or(if b.is_negative() { i64::MIN } else { i64::MAX }))
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(val)
+            ),
+        )),
+    }
+}
+
+/// IEEE 754 remainder, matching CPython's `m_remainder` (Modules/mathmodule.c):
+/// the nearest-integer-ties-to-even remainder of `x` by `y`.  Returns NaN for
+/// the degenerate finite cases (`y == 0`) and the infinite-`x` case, which the
+/// callers translate into a `ValueError`.
+fn ieee_remainder(x: f64, y: f64) -> f64 {
+    if x.is_finite() && y.is_finite() {
+        if y == 0.0 {
+            return f64::NAN;
+        }
+        let absx = x.abs();
+        let absy = y.abs();
+        let m = absx % absy;
+        let c = absy - m;
+        let r = if m < c {
+            m
+        } else if m > c {
+            -c
+        } else {
+            // Exact halfway: pick the value that makes the quotient even.
+            m - 2.0 * ((0.5 * (absx - m)) % absy)
+        };
+        return 1.0_f64.copysign(x) * r;
+    }
+    if x.is_nan() {
+        return x;
+    }
+    if y.is_nan() {
+        return y;
+    }
+    if x.is_infinite() {
+        return f64::NAN;
+    }
+    // x finite, y infinite: remainder is x unchanged.
+    x
+}
+
+/// Decompose `x` into `(m, e)` with `x == m * 2**e` and `0.5 <= |m| < 1`,
+/// matching C `frexp` / CPython `math.frexp`.  For `0`, `±inf`, and `NaN` the
+/// exponent is `0` and `m == x`.
+fn frexp_f64(x: f64) -> (f64, i32) {
+    if x == 0.0 || !x.is_finite() {
+        return (x, 0);
+    }
+    let bits = x.to_bits();
+    let raw_exp = ((bits >> 52) & 0x7ff) as i32;
+    if raw_exp == 0 {
+        // Subnormal: scale up by 2**64 to normalise, then adjust the exponent.
+        let (m, e) = frexp_f64(x * (2f64).powi(64));
+        return (m, e - 64);
+    }
+    // Normalised: exponent is biased by 1022 so the mantissa lands in [0.5, 1).
+    let e = raw_exp - 1022;
+    let m = f64::from_bits((bits & !(0x7ffu64 << 52)) | (1022u64 << 52));
+    (m, e)
+}
+
+/// Compute `x * 2**exp`, matching C `ldexp` / CPython `math.ldexp`.
+fn ldexp_f64(x: f64, exp: i32) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x;
+    }
+    // Scale in bounded steps so we keep correct gradual underflow into the
+    // subnormal range: a single `2f64.powi(exp)` underflows to 0 once
+    // `exp < -1074` even when `x * 2**exp` is still a representable subnormal.
+    // 2**±1000 is always finite-and-normal, so multiplying by it never loses a
+    // bit; the residual `|exp| <= 1000` step lands the result exactly.
+    let mut e = exp;
+    let mut r = x;
+    while e > 1000 {
+        r *= 2f64.powi(1000);
+        e -= 1000;
+        if r.is_infinite() {
+            return r;
+        }
+    }
+    while e < -1000 {
+        r *= 2f64.powi(-1000);
+        e += 1000;
+        if r == 0.0 {
+            return r;
+        }
+    }
+    r * 2f64.powi(e)
+}
+
+/// The `steps`-th representable double after `x` toward `y`, matching CPython's
+/// `math.nextafter`.  `steps` is assumed non-negative (validated by the caller).
+///
+/// Done with direct bit arithmetic (not a step loop): consecutive doubles have
+/// consecutive sign-magnitude bit patterns, so we map each value to a totally
+/// ordered `i64` key, advance by `steps`, and map back.  This is O(1) and
+/// matches CPython for arbitrarily large `steps`.
+fn nextafter_f64(x: f64, y: f64, steps: i64) -> f64 {
+    if x.is_nan() || y.is_nan() {
+        return f64::NAN;
+    }
+    if x == y {
+        // CPython returns y here (preserves -0.0 vs 0.0 of the target).
+        return y;
+    }
+    if steps == 0 {
+        return x;
+    }
+    // Map each f64 to a monotonic i64 key so that incrementing the key by 1
+    // advances to the next representable double.  Positive floats keep their
+    // bit pattern (a non-negative key); negative floats map to the negation of
+    // their magnitude (an ordered negative key).  ±0.0 both map to key 0, which
+    // is correct: a downward step from +0.0 and from -0.0 both reach -smallest.
+    let to_ordered = |b: u64| -> i64 {
+        if b & 0x8000_0000_0000_0000 == 0 {
+            b as i64
+        } else {
+            -((b & 0x7fff_ffff_ffff_ffff) as i64)
+        }
+    };
+    let from_ordered = |k: i64| -> u64 {
+        if k >= 0 {
+            k as u64
+        } else {
+            k.unsigned_abs() | 0x8000_0000_0000_0000
+        }
+    };
+    let kx = to_ordered(x.to_bits()) as i128;
+    let ky = to_ordered(y.to_bits()) as i128;
+    // Move toward y by at most |ky - kx| steps; saturate at y.
+    let dir: i128 = if ky > kx { 1 } else { -1 };
+    let dist = (ky - kx).unsigned_abs();
+    let advance = (steps as u128).min(dist) as i128;
+    let kr = kx + dir * advance;
+    f64::from_bits(from_ordered(kr as i64))
+}
+
+/// `math.ulp(x)`: the value of the least-significant bit of `x`.
+fn ulp_f64(x: f64) -> f64 {
+    if x.is_nan() {
+        return x;
+    }
+    let ax = x.abs();
+    if ax.is_infinite() {
+        return ax;
+    }
+    let up = ax.next_up();
+    if up.is_infinite() {
+        // At the largest finite magnitude, step downward instead.
+        ax - ax.next_down()
+    } else {
+        up - ax
+    }
 }
 
 /// Extract a `Value` as a `PyBigInt` integer.
