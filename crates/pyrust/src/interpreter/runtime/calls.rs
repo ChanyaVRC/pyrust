@@ -2534,21 +2534,7 @@ impl Interpreter {
             // Use the qualified name (e.g. "Foo.__new__") so the error message
             // matches CPython 3.12: "Foo.__new__() missing 1 required positional
             // argument: 'x'" rather than the bare "__new__()".
-            let fn_display_name = &function.qualname;
-            if !missing_positional.is_empty() {
-                let count = missing_positional.len();
-                let arg_word = if count == 1 { "argument" } else { "arguments" };
-                let names_str = format_missing_args(&missing_positional);
-                return Err(pyrust_core::type_err!("{}() missing {count} required positional {arg_word}: {names_str}",
-                        fn_display_name,));
-            }
-            if !missing_kwonly.is_empty() {
-                let count = missing_kwonly.len();
-                let arg_word = if count == 1 { "argument" } else { "arguments" };
-                let names_str = format_missing_args(&missing_kwonly);
-                return Err(pyrust_core::type_err!("{}() missing {count} required keyword-only {arg_word}: {names_str}",
-                        fn_display_name,));
-            }
+            check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
 
             // Memoization: build cache key by borrowing from bound_args — no extra clone.
             // MemoKey wraps PyKey and includes the ValueKind discriminant so that
@@ -2852,21 +2838,7 @@ impl Interpreter {
 
         // Report positional missing args first; only report kwonly if all
         // positional params were satisfied (matching CPython 3.12 behaviour).
-        let fn_display_name = &function.qualname;
-        if !missing_positional.is_empty() {
-            let count = missing_positional.len();
-            let arg_word = if count == 1 { "argument" } else { "arguments" };
-            let names_str = format_missing_args(&missing_positional);
-            return Err(pyrust_core::type_err!("{}() missing {count} required positional {arg_word}: {names_str}",
-                    fn_display_name,));
-        }
-        if !missing_kwonly.is_empty() {
-            let count = missing_kwonly.len();
-            let arg_word = if count == 1 { "argument" } else { "arguments" };
-            let names_str = format_missing_args(&missing_kwonly);
-            return Err(pyrust_core::type_err!("{}() missing {count} required keyword-only {arg_word}: {names_str}",
-                    fn_display_name,));
-        }
+        check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
 
         if !has_kwargs {
             // First pass: collect all positional-only violations so the error
@@ -6326,6 +6298,33 @@ fn format_missing_args(names: &[&str]) -> String {
             format!("{}, and '{last}'", quoted.join(", "))
         }
     }
+}
+
+/// Raise the CPython-3.12 `TypeError` for unbound required parameters, if any.
+///
+/// Positional misses are reported before keyword-only misses (CPython only
+/// surfaces the kwonly error once all positionals are satisfied).  `display`
+/// is the function's qualified name (e.g. `"Foo.__new__"`).  Shared by both
+/// the no-variadic and the `*args`/`**kwargs` binding paths in
+/// `call_user_function_expanded`, which previously inlined identical copies.
+fn check_missing_args(display: &str, missing_positional: &[&str], missing_kwonly: &[&str]) -> Result<()> {
+    if !missing_positional.is_empty() {
+        let count = missing_positional.len();
+        let arg_word = if count == 1 { "argument" } else { "arguments" };
+        let names_str = format_missing_args(missing_positional);
+        return Err(pyrust_core::type_err!(
+            "{display}() missing {count} required positional {arg_word}: {names_str}"
+        ));
+    }
+    if !missing_kwonly.is_empty() {
+        let count = missing_kwonly.len();
+        let arg_word = if count == 1 { "argument" } else { "arguments" };
+        let names_str = format_missing_args(missing_kwonly);
+        return Err(pyrust_core::type_err!(
+            "{display}() missing {count} required keyword-only {arg_word}: {names_str}"
+        ));
+    }
+    Ok(())
 }
 
 impl Interpreter {
