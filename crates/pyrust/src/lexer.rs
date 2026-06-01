@@ -1619,6 +1619,33 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
     Ok(parts)
 }
 
+/// Encode a Unicode codepoint into a `String` fragment for a string literal.
+///
+/// Non-surrogate codepoints in `0..=0x10FFFF` are valid Unicode scalar values
+/// and go through `char::from_u32`.  Lone surrogates (`0xD800..=0xDFFF`) are
+/// not valid scalar values (Rust `char` rejects them), but pyrust's `str`
+/// freely stores them — `chr(0xdc80)` works.  We encode a lone surrogate as
+/// the same three-byte CESU-8 sequence that `chr_from_code_point`
+/// (builtins.rs) uses, so a `\u`/`\U` surrogate escape produces a string
+/// byte-identical to the corresponding `chr()` result.
+fn codepoint_to_string_fragment(cp: u32) -> Option<String> {
+    if (0xD800..=0xDFFF).contains(&cp) {
+        // SAFETY: the three bytes are a well-formed CESU-8 encoding of a
+        // surrogate codepoint, matching the representation pyrust uses for
+        // surrogate-containing strings throughout the runtime.
+        let s = unsafe {
+            String::from_utf8_unchecked(vec![
+                0xE0 | (cp >> 12) as u8,
+                0x80 | ((cp >> 6) & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ])
+        };
+        Some(s)
+    } else {
+        char::from_u32(cp).map(|ch| ch.to_string())
+    }
+}
+
 /// Parse a string escape sequence starting at `pos` (the character after the
 /// backslash) and return `(resulting_str, next_pos)` where `next_pos` is the
 /// index of the first character not consumed by this escape.
@@ -1695,14 +1722,12 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
                 .collect::<Result<_>>()?;
             let codepoint = u32::from_str_radix(&digits, 16)
                 .map_err(|_| PyError::Lex(format!("invalid \\u escape: \\u{digits}")))?;
-            if (0xD800..=0xDFFF).contains(&codepoint) {
-                return Err(PyError::Lex(format!(
-                    "invalid \\u escape: surrogate codepoint U+{codepoint:04X}"
-                )));
-            }
-            let ch = char::from_u32(codepoint)
+            // Lone surrogates (U+D800–U+DFFF) are stored using pyrust's
+            // surrogate-aware encoding (same as `chr()`), matching CPython
+            // which keeps lone surrogates in `str` (fixes #1893).
+            let frag = codepoint_to_string_fragment(codepoint)
                 .ok_or_else(|| PyError::Lex(format!("invalid \\u escape: U+{codepoint:04X}")))?;
-            Ok((ch.to_string(), pos + 5))
+            Ok((frag, pos + 5))
         }
         'U' => {
             // \UNNNNNNNN — exactly eight hex digits; full Unicode range (surrogates and >0x10FFFF forbidden).
@@ -1715,19 +1740,18 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
                 .collect::<Result<_>>()?;
             let codepoint = u32::from_str_radix(&digits, 16)
                 .map_err(|_| PyError::Lex(format!("invalid \\U escape: \\U{digits}")))?;
-            if (0xD800..=0xDFFF).contains(&codepoint) {
-                return Err(PyError::Lex(format!(
-                    "invalid \\U escape: surrogate codepoint U+{codepoint:04X}"
-                )));
-            }
+            // Keep the genuine out-of-range check; only the surrogate
+            // rejection is lifted (fixes #1893).
             if codepoint > 0x10FFFF {
                 return Err(PyError::Lex(format!(
                     "invalid \\U escape: codepoint U+{codepoint:08X} out of range"
                 )));
             }
-            let ch = char::from_u32(codepoint)
+            // Lone surrogates are stored using pyrust's surrogate-aware
+            // encoding (same as `chr()`), matching CPython.
+            let frag = codepoint_to_string_fragment(codepoint)
                 .ok_or_else(|| PyError::Lex(format!("invalid \\U escape: U+{codepoint:08X}")))?;
-            Ok((ch.to_string(), pos + 9))
+            Ok((frag, pos + 9))
         }
         'N' => {
             // \N{Unicode name} — look up character by Unicode name.

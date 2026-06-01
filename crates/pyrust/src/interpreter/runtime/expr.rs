@@ -5145,7 +5145,9 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
             Ok(out)
         }
         ValueKind::Bytes(rc) => Ok(rc.iter().map(|b| Value::int(*b as i64)).collect()),
-        ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
+        ValueKind::Str(text) => Ok(pyrust_core::cesu8_codepoints(text)
+            .map(|cp| Value::string(pyrust_core::cesu8_encode_codepoint(cp)))
+            .collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::Range { start, stop, step } => {
             let mut out = Vec::new();
