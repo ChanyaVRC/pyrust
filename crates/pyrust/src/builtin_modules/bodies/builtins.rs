@@ -2322,7 +2322,8 @@ pyrust_module! {
             if has_instance {
                 keyed.sort_by(|(a, _), (b, _)| {
                     if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                    match _interp.richcmp_order(a, b) {
+                    let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                    match _interp.richcmp_order(lhs, rhs) {
                         Ok(ord) => ord,
                         Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
                     }
@@ -2330,7 +2331,8 @@ pyrust_module! {
             } else {
                 keyed.sort_by(|(a, _), (b, _)| {
                     if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                    match compare_values(a, b) {
+                    let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                    match compare_values(lhs, rhs) {
                         Ok(ord) => ord,
                         Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
                     }
@@ -2350,7 +2352,8 @@ pyrust_module! {
             if has_instance {
                 items.sort_by(|a, b| {
                     if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                    match _interp.richcmp_order(a, b) {
+                    let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                    match _interp.richcmp_order(lhs, rhs) {
                         Ok(ord) => ord,
                         Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
                     }
@@ -2358,7 +2361,8 @@ pyrust_module! {
             } else {
                 items.sort_by(|a, b| {
                     if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                    match compare_values(a, b) {
+                    let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                    match compare_values(lhs, rhs) {
                         Ok(ord) => ord,
                         Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
                     }
@@ -2366,9 +2370,10 @@ pyrust_module! {
             }
             if let Some(e) = sort_err { return Err(e); }
         }
-        if reverse {
-            items.reverse();
-        }
+        // `reverse=True` is applied by inverting the comparison inside the
+        // stable `sort_by` (operand swap above), matching `list.sort`'s
+        // `sort_by_cmp`.  A trailing `items.reverse()` would flip equal
+        // runs too and break stability (see #1904).
         Ok(Value::list(items))
     }
 
