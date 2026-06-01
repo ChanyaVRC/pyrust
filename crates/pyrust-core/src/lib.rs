@@ -4192,6 +4192,32 @@ pub fn cesu8_codepoints(s: &str) -> impl Iterator<Item = u32> + '_ {
     })
 }
 
+/// Encode a single codepoint into a one-character `String`, mirroring the
+/// representation produced by [`cesu8_codepoints`].  Lone surrogates
+/// (0xD800–0xDFFF) are written as their three-byte CESU-8 sequence directly,
+/// since `char::from_u32` rejects them; every other value in 0..=0x10FFFF is a
+/// valid Unicode scalar and goes through `char`.  This is the inverse of one
+/// step of [`cesu8_codepoints`] and the surrogate-safe replacement for
+/// `char::to_string()` when iterating a string that may hold lone surrogates.
+pub fn cesu8_encode_codepoint(cp: u32) -> String {
+    if (0xD800..=0xDFFF).contains(&cp) {
+        // SAFETY: the three bytes are a well-formed CESU-8 encoding of a
+        // surrogate codepoint, matching the representation pyrust uses for
+        // surrogate-containing strings throughout the runtime.
+        unsafe {
+            String::from_utf8_unchecked(vec![
+                0xE0 | (cp >> 12) as u8,
+                0x80 | ((cp >> 6) & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ])
+        }
+    } else {
+        char::from_u32(cp)
+            .expect("non-surrogate codepoint is a valid char")
+            .to_string()
+    }
+}
+
 fn escape_str(s: &str, quote: char) -> String {
     let quote_u32 = quote as u32;
     let mut out = String::with_capacity(s.len());

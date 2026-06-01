@@ -130,11 +130,15 @@ pyrust_module! {
     #[pure]
     fn ord(#[positional_only] c: PyStr) -> Result<Value> {
         let s: &str = &c;
-        let mut chars = s.chars();
-        let first = chars.next();
-        let second = chars.next();
+        // Use the surrogate-safe codepoint iterator, not `str::chars()`:
+        // a string built from a lone-surrogate escape (`"\udc80"`) is stored
+        // CESU-8, and `chars()` would feed the surrogate to
+        // `char::from_u32_unchecked` → UB / debug-build abort (issue #1893).
+        let mut cps = pyrust_core::cesu8_codepoints(s);
+        let first = cps.next();
+        let second = cps.next();
         match (first, second) {
-            (Some(ch), None) => Ok(Value::int(ch as i64)),
+            (Some(cp), None) => Ok(Value::int(cp as i64)),
             (None, _) => Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() expected a character, but string of length 0 found"),
@@ -143,7 +147,7 @@ pyrust_module! {
                 "TypeError",
                 format!(
                     "{FN_NAME}() expected a character, but string of length {} found",
-                    s.chars().count()
+                    pyrust_core::cesu8_codepoints(s).count()
                 ),
             )),
         }
@@ -8136,29 +8140,10 @@ fn chr_from_code_point(code_point: i64) -> Result<Value> {
             "chr() arg not in range(0x110000)".to_string(),
         ));
     }
-    let cp = code_point as u32;
-    if (0xD800..=0xDFFF).contains(&cp) {
-        // Lone surrogates are not valid Unicode scalar values; char::from_u32
-        // rejects them.  CPython's str type freely stores lone surrogates, so
-        // we write the CESU-8 three-byte sequence directly into a new String.
-        // SAFETY: the three bytes produced by the formula below are a
-        // well-formed CESU-8 encoding of a surrogate codepoint and match the
-        // representation pyrust uses for surrogate-containing strings
-        // throughout the runtime (same pattern as str.translate after #1565).
-        let s = unsafe {
-            String::from_utf8_unchecked(vec![
-                0xE0 | (cp >> 12) as u8,
-                0x80 | ((cp >> 6) & 0x3F) as u8,
-                0x80 | (cp & 0x3F) as u8,
-            ])
-        };
-        Ok(Value::string(s))
-    } else {
-        // Non-surrogate codepoints in 0..=0x10FFFF are valid Unicode scalar
-        // values; char::from_u32 is safe and infallible here.
-        let ch = char::from_u32(cp).expect("non-surrogate in 0..=0x10FFFF is a valid char");
-        Ok(Value::string(ch.to_string()))
-    }
+    // Lone surrogates (0xD800–0xDFFF) are stored as CESU-8; non-surrogates go
+    // through `char`.  Both cases are handled by the shared encoder, which is
+    // the inverse of `cesu8_codepoints`.
+    Ok(Value::string(pyrust_core::cesu8_encode_codepoint(code_point as u32)))
 }
 
 /// Encode a Python `str` to `bytes` for `bytes(source, encoding[, errors])`.
