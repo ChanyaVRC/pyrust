@@ -872,25 +872,28 @@ fn is_python_alpha(c: char) -> bool {
     )
 }
 
+/// Validate that the first argument to a `str` search method is itself a `str`,
+/// returning the borrowed substring. `method` is the bare method name (e.g.
+/// `"index"`) threaded into the missing-argument error message.
+fn require_str_arg<'a>(args: &'a [Value], method: &str) -> Result<&'a str> {
+    match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Str(sub)) => Ok(sub),
+        Some(_) => Err(PyError::named(
+            "TypeError",
+            format!(
+                "must be str, not {}",
+                builtin_type_name(args.first().unwrap())
+            ),
+        )),
+        None => Err(PyError::named(
+            "TypeError",
+            format!("str.{method}() requires a str argument"),
+        )),
+    }
+}
+
 fn str_index(s: &str, args: &[Value]) -> Result<Value> {
-    let sub = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(sub)) => sub,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "must be str, not {}",
-                    builtin_type_name(args.first().unwrap())
-                ),
-            ));
-        }
-        None => {
-            return Err(PyError::named(
-                "TypeError",
-                "str.index() requires a str argument".to_string(),
-            ));
-        }
-    };
+    let sub = require_str_arg(args, "index")?;
     let Some((start, end)) = str_slice_args(s, args)? else {
         return Err(PyError::named(
             "ValueError",
@@ -911,24 +914,7 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_count(s: &str, args: &[Value]) -> Result<Value> {
-    let sub = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(sub)) => sub,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "must be str, not {}",
-                    builtin_type_name(args.first().unwrap())
-                ),
-            ));
-        }
-        None => {
-            return Err(PyError::named(
-                "TypeError",
-                "str.count() requires a str argument".to_string(),
-            ));
-        }
-    };
+    let sub = require_str_arg(args, "count")?;
     let Some((start, end)) = str_slice_args(s, args)? else {
         // Inverted window: CPython returns 0 for all substrings including empty.
         return Ok(Value::int(0));
@@ -943,24 +929,7 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
-    let sub = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(sub)) => sub,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "must be str, not {}",
-                    builtin_type_name(args.first().unwrap())
-                ),
-            ));
-        }
-        None => {
-            return Err(PyError::named(
-                "TypeError",
-                "str.find() requires a str argument".to_string(),
-            ));
-        }
-    };
+    let sub = require_str_arg(args, "find")?;
     let Some((start, end)) = str_slice_args(s, args)? else {
         if raise_on_miss {
             return Err(PyError::named(
@@ -990,24 +959,7 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
 }
 
 fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
-    let sub = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(sub)) => sub,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "must be str, not {}",
-                    builtin_type_name(args.first().unwrap())
-                ),
-            ));
-        }
-        None => {
-            return Err(PyError::named(
-                "TypeError",
-                "str.rfind() requires a str argument".to_string(),
-            ));
-        }
-    };
+    let sub = require_str_arg(args, "rfind")?;
     let Some((start, end)) = str_slice_args(s, args)? else {
         if raise_on_miss {
             return Err(PyError::named(
