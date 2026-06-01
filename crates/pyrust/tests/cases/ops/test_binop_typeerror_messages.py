@@ -37,6 +37,12 @@ show("True + None", lambda: True + None)
 show("MyInt(5) + 'a'", lambda: MyInt(5) + "a")
 show("1.0 + None", lambda: 1.0 + None)
 
+# --- "+" : bytes concat error names the original RHS operand (bool / subclass
+# must not collapse to int) ---
+show("b'z' + 1", lambda: b"z" + 1)
+show("b'z' + True", lambda: b"z" + True)
+show("b'z' + MyInt(5)", lambda: b"z" + MyInt(5))
+
 # --- "-" : typed message ---
 show('1 - "a"', lambda: 1 - "a")
 show('"a" - "b"', lambda: "a" - "b")

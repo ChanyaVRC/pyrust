@@ -3041,7 +3041,7 @@ impl Interpreter {
                     Ok(Value::bytes(out))
                 }
                 (ValueKind::Bytes(_), _) => Err(pyrust_core::type_err!("can't concat {} to bytes",
-                        pyrust_core::builtin_type_name(&r))),
+                        pyrust_core::builtin_type_name(&right))),
                 // CPython sequences (str / list / tuple) report a dedicated
                 // "can only concatenate X (not "Y") to X" message when the RHS is
                 // not the same sequence type, rather than the generic
