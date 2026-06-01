@@ -109,7 +109,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // including the inversion emitted by the issue #287 trampoline rewrite.
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_const_reg_prop(insns, num_locals, &consts);
-    let insns = pass_binopinplace_downgrade(insns, num_locals);
+    let insns = pass_binopinplace_downgrade(insns, num_locals, &consts);
     let insns = pass_concat_merge(insns, num_locals, &mut num_regs);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
@@ -2176,7 +2176,31 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
 ///   (If `dst == lhs` the result is in the same register either way.)
 ///
 /// Reference: GCC algebraic simplification; classical augmented-assignment lowering.
-fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec<Insn> {
+    // `BinOpInPlace(dst, lhs, op, rhs)` carries augmented-assignment (`__i<op>__`)
+    // semantics: it mutates `lhs` IN PLACE and accepts a broader set of RHS types
+    // than the plain binary op (e.g. `list += <any iterable>` extends via
+    // `list.extend`; `set |= dict` updates; `bytearray += bytes`).  Downgrading it
+    // to `BinOp` (the plain `+`/`*`/… operator, which builds a NEW value and is
+    // type-strict) is only sound when `lhs` provably holds a value for which the
+    // in-place op is semantically identical to the binary op — i.e. an immutable
+    // numeric primitive (`int`/`float`/`complex`), where `__iadd__` does not exist
+    // and `+=` falls back to `__add__` producing a fresh value.
+    //
+    // For containers (`list`/`set`/`dict`/`bytearray`) the in-place op extends/
+    // updates in place and accepts iterables the binary op rejects, and for
+    // user-defined types `__iadd__` may have arbitrary side effects.  Downgrading
+    // any of those silently changes runtime behaviour (issue #1943:
+    // `l[0] += (9,)` raised `TypeError` instead of extending the inner list).
+    //
+    // So the downgrade is gated on `lhs` being a PROVABLY numeric-primitive
+    // register at the point of the op, tracked per basic block in the spirit of
+    // `pass_const_fold`'s `int_regs`.  Registers loaded from `GetItem`/`GetAttr`/
+    // `LoadGlobal`/`BuildList`/… are not provably numeric and are never
+    // downgraded.  The set is keyed by INSTRUCTION INDEX (not register number) so
+    // that the same temp reused for a numeric op in one place and a container op
+    // in another is gated independently.
+    let downgradeable: HashSet<usize> = numeric_inplace_sites(&insns, consts);
     insns
         .iter()
         .enumerate()
@@ -2187,17 +2211,190 @@ fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 // When num_locals == 0 (all-env module scope, issue #706), every
                 // register is a "temp" but may hold a module global loaded via
                 // LoadGlobal — such values can have user-defined __iadd__ etc.
-                // Downgrading those would skip __i<op>__ and break augmented
-                // assignment semantics for user-defined objects at module scope.
                 && num_locals > 0
                 && *lhs >= num_locals
                 && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs))
+                // Type gate (issue #1943): only downgrade when `lhs` is provably a
+                // numeric primitive, where `+=` and `+` have identical semantics.
+                && downgradeable.contains(&i)
             {
                 return Insn::BinOp(*dst, *lhs, *op, *rhs);
             }
             insn.clone()
         })
         .collect()
+}
+
+/// Compute the set of `BinOpInPlace` instruction indices whose LHS register
+/// provably holds a numeric primitive (`int`/`float`/`complex`) at the point of
+/// the op — values for which augmented assignment is semantically identical to
+/// the binary op, so the `BinOpInPlace → BinOp` downgrade is sound.
+///
+/// This mirrors the per-basic-block Int-tracking of `pass_const_fold`'s
+/// `int_regs`, but admits floats/complex too (the downgrade is sound for any
+/// numeric where `__iadd__` doesn't exist).  A register joins the set when it is
+/// loaded from a numeric constant or produced by a numeric-preserving op whose
+/// inputs are themselves provably numeric; it is dropped on any other write and
+/// the whole set is cleared at basic-block boundaries (a register's contents are
+/// not provable across a branch/merge).
+fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
+    use crate::ast::BinaryOp::*;
+
+    let is_numeric_const = |idx: u16| -> bool {
+        matches!(
+            consts[idx as usize].kind(),
+            ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Float(_)
+                | ValueKind::Complex(_, _)
+        )
+    };
+    // Ops that keep a numeric result when all operands are numeric.  These never
+    // produce a container, so the resulting register stays "provably numeric".
+    let numeric_preserving = |op: crate::ast::BinaryOp| -> bool {
+        matches!(
+            op,
+            Add | Sub
+                | Mul
+                | Div
+                | FloorDiv
+                | Mod
+                | Pow
+                | BitAnd
+                | BitOr
+                | BitXor
+                | LShift
+                | RShift
+        )
+    };
+
+    // Basic-block boundary set: any instruction that is a branch/jump target
+    // starts a new block where register provenance can no longer be trusted.
+    let mut bb_starts: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target < insns.len() {
+                bb_starts.insert(target);
+            }
+        }
+    }
+
+    // `result.insert(i)` records that the LHS read by the BinOpInPlace at index
+    // `i` is provably numeric.  We track the live numeric register set as we walk
+    // forward, then resolve each BinOpInPlace against the set state at its index.
+    let mut result: HashSet<usize> = HashSet::new();
+    let mut numeric: HashSet<u32> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        if bb_starts.contains(&i) {
+            numeric.clear();
+        }
+        match insn {
+            Insn::LoadConst(dst, c) => {
+                if is_numeric_const(*c) {
+                    numeric.insert(*dst);
+                } else {
+                    numeric.remove(dst);
+                }
+            }
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                if numeric.contains(src) {
+                    numeric.insert(*dst);
+                } else {
+                    numeric.remove(dst);
+                }
+            }
+            Insn::ForCountReg(var, ..)
+            | Insn::ForCountConst(var, ..)
+            | Insn::ForCountConstInline(var, ..) => {
+                // range() loop counters are always Int.
+                numeric.insert(*var);
+            }
+            Insn::BinOpConst(dst, lhs, op, c, _) => {
+                if numeric.contains(lhs) && is_numeric_const(*c) && numeric_preserving(*op) {
+                    numeric.insert(*dst);
+                } else {
+                    numeric.remove(dst);
+                }
+            }
+            Insn::BinOpImm(dst, lhs, op, _, _) => {
+                // The immediate is always an integer.
+                if numeric.contains(lhs) && numeric_preserving(*op) {
+                    numeric.insert(*dst);
+                } else {
+                    numeric.remove(dst);
+                }
+            }
+            Insn::BinOp(dst, lhs, op, rhs) => {
+                if numeric.contains(lhs) && numeric.contains(rhs) && numeric_preserving(*op) {
+                    numeric.insert(*dst);
+                } else {
+                    numeric.remove(dst);
+                }
+            }
+            Insn::BinOpInPlace(dst, lhs, op, rhs) => {
+                // Resolve the gate for this op against the current state.
+                if numeric.contains(lhs) {
+                    result.insert(i);
+                }
+                // A numeric-preserving in-place op on numeric operands keeps the
+                // dst numeric; otherwise the dst's provenance is lost.
+                if numeric.contains(lhs) && numeric.contains(rhs) && numeric_preserving(*op) {
+                    numeric.insert(*dst);
+                } else {
+                    numeric.remove(dst);
+                }
+            }
+            // Instructions that write registers `writable_dst` does NOT fully
+            // capture: multi-register writers (`Unpack`/`UnpackEx`/
+            // `MatchClassPositional` write a whole range, not just one reg) and
+            // external-resume / write-through instructions (`YieldFrom` writes
+            // `result_reg`+`sent_reg`; `ImportStar` injects names; `Call`-family
+            // can write a module fastlocal via `global` through `vm_frame_views`).
+            // For these, conservatively drop ALL numeric provenance — mirroring
+            // `pass_const_fold`, which clears its `known` map on the same set. A
+            // stale numeric entry surviving one of these would be a false
+            // positive: a temp could be overwritten with a container and then
+            // wrongly downgraded. The set only ever holds short-lived compiler
+            // temps, so clearing on these rare instructions costs nothing.
+            Insn::Unpack(..)
+            | Insn::UnpackEx { .. }
+            | Insn::MatchClassPositional { .. }
+            | Insn::YieldFrom { .. }
+            | Insn::ImportStar(_)
+            | Insn::Call(..)
+            | Insn::CallMemo(..)
+            | Insn::CallMethod { .. }
+            | Insn::CallMethodExpanded { .. }
+            | Insn::MakeClass(..) => {
+                numeric.clear();
+            }
+            other => {
+                if let Some(dst) = writable_dst(other) {
+                    numeric.remove(&dst);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 // ─── Exit-block inlining ───────────────────────────────────────────────────────
@@ -7405,14 +7602,38 @@ mod tests {
     // ── pass_binopinplace_downgrade ───────────────────────────────────────────
 
     #[test]
-    fn binopinplace_downgrades_dead_temp_lhs() {
+    fn binopinplace_downgrades_dead_numeric_temp_lhs() {
         use crate::ast::BinaryOp;
-        // BinOpInPlace(dst=2, lhs=5, Add, rhs=1); r5 not read after → BinOp
-        let insns = vec![Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1), Insn::Return(2)];
-        let out = pass_binopinplace_downgrade(insns, 2);
+        // r5 loaded from a numeric const → provably Int; r5 not read after the op
+        // → safe to downgrade to BinOp (issue #1943 type gate).
+        let consts = vec![Value::int(7)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 5),
+            Insn::Return(2),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
         assert!(
-            matches!(out[0], Insn::BinOp(2, 5, BinaryOp::Add, 1)),
-            "BinOpInPlace with dead temp lhs should become BinOp"
+            matches!(out[1], Insn::BinOp(2, 5, BinaryOp::Add, 5)),
+            "BinOpInPlace with dead numeric temp lhs should become BinOp"
+        );
+    }
+
+    #[test]
+    fn binopinplace_skips_unknown_type_temp_lhs() {
+        use crate::ast::BinaryOp;
+        // lhs=5 comes from GetItem → runtime type unknown (could be a list with
+        // extend-from-any-iterable __iadd__). Must NOT downgrade (issue #1943).
+        let consts = vec![Value::int(0)];
+        let insns = vec![
+            Insn::GetItem(5, 3, 4),
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 6),
+            Insn::Return(2),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
+        assert!(
+            matches!(out[1], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 6)),
+            "BinOpInPlace with unknown-type temp lhs must not be downgraded"
         );
     }
 
@@ -7420,8 +7641,9 @@ mod tests {
     fn binopinplace_skips_local_lhs() {
         use crate::ast::BinaryOp;
         // lhs=1 < num_locals=3 → user object may have __iadd__, must not downgrade
+        let consts = vec![Value::int(0)];
         let insns = vec![Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0), Insn::Return(2)];
-        let out = pass_binopinplace_downgrade(insns, 3);
+        let out = pass_binopinplace_downgrade(insns, 3, &consts);
         assert!(
             matches!(out[0], Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0)),
             "BinOpInPlace with local lhs must not be downgraded"
@@ -7431,24 +7653,75 @@ mod tests {
     #[test]
     fn binopinplace_skips_live_lhs() {
         use crate::ast::BinaryOp;
-        // lhs=5 is read after by Return(5) → live, must not downgrade
-        let insns = vec![Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1), Insn::Return(5)];
-        let out = pass_binopinplace_downgrade(insns, 2);
+        // lhs=5 is numeric but read after by Return(5) → live, must not downgrade
+        let consts = vec![Value::int(1)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 5),
+            Insn::Return(5),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
         assert!(
-            matches!(out[0], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1)),
+            matches!(out[1], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 5)),
             "BinOpInPlace with live lhs must not be downgraded"
         );
     }
 
     #[test]
-    fn binopinplace_downgrades_dst_equals_lhs() {
+    fn binopinplace_downgrades_numeric_dst_equals_lhs() {
         use crate::ast::BinaryOp;
-        // dst == lhs: result lands in same register, always safe to downgrade
-        let insns = vec![Insn::BinOpInPlace(5, 5, BinaryOp::Mul, 1), Insn::Return(5)];
-        let out = pass_binopinplace_downgrade(insns, 2);
+        // dst == lhs AND lhs provably numeric → safe to downgrade.
+        let consts = vec![Value::int(2)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOpInPlace(5, 5, BinaryOp::Mul, 5),
+            Insn::Return(5),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
         assert!(
-            matches!(out[0], Insn::BinOp(5, 5, BinaryOp::Mul, 1)),
-            "BinOpInPlace(dst==lhs) should always downgrade to BinOp"
+            matches!(out[1], Insn::BinOp(5, 5, BinaryOp::Mul, 5)),
+            "BinOpInPlace(dst==lhs) on numeric lhs should downgrade to BinOp"
+        );
+    }
+
+    #[test]
+    fn binopinplace_skips_container_dst_equals_lhs() {
+        use crate::ast::BinaryOp;
+        // dst == lhs but lhs is a freshly built list → list += extends in place
+        // and accepts any iterable; downgrading to BinOp would lose that and
+        // raise a spurious TypeError (issue #1943). Must NOT downgrade.
+        let consts = vec![Value::int(0)];
+        let insns = vec![
+            Insn::BuildList(5, 5, 0),
+            Insn::BinOpInPlace(5, 5, BinaryOp::Add, 6),
+            Insn::Return(5),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
+        assert!(
+            matches!(out[1], Insn::BinOpInPlace(5, 5, BinaryOp::Add, 6)),
+            "BinOpInPlace(dst==lhs) on a container lhs must not be downgraded"
+        );
+    }
+
+    #[test]
+    fn binopinplace_skips_numeric_temp_clobbered_by_unpack() {
+        use crate::ast::BinaryOp;
+        // r5 starts numeric (LoadConst Int) but is then overwritten by Unpack,
+        // which can store an element of ANY type (e.g. a list). `writable_dst`
+        // does not capture Unpack's destination range, so without an explicit
+        // clear the stale numeric provenance would survive and wrongly downgrade
+        // the following in-place op. Must NOT downgrade.
+        let consts = vec![Value::int(7)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::Unpack(5, 6, 1),
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 7),
+            Insn::Return(2),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
+        assert!(
+            matches!(out[2], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 7)),
+            "numeric temp clobbered by Unpack must not be downgraded"
         );
     }
 
