@@ -4528,6 +4528,13 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
         return Err(pyrust_core::value_err!("Unknown format code '{t}' for object of type 'complex'"));
     }
     match t {
+        // 'n' is locale-aware and supported on both integer and float values.
+        // Route it by the value's type: int/bool to the integer formatter,
+        // float to the float formatter (which treats 'n' as 'g' since pyrust
+        // has no locale, matching CPython's C-locale behavior where n == g).
+        'n' if matches!(value.kind(), ValueKind::Float(_)) => {
+            format_float_value(value, fs, Some('n'))
+        }
         'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t)),
         'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => format_float_value(value, fs, Some(t)),
         's' => format_as_string(value, fs),
@@ -4838,13 +4845,18 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
             let s = normalise_exp_digits(s);
             (ensure_alt_float(s, fs.alt, fs.precision), "")
         }
-        'g' | 'G' => {
+        // 'g'/'G' general format and 'n' (locale-aware general format). In
+        // pyrust's locale-free C-locale behavior, 'n' is identical to 'g':
+        // same default precision, same trailing-zero stripping, same exponent
+        // threshold, and lowercase output (no uppercase 'N' variant exists).
+        'g' | 'G' | 'n' => {
+            let upper = t == 'G';
             let prec = fs.precision.unwrap_or(6);
             let prec = if prec == 0 { 1 } else { prec };
-            let s = format_g(abs_f, prec, t == 'G');
+            let s = format_g(abs_f, prec, upper);
             // Alternate '#': keep trailing zeros / decimal point.
             let s = if fs.alt {
-                ensure_g_trailing_zeros(s, prec, t == 'G', abs_f)
+                ensure_g_trailing_zeros(s, prec, upper, abs_f)
             } else {
                 s
             };
