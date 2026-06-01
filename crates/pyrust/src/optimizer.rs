@@ -2362,6 +2362,30 @@ fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
                     numeric.remove(dst);
                 }
             }
+            // Instructions that write registers `writable_dst` does NOT fully
+            // capture: multi-register writers (`Unpack`/`UnpackEx`/
+            // `MatchClassPositional` write a whole range, not just one reg) and
+            // external-resume / write-through instructions (`YieldFrom` writes
+            // `result_reg`+`sent_reg`; `ImportStar` injects names; `Call`-family
+            // can write a module fastlocal via `global` through `vm_frame_views`).
+            // For these, conservatively drop ALL numeric provenance — mirroring
+            // `pass_const_fold`, which clears its `known` map on the same set. A
+            // stale numeric entry surviving one of these would be a false
+            // positive: a temp could be overwritten with a container and then
+            // wrongly downgraded. The set only ever holds short-lived compiler
+            // temps, so clearing on these rare instructions costs nothing.
+            Insn::Unpack(..)
+            | Insn::UnpackEx { .. }
+            | Insn::MatchClassPositional { .. }
+            | Insn::YieldFrom { .. }
+            | Insn::ImportStar(_)
+            | Insn::Call(..)
+            | Insn::CallMemo(..)
+            | Insn::CallMethod { .. }
+            | Insn::CallMethodExpanded { .. }
+            | Insn::MakeClass(..) => {
+                numeric.clear();
+            }
             other => {
                 if let Some(dst) = writable_dst(other) {
                     numeric.remove(&dst);
@@ -7676,6 +7700,28 @@ mod tests {
         assert!(
             matches!(out[1], Insn::BinOpInPlace(5, 5, BinaryOp::Add, 6)),
             "BinOpInPlace(dst==lhs) on a container lhs must not be downgraded"
+        );
+    }
+
+    #[test]
+    fn binopinplace_skips_numeric_temp_clobbered_by_unpack() {
+        use crate::ast::BinaryOp;
+        // r5 starts numeric (LoadConst Int) but is then overwritten by Unpack,
+        // which can store an element of ANY type (e.g. a list). `writable_dst`
+        // does not capture Unpack's destination range, so without an explicit
+        // clear the stale numeric provenance would survive and wrongly downgrade
+        // the following in-place op. Must NOT downgrade.
+        let consts = vec![Value::int(7)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::Unpack(5, 6, 1),
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 7),
+            Insn::Return(2),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2, &consts);
+        assert!(
+            matches!(out[2], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 7)),
+            "numeric temp clobbered by Unpack must not be downgraded"
         );
     }
 
