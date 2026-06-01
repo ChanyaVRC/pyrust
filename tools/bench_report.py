@@ -263,8 +263,19 @@ def _fmt_kb(kb: "int | None") -> str:
     return f"{kb} KB"
 
 
-def _summary_md(rows: list[ScriptResult]) -> str:
-    """Timing-only PR comment. Memory is a separate comment."""
+def _details_summary(shown: int, total: int, label: str) -> str:
+    """`<details>` heading; flags truncation so readers know to grab the full report."""
+    if shown >= total:
+        return f"All {total} scripts — {label}"
+    return f"Top {shown} of {total} scripts — {label} (full report attached)"
+
+
+def _summary_md(rows: list[ScriptResult], top: "int | None" = None) -> str:
+    """Timing-only PR comment. Memory is a separate comment.
+
+    `top` caps each `<details>` table to that many (slowest) scripts so the
+    posted comment stays small; pass `None` for the complete, attachable report.
+    """
     lines: list[str] = []
     base_rows = [r for r in rows if r.has_base]
 
@@ -273,6 +284,7 @@ def _summary_md(rows: list[ScriptResult]) -> str:
         total_base = sum(r.base_avg_ms for r in base_rows)
         total_pr   = sum(r.rs_avg_ms   for r in base_rows)
         overall    = (total_pr / total_base - 1.0) * 100.0 if total_base > 0 else math.inf
+        base_shown = base_rows if top is None else base_rows[:top]
         lines += [
             "### ⏱ PR vs Base",
             "",
@@ -282,12 +294,12 @@ def _summary_md(rows: list[ScriptResult]) -> str:
             f"| PR total   | {total_pr:.1f} ms |",
             f"| Change     | {overall:+.2f}% {_indicator(overall)} |",
             "",
-            f"<details><summary>All {len(base_rows)} scripts — PR vs Base</summary>",
+            f"<details><summary>{_details_summary(len(base_shown), len(base_rows), 'PR vs Base')}</summary>",
             "",
             "| Script | iters | Base (ms) | PR (ms) | Change |",
             "|---|---:|---:|---:|---:|",
         ]
-        for r in base_rows:
+        for r in base_shown:
             lines.append(
                 f"| `{r.rel}` | {r.cfg.iterations}"
                 f" | {r.base_avg_ms:.3f} | {r.rs_avg_ms:.3f}"
@@ -299,6 +311,7 @@ def _summary_md(rows: list[ScriptResult]) -> str:
     total_py = sum(r.py_avg_ms for r in rows)
     total_rs = sum(r.rs_avg_ms for r in rows)
     overall_ratio = total_rs / total_py if total_py > 0 else math.inf
+    rows_shown = rows if top is None else rows[:top]
     lines += [
         "### 🚀 Speed: Python vs PyRust",
         "",
@@ -309,12 +322,12 @@ def _summary_md(rows: list[ScriptResult]) -> str:
         f"| PyRust total  | {total_rs:.1f} ms |",
         f"| Overall ratio | {overall_ratio:.3f}x |",
         "",
-        f"<details><summary>All {len(rows)} scripts — timing</summary>",
+        f"<details><summary>{_details_summary(len(rows_shown), len(rows), 'timing')}</summary>",
         "",
         "| Script | iters | Python (ms) | PyRust (ms) | Ratio |",
         "|---|---:|---:|---:|---:|",
     ]
-    for r in rows:
+    for r in rows_shown:
         lines.append(
             f"| `{r.rel}` | {r.cfg.iterations}"
             f" | {r.py_avg_ms:.3f} | {r.rs_avg_ms:.3f} | {r.ratio:.3f}x |"
@@ -323,8 +336,13 @@ def _summary_md(rows: list[ScriptResult]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _memory_comment_md(rows: list[ScriptResult], memory: "dict[str, dict]") -> str:
-    """Standalone memory-usage comment (peak RSS per script)."""
+def _memory_comment_md(rows: list[ScriptResult], memory: "dict[str, dict]",
+                       top: "int | None" = None) -> str:
+    """Standalone memory-usage comment (peak RSS per script).
+
+    `top` caps the `<details>` table to that many (slowest) scripts; pass
+    `None` for the complete, attachable report.
+    """
     py_mems = [memory[r.rel]["py_kb"] for r in rows
                if r.rel in memory and isinstance(memory[r.rel].get("py_kb"), (int, float))]
     rs_mems = [memory[r.rel]["rs_kb"] for r in rows
@@ -348,14 +366,15 @@ def _memory_comment_md(rows: list[ScriptResult], memory: "dict[str, dict]") -> s
                      if r.rel in memory and isinstance(memory[r.rel].get("base_kb"), (int, float))]
         base_med = sorted(base_mems)[len(base_mems) // 2] if base_mems else None
         lines.append(f"| Base   | {_fmt_kb(base_med)} |")
+    rows_shown = rows if top is None else rows[:top]
     lines += [
         "",
-        f"<details><summary>All {len(rows)} scripts — peak memory</summary>",
+        f"<details><summary>{_details_summary(len(rows_shown), len(rows), 'peak memory')}</summary>",
         "",
     ]
     if has_base:
         lines += ["| Script | Python | PyRust | Base |", "|---|---:|---:|---:|"]
-        for r in rows:
+        for r in rows_shown:
             m = memory.get(r.rel, {})
             lines.append(
                 f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))}"
@@ -363,7 +382,7 @@ def _memory_comment_md(rows: list[ScriptResult], memory: "dict[str, dict]") -> s
             )
     else:
         lines += ["| Script | Python | PyRust |", "|---|---:|---:|"]
-        for r in rows:
+        for r in rows_shown:
             m = memory.get(r.rel, {})
             lines.append(
                 f"| `{r.rel}` | {_fmt_kb(m.get('py_kb'))} | {_fmt_kb(m.get('rs_kb'))} |"
@@ -556,8 +575,12 @@ def main() -> int:
     p.add_argument("--memory-dir",           default="", metavar="DIR",
                    help="directory with per-script peak-RSS JSON files from bench.sh")
     p.add_argument("--pr-comment-out",       default="", metavar="PATH")
+    p.add_argument("--pr-full-out",          default="", metavar="PATH",
+                   help="write the complete (untruncated) timing report to PATH for attachment")
     p.add_argument("--memory-comment-out",   default="", metavar="PATH",
                    help="write memory-usage comment to PATH (requires --memory-dir)")
+    p.add_argument("--memory-full-out",      default="", metavar="PATH",
+                   help="write the complete (untruncated) memory report to PATH for attachment")
     p.add_argument("--benchmark-action-out", default="", metavar="PATH")
     p.add_argument("--svg-out",              default="", metavar="PATH")
     p.add_argument("--markdown-out",         default="", metavar="PATH")
@@ -587,9 +610,17 @@ def main() -> int:
     write_github_step_summary(rows)
 
     if args.pr_comment_out:
-        Path(args.pr_comment_out).write_text(_summary_md(rows), encoding="utf-8")
+        Path(args.pr_comment_out).write_text(_summary_md(rows, top=args.top), encoding="utf-8")
+    if args.pr_full_out:
+        Path(args.pr_full_out).write_text(_summary_md(rows), encoding="utf-8")
     if args.memory_comment_out and memory:
-        Path(args.memory_comment_out).write_text(_memory_comment_md(rows, memory), encoding="utf-8")
+        Path(args.memory_comment_out).write_text(
+            _memory_comment_md(rows, memory, top=args.top), encoding="utf-8"
+        )
+    if args.memory_full_out and memory:
+        Path(args.memory_full_out).write_text(
+            _memory_comment_md(rows, memory), encoding="utf-8"
+        )
     if args.benchmark_action_out:
         Path(args.benchmark_action_out).write_text(
             json.dumps(build_benchmark_action(rows), indent=2), encoding="utf-8"

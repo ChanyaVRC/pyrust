@@ -41,59 +41,56 @@ jobs:
           bash tools/bench.sh \
             --release \
             --measure-memory \
+            --top 15 \
             --base-bin /tmp/pyrust-base/target/release/pyrust \
             --pr-comment-out /tmp/benchmark_body.md \
-            --memory-comment-out /tmp/memory_body.md
+            --pr-full-out /tmp/benchmark_full.md \
+            --memory-comment-out /tmp/memory_body.md \
+            --memory-full-out /tmp/memory_full.md
 
-      - name: Prepend timing comment marker
+      - name: Upload full benchmark reports
+        id: upload-reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-reports
+          path: |
+            /tmp/benchmark_full.md
+            /tmp/memory_full.md
+          if-no-files-found: ignore
+
+      - name: Build combined comment
+        env:
+          REPORTS_URL: ${{ steps.upload-reports.outputs.artifact-url }}
         run: |
           {
             echo "<!-- pyrust-benchmark-comment -->"
             echo "## :bar_chart: Benchmark Results"
             echo ""
             cat /tmp/benchmark_body.md
+            if [[ -s /tmp/memory_body.md ]]; then
+              echo ""
+              echo "---"
+              echo ""
+              echo "## :brain: Memory Usage"
+              echo ""
+              cat /tmp/memory_body.md
+            fi
+            echo ""
+            echo ":paperclip: Showing the 15 slowest scripts. Full results for all scripts: [\`benchmark-reports\` artifact](${REPORTS_URL})."
           } > /tmp/benchmark_comment.md
 
-      - name: Prepend memory comment marker
-        if: hashFiles('/tmp/memory_body.md') != ''
-        run: |
-          {
-            echo "<!-- pyrust-memory-comment -->"
-            echo "## :brain: Memory Usage"
-            echo ""
-            cat /tmp/memory_body.md
-          } > /tmp/memory_comment.md
-
-      - name: Find existing benchmark comment
+      - name: Find existing comment
         uses: peter-evans/find-comment@v3
-        id: find-bench-comment
+        id: find-comment
         with:
           issue-number: ${{ github.event.pull_request.number }}
           comment-author: github-actions[bot]
           body-includes: "<!-- pyrust-benchmark-comment -->"
 
-      - name: Create or update benchmark comment
+      - name: Create or update comment
         uses: peter-evans/create-or-update-comment@v4
         with:
-          comment-id: ${{ steps.find-bench-comment.outputs.comment-id }}
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
           issue-number: ${{ github.event.pull_request.number }}
           body-file: /tmp/benchmark_comment.md
-          edit-mode: replace
-
-      - name: Find existing memory comment
-        uses: peter-evans/find-comment@v3
-        id: find-memory-comment
-        if: hashFiles('/tmp/memory_body.md') != ''
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: github-actions[bot]
-          body-includes: "<!-- pyrust-memory-comment -->"
-
-      - name: Create or update memory comment
-        uses: peter-evans/create-or-update-comment@v4
-        if: hashFiles('/tmp/memory_body.md') != ''
-        with:
-          comment-id: ${{ steps.find-memory-comment.outputs.comment-id }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body-file: /tmp/memory_comment.md
           edit-mode: replace
