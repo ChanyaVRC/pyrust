@@ -2138,6 +2138,17 @@ impl Interpreter {
         Ok(Some(Value::tuple(row)))
     }
 
+    /// Resolve one `next()` step: yield the produced value, or fall back to
+    /// `default` if the iterator is exhausted, or raise a bare `StopIteration`
+    /// if there is no default.  Shared by every built-in iterator arm in
+    /// [`call_next`], which previously inlined this same match.
+    fn step_or_stop(item: Option<Value>, default: Option<Value>) -> Result<Value> {
+        match item {
+            Some(v) => Ok(v),
+            None => default.ok_or_else(|| pyrust_core::py_err!("StopIteration", String::new())),
+        }
+    }
+
     /// Call next() on a generator or any object with __next__.
     pub(crate) fn call_next(&mut self, val: &Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
@@ -2169,16 +2180,7 @@ impl Interpreter {
                     .downcast_ref::<GetItemIter>()
                     .is_some();
                 if is_getitem {
-                    return match self.step_getitem_iter(&state_rc)? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
-                        }
-                    };
+                    return Self::step_or_stop(self.step_getitem_iter(&state_rc)?, default);
                 }
             }
 
@@ -2189,16 +2191,7 @@ impl Interpreter {
                     .downcast_ref::<CallableIter>()
                     .is_some();
                 if is_callable_iter {
-                    return match self.step_callable_iter(&state_rc)? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
-                        }
-                    };
+                    return Self::step_or_stop(self.step_callable_iter(&state_rc)?, default);
                 }
             }
 
@@ -2206,16 +2199,7 @@ impl Interpreter {
             {
                 let is_map_iter = state_rc.borrow().downcast_ref::<MapIter>().is_some();
                 if is_map_iter {
-                    return match self.step_map_iter(&state_rc)? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
-                        }
-                    };
+                    return Self::step_or_stop(self.step_map_iter(&state_rc)?, default);
                 }
             }
 
@@ -2223,16 +2207,7 @@ impl Interpreter {
             {
                 let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
                 if is_filter_iter {
-                    return match self.step_filter_iter(&state_rc)? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
-                        }
-                    };
+                    return Self::step_or_stop(self.step_filter_iter(&state_rc)?, default);
                 }
             }
 
@@ -2241,16 +2216,7 @@ impl Interpreter {
                 let is_enumerate_iter =
                     state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
                 if is_enumerate_iter {
-                    return match self.step_enumerate_iter(&state_rc)? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
-                        }
-                    };
+                    return Self::step_or_stop(self.step_enumerate_iter(&state_rc)?, default);
                 }
             }
 
@@ -2258,16 +2224,7 @@ impl Interpreter {
             {
                 let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
                 if is_zip_iter {
-                    return match self.step_zip_iter(&state_rc)? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
-                        }
-                    };
+                    return Self::step_or_stop(self.step_zip_iter(&state_rc)?, default);
                 }
             }
 
@@ -2332,16 +2289,7 @@ impl Interpreter {
         } else if let ValueKind::BuiltinObject { ops, state } = val.kind()
             && ops.is_iterable()
         {
-            match ops.iter_next(state)? {
-                Some(v) => Ok(v),
-                None => {
-                    if let Some(d) = default {
-                        Ok(d)
-                    } else {
-                        Err(pyrust_core::py_err!("StopIteration", String::new()))
-                    }
-                }
-            }
+            Self::step_or_stop(ops.iter_next(state)?, default)
         } else {
             Err(pyrust_core::type_err!("'{}' object is not an iterator", value_type_name_str(&val)))
         }
