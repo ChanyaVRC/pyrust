@@ -63,19 +63,8 @@ impl Interpreter {
                 // A), so super() must walk D's full MRO rather than just B.base.
                 let instance_class = Rc::clone(&instance.borrow().class);
                 let mro = class_mro_items(&instance_class)?;
-                let class_ptr = Rc::as_ptr(&class);
                 // Find `class` in the MRO, then search from the next entry.
-                let start = mro
-                    .iter()
-                    .position(|v| {
-                        if let ValueKind::PyClass(c) = v.kind() {
-                            Rc::as_ptr(c) == class_ptr
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
+                let start = mro_search_start(&mro, &class);
                 for mro_entry in mro.iter().skip(start) {
                     let entry_class = match mro_entry.kind() {
                         ValueKind::PyClass(c) => Rc::clone(c),
@@ -134,18 +123,7 @@ impl Interpreter {
                 let obj_class = Rc::clone(obj_class);
                 // classmethod super(): use MRO of obj_class, start after `class`.
                 let mro = class_mro_items(&obj_class)?;
-                let class_ptr = Rc::as_ptr(&class);
-                let start = mro
-                    .iter()
-                    .position(|v| {
-                        if let ValueKind::PyClass(c) = v.kind() {
-                            Rc::as_ptr(c) == class_ptr
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
+                let start = mro_search_start(&mro, &class);
                 for mro_entry in mro.iter().skip(start) {
                     let entry_class = match mro_entry.kind() {
                         ValueKind::PyClass(c) => Rc::clone(c),
@@ -3041,6 +3019,23 @@ fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
     }
 
     Ok(mro.into_iter().map(Value::py_class).collect())
+}
+
+/// Index in `mro` at which a `super()` lookup should begin: the entry *after*
+/// `class` (found by pointer identity), or `0` if `class` is not present.
+///
+/// Shared by the instance and classmethod `super()` paths, which both walk the
+/// receiver's full MRO from the position following the defining class
+/// (cooperative multiple inheritance).
+fn mro_search_start(mro: &[Value], class: &Rc<RefCell<PyClass>>) -> usize {
+    let class_ptr = Rc::as_ptr(class);
+    mro.iter()
+        .position(|v| match v.kind() {
+            ValueKind::PyClass(c) => Rc::as_ptr(c) == class_ptr,
+            _ => false,
+        })
+        .map(|i| i + 1)
+        .unwrap_or(0)
 }
 
 /// Returns the list of direct subclasses of `class`, pruning stale weak refs.
