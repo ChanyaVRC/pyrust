@@ -45,17 +45,16 @@ pyrust_module! {
     /// overload set: `PyInt` is the primary path; `PyBool` mirrors
     /// CPython's `bool ⊆ int` subtyping (`chr(True) == '\x01'`), since
     /// strict `PyInt` doesn't auto-coerce `bool` in the typed dialect.
-    /// A trailing `PyValue` catch-all preserves the legacy
-    /// `"an integer is required (got type X)"` TypeError verbatim — the
-    /// macro's default "unsupported argument type(s)" fallback would
-    /// drift from that canonical wording.  All parameters are
+    /// A trailing `PyValue` catch-all resolves a user object's `__index__`
+    /// (CPython 3.12 honors the index protocol for `chr`, #1908) and
+    /// otherwise raises `"'X' object cannot be interpreted as an integer"`,
+    /// matching CPython 3.12 verbatim.  All parameters are
     /// `#[positional_only]` so the macro's positional-only fast-path
     /// applies (no kwarg-validation work).  Bignum inputs that don't fit
     /// in i64 raise `OverflowError("Python int too large to convert to C
     /// int")` — matching CPython 3.12's exact wording (#1584).  Values
     /// that fit in i64 but exceed the Unicode range raise `ValueError` via
     /// `chr_from_code_point`.
-    #[pure]
     fn chr(#[positional_only] i: PyInt) -> Result<Value> {
         let code_point = i.as_i64().ok_or_else(|| {
             PyError::named(
@@ -66,18 +65,48 @@ pyrust_module! {
         chr_from_code_point(code_point)
     }
 
-    #[pure]
     fn chr(#[positional_only] i: PyBool) -> Result<Value> {
         // CPython: `chr(True) == '\x01'`, `chr(False) == '\x00'`.
         chr_from_code_point(if i.0 { 1 } else { 0 })
     }
 
-    #[pure]
     fn chr(#[positional_only] i: PyValue) -> Result<Value> {
+        // CPython 3.12: chr() honors the __index__ protocol. A plain int /
+        // bool is handled by the typed overloads above; here we resolve a
+        // user object's __index__ (mirroring bin/oct/hex), then apply the
+        // same range check as the PyInt path. __int__ alone is not enough.
+        if let ValueKind::PyInstance(inst) = i.0.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let self_val = Value::py_instance(Rc::clone(&inst_rc));
+            if let Some(method) = lookup_class_attr(&class, "__index__") {
+                let result = invoke_class_method(_interp, method, self_val, &[])?;
+                let code_point = match result.kind() {
+                    ValueKind::Bool(b) => return chr_from_code_point(if b { 1 } else { 0 }),
+                    ValueKind::Int(v) => v,
+                    ValueKind::BigInt(_) => {
+                        return Err(PyError::named(
+                            "OverflowError",
+                            "Python int too large to convert to C int".to_string(),
+                        ))
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "__index__ returned non-int (type {})",
+                                value_type_name_str(&result),
+                            ),
+                        ))
+                    }
+                };
+                return chr_from_code_point(code_point);
+            }
+        }
         Err(PyError::named(
             "TypeError",
             format!(
-                "an integer is required (got type {})",
+                "'{}' object cannot be interpreted as an integer",
                 value_type_name_str(&i.0),
             ),
         ))
@@ -2753,54 +2782,35 @@ pyrust_module! {
                     "string argument without an encoding".to_string(),
                 )),
                 ValueKind::List(items) => {
-                    let mut out = Vec::with_capacity(items.len());
-                    for v in items.iter() {
-                        match v.kind() {
-                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "bytes must be in range(0, 256)".to_string(),
-                                ))
+                    // Warm path: every element is a plain int/bool — no clone,
+                    // no per-element dispatch.  Only on hitting a PyInstance do
+                    // we clone the remaining elements (releasing the cell borrow
+                    // so __index__ can't alias the list) and resolve them.
+                    let fast = try_fast_bytes_elems(&items)?;
+                    match fast {
+                        Ok(out) => Ok(Value::bytes(out)),
+                        Err((mut out, from)) => {
+                            let rest: Vec<Value> = items[from..].to_vec();
+                            drop(items);
+                            for v in &rest {
+                                out.push(bytes_element_to_u8(_interp, v)?);
                             }
-                            ValueKind::Bool(b) => out.push(b as u8),
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "'{}' object cannot be interpreted as an integer",
-                                        pyrust_core::builtin_type_name(v),
-                                    ),
-                                ))
-                            }
+                            Ok(Value::bytes(out))
                         }
                     }
-                    Ok(Value::bytes(out))
                 }
                 ValueKind::Tuple(items) => {
-                    let mut out = Vec::with_capacity(items.len());
-                    for v in items.iter() {
-                        match v.kind() {
-                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "bytes must be in range(0, 256)".to_string(),
-                                ))
+                    let fast = try_fast_bytes_elems(items)?;
+                    match fast {
+                        Ok(out) => Ok(Value::bytes(out)),
+                        Err((mut out, from)) => {
+                            let rest: Vec<Value> = items[from..].to_vec();
+                            for v in &rest {
+                                out.push(bytes_element_to_u8(_interp, v)?);
                             }
-                            ValueKind::Bool(b) => out.push(b as u8),
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "'{}' object cannot be interpreted as an integer",
-                                        pyrust_core::builtin_type_name(v),
-                                    ),
-                                ))
-                            }
+                            Ok(Value::bytes(out))
                         }
                     }
-                    Ok(Value::bytes(out))
                 }
                 ValueKind::BigInt(_) => Err(PyError::named(
                     "OverflowError",
@@ -2833,7 +2843,12 @@ pyrust_module! {
                             ))
                         };
                     }
-                    // No __bytes__: fall through to the iterable path.
+                    // No __bytes__: CPython next honors __index__ as the count
+                    // form (`bytes(obj)` -> N zero bytes) before __iter__ (#1908).
+                    if let Some(count) = bytes_count_via_index(_interp, &args[0].value)? {
+                        return Ok(Value::bytes(vec![0u8; count]));
+                    }
+                    // Otherwise fall through to the iterable path.
                     let type_name = value_type_name_str(&args[0].value).to_string();
                     let items =
                         _interp.collect_iterable(&args[0].value).map_err(|e| {
@@ -2846,29 +2861,7 @@ pyrust_module! {
                                 e
                             }
                         })?;
-                    let mut out = Vec::with_capacity(items.len());
-                    for v in &items {
-                        match v.kind() {
-                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Bool(b) => out.push(b as u8),
-                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "bytes must be in range(0, 256)".to_string(),
-                                ))
-                            }
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "'{}' object cannot be interpreted as an integer",
-                                        pyrust_core::builtin_type_name(v),
-                                    ),
-                                ))
-                            }
-                        }
-                    }
-                    Ok(Value::bytes(out))
+                    Ok(Value::bytes(bytes_from_items(_interp, items)?))
                 }
                 _ => {
                     // General iterable fallback: any object supporting __iter__ /
@@ -2887,29 +2880,7 @@ pyrust_module! {
                                 e
                             }
                         })?;
-                    let mut out = Vec::with_capacity(items.len());
-                    for v in &items {
-                        match v.kind() {
-                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Bool(b) => out.push(b as u8),
-                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "bytes must be in range(0, 256)".to_string(),
-                                ))
-                            }
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "'{}' object cannot be interpreted as an integer",
-                                        pyrust_core::builtin_type_name(v),
-                                    ),
-                                ))
-                            }
-                        }
-                    }
-                    Ok(Value::bytes(out))
+                    Ok(Value::bytes(bytes_from_items(_interp, items)?))
                 }
                 #[allow(unreachable_patterns)]
                 _ => Err(PyError::named(
@@ -3017,7 +2988,12 @@ pyrust_module! {
                     "cannot fit 'int' into an index-sized integer".to_string(),
                 )),
                 _ => {
-                    // General iterable or PyInstance path.
+                    // General iterable or PyInstance path. CPython honors the
+                    // __index__ count form (`bytearray(obj)` -> N zero bytes)
+                    // before falling back to __iter__ (#1908).
+                    if let Some(count) = bytes_count_via_index(_interp, &args[0].value)? {
+                        return Ok(pyrust_builtins::bytearray::bytearray(vec![0u8; count]));
+                    }
                     let type_name = pyrust_core::builtin_type_name(&args[0].value).into_owned();
                     let items = _interp.collect_iterable(&args[0].value).map_err(|e| {
                         if e.class_name_is("TypeError") {
@@ -3029,29 +3005,9 @@ pyrust_module! {
                             e
                         }
                     })?;
-                    let mut out = Vec::with_capacity(items.len());
-                    for v in &items {
-                        match v.kind() {
-                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Bool(b) => out.push(b as u8),
-                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "bytes must be in range(0, 256)".to_string(),
-                                ))
-                            }
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "'{}' object cannot be interpreted as an integer",
-                                        pyrust_core::builtin_type_name(v),
-                                    ),
-                                ))
-                            }
-                        }
-                    }
-                    Ok(pyrust_builtins::bytearray::bytearray(out))
+                    Ok(pyrust_builtins::bytearray::bytearray(bytes_from_items(
+                        _interp, items,
+                    )?))
                 }
             },
             2 | 3 => {
@@ -8209,6 +8165,161 @@ fn chr_from_code_point(code_point: i64) -> Result<Value> {
 /// Delegates to `pyrust_builtins::string::encode_str_to_bytes`.
 fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
     pyrust_builtins::string::encode_str_to_bytes(source, encoding, errors)
+}
+
+/// Warm-path element conversion for `bytes()` / `bytearray()` from a `List` /
+/// `Tuple` slice without allocating or dispatching: each `int` in `0..=255` (or
+/// `bool`) is converted in place.  Returns:
+/// - `Ok(Ok(out))` — every element was a plain int/bool (the common case);
+/// - `Ok(Err((out, i)))` — element `i` is a `PyInstance` that may carry
+///   `__index__`; the caller resolves `items[i..]` via `bytes_element_to_u8`;
+/// - `Err(_)` — an out-of-range int (`ValueError`) or a non-int non-instance
+///   (`TypeError`), raised immediately (CPython stops at the first bad element).
+#[allow(clippy::type_complexity)]
+fn try_fast_bytes_elems(items: &[Value]) -> Result<std::result::Result<Vec<u8>, (Vec<u8>, usize)>> {
+    let mut out = Vec::with_capacity(items.len());
+    for (i, v) in items.iter().enumerate() {
+        match v.kind() {
+            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+            ValueKind::Bool(b) => out.push(b as u8),
+            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "bytes must be in range(0, 256)".to_string(),
+                ))
+            }
+            ValueKind::PyInstance(_) => return Ok(Err((out, i))),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        pyrust_core::builtin_type_name(v),
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(Ok(out))
+}
+
+/// Convert an owned `Vec<Value>` of `bytes()` / `bytearray()` elements to a
+/// `Vec<u8>`, taking the allocation-free fast path when every element is a plain
+/// int/bool and only dispatching `__index__` for the rare `PyInstance` element.
+fn bytes_from_items(interp: &mut crate::Interpreter, items: Vec<Value>) -> Result<Vec<u8>> {
+    match try_fast_bytes_elems(&items)? {
+        Ok(out) => Ok(out),
+        Err((mut out, from)) => {
+            for v in &items[from..] {
+                out.push(bytes_element_to_u8(interp, v)?);
+            }
+            Ok(out)
+        }
+    }
+}
+
+/// Convert a single element of a `bytes()` / `bytearray()` source iterable to a
+/// `u8`, honoring CPython 3.12's `__index__` protocol.  Plain `int` / `bool`
+/// short-circuit (the warm path); only a `PyInstance` triggers a `__index__`
+/// dispatch.  An int outside `0..=255` (after `__index__`) raises
+/// `ValueError: bytes must be in range(0, 256)`; a non-integer without
+/// `__index__` raises `TypeError: 'X' object cannot be interpreted as an
+/// integer`; `__index__` returning a non-int raises
+/// `TypeError: __index__ returned non-int (type X)`.
+fn bytes_element_to_u8(interp: &mut crate::Interpreter, v: &Value) -> Result<u8> {
+    match v.kind() {
+        ValueKind::Int(n) if (0..=255).contains(&n) => Ok(n as u8),
+        ValueKind::Bool(b) => Ok(b as u8),
+        ValueKind::Int(_) | ValueKind::BigInt(_) => Err(PyError::named(
+            "ValueError",
+            "bytes must be in range(0, 256)".to_string(),
+        )),
+        ValueKind::PyInstance(inst) => {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let Some(method) = lookup_class_attr(&class, "__index__") else {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        pyrust_core::builtin_type_name(v),
+                    ),
+                ));
+            };
+            let self_val = Value::py_instance(inst_rc);
+            let result = invoke_class_method(interp, method, self_val, &[])?;
+            bytes_index_result_to_u8(&result)
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                pyrust_core::builtin_type_name(v),
+            ),
+        )),
+    }
+}
+
+/// Range-check the result of an element `__index__` call for `bytes()` /
+/// `bytearray()`.  `bool` / `int` in `0..=255` succeed; out-of-range ints raise
+/// `ValueError`; anything else raises the `__index__ returned non-int` TypeError.
+fn bytes_index_result_to_u8(result: &Value) -> Result<u8> {
+    match result.kind() {
+        ValueKind::Bool(b) => Ok(b as u8),
+        ValueKind::Int(n) if (0..=255).contains(&n) => Ok(n as u8),
+        ValueKind::Int(_) | ValueKind::BigInt(_) => Err(PyError::named(
+            "ValueError",
+            "bytes must be in range(0, 256)".to_string(),
+        )),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "__index__ returned non-int (type {})",
+                value_type_name_str(result),
+            ),
+        )),
+    }
+}
+
+/// Resolve the `bytes(n)` / `bytearray(n)` count argument through `__index__`
+/// when the argument is a `PyInstance`.  Returns `Some(count)` (the non-negative
+/// byte count) on success, `None` when the instance has no `__index__` (so the
+/// caller should fall through to the iterable path).  A negative count or a
+/// `__index__` returning a non-int / out-of-range value raises directly.
+fn bytes_count_via_index(interp: &mut crate::Interpreter, val: &Value) -> Result<Option<usize>> {
+    let ValueKind::PyInstance(inst) = val.kind() else {
+        return Ok(None);
+    };
+    let inst_rc = Rc::clone(inst);
+    let class = Rc::clone(&inst_rc.borrow().class);
+    let Some(method) = lookup_class_attr(&class, "__index__") else {
+        return Ok(None);
+    };
+    let self_val = Value::py_instance(inst_rc);
+    let result = invoke_class_method(interp, method, self_val, &[])?;
+    let count = match result.kind() {
+        ValueKind::Bool(b) => b as i64,
+        ValueKind::Int(n) => n,
+        ValueKind::BigInt(_) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "cannot fit 'int' into an index-sized integer".to_string(),
+            ))
+        }
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "__index__ returned non-int (type {})",
+                    value_type_name_str(&result),
+                ),
+            ))
+        }
+    };
+    if count < 0 {
+        return Err(PyError::named("ValueError", "negative count".to_string()));
+    }
+    Ok(Some(count as usize))
 }
 
 /// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used

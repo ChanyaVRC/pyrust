@@ -728,18 +728,28 @@ impl Interpreter {
         // as legitimate hashable keys (e.g. `d = {}; d[slice(1,3)] = "a"`).
         // Only sequence-like targets (List, Tuple, Str, Bytes, PyInstance) need
         // the redirect.
-        let target_is_sequence_like = matches!(
-            target.kind(),
-            ValueKind::List(_)
-                | ValueKind::Tuple(_)
-                | ValueKind::Str(_)
-                | ValueKind::Bytes(_)
-                | ValueKind::PyInstance(_)
-        );
-        if target_is_sequence_like {
-            if let ValueKind::BuiltinObject { ops, state } = index.kind()
-                && ops.type_name() == pyrust_builtins::slice::TYPE_NAME
-            {
+        // Slice-object subscript redirect.  Probe the *index* first: for the
+        // hot integer-index path the BuiltinObject match misses immediately and
+        // no target type_name() probe runs.  Only when the index is actually a
+        // slice object do we consult the target type (#1908 adds bytearray to
+        // the sequence-like set; bytearray slices are always slice ops, never
+        // hashable keys, so the redirect is safe).
+        if let ValueKind::BuiltinObject { ops, state } = index.kind()
+            && ops.type_name() == pyrust_builtins::slice::TYPE_NAME
+        {
+            let target_is_sequence_like = matches!(
+                target.kind(),
+                ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Str(_)
+                    | ValueKind::Bytes(_)
+                    | ValueKind::PyInstance(_)
+            ) || matches!(
+                target.kind(),
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+            );
+            if target_is_sequence_like {
                 let borrow = state.borrow();
                 let s = borrow
                     .downcast_ref::<pyrust_builtins::slice::SliceState>()
@@ -839,7 +849,9 @@ impl Interpreter {
                 // `BuiltinTypeOps::get_item`.  The default impl returns a
                 // TypeError shaped like the legacy "object is not
                 // subscriptable" message, so non-subscriptable types
-                // don't need per-type plumbing.
+                // don't need per-type plumbing.  bytearray's __index__ subscript
+                // resolution is handled by callers (exec_get_item and the slice
+                // redirect above) so the int-index hot path stays untouched.
                 ops.get_item(state, &index)
             }
             ValueKind::PyClass(class_rc) => {
@@ -3685,6 +3697,36 @@ impl Interpreter {
         Ok(Some(resolved))
     }
 
+    /// Resolve a value assigned to a bytearray element (`ba[i] = v`) through
+    /// the `__index__` protocol (#1908).  A `PyInstance` defining `__index__`
+    /// is called and its integer result returned (`__index__ returned non-int`
+    /// on a bad return).  Every other value — including plain ints, floats, and
+    /// `__int__`-only objects — is returned unchanged so the receiver-side
+    /// `value_to_byte` produces the correct range / type error verbatim.
+    fn resolve_byte_value(&mut self, v: Value) -> Result<Value> {
+        let ValueKind::PyInstance(inst) = v.kind() else {
+            return Ok(v);
+        };
+        let inst_rc = Rc::clone(inst);
+        let class = Rc::clone(&inst_rc.borrow().class);
+        let Some(method) = lookup_class_attr(&class, "__index__") else {
+            return Ok(v);
+        };
+        let result = invoke_class_method(self, method, Value::py_instance(inst_rc), &[])?;
+        let is_int = matches!(
+            result.kind(),
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+        );
+        if is_int {
+            Ok(result)
+        } else {
+            Err(pyrust_core::type_err!(
+                "__index__ returned non-int (type {})",
+                value_type_name_str(&result)
+            ))
+        }
+    }
+
     fn eval_slice(&mut self, target: &Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
         // PyInstance: dispatch __getitem__ with a slice object built from the
         // raw (unresolved) bounds.  CPython passes the bound objects as-is so
@@ -3735,8 +3777,21 @@ impl Interpreter {
         // BuiltinObject: delegate to ops.get_item with a slice value (issue #847).
         // This mirrors what eval_index does when a runtime slice object is used
         // as a subscript, and lets BuiltinObject types opt into slice subscripting
-        // via BuiltinTypeOps::get_item.  Pass raw bounds — ops.get_item receives
-        // the constructed slice Value and handles resolution internally.
+        // via BuiltinTypeOps::get_item.  bytearray's receiver-only get_item can't
+        // reach user dunders, so resolve any __index__ bounds here first (#1908);
+        // other BuiltinObject types resolve internally so are passed raw.
+        if let ValueKind::BuiltinObject { ops, .. } = target.kind()
+            && ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+        {
+            let lo = self.resolve_slice_bound_val(lo)?;
+            let hi = self.resolve_slice_bound_val(hi)?;
+            let st = self.resolve_slice_bound_val(st)?;
+            let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
+            let ValueKind::BuiltinObject { ops, state } = target.kind() else {
+                unreachable!("target kind checked above");
+            };
+            return ops.get_item(state, &slice_val);
+        }
         if let ValueKind::BuiltinObject { ops, state } = target.kind() {
             let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
             return ops.get_item(state, &slice_val);
@@ -5685,6 +5740,20 @@ impl Interpreter {
             }
             FastResult::Miss => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
+                // bytearray honors __index__ on a non-int subscript like bytes
+                // (#1908).  Resolve only for a PyInstance index — this check is
+                // reached only after the int/list/tuple fast paths miss, so the
+                // hot `ba[i]` path never runs it.
+                if matches!(idx_val.kind(), ValueKind::PyInstance(_))
+                    && matches!(
+                        obj_val.kind(),
+                        ValueKind::BuiltinObject { ops, .. }
+                            if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+                    )
+                {
+                    let resolved = self.call_index_protocol(&idx_val, "bytearray")?;
+                    return self.eval_index(&obj_val, resolved);
+                }
                 self.eval_index(&obj_val, idx_val)
             }
         }
@@ -5835,6 +5904,39 @@ impl Interpreter {
                 return Err(pyrust_core::type_err!("'{}' object does not support item assignment", tname));
             }
             4 => {
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                // bytearray item assignment honors the __index__ protocol on
+                // both the index and the assigned value (#1908). bytearray's
+                // receiver-only set_item can't reach user dunders, so resolve
+                // here before delegating. Slice assignment (idx is a slice
+                // object) passes through unchanged.
+                let is_bytearray = matches!(
+                    obj_val.kind(),
+                    ValueKind::BuiltinObject { ops, .. }
+                        if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+                );
+                let (idx_val, val_val) = if is_bytearray {
+                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        // Slice assignment: resolve the __index__ bounds and
+                        // rebuild the slice; element resolution stays in
+                        // set_item (#1908).
+                        let lo = self.resolve_slice_bound_val(lo)?;
+                        let hi = self.resolve_slice_bound_val(hi)?;
+                        let st = self.resolve_slice_bound_val(st)?;
+                        (pyrust_builtins::slice::make_slice(lo, hi, st), val_val)
+                    } else {
+                        let resolved_idx = self.call_index_protocol(&idx_val, "bytearray")?;
+                        // Resolve the assigned value's __index__ only when it is
+                        // a PyInstance carrying one; otherwise leave it untouched
+                        // so set_item's value_to_byte produces the correct error
+                        // ("byte must be in range(0, 256)" / "'X' object cannot be
+                        // interpreted as an integer").
+                        let resolved_val = self.resolve_byte_value(val_val)?;
+                        (resolved_idx, resolved_val)
+                    }
+                } else {
+                    (idx_val, val_val)
+                };
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
                     ops.set_item(state, &idx_val, val_val)?;

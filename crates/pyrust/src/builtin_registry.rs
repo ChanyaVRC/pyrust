@@ -149,8 +149,9 @@ mod tests {
         //    pure here, otherwise the optimizer's call-DCE pass would
         //    drift backwards relative to the legacy `PURE_BUILTINS` list.
         //    `len` is intentionally absent: it dispatches user `__len__` and
-        //    is therefore impure (issue #1526).
-        for name in ["abs", "chr", "ord", "type"] {
+        //    is therefore impure (issue #1526).  `chr` is likewise absent: it
+        //    dispatches user `__index__` and is impure (issue #1908).
+        for name in ["abs", "ord", "type"] {
             assert!(is_pure(name), "{name:?} must be registered as pure");
         }
 
@@ -186,7 +187,8 @@ mod tests {
             // divmod dispatches __divmod__/__rdivmod__ on user instances (#1094).
             "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
             "ascii",  // len dispatches user __len__ on PyInstance values (#1526).
-            "len",
+            "len",    // chr dispatches user __index__ on PyInstance values (#1908).
+            "chr",
         ] {
             assert!(
                 !is_pure(name),

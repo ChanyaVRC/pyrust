@@ -748,10 +748,12 @@ fn value_to_index(key: &Value, len: usize, type_name: &str) -> Result<usize> {
             ));
         }
         _ => {
+            // CPython 3.12 uses the bare (unquoted) type name here, matching
+            // bytes: `bytearray indices must be integers or slices, not float`.
             return Err(PyError::named(
                 "TypeError",
                 format!(
-                    "{type_name} indices must be integers or slices, not '{}'",
+                    "{type_name} indices must be integers or slices, not {}",
                     pyrust_core::builtin_type_name(key)
                 ),
             ));
@@ -790,6 +792,13 @@ fn value_to_byte(v: &Value, _context: &str) -> Result<u8> {
             }
         }
         ValueKind::Bool(b) => Ok(b as u8),
+        // A BigInt is a valid int but always outside 0..=255 — CPython raises
+        // ValueError, not the "cannot be interpreted as an integer" TypeError
+        // used for non-int types.
+        ValueKind::BigInt(_) => Err(PyError::named(
+            "ValueError",
+            "byte must be in range(0, 256)".to_string(),
+        )),
         _ => Err(PyError::named(
             "TypeError",
             format!(
