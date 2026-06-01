@@ -49,3 +49,23 @@ print(w3.x)
 w4 = W()
 object.__setattr__(w4, "__dict__", {"p": 11})
 print(w4.p)
+
+# Assigning another instance's __dict__ copies its visible attributes.
+src = W()
+src.s1 = "one"
+src.s2 = "two"
+w5 = W()
+w5.old = 0
+w5.__dict__ = src.__dict__
+print(w5.s1, w5.s2)
+print(w5.__dict__)
+try:
+    w5.old
+except AttributeError as e:
+    print("AttributeError:", e)
+
+# Self-assignment via the proxy preserves the existing attributes.
+w6 = W()
+w6.q = 42
+w6.__dict__ = w6.__dict__
+print(w6.q, w6.__dict__)
