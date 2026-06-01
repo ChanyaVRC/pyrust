@@ -7146,7 +7146,9 @@ impl Interpreter {
                 }
             }
         }
-        let key_fn = kw.get(&StrKey("key")).cloned();
+        // An explicit `key=None` means "no key function" (default comparison),
+        // mirroring `sorted`/`min`/`max` (#1937).
+        let key_fn = kw.get(&StrKey("key")).cloned().filter(|v| !v.is_none());
         let reverse = kw.get(&StrKey("reverse")).map(|v| v.truthy()).unwrap_or(false);
         if let Some(key_fn_val) = key_fn {
             // Compute keys via the interpreter, then delegate sorting to builtins.
