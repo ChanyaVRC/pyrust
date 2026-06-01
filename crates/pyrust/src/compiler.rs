@@ -8578,9 +8578,19 @@ impl Compiler {
             dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n,
         ));
         if bases_n > 0 && metaclass.is_none() {
-            // Without metaclass, the base registers are dead after MakeClass.
-            // (With metaclass, dst sits at bases_base + bases_n and must stay live.)
-            self.next_temp = bases_base + 1;
+            // Without metaclass, the base registers are dead after MakeClass,
+            // but `dst` (the freshly built class object) must stay live for the
+            // decorator / type-params / store steps below.  `dst` was allocated
+            // immediately after the bases, so `dst == bases_base + bases_n`; the
+            // correct watermark is therefore `dst + 1`, which preserves the
+            // class object and releases every slot above it.
+            //
+            // The previous formula (`bases_base + 1`) overwrote `dst` whenever a
+            // base was present: with one base, `bases_base + 1 == dst`, so the
+            // subsequent decorator base allocated the same register as `dst` and
+            // the decorator value clobbered the class object (issue #1889). The
+            // class decorator then received the decorator function itself.
+            self.next_temp = dst + 1;
         }
 
         // If a metaclass is provided, replace `dst` with the result of
@@ -8596,11 +8606,10 @@ impl Compiler {
 
         // PEP 695: if this is a generic class, build the __type_params__ tuple
         // and store it on the class object before decorators are applied.
-        // Ensure next_temp is at least dst + 1 before calling emit_type_params_attr:
-        // when there are base classes and no metaclass, next_temp is reset to
-        // bases_base + 1 (which equals dst when bases_n == 1), and
-        // emit_type_params_attr would allocate TypeVar registers starting at dst,
-        // overwriting the class object with a TypeVar.
+        // The watermark reset above already leaves `next_temp == dst + 1`, so
+        // `emit_type_params_attr` allocates TypeVar registers above `dst` and
+        // never overwrites the class object. The guard below is kept as
+        // defense-in-depth in case any future path leaves `next_temp <= dst`.
         if !type_params.is_empty() {
             if self.next_temp <= dst {
                 self.next_temp = dst + 1;
