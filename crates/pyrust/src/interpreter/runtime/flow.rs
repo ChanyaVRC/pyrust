@@ -13,10 +13,7 @@ impl Interpreter {
                     _ => i64::MAX,
                 },
             }),
-            _ => Err(PyError::named(
-                "TypeError",
-                "slice indices must be integers or None or have an __index__ method".to_string(),
-            )),
+            _ => Err(pyrust_core::type_err!("slice indices must be integers or None or have an __index__ method")),
         }
     }
 
@@ -32,10 +29,7 @@ impl Interpreter {
             Some(v) => {
                 let s = Self::slice_index_from_value(v)?;
                 if s == 0 {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "slice step cannot be zero".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("slice step cannot be zero"));
                 }
                 s
             }
@@ -221,10 +215,7 @@ impl Interpreter {
                 if is_exception_class(&instance.borrow().class) {
                     Ok(Value::py_instance(instance))
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        "exceptions must derive from BaseException".to_string(),
-                    ))
+                    Err(pyrust_core::type_err!("exceptions must derive from BaseException"))
                 }
             }
             ValueKind::PyClass(class) => {
@@ -235,16 +226,10 @@ impl Interpreter {
                     // default args).  Mirrors CPython's do_raise behaviour.
                     self.call_class_expanded(class, &[])
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        "exceptions must derive from BaseException".to_string(),
-                    ))
+                    Err(pyrust_core::type_err!("exceptions must derive from BaseException"))
                 }
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                "exceptions must derive from BaseException".to_string(),
-            )),
+            _ => Err(pyrust_core::type_err!("exceptions must derive from BaseException")),
         }
     }
 
@@ -264,10 +249,7 @@ impl Interpreter {
                 if is_exception_class(&instance.borrow().class) {
                     Ok(Value::py_instance(instance))
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        "exception causes must derive from BaseException".to_string(),
-                    ))
+                    Err(pyrust_core::type_err!("exception causes must derive from BaseException"))
                 }
             }
             ValueKind::PyClass(class) => {
@@ -277,16 +259,10 @@ impl Interpreter {
                     // invoked when a class is used as a cause.
                     self.call_class_expanded(class, &[])
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        "exception causes must derive from BaseException".to_string(),
-                    ))
+                    Err(pyrust_core::type_err!("exception causes must derive from BaseException"))
                 }
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                "exception causes must derive from BaseException".to_string(),
-            )),
+            _ => Err(pyrust_core::type_err!("exception causes must derive from BaseException")),
         }
     }
 
@@ -530,10 +506,7 @@ impl Interpreter {
             ValueKind::PyClass(expected) => {
                 let expected = Rc::clone(expected);
                 if !is_exception_class(&expected) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "catching classes that do not inherit from BaseException is not allowed",
-                    ));
+                    return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
                 }
                 Ok(class_is_subclass_of(exc_class, &expected))
             }
@@ -544,29 +517,20 @@ impl Interpreter {
                         ValueKind::PyClass(expected) => {
                             let expected = Rc::clone(expected);
                             if !is_exception_class(&expected) {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "catching classes that do not inherit from BaseException is not allowed",
-                                ));
+                                return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
                             }
                             if class_is_subclass_of(exc_class, &expected) {
                                 matched = true;
                             }
                         }
                         _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "catching classes that do not inherit from BaseException is not allowed",
-                            ));
+                            return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
                         }
                     }
                 }
                 Ok(matched)
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                "catching classes that do not inherit from BaseException is not allowed",
-            )),
+            _ => Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed")),
         }
     }
 
@@ -581,10 +545,7 @@ impl Interpreter {
             ValueKind::PyClass(expected) => {
                 let expected = Rc::clone(expected);
                 if !is_exception_class(&expected) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "catching classes that do not inherit from BaseException is not allowed",
-                    ));
+                    return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
                 }
                 Ok(class_is_subclass_of(&raised_class, &expected))
             }
@@ -597,27 +558,18 @@ impl Interpreter {
                         ValueKind::PyClass(expected) => {
                             let expected = Rc::clone(expected);
                             if !is_exception_class(&expected) {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "catching classes that do not inherit from BaseException is not allowed",
-                                ));
+                                return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
                             }
                             if class_is_subclass_of(&raised_class, &expected) {
                                 matched = true;
                             }
                         }
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            "catching classes that do not inherit from BaseException is not allowed",
-                        )),
+                        _ => return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed")),
                     }
                 }
                 Ok(matched)
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                "catching classes that do not inherit from BaseException is not allowed",
-            )),
+            _ => Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed")),
         }
     }
 

@@ -406,12 +406,12 @@ impl Interpreter {
     /// Converts lexer/parse errors into `SyntaxError` exceptions.
     pub(crate) fn parse_source_to_stmts(source: &str) -> Result<Vec<crate::ast::Stmt>> {
         let tokens = crate::lexer::Lexer::new(source)
-            .map_err(|e| PyError::named("SyntaxError", lex_parse_message(e)))?
+            .map_err(|e| pyrust_core::py_err!("SyntaxError", lex_parse_message(e)))?
             .into_tokens();
         let mut parser = crate::parser::Parser::new(tokens);
         parser
             .parse_program()
-            .map_err(|e| PyError::named("SyntaxError", lex_parse_message(e)))
+            .map_err(|e| pyrust_core::py_err!("SyntaxError", lex_parse_message(e)))
     }
 
     /// Execute a source string as statements, optionally in an explicit
@@ -849,10 +849,7 @@ impl Interpreter {
             }
         });
         if seeded.is_none() {
-            return Err(PyError::named(
-                "TypeError",
-                "exec/eval globals must be a dict".to_string(),
-            ));
+            return Err(pyrust_core::type_err!("exec/eval globals must be a dict"));
         }
         // Then overlay locals on top (locals shadow globals).
         if let Some(ldict) = locals_dict {
@@ -866,10 +863,7 @@ impl Interpreter {
                 }
             });
             if seeded_locals.is_none() {
-                return Err(PyError::named(
-                    "TypeError",
-                    "exec/eval locals must be a dict".to_string(),
-                ));
+                return Err(pyrust_core::type_err!("exec/eval locals must be a dict"));
             }
         }
         Ok(exec_env)

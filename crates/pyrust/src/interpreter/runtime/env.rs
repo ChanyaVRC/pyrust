@@ -127,10 +127,7 @@ impl Interpreter {
                         });
                     }
                 }
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'super' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'super' object has no attribute '{name}'"))
             }
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);
@@ -208,10 +205,7 @@ impl Interpreter {
                         });
                     }
                 }
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'super' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'super' object has no attribute '{name}'"))
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.
             // These return a new property with the respective accessor replaced.
@@ -253,10 +247,7 @@ impl Interpreter {
                         target.clone(),
                         pyrust_builtins::property::PropertyMethodKind::Delete,
                     )),
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("property object has no attribute '{name}'"),
-                    )),
+                    _ => Err(pyrust_core::py_err!("AttributeError", "property object has no attribute '{name}'")),
                 }
             }
             ValueKind::PyModule(module) => {
@@ -282,7 +273,7 @@ impl Interpreter {
                             let mod_name = module.borrow().name.clone();
                             format!("module '{mod_name}' has no attribute '{name}'")
                         };
-                        return Err(PyError::named("AttributeError", msg));
+                        return Err(pyrust_core::py_err!("AttributeError", msg));
                     }
                     return Ok(value);
                 }
@@ -476,10 +467,7 @@ impl Interpreter {
                         // Method descriptors (str.upper, list.append, …) do not
                         // expose __module__; CPython raises AttributeError with
                         // "'method_descriptor' object has no attribute '__module__'"
-                        return Err(PyError::named(
-                            "AttributeError",
-                            format!("'method_descriptor' object has no attribute '__module__'"),
-                        ));
+                        return Err(pyrust_core::py_err!("AttributeError", "'method_descriptor' object has no attribute '__module__'"));
                     }
                     return Ok(Value::string("builtins"));
                 }
@@ -522,10 +510,7 @@ impl Interpreter {
                         "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
                         "isalnum"    => Ok(Value::builtin_function("str.isalnum")),
                         "isspace"    => Ok(Value::builtin_function("str.isspace")),
-                        _ => Err(PyError::named(
-                            "AttributeError",
-                            format!("type object 'str' has no attribute '{name}'"),
-                        )),
+                        _ => Err(pyrust_core::py_err!("AttributeError", "type object 'str' has no attribute '{name}'")),
                     }
                 } else if func_name == "property"
                     && matches!(name, "__get__" | "__set__" | "__delete__")
@@ -550,10 +535,7 @@ impl Interpreter {
                     );
                     Ok(pyrust_builtins::property::property_method(empty, kind))
                 } else {
-                    Err(PyError::named(
-                        "AttributeError",
-                        format!("type object '{}' has no attribute '{name}'", func_name),
-                    ))
+                    Err(pyrust_core::py_err!("AttributeError", "type object '{}' has no attribute '{name}'", func_name))
                 }
             }
             ValueKind::BuiltinObject { .. } => {
@@ -1243,13 +1225,8 @@ impl Interpreter {
                         if let Some(defining_class) = primitive_class_by_name(defining_type) {
                             if !class_is_subclass_of(&class, &defining_class) {
                                 let instance_type = class.borrow().name.clone();
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "descriptor '{}' for '{}' objects doesn't apply to a '{}' object",
-                                        method_name, defining_type, instance_type
-                                    ),
-                                ));
+                                return Err(pyrust_core::type_err!("descriptor '{}' for '{}' objects doesn't apply to a '{}' object",
+                                        method_name, defining_type, instance_type));
                             }
                         }
                         if method_name == name {
@@ -1342,10 +1319,7 @@ impl Interpreter {
         }
         // Issue #1198: bare `object()` instances have no __dict__.
         if Rc::ptr_eq(&class, &object_class_singleton()) {
-            return Err(PyError::named(
-                "AttributeError",
-                format!("'object' object has no attribute '{name}'"),
-            ));
+            return Err(pyrust_core::py_err!("AttributeError", "'object' object has no attribute '{name}'"));
         }
         // PEP 3134 / issue #1066: validate exception-slot types.
         if is_exception_class(&class) {
@@ -1357,21 +1331,13 @@ impl Interpreter {
                         _ => false,
                     };
                     if !ok {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "exception {} must be None or derive from BaseException",
-                                if name == "__cause__" { "cause" } else { "context" }
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("exception {} must be None or derive from BaseException",
+                                if name == "__cause__" { "cause" } else { "context" }));
                     }
                 }
                 "__suppress_context__" => {
                     if !matches!(value.kind(), ValueKind::Bool(_)) {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "attribute value type must be bool",
-                        ));
+                        return Err(pyrust_core::type_err!("attribute value type must be bool"));
                     }
                 }
                 "__traceback__" => {
@@ -1383,10 +1349,7 @@ impl Interpreter {
                         _ => false,
                     };
                     if !ok {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "__traceback__ must be a traceback or None".to_string(),
-                        ));
+                        return Err(pyrust_core::type_err!("__traceback__ must be a traceback or None"));
                     }
                 }
                 _ => {}
@@ -1410,10 +1373,7 @@ impl Interpreter {
                     && !mro_has_unslotted_ancestor(&class)
                 {
                     let class_name = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("'{class_name}' object has no attribute '{name}'"),
-                    ));
+                    return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
                 }
             }
         }
@@ -1457,7 +1417,7 @@ impl Interpreter {
         // CPython 3.12: BaseException.args is a C-level member descriptor
         // with no tp_delete slot; any deletion attempt raises TypeError.
         if name == "args" && class_chain_contains_name(&class, "BaseException") {
-            return Err(PyError::named("TypeError", "args may not be deleted"));
+            return Err(pyrust_core::type_err!("args may not be deleted"));
         }
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
             let class_name = instance.borrow().class.borrow().name.clone();
@@ -1515,24 +1475,10 @@ impl Interpreter {
                 if func_name.contains('.') {
                     // method_descriptor path
                     match name {
-                        "__module__" => Err(PyError::named(
-                            "AttributeError",
-                            format!("'method_descriptor' object has no attribute '__module__'"),
-                        )),
-                        "__name__" => Err(PyError::named(
-                            "AttributeError",
-                            "readonly attribute".to_string(),
-                        )),
-                        "__qualname__" | "__doc__" => Err(PyError::named(
-                            "AttributeError",
-                            format!(
-                                "attribute '{name}' of 'method_descriptor' objects is not writable"
-                            ),
-                        )),
-                        _ => Err(PyError::named(
-                            "AttributeError",
-                            format!("'method_descriptor' object has no attribute '{name}'"),
-                        )),
+                        "__module__" => Err(pyrust_core::py_err!("AttributeError", "'method_descriptor' object has no attribute '__module__'")),
+                        "__name__" => Err(pyrust_core::py_err!("AttributeError", "readonly attribute")),
+                        "__qualname__" | "__doc__" => Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of 'method_descriptor' objects is not writable")),
+                        _ => Err(pyrust_core::py_err!("AttributeError", "'method_descriptor' object has no attribute '{name}'")),
                     }
                 } else {
                     // builtin_function_or_method path
@@ -1541,35 +1487,19 @@ impl Interpreter {
                             // CPython allows this write; pyrust lacks per-instance storage.
                             // Raise AttributeError so the error class is correct until
                             // mutable __module__ storage is added to BuiltinFunction.
-                            Err(PyError::named(
-                                "AttributeError",
-                                format!(
-                                    "attribute '__module__' of 'builtin_function_or_method' \
-                                     objects is not writable"
-                                ),
-                            ))
+                            Err(pyrust_core::py_err!("AttributeError", "attribute '__module__' of 'builtin_function_or_method' \
+                                     objects is not writable"))
                         }
-                        "__name__" | "__qualname__" | "__doc__" => Err(PyError::named(
-                            "AttributeError",
-                            format!(
-                                "attribute '{name}' of 'builtin_function_or_method' \
-                                 objects is not writable"
-                            ),
-                        )),
-                        _ => Err(PyError::named(
-                            "AttributeError",
-                            format!("'builtin_function_or_method' object has no attribute '{name}'"),
-                        )),
+                        "__name__" | "__qualname__" | "__doc__" => Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of 'builtin_function_or_method' \
+                                 objects is not writable")),
+                        _ => Err(pyrust_core::py_err!("AttributeError", "'builtin_function_or_method' object has no attribute '{name}'")),
                     }
                 }
             }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
                 // CPython raises AttributeError (not a generic RuntimeError) when
                 // you try to set any attribute on a bound method object.
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'method' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'method' object has no attribute '{name}'"))
             }
             ValueKind::PyModule(module) => {
                 // CPython 3.12: module attribute assignment always writes to
@@ -1582,10 +1512,7 @@ impl Interpreter {
                 // raises AttributeError("readonly attribute") for both
                 // `m.__dict__ = x` and `del m.__dict__` (symmetric).
                 if name == "__dict__" {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        "readonly attribute".to_string(),
-                    ));
+                    return Err(pyrust_core::py_err!("AttributeError", "readonly attribute"));
                 }
                 let module = Rc::clone(module);
                 module.borrow_mut().attrs.insert(name.to_string(), value);
@@ -1596,14 +1523,8 @@ impl Interpreter {
                 // C-level slots in CPython; the error message is "readonly attribute".
                 // Any other attribute gives "has no attribute" (issue #1807).
                 match name {
-                    "start" | "stop" | "step" => Err(PyError::named(
-                        "AttributeError",
-                        "readonly attribute".to_string(),
-                    )),
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'range' object has no attribute '{name}'"),
-                    )),
+                    "start" | "stop" | "step" => Err(pyrust_core::py_err!("AttributeError", "readonly attribute")),
+                    _ => Err(pyrust_core::py_err!("AttributeError", "'range' object has no attribute '{name}'")),
                 }
             }
             ValueKind::Generator(state_rc) => {
@@ -1617,10 +1538,7 @@ impl Interpreter {
                         let s = if let ValueKind::Str(s) = value.kind() {
                             s.to_string()
                         } else {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("{name} must be set to a string object"),
-                            ));
+                            return Err(pyrust_core::type_err!("{name} must be set to a string object"));
                         };
                         let mut borrow = state_rc.borrow_mut();
                         if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
@@ -1633,23 +1551,14 @@ impl Interpreter {
                         Ok(())
                     }
                     "gi_running" | "gi_yieldfrom" | "gi_frame" | "gi_code" => {
-                        Err(PyError::named(
-                            "AttributeError",
-                            format!("attribute '{name}' of 'generator' objects is not writable"),
-                        ))
+                        Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of 'generator' objects is not writable"))
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'generator' object has no attribute '{name}'"),
-                    )),
+                    _ => Err(pyrust_core::py_err!("AttributeError", "'generator' object has no attribute '{name}'")),
                 }
             }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'{type_name}' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object has no attribute '{name}'"))
             }
         }
     }
@@ -1704,10 +1613,7 @@ impl Interpreter {
             // user-defined class (even `class Foo(object): pass`) gets its
             // own PyClass Rc and is not ptr_eq to the singleton.
             if Rc::ptr_eq(&class, &object_class_singleton()) {
-                return Err(PyError::named(
-                    "AttributeError",
-                    format!("'object' object has no attribute '{name}'"),
-                ));
+                return Err(pyrust_core::py_err!("AttributeError", "'object' object has no attribute '{name}'"));
             }
             // PEP 3134: __cause__ and __context__ must be None or a
             // BaseException subclass instance.  __suppress_context__ must
@@ -1725,21 +1631,13 @@ impl Interpreter {
                             _ => false,
                         };
                         if !ok {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "exception {} must be None or derive from BaseException",
-                                    if name == "__cause__" { "cause" } else { "context" }
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("exception {} must be None or derive from BaseException",
+                                    if name == "__cause__" { "cause" } else { "context" }));
                         }
                     }
                     "__suppress_context__" => {
                         if !matches!(value.kind(), ValueKind::Bool(_)) {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "attribute value type must be bool",
-                            ));
+                            return Err(pyrust_core::type_err!("attribute value type must be bool"));
                         }
                     }
                     // Issue #1441: __traceback__ must be None or a traceback
@@ -1753,10 +1651,7 @@ impl Interpreter {
                             _ => false,
                         };
                         if !ok {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "__traceback__ must be a traceback or None".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("__traceback__ must be a traceback or None"));
                         }
                     }
                     _ => {}
@@ -1777,10 +1672,7 @@ impl Interpreter {
                         && !mro_has_unslotted_ancestor(&class)
                     {
                         let class_name = class.borrow().name.clone();
-                        return Err(PyError::named(
-                            "AttributeError",
-                            format!("'{class_name}' object has no attribute '{name}'"),
-                        ));
+                        return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
                     }
                 }
             }
@@ -1803,20 +1695,12 @@ impl Interpreter {
             // review on #463.
             if crate::interpreter::is_primitive_class(class) {
                 let n = class.borrow().name.clone();
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "cannot set '{name}' attribute of immutable type '{n}'"
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("cannot set '{name}' attribute of immutable type '{n}'"));
             }
             // __dict__ is a read-only descriptor on type objects — CPython
             // raises AttributeError on direct assignment.
             if name == "__dict__" {
-                return Err(PyError::named(
-                    "AttributeError",
-                    "attribute '__dict__' of 'type' objects is not writable".to_string(),
-                ));
+                return Err(pyrust_core::py_err!("AttributeError", "attribute '__dict__' of 'type' objects is not writable"));
             }
             // Issue #553: __qualname__ is a type-level descriptor on `type`
             // in CPython — assigning it updates the descriptor slot, not the
@@ -1837,14 +1721,9 @@ impl Interpreter {
                     None => {
                         let type_name =
                             pyrust_core::builtin_type_name(&value).into_owned();
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "can only assign string to {}.__qualname__, not '{}'",
+                        return Err(pyrust_core::type_err!("can only assign string to {}.__qualname__, not '{}'",
                                 class.borrow().name,
-                                type_name,
-                            ),
-                        ));
+                                type_name,));
                     }
                 }
             }
@@ -1886,10 +1765,7 @@ impl Interpreter {
                             }
                             Ok(())
                         }
-                        None => Err(PyError::named(
-                            "TypeError",
-                            format!("{name} must be set to a string object"),
-                        )),
+                        None => Err(pyrust_core::type_err!("{name} must be set to a string object")),
                     }
                 }
                 "__module__" => {
@@ -1915,12 +1791,7 @@ impl Interpreter {
                         Ok(())
                     } else {
                         let type_name = pyrust_core::builtin_type_name(&value);
-                        Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "__dict__ must be set to a dictionary, not a '{type_name}'"
-                            ),
-                        ))
+                        Err(pyrust_core::type_err!("__dict__ must be set to a dictionary, not a '{type_name}'"))
                     }
                 }
                 "__annotations__" => {
@@ -1937,10 +1808,7 @@ impl Interpreter {
                             Value::dict(indexmap::IndexMap::new());
                         Ok(())
                     } else {
-                        Err(PyError::named(
-                            "TypeError",
-                            "__annotations__ must be set to a dict object".to_string(),
-                        ))
+                        Err(pyrust_core::type_err!("__annotations__ must be set to a dict object"))
                     }
                 }
                 // CPython validates these slots and rejects arbitrary values.
@@ -1948,19 +1816,13 @@ impl Interpreter {
                 // validate the type and silently succeed for accepted values
                 // (pyrust is already in the "unset" state CPython would be
                 // in after the assignment).
-                "__code__" => Err(PyError::named(
-                    "TypeError",
-                    "__code__ must be set to a code object".to_string(),
-                )),
+                "__code__" => Err(pyrust_core::type_err!("__code__ must be set to a code object")),
                 "__defaults__" => {
                     // CPython accepts None or a tuple; anything else → TypeError.
                     if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
                         Ok(())
                     } else {
-                        Err(PyError::named(
-                            "TypeError",
-                            "__defaults__ must be set to a tuple object".to_string(),
-                        ))
+                        Err(pyrust_core::type_err!("__defaults__ must be set to a tuple object"))
                     }
                 }
                 "__kwdefaults__" => {
@@ -1968,26 +1830,17 @@ impl Interpreter {
                     if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
                         Ok(())
                     } else {
-                        Err(PyError::named(
-                            "TypeError",
-                            "__kwdefaults__ must be set to a dict object".to_string(),
-                        ))
+                        Err(pyrust_core::type_err!("__kwdefaults__ must be set to a dict object"))
                     }
                 }
-                "__globals__" | "__closure__" => Err(PyError::named(
-                    "AttributeError",
-                    "readonly attribute".to_string(),
-                )),
+                "__globals__" | "__closure__" => Err(pyrust_core::py_err!("AttributeError", "readonly attribute")),
                 "__func__"
                     if matches!(
                         func.kind,
                         UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
                     ) =>
                 {
-                    Err(PyError::named(
-                        "AttributeError",
-                        "readonly attribute".to_string(),
-                    ))
+                    Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
                 }
                 _ => {
                     // Arbitrary dynamic attribute — insert into the live dict,
@@ -2019,10 +1872,7 @@ impl Interpreter {
                 // AttributeError (matching CPython).
                 // `del f.__annotations__` resets the dict to empty (matching CPython).
                 match name {
-                    "__name__" | "__qualname__" => Err(PyError::named(
-                        "TypeError",
-                        format!("{name} must be set to a string object"),
-                    )),
+                    "__name__" | "__qualname__" => Err(pyrust_core::type_err!("{name} must be set to a string object")),
                     "__module__" => {
                         *func.module.borrow_mut() = Value::none();
                         Ok(())
@@ -2031,10 +1881,7 @@ impl Interpreter {
                         *func.doc.borrow_mut() = Value::none();
                         Ok(())
                     }
-                    "__dict__" => Err(PyError::named(
-                        "TypeError",
-                        "cannot delete __dict__".to_string(),
-                    )),
+                    "__dict__" => Err(pyrust_core::type_err!("cannot delete __dict__")),
                     "__annotations__" => {
                         // CPython allows `del f.__annotations__`; it resets the
                         // dict to a fresh empty dict (new object).
@@ -2043,24 +1890,15 @@ impl Interpreter {
                         Ok(())
                     }
                     // CPython-matched behaviour for validated-but-unimplemented slots.
-                    "__code__" => Err(PyError::named(
-                        "TypeError",
-                        "__code__ must be set to a code object".to_string(),
-                    )),
-                    "__globals__" | "__closure__" => Err(PyError::named(
-                        "AttributeError",
-                        "readonly attribute".to_string(),
-                    )),
+                    "__code__" => Err(pyrust_core::type_err!("__code__ must be set to a code object")),
+                    "__globals__" | "__closure__" => Err(pyrust_core::py_err!("AttributeError", "readonly attribute")),
                     "__func__"
                         if matches!(
                             func.kind,
                             UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
                         ) =>
                     {
-                        Err(PyError::named(
-                            "AttributeError",
-                            "readonly attribute".to_string(),
-                        ))
+                        Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
                     }
                     // CPython allows `del f.__defaults__` / `del f.__kwdefaults__`
                     // (they reset to None).  Since pyrust doesn't implement these slots
@@ -2084,10 +1922,7 @@ impl Interpreter {
                                 UserFunctionKind::ClassMethod => "classmethod",
                                 _ => "function",
                             };
-                            Err(PyError::named(
-                                "AttributeError",
-                                format!("'{type_name}' object has no attribute '{name}'"),
-                            ))
+                            Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object has no attribute '{name}'"))
                         }
                     }
                 }
@@ -2102,52 +1937,25 @@ impl Interpreter {
                 // CPython exactly.  (Mutable __module__ storage is a follow-up.)
                 if func_name.contains('.') {
                     match name {
-                        "__module__" => Err(PyError::named(
-                            "AttributeError",
-                            format!("'method_descriptor' object has no attribute '__module__'"),
-                        )),
-                        "__name__" => Err(PyError::named(
-                            "AttributeError",
-                            "readonly attribute".to_string(),
-                        )),
-                        "__qualname__" | "__doc__" => Err(PyError::named(
-                            "AttributeError",
-                            format!(
-                                "attribute '{name}' of 'method_descriptor' objects is not writable"
-                            ),
-                        )),
-                        _ => Err(PyError::named(
-                            "AttributeError",
-                            format!("'method_descriptor' object has no attribute '{name}'"),
-                        )),
+                        "__module__" => Err(pyrust_core::py_err!("AttributeError", "'method_descriptor' object has no attribute '__module__'")),
+                        "__name__" => Err(pyrust_core::py_err!("AttributeError", "readonly attribute")),
+                        "__qualname__" | "__doc__" => Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of 'method_descriptor' objects is not writable")),
+                        _ => Err(pyrust_core::py_err!("AttributeError", "'method_descriptor' object has no attribute '{name}'")),
                     }
                 } else {
                     match name {
                         "__module__" | "__name__" | "__qualname__" | "__doc__" => {
-                            Err(PyError::named(
-                                "AttributeError",
-                                format!(
-                                    "attribute '{name}' of 'builtin_function_or_method' \
-                                     objects is not writable"
-                                ),
-                            ))
+                            Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of 'builtin_function_or_method' \
+                                     objects is not writable"))
                         }
-                        _ => Err(PyError::named(
-                            "AttributeError",
-                            format!(
-                                "'builtin_function_or_method' object has no attribute '{name}'"
-                            ),
-                        )),
+                        _ => Err(pyrust_core::py_err!("AttributeError", "'builtin_function_or_method' object has no attribute '{name}'")),
                     }
                 }
             }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
                 // CPython raises AttributeError when deleting any attribute on a
                 // bound method object.
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'method' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'method' object has no attribute '{name}'"))
             }
             ValueKind::PyModule(module) => {
                 // CPython 3.12: module attribute deletion removes the key from
@@ -2159,10 +1967,7 @@ impl Interpreter {
                 // __dict__ is a read-only slot on module objects — CPython 3.12
                 // raises AttributeError("readonly attribute") for `del m.__dict__`.
                 if name == "__dict__" {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        "readonly attribute".to_string(),
-                    ));
+                    return Err(pyrust_core::py_err!("AttributeError", "readonly attribute"));
                 }
                 let module = Rc::clone(module);
                 // Peek before removing.  A Value::unset() in attrs is a
@@ -2207,10 +2012,7 @@ impl Interpreter {
                     }
                     _ => {}
                 }
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'module' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'module' object has no attribute '{name}'"))
             }
             ValueKind::Generator(_) => {
                 // CPython 3.12 symmetry with assign_attr: deleting __name__ or
@@ -2218,28 +2020,16 @@ impl Interpreter {
                 // The read-only gi_* attrs raise AttributeError "not writable".
                 // Anything else raises AttributeError "has no attribute".
                 match name {
-                    "__name__" | "__qualname__" => Err(PyError::named(
-                        "TypeError",
-                        format!("{name} must be set to a string object"),
-                    )),
+                    "__name__" | "__qualname__" => Err(pyrust_core::type_err!("{name} must be set to a string object")),
                     "gi_running" | "gi_yieldfrom" | "gi_frame" | "gi_code" => {
-                        Err(PyError::named(
-                            "AttributeError",
-                            format!("attribute '{name}' of 'generator' objects is not writable"),
-                        ))
+                        Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of 'generator' objects is not writable"))
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'generator' object has no attribute '{name}'"),
-                    )),
+                    _ => Err(pyrust_core::py_err!("AttributeError", "'generator' object has no attribute '{name}'")),
                 }
             }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'{type_name}' object has no attribute '{name}'"),
-                ))
+                Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object has no attribute '{name}'"))
             }
         }
     }
@@ -2306,7 +2096,7 @@ impl Interpreter {
             // CPython 3.12: BaseException.args is a C-level member descriptor
             // with no tp_delete slot; any deletion attempt raises TypeError.
             if name == "args" && class_chain_contains_name(&class, "BaseException") {
-                return Err(PyError::named("TypeError", "args may not be deleted"));
+                return Err(pyrust_core::type_err!("args may not be deleted"));
             }
             // `shift_remove` keeps the remaining entries in their
             // original insertion order so `vars(obj)` after `del obj.x`
@@ -2314,10 +2104,7 @@ impl Interpreter {
             // CPython raises AttributeError when the attribute is absent.
             if instance.borrow_mut().attrs.shift_remove(name).is_none() {
                 let class_name = instance.borrow().class.borrow().name.clone();
-                return Err(PyError::named(
-                    "AttributeError",
-                    format!("'{class_name}' object has no attribute '{name}'"),
-                ));
+                return Err(pyrust_core::py_err!("AttributeError", "'{class_name}' object has no attribute '{name}'"));
             }
             Ok(())
     }
@@ -2331,19 +2118,13 @@ impl Interpreter {
             // __dict__ is a read-only descriptor on type objects — CPython
             // raises AttributeError on `del C.__dict__`.
             if name == "__dict__" {
-                return Err(PyError::named(
-                    "AttributeError",
-                    "attribute '__dict__' of 'type' objects is not writable".to_string(),
-                ));
+                return Err(pyrust_core::py_err!("AttributeError", "attribute '__dict__' of 'type' objects is not writable"));
             }
             // Issue #553: __qualname__ is a type-level descriptor on `type`
             // in CPython — you cannot delete it.  CPython raises TypeError.
             if name == "__qualname__" {
                 let n = class.borrow().name.clone();
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("cannot delete '__qualname__' attribute of immutable type '{n}'"),
-                ));
+                return Err(pyrust_core::type_err!("cannot delete '__qualname__' attribute of immutable type '{n}'"));
             }
             // Issue #737: `del Cls.__annotations__` must raise
             // `AttributeError` when no annotations dict has been
@@ -2352,20 +2133,14 @@ impl Interpreter {
             if name == "__annotations__"
                 && !class.borrow().attrs.contains_key("__annotations__")
             {
-                return Err(PyError::named(
-                    "AttributeError",
-                    "__annotations__".to_string(),
-                ));
+                return Err(pyrust_core::py_err!("AttributeError", "__annotations__"));
             }
             // CPython raises AttributeError when the attribute is absent.
             {
                 let mut cls = class.borrow_mut();
                 if cls.attrs.shift_remove(name).is_none() {
                     let class_name = cls.name.clone();
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("type object '{class_name}' has no attribute '{name}'"),
-                    ));
+                    return Err(pyrust_core::py_err!("AttributeError", "type object '{class_name}' has no attribute '{name}'"));
                 }
                 let v = cls.mutation_version.get().wrapping_add(1);
                 cls.mutation_version.set(v);
@@ -2672,13 +2447,8 @@ impl Interpreter {
                 let result = invoke_class_method(self, method_val, self_val, &[])?;
                 return match result.kind() {
                     ValueKind::Bool(b) => Ok(b),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__bool__ should return bool, returned {}",
-                            pyrust_core::builtin_type_name(&result),
-                        ),
-                    )),
+                    _ => Err(pyrust_core::type_err!("__bool__ should return bool, returned {}",
+                            pyrust_core::builtin_type_name(&result),)),
                 };
             }
             // Fall back to __len__.
@@ -2691,35 +2461,21 @@ impl Interpreter {
                 let result = invoke_class_method(self, method_val, self_val, &[])?;
                 return match result.kind() {
                     ValueKind::Int(n) if n >= 0 => Ok(n != 0),
-                    ValueKind::Int(_) => Err(PyError::named(
-                        "ValueError",
-                        "__len__() should return >= 0".to_string(),
-                    )),
+                    ValueKind::Int(_) => Err(pyrust_core::value_err!("__len__() should return >= 0")),
                     ValueKind::Bool(b) => Ok(b),
                     ValueKind::BigInt(big) => match big.sign() {
-                        PyBigIntSign::Minus => Err(PyError::named(
-                            "ValueError",
-                            "__len__() should return >= 0".to_string(),
-                        )),
+                        PyBigIntSign::Minus => Err(pyrust_core::value_err!("__len__() should return >= 0")),
                         PyBigIntSign::NoSign => Ok(false),
                         PyBigIntSign::Plus => {
                             if big.to_usize().is_none() {
-                                Err(PyError::named(
-                                    "OverflowError",
-                                    "cannot fit 'int' into an index-sized integer".to_string(),
-                                ))
+                                Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer"))
                             } else {
                                 Ok(true)
                             }
                         }
                     },
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&result),
-                        ),
-                    )),
+                    _ => Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&result),)),
                 };
             }
             // Issue #1204: no __bool__ or __len__ in the user class.
@@ -2906,12 +2662,8 @@ pub(crate) fn dispatch_property_method(
     match kind {
         K::Get => {
             if args.is_empty() || args.len() > 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                    "expected 1 or 2 arguments, got {}",
-                    args.len()
-                )));
+                return Err(pyrust_core::type_err!("expected 1 or 2 arguments, got {}",
+                    args.len()));
             }
             // Class-level access (`obj is None`) returns the property itself,
             // but only when an owner is supplied: CPython rejects
@@ -2921,10 +2673,7 @@ pub(crate) fn dispatch_property_method(
             if obj.is_none() {
                 let owner = args.get(1).cloned().unwrap_or_else(Value::none);
                 if owner.is_none() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "__get__(None, None) is invalid".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("__get__(None, None) is invalid"));
                 }
                 return Ok(prop.clone());
             }
@@ -2937,12 +2686,8 @@ pub(crate) fn dispatch_property_method(
         }
         K::Set => {
             if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                    "expected 2 arguments, got {}",
-                    args.len()
-                )));
+                return Err(pyrust_core::type_err!("expected 2 arguments, got {}",
+                    args.len()));
             }
             let obj = args[0].clone();
             let value = args[1].clone();
@@ -2961,12 +2706,8 @@ pub(crate) fn dispatch_property_method(
         }
         K::Delete => {
             if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                    "expected 1 argument, got {}",
-                    args.len()
-                )));
+                return Err(pyrust_core::type_err!("expected 1 argument, got {}",
+                    args.len()));
             }
             let obj = args[0].clone();
             let fdel = pyrust_builtins::property::with_property(prop, |s| (*s.fdel).clone())
@@ -2991,10 +2732,7 @@ fn property_accessor_error(prop: &Value, instance: &Value, which: &str) -> PyErr
         Some(n) => format!("property '{n}'"),
         None => "property".to_string(),
     };
-    PyError::named(
-        "AttributeError",
-        format!("{prop_desc} of '{owner}' object has no {which}"),
-    )
+    pyrust_core::py_err!("AttributeError", "{prop_desc} of '{owner}' object has no {which}")
 }
 
 /// Handles both `property` (BuiltinObject with fget) and user-defined
@@ -3022,10 +2760,7 @@ fn call_descriptor_get(
                 Some(n) => format!("property '{n}'"),
                 None => "property".to_string(),
             };
-            Err(PyError::named(
-                "AttributeError",
-                format!("{prop_desc} of '{owner}' object has no getter"),
-            ))
+            Err(pyrust_core::py_err!("AttributeError", "{prop_desc} of '{owner}' object has no getter"))
         } else {
             let getter = (*fget).clone();
             interp.call_function_expanded(
@@ -3091,10 +2826,7 @@ fn call_descriptor_set(
                 Some(n) => format!("property '{n}'"),
                 None => "property".to_string(),
             };
-            Err(PyError::named(
-                "AttributeError",
-                format!("{prop_desc} of '{owner}' object has no setter"),
-            ))
+            Err(pyrust_core::py_err!("AttributeError", "{prop_desc} of '{owner}' object has no setter"))
         } else {
             let setter = (*fset).clone();
             interp.call_function_expanded(
@@ -3132,7 +2864,7 @@ fn call_descriptor_set(
         // descriptor and blocks assignment.  Raise AttributeError: __set__
         // (CPython's exact message) rather than falling through to instance dict.
         if lookup_class_attr(&desc_class, "__delete__").is_some() {
-            return Ok(Some(Err(PyError::named("AttributeError", "__set__"))));
+            return Ok(Some(Err(pyrust_core::py_err!("AttributeError", "__set__"))));
         }
     }
     Ok(None)
@@ -3165,10 +2897,7 @@ fn call_descriptor_delete(
                 Some(n) => format!("property '{n}'"),
                 None => "property".to_string(),
             };
-            Err(PyError::named(
-                "AttributeError",
-                format!("{prop_desc} of '{owner}' object has no deleter"),
-            ))
+            Err(pyrust_core::py_err!("AttributeError", "{prop_desc} of '{owner}' object has no deleter"))
         } else {
             let deleter = (*fdel).clone();
             interp.call_function_expanded(
@@ -3283,12 +3012,7 @@ fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
                         .map(|b| b.borrow().name.clone())
                         .collect();
                     let bases_str = base_names.join(", ");
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "Cannot create a consistent method resolution\norder (MRO) for bases {bases_str}"
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("Cannot create a consistent method resolution\norder (MRO) for bases {bases_str}"));
                 }
             };
 
@@ -3372,13 +3096,8 @@ impl Interpreter {
     ) -> Result<()> {
         let mod_val = vm_read(regs, mod_reg, num_locals)?;
         if !matches!(mod_val.kind(), ValueKind::PyModule(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "import * requires a module, got {}",
-                    pyrust_core::builtin_type_name(&mod_val),
-                ),
-            ));
+            return Err(pyrust_core::type_err!("import * requires a module, got {}",
+                    pyrust_core::builtin_type_name(&mod_val),));
         }
         let ValueKind::PyModule(m) = mod_val.kind() else {
             unreachable!()
@@ -3397,27 +3116,17 @@ impl Interpreter {
                             match item.as_str() {
                                 Some(s) => names.push(s.to_string()),
                                 None => {
-                                    err = Some(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "Item in {}.__all__ must be str, not {}",
+                                    err = Some(pyrust_core::type_err!("Item in {}.__all__ must be str, not {}",
                                             mod_name,
-                                            pyrust_core::builtin_type_name(item),
-                                        ),
-                                    ));
+                                            pyrust_core::builtin_type_name(item),));
                                     break;
                                 }
                             }
                         }
                     }
                     None => {
-                        err = Some(PyError::named(
-                            "TypeError",
-                            format!(
-                                "'{}' object does not support indexing",
-                                pyrust_core::builtin_type_name(all_val),
-                            ),
-                        ));
+                        err = Some(pyrust_core::type_err!("'{}' object does not support indexing",
+                                pyrust_core::builtin_type_name(all_val),));
                     }
                 }
                 drop(borrowed);

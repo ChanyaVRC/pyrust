@@ -37,27 +37,20 @@ pub fn next_fn_id() -> u64 {
 /// every position the constructor did — `Err(py_err!(...))`,
 /// `.ok_or_else(|| py_err!(...))`, a match arm, etc.
 ///
-/// Three forms:
-/// - `py_err!("TypeError", "fmt {x}")` — a string literal, always run through
-///   `format!`, so inline captures (`{x}`) and `{{`/`}}` escapes behave exactly
-///   as in the original `format!(…)` call sites.
-/// - `py_err!("TypeError", "fmt {}", arg)` — `format!`-style with explicit args.
-/// - `py_err!("TypeError", expr)` — a non-literal message expression already of
-///   type `impl Into<String>` (a `String`/`&str` variable); passed through
-///   verbatim, **not** formatted.
+/// Two arms, one rule: **a string-literal message is run through `format!`**
+/// (so inline captures `{x}` and explicit `"…{}", arg` both work, matching the
+/// original `format!(…)` sites); **any other expression is taken verbatim** as
+/// an `impl Into<String>` (a `String`/`&str` variable, or a literal that must
+/// not be formatted — pass it as `"text".to_string()`).
 ///
-/// In every case the message is only built when the macro is evaluated (i.e.
-/// on the error path).  Prefer the per-exception sugar macros ([`type_err!`],
-/// [`value_err!`], …) at call sites; this is the escape hatch for the rest.
+/// The message is only built on evaluation (the error path).  Prefer the
+/// per-exception sugar ([`type_err!`], [`value_err!`], …); this is the escape
+/// hatch for the rarer classes.
 #[macro_export]
 macro_rules! py_err {
-    ($cls:literal, $fmt:literal, $($arg:tt)+) => {
-        $crate::PyError::named($cls, format!($fmt, $($arg)+))
+    ($cls:literal, $fmt:literal $(, $($arg:tt)*)?) => {
+        $crate::PyError::named($cls, format!($fmt $(, $($arg)*)?))
     };
-    ($cls:literal, $msg:literal $(,)?) => {
-        $crate::PyError::named($cls, format!($msg))
-    };
-    // Non-literal message expression (precomputed String / &str / call).
     ($cls:literal, $msg:expr $(,)?) => {
         $crate::PyError::named($cls, $msg)
     };

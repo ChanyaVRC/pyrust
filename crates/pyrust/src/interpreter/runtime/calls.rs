@@ -56,10 +56,7 @@ impl Drop for CallDepthGuard {
 macro_rules! reject_kwargs {
     ($kw:expr, $($label:tt)+) => {
         if !$kw.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{}() takes no keyword arguments", format_args!($($label)+)),
-            ));
+            return Err(pyrust_core::type_err!("{}() takes no keyword arguments", format_args!($($label)+)));
         }
     };
 }
@@ -207,16 +204,10 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| PyError::named(
-                        "TypeError",
-                        "descriptor 'format' of 'str' object needs an argument".to_string(),
-                    ))?;
+                    .ok_or_else(|| pyrust_core::type_err!("descriptor 'format' of 'str' object needs an argument"))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "descriptor 'format' requires a 'str' object".to_string(),
-                    )),
+                    _ => return Err(pyrust_core::type_err!("descriptor 'format' requires a 'str' object")),
                 };
                 let mut positional: Vec<Value> = Vec::new();
                 let mut keyword: Vec<(String, Value)> = Vec::new();
@@ -254,19 +245,11 @@ impl Interpreter {
                     positional_args.len()
                 };
                 if n_payload == 0 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "float.fromhex() takes exactly one argument (0 given)",
-                    ));
+                    return Err(pyrust_core::type_err!("float.fromhex() takes exactly one argument (0 given)"));
                 }
                 if n_payload > 1 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "float.fromhex() takes exactly one argument ({} given)",
-                            n_payload
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("float.fromhex() takes exactly one argument ({} given)",
+                            n_payload));
                 }
                 let s_val = if positional_args.is_empty() {
                     args.first().map(|a| a.value.clone())
@@ -274,18 +257,12 @@ impl Interpreter {
                     positional_args.first().map(|a| a.value.clone())
                 }
                 .ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "float.fromhex() takes exactly one argument (0 given)",
-                    )
+                    pyrust_core::type_err!("float.fromhex() takes exactly one argument (0 given)")
                 })?;
                 let s = match s_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
                     _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "bad argument type for built-in operation",
-                        ))
+                        return Err(pyrust_core::type_err!("bad argument type for built-in operation"))
                     }
                 };
                 pyrust_builtins::float::fromhex(&s).map(Value::float)
@@ -303,19 +280,11 @@ impl Interpreter {
                     .first()
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("descriptor '{method}' of 'generator' object needs an argument"),
-                        )
+                        pyrust_core::type_err!("descriptor '{method}' of 'generator' object needs an argument")
                     })?;
                 if !matches!(self_val.kind(), ValueKind::Generator(_)) {
                     let actual = pyrust_core::builtin_type_name(&self_val);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "descriptor '{method}' requires a 'generator' object but received a '{actual}'",
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("descriptor '{method}' requires a 'generator' object but received a '{actual}'",));
                 }
                 let pos: Vec<Value> = args[1..].iter().filter(|a| a.name.is_none()).map(|a| a.value.clone()).collect();
                 self.call_generator_method(self_val, method, pos)
@@ -331,21 +300,13 @@ impl Interpreter {
                     .first()
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!("descriptor '{method}' of 'float' object needs an argument"),
-                        )
+                        pyrust_core::type_err!("descriptor '{method}' of 'float' object needs an argument")
                     })?;
                 let f = match self_val.kind() {
                     ValueKind::Float(f) => f,
                     _ => {
                         let actual = pyrust_core::builtin_type_name(&self_val);
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "descriptor '{method}' for 'float' objects doesn't apply to a '{actual}' object",
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("descriptor '{method}' for 'float' objects doesn't apply to a '{actual}' object",));
                     }
                 };
                 let pos: Vec<Value> = args[1..]
@@ -386,13 +347,8 @@ impl Interpreter {
                     .find(|a| a.name.is_none())
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            format!(
-                                "descriptor '__class_getitem__' of '{type_name}' object \
-                                 needs an argument"
-                            ),
-                        )
+                        pyrust_core::type_err!("descriptor '__class_getitem__' of '{type_name}' object \
+                                 needs an argument")
                     })?;
                 let is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
                 let type_args = if is_tuple { index } else { Value::tuple(vec![index]) };
@@ -405,29 +361,18 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| PyError::named(
-                        "TypeError",
-                        "descriptor 'format_map' of 'str' object needs an argument".to_string(),
-                    ))?;
+                    .ok_or_else(|| pyrust_core::type_err!("descriptor 'format_map' of 'str' object needs an argument"))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "descriptor 'format_map' requires a 'str' object".to_string(),
-                    )),
+                    _ => return Err(pyrust_core::type_err!("descriptor 'format_map' requires a 'str' object")),
                 };
                 // format_map takes exactly one positional argument (the mapping).
                 let rest = &args[1..];
                 let kw_count = rest.iter().filter(|a| a.name.is_some()).count();
                 let pos_count = rest.iter().filter(|a| a.name.is_none()).count();
                 if pos_count != 1 || kw_count != 0 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "str.format_map() takes exactly one argument ({} given)",
-                            pos_count + kw_count
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("str.format_map() takes exactly one argument ({} given)",
+                            pos_count + kw_count));
                 }
                 let mapping = rest[0].value.clone();
                 self.format_str_template_map(&template, mapping)
@@ -455,16 +400,10 @@ impl Interpreter {
                     positional_args.len()
                 };
                 if n_payload == 0 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "bytes.fromhex() takes exactly one argument (0 given)",
-                    ));
+                    return Err(pyrust_core::type_err!("bytes.fromhex() takes exactly one argument (0 given)"));
                 }
                 if n_payload > 1 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("bytes.fromhex() takes exactly one argument ({n_payload} given)"),
-                    ));
+                    return Err(pyrust_core::type_err!("bytes.fromhex() takes exactly one argument ({n_payload} given)"));
                 }
                 let s_val = if positional_args.is_empty() {
                     args.first().map(|a| a.value.clone())
@@ -472,21 +411,13 @@ impl Interpreter {
                     positional_args.first().map(|a| a.value.clone())
                 }
                 .ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "bytes.fromhex() takes exactly one argument (0 given)",
-                    )
+                    pyrust_core::type_err!("bytes.fromhex() takes exactly one argument (0 given)")
                 })?;
                 let s = match s_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
                     _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "fromhex() argument must be str, not {}",
-                                pyrust_core::builtin_type_name(&s_val)
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("fromhex() argument must be str, not {}",
+                                pyrust_core::builtin_type_name(&s_val)));
                     }
                 };
                 pyrust_builtins::bytes::bytes_fromhex(&s).map(Value::bytes)
@@ -511,16 +442,10 @@ impl Interpreter {
                     positional_args.len()
                 };
                 if n_payload == 0 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "bytearray.fromhex() takes exactly one argument (0 given)".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("bytearray.fromhex() takes exactly one argument (0 given)"));
                 }
                 if n_payload > 1 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("bytearray.fromhex() takes exactly one argument ({n_payload} given)"),
-                    ));
+                    return Err(pyrust_core::type_err!("bytearray.fromhex() takes exactly one argument ({n_payload} given)"));
                 }
                 let s_val = if positional_args.is_empty() {
                     args.first().map(|a| a.value.clone())
@@ -528,21 +453,13 @@ impl Interpreter {
                     positional_args.first().map(|a| a.value.clone())
                 }
                 .ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "bytearray.fromhex() takes exactly one argument (0 given)".to_string(),
-                    )
+                    pyrust_core::type_err!("bytearray.fromhex() takes exactly one argument (0 given)")
                 })?;
                 let s = match s_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
                     _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "fromhex() argument must be str, not {}",
-                                pyrust_core::builtin_type_name(&s_val)
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("fromhex() argument must be str, not {}",
+                                pyrust_core::builtin_type_name(&s_val)));
                     }
                 };
                 pyrust_builtins::bytes::bytes_fromhex(&s)
@@ -608,10 +525,7 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())
-                    .ok_or_else(|| PyError::named(
-                        "TypeError",
-                        format!("descriptor '{method}' of '{type_name}' object needs an argument"),
-                    ))?;
+                    .ok_or_else(|| pyrust_core::type_err!("descriptor '{method}' of '{type_name}' object needs an argument"))?;
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
                 for a in &args[1..] {
@@ -663,12 +577,7 @@ impl Interpreter {
                 };
                 if !kind_ok {
                     let actual = pyrust_core::builtin_type_name(&self_val);
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "descriptor '{method}' for '{type_name}' objects doesn't apply to a '{actual}' object",
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("descriptor '{method}' for '{type_name}' objects doesn't apply to a '{actual}' object",));
                 }
                 match type_name {
                     "int" => {
@@ -699,10 +608,7 @@ impl Interpreter {
                                 let snapshot = self_val
                                     .list_with(|items| items.clone())
                                     .ok_or_else(|| {
-                                        PyError::named(
-                                            "TypeError",
-                                            "list.index receiver is not a list".to_string(),
-                                        )
+                                        pyrust_core::type_err!("list.index receiver is not a list")
                                     })?;
                                 if method == "index" {
                                     self.call_seq_index(snapshot, &pos, "list")
@@ -798,10 +704,7 @@ impl Interpreter {
                 // CPython's descriptor slot wrappers are positional-only; a
                 // keyword argument raises TypeError rather than being bound.
                 if args.iter().any(|a| a.name.is_some()) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "this method takes no keyword arguments".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("this method takes no keyword arguments"));
                 }
                 let pos: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
                 dispatch_property_method(self, &prop, kind, &pos)
@@ -828,19 +731,11 @@ impl Interpreter {
                     _ => "property.deleter",
                 };
                 if args.iter().any(|a| a.name.is_some()) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("{accessor_name}() takes no keyword arguments"),
-                    ));
+                    return Err(pyrust_core::type_err!("{accessor_name}() takes no keyword arguments"));
                 }
                 if args.len() != 1 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{accessor_name}() takes exactly one argument ({} given)",
-                            args.len()
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("{accessor_name}() takes exactly one argument ({} given)",
+                            args.len()));
                 }
                 let new_fn = args[0].value.clone();
                 let (fget_val, fset_val, fdel_val) = match slot {
@@ -877,10 +772,7 @@ impl Interpreter {
                 if matches!(instance.kind(), ValueKind::None)
                     && matches!(owner.kind(), ValueKind::None)
                 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "__get__(None, None) is invalid".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("__get__(None, None) is invalid"));
                 }
                 let class_rc = match owner.kind() {
                     ValueKind::PyClass(c) => Some(Rc::clone(c)),
@@ -906,10 +798,7 @@ impl Interpreter {
                 if matches!(instance.kind(), ValueKind::None)
                     && matches!(owner.kind(), ValueKind::None)
                 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "__get__(None, None) is invalid".to_string(),
-                    ));
+                    return Err(pyrust_core::type_err!("__get__(None, None) is invalid"));
                 }
                 // Prefer wrapped_func to preserve object identity when
                 // `sm = staticmethod(fn)` and `sm.__get__(obj, cls) is fn`.
@@ -933,22 +822,12 @@ impl Interpreter {
                 // Reject keyword arguments — CPython's method_descriptor does not
                 // accept them.
                 if args.iter().any(|a| a.name.is_some()) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{}() takes no keyword arguments",
-                            attr_name
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("{}() takes no keyword arguments",
+                            attr_name));
                 }
                 if args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "descriptor '{}' of '{}' object needs an argument",
-                            attr_name, _class_name
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("descriptor '{}' of '{}' object needs an argument",
+                            attr_name, _class_name));
                 }
                 // Re-dispatch as attribute access on the first argument.
                 let remaining = &args[1..];
@@ -974,18 +853,10 @@ impl Interpreter {
                         args,
                     );
                 }
-                Err(PyError::named(
-                    "TypeError",
-                    format!("'{}' object is not callable", class.borrow().name),
-                ))
+                Err(pyrust_core::type_err!("'{}' object is not callable", class.borrow().name))
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object is not callable",
-                    pyrust_core::builtin_type_name(&function)
-                ),
-            )),
+            _ => Err(pyrust_core::type_err!("'{}' object is not callable",
+                    pyrust_core::builtin_type_name(&function))),
         }
     }
 
@@ -1106,10 +977,7 @@ impl Interpreter {
                 reject_kwargs!(kw, "wrapper __iter__");
                 if !pos.is_empty() {
                     let n = pos.len();
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("expected 0 arguments, got {n}"),
-                    ));
+                    return Err(pyrust_core::type_err!("expected 0 arguments, got {n}"));
                 }
                 let iter_arg = ExpandedCallArg {
                     name: None,
@@ -1154,10 +1022,7 @@ impl Interpreter {
                     let template = match receiver.kind() {
                         ValueKind::Str(s) => s.to_string(),
                         _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "descriptor 'format' requires a 'str' object".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("descriptor 'format' requires a 'str' object"));
                         }
                     };
                     let keyword: Vec<(String, Value)> = kw
@@ -1215,10 +1080,7 @@ impl Interpreter {
                         let snapshot = receiver
                             .list_with(|items| items.clone())
                             .ok_or_else(|| {
-                                PyError::named(
-                                    "TypeError",
-                                    "list.index receiver is not a list".to_string(),
-                                )
+                                pyrust_core::type_err!("list.index receiver is not a list")
                             })?;
                         if method == "index" {
                             self.call_seq_index(snapshot, &args_vec, "list")
@@ -1395,11 +1257,8 @@ impl Interpreter {
                                             let snapshot = backing
                                                 .list_with(|items| items.clone())
                                                 .ok_or_else(|| {
-                                                    PyError::named(
-                                                        "TypeError",
-                                                        "list.index receiver is not a list"
-                                                            .to_string(),
-                                                    )
+                                                    pyrust_core::type_err!("list.index receiver is not a list"
+                                                            .to_string())
                                                 })?;
                                             if method == "index" {
                                                 self.call_seq_index(
@@ -1555,10 +1414,7 @@ impl Interpreter {
                             // Requires exactly one positional arg that is a type,
                             // with no extra positional or keyword arguments.
                             if pos.is_empty() {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "unbound method type.mro() needs an argument".to_string(),
-                                ));
+                                return Err(pyrust_core::type_err!("unbound method type.mro() needs an argument"));
                             }
                             // pos[0] is the self (type) argument.
                             let maybe_class = match pos[0].kind() {
@@ -1569,24 +1425,14 @@ impl Interpreter {
                                 Some(c) => c,
                                 None => {
                                     let type_name = pyrust_core::builtin_type_name(&pos[0]).to_string();
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "descriptor 'mro' for 'type' objects doesn't apply to a '{type_name}' object",
-                                        ),
-                                    ));
+                                    return Err(pyrust_core::type_err!("descriptor 'mro' for 'type' objects doesn't apply to a '{type_name}' object",));
                                 }
                             };
                             // After resolving self, no extra positional args or kwargs allowed.
                             reject_kwargs!(kw, "type.mro");
                             if pos.len() > 1 {
                                 let extra = pos.len() - 1;
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "type.mro() takes no arguments ({extra} given)",
-                                    ),
-                                ));
+                                return Err(pyrust_core::type_err!("type.mro() takes no arguments ({extra} given)",));
                             }
                             target
                         } else if pos.is_empty() && kw.is_empty() {
@@ -1595,20 +1441,12 @@ impl Interpreter {
                         } else if !kw.is_empty() {
                             // Keyword arguments are never accepted.
                             let class_name = class.borrow().name.clone();
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("{class_name}.mro() takes no keyword arguments"),
-                            ));
+                            return Err(pyrust_core::type_err!("{class_name}.mro() takes no keyword arguments"));
                         } else {
                             // Too many positional arguments.
                             let n = pos.len();
                             let class_name = class.borrow().name.clone();
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{class_name}.mro() takes no arguments ({n} given)",
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("{class_name}.mro() takes no arguments ({n} given)",));
                         };
                         Ok(Value::list(class_mro_items(&target_class)?))
                     }
@@ -1623,12 +1461,7 @@ impl Interpreter {
                         reject_kwargs!(kw, "{class_name}.__subclasses__");
                         let n_pos = pos.len();
                         if n_pos > 0 {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{class_name}.__subclasses__() takes no arguments ({n_pos} given)",
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("{class_name}.__subclasses__() takes no arguments ({n_pos} given)",));
                         }
                         Ok(Value::list(class_direct_subclasses(&class)))
                     }
@@ -1640,19 +1473,11 @@ impl Interpreter {
                     "fromkeys" => {
                         reject_kwargs!(kw, "{}.fromkeys", class.borrow().name);
                         if pos.is_empty() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "fromkeys expected at least 1 argument, got 0".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("fromkeys expected at least 1 argument, got 0"));
                         }
                         if pos.len() > 2 {
                             let n = pos.len();
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "fromkeys expected at most 2 arguments, got {n}",
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("fromkeys expected at most 2 arguments, got {n}",));
                         }
                         let default_val =
                             pos.get(1).cloned().unwrap_or_else(Value::none);
@@ -1698,10 +1523,7 @@ impl Interpreter {
                     "__len__" => {
                         let extra = args_vec.len() + kw.len();
                         if extra != 0 {
-                            Err(PyError::named(
-                                "TypeError",
-                                format!("expected 0 arguments, got {extra}"),
-                            ))
+                            Err(pyrust_core::type_err!("expected 0 arguments, got {extra}"))
                         } else {
                             use crate::value::range_len;
                             Ok(Value::int(range_len(start, stop, step)))
@@ -1709,13 +1531,8 @@ impl Interpreter {
                     }
                     "count" => {
                         if args_vec.len() != 1 || !kw.is_empty() {
-                            Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "range.count() takes exactly one argument ({} given)",
-                                    args_vec.len() + kw.len()
-                                ),
-                            ))
+                            Err(pyrust_core::type_err!("range.count() takes exactly one argument ({} given)",
+                                    args_vec.len() + kw.len()))
                         } else {
                             let contained = self.range_contains_value(
                                 start, stop, step, &args_vec[0],
@@ -1725,13 +1542,8 @@ impl Interpreter {
                     }
                     "index" => {
                         if args_vec.len() != 1 || !kw.is_empty() {
-                            Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "range.index() takes exactly one argument ({} given)",
-                                    args_vec.len() + kw.len()
-                                ),
-                            ))
+                            Err(pyrust_core::type_err!("range.index() takes exactly one argument ({} given)",
+                                    args_vec.len() + kw.len()))
                         } else {
                             use crate::value::PyToPrimitive;
                             let v = &args_vec[0];
@@ -1759,10 +1571,7 @@ impl Interpreter {
                                 _ => None,
                             };
                             match vi_opt {
-                                None => Err(PyError::named(
-                                    "ValueError",
-                                    "sequence.index(x): x not in sequence".to_string(),
-                                )),
+                                None => Err(pyrust_core::value_err!("sequence.index(x): x not in sequence")),
                                 Some(vi) => {
                                     let contained = self.range_contains_value(
                                         start, stop, step, v,
@@ -1770,19 +1579,13 @@ impl Interpreter {
                                     if contained {
                                         Ok(Value::int((vi - start) / step))
                                     } else {
-                                        Err(PyError::named(
-                                            "ValueError",
-                                            format!("{} is not in range", v.repr()),
-                                        ))
+                                        Err(pyrust_core::value_err!("{} is not in range", v.repr()))
                                     }
                                 }
                             }
                         }
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'range' object has no attribute '{method}'"),
-                    )),
+                    _ => Err(pyrust_core::py_err!("AttributeError", "'range' object has no attribute '{method}'")),
                 }
             }
             // Issue #1413: generator bound-methods (__iter__, __next__,
@@ -1795,10 +1598,7 @@ impl Interpreter {
                 let args_vec: Vec<Value> = pos.drain(..).collect();
                 self.call_generator_method(gen_val, method, args_vec)
             }
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
-            )),
+            _ => Err(pyrust_core::type_err!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver))),
             },
         };
         // Restore the positional-args buffer.  For borrow arms (Int,
@@ -1975,10 +1775,7 @@ impl Interpreter {
                 // demand and terminates on IndexError/StopIteration.
                 self.make_getitem_iter(Rc::clone(&inst_rc))?
             } else {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("'{}' object is not iterable", class.borrow().name),
-                ));
+                return Err(pyrust_core::type_err!("'{}' object is not iterable", class.borrow().name));
             };
             let mut items = Vec::new();
             // Cache the __next__ method once for PyInstance iterators to avoid a
@@ -1986,10 +1783,7 @@ impl Interpreter {
             if let ValueKind::PyInstance(iter_inst) = iterator.kind() {
                 let iter_class = Rc::clone(&iter_inst.borrow().class);
                 let Some(next_method) = lookup_class_attr(&iter_class, "__next__") else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' object is not an iterator", iter_class.borrow().name),
-                    ));
+                    return Err(pyrust_core::type_err!("'{}' object is not an iterator", iter_class.borrow().name));
                 };
                 loop {
                     match invoke_class_method(self, next_method.clone(), iterator.clone(), &[]) {
@@ -2026,10 +1820,7 @@ impl Interpreter {
     pub(crate) fn make_getitem_iter(&self, inst_rc: Rc<RefCell<PyInstance>>) -> Result<Value> {
         let class = Rc::clone(&inst_rc.borrow().class);
         let method_val = lookup_class_attr(&class, "__getitem__").ok_or_else(|| {
-            PyError::named(
-                "TypeError",
-                format!("'{}' object is not iterable", class.borrow().name),
-            )
+            pyrust_core::type_err!("'{}' object is not iterable", class.borrow().name)
         })?;
         let obj = Value::py_instance(inst_rc);
         Ok(Value::generator(Box::new(GetItemIter {
@@ -2328,15 +2119,9 @@ impl Interpreter {
                     match self.call_next(&iter_val, None) {
                         Ok(_) => {
                             if short_idx == 0 {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    zip_longer_message(j, count),
-                                ));
+                                return Err(pyrust_core::value_err!(zip_longer_message(j, count)));
                             } else {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    zip_shorter_message(short_idx, count),
-                                ));
+                                return Err(pyrust_core::value_err!(zip_shorter_message(short_idx, count)));
                             }
                         }
                         Err(e) if e.class_name_is("StopIteration") => {}
@@ -2344,10 +2129,7 @@ impl Interpreter {
                     }
                 }
                 if short_idx > 0 {
-                    return Err(PyError::named(
-                        "ValueError",
-                        zip_shorter_message(short_idx, count),
-                    ));
+                    return Err(pyrust_core::value_err!(zip_shorter_message(short_idx, count)));
                 }
             }
             return Ok(None);
@@ -2369,7 +2151,7 @@ impl Interpreter {
                         return if let Some(d) = default {
                             Ok(d)
                         } else {
-                            Err(PyError::named("StopIteration", String::new()))
+                            Err(pyrust_core::py_err!("StopIteration", String::new()))
                         };
                     }
                     let item = native.items[native.pos].clone();
@@ -2393,7 +2175,7 @@ impl Interpreter {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {
-                                Err(PyError::named("StopIteration", String::new()))
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
                             }
                         }
                     };
@@ -2413,7 +2195,7 @@ impl Interpreter {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {
-                                Err(PyError::named("StopIteration", String::new()))
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
                             }
                         }
                     };
@@ -2430,7 +2212,7 @@ impl Interpreter {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {
-                                Err(PyError::named("StopIteration", String::new()))
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
                             }
                         }
                     };
@@ -2447,7 +2229,7 @@ impl Interpreter {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {
-                                Err(PyError::named("StopIteration", String::new()))
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
                             }
                         }
                     };
@@ -2465,7 +2247,7 @@ impl Interpreter {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {
-                                Err(PyError::named("StopIteration", String::new()))
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
                             }
                         }
                     };
@@ -2482,7 +2264,7 @@ impl Interpreter {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {
-                                Err(PyError::named("StopIteration", String::new()))
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
                             }
                         }
                     };
@@ -2503,7 +2285,7 @@ impl Interpreter {
                     let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                         PyError::Raised(instantiate_exception(cls, vec![]))
                     } else {
-                        PyError::named("StopIteration", String::new())
+                        pyrust_core::py_err!("StopIteration", String::new())
                     };
                     Err(exc)
                 };
@@ -2544,13 +2326,8 @@ impl Interpreter {
                     Err(e) => Err(e),
                 }
             } else {
-                Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object is not an iterator",
-                        class.borrow().name
-                    ),
-                ))
+                Err(pyrust_core::type_err!("'{}' object is not an iterator",
+                        class.borrow().name))
             }
         } else if let ValueKind::BuiltinObject { ops, state } = val.kind()
             && ops.is_iterable()
@@ -2561,15 +2338,12 @@ impl Interpreter {
                     if let Some(d) = default {
                         Ok(d)
                     } else {
-                        Err(PyError::named("StopIteration", String::new()))
+                        Err(pyrust_core::py_err!("StopIteration", String::new()))
                     }
                 }
             }
         } else {
-            Err(PyError::named(
-                "TypeError",
-                format!("'{}' object is not an iterator", value_type_name_str(&val)),
-            ))
+            Err(pyrust_core::type_err!("'{}' object is not an iterator", value_type_name_str(&val)))
         }
     }
 
@@ -2579,10 +2353,7 @@ impl Interpreter {
         for arg in args {
             if let Some(name) = arg.name.as_deref() {
                 if !matches!(name, "sep" | "end" | "file" | "flush") {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' is an invalid keyword argument for print()", name),
-                    ));
+                    return Err(pyrust_core::type_err!("'{}' is an invalid keyword argument for print()", name));
                 }
             }
         }
@@ -2655,14 +2426,9 @@ impl Interpreter {
                         "arguments",
                     )
                 };
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+                return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
                         function.name,
-                        total_positional_given,
-                    ),
-                ));
+                        total_positional_given,));
             }
             let mut bound_args: Vec<Option<Value>> = vec![None; function.params.len()];
             for (index, value) in bound_prefix.iter().enumerate() {
@@ -2700,13 +2466,8 @@ impl Interpreter {
                         continue;
                     }
                     if bound_args[param_index].is_some() {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{}() got multiple values for argument '{}'",
-                                function.name, name
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("{}() got multiple values for argument '{}'",
+                                function.name, name));
                     }
                     bound_args[param_index] = Some(value);
                 } else {
@@ -2738,34 +2499,21 @@ impl Interpreter {
                                     "arguments",
                                 )
                             };
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+                        return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
                                 function.name,
-                                total_positional_given,
-                            ),
-                        ));
+                                total_positional_given,));
                     }
                     bound_args[positional_index] = Some(value);
                     positional_index += 1;
                 }
             }
             if !posonly_violations.is_empty() {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                return Err(pyrust_core::type_err!("{}() got some positional-only arguments passed as keyword arguments: '{}'",
                         function.name,
-                        posonly_violations.join(", ")
-                    ),
-                ));
+                        posonly_violations.join(", ")));
             }
             if let Some(name) = first_unknown_keyword {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{}() got an unexpected keyword argument '{}'", function.name, name),
-                ));
+                return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'", function.name, name));
             }
             // Resolve defaults: fill any still-empty bound_args slots in-place.
             // Collect all missing required positional and keyword-only args before
@@ -2791,25 +2539,15 @@ impl Interpreter {
                 let count = missing_positional.len();
                 let arg_word = if count == 1 { "argument" } else { "arguments" };
                 let names_str = format_missing_args(&missing_positional);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{}() missing {count} required positional {arg_word}: {names_str}",
-                        fn_display_name,
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("{}() missing {count} required positional {arg_word}: {names_str}",
+                        fn_display_name,));
             }
             if !missing_kwonly.is_empty() {
                 let count = missing_kwonly.len();
                 let arg_word = if count == 1 { "argument" } else { "arguments" };
                 let names_str = format_missing_args(&missing_kwonly);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{}() missing {count} required keyword-only {arg_word}: {names_str}",
-                        fn_display_name,
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("{}() missing {count} required keyword-only {arg_word}: {names_str}",
+                        fn_display_name,));
             }
 
             // Memoization: build cache key by borrowing from bound_args — no extra clone.
@@ -2871,13 +2609,8 @@ impl Interpreter {
                                 e.values.insert(param.name.clone(), val);
                             } else if let Some(&reg) = function.local_index.get(&param.name) {
                                 if reg as usize >= num_regs {
-                                    return Err(PyError::named(
-                                        "SystemError",
-                                        format!(
-                                            "parameter '{}' register index {} out of range (num_regs={})",
-                                            param.name, reg, num_regs
-                                        ),
-                                    ));
+                                    return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
+                                            param.name, reg, num_regs));
                                 }
                                 regs[reg as usize] = val;
                             }
@@ -2889,13 +2622,8 @@ impl Interpreter {
                         let val = slot.take().unwrap();
                         if let Some(&reg) = function.local_index.get(&param.name) {
                             if reg as usize >= num_regs {
-                                return Err(PyError::named(
-                                    "SystemError",
-                                    format!(
-                                        "parameter '{}' register index {} out of range (num_regs={})",
-                                        param.name, reg, num_regs
-                                    ),
-                                ));
+                                return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
+                                        param.name, reg, num_regs));
                             }
                             regs[reg as usize] = val;
                         }
@@ -2907,13 +2635,8 @@ impl Interpreter {
                 if !code.cell_vars.contains(&function.name)
                     && let Some(&slot) = function.local_index.get(&function.name) {
                         if slot as usize >= num_regs {
-                            return Err(PyError::named(
-                                "SystemError",
-                                format!(
-                                    "self-reference register index {} out of range (num_regs={})",
-                                    slot, num_regs
-                                ),
-                            ));
+                            return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
+                                    slot, num_regs));
                         }
                         regs[slot as usize] = Value::user_function(Rc::clone(&function));
                     }
@@ -3073,13 +2796,8 @@ impl Interpreter {
                         "arguments",
                     )
                 };
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                        function.name, positional_vals.len(),
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+                        function.name, positional_vals.len(),));
             }
         }
 
@@ -3139,25 +2857,15 @@ impl Interpreter {
             let count = missing_positional.len();
             let arg_word = if count == 1 { "argument" } else { "arguments" };
             let names_str = format_missing_args(&missing_positional);
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "{}() missing {count} required positional {arg_word}: {names_str}",
-                    fn_display_name,
-                ),
-            ));
+            return Err(pyrust_core::type_err!("{}() missing {count} required positional {arg_word}: {names_str}",
+                    fn_display_name,));
         }
         if !missing_kwonly.is_empty() {
             let count = missing_kwonly.len();
             let arg_word = if count == 1 { "argument" } else { "arguments" };
             let names_str = format_missing_args(&missing_kwonly);
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "{}() missing {count} required keyword-only {arg_word}: {names_str}",
-                    fn_display_name,
-                ),
-            ));
+            return Err(pyrust_core::type_err!("{}() missing {count} required keyword-only {arg_word}: {names_str}",
+                    fn_display_name,));
         }
 
         if !has_kwargs {
@@ -3175,25 +2883,15 @@ impl Interpreter {
                 .map(|(name, _)| name.as_str())
                 .collect();
             if !posonly_violations.is_empty() {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                return Err(pyrust_core::type_err!("{}() got some positional-only arguments passed as keyword arguments: '{}'",
                         function.name,
-                        posonly_violations.join(", ")
-                    ),
-                ));
+                        posonly_violations.join(", ")));
             }
             // Second pass: check for entirely unexpected keyword arguments.
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{}() got an unexpected keyword argument '{}'",
-                            function.name, name
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'",
+                            function.name, name));
                 }
             }
         }
@@ -3208,13 +2906,8 @@ impl Interpreter {
                 if !code.cell_vars.contains(&param.name)
                     && let Some(&slot) = function.local_index.get(&param.name) {
                         if (slot as usize) >= num_regs {
-                            return Err(PyError::named(
-                                "SystemError",
-                                format!(
-                                    "parameter '{}' register index {} out of range (num_regs={})",
-                                    param.name, slot, num_regs
-                                ),
-                            ));
+                            return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
+                                    param.name, slot, num_regs));
                         }
                         regs[slot as usize] = val.clone();
                     }
@@ -3223,13 +2916,8 @@ impl Interpreter {
             if !code.cell_vars.contains(&function.name)
                 && let Some(&slot) = function.local_index.get(&function.name) {
                     if (slot as usize) >= num_regs {
-                        return Err(PyError::named(
-                            "SystemError",
-                            format!(
-                                "self-reference register index {} out of range (num_regs={})",
-                                slot, num_regs
-                            ),
-                        ));
+                        return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
+                                slot, num_regs));
                     }
                     regs[slot as usize] = Value::user_function(Rc::clone(&function));
                 }
@@ -3371,51 +3059,28 @@ impl Interpreter {
     /// Matches CPython 3.12's `UnicodeDecodeError_init` checks.
     fn validate_unicode_decode_args(args: &[Value]) -> Result<()> {
         if args.len() != 5 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("function takes exactly 5 arguments ({} given)", args.len()),
-            ));
+            return Err(pyrust_core::type_err!("function takes exactly 5 arguments ({} given)", args.len()));
         }
         if !matches!(args[0].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 1 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[0])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 1 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[0])));
         }
         if !matches!(args[1].kind(), ValueKind::Bytes(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "a bytes-like object is required, not '{}'",
-                    pyrust_core::builtin_type_name(&args[1])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[1])));
         }
         for idx in [2usize, 3usize] {
             match args[idx].kind() {
                 ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
                 _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&args[idx])
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&args[idx])));
                 }
             }
         }
         if !matches!(args[4].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 5 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[4])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 5 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[4])));
         }
         Ok(())
     }
@@ -3424,51 +3089,28 @@ impl Interpreter {
     /// Matches CPython 3.12's `UnicodeEncodeError_init` checks.
     fn validate_unicode_encode_args(args: &[Value]) -> Result<()> {
         if args.len() != 5 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("function takes exactly 5 arguments ({} given)", args.len()),
-            ));
+            return Err(pyrust_core::type_err!("function takes exactly 5 arguments ({} given)", args.len()));
         }
         if !matches!(args[0].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 1 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[0])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 1 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[0])));
         }
         if !matches!(args[1].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 2 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[1])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 2 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[1])));
         }
         for idx in [2usize, 3usize] {
             match args[idx].kind() {
                 ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
                 _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&args[idx])
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&args[idx])));
                 }
             }
         }
         if !matches!(args[4].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 5 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[4])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 5 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[4])));
         }
         Ok(())
     }
@@ -3477,42 +3119,24 @@ impl Interpreter {
     /// Matches CPython 3.12's `UnicodeTranslateError_init` checks.
     fn validate_unicode_translate_args(args: &[Value]) -> Result<()> {
         if args.len() != 4 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("function takes exactly 4 arguments ({} given)", args.len()),
-            ));
+            return Err(pyrust_core::type_err!("function takes exactly 4 arguments ({} given)", args.len()));
         }
         if !matches!(args[0].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 1 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[0])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 1 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[0])));
         }
         for idx in [1usize, 2usize] {
             match args[idx].kind() {
                 ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
                 _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&args[idx])
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&args[idx])));
                 }
             }
         }
         if !matches!(args[3].kind(), ValueKind::Str(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "argument 4 must be str, not {}",
-                    pyrust_core::builtin_type_name(&args[3])
-                ),
-            ));
+            return Err(pyrust_core::type_err!("argument 4 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[3])));
         }
         Ok(())
     }
@@ -3573,13 +3197,10 @@ impl Interpreter {
                                 args,
                             )?;
                             if !result.is_none() {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    &format!(
+                                return Err(pyrust_core::type_err!(&format!(
                                         "__init__() should return None, not '{}'",
                                         pyrust_core::builtin_type_name(&result),
-                                    ),
-                                ));
+                                    )));
                             }
                         }
                     }
@@ -3604,13 +3225,10 @@ impl Interpreter {
             let instance = instantiate_exception(Rc::clone(&class), values);
             let result = invoke_class_method(self, init_val, instance.clone(), args)?;
             if !result.is_none() {
-                return Err(PyError::named(
-                    "TypeError",
-                    &format!(
+                return Err(pyrust_core::type_err!(&format!(
                         "__init__() should return None, not '{}'",
                         pyrust_core::builtin_type_name(&result),
-                    ),
-                ));
+                    )));
             }
             return Ok(instance);
         }
@@ -3637,24 +3255,14 @@ impl Interpreter {
             // Error messages always say "NameError()" regardless of the actual subclass.
             let kw_count = args.iter().filter(|a| a.name.is_some()).count();
             if kw_count > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "NameError() takes at most 1 keyword argument ({kw_count} given)"
-                    ),
-                ));
+                return Err(pyrust_core::type_err!("NameError() takes at most 1 keyword argument ({kw_count} given)"));
             }
             for arg in args {
                 match arg.name.as_deref() {
                     None => values.push(arg.value.clone()),
                     Some("name") => kw_name = Some(arg.value.clone()),
                     Some(other) => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "'{other}' is an invalid keyword argument for NameError()"
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for NameError()"));
                     }
                 }
             }
@@ -3668,12 +3276,7 @@ impl Interpreter {
                     Some("name") => kw_name = Some(arg.value.clone()),
                     Some("path") => kw_path = Some(arg.value.clone()),
                     Some(other) => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "'{other}' is an invalid keyword argument for ImportError()"
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for ImportError()"));
                     }
                 }
             }
@@ -3695,37 +3298,25 @@ impl Interpreter {
             match items_opt {
                 None => {
                     // args[1] is not a sequence — CPython raises TypeError
-                    return Err(PyError::named(
-                        "TypeError",
-                        &format!(
+                    return Err(pyrust_core::type_err!(&format!(
                             "'{}' object is not iterable",
                             pyrust_core::builtin_type_name(second)
-                        ),
-                    ));
+                        )));
                 }
                 Some(ref items) if items.len() < 4 => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        &format!(
+                    return Err(pyrust_core::type_err!(&format!(
                             "function takes at least 4 arguments ({} given)",
                             items.len()
-                        ),
-                    ));
+                        )));
                 }
                 Some(ref items) if items.len() == 5 => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "end_offset must be provided when end_lineno is provided",
-                    ));
+                    return Err(pyrust_core::type_err!("end_offset must be provided when end_lineno is provided"));
                 }
                 Some(ref items) if items.len() > 6 => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        &format!(
+                    return Err(pyrust_core::type_err!(&format!(
                             "function takes at most 6 arguments ({} given)",
                             items.len()
-                        ),
-                    ));
+                        )));
                 }
                 _ => {}
             }
@@ -3753,24 +3344,18 @@ impl Interpreter {
         if is_base_exception_group {
             // Validate arg count.
             if values.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    &format!(
+                return Err(pyrust_core::type_err!(&format!(
                         "BaseExceptionGroup.__new__() takes exactly 2 arguments ({} given)",
                         values.len()
-                    ),
-                ));
+                    )));
             }
             // Validate message is a str.
             // CPython: "BaseExceptionGroup.__new__() argument 1 must be str, not <type>"
             if !matches!(values[0].kind(), ValueKind::Str(_)) {
-                return Err(PyError::named(
-                    "TypeError",
-                    &format!(
+                return Err(pyrust_core::type_err!(&format!(
                         "BaseExceptionGroup.__new__() argument 1 must be str, not {}",
                         pyrust_core::builtin_type_name(&values[0])
-                    ),
-                ));
+                    )));
             }
             // Validate exceptions is a non-empty sequence.
             let exc_items: Option<Vec<Value>> = values[1]
@@ -3788,26 +3373,14 @@ impl Interpreter {
                 // checked and produces ValueError; everything else is TypeError.
                 if let ValueKind::Str(s) = values[1].kind() {
                     if s.is_empty() {
-                        return Err(PyError::named(
-                            "ValueError",
-                            "second argument (exceptions) must be a non-empty sequence",
-                        ));
+                        return Err(pyrust_core::value_err!("second argument (exceptions) must be a non-empty sequence"));
                     }
-                    return Err(PyError::named(
-                        "ValueError",
-                        "Item 0 of second argument (exceptions) is not an exception",
-                    ));
+                    return Err(pyrust_core::value_err!("Item 0 of second argument (exceptions) is not an exception"));
                 }
-                return Err(PyError::named(
-                    "TypeError",
-                    "second argument (exceptions) must be a sequence",
-                ));
+                return Err(pyrust_core::type_err!("second argument (exceptions) must be a sequence"));
             };
             if exc_items.is_empty() {
-                return Err(PyError::named(
-                    "ValueError",
-                    "second argument (exceptions) must be a non-empty sequence",
-                ));
+                return Err(pyrust_core::value_err!("second argument (exceptions) must be a non-empty sequence"));
             }
             // Validate each exception is a BaseException instance.
             for (i, exc_val) in exc_items.iter().enumerate() {
@@ -3817,13 +3390,10 @@ impl Interpreter {
                     false
                 };
                 if !ok {
-                    return Err(PyError::named(
-                        "ValueError",
-                        &format!(
+                    return Err(pyrust_core::value_err!(&format!(
                             "Item {} of second argument (exceptions) is not an exception",
                             i
-                        ),
-                    ));
+                        )));
                 }
             }
             // If ExceptionGroup, all exceptions must be Exception (not just BaseException).
@@ -3833,10 +3403,7 @@ impl Interpreter {
                 for exc_val in &exc_items {
                     if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
                         if !class_chain_contains_name(&inst_rc.borrow().class, "Exception") {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "Cannot nest BaseExceptions in an ExceptionGroup",
-                            ));
+                            return Err(pyrust_core::type_err!("Cannot nest BaseExceptions in an ExceptionGroup"));
                         }
                     }
                 }
@@ -3937,13 +3504,8 @@ impl Interpreter {
                     dispatch(self, &combined)?
                 }
                 _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__new__ must be a callable, not '{}'",
-                            pyrust_core::builtin_type_name(&new_val)
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("__new__ must be a callable, not '{}'",
+                            pyrust_core::builtin_type_name(&new_val)));
                 }
             };
 
@@ -3965,13 +3527,10 @@ impl Interpreter {
                                 args,
                             )?;
                             if !result.is_none() {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    &format!(
+                                return Err(pyrust_core::type_err!(&format!(
                                         "__init__() should return None, not '{}'",
                                         pyrust_core::builtin_type_name(&result),
-                                    ),
-                                ));
+                                    )));
                             }
                         }
                     }
@@ -4006,13 +3565,10 @@ impl Interpreter {
                                     args,
                                 )?;
                                 if !result.is_none() {
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        &format!(
+                                    return Err(pyrust_core::type_err!(&format!(
                                             "__init__() should return None, not '{}'",
                                             pyrust_core::builtin_type_name(&result),
-                                        ),
-                                    ));
+                                        )));
                                 }
                             }
                         }
@@ -4092,13 +3648,10 @@ impl Interpreter {
                     args,
                 )?;
                 if !result.is_none() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        &format!(
+                    return Err(pyrust_core::type_err!(&format!(
                             "__init__() should return None, not '{}'",
                             pyrust_core::builtin_type_name(&result),
-                        ),
-                    ));
+                        )));
                 }
             }
             Some(_) => {
@@ -4139,22 +3692,12 @@ impl Interpreter {
     pub(crate) fn call_range_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
         reject_keyword_args_expanded("range", args)?;
         if args.is_empty() {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "range expected at least 1 argument, got {}",
-                    args.len()
-                ),
-            ));
+            return Err(pyrust_core::type_err!("range expected at least 1 argument, got {}",
+                    args.len()));
         }
         if args.len() > 3 {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "range expected at most 3 arguments, got {}",
-                    args.len()
-                ),
-            ));
+            return Err(pyrust_core::type_err!("range expected at most 3 arguments, got {}",
+                    args.len()));
         }
 
         let mut ints = Vec::with_capacity(args.len());
@@ -4171,10 +3714,7 @@ impl Interpreter {
         };
 
         if step == 0 {
-            return Err(PyError::named(
-                "ValueError",
-                "range() arg 3 must not be zero".to_string(),
-            ));
+            return Err(pyrust_core::value_err!("range() arg 3 must not be zero"));
         }
 
         Ok(Value::range(start, stop, step))
@@ -4228,10 +3768,7 @@ impl Interpreter {
                     j += 1;
                 }
                 if depth != 0 {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "Single '{' encountered in format string".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("Single '{' encountered in format string".to_string()));
                 }
                 let field = &template[i + 1..j];
                 i = j + 1;
@@ -4247,10 +3784,7 @@ impl Interpreter {
                 let (head, rest) = split_head_and_accessors(field_name);
                 // format_map does not support positional fields.
                 if head.is_empty() || head.parse::<usize>().is_ok() {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "Format string contains positional fields".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("Format string contains positional fields"));
                 }
                 // Look up the named key in the mapping via __getitem__.
                 let base =
@@ -4262,10 +3796,7 @@ impl Interpreter {
                     Some('s') => Value::string(self.render_value_as_str(&value)?),
                     Some('a') => Value::string(ascii_repr_interp(self, &value)?),
                     Some(c) => {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("Unknown conversion specifier {c}"),
-                        ));
+                        return Err(pyrust_core::value_err!("Unknown conversion specifier {c}"));
                     }
                     None => value,
                 };
@@ -4293,10 +3824,7 @@ impl Interpreter {
                                     .iter()
                                     .position(|&b| b == b'}')
                                     .ok_or_else(|| {
-                                        PyError::named(
-                                            "ValueError",
-                                            "Single '{' encountered in format string".to_string(),
-                                        )
+                                        pyrust_core::value_err!("Single '{' encountered in format string".to_string())
                                     })?
                                     + ss;
                                 // PEP 3101: inner fields cannot have a nested spec; if the
@@ -4309,10 +3837,7 @@ impl Interpreter {
                                     .map(|(name, _)| name)
                                     .unwrap_or(inner_raw);
                                 if inner.is_empty() || inner.parse::<usize>().is_ok() {
-                                    return Err(PyError::named(
-                                        "ValueError",
-                                        "Format string contains positional fields".to_string(),
-                                    ));
+                                    return Err(pyrust_core::value_err!("Format string contains positional fields"));
                                 }
                                 let sv = self.eval_index(
                                     &mapping,
@@ -4321,10 +3846,7 @@ impl Interpreter {
                                 spec_out.push_str(&sv.to_py_str());
                             }
                             b'}' => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "Single '}' encountered in format string".to_string(),
-                                ));
+                                return Err(pyrust_core::value_err!("Single '}' encountered in format string".to_string()));
                             }
                             _ => {
                                 let ch_s = si;
@@ -4348,10 +3870,7 @@ impl Interpreter {
                     out.push('}');
                     i += 2;
                 } else {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "Single '}' encountered in format string".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("Single '}' encountered in format string".to_string()));
                 }
             } else {
                 let ch_start = i;
@@ -4395,10 +3914,7 @@ impl Interpreter {
         match tag {
             Tag::Int(v) => Ok(v),
             Tag::BigIntI64(Some(v)) => Ok(v),
-            Tag::BigIntI64(None) => Err(PyError::named(
-                "OverflowError",
-                "Python int too large to convert to C ssize_t".to_string(),
-            )),
+            Tag::BigIntI64(None) => Err(pyrust_core::overflow_err!("Python int too large to convert to C ssize_t")),
             Tag::Instance(inst_rc) => {
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__index__") {
@@ -4415,31 +3931,16 @@ impl Interpreter {
                     if result_ok {
                         self.coerce_range_arg(result)
                     } else {
-                        Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "__index__ returned non-int (type {})",
-                                value_type_name_str(&result),
-                            ),
-                        ))
+                        Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
+                                value_type_name_str(&result),))
                     }
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            value_type_name_str(&Value::py_instance(inst_rc)),
-                        ),
-                    ))
+                    Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(&Value::py_instance(inst_rc)),))
                 }
             }
-            Tag::Other => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    pyrust_core::builtin_type_name(&val),
-                ),
-            )),
+            Tag::Other => Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(&val),)),
         }
     }
 
@@ -4484,25 +3985,14 @@ impl Interpreter {
                     if result_ok {
                         Ok(result)
                     } else {
-                        Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "__index__ returned non-int (type {})",
-                                value_type_name_str(&result),
-                            ),
-                        ))
+                        Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
+                                value_type_name_str(&result),))
                     }
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        "slice indices must be integers or have an __index__ method".to_string(),
-                    ))
+                    Err(pyrust_core::type_err!("slice indices must be integers or have an __index__ method"))
                 }
             }
-            Tag::Other => Err(PyError::named(
-                "TypeError",
-                "slice indices must be integers or have an __index__ method".to_string(),
-            )),
+            Tag::Other => Err(pyrust_core::type_err!("slice indices must be integers or have an __index__ method")),
         }
     }
 
@@ -4596,7 +4086,7 @@ impl Interpreter {
         type_name: &'static str,
     ) -> Result<Value> {
         let target = args.first().ok_or_else(|| {
-            PyError::named("TypeError", "index expected at least 1 argument, got 0")
+            pyrust_core::type_err!("index expected at least 1 argument, got 0")
         })?;
         let len = items.len();
         let start = match args.get(1).map(|v| v.kind()) {
@@ -4643,7 +4133,7 @@ impl Interpreter {
             let repr_str = render_instance_repr(self, target)?;
             format!("{repr_str} is not in {type_name}")
         };
-        Err(PyError::named("ValueError", msg))
+        Err(pyrust_core::value_err!(msg))
     }
 
     /// `list.count(target)` / `tuple.count(target)` with correct `__eq__` dispatch.
@@ -4657,10 +4147,7 @@ impl Interpreter {
         type_name: &'static str,
     ) -> Result<Value> {
         let target = args.first().ok_or_else(|| {
-            PyError::named(
-                "TypeError",
-                format!("{type_name}.count() takes exactly one argument (0 given)"),
-            )
+            pyrust_core::type_err!("{type_name}.count() takes exactly one argument (0 given)")
         })?;
         if Self::seq_search_needs_dispatch(target, &items) {
             let mut n: i64 = 0;
@@ -4718,28 +4205,17 @@ impl Interpreter {
                     if result_ok {
                         Ok(result)
                     } else {
-                        Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "__index__ returned non-int (type {})",
-                                value_type_name_str(&result),
-                            ),
-                        ))
+                        Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
+                                value_type_name_str(&result),))
                     }
                 } else {
                     let type_name = value_type_name_str(&Value::py_instance(inst_rc));
-                    Err(PyError::named(
-                        "TypeError",
-                        seq_index_type_error(label, &type_name),
-                    ))
+                    Err(pyrust_core::type_err!(seq_index_type_error(label, &type_name)))
                 }
             }
             Tag::Other => {
                 let type_name = value_type_name_str(&val);
-                Err(PyError::named(
-                    "TypeError",
-                    seq_index_type_error(label, &type_name),
-                ))
+                Err(pyrust_core::type_err!(seq_index_type_error(label, &type_name)))
             }
         }
     }
@@ -4858,10 +4334,7 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
     let width: usize = if pos > width_start {
         let raw: String = chars[width_start..pos].iter().collect();
         raw.parse::<usize>().map_err(|_| {
-            PyError::named(
-                "ValueError",
-                "Too many decimal digits in format string".to_string(),
-            )
+            pyrust_core::value_err!("Too many decimal digits in format string")
         })?
     } else {
         0
@@ -4886,17 +4359,11 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
         if pos > prec_start {
             let raw: String = chars[prec_start..pos].iter().collect();
             Some(raw.parse::<usize>().map_err(|_| {
-                PyError::named(
-                    "ValueError",
-                    "Too many decimal digits in format string".to_string(),
-                )
+                pyrust_core::value_err!("Too many decimal digits in format string")
             })?)
         } else {
             // '.' with no digits is a syntax error in CPython.
-            return Err(PyError::named(
-                "ValueError",
-                "Format specifier missing precision".to_string(),
-            ));
+            return Err(pyrust_core::value_err!("Format specifier missing precision"));
         }
     } else {
         None
@@ -4912,10 +4379,7 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
     };
 
     if pos != len {
-        return Err(PyError::named(
-            "ValueError",
-            "Invalid format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Invalid format specifier"));
     }
 
     Ok(FormatSpec {
@@ -4970,50 +4434,28 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
         'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t)),
         'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => format_float_value(value, fs, Some(t)),
         's' => format_as_string(value, fs),
-        _ => Err(PyError::named(
-            "ValueError",
-            format!(
-                "Unknown format code '{t}' for object of type '{}'",
-                value_type_name_str(value)
-            ),
-        )),
+        _ => Err(pyrust_core::value_err!("Unknown format code '{t}' for object of type '{}'",
+                value_type_name_str(value))),
     }
 }
 
 fn format_as_string(value: &Value, fs: &FormatSpec) -> Result<String> {
     // Reject numeric-only options on strings, matching CPython.
     if matches!(fs.type_char, Some('s')) && !matches!(value.kind(), ValueKind::Str(_)) {
-        return Err(PyError::named(
-            "ValueError",
-            format!(
-                "Unknown format code 's' for object of type '{}'",
-                value_type_name_str(value)
-            ),
-        ));
+        return Err(pyrust_core::value_err!("Unknown format code 's' for object of type '{}'",
+                value_type_name_str(value)));
     }
     if fs.sign.is_some() {
-        return Err(PyError::named(
-            "ValueError",
-            "Sign not allowed in string format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Sign not allowed in string format specifier"));
     }
     if fs.alt {
-        return Err(PyError::named(
-            "ValueError",
-            "Alternate form (#) not allowed in string format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Alternate form (#) not allowed in string format specifier"));
     }
     if fs.grouping.is_some() {
-        return Err(PyError::named(
-            "ValueError",
-            "Cannot specify ',' or '_' with 's'.".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Cannot specify ',' or '_' with 's'."));
     }
     if matches!(fs.align, Some('=')) {
-        return Err(PyError::named(
-            "ValueError",
-            "'=' alignment not allowed in string format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("'=' alignment not allowed in string format specifier"));
     }
 
     let raw = match value.kind() {
@@ -5094,21 +4536,13 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         }
         _ => {
             let code = type_char.unwrap_or('d');
-            return Err(PyError::named(
-                "ValueError",
-                format!(
-                    "Unknown format code '{code}' for object of type '{}'",
-                    value_type_name_str(value)
-                ),
-            ));
+            return Err(pyrust_core::value_err!("Unknown format code '{code}' for object of type '{}'",
+                    value_type_name_str(value)));
         }
     };
 
     if fs.precision.is_some() {
-        return Err(PyError::named(
-            "ValueError",
-            "Precision not allowed in integer format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Precision not allowed in integer format specifier"));
     }
 
     let t = type_char.unwrap_or('d');
@@ -5116,22 +4550,13 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
     // 'c': render as the unicode character.
     if t == 'c' {
         if fs.sign.is_some() || fs.alt || fs.grouping.is_some() {
-            return Err(PyError::named(
-                "ValueError",
-                "Cannot specify ',' or '_', sign, or '#' with 'c'.".to_string(),
-            ));
+            return Err(pyrust_core::value_err!("Cannot specify ',' or '_', sign, or '#' with 'c'."));
         }
         if n < 0 || n > 0x10FFFF {
-            return Err(PyError::named(
-                "OverflowError",
-                "%c arg not in range(0x110000)".to_string(),
-            ));
+            return Err(pyrust_core::overflow_err!("%c arg not in range(0x110000)"));
         }
         let ch = char::from_u32(n as u32).ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "%c arg not in range(0x110000)".to_string(),
-            )
+            pyrust_core::overflow_err!("%c arg not in range(0x110000)")
         })?;
         let raw = ch.to_string();
         return Ok(pad_value(&raw, fs, '<', fs.fill));
@@ -5149,10 +4574,7 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
             _ => false,
         };
         if !ok {
-            return Err(PyError::named(
-                "ValueError",
-                format!("Cannot specify '{g}' with '{effective_t}'."),
-            ));
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with '{effective_t}'."));
         }
     }
 
@@ -5195,10 +4617,7 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
 /// `u64`-based `int_body` to avoid narrowing large values.
 fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
     if fs.precision.is_some() {
-        return Err(PyError::named(
-            "ValueError",
-            "Precision not allowed in integer format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Precision not allowed in integer format specifier"));
     }
 
     let t = type_char.unwrap_or('d');
@@ -5206,20 +4625,14 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
     // 'c': a BigInt is almost certainly out of range, but check correctly.
     if t == 'c' {
         if fs.sign.is_some() || fs.alt || fs.grouping.is_some() {
-            return Err(PyError::named(
-                "ValueError",
-                "Cannot specify ',' or '_', sign, or '#' with 'c'.".to_string(),
-            ));
+            return Err(pyrust_core::value_err!("Cannot specify ',' or '_', sign, or '#' with 'c'."));
         }
         // A BigInt is by definition outside the C long range (> i64::MAX or
         // < i64::MIN), so it can never be a valid chr() argument.  CPython
         // raises "Python int too large to convert to C long" for such values
         // rather than the "%c arg not in range(0x110000)" it uses for
         // in-range negative integers.
-        return Err(PyError::named(
-            "OverflowError",
-            "Python int too large to convert to C long".to_string(),
-        ));
+        return Err(pyrust_core::overflow_err!("Python int too large to convert to C long"));
     }
 
     // 'n' = same as 'd' for now (no locale-aware grouping).
@@ -5234,10 +4647,7 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
             _ => false,
         };
         if !ok {
-            return Err(PyError::named(
-                "ValueError",
-                format!("Cannot specify '{g}' with '{effective_t}'."),
-            ));
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with '{effective_t}'."));
         }
     }
 
@@ -5272,10 +4682,7 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
     // value here means the user supplied an unsupported type code.
     if matches!(value.kind(), ValueKind::Complex(_, _)) {
         let code = type_char.unwrap_or('\0');
-        return Err(PyError::named(
-            "ValueError",
-            format!("Unknown format code '{code}' for object of type 'complex'"),
-        ));
+        return Err(pyrust_core::value_err!("Unknown format code '{code}' for object of type 'complex'"));
     }
 
     // str.__format__ rejects float format codes with ValueError (matching
@@ -5284,13 +4691,8 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
     // intercept str values here before the conversion attempt.
     if matches!(value.kind(), ValueKind::Str(_)) {
         let code = type_char.unwrap_or('\0');
-        return Err(PyError::named(
-            "ValueError",
-            format!(
-                "Unknown format code '{code}' for object of type '{}'",
-                value_type_name_str(value)
-            ),
-        ));
+        return Err(pyrust_core::value_err!("Unknown format code '{code}' for object of type '{}'",
+                value_type_name_str(value)));
     }
 
     let f = fmt_value_to_float(value)?;
@@ -5411,16 +4813,10 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
 /// because the leading `(` makes them ill-defined for Complex.
 fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
     if fs.zero_pad && !fs.fill_explicit {
-        return Err(PyError::named(
-            "ValueError",
-            "Zero padding is not allowed in complex format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Zero padding is not allowed in complex format specifier"));
     }
     if matches!(fs.align, Some('=')) {
-        return Err(PyError::named(
-            "ValueError",
-            "'=' alignment flag is not allowed in complex format specifier".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("'=' alignment flag is not allowed in complex format specifier"));
     }
     // Sign / precision / grouping / alt with no type code would require
     // re-rendering the components; not supported here.  Reject explicitly so
@@ -5430,10 +4826,7 @@ fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
         || fs.precision.is_some()
         || fs.grouping.is_some()
     {
-        return Err(PyError::named(
-            "ValueError",
-            "Format specifier missing precision".to_string(),
-        ));
+        return Err(pyrust_core::value_err!("Format specifier missing precision"));
     }
 
     // Use the canonical Complex repr (mirrors CPython's `format(c)`).
@@ -5705,17 +5098,11 @@ fn fmt_value_to_float(value: &Value) -> Result<f64> {
         return if f.is_finite() {
             Ok(f)
         } else {
-            Err(PyError::named(
-                "OverflowError",
-                "int too large to convert to float".to_string(),
-            ))
+            Err(pyrust_core::overflow_err!("int too large to convert to float"))
         };
     }
     try_value_to_float(value).ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!("must be real number, not {}", value_type_name_str(value)),
-        )
+        pyrust_core::type_err!("must be real number, not {}", value_type_name_str(value))
     })
 }
 
@@ -6075,13 +5462,8 @@ impl Interpreter {
                 )?;
                 return match result.kind() {
                     ValueKind::Str(s) => Ok(s.to_string()),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__str__ returned non-string (type {})",
-                            pyrust_core::builtin_type_name(&result)
-                        ),
-                    )),
+                    _ => Err(pyrust_core::type_err!("__str__ returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result))),
                 };
             }
         }
@@ -6111,13 +5493,8 @@ impl Interpreter {
                 )?;
                 return match result.kind() {
                     ValueKind::Str(s) => Ok(s.to_string()),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__repr__ returned non-string (type {})",
-                            pyrust_core::builtin_type_name(&result)
-                        ),
-                    )),
+                    _ => Err(pyrust_core::type_err!("__repr__ returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result))),
                 };
             }
         }
@@ -6217,13 +5594,8 @@ impl Interpreter {
                 return if is_str_or_str_subclass(&result) {
                     Ok(result)
                 } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__format__ must return a str, not {}",
-                            value_type_name_str(&result),
-                        ),
-                    ))
+                    Err(pyrust_core::type_err!("__format__ must return a str, not {}",
+                            value_type_name_str(&result),))
                 };
             }
         }
@@ -6236,10 +5608,7 @@ impl Interpreter {
             Ok(Value::string(self.render_value_as_str(value)?))
         } else {
             let type_name = value_type_name_str(value);
-            Err(PyError::named(
-                "TypeError",
-                format!("unsupported format string passed to {}.__format__", type_name),
-            ))
+            Err(pyrust_core::type_err!("unsupported format string passed to {}.__format__", type_name))
         }
     }
 
@@ -6281,10 +5650,7 @@ fn format_str_template(
                 j += 1;
             }
             if depth != 0 {
-                return Err(PyError::named(
-                    "ValueError",
-                    "Single '{' encountered in format string".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("Single '{' encountered in format string".to_string()));
             }
             let field = &template[i + 1..j];
             i = j + 1;
@@ -6302,30 +5668,18 @@ fn format_str_template(
             let base = if head.is_empty() {
                 // Auto-numbered field
                 if saw_manual {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "cannot switch from manual field specification to automatic field numbering".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("cannot switch from manual field specification to automatic field numbering"));
                 }
                 let Some(idx) = auto_idx else { unreachable!() };
                 auto_idx = Some(idx + 1);
-                positional.get(idx).cloned().ok_or_else(|| PyError::named(
-                    "IndexError",
-                    format!("Replacement index {idx} out of range for positional args tuple"),
-                ))?
+                positional.get(idx).cloned().ok_or_else(|| pyrust_core::index_err!("Replacement index {idx} out of range for positional args tuple"))?
             } else if let Ok(n) = head.parse::<usize>() {
                 if auto_idx.is_some() && auto_idx != Some(0) {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "cannot switch from automatic field numbering to manual field specification".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("cannot switch from automatic field numbering to manual field specification"));
                 }
                 saw_manual = true;
                 auto_idx = None;
-                positional.get(n).cloned().ok_or_else(|| PyError::named(
-                    "IndexError",
-                    format!("Replacement index {n} out of range for positional args tuple"),
-                ))?
+                positional.get(n).cloned().ok_or_else(|| pyrust_core::index_err!("Replacement index {n} out of range for positional args tuple"))?
             } else {
                 keyword
                     .iter()
@@ -6344,10 +5698,7 @@ fn format_str_template(
                 Some('s') => Value::string(self.render_value_as_str(&value)?),
                 Some('a') => Value::string(ascii_repr_interp(self, &value)?),
                 Some(c) => {
-                    return Err(PyError::named(
-                        "ValueError",
-                        format!("Unknown conversion specifier {c}"),
-                    ));
+                    return Err(pyrust_core::value_err!("Unknown conversion specifier {c}"));
                 }
                 None => value,
             };
@@ -6378,10 +5729,7 @@ fn format_str_template(
                 out.push('}');
                 i += 2;
             } else {
-                return Err(PyError::named(
-                    "ValueError",
-                    "Single '}' encountered in format string".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("Single '}' encountered in format string".to_string()));
             }
         } else {
             // Walk one UTF-8 char: advance past the start byte, then skip any
@@ -6452,10 +5800,7 @@ fn apply_field_accessors(
             let end = bytes
                 .iter()
                 .position(|&b| b == b']')
-                .ok_or_else(|| PyError::named(
-                    "ValueError",
-                    "Missing ']' in format field accessor".to_string(),
-                ))?;
+                .ok_or_else(|| pyrust_core::value_err!("Missing ']' in format field accessor"))?;
             let key_str = &rest[1..end];
             rest = &rest[end + 1..];
             // Per CPython 3.12: a subscript that parses as a non-negative
@@ -6466,10 +5811,7 @@ fn apply_field_accessors(
             // Py_ssize_t overflow check in _PyObject_GetMethod).
             let key = if let Ok(idx) = key_str.parse::<u64>() {
                 if idx > i64::MAX as u64 {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "Too many decimal digits in format string".to_string(),
-                    ));
+                    return Err(pyrust_core::value_err!("Too many decimal digits in format string"));
                 }
                 Value::int(idx as i64)
             } else {
@@ -6477,10 +5819,7 @@ fn apply_field_accessors(
             };
             value = interp.eval_index(&value, key)?;
         } else {
-            return Err(PyError::named(
-                "ValueError",
-                format!("unexpected character in format field: '{}'", &rest[..1]),
-            ));
+            return Err(pyrust_core::value_err!("unexpected character in format field: '{}'", &rest[..1]));
         }
     }
     Ok(value)
@@ -6522,10 +5861,7 @@ fn expand_format_spec_positional(
                     .iter()
                     .position(|&b| b == b'}')
                     .ok_or_else(|| {
-                        PyError::named(
-                            "ValueError",
-                            "Single '{' encountered in format string".to_string(),
-                        )
+                        pyrust_core::value_err!("Single '{' encountered in format string".to_string())
                     })?
                     + start;
                 // PEP 3101: inner fields cannot have a nested spec; if the user
@@ -6542,33 +5878,21 @@ fn expand_format_spec_positional(
                 let value = if inner.is_empty() {
                     // Auto-numbered
                     if *saw_manual {
-                        return Err(PyError::named(
-                            "ValueError",
-                            "cannot switch from manual field specification to automatic field numbering".to_string(),
-                        ));
+                        return Err(pyrust_core::value_err!("cannot switch from manual field specification to automatic field numbering"));
                     }
                     let Some(idx) = *auto_idx else { unreachable!() };
                     *auto_idx = Some(idx + 1);
                     positional.get(idx).cloned().ok_or_else(|| {
-                        PyError::named(
-                            "IndexError",
-                            format!("Replacement index {idx} out of range for positional args tuple"),
-                        )
+                        pyrust_core::index_err!("Replacement index {idx} out of range for positional args tuple")
                     })?
                 } else if let Ok(n) = inner.parse::<usize>() {
                     if auto_idx.is_some() && *auto_idx != Some(0) {
-                        return Err(PyError::named(
-                            "ValueError",
-                            "cannot switch from automatic field numbering to manual field specification".to_string(),
-                        ));
+                        return Err(pyrust_core::value_err!("cannot switch from automatic field numbering to manual field specification"));
                     }
                     *saw_manual = true;
                     *auto_idx = None;
                     positional.get(n).cloned().ok_or_else(|| {
-                        PyError::named(
-                            "IndexError",
-                            format!("Replacement index {n} out of range for positional args tuple"),
-                        )
+                        pyrust_core::index_err!("Replacement index {n} out of range for positional args tuple")
                     })?
                 } else {
                     keyword
@@ -6580,10 +5904,7 @@ fn expand_format_spec_positional(
                 out.push_str(&value.to_py_str());
             }
             b'}' => {
-                return Err(PyError::named(
-                    "ValueError",
-                    "Single '}' encountered in format string".to_string(),
-                ));
+                return Err(pyrust_core::value_err!("Single '}' encountered in format string".to_string()));
             }
             _ => {
                 let ch_start = i;
@@ -6697,13 +6018,8 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
             )?;
             return match result.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "__repr__ returned non-string (type {})",
-                        pyrust_core::builtin_type_name(&result)
-                    ),
-                )),
+                _ => Err(pyrust_core::type_err!("__repr__ returned non-string (type {})",
+                        pyrust_core::builtin_type_name(&result))),
             };
         }
     }
@@ -6818,31 +6134,18 @@ fn str_merge_kwargs(
                 match key_str.as_str() {
                     "sep" => {
                         if pos.first().is_some() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "argument for {method}() given by name ('sep') and position (1)"
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("argument for {method}() given by name ('sep') and position (1)"));
                         }
                         sep = Some(v);
                     }
                     "maxsplit" => {
                         if pos.get(1).is_some() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "argument for {method}() given by name ('maxsplit') and position (2)"
-                                ),
-                            ));
+                            return Err(pyrust_core::type_err!("argument for {method}() given by name ('maxsplit') and position (2)"));
                         }
                         maxsplit = Some(v);
                     }
                     other => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("'{other}' is an invalid keyword argument for {method}()"),
-                        ));
+                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for {method}()"));
                     }
                 }
             }
@@ -6878,18 +6181,12 @@ fn str_merge_kwargs(
                 match key_str.as_str() {
                     "keepends" => {
                         if pos.first().is_some() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "argument for splitlines() given by name ('keepends') and position (1)".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("argument for splitlines() given by name ('keepends') and position (1)"));
                         }
                         keepends = Some(v);
                     }
                     other => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("'{other}' is an invalid keyword argument for splitlines()"),
-                        ));
+                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for splitlines()"));
                     }
                 }
             }
@@ -6906,15 +6203,9 @@ fn str_merge_kwargs(
             let total = pos.len() + kw.len();
             if total > 2 {
                 if pos.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("encode() takes at most 2 keyword arguments ({total} given)"),
-                    ));
+                    return Err(pyrust_core::type_err!("encode() takes at most 2 keyword arguments ({total} given)"));
                 }
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("encode() takes at most 2 arguments ({total} given)"),
-                ));
+                return Err(pyrust_core::type_err!("encode() takes at most 2 arguments ({total} given)"));
             }
             let mut encoding: Option<Value> = None;
             let mut errors: Option<Value> = None;
@@ -6926,27 +6217,18 @@ fn str_merge_kwargs(
                 match key_str.as_str() {
                     "encoding" => {
                         if pos.first().is_some() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "argument for encode() given by name ('encoding') and position (1)".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("argument for encode() given by name ('encoding') and position (1)"));
                         }
                         encoding = Some(v);
                     }
                     "errors" => {
                         if pos.get(1).is_some() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "argument for encode() given by name ('errors') and position (2)".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("argument for encode() given by name ('errors') and position (2)"));
                         }
                         errors = Some(v);
                     }
                     other => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("'{other}' is an invalid keyword argument for encode()"),
-                        ));
+                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for encode()"));
                     }
                 }
             }
@@ -6980,22 +6262,14 @@ fn str_merge_kwargs(
                 match key_str.as_str() {
                     "tabsize" => {
                         if pos.first().is_some() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "argument for expandtabs() given by name ('tabsize') and position (1)".to_string(),
-                            ));
+                            return Err(pyrust_core::type_err!("argument for expandtabs() given by name ('tabsize') and position (1)"));
                         }
                         tabsize = Some(v);
                     }
                     other => {
                         // CPython: "expandtabs() takes at most 1 keyword argument (N given)"
                         // but for unknown kwarg it raises "'foo' is an invalid keyword argument"
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "'{other}' is an invalid keyword argument for expandtabs()"
-                            ),
-                        ));
+                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for expandtabs()"));
                     }
                 }
             }
@@ -7005,10 +6279,7 @@ fn str_merge_kwargs(
             Ok(())
         }
         // All str methods that take no keyword arguments use the `str.` prefix
-        _ => Err(PyError::named(
-            "TypeError",
-            format!("str.{method}() takes no keyword arguments"),
-        )),
+        _ => Err(pyrust_core::type_err!("str.{method}() takes no keyword arguments")),
     }
 }
 
@@ -7118,10 +6389,7 @@ impl Interpreter {
         let annotations = Value::dict(annotations_map);
         for name in proto_nonlocal_names.iter() {
             if !has_local_binding_in_current_or_ancestor(&self.env, name) {
-                return Err(PyError::named(
-                    "SyntaxError",
-                    format!("no binding for nonlocal '{}' found", name),
-                ));
+                return Err(pyrust_core::py_err!("SyntaxError", "no binding for nonlocal '{}' found", name));
             }
         }
         let func = Rc::new(UserFunction {
@@ -7341,10 +6609,7 @@ impl Interpreter {
             };
             let cls = Rc::clone(c);
             if let Some(tname) = crate::interpreter::non_subclassable_builtin_name(&cls) {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("type '{tname}' is not an acceptable base type"),
-                ));
+                return Err(pyrust_core::type_err!("type '{tname}' is not an acceptable base type"));
             }
             classes.push(cls);
         }
@@ -7353,10 +6618,7 @@ impl Interpreter {
             .filter(|c| crate::interpreter::is_solid_primitive_class(c))
             .count();
         if solid_count >= 2 {
-            return Err(PyError::named(
-                "TypeError",
-                "multiple bases have instance lay-out conflict".to_string(),
-            ));
+            return Err(pyrust_core::type_err!("multiple bases have instance lay-out conflict"));
         }
         let mut iter = classes.into_iter();
         let base = iter.next();
@@ -7506,10 +6768,7 @@ fn make_class_finalize_attrs(
             ValueKind::Str(s) => s.to_string(),
             _ => {
                 let tname = pyrust_core::builtin_type_name(&v).into_owned();
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("type __qualname__ must be a str, not {tname}"),
-                ));
+                return Err(pyrust_core::type_err!("type __qualname__ must be a str, not {tname}"));
             }
         },
     };
@@ -7636,10 +6895,7 @@ impl Interpreter {
                     if needs_dispatch {
                         let snapshot: Vec<Value> =
                             receiver.list_with(|items| items.to_vec()).ok_or_else(|| {
-                                PyError::named(
-                                    "TypeError",
-                                    "list.index receiver is not a list".to_string(),
-                                )
+                                pyrust_core::type_err!("list.index receiver is not a list")
                             })?;
                         if method == "index" {
                             self.call_seq_index(snapshot, &pos, "list")
@@ -7735,10 +6991,7 @@ impl Interpreter {
             if let PyKey::Str(s) = k {
                 let s = s.as_str().unwrap_or("");
                 if s != "key" && s != "reverse" {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("sort() got an unexpected keyword argument '{s}'"),
-                    ));
+                    return Err(pyrust_core::type_err!("sort() got an unexpected keyword argument '{s}'"));
                 }
             }
         }
@@ -7793,13 +7046,8 @@ impl Interpreter {
             }
             "format_map" => {
                 if pos.len() != 1 || !kw.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "str.format_map() takes exactly one argument ({} given)",
-                            pos.len() + kw.len()
-                        ),
-                    ));
+                    return Err(pyrust_core::type_err!("str.format_map() takes exactly one argument ({} given)",
+                            pos.len() + kw.len()));
                 }
                 let mapping = pos.into_iter().next().unwrap();
                 let template = receiver
@@ -7846,10 +7094,7 @@ impl Interpreter {
                     };
                     if needs_dispatch {
                         let snapshot = backing.list_with(|items| items.clone()).ok_or_else(|| {
-                            PyError::named(
-                                "TypeError",
-                                "list.index receiver is not a list".to_string(),
-                            )
+                            pyrust_core::type_err!("list.index receiver is not a list")
                         })?;
                         if prim_method == "index" {
                             self.call_seq_index(snapshot, &args, "list")
@@ -8066,10 +7311,7 @@ impl Interpreter {
         // iter(receiver): produce a NativeIterFrame generator.
         if method == "__iter__" && obj_kind_tag != 0 {
             if !args.is_empty() {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("expected 0 arguments, got {}", args.len()),
-                ));
+                return Err(pyrust_core::type_err!("expected 0 arguments, got {}", args.len()));
             }
             let receiver = vm_read(regs, obj, num_locals)?;
             let iter_arg = ExpandedCallArg { name: None, value: receiver };
@@ -8170,16 +7412,10 @@ impl Interpreter {
         // __iter__ on any tagged builtin type: same logic as iter(receiver).
         if method == "__iter__" && obj_kind_tag != 0 {
             if !kw_map.is_empty() {
-                return Err(PyError::named(
-                    "TypeError",
-                    "wrapper __iter__() takes no keyword arguments".to_string(),
-                ));
+                return Err(pyrust_core::type_err!("wrapper __iter__() takes no keyword arguments"));
             }
             if !pos_items.is_empty() {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("expected 0 arguments, got {}", pos_items.len()),
-                ));
+                return Err(pyrust_core::type_err!("expected 0 arguments, got {}", pos_items.len()));
             }
             let receiver = vm_read(regs, obj, num_locals)?;
             let iter_arg = ExpandedCallArg { name: None, value: receiver };
@@ -8209,10 +7445,7 @@ impl Interpreter {
                 );
                 if is_generator {
                     if !kw_map.is_empty() {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("generator.{method}() takes no keyword arguments"),
-                        ));
+                        return Err(pyrust_core::type_err!("generator.{method}() takes no keyword arguments"));
                     }
                     let obj_val = vm_read(regs, obj, num_locals)?;
                     return self.call_generator_method(obj_val, method, pos_items);
