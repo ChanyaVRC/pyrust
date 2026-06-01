@@ -202,6 +202,20 @@ pub enum Insn {
     BuildList(Reg, Reg, u8),
     /// R[dst] = (R[base], R[base+1], ..., R[base+n-1])
     BuildTuple(Reg, Reg, u8),
+    /// R[dst] = R[base] ++ R[base+1] ++ ... ++ R[base+n-1]
+    /// Concatenates `n` consecutive `str` registers into a single string in one
+    /// pass over a preallocated buffer. Emitted only by f-string lowering
+    /// (`compile_fstring`), where every operand is guaranteed to be a `str`
+    /// (literals + formatted interpolations). Mirrors CPython's BUILD_STRING.
+    BuildString(Reg, Reg, u8),
+    /// R[dst] = format(R[src], "") — the f-string interpolation default
+    /// conversion with no `!r/!s/!a` flag and no format spec. Equivalent to the
+    /// `format` builtin called with an empty spec, but skips the `format` global
+    /// lookup and the generic call frame. Mirrors CPython's FORMAT_VALUE with no
+    /// conversion + no spec. User `__format__`/`__str__` dispatch is preserved
+    /// for `PyInstance` operands (handled in the VM by delegating to the real
+    /// `format` builtin for that rare case).
+    FormatValue(Reg, Reg),
     /// R[dst] = slice(R[base], R[base+1], R[base+2])
     /// Emitted by the compiler for slice notation (a[lo:hi:step]).  Always
     /// reads exactly three registers (start, stop, step); `None` means absent.

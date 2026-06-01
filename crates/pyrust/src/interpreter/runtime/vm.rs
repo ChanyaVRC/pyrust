@@ -2524,6 +2524,30 @@ impl Interpreter {
                     }
                     regs[*dst as usize] = Value::tuple(items);
                 }
+                Insn::BuildString(dst, base, n) => {
+                    let count = crate::bytecode::Reg::from(*n);
+                    // Sum byte lengths in one pass, then allocate exactly once.
+                    let mut total = 0usize;
+                    for i in 0..count {
+                        let v = vm_try!(vm_read(&regs, *base + i, num_locals));
+                        // Parts are guaranteed `str` by the f-string lowering;
+                        // `.len()` is the byte length, which is what push_str needs.
+                        total += v.as_str().map(str::len).unwrap_or(0);
+                    }
+                    let mut out = String::with_capacity(total);
+                    for i in 0..count {
+                        let v = vm_try!(vm_read(&regs, *base + i, num_locals));
+                        if let Some(s) = v.as_str() {
+                            out.push_str(s);
+                        }
+                    }
+                    regs[*dst as usize] = Value::string(out);
+                }
+                Insn::FormatValue(dst, src) => {
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    let s = vm_try!(self.format_value_default(&val));
+                    regs[*dst as usize] = s;
+                }
                 Insn::BuildSlice(dst, base) => {
                     // Reads three contiguous registers (base, base+1, base+2) holding
                     // the start, stop, step bounds.  `None` values mean "absent bound".

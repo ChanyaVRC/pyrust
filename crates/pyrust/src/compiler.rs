@@ -9884,33 +9884,54 @@ impl Compiler {
                         self.next_temp = frame + 1;
                         frame
                     } else {
-                        // format(val, "") — dispatch __format__("") per Python semantics
-                        let frame = self.next_temp;
-                        if frame + 2 > self.max_reg {
-                            self.max_reg = frame + 2;
-                        }
-                        self.next_temp = frame + 3;
-                        let fmt_idx = self.intern_name("format");
-                        self.emit(Insn::LoadGlobal(frame, fmt_idx));
-                        if val_r != frame + 1 {
-                            self.emit(Insn::Move(frame + 1, val_r));
-                        }
+                        // format(val, "") — dispatch __format__("") per Python
+                        // semantics, but via the dedicated FormatValue opcode so
+                        // we skip the `format` global lookup and the generic call
+                        // frame (issue #1926). The VM preserves user
+                        // `__format__`/`__str__` dispatch for PyInstance values.
+                        let dst = self.alloc_temp();
+                        self.emit(Insn::FormatValue(dst, val_r));
                         self.free_temp(val_r);
-                        let empty_r = self.compile_literal(Value::string(String::new()));
-                        if empty_r != frame + 2 {
-                            self.emit(Insn::Move(frame + 2, empty_r));
-                        }
-                        self.free_temp(empty_r);
-                        self.emit(Insn::Call(frame, 2));
-                        self.next_temp = frame + 1;
-                        frame
+                        dst
                     }
                 }
             };
             part_regs.push(r);
         }
 
-        // Concatenate all parts with BinOp(Add).
+        // Single part: nothing to join.
+        if part_regs.len() == 1 {
+            return part_regs[0];
+        }
+
+        // BuildString consumes `n` CONSECUTIVE str registers and joins them in a
+        // single preallocated pass (mirrors CPython's BUILD_STRING). The count is
+        // encoded as u8, so for the rare >255-part f-string fall back to the
+        // chained `BinOp(Add)` fold below.
+        if part_regs.len() <= u8::MAX as usize {
+            let n = part_regs.len() as u8;
+            // Lay the parts out in a consecutive window starting at `base`, then
+            // build into `base` (same shape as BuildList lowering).
+            let base = self.next_temp;
+            self.next_temp = base + Reg::from(n);
+            let max_used = base + Reg::from(n) - 1;
+            if max_used > self.max_reg {
+                self.max_reg = max_used;
+            }
+            for (i, &r) in part_regs.iter().enumerate() {
+                let slot = base + i as Reg;
+                if r != slot {
+                    self.emit(Insn::Move(slot, r));
+                }
+            }
+            self.emit(Insn::BuildString(base, base, n));
+            // Collapse the temp window: every part register lives below `base`
+            // and is dead once the join is done.
+            self.next_temp = base + 1;
+            return base;
+        }
+
+        // Fallback for >255 parts: concatenate with BinOp(Add).
         let mut acc = part_regs[0];
         for &r in &part_regs[1..] {
             let dst = self.ensure_dst(acc);

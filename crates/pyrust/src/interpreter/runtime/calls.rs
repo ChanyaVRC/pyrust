@@ -5680,6 +5680,36 @@ impl Interpreter {
 /// a `:spec` and/or converted by `!r`/`!s`/`!a`.  Supports `{{` / `}}` for
 /// literal braces and `{0.attr}` / `{0[key]}` field accessors.
 impl Interpreter {
+    /// Fast path for an f-string interpolation with no `!r/!s/!a` conversion and
+    /// no format spec: equivalent to `format(value, "")` but without the
+    /// `format` global lookup or the generic call frame (issue #1926, mirrors
+    /// CPython's FORMAT_VALUE).
+    ///
+    /// For a non-`PyInstance` value, `format(value, "")` is exactly
+    /// `apply_format_spec(value, "")`, i.e. `str(value)` — computed inline here.
+    /// For the rarer `PyInstance` case (which may define a custom
+    /// `__format__`/`__str__`), we delegate to the real `format` builtin so the
+    /// dispatch is byte-for-byte identical to the call-based lowering.
+    pub(crate) fn format_value_default(&mut self, value: &Value) -> Result<Value> {
+        if matches!(value.kind(), ValueKind::PyInstance(_)) {
+            return self.call_function_expanded(
+                Value::builtin_function("format"),
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: value.clone(),
+                    },
+                    ExpandedCallArg {
+                        name: None,
+                        value: Value::string(""),
+                    },
+                ],
+            );
+        }
+        // Non-instance: empty spec == str(value).
+        apply_format_spec(value, "")
+    }
+
     /// Dispatch `__format__(spec)` for a value, validating that the result is a
     /// `str`.  Mirrors the logic in the `format()` builtin (#1370).
     ///
