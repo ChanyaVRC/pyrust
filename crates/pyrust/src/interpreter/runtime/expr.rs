@@ -174,6 +174,133 @@ fn try_seq_fast_eq(av: &[Value], bv: &[Value]) -> SeqFast {
     SeqFast::Resolved(true)
 }
 
+/// Correctly-rounded `int / int` true division, mirroring CPython's
+/// `long_true_divide` (`Objects/longobject.c`).  Operands are never
+/// converted to `f64` first — that would raise `OverflowError` for any
+/// operand outside `f64` range even when the *quotient* is representable
+/// (issue #1923).  Instead the correctly-rounded (round-half-to-even)
+/// quotient is computed with exact integer arithmetic and only the
+/// *result* is checked for overflow.
+///
+/// Returns `Err(OverflowError)` only when the quotient itself is too
+/// large for `f64`, and `Err(ZeroDivisionError)` when `den == 0`.
+fn bigint_true_divide(num: &PyBigInt, den: &PyBigInt) -> Result<f64> {
+    // f64 layout constants (IEEE-754 double).
+    const MANT_DIG: i64 = 53; // significand bits (incl. implicit leading 1)
+    const MIN_EXP: i64 = -1021; // frexp's minimum normal exponent
+    const MAX_EXP: i64 = 1024; // frexp's maximum exponent
+    const SUBNORMAL_LSB: i64 = MIN_EXP - MANT_DIG; // -1074: lsb exponent of smallest subnormal
+
+    if den.is_zero() {
+        return Err(pyrust_core::zerodiv_err!("division by zero"));
+    }
+    let negate = (num.sign() == PyBigIntSign::Minus) != (den.sign() == PyBigIntSign::Minus);
+    if num.is_zero() {
+        return Ok(if negate { -0.0 } else { 0.0 });
+    }
+    // Work with magnitudes; the sign is reapplied at the end.
+    let a = magnitude(num);
+    let b = magnitude(den);
+    let diff = a.bits() as i64 - b.bits() as i64;
+
+    // q = a/b lies in [2^(diff-1), 2^(diff+1)).  Bail out early on the
+    // extremes both to match CPython and to keep the working shifts bounded.
+    if diff > MAX_EXP {
+        return Err(pyrust_core::overflow_err!(
+            "integer division result too large for a float"
+        ));
+    }
+    if diff < SUBNORMAL_LSB - 1 {
+        // Quotient is below half the smallest subnormal: rounds to 0.
+        return Ok(if negate { -0.0 } else { 0.0 });
+    }
+
+    // Compute the integer quotient `x` whose lsb has exponent `shift`,
+    // keeping at least two guard bits below the eventual rounding point so
+    // the single round-half-even step below always drops >= 2 bits.
+    let l0 = ((diff - 1) - (MANT_DIG - 1)).max(SUBNORMAL_LSB);
+    let mut shift = l0 - 2;
+    let (mut x, rem) = if shift <= 0 {
+        let scaled = &a << ((-shift) as usize);
+        (&scaled / &b, &scaled % &b)
+    } else {
+        let scaled_b = &b << (shift as usize);
+        (&a / &scaled_b, &a % &scaled_b)
+    };
+    let inexact = !rem.is_zero();
+    if x.is_zero() {
+        return Ok(if negate { -0.0 } else { 0.0 });
+    }
+
+    // Refine the true exponent of the quotient from `x`, then round its lsb
+    // to the exponent `l` allowed by the (normal or subnormal) result.
+    let e = (x.bits() as i64 - 1) + shift;
+    let l = (e - (MANT_DIG - 1)).max(SUBNORMAL_LSB);
+    let drop = (l - shift) as usize; // >= 2 by construction
+    let low = &x & ((PyBigInt::from(1) << drop) - 1);
+    x >>= drop;
+    let half = PyBigInt::from(1) << (drop - 1);
+    let round_up =
+        low > half || (low == half && ((&x & PyBigInt::from(1)) == PyBigInt::from(1) || inexact));
+    if round_up {
+        x += 1;
+    }
+    shift = l;
+
+    // `x` now has at most MANT_DIG + 1 bits (after a possible rounding
+    // carry), so it converts to f64 exactly; ldexp applies the exponent.
+    let mantissa = x.to_f64().filter(|f| f.is_finite()).ok_or_else(|| {
+        pyrust_core::overflow_err!("integer division result too large for a float")
+    })?;
+    let result = ldexp_f64(mantissa, shift);
+    if !result.is_finite() {
+        return Err(pyrust_core::overflow_err!(
+            "integer division result too large for a float"
+        ));
+    }
+    Ok(if negate { -result } else { result })
+}
+
+/// Absolute value of a `PyBigInt` (CPython's true division works on
+/// magnitudes, reapplying the sign at the end).
+fn magnitude(b: &PyBigInt) -> PyBigInt {
+    if b.sign() == PyBigIntSign::Minus {
+        -b
+    } else {
+        b.clone()
+    }
+}
+
+/// `m * 2^exp` for finite `m` — a faithful C `ldexp`.  Applying the whole
+/// exponent as a single `2^exp` factor would underflow to `0.0` for a
+/// subnormal *result* (e.g. `2^52 * 2^-1110` whose `2^-1110` factor
+/// vanishes even though the product `2^-1058` is representable).  The
+/// exponent is therefore applied in steps small enough that each
+/// intermediate factor stays in the normal range; the final step performs
+/// the single correct rounding into the subnormal range.  Out-of-range
+/// exponents over/underflow to `inf` / `0.0` (the overflow case is caught
+/// by the caller).
+fn ldexp_f64(mut m: f64, mut exp: i64) -> f64 {
+    if m == 0.0 || !m.is_finite() {
+        return m;
+    }
+    // Each factor of 2^512 is safely within f64's normal range, so stepping
+    // by ±512 never under/overflows an intermediate while still converging.
+    const STEP: i64 = 512;
+    const STEP_FACTOR: f64 = 1.340_780_792_994_259_7e154; // 2^512
+    while exp > STEP {
+        m *= STEP_FACTOR;
+        exp -= STEP;
+    }
+    while exp < -STEP {
+        m /= STEP_FACTOR;
+        exp += STEP;
+    }
+    // |exp| <= 512 now: a single multiply by 2^exp rounds correctly, even
+    // when the result is subnormal.
+    m * 2.0_f64.powi(exp as i32)
+}
+
 /// Python-style `(quotient, remainder)` for `a // b` and `a % b` where
 /// both operands are BigInts.  Unlike Rust's `/` / `%` (truncate-toward-
 /// zero), CPython uses floor division: the quotient is rounded toward
@@ -408,24 +535,42 @@ impl NumericOps for NumericSlot {
 
     fn nb_div(&self, rhs: &Value) -> Option<Result<Value>> {
         let r = numeric_slot(rhs)?;
-        // CPython true division always yields a float.  The
-        // ZeroDivisionError wording differs by operand types: `int / int`
-        // says "division by zero"; anything involving a float says
-        // "float division by zero".
-        let both_int = matches!(self, NumericSlot::Int(_) | NumericSlot::BigInt(_))
-            && matches!(r, NumericSlot::Int(_) | NumericSlot::BigInt(_));
-        Some((|| {
-            let a = slot_to_float(self)?;
-            let b = slot_to_float(&r)?;
-            if b == 0.0 {
-                return Err(pyrust_core::zerodiv_err!(if both_int {
-                        "division by zero".to_string()
-                    } else {
-                        "float division by zero".to_string()
-                    }));
+        // CPython true division always yields a float.  The int/int case must
+        // NOT convert operands to f64 first (that overflows for any operand
+        // beyond f64 range even when the quotient is representable, #1923) —
+        // route through the correctly-rounded integer divider.  The small
+        // int/int fast path also goes here but avoids any BigInt allocation
+        // for typical magnitudes; only operands actually beyond f64 range pay
+        // for the full algorithm.
+        Some(match (self, &r) {
+            // Small int/int fast path: when both operands are exactly
+            // representable as f64 (|n| < 2^53), IEEE-754 division is itself
+            // correctly rounded and matches CPython byte-for-byte — no BigInt
+            // allocation.  Larger magnitudes route through the exact divider.
+            (NumericSlot::Int(a), NumericSlot::Int(b)) => {
+                if *b == 0 {
+                    Err(pyrust_core::zerodiv_err!("division by zero"))
+                } else if a.unsigned_abs() < (1 << 53) && b.unsigned_abs() < (1 << 53) {
+                    Ok(Value::float(*a as f64 / *b as f64))
+                } else {
+                    bigint_true_divide(&PyBigInt::from(*a), &PyBigInt::from(*b)).map(Value::float)
+                }
             }
-            Ok(Value::float(a / b))
-        })())
+            (
+                NumericSlot::Int(_) | NumericSlot::BigInt(_),
+                NumericSlot::Int(_) | NumericSlot::BigInt(_),
+            ) => bigint_true_divide(&slot_to_bigint(self), &slot_to_bigint(&r)).map(Value::float),
+            // At least one Float operand: CPython divides as doubles and the
+            // ZeroDivisionError wording is "float division by zero".
+            _ => (|| {
+                let a = slot_to_float(self)?;
+                let b = slot_to_float(&r)?;
+                if b == 0.0 {
+                    return Err(pyrust_core::zerodiv_err!("float division by zero"));
+                }
+                Ok(Value::float(a / b))
+            })(),
+        })
     }
 
     fn nb_floordiv(&self, rhs: &Value) -> Option<Result<Value>> {
