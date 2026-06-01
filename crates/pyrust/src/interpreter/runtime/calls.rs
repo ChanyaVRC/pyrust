@@ -45,6 +45,25 @@ impl Drop for CallDepthGuard {
     }
 }
 
+/// Reject keyword arguments on a builtin method that accepts none, raising the
+/// CPython-matching `"<label>() takes no keyword arguments"` `TypeError`.
+///
+/// `label` is the method's display name and may be a literal or a `format!`
+/// pattern (e.g. `reject_kwargs!(kw, "{}.fromkeys", class_name)`).  The label
+/// is only built when `kw` is non-empty, so the empty-kw fast path (the common
+/// case) pays no allocation.  Expands to an early `return Err(...)`, so call it
+/// from a function returning `Result<_>`.
+macro_rules! reject_kwargs {
+    ($kw:expr, $($label:tt)+) => {
+        if !$kw.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{}() takes no keyword arguments", format_args!($($label)+)),
+            ));
+        }
+    };
+}
+
 /// Build the per-type `TypeError` message for sequence item access with a
 /// non-integer non-`__index__` index, matching CPython 3.12.
 ///
@@ -182,846 +201,7 @@ impl Interpreter {
             _ if pyrust_builtins::bound_method::as_bound_method(&function).is_some() => {
                 let (name_rc, receiver_owned) =
                     pyrust_builtins::bound_method::as_bound_method(&function).unwrap();
-                // Borrow the method name as `&str` from the `Rc<String>` rather
-                // than cloning into a fresh `String` — the dispatch helpers
-                // below all accept `&str`. See issue #276 item #1.
-                let method: &str = name_rc.as_str();
-                let receiver = receiver_owned;
-                // Reuse the interpreter-level positional-args buffer so that
-                // tight loops calling a bound method pay zero allocation once
-                // the buffer has grown to the high-watermark arg count (issue
-                // #276 item #3).  The buffer is taken with `std::mem::take` so
-                // no borrow-checker split is needed; it is restored at the end
-                // of this arm (via `bound_method_pos_buf = pos` after the match).
-                let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
-                pos.clear();
-                // Keyword-args fast path (issue #276 item #4): skip IndexMap
-                // construction entirely when all arguments are positional —
-                // the common case for builtin bound methods.
-                let has_kw = args.iter().any(|a| a.name.is_some());
-                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
-                if has_kw {
-                    for a in args {
-                        match &a.name {
-                            Some(n) => { kw.insert(PyKey::str_from(n.as_str()), a.value.clone()); }
-                            None => pos.push(a.value.clone()),
-                        }
-                    }
-                } else {
-                    for a in args {
-                        pos.push(a.value.clone());
-                    }
-                }
-                // Bound-method dispatch: each builtin takes `&Value`
-                // and scopes its own `RefCell::borrow_mut()` for the
-                // duration of the operation (#448).  No `&mut Vec /
-                // Map / Set` crosses the crate boundary, so the
-                // previous `unalias_args_for_mutation` dance is
-                // unnecessary — aliasing-safety is structural now,
-                // not a discipline the caller has to remember.
-                // Probe the receiver's kind via a scoped block so the
-                // `kind()` Ref guards drop before we may move
-                // `receiver` into call_dict_method / call_set_method
-                // (#450).  Variants that read the kind's payload
-                // (Tuple, Complex, BuiltinObject, PyInstance) keep
-                // working off the live Ref because they don't move
-                // the receiver.
-                enum Kind {
-                    Int,
-                    Float,
-                    Bytes,
-                    Str,
-                    List,
-                    Dict,
-                    Set,
-                    Other,
-                }
-                let kind_tag = match receiver.kind() {
-                    // bool is a subclass of int in CPython; route to the int
-                    // dispatch so True.bit_length() / True.is_integer() work.
-                    ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => Kind::Int,
-                    ValueKind::Float(_) => Kind::Float,
-                    ValueKind::Bytes(_) => Kind::Bytes,
-                    ValueKind::Str(_) => Kind::Str,
-                    ValueKind::List(_) => Kind::List,
-                    ValueKind::Dict(_) => Kind::Dict,
-                    ValueKind::Set(_) => Kind::Set,
-                    _ => Kind::Other,
-                };
-                // __iter__ on any iterable built-in type delegates to the same
-                // logic as the `iter()` built-in: wrap the receiver in a
-                // NativeIterFrame generator.  Intercept here before the per-type
-                // arms so that none of the crate-level `call` functions need to
-                // handle "__iter__" (they would error on an unknown method name).
-                if method == "__iter__" {
-                    let is_iterable_builtin = matches!(
-                        receiver.kind(),
-                        ValueKind::List(_)
-                            | ValueKind::Tuple(_)
-                            | ValueKind::Str(_)
-                            | ValueKind::Bytes(_)
-                            | ValueKind::Dict(_)
-                            | ValueKind::Set(_)
-                            | ValueKind::Range { .. }
-                    ) || matches!(receiver.kind(), ValueKind::BuiltinObject { ops, .. }
-                        if ops.has_method("__iter__"));
-                    if is_iterable_builtin {
-                        if !kw.is_empty() {
-                            self.bound_method_pos_buf = pos;
-                            return Err(PyError::named(
-                                "TypeError",
-                                "wrapper __iter__() takes no keyword arguments".to_string(),
-                            ));
-                        }
-                        if !pos.is_empty() {
-                            let n = pos.len();
-                            self.bound_method_pos_buf = pos;
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("expected 0 arguments, got {n}"),
-                            ));
-                        }
-                        let iter_arg = ExpandedCallArg {
-                            name: None,
-                            value: receiver,
-                        };
-                        self.bound_method_pos_buf = pos;
-                        let dispatch = crate::builtin_registry::lookup("iter")
-                            .expect("iter must be in the registry");
-                        return dispatch(self, &[iter_arg]);
-                    }
-                }
-                // Arms that accept `&[Value]` (Int, Float, Bytes) borrow `pos`
-                // directly — the buf's capacity is fully preserved on return.
-                // Arms that need `Vec<Value>` ownership drain `pos` into a
-                // fresh allocation so the (now-empty) buf can be returned to
-                // `bound_method_pos_buf` below, retaining its capacity for the
-                // next call.  Early-return error paths also restore the buf.
-                let result = match kind_tag {
-                    Kind::Int => {
-                        pyrust_builtins::int::call(method, &receiver, &pos, &kw)
-                    }
-                    Kind::Float => {
-                        let f = match receiver.kind() {
-                            ValueKind::Float(f) => f,
-                            _ => unreachable!("kind_tag guard above"),
-                        };
-                        pyrust_builtins::float::call(method, f, &pos)
-                    }
-                    Kind::Bytes => {
-                        if method == "join" {
-                            if !kw.is_empty() {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "bytes.join() takes no keyword arguments".to_string(),
-                                ));
-                            }
-                            let args_vec: Vec<Value> = pos.drain(..).collect();
-                            self.call_bytes_join(receiver, args_vec)
-                        } else {
-                            pyrust_builtins::bytes::call(method, &receiver, &pos, &kw)
-                        }
-                    }
-                    Kind::Str => {
-                        // `format` needs kwargs threaded into the template.
-                        // Intercept before `call_str_method`, which only receives
-                        // positional args and would silently drop keyword arguments.
-                        if method == "format" {
-                            let template = match receiver.kind() {
-                                ValueKind::Str(s) => s.to_string(),
-                                _ => {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        "descriptor 'format' requires a 'str' object".to_string(),
-                                    ));
-                                }
-                            };
-                            let keyword: Vec<(String, Value)> = kw
-                                .into_iter()
-                                .filter_map(|(k, v)| {
-                                    if let PyKey::Str(name) = k {
-                                        Some((name.as_str().unwrap_or("").to_owned(), v))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            // Borrow pos; capacity retained in the buf below.
-                            self.format_str_template(&template, &pos, &keyword)
-                        } else if !kw.is_empty() {
-                            // Resolve kwargs for str methods before passing to
-                            // call_str_method, which only accepts positional args.
-                            match str_merge_kwargs(method, &mut pos, kw) {
-                                Ok(()) => {
-                                    let args_vec: Vec<Value> = pos.drain(..).collect();
-                                    self.call_str_method(method, receiver, args_vec)
-                                }
-                                Err(e) => {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(e);
-                                }
-                            }
-                        } else {
-                            // call_str_method takes Vec<Value> by value; drain
-                            // so pos retains its capacity for the next call.
-                            let args_vec: Vec<Value> = pos.drain(..).collect();
-                            self.call_str_method(method, receiver, args_vec)
-                        }
-                    }
-                    Kind::List => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        if method == "index" || method == "count" {
-                            let needs_dispatch = args_vec.first().map(|t| {
-                                receiver
-                                    .list_with(|items| Self::seq_search_needs_dispatch(t, items))
-                                    .unwrap_or(true)
-                            }).unwrap_or(false);
-                            let args_vec = if method == "index" {
-                                match self.resolve_seq_index_pos(args_vec) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        self.bound_method_pos_buf = pos;
-                                        return Err(e);
-                                    }
-                                }
-                            } else {
-                                args_vec
-                            };
-                            if needs_dispatch {
-                                // Snapshot so we can release the list borrow
-                                // before `values_user_eq` may re-enter user code.
-                                let snapshot = receiver
-                                    .list_with(|items| items.clone())
-                                    .ok_or_else(|| {
-                                        PyError::named(
-                                            "TypeError",
-                                            "list.index receiver is not a list".to_string(),
-                                        )
-                                    })?;
-                                if method == "index" {
-                                    self.call_seq_index(snapshot, &args_vec, "list")
-                                } else {
-                                    self.call_seq_count(snapshot, &args_vec, "list")
-                                }
-                            } else {
-                                pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
-                            }
-                        } else {
-                            pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
-                        }
-                    }
-                    Kind::Dict => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        self.call_dict_method(method, receiver, args_vec, &kw)
-                    }
-                    Kind::Set => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        self.call_set_method(method, receiver, args_vec)
-                    }
-                    Kind::Other => match receiver.kind() {
-                    ValueKind::Tuple(items) => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        if method == "index" || method == "count" {
-                            let needs_dispatch = args_vec
-                                .first()
-                                .map(|t| Self::seq_search_needs_dispatch(t, &items))
-                                .unwrap_or(false);
-                            let args_vec = if method == "index" {
-                                match self.resolve_seq_index_pos(args_vec) {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        self.bound_method_pos_buf = pos;
-                                        return Err(e);
-                                    }
-                                }
-                            } else {
-                                args_vec
-                            };
-                            if needs_dispatch {
-                                // Snapshot to release the tuple Ref before
-                                // `values_user_eq` may re-enter user code.
-                                let snapshot = items.to_vec();
-                                if method == "index" {
-                                    self.call_seq_index(snapshot, &args_vec, "tuple")
-                                } else {
-                                    self.call_seq_count(snapshot, &args_vec, "tuple")
-                                }
-                            } else {
-                                pyrust_builtins::tuple::call(method, items, args_vec)
-                            }
-                        } else {
-                            pyrust_builtins::tuple::call(method, items, args_vec)
-                        }
-                    }
-                    ValueKind::Complex(_, _) => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        pyrust_builtins::complex::call(method, &receiver, args_vec)
-                    }
-                    ValueKind::BuiltinObject { ops, state } => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        let empty_kw: indexmap::IndexMap<String, Value> =
-                            indexmap::IndexMap::new();
-                        ops.call_method(state, method, args_vec, &empty_kw)
-                    }
-                    ValueKind::PyInstance(inst) => {
-                        // Class method backed by a `BuiltinFunction` — emitted
-                        // by `pyrust_module!`'s `class { … }` block.  `get_attr`
-                        // wrapped the method-name-on-instance pair as a
-                        // bound_method; here we re-resolve the method on the
-                        // class and dispatch with `self` prepended through the
-                        // unified helper.
-                        let class = Rc::clone(&inst.borrow().class);
-                        let method_val = match lookup_class_attr(&class, method) {
-                            Some(v) => v,
-                            None => {
-                                self.bound_method_pos_buf = pos;
-                                let class_name = class.borrow().name.clone();
-                                return Err(PyError::attribute_error(
-                                    format!("'{class_name}' object has no attribute '{method}'"),
-                                    Some(method.to_string()),
-                                    Some(Value::py_instance(Rc::clone(inst))),
-                                ));
-                            }
-                        };
-                        // Issue #976/#994: if the resolved method is a primitive
-                        // builtin (e.g. `dict.keys`, `tuple.count`), and the
-                        // instance has a `__builtin_data__` backing value (set at
-                        // construction time for subclasses of dict/list/set/
-                        // frozenset/tuple), dispatch on the backing value directly.
-                        // This avoids the `kind_ok` type guard in
-                        // `call_function_expanded` rejecting the PyInstance receiver.
-                        // Issue #1204: same mechanism for str/int/float/bytes subclasses.
-                        if let ValueKind::BuiltinFunction(fn_name) = method_val.kind() {
-                            if fn_name.split_once('.').is_some_and(|(t, _)| {
-                                matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
-                                    | "str" | "int" | "float" | "bytes")
-                            }) {
-                                if let Some(backing) = instance_builtin_data(&inst) {
-                                    enum BkKind {
-                                        Dict, List, Set, Frozenset, Tuple,
-                                        Str, Int, Float, Bytes, Other,
-                                    }
-                                    let bk_kind = match backing.kind() {
-                                        ValueKind::Dict(_) => BkKind::Dict,
-                                        ValueKind::List(_) => BkKind::List,
-                                        ValueKind::Set(_) => BkKind::Set,
-                                        ValueKind::BuiltinObject { ops, .. }
-                                            if ops.type_name() == "frozenset" =>
-                                        {
-                                            BkKind::Frozenset
-                                        }
-                                        ValueKind::Tuple(_) => BkKind::Tuple,
-                                        ValueKind::Str(_) => BkKind::Str,
-                                        ValueKind::Int(_)
-                                        | ValueKind::BigInt(_)
-                                        | ValueKind::Bool(_) => BkKind::Int,
-                                        ValueKind::Float(_) => BkKind::Float,
-                                        ValueKind::Bytes(_) => BkKind::Bytes,
-                                        _ => BkKind::Other,
-                                    };
-                                    let args_vec: Vec<Value> = pos.drain(..).collect();
-                                    self.bound_method_pos_buf = pos;
-                                    return match bk_kind {
-                                        BkKind::Dict => {
-                                            // Issue #1563: `fromkeys` is a classmethod; when
-                                            // called on a subclass instance (`MyDict().fromkeys`)
-                                            // CPython uses `type(self)` as `cls`, so the result
-                                            // is a `MyDict`, not a plain `dict`.  Route through
-                                            // the same class-dispatch path used for
-                                            // `MyDict.fromkeys` (bound-method on PyClass).
-                                            if method == "fromkeys" {
-                                                let bound = pyrust_builtins::bound_method::bound_method(
-                                                    "fromkeys",
-                                                    Value::py_class(Rc::clone(&class)),
-                                                );
-                                                let mut expanded: Vec<ExpandedCallArg> =
-                                                    args_vec
-                                                        .into_iter()
-                                                        .map(|v| ExpandedCallArg {
-                                                            name: None,
-                                                            value: v,
-                                                        })
-                                                        .collect();
-                                                for (k, v) in &kw {
-                                                    if let PyKey::Str(s) = k {
-                                                        expanded.push(ExpandedCallArg {
-                                                            name: Some(
-                                                                s.as_str()
-                                                                    .unwrap_or("")
-                                                                    .to_owned(),
-                                                            ),
-                                                            value: v.clone(),
-                                                        });
-                                                    }
-                                                }
-                                                return self.call_function_expanded(
-                                                    bound, &expanded,
-                                                );
-                                            }
-                                            self.call_dict_method(method, backing, args_vec, &kw)
-                                        }
-                                        BkKind::List => {
-                                            if method == "index" || method == "count" {
-                                                let needs_dispatch =
-                                                    args_vec.first().map(|t| {
-                                                        backing
-                                                            .list_with(|items| {
-                                                                Self::seq_search_needs_dispatch(
-                                                                    t, items,
-                                                                )
-                                                            })
-                                                            .unwrap_or(true)
-                                                    }).unwrap_or(false);
-                                                if needs_dispatch {
-                                                    let snapshot = backing
-                                                        .list_with(|items| items.clone())
-                                                        .ok_or_else(|| {
-                                                            PyError::named(
-                                                                "TypeError",
-                                                                "list.index receiver is not a list"
-                                                                    .to_string(),
-                                                            )
-                                                        })?;
-                                                    if method == "index" {
-                                                        self.call_seq_index(
-                                                            snapshot, &args_vec, "list",
-                                                        )
-                                                    } else {
-                                                        self.call_seq_count(
-                                                            snapshot, &args_vec, "list",
-                                                        )
-                                                    }
-                                                } else {
-                                                    pyrust_builtins::list::call(
-                                                        method,
-                                                        &backing,
-                                                        args_vec,
-                                                        &kw,
-                                                    )
-                                                }
-                                            } else {
-                                                pyrust_builtins::list::call(
-                                                    method,
-                                                    &backing,
-                                                    args_vec,
-                                                    &kw,
-                                                )
-                                            }
-                                        }
-                                        BkKind::Set => {
-                                            self.call_set_method(method, backing, args_vec)
-                                        }
-                                        BkKind::Frozenset => {
-                                            pyrust_builtins::frozenset::call(
-                                                method,
-                                                &backing,
-                                                args_vec,
-                                            )
-                                        }
-                                        BkKind::Tuple => match backing.kind() {
-                                            ValueKind::Tuple(items) => {
-                                                if method == "index" || method == "count" {
-                                                    let needs_dispatch = args_vec
-                                                        .first()
-                                                        .map(|t| {
-                                                            Self::seq_search_needs_dispatch(
-                                                                t, &items,
-                                                            )
-                                                        })
-                                                        .unwrap_or(false);
-                                                    if needs_dispatch {
-                                                        let snapshot = items.to_vec();
-                                                        if method == "index" {
-                                                            self.call_seq_index(
-                                                                snapshot, &args_vec, "tuple",
-                                                            )
-                                                        } else {
-                                                            self.call_seq_count(
-                                                                snapshot, &args_vec, "tuple",
-                                                            )
-                                                        }
-                                                    } else {
-                                                        pyrust_builtins::tuple::call(
-                                                            method,
-                                                            items,
-                                                            args_vec,
-                                                        )
-                                                    }
-                                                } else {
-                                                    pyrust_builtins::tuple::call(
-                                                        method,
-                                                        items,
-                                                        args_vec,
-                                                    )
-                                                }
-                                            }
-                                            _ => unreachable!("BkKind::Tuple guard above"),
-                                        },
-                                        BkKind::Str => {
-                                            self.call_str_method(method, backing, args_vec)
-                                        }
-                                        BkKind::Int => {
-                                            pyrust_builtins::int::call(
-                                                method,
-                                                &backing,
-                                                &args_vec,
-                                                &kw,
-                                            )
-                                        }
-                                        BkKind::Float => {
-                                            let f = match backing.kind() {
-                                                ValueKind::Float(f) => f,
-                                                _ => unreachable!("BkKind::Float guard above"),
-                                            };
-                                            pyrust_builtins::float::call(method, f, &args_vec)
-                                        }
-                                        BkKind::Bytes => {
-                                            pyrust_builtins::bytes::call(
-                                                method,
-                                                &backing,
-                                                &args_vec,
-                                                &kw,
-                                            )
-                                        }
-                                        BkKind::Other => Err(PyError::Runtime(format!(
-                                            "internal: unexpected builtin_data kind for method '{method}'"
-                                        ))),
-                                    };
-                                }
-                            }
-                        }
-                        // Reconstitute kwargs as ExpandedCallArgs (the
-                        // bound_method dispatch split them into pos+kw maps).
-                        // Drain pos so its capacity is preserved in the buf.
-                        let mut combined: ExpandedArgBuf =
-                            ExpandedArgBuf::with_capacity(pos.len() + kw.len());
-                        for v in pos.drain(..) {
-                            combined.push(ExpandedCallArg { name: None, value: v });
-                        }
-                        for (k, v) in kw {
-                            if let PyKey::Str(name) = k {
-                                combined.push(ExpandedCallArg {
-                                    name: Some(name.as_str().unwrap_or("").to_owned()),
-                                    value: v,
-                                });
-                            }
-                        }
-                        invoke_class_method(
-                            self,
-                            method_val,
-                            Value::py_instance(inst.clone()),
-                            &combined,
-                        )
-                    }
-                    ValueKind::PyClass(class) => {
-                        // `type.mro()` — returns the MRO as a list (same entries
-                        // as `__mro__` tuple).  CPython's `type.mro(self)` is a
-                        // C slot that returns `list(self.__mro__)`.
-                        //
-                        // Two call forms:
-                        //   B.mro()          → bound receiver is B, pos is empty
-                        //   type.mro(B)      → bound receiver is `type`, pos[0] is B
-                        let class = Rc::clone(class);
-                        match method {
-                            "mro" => {
-                                // Determine the target class.  When the bound receiver
-                                // IS the `type` metaclass, the first positional arg is
-                                // the self argument (unbound descriptor form).  When
-                                // the receiver is any other class, mro() takes no
-                                // extra arguments.
-                                let receiver_is_type =
-                                    Rc::ptr_eq(&class, &type_class_singleton());
-                                let target_class: Rc<RefCell<PyClass>> = if receiver_is_type {
-                                    // Unbound descriptor call: type.mro(B).
-                                    // Requires exactly one positional arg that is a type,
-                                    // with no extra positional or keyword arguments.
-                                    if pos.is_empty() {
-                                        self.bound_method_pos_buf = pos;
-                                        return Err(PyError::named(
-                                            "TypeError",
-                                            "unbound method type.mro() needs an argument".to_string(),
-                                        ));
-                                    }
-                                    // pos[0] is the self (type) argument.
-                                    let maybe_class = match pos[0].kind() {
-                                        ValueKind::PyClass(c) => Some(Rc::clone(c)),
-                                        _ => None,
-                                    };
-                                    let target = match maybe_class {
-                                        Some(c) => c,
-                                        None => {
-                                            let type_name = pyrust_core::builtin_type_name(&pos[0]).to_string();
-                                            self.bound_method_pos_buf = pos;
-                                            return Err(PyError::named(
-                                                "TypeError",
-                                                format!(
-                                                    "descriptor 'mro' for 'type' objects doesn't apply to a '{type_name}' object",
-                                                ),
-                                            ));
-                                        }
-                                    };
-                                    // After resolving self, no extra positional args or kwargs allowed.
-                                    if !kw.is_empty() {
-                                        self.bound_method_pos_buf = pos;
-                                        return Err(PyError::named(
-                                            "TypeError",
-                                            "type.mro() takes no keyword arguments".to_string(),
-                                        ));
-                                    }
-                                    if pos.len() > 1 {
-                                        let extra = pos.len() - 1;
-                                        self.bound_method_pos_buf = pos;
-                                        return Err(PyError::named(
-                                            "TypeError",
-                                            format!(
-                                                "type.mro() takes no arguments ({extra} given)",
-                                            ),
-                                        ));
-                                    }
-                                    target
-                                } else if pos.is_empty() && kw.is_empty() {
-                                    // Bound call: B.mro()
-                                    class
-                                } else if !kw.is_empty() {
-                                    // Keyword arguments are never accepted.
-                                    let class_name = class.borrow().name.clone();
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!("{class_name}.mro() takes no keyword arguments"),
-                                    ));
-                                } else {
-                                    // Too many positional arguments.
-                                    let n = pos.len();
-                                    let class_name = class.borrow().name.clone();
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "{class_name}.mro() takes no arguments ({n} given)",
-                                        ),
-                                    ));
-                                };
-                                Ok(Value::list(class_mro_items(&target_class)?))
-                            }
-                            "__subclasses__" => {
-                                // CPython: type.__subclasses__(self) → list of direct subclasses.
-                                // Takes no arguments. Prunes stale weak refs lazily.
-                                // CPython distinguishes kw vs positional:
-                                //   A.__subclasses__(1)       → "takes no arguments (1 given)"
-                                //   A.__subclasses__(x=1)     → "takes no keyword arguments"
-                                //   A.__subclasses__(1, x=2)  → "takes no keyword arguments"
-                                let class_name = class.borrow().name.clone();
-                                if !kw.is_empty() {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "{class_name}.__subclasses__() takes no keyword arguments",
-                                        ),
-                                    ));
-                                }
-                                let n_pos = pos.len();
-                                if n_pos > 0 {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "{class_name}.__subclasses__() takes no arguments ({n_pos} given)",
-                                        ),
-                                    ));
-                                }
-                                Ok(Value::list(class_direct_subclasses(&class)))
-                            }
-                            // Issue #1563: `dict.fromkeys` classmethod on a dict subclass.
-                            // `env.rs` binds the subclass as the receiver when `fromkeys` is
-                            // looked up on a non-primitive dict subclass.  Collect the iterable
-                            // and optional default, call `cls()` to construct an empty instance,
-                            // then replace its `__builtin_data__` with the populated dict.
-                            "fromkeys" => {
-                                if !kw.is_empty() {
-                                    let class_name = class.borrow().name.clone();
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "{class_name}.fromkeys() takes no keyword arguments",
-                                        ),
-                                    ));
-                                }
-                                if pos.is_empty() {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        "fromkeys expected at least 1 argument, got 0".to_string(),
-                                    ));
-                                }
-                                if pos.len() > 2 {
-                                    let n = pos.len();
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "fromkeys expected at most 2 arguments, got {n}",
-                                        ),
-                                    ));
-                                }
-                                let default_val =
-                                    pos.get(1).cloned().unwrap_or_else(Value::none);
-                                // Collect keys before moving pos into bound_method_pos_buf
-                                // so we can borrow &pos[0] without an extra clone.
-                                let keys = self.collect_iterable(&pos[0])?;
-                                self.bound_method_pos_buf = pos;
-                                let mut map: indexmap::IndexMap<PyKey, Value> =
-                                    indexmap::IndexMap::with_capacity(keys.len());
-                                for key in &keys {
-                                    let py_key = self.value_to_pykey(key)?;
-                                    map.entry(py_key).or_insert_with(|| default_val.clone());
-                                }
-                                // Construct `cls()` with no arguments to get a subclass instance
-                                // (matching CPython's `dict.fromkeys` classmethod semantics).
-                                let instance =
-                                    self.call_class_expanded(Rc::clone(&class), &[])?;
-                                // Replace the empty `__builtin_data__` backing set by
-                                // `call_class_expanded` with the populated dict.
-                                if let ValueKind::PyInstance(inst_rc) = instance.kind() {
-                                    inst_rc.borrow_mut().attrs.insert(
-                                        BUILTIN_DATA_ATTR.to_string(),
-                                        Value::dict(map),
-                                    );
-                                }
-                                return Ok(instance);
-                            }
-                            _ => {
-                                self.bound_method_pos_buf = pos;
-                                let class_name = class.borrow().name.clone();
-                                return Err(PyError::attribute_error(
-                                    format!("type object '{class_name}' has no attribute '{method}'"),
-                                    Some(method.to_string()),
-                                    Some(Value::py_class(Rc::clone(&class))),
-                                ));
-                            }
-                        }
-                    }
-                    // Range methods: count, index, __len__ (issue #1807).
-                    // These are dispatched directly here rather than through
-                    // pyrust_builtins because range is not a BuiltinObject.
-                    ValueKind::Range { start, stop, step } => {
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        match method {
-                            "__len__" => {
-                                let extra = args_vec.len() + kw.len();
-                                if extra != 0 {
-                                    Err(PyError::named(
-                                        "TypeError",
-                                        format!("expected 0 arguments, got {extra}"),
-                                    ))
-                                } else {
-                                    use crate::value::range_len;
-                                    Ok(Value::int(range_len(start, stop, step)))
-                                }
-                            }
-                            "count" => {
-                                if args_vec.len() != 1 || !kw.is_empty() {
-                                    Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "range.count() takes exactly one argument ({} given)",
-                                            args_vec.len() + kw.len()
-                                        ),
-                                    ))
-                                } else {
-                                    let contained = self.range_contains_value(
-                                        start, stop, step, &args_vec[0],
-                                    )?;
-                                    Ok(Value::int(if contained { 1 } else { 0 }))
-                                }
-                            }
-                            "index" => {
-                                if args_vec.len() != 1 || !kw.is_empty() {
-                                    Err(PyError::named(
-                                        "TypeError",
-                                        format!(
-                                            "range.index() takes exactly one argument ({} given)",
-                                            args_vec.len() + kw.len()
-                                        ),
-                                    ))
-                                } else {
-                                    use crate::value::PyToPrimitive;
-                                    let v = &args_vec[0];
-                                    // Convert v to i64 if possible; non-integer types
-                                    // can never be in a range (CPython returns the
-                                    // "x not in sequence" message for those).
-                                    let vi_opt: Option<i64> = match v.kind() {
-                                        ValueKind::Int(x) => Some(x),
-                                        ValueKind::Bool(b) => Some(b as i64),
-                                        ValueKind::BigInt(n) => n.to_i64(),
-                                        ValueKind::Float(f) => {
-                                            const I64_MIN_F: f64 = i64::MIN as f64;
-                                            const I64_MAX_PLUS1_F: f64 =
-                                                9_223_372_036_854_775_808.0_f64;
-                                            if f.is_finite()
-                                                && f.fract() == 0.0
-                                                && f >= I64_MIN_F
-                                                && f < I64_MAX_PLUS1_F
-                                            {
-                                                Some(f as i64)
-                                            } else {
-                                                None
-                                            }
-                                        }
-                                        _ => None,
-                                    };
-                                    match vi_opt {
-                                        None => Err(PyError::named(
-                                            "ValueError",
-                                            "sequence.index(x): x not in sequence".to_string(),
-                                        )),
-                                        Some(vi) => {
-                                            let contained = self.range_contains_value(
-                                                start, stop, step, v,
-                                            )?;
-                                            if contained {
-                                                Ok(Value::int((vi - start) / step))
-                                            } else {
-                                                Err(PyError::named(
-                                                    "ValueError",
-                                                    format!("{} is not in range", v.repr()),
-                                                ))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => Err(PyError::named(
-                                "AttributeError",
-                                format!("'range' object has no attribute '{method}'"),
-                            )),
-                        }
-                    }
-                    // Issue #1413: generator bound-methods (__iter__, __next__,
-                    // send, close, throw) captured via get_attr route here.
-                    // Delegate to call_generator_method which holds all the VM
-                    // logic for these operations.  Clone the receiver to release
-                    // the borrow held by the outer `match receiver.kind()`.
-                    ValueKind::Generator(_) => {
-                        let gen_val = receiver.clone();
-                        let args_vec: Vec<Value> = pos.drain(..).collect();
-                        self.call_generator_method(gen_val, method, args_vec)
-                    }
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
-                    )),
-                    },
-                };
-                // Restore the positional-args buffer.  For borrow arms (Int,
-                // Float, Bytes, Str::format) pos still holds all elements with
-                // full capacity.  For drain arms pos is empty but retains the
-                // grown capacity, avoiding a re-allocation on the next call.
-                self.bound_method_pos_buf = pos;
-                result
+                self.call_bound_method_dispatch(name_rc, receiver_owned, args)
             }
             ValueKind::BuiltinFunction("str.format") => {
                 let self_val = args
@@ -1807,6 +987,825 @@ impl Interpreter {
                 ),
             )),
         }
+    }
+
+    /// Dispatch a call on a bound-method value (`x.append(...)`, `s.upper()`,
+    /// …).  Extracted verbatim from `call_function_expanded`'s bound-method
+    /// match arm (issue #458 / size reduction); behaviour is identical.  The
+    /// caller has already confirmed `function` is a bound method and passes the
+    /// unwrapped `(name, receiver)` pair so this helper holds no `function`
+    /// coupling.
+    /// Dispatch a call on a bound-method value (`x.append(...)`, `s.upper()`,
+    /// …).  Thin wrapper that borrows the interpreter's reusable
+    /// positional-args buffer and hands it back on every exit path, so the
+    /// inner method has a single owner-restore point instead of ~20 scattered
+    /// `self.bound_method_pos_buf = pos;` lines.
+    fn call_bound_method_dispatch(
+        &mut self,
+        name_rc: std::rc::Rc<String>,
+        receiver_owned: Value,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
+        let result =
+            self.bound_method_dispatch_inner(name_rc, receiver_owned, args, &mut pos);
+        self.bound_method_pos_buf = pos;
+        result
+    }
+
+    fn bound_method_dispatch_inner(
+        &mut self,
+        name_rc: std::rc::Rc<String>,
+        receiver_owned: Value,
+        args: &[ExpandedCallArg],
+        pos: &mut Vec<Value>,
+    ) -> Result<Value> {
+        // Borrow the method name as `&str` from the `Rc<String>` rather
+        // than cloning into a fresh `String` — the dispatch helpers
+        // below all accept `&str`. See issue #276 item #1.
+        let method: &str = name_rc.as_str();
+        let receiver = receiver_owned;
+        // Reuse the interpreter-level positional-args buffer so that
+        // tight loops calling a bound method pay zero allocation once
+        // the buffer has grown to the high-watermark arg count (issue
+        // #276 item #3).  The buffer is taken with `std::mem::take` so
+        // no borrow-checker split is needed; it is restored at the end
+        // of this arm (via `bound_method_pos_buf = pos` after the match).
+        pos.clear();
+        // Keyword-args fast path (issue #276 item #4): skip IndexMap
+        // construction entirely when all arguments are positional —
+        // the common case for builtin bound methods.
+        let has_kw = args.iter().any(|a| a.name.is_some());
+        let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+        if has_kw {
+            for a in args {
+                match &a.name {
+                    Some(n) => { kw.insert(PyKey::str_from(n.as_str()), a.value.clone()); }
+                    None => pos.push(a.value.clone()),
+                }
+            }
+        } else {
+            for a in args {
+                pos.push(a.value.clone());
+            }
+        }
+        // Bound-method dispatch: each builtin takes `&Value`
+        // and scopes its own `RefCell::borrow_mut()` for the
+        // duration of the operation (#448).  No `&mut Vec /
+        // Map / Set` crosses the crate boundary, so the
+        // previous `unalias_args_for_mutation` dance is
+        // unnecessary — aliasing-safety is structural now,
+        // not a discipline the caller has to remember.
+        // Probe the receiver's kind via a scoped block so the
+        // `kind()` Ref guards drop before we may move
+        // `receiver` into call_dict_method / call_set_method
+        // (#450).  Variants that read the kind's payload
+        // (Tuple, Complex, BuiltinObject, PyInstance) keep
+        // working off the live Ref because they don't move
+        // the receiver.
+        enum Kind {
+            Int,
+            Float,
+            Bytes,
+            Str,
+            List,
+            Dict,
+            Set,
+            Other,
+        }
+        let kind_tag = match receiver.kind() {
+            // bool is a subclass of int in CPython; route to the int
+            // dispatch so True.bit_length() / True.is_integer() work.
+            ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => Kind::Int,
+            ValueKind::Float(_) => Kind::Float,
+            ValueKind::Bytes(_) => Kind::Bytes,
+            ValueKind::Str(_) => Kind::Str,
+            ValueKind::List(_) => Kind::List,
+            ValueKind::Dict(_) => Kind::Dict,
+            ValueKind::Set(_) => Kind::Set,
+            _ => Kind::Other,
+        };
+        // __iter__ on any iterable built-in type delegates to the same
+        // logic as the `iter()` built-in: wrap the receiver in a
+        // NativeIterFrame generator.  Intercept here before the per-type
+        // arms so that none of the crate-level `call` functions need to
+        // handle "__iter__" (they would error on an unknown method name).
+        if method == "__iter__" {
+            let is_iterable_builtin = matches!(
+                receiver.kind(),
+                ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Str(_)
+                    | ValueKind::Bytes(_)
+                    | ValueKind::Dict(_)
+                    | ValueKind::Set(_)
+                    | ValueKind::Range { .. }
+            ) || matches!(receiver.kind(), ValueKind::BuiltinObject { ops, .. }
+                if ops.has_method("__iter__"));
+            if is_iterable_builtin {
+                reject_kwargs!(kw, "wrapper __iter__");
+                if !pos.is_empty() {
+                    let n = pos.len();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("expected 0 arguments, got {n}"),
+                    ));
+                }
+                let iter_arg = ExpandedCallArg {
+                    name: None,
+                    value: receiver,
+                };
+                let dispatch = crate::builtin_registry::lookup("iter")
+                    .expect("iter must be in the registry");
+                return dispatch(self, &[iter_arg]);
+            }
+        }
+        // Arms that accept `&[Value]` (Int, Float, Bytes) borrow `pos`
+        // directly — the buf's capacity is fully preserved on return.
+        // Arms that need `Vec<Value>` ownership drain `pos` into a
+        // fresh allocation so the (now-empty) buf can be returned to
+        // `bound_method_pos_buf` below, retaining its capacity for the
+        // next call.  Early-return error paths also restore the buf.
+        let result = match kind_tag {
+            Kind::Int => {
+                pyrust_builtins::int::call(method, &receiver, &pos, &kw)
+            }
+            Kind::Float => {
+                let f = match receiver.kind() {
+                    ValueKind::Float(f) => f,
+                    _ => unreachable!("kind_tag guard above"),
+                };
+                pyrust_builtins::float::call(method, f, &pos)
+            }
+            Kind::Bytes => {
+                if method == "join" {
+                    reject_kwargs!(kw, "bytes.join");
+                    let args_vec: Vec<Value> = pos.drain(..).collect();
+                    self.call_bytes_join(receiver, args_vec)
+                } else {
+                    pyrust_builtins::bytes::call(method, &receiver, &pos, &kw)
+                }
+            }
+            Kind::Str => {
+                // `format` needs kwargs threaded into the template.
+                // Intercept before `call_str_method`, which only receives
+                // positional args and would silently drop keyword arguments.
+                if method == "format" {
+                    let template = match receiver.kind() {
+                        ValueKind::Str(s) => s.to_string(),
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "descriptor 'format' requires a 'str' object".to_string(),
+                            ));
+                        }
+                    };
+                    let keyword: Vec<(String, Value)> = kw
+                        .into_iter()
+                        .filter_map(|(k, v)| {
+                            if let PyKey::Str(name) = k {
+                                Some((name.as_str().unwrap_or("").to_owned(), v))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    // Borrow pos; capacity retained in the buf below.
+                    self.format_str_template(&template, &pos, &keyword)
+                } else if !kw.is_empty() {
+                    // Resolve kwargs for str methods before passing to
+                    // call_str_method, which only accepts positional args.
+                    match str_merge_kwargs(method, pos, kw) {
+                        Ok(()) => {
+                            let args_vec: Vec<Value> = pos.drain(..).collect();
+                            self.call_str_method(method, receiver, args_vec)
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    // call_str_method takes Vec<Value> by value; drain
+                    // so pos retains its capacity for the next call.
+                    let args_vec: Vec<Value> = pos.drain(..).collect();
+                    self.call_str_method(method, receiver, args_vec)
+                }
+            }
+            Kind::List => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                if method == "index" || method == "count" {
+                    let needs_dispatch = args_vec.first().map(|t| {
+                        receiver
+                            .list_with(|items| Self::seq_search_needs_dispatch(t, items))
+                            .unwrap_or(true)
+                    }).unwrap_or(false);
+                    let args_vec = if method == "index" {
+                        match self.resolve_seq_index_pos(args_vec) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    } else {
+                        args_vec
+                    };
+                    if needs_dispatch {
+                        // Snapshot so we can release the list borrow
+                        // before `values_user_eq` may re-enter user code.
+                        let snapshot = receiver
+                            .list_with(|items| items.clone())
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "TypeError",
+                                    "list.index receiver is not a list".to_string(),
+                                )
+                            })?;
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &args_vec, "list")
+                        } else {
+                            self.call_seq_count(snapshot, &args_vec, "list")
+                        }
+                    } else {
+                        pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
+                    }
+                } else {
+                    pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
+                }
+            }
+            Kind::Dict => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                self.call_dict_method(method, receiver, args_vec, &kw)
+            }
+            Kind::Set => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                self.call_set_method(method, receiver, args_vec)
+            }
+            Kind::Other => match receiver.kind() {
+            ValueKind::Tuple(items) => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                if method == "index" || method == "count" {
+                    let needs_dispatch = args_vec
+                        .first()
+                        .map(|t| Self::seq_search_needs_dispatch(t, &items))
+                        .unwrap_or(false);
+                    let args_vec = if method == "index" {
+                        match self.resolve_seq_index_pos(args_vec) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    } else {
+                        args_vec
+                    };
+                    if needs_dispatch {
+                        // Snapshot to release the tuple Ref before
+                        // `values_user_eq` may re-enter user code.
+                        let snapshot = items.to_vec();
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &args_vec, "tuple")
+                        } else {
+                            self.call_seq_count(snapshot, &args_vec, "tuple")
+                        }
+                    } else {
+                        pyrust_builtins::tuple::call(method, items, args_vec)
+                    }
+                } else {
+                    pyrust_builtins::tuple::call(method, items, args_vec)
+                }
+            }
+            ValueKind::Complex(_, _) => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                pyrust_builtins::complex::call(method, &receiver, args_vec)
+            }
+            ValueKind::BuiltinObject { ops, state } => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                let empty_kw: indexmap::IndexMap<String, Value> =
+                    indexmap::IndexMap::new();
+                ops.call_method(state, method, args_vec, &empty_kw)
+            }
+            ValueKind::PyInstance(inst) => {
+                // Class method backed by a `BuiltinFunction` — emitted
+                // by `pyrust_module!`'s `class { … }` block.  `get_attr`
+                // wrapped the method-name-on-instance pair as a
+                // bound_method; here we re-resolve the method on the
+                // class and dispatch with `self` prepended through the
+                // unified helper.
+                let class = Rc::clone(&inst.borrow().class);
+                let method_val = match lookup_class_attr(&class, method) {
+                    Some(v) => v,
+                    None => {
+                        let class_name = class.borrow().name.clone();
+                        return Err(PyError::attribute_error(
+                            format!("'{class_name}' object has no attribute '{method}'"),
+                            Some(method.to_string()),
+                            Some(Value::py_instance(Rc::clone(inst))),
+                        ));
+                    }
+                };
+                // Issue #976/#994: if the resolved method is a primitive
+                // builtin (e.g. `dict.keys`, `tuple.count`), and the
+                // instance has a `__builtin_data__` backing value (set at
+                // construction time for subclasses of dict/list/set/
+                // frozenset/tuple), dispatch on the backing value directly.
+                // This avoids the `kind_ok` type guard in
+                // `call_function_expanded` rejecting the PyInstance receiver.
+                // Issue #1204: same mechanism for str/int/float/bytes subclasses.
+                if let ValueKind::BuiltinFunction(fn_name) = method_val.kind() {
+                    if fn_name.split_once('.').is_some_and(|(t, _)| {
+                        matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
+                            | "str" | "int" | "float" | "bytes")
+                    }) {
+                        if let Some(backing) = instance_builtin_data(&inst) {
+                            enum BkKind {
+                                Dict, List, Set, Frozenset, Tuple,
+                                Str, Int, Float, Bytes, Other,
+                            }
+                            let bk_kind = match backing.kind() {
+                                ValueKind::Dict(_) => BkKind::Dict,
+                                ValueKind::List(_) => BkKind::List,
+                                ValueKind::Set(_) => BkKind::Set,
+                                ValueKind::BuiltinObject { ops, .. }
+                                    if ops.type_name() == "frozenset" =>
+                                {
+                                    BkKind::Frozenset
+                                }
+                                ValueKind::Tuple(_) => BkKind::Tuple,
+                                ValueKind::Str(_) => BkKind::Str,
+                                ValueKind::Int(_)
+                                | ValueKind::BigInt(_)
+                                | ValueKind::Bool(_) => BkKind::Int,
+                                ValueKind::Float(_) => BkKind::Float,
+                                ValueKind::Bytes(_) => BkKind::Bytes,
+                                _ => BkKind::Other,
+                            };
+                            let args_vec: Vec<Value> = pos.drain(..).collect();
+                            return match bk_kind {
+                                BkKind::Dict => {
+                                    // Issue #1563: `fromkeys` is a classmethod; when
+                                    // called on a subclass instance (`MyDict().fromkeys`)
+                                    // CPython uses `type(self)` as `cls`, so the result
+                                    // is a `MyDict`, not a plain `dict`.  Route through
+                                    // the same class-dispatch path used for
+                                    // `MyDict.fromkeys` (bound-method on PyClass).
+                                    if method == "fromkeys" {
+                                        let bound = pyrust_builtins::bound_method::bound_method(
+                                            "fromkeys",
+                                            Value::py_class(Rc::clone(&class)),
+                                        );
+                                        let mut expanded: Vec<ExpandedCallArg> =
+                                            args_vec
+                                                .into_iter()
+                                                .map(|v| ExpandedCallArg {
+                                                    name: None,
+                                                    value: v,
+                                                })
+                                                .collect();
+                                        for (k, v) in &kw {
+                                            if let PyKey::Str(s) = k {
+                                                expanded.push(ExpandedCallArg {
+                                                    name: Some(
+                                                        s.as_str()
+                                                            .unwrap_or("")
+                                                            .to_owned(),
+                                                    ),
+                                                    value: v.clone(),
+                                                });
+                                            }
+                                        }
+                                        return self.call_function_expanded(
+                                            bound, &expanded,
+                                        );
+                                    }
+                                    self.call_dict_method(method, backing, args_vec, &kw)
+                                }
+                                BkKind::List => {
+                                    if method == "index" || method == "count" {
+                                        let needs_dispatch =
+                                            args_vec.first().map(|t| {
+                                                backing
+                                                    .list_with(|items| {
+                                                        Self::seq_search_needs_dispatch(
+                                                            t, items,
+                                                        )
+                                                    })
+                                                    .unwrap_or(true)
+                                            }).unwrap_or(false);
+                                        if needs_dispatch {
+                                            let snapshot = backing
+                                                .list_with(|items| items.clone())
+                                                .ok_or_else(|| {
+                                                    PyError::named(
+                                                        "TypeError",
+                                                        "list.index receiver is not a list"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+                                            if method == "index" {
+                                                self.call_seq_index(
+                                                    snapshot, &args_vec, "list",
+                                                )
+                                            } else {
+                                                self.call_seq_count(
+                                                    snapshot, &args_vec, "list",
+                                                )
+                                            }
+                                        } else {
+                                            pyrust_builtins::list::call(
+                                                method,
+                                                &backing,
+                                                args_vec,
+                                                &kw,
+                                            )
+                                        }
+                                    } else {
+                                        pyrust_builtins::list::call(
+                                            method,
+                                            &backing,
+                                            args_vec,
+                                            &kw,
+                                        )
+                                    }
+                                }
+                                BkKind::Set => {
+                                    self.call_set_method(method, backing, args_vec)
+                                }
+                                BkKind::Frozenset => {
+                                    pyrust_builtins::frozenset::call(
+                                        method,
+                                        &backing,
+                                        args_vec,
+                                    )
+                                }
+                                BkKind::Tuple => match backing.kind() {
+                                    ValueKind::Tuple(items) => {
+                                        if method == "index" || method == "count" {
+                                            let needs_dispatch = args_vec
+                                                .first()
+                                                .map(|t| {
+                                                    Self::seq_search_needs_dispatch(
+                                                        t, &items,
+                                                    )
+                                                })
+                                                .unwrap_or(false);
+                                            if needs_dispatch {
+                                                let snapshot = items.to_vec();
+                                                if method == "index" {
+                                                    self.call_seq_index(
+                                                        snapshot, &args_vec, "tuple",
+                                                    )
+                                                } else {
+                                                    self.call_seq_count(
+                                                        snapshot, &args_vec, "tuple",
+                                                    )
+                                                }
+                                            } else {
+                                                pyrust_builtins::tuple::call(
+                                                    method,
+                                                    items,
+                                                    args_vec,
+                                                )
+                                            }
+                                        } else {
+                                            pyrust_builtins::tuple::call(
+                                                method,
+                                                items,
+                                                args_vec,
+                                            )
+                                        }
+                                    }
+                                    _ => unreachable!("BkKind::Tuple guard above"),
+                                },
+                                BkKind::Str => {
+                                    self.call_str_method(method, backing, args_vec)
+                                }
+                                BkKind::Int => {
+                                    pyrust_builtins::int::call(
+                                        method,
+                                        &backing,
+                                        &args_vec,
+                                        &kw,
+                                    )
+                                }
+                                BkKind::Float => {
+                                    let f = match backing.kind() {
+                                        ValueKind::Float(f) => f,
+                                        _ => unreachable!("BkKind::Float guard above"),
+                                    };
+                                    pyrust_builtins::float::call(method, f, &args_vec)
+                                }
+                                BkKind::Bytes => {
+                                    pyrust_builtins::bytes::call(
+                                        method,
+                                        &backing,
+                                        &args_vec,
+                                        &kw,
+                                    )
+                                }
+                                BkKind::Other => Err(PyError::Runtime(format!(
+                                    "internal: unexpected builtin_data kind for method '{method}'"
+                                ))),
+                            };
+                        }
+                    }
+                }
+                // Reconstitute kwargs as ExpandedCallArgs (the
+                // bound_method dispatch split them into pos+kw maps).
+                // Drain pos so its capacity is preserved in the buf.
+                let mut combined: ExpandedArgBuf =
+                    ExpandedArgBuf::with_capacity(pos.len() + kw.len());
+                for v in pos.drain(..) {
+                    combined.push(ExpandedCallArg { name: None, value: v });
+                }
+                for (k, v) in kw {
+                    if let PyKey::Str(name) = k {
+                        combined.push(ExpandedCallArg {
+                            name: Some(name.as_str().unwrap_or("").to_owned()),
+                            value: v,
+                        });
+                    }
+                }
+                invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(inst.clone()),
+                    &combined,
+                )
+            }
+            ValueKind::PyClass(class) => {
+                // `type.mro()` — returns the MRO as a list (same entries
+                // as `__mro__` tuple).  CPython's `type.mro(self)` is a
+                // C slot that returns `list(self.__mro__)`.
+                //
+                // Two call forms:
+                //   B.mro()          → bound receiver is B, pos is empty
+                //   type.mro(B)      → bound receiver is `type`, pos[0] is B
+                let class = Rc::clone(class);
+                match method {
+                    "mro" => {
+                        // Determine the target class.  When the bound receiver
+                        // IS the `type` metaclass, the first positional arg is
+                        // the self argument (unbound descriptor form).  When
+                        // the receiver is any other class, mro() takes no
+                        // extra arguments.
+                        let receiver_is_type =
+                            Rc::ptr_eq(&class, &type_class_singleton());
+                        let target_class: Rc<RefCell<PyClass>> = if receiver_is_type {
+                            // Unbound descriptor call: type.mro(B).
+                            // Requires exactly one positional arg that is a type,
+                            // with no extra positional or keyword arguments.
+                            if pos.is_empty() {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "unbound method type.mro() needs an argument".to_string(),
+                                ));
+                            }
+                            // pos[0] is the self (type) argument.
+                            let maybe_class = match pos[0].kind() {
+                                ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                _ => None,
+                            };
+                            let target = match maybe_class {
+                                Some(c) => c,
+                                None => {
+                                    let type_name = pyrust_core::builtin_type_name(&pos[0]).to_string();
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "descriptor 'mro' for 'type' objects doesn't apply to a '{type_name}' object",
+                                        ),
+                                    ));
+                                }
+                            };
+                            // After resolving self, no extra positional args or kwargs allowed.
+                            reject_kwargs!(kw, "type.mro");
+                            if pos.len() > 1 {
+                                let extra = pos.len() - 1;
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "type.mro() takes no arguments ({extra} given)",
+                                    ),
+                                ));
+                            }
+                            target
+                        } else if pos.is_empty() && kw.is_empty() {
+                            // Bound call: B.mro()
+                            class
+                        } else if !kw.is_empty() {
+                            // Keyword arguments are never accepted.
+                            let class_name = class.borrow().name.clone();
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("{class_name}.mro() takes no keyword arguments"),
+                            ));
+                        } else {
+                            // Too many positional arguments.
+                            let n = pos.len();
+                            let class_name = class.borrow().name.clone();
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{class_name}.mro() takes no arguments ({n} given)",
+                                ),
+                            ));
+                        };
+                        Ok(Value::list(class_mro_items(&target_class)?))
+                    }
+                    "__subclasses__" => {
+                        // CPython: type.__subclasses__(self) → list of direct subclasses.
+                        // Takes no arguments. Prunes stale weak refs lazily.
+                        // CPython distinguishes kw vs positional:
+                        //   A.__subclasses__(1)       → "takes no arguments (1 given)"
+                        //   A.__subclasses__(x=1)     → "takes no keyword arguments"
+                        //   A.__subclasses__(1, x=2)  → "takes no keyword arguments"
+                        let class_name = class.borrow().name.clone();
+                        reject_kwargs!(kw, "{class_name}.__subclasses__");
+                        let n_pos = pos.len();
+                        if n_pos > 0 {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{class_name}.__subclasses__() takes no arguments ({n_pos} given)",
+                                ),
+                            ));
+                        }
+                        Ok(Value::list(class_direct_subclasses(&class)))
+                    }
+                    // Issue #1563: `dict.fromkeys` classmethod on a dict subclass.
+                    // `env.rs` binds the subclass as the receiver when `fromkeys` is
+                    // looked up on a non-primitive dict subclass.  Collect the iterable
+                    // and optional default, call `cls()` to construct an empty instance,
+                    // then replace its `__builtin_data__` with the populated dict.
+                    "fromkeys" => {
+                        reject_kwargs!(kw, "{}.fromkeys", class.borrow().name);
+                        if pos.is_empty() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "fromkeys expected at least 1 argument, got 0".to_string(),
+                            ));
+                        }
+                        if pos.len() > 2 {
+                            let n = pos.len();
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "fromkeys expected at most 2 arguments, got {n}",
+                                ),
+                            ));
+                        }
+                        let default_val =
+                            pos.get(1).cloned().unwrap_or_else(Value::none);
+                        // Collect keys before moving pos into bound_method_pos_buf
+                        // so we can borrow &pos[0] without an extra clone.
+                        let keys = self.collect_iterable(&pos[0])?;
+                        let mut map: indexmap::IndexMap<PyKey, Value> =
+                            indexmap::IndexMap::with_capacity(keys.len());
+                        for key in &keys {
+                            let py_key = self.value_to_pykey(key)?;
+                            map.entry(py_key).or_insert_with(|| default_val.clone());
+                        }
+                        // Construct `cls()` with no arguments to get a subclass instance
+                        // (matching CPython's `dict.fromkeys` classmethod semantics).
+                        let instance =
+                            self.call_class_expanded(Rc::clone(&class), &[])?;
+                        // Replace the empty `__builtin_data__` backing set by
+                        // `call_class_expanded` with the populated dict.
+                        if let ValueKind::PyInstance(inst_rc) = instance.kind() {
+                            inst_rc.borrow_mut().attrs.insert(
+                                BUILTIN_DATA_ATTR.to_string(),
+                                Value::dict(map),
+                            );
+                        }
+                        return Ok(instance);
+                    }
+                    _ => {
+                        let class_name = class.borrow().name.clone();
+                        return Err(PyError::attribute_error(
+                            format!("type object '{class_name}' has no attribute '{method}'"),
+                            Some(method.to_string()),
+                            Some(Value::py_class(Rc::clone(&class))),
+                        ));
+                    }
+                }
+            }
+            // Range methods: count, index, __len__ (issue #1807).
+            // These are dispatched directly here rather than through
+            // pyrust_builtins because range is not a BuiltinObject.
+            ValueKind::Range { start, stop, step } => {
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                match method {
+                    "__len__" => {
+                        let extra = args_vec.len() + kw.len();
+                        if extra != 0 {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!("expected 0 arguments, got {extra}"),
+                            ))
+                        } else {
+                            use crate::value::range_len;
+                            Ok(Value::int(range_len(start, stop, step)))
+                        }
+                    }
+                    "count" => {
+                        if args_vec.len() != 1 || !kw.is_empty() {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "range.count() takes exactly one argument ({} given)",
+                                    args_vec.len() + kw.len()
+                                ),
+                            ))
+                        } else {
+                            let contained = self.range_contains_value(
+                                start, stop, step, &args_vec[0],
+                            )?;
+                            Ok(Value::int(if contained { 1 } else { 0 }))
+                        }
+                    }
+                    "index" => {
+                        if args_vec.len() != 1 || !kw.is_empty() {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "range.index() takes exactly one argument ({} given)",
+                                    args_vec.len() + kw.len()
+                                ),
+                            ))
+                        } else {
+                            use crate::value::PyToPrimitive;
+                            let v = &args_vec[0];
+                            // Convert v to i64 if possible; non-integer types
+                            // can never be in a range (CPython returns the
+                            // "x not in sequence" message for those).
+                            let vi_opt: Option<i64> = match v.kind() {
+                                ValueKind::Int(x) => Some(x),
+                                ValueKind::Bool(b) => Some(b as i64),
+                                ValueKind::BigInt(n) => n.to_i64(),
+                                ValueKind::Float(f) => {
+                                    const I64_MIN_F: f64 = i64::MIN as f64;
+                                    const I64_MAX_PLUS1_F: f64 =
+                                        9_223_372_036_854_775_808.0_f64;
+                                    if f.is_finite()
+                                        && f.fract() == 0.0
+                                        && f >= I64_MIN_F
+                                        && f < I64_MAX_PLUS1_F
+                                    {
+                                        Some(f as i64)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            match vi_opt {
+                                None => Err(PyError::named(
+                                    "ValueError",
+                                    "sequence.index(x): x not in sequence".to_string(),
+                                )),
+                                Some(vi) => {
+                                    let contained = self.range_contains_value(
+                                        start, stop, step, v,
+                                    )?;
+                                    if contained {
+                                        Ok(Value::int((vi - start) / step))
+                                    } else {
+                                        Err(PyError::named(
+                                            "ValueError",
+                                            format!("{} is not in range", v.repr()),
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'range' object has no attribute '{method}'"),
+                    )),
+                }
+            }
+            // Issue #1413: generator bound-methods (__iter__, __next__,
+            // send, close, throw) captured via get_attr route here.
+            // Delegate to call_generator_method which holds all the VM
+            // logic for these operations.  Clone the receiver to release
+            // the borrow held by the outer `match receiver.kind()`.
+            ValueKind::Generator(_) => {
+                let gen_val = receiver.clone();
+                let args_vec: Vec<Value> = pos.drain(..).collect();
+                self.call_generator_method(gen_val, method, args_vec)
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
+            )),
+            },
+        };
+        // Restore the positional-args buffer.  For borrow arms (Int,
+        // Float, Bytes, Str::format) pos still holds all elements with
+        // full capacity.  For drain arms pos is empty but retains the
+        // grown capacity, avoiding a re-allocation on the next call.
+        result
     }
 
     /// Collect all values from an iterable (including generators) into a Vec.
@@ -3021,6 +3020,22 @@ impl Interpreter {
             return Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)));
         }
 
+        // Variadic path (*args / **kwargs) lives in a helper to keep this
+        // function focused on the common no-variadic fast path above.
+        self.call_user_function_variadic(function, args, bound_prefix, has_args_param)
+    }
+
+    /// Variadic argument-binding + execution path for
+    /// `call_user_function_expanded` — the `*args` / `**kwargs` case.
+    /// Extracted verbatim (size reduction); the fast no-variadic path stays
+    /// inline in the caller and returns before reaching this helper.
+    fn call_user_function_variadic(
+        &mut self,
+        function: Rc<UserFunction>,
+        args: &[ExpandedCallArg],
+        bound_prefix: &[Value],
+        has_args_param: bool,
+    ) -> Result<Value> {
         // Variadic path: handle *args and **kwargs
         // Gather positional and keyword args
         let mut positional_vals: Vec<Value> = bound_prefix.to_vec();
