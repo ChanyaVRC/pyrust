@@ -3516,12 +3516,18 @@ pyrust_module! {
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                 ValueKind::Str(s) => {
                     let trimmed = s.trim();
-                    match trimmed.parse::<i64>() {
+                    let cleaned = int_strip_explicit_base(trimmed, 10).ok_or_else(|| {
+                        PyError::named(
+                            "ValueError",
+                            format!("invalid literal for int() with base 10: '{s}'"),
+                        )
+                    })?;
+                    match cleaned.parse::<i64>() {
                         Ok(v) => Ok(Value::int(v)),
                         Err(_) => {
                             // Overflow: try BigInt before giving up.
                             use num_traits::Num as _;
-                            crate::value::PyBigInt::from_str_radix(trimmed, 10)
+                            crate::value::PyBigInt::from_str_radix(&cleaned, 10)
                                 .map(Value::bigint)
                                 .map_err(|_| PyError::named(
                                     "ValueError",
@@ -3539,12 +3545,18 @@ pyrust_module! {
                         )
                     })?;
                     let trimmed = s.trim();
-                    match trimmed.parse::<i64>() {
+                    let cleaned = int_strip_explicit_base(trimmed, 10).ok_or_else(|| {
+                        PyError::named(
+                            "ValueError",
+                            format!("invalid literal for int() with base 10: {repr}"),
+                        )
+                    })?;
+                    match cleaned.parse::<i64>() {
                         Ok(v) => Ok(Value::int(v)),
                         Err(_) => {
                             // Overflow: try BigInt before giving up.
                             use num_traits::Num as _;
-                            crate::value::PyBigInt::from_str_radix(trimmed, 10)
+                            crate::value::PyBigInt::from_str_radix(&cleaned, 10)
                                 .map(Value::bigint)
                                 .map_err(|_| PyError::named(
                                     "ValueError",
@@ -3697,20 +3709,18 @@ pyrust_module! {
                             }
                         } else {
                             let base = base_arg as u32;
-                            let stripped = if (base == 16 && (trimmed.starts_with("0x") || trimmed.starts_with("0X")))
-                                || (base == 2 && (trimmed.starts_with("0b") || trimmed.starts_with("0B")))
-                                || (base == 8 && (trimmed.starts_with("0o") || trimmed.starts_with("0O")))
-                            {
-                                &trimmed[2..]
-                            } else {
-                                trimmed
-                            };
-                            match i64::from_str_radix(stripped, base) {
+                            let stripped = int_strip_explicit_base(trimmed, base).ok_or_else(|| {
+                                PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
+                                )
+                            })?;
+                            match i64::from_str_radix(&stripped, base) {
                                 Ok(v) => Ok(Value::int(v)),
                                 Err(_) => {
                                     // Overflow: try BigInt before giving up.
                                     use num_traits::Num as _;
-                                    crate::value::PyBigInt::from_str_radix(stripped, base)
+                                    crate::value::PyBigInt::from_str_radix(&stripped, base)
                                         .map(Value::bigint)
                                         .map_err(|_| PyError::named(
                                             "ValueError",
@@ -3754,23 +3764,21 @@ pyrust_module! {
                             }
                         } else {
                             let base = base_arg as u32;
-                            let stripped = if (base == 16
-                                && (trimmed.starts_with("0x") || trimmed.starts_with("0X")))
-                                || (base == 2
-                                    && (trimmed.starts_with("0b") || trimmed.starts_with("0B")))
-                                || (base == 8
-                                    && (trimmed.starts_with("0o") || trimmed.starts_with("0O")))
-                            {
-                                &trimmed[2..]
-                            } else {
-                                trimmed
-                            };
-                            match i64::from_str_radix(stripped, base) {
+                            let stripped =
+                                int_strip_explicit_base(trimmed, base).ok_or_else(|| {
+                                    PyError::named(
+                                        "ValueError",
+                                        format!(
+                                            "invalid literal for int() with base {base_arg}: {repr}"
+                                        ),
+                                    )
+                                })?;
+                            match i64::from_str_radix(&stripped, base) {
                                 Ok(v) => Ok(Value::int(v)),
                                 Err(_) => {
                                     // Overflow: try BigInt before giving up.
                                     use num_traits::Num as _;
-                                    crate::value::PyBigInt::from_str_radix(stripped, base)
+                                    crate::value::PyBigInt::from_str_radix(&stripped, base)
                                         .map(Value::bigint)
                                         .map_err(|_| PyError::named(
                                             "ValueError",
@@ -3817,12 +3825,17 @@ pyrust_module! {
                             "int too large to convert to float".to_string(),
                         )
                     }),
-                ValueKind::Str(s) => s.trim().parse::<f64>().map(Value::float).map_err(|_| {
-                    PyError::named(
-                        "ValueError",
-                        format!("could not convert string to float: '{s}'"),
-                    )
-                }),
+                ValueKind::Str(s) => {
+                    let err = || {
+                        PyError::named(
+                            "ValueError",
+                            format!("could not convert string to float: '{s}'"),
+                        )
+                    };
+                    // PEP 515: strip valid underscores, reject invalid placement.
+                    let cleaned = pep515_strip_float(s.trim()).ok_or_else(err)?;
+                    cleaned.parse::<f64>().map(Value::float).map_err(|_| err())
+                }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);
@@ -7027,30 +7040,158 @@ fn int_parse_base_zero(s: &str) -> Option<(u32, String)> {
     };
 
     let signed = |digits: &str| -> String {
-        if sign.is_empty() { digits.to_owned() } else { format!("{sign}{digits}") }
+        if sign.is_empty() {
+            digits.to_owned()
+        } else {
+            format!("{sign}{digits}")
+        }
     };
 
-    if let Some(rest) = after_sign.strip_prefix("0x").or_else(|| after_sign.strip_prefix("0X")) {
-        if rest.is_empty() { return None; }
-        return Some((16, signed(rest)));
+    if let Some(rest) = after_sign
+        .strip_prefix("0x")
+        .or_else(|| after_sign.strip_prefix("0X"))
+    {
+        if rest.is_empty() {
+            return None;
+        }
+        // PEP 515: a `_` may immediately follow the base prefix (`0x_FF`).
+        let digits = pep515_strip_int(rest, true)?;
+        if digits.is_empty() {
+            return None;
+        }
+        return Some((16, signed(&digits)));
     }
-    if let Some(rest) = after_sign.strip_prefix("0b").or_else(|| after_sign.strip_prefix("0B")) {
-        if rest.is_empty() { return None; }
-        return Some((2, signed(rest)));
+    if let Some(rest) = after_sign
+        .strip_prefix("0b")
+        .or_else(|| after_sign.strip_prefix("0B"))
+    {
+        if rest.is_empty() {
+            return None;
+        }
+        let digits = pep515_strip_int(rest, true)?;
+        if digits.is_empty() {
+            return None;
+        }
+        return Some((2, signed(&digits)));
     }
-    if let Some(rest) = after_sign.strip_prefix("0o").or_else(|| after_sign.strip_prefix("0O")) {
-        if rest.is_empty() { return None; }
-        return Some((8, signed(rest)));
+    if let Some(rest) = after_sign
+        .strip_prefix("0o")
+        .or_else(|| after_sign.strip_prefix("0O"))
+    {
+        if rest.is_empty() {
+            return None;
+        }
+        let digits = pep515_strip_int(rest, true)?;
+        if digits.is_empty() {
+            return None;
+        }
+        return Some((8, signed(&digits)));
     }
-    // No letter prefix: a leading `0` followed by more chars must all be `0`
+    // No letter prefix: PEP 515 underscores only between digits.
+    let after_sign = pep515_strip_int(after_sign, false)?;
+    // A leading `0` followed by more chars must all be `0`
     // (Python 3 forbids the Python 2 octal syntax `09` etc.).
     if after_sign.starts_with('0') && after_sign.len() > 1 {
         if after_sign.chars().all(|c| c == '0') {
-            return Some((10, signed(after_sign)));
+            return Some((10, signed(&after_sign)));
         }
         return None;
     }
-    Some((10, signed(after_sign)))
+    Some((10, signed(&after_sign)))
+}
+
+/// Validate PEP 515 underscore placement in the digit portion of an integer
+/// literal (after any sign and base prefix have been removed) and return the
+/// underscore-stripped digits.
+///
+/// CPython rule: a `_` must be preceded by a digit and followed by a digit,
+/// with the single exception that a `_` may immediately follow a base prefix
+/// (`0x_FF`, `0o_17`, `0b_101`).  Leading (without a preceding prefix),
+/// trailing, and doubled underscores are all rejected.
+///
+/// `allow_leading` is `true` when a base prefix was present, permitting the
+/// post-prefix underscore.  Returns `None` on any invalid placement.
+fn pep515_strip_int(digits: &str, allow_leading: bool) -> Option<String> {
+    if digits.is_empty() {
+        return Some(String::new());
+    }
+    let bytes = digits.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'_' {
+            // Doubled underscore.
+            if i + 1 < bytes.len() && bytes[i + 1] == b'_' {
+                return None;
+            }
+            // Trailing underscore.
+            if i + 1 == bytes.len() {
+                return None;
+            }
+            // Leading underscore: only allowed immediately after a prefix.
+            if i == 0 && !allow_leading {
+                return None;
+            }
+        }
+    }
+    Some(digits.chars().filter(|&c| c != '_').collect())
+}
+
+/// Validate PEP 515 underscore placement in a float literal string (sign and
+/// surrounding whitespace already stripped) and return the underscore-stripped
+/// string ready for `f64::from_str`.
+///
+/// CPython rule for floats: every `_` must be both preceded and followed by a
+/// decimal digit.  Underscores adjacent to `.`, `e`/`E`, signs, or the string
+/// boundary are invalid, as are doubled underscores.  Returns `None` on any
+/// invalid placement.
+fn pep515_strip_float(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'_' {
+            let prev_ok = i > 0 && bytes[i - 1].is_ascii_digit();
+            let next_ok = i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit();
+            if !prev_ok || !next_ok {
+                return None;
+            }
+        }
+    }
+    Some(s.chars().filter(|&c| c != '_').collect())
+}
+
+/// Strip the optional sign and matching base prefix from a string passed to
+/// `int(str, base)` with an explicit `base` (2 / 8 / 16 accept their prefix;
+/// other bases have none), validate PEP 515 underscore placement, and return
+/// the sign-prefixed, underscore-stripped digits ready for `from_str_radix`.
+///
+/// Returns `None` on invalid underscore placement.  Invalid *digits* are left
+/// for `from_str_radix` to reject so the caller produces the right message.
+fn int_strip_explicit_base(trimmed: &str, base: u32) -> Option<String> {
+    let (sign, after_sign) = if let Some(rest) = trimmed.strip_prefix('-') {
+        ("-", rest)
+    } else if let Some(rest) = trimmed.strip_prefix('+') {
+        ("", rest) // `+` consumed but not forwarded; from_str_radix rejects it.
+    } else {
+        ("", trimmed)
+    };
+
+    let (digits_part, has_prefix) = match base {
+        16 if after_sign.starts_with("0x") || after_sign.starts_with("0X") => {
+            (&after_sign[2..], true)
+        }
+        2 if after_sign.starts_with("0b") || after_sign.starts_with("0B") => {
+            (&after_sign[2..], true)
+        }
+        8 if after_sign.starts_with("0o") || after_sign.starts_with("0O") => {
+            (&after_sign[2..], true)
+        }
+        _ => (after_sign, false),
+    };
+
+    let stripped = pep515_strip_int(digits_part, has_prefix)?;
+    if sign.is_empty() {
+        Some(stripped)
+    } else {
+        Some(format!("{sign}{stripped}"))
+    }
 }
 
 /// Integer divmod shared by all `int`/`bool` overload combinations.
