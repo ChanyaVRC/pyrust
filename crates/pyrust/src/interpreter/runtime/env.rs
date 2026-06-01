@@ -512,6 +512,13 @@ impl Interpreter {
                         Value::none(),
                     );
                     Ok(pyrust_builtins::property::property_method(empty, kind))
+                } else if func_name == "itertools.chain" && name == "from_iterable" {
+                    // Issue #1920: `itertools.chain` is a BuiltinFunction (not a
+                    // real PyClass), so its `from_iterable` alternate constructor
+                    // has no natural attribute slot.  Resolve it to the registered
+                    // `itertools.chain_from_iterable` builtin, which builds the
+                    // lazy flattening iterator.
+                    Ok(Value::builtin_function("itertools.chain_from_iterable"))
                 } else {
                     Err(pyrust_core::py_err!("AttributeError", "type object '{}' has no attribute '{name}'", func_name))
                 }
