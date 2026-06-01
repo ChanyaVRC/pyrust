@@ -51,6 +51,90 @@ pyrust_module! {
         Ok(pyrust_builtins::iter_helpers::chain(sources))
     }
 
+    /// CPython: itertools.chain.from_iterable(iterable) — the alternate
+    /// constructor that takes a *single* iterable whose elements are the
+    /// iterables to chain.  Equivalent to `chain(*iterable)` but lazy: the
+    /// outer iterable is consumed one element at a time, and each inner
+    /// iterable is only iterated when reached, so an infinite outer source
+    /// works up to the consumed point.  Exposed via attribute access on the
+    /// `chain` builtin (see `env.rs::get_attr` BuiltinFunction arm).
+    /// <https://docs.python.org/3/library/itertools.html#itertools.chain.from_iterable>
+    fn chain_from_iterable(args) -> Result<Value> {
+        reject_keyword_args_expanded("chain.from_iterable", args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "chain.from_iterable() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        // `iter(arg)` over the outer iterable.  This does not consume any
+        // element yet (for a generator source it just returns the generator);
+        // the first element is pulled on the first `__next__`, matching
+        // CPython's lazy timing.
+        let outer = make_iter(_interp, &args[0].value)?;
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert("_outer".to_string(), outer);
+        attrs.insert("_inner".to_string(), Value::none());
+        make_itertools_instance("_chain_from_iterable", attrs)
+    }
+
+    /// CPython: the iterator returned by `itertools.chain.from_iterable`.
+    /// Holds the outer iterator (`_outer`) and the current inner iterator
+    /// (`_inner`, `None` until the first inner iterable is reached).  Inner
+    /// iterables are pulled from the outer source on demand and `iter()`-ed
+    /// lazily, so a non-iterable element raises `TypeError` only when
+    /// reached.
+    class _chain_from_iterable {
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            loop {
+                let inner = inst
+                    .borrow()
+                    .attrs
+                    .get("_inner")
+                    .cloned()
+                    .ok_or_else(|| internal(FN_NAME))?;
+                if inner.is_none() {
+                    // No current inner iterator — pull the next inner iterable
+                    // from the outer source (StopIteration propagates to end
+                    // the whole chain), then `iter()` it lazily.  A
+                    // non-iterable element raises TypeError here, matching
+                    // CPython's "'<type>' object is not iterable".
+                    let outer = inst
+                        .borrow()
+                        .attrs
+                        .get("_outer")
+                        .cloned()
+                        .ok_or_else(|| internal(FN_NAME))?;
+                    let next_iterable = _interp.call_next(&outer, None)?;
+                    let new_inner = make_iter(_interp, &next_iterable)?;
+                    inst.borrow_mut()
+                        .attrs
+                        .insert("_inner".to_string(), new_inner);
+                    continue;
+                }
+                // Drain the current inner iterator; on exhaustion drop it and
+                // loop back to fetch the next inner iterable.
+                match _interp.call_next(&inner, None) {
+                    Ok(v) => return Ok(v),
+                    Err(e) if is_stop_iteration(&e) => {
+                        inst.borrow_mut()
+                            .attrs
+                            .insert("_inner".to_string(), Value::none());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
     /// `itertools.islice` — fully lazy slice with class-based dispatch.
     /// State: `_iter` (advanced past start), `_remaining_stop` (Optional
     /// remaining count until stop), `_step`.
