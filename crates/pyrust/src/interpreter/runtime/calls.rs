@@ -4666,6 +4666,15 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         return Ok(pad_value(&raw, fs, '<', fs.fill));
     }
 
+    // 'n' already implies locale-aware grouping, so CPython rejects an
+    // explicit ',' / '_' combined with it (reported against the original 'n'
+    // type, not the effective 'd' it maps to).
+    if let Some(g) = fs.grouping {
+        if t == 'n' {
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
+        }
+    }
+
     // 'n' = same as 'd' for now (no locale-aware grouping).
     let effective_t = if t == 'n' { 'd' } else { t };
 
@@ -4737,6 +4746,15 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
         // rather than the "%c arg not in range(0x110000)" it uses for
         // in-range negative integers.
         return Err(pyrust_core::overflow_err!("Python int too large to convert to C long"));
+    }
+
+    // 'n' already implies locale-aware grouping, so CPython rejects an
+    // explicit ',' / '_' combined with it (reported against the original 'n'
+    // type, not the effective 'd' it maps to).
+    if let Some(g) = fs.grouping {
+        if t == 'n' {
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
+        }
     }
 
     // 'n' = same as 'd' for now (no locale-aware grouping).
@@ -4826,8 +4844,15 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
     }
 
-    // Validate grouping vs type.  Comma allowed on all float types; '_'
-    // similarly per CPython.
+    // Validate grouping vs type.  Comma and '_' are allowed on all float
+    // types except 'n', which already implies locale-aware grouping and so
+    // CPython rejects an explicit ',' / '_' combined with it.
+    if let Some(g) = fs.grouping {
+        if t == 'n' {
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
+        }
+    }
+
     let (mut body, alt_prefix) = match t {
         'f' | 'F' => {
             let prec = fs.precision.unwrap_or(6);

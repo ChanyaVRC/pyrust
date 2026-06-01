@@ -49,3 +49,13 @@ print(f"{1234567.0:.2n}")
 
 # complex 'n' (already supported before the fix; guard against regression).
 print(repr(format(1 + 2j, "n")))
+
+# 'n' already implies locale-aware grouping, so an explicit ',' / '_' grouping
+# flag combined with it is a ValueError in CPython, for both ints and floats.
+for v in [1234.5, 1000000, True, 10**40, 100000.0]:
+    for spec in [",n", "_n"]:
+        try:
+            format(v, spec)
+            print("NO ERROR", repr(v), spec)
+        except ValueError as e:
+            print(type(e).__name__, str(e))
