@@ -63,19 +63,8 @@ impl Interpreter {
                 // A), so super() must walk D's full MRO rather than just B.base.
                 let instance_class = Rc::clone(&instance.borrow().class);
                 let mro = class_mro_items(&instance_class)?;
-                let class_ptr = Rc::as_ptr(&class);
                 // Find `class` in the MRO, then search from the next entry.
-                let start = mro
-                    .iter()
-                    .position(|v| {
-                        if let ValueKind::PyClass(c) = v.kind() {
-                            Rc::as_ptr(c) == class_ptr
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
+                let start = mro_search_start(&mro, &class);
                 for mro_entry in mro.iter().skip(start) {
                     let entry_class = match mro_entry.kind() {
                         ValueKind::PyClass(c) => Rc::clone(c),
@@ -134,18 +123,7 @@ impl Interpreter {
                 let obj_class = Rc::clone(obj_class);
                 // classmethod super(): use MRO of obj_class, start after `class`.
                 let mro = class_mro_items(&obj_class)?;
-                let class_ptr = Rc::as_ptr(&class);
-                let start = mro
-                    .iter()
-                    .position(|v| {
-                        if let ValueKind::PyClass(c) = v.kind() {
-                            Rc::as_ptr(c) == class_ptr
-                        } else {
-                            false
-                        }
-                    })
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
+                let start = mro_search_start(&mro, &class);
                 for mro_entry in mro.iter().skip(start) {
                     let entry_class = match mro_entry.kind() {
                         ValueKind::PyClass(c) => Rc::clone(c),
@@ -1024,6 +1002,32 @@ impl Interpreter {
         ))
     }
 
+    /// The CPython `slot_tp_getattr_hook` fallback: if `class` defines
+    /// `__getattr__`, invoke it as `__getattr__(instance, name)` and return the
+    /// result; otherwise return `None` so the caller proceeds (re-raising the
+    /// original `AttributeError`, or continuing normal lookup).
+    ///
+    /// Shared by the three sites in `get_attr_instance_raw` that previously
+    /// inlined this identical lookup-and-invoke (two on a descriptor `__get__`
+    /// raising `AttributeError`, one as the final no-attribute fallback).
+    fn try_invoke_getattr_hook(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        instance: &Rc<RefCell<PyInstance>>,
+        name: &str,
+    ) -> Option<Result<Value>> {
+        let getattr_val = lookup_class_attr(class, "__getattr__")?;
+        Some(invoke_class_method(
+            self,
+            getattr_val,
+            Value::py_instance(Rc::clone(instance)),
+            &[ExpandedCallArg {
+                name: None,
+                value: Value::string(name.to_string()),
+            }],
+        ))
+    }
+
     /// Standard attribute lookup for a `PyInstance` — the body of
     /// CPython's `object.__getattribute__`.  Called by `get_attr` when no
     /// user-defined `__getattribute__` is in the MRO, and directly by the
@@ -1074,16 +1078,8 @@ impl Interpreter {
                         // __get__ raised AttributeError: try __getattr__ if
                         // defined, otherwise re-raise the original error
                         // (CPython slot_tp_getattr_hook behaviour).
-                        if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
-                            return invoke_class_method(
-                                self,
-                                getattr_val,
-                                Value::py_instance(Rc::clone(&instance)),
-                                &[ExpandedCallArg {
-                                    name: None,
-                                    value: Value::string(name.to_string()),
-                                }],
-                            );
+                        if let Some(r) = self.try_invoke_getattr_hook(&class, &instance, name) {
+                            return r;
                         }
                     }
                     Err(_) => {}
@@ -1153,16 +1149,8 @@ impl Interpreter {
                     Err(ref e) if e.class_name_is("AttributeError") => {
                         // __get__ raised AttributeError: try __getattr__ if
                         // defined, otherwise re-raise the original error.
-                        if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
-                            return invoke_class_method(
-                                self,
-                                getattr_val,
-                                Value::py_instance(Rc::clone(&instance)),
-                                &[ExpandedCallArg {
-                                    name: None,
-                                    value: Value::string(name.to_string()),
-                                }],
-                            );
+                        if let Some(r) = self.try_invoke_getattr_hook(&class, &instance, name) {
+                            return r;
                         }
                     }
                     Err(_) => {}
@@ -1271,16 +1259,8 @@ impl Interpreter {
 
         // Step 4: __getattr__ fallback — called when normal lookup
         // finds nothing (CPython slot_tp_getattr_hook).
-        if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
-            return invoke_class_method(
-                self,
-                getattr_val,
-                Value::py_instance(Rc::clone(&instance)),
-                &[ExpandedCallArg {
-                    name: None,
-                    value: Value::string(name.to_string()),
-                }],
-            );
+        if let Some(r) = self.try_invoke_getattr_hook(&class, &instance, name) {
+            return r;
         }
 
         let class_name = class.borrow().name.clone();
@@ -3039,6 +3019,23 @@ fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
     }
 
     Ok(mro.into_iter().map(Value::py_class).collect())
+}
+
+/// Index in `mro` at which a `super()` lookup should begin: the entry *after*
+/// `class` (found by pointer identity), or `0` if `class` is not present.
+///
+/// Shared by the instance and classmethod `super()` paths, which both walk the
+/// receiver's full MRO from the position following the defining class
+/// (cooperative multiple inheritance).
+fn mro_search_start(mro: &[Value], class: &Rc<RefCell<PyClass>>) -> usize {
+    let class_ptr = Rc::as_ptr(class);
+    mro.iter()
+        .position(|v| match v.kind() {
+            ValueKind::PyClass(c) => Rc::as_ptr(c) == class_ptr,
+            _ => false,
+        })
+        .map(|i| i + 1)
+        .unwrap_or(0)
 }
 
 /// Returns the list of direct subclasses of `class`, pruning stale weak refs.
