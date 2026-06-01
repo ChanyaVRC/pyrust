@@ -889,6 +889,24 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
 
 pub type NameSet = Rc<HashSet<String>>;
 
+/// A single lexical scope's binding storage.
+///
+/// `Environment` is the **slow, name-keyed** half of pyrust's dual storage:
+/// `values` holds module/class-body bindings, closure/`nonlocal` cells, and
+/// any function local the compiler chose not to register-allocate. The
+/// **fast, index-keyed** half (fastlocals) is not stored here — it lives in
+/// the active VM frame's register file, keyed by compile-time slot analysis.
+///
+/// Which store a name uses, and which lookup/assign path handles it (keyed by
+/// `global_names` / `nonlocal_names` / `local_names` and whether `parent` is
+/// `None`), is decided at compile time. The single authoritative description
+/// of that rule — "THE RULE" — lives next to the runtime helpers in
+/// `crates/pyrust/src/interpreter/helpers.rs` (search for
+/// "the env-lookup rule (issue #452)"). Keep these in sync.
+///
+/// Note: collapsing `values` and the fastlocals into one store is the
+/// long-term direction tracked by #452 but is perf-sensitive and explicitly
+/// not done here.
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub values: HashMap<String, Value>,
