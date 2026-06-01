@@ -130,7 +130,7 @@ pub fn remove(receiver: &Value, args: Vec<Value>) -> Result<Value> {
             )
         })?;
     let pos = pos
-        .ok_or_else(|| PyError::named("ValueError", format!("{} is not in list", target.repr())))?;
+        .ok_or_else(|| PyError::named("ValueError", "list.remove(x): x not in list".to_string()))?;
     receiver.list_pop_at(pos)?;
     Ok(Value::none())
 }
