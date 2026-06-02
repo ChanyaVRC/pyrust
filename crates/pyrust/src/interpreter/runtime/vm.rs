@@ -1849,6 +1849,10 @@ impl Interpreter {
                     let r = self.exec_get_item(&regs, num_locals, *obj, *idx);
                     regs[*dst as usize] = vm_try!(r);
                 }
+                Insn::GetSlice(dst, obj, base) => {
+                    let r = self.exec_get_slice(&regs, num_locals, *obj, *base);
+                    regs[*dst as usize] = vm_try!(r);
+                }
                 Insn::SetItem(obj, idx, val) => {
                     vm_try!(self.exec_set_item(&mut regs, num_locals, *obj, *idx, *val));
                 }

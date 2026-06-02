@@ -4512,6 +4512,9 @@ impl Interpreter {
         let hi = self.resolve_slice_bound_val(hi)?;
         let st = self.resolve_slice_bound_val(st)?;
 
+        // For str, the slice bounds are char-based; computing `len` as the char
+        // count is O(n), so the contiguous fast path below resolves char->byte
+        // offsets in a single forward scan instead of materialising Vec<char>.
         let len = match target.kind() {
             ValueKind::List(items) => items.len() as i64,
             ValueKind::Tuple(items) => items.len() as i64,
@@ -4523,6 +4526,43 @@ impl Interpreter {
             }
         };
         let (start, end, step) = Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
+
+        // Contiguous fast path: `step == 1` produces the contiguous run
+        // `[start, end)`.  resolve_slice_bounds clamps both bounds to `[0, len]`
+        // for positive step, so `start..end.max(start)` is always in range; copy
+        // the run directly (memcpy for bytes, range clone for list/tuple) instead
+        // of building a full index Vec and copying element-by-element (#2066).
+        if step == 1 {
+            let s = start as usize;
+            let e = (end.max(start)) as usize;
+            match target.kind() {
+                ValueKind::List(items) => return Ok(Value::list(items[s..e].to_vec())),
+                ValueKind::Tuple(items) => return Ok(Value::tuple(items[s..e].to_vec())),
+                ValueKind::Bytes(rc) => return Ok(Value::bytes(rc[s..e].to_vec())),
+                ValueKind::Str(string) => {
+                    // s/e are char indices; walk char_indices once to find the
+                    // corresponding byte offsets, then slice the &str (no
+                    // Vec<char> allocation, char-boundary correct for multibyte).
+                    if s >= e {
+                        return Ok(Value::string(String::new()));
+                    }
+                    let mut byte_start = string.len();
+                    let mut byte_end = string.len();
+                    for (ci, (bi, _)) in string.char_indices().enumerate() {
+                        if ci == s {
+                            byte_start = bi;
+                        }
+                        if ci == e {
+                            byte_end = bi;
+                            break;
+                        }
+                    }
+                    return Ok(Value::string(string[byte_start..byte_end].to_string()));
+                }
+                _ => unreachable!(),
+            }
+        }
+
         let indices = Self::slice_target_indices(len, start, end, step);
 
         match target.kind() {
@@ -7215,6 +7255,39 @@ impl Interpreter {
                 self.eval_index(&obj_val, idx_val)
             }
         }
+    }
+
+    /// Execute an rvalue slice read `obj[lo:hi:step]` (the `GetSlice` opcode,
+    /// CPython BINARY_SLICE analogue).  Reads the three contiguous bound
+    /// registers (`base`, `base+1`, `base+2`) and slices `obj` directly via
+    /// `eval_slice`, which only materialises a real `slice` object for the
+    /// PyInstance `__getitem__` / BuiltinObject paths — built-in sequences skip
+    /// the per-access `slice`-object allocation entirely (#1964).
+    pub(crate) fn exec_get_slice(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        base: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let start = vm_read(regs, base, num_locals)?;
+        let stop = vm_read(regs, base + 1, num_locals)?;
+        let step = vm_read(regs, base + 2, num_locals)?;
+        let obj_val = vm_read(regs, obj, num_locals)?;
+        let lo = if start.is_none() { None } else { Some(start) };
+        let hi = if stop.is_none() { None } else { Some(stop) };
+        let st = if step.is_none() { None } else { Some(step) };
+        // Mapping targets (dict) treat slice notation as a *key lookup*, not a
+        // slice: `d[1:2]` builds the slice object and looks it up as a key
+        // (KeyError if absent), matching CPython and the prior BuildSlice +
+        // GetItem path.  Build a real slice object and dispatch through
+        // eval_index so the dict lookup runs.  eval_slice handles every other
+        // target (built-in sequences, range, BuiltinObject, PyInstance).
+        if matches!(obj_val.kind(), ValueKind::Dict(_)) {
+            let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
+            return self.eval_index(&obj_val, slice_val);
+        }
+        self.eval_slice(&obj_val, lo, hi, st)
     }
 
     /// Execute `obj[idx] = val`.

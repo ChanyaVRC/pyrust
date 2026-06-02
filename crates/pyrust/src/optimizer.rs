@@ -949,6 +949,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | GetAttrForWith(r, _, _, _)
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
+        | GetSlice(r, _, _)
         | Call(r, _)
         | CallMemo(r, _)
         | BuildList(r, _, _)
@@ -1751,6 +1752,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         BuildString(_, base, n) => r >= *base && r < *base + *n as u32,
         // BuildSlice always reads exactly 3 registers: start, stop, step.
         BuildSlice(_, base) => r >= *base && r < *base + 3,
+        // GetSlice reads `obj` plus the 3 contiguous bound registers (start,
+        // stop, step) starting at `base`.
+        GetSlice(_, obj, base) => *obj == r || (r >= *base && r < *base + 3),
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
         // so the live range is base .. base + 2*n (not base + n).
         BuildDict(_, base, n) => r >= *base && r < *base + 2 * *n,
@@ -1914,6 +1918,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             }
         }
         BuildSlice(_, base) => {
+            for r in *base..*base + 3 {
+                reads.insert(r);
+            }
+        }
+        GetSlice(_, obj, base) => {
+            reads.insert(*obj);
             for r in *base..*base + 3 {
                 reads.insert(r);
             }
@@ -2751,6 +2761,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | GetAttrForWith(r, _, _, _)
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
+        | GetSlice(r, _, _)
         | Call(r, _)
         | CallMemo(r, _)
         | Move(r, _)
@@ -6141,6 +6152,12 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             }
         }
         BuildSlice(_, base) => {
+            for r in *base..*base + 3 {
+                f(r);
+            }
+        }
+        GetSlice(_, obj, base) => {
+            f(*obj);
             for r in *base..*base + 3 {
                 f(r);
             }
