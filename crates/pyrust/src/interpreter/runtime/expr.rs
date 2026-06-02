@@ -1298,6 +1298,23 @@ impl Interpreter {
             return compare_values(a, b);
         }
 
+        // Issue #1934/#1939: a builtin-subclass operand (int/float/str/bytes/
+        // list/tuple/… subclass) with no user comparison override inherits the
+        // base type's ordering, so `min`/`max`/`sorted` must compare via the
+        // backing value (`min(F(1.0), F(2.0))`, `sorted([L([2]), [1]])`).
+        // Coerce each side to its backing when the subclass doesn't override
+        // `__lt__`/`__gt__`/`__le__`/`__ge__`, then recurse so the primitive
+        // fast path runs.  A genuine user comparison dunder is left intact and
+        // dispatched below.
+        const ORDER_OVERRIDES: &[&str] = &["__lt__", "__gt__", "__le__", "__ge__"];
+        let a_b = coerce_subclass_backing(a, ORDER_OVERRIDES);
+        let b_b = coerce_subclass_backing(b, ORDER_OVERRIDES);
+        if a_b.is_some() || b_b.is_some() {
+            let a_c = a_b.unwrap_or_else(|| a.clone());
+            let b_c = b_b.unwrap_or_else(|| b.clone());
+            return self.richcmp_order(&a_c, &b_c);
+        }
+
         // Try a < b (dispatches __lt__ on a, then __gt__ on b).
         match self.try_dunder_binary(a, b, "__lt__", "__gt__") {
             Some(Ok(v)) => {
@@ -1349,6 +1366,18 @@ impl Interpreter {
             && !matches!(b.kind(), ValueKind::PyInstance(_))
         {
             return compare_values(a, b);
+        }
+
+        // Issue #1934/#1939: coerce builtin-subclass operands to their backing
+        // (mirrors `richcmp_order`) so `max(...)` over subclass elements
+        // compares via the inherited base-type ordering.
+        const ORDER_OVERRIDES: &[&str] = &["__lt__", "__gt__", "__le__", "__ge__"];
+        let a_b = coerce_subclass_backing(a, ORDER_OVERRIDES);
+        let b_b = coerce_subclass_backing(b, ORDER_OVERRIDES);
+        if a_b.is_some() || b_b.is_some() {
+            let a_c = a_b.unwrap_or_else(|| a.clone());
+            let b_c = b_b.unwrap_or_else(|| b.clone());
+            return self.richcmp_order_gt(&a_c, &b_c);
         }
 
         // Try a > b (dispatches __gt__ on a, then __lt__ on b).
@@ -1480,6 +1509,30 @@ impl Interpreter {
             });
         }
         if let ValueKind::PyInstance(inst) = value.kind() {
+            // Issue #1936: a builtin-subclass instance (int/str/float/bytes/
+            // tuple/frozenset subclass) with no user `__hash__` inherits the
+            // base type's `__hash__`, so it must key identically to its backing
+            // value (`hash(I(5)) == hash(5)`, `{1: "a"}[I(1)]`, `len({1, I(1)})
+            // == 1`).  `coerce_subclass_backing` excludes a user `__hash__`
+            // override and the `__hash__ = None` unhashable case (handled
+            // below), and skips the inherited `object.__hash__`/`int.__hash__`
+            // sentinels.  Only hashable (immutable) backings key by value;
+            // list/dict/set backings fall through to the unhashable handling.
+            if let Some(backing) = coerce_subclass_backing(value, &["__hash__"]) {
+                let hashable = matches!(
+                    backing.kind(),
+                    ValueKind::Int(_)
+                        | ValueKind::BigInt(_)
+                        | ValueKind::Bool(_)
+                        | ValueKind::Float(_)
+                        | ValueKind::Str(_)
+                        | ValueKind::Bytes(_)
+                        | ValueKind::Tuple(_)
+                ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
+                if hashable {
+                    return self.value_to_pykey(&backing);
+                }
+            }
             let class = Rc::clone(&inst.borrow().class);
             // CPython treats a class that explicitly sets `__hash__ = None`
             // as unhashable.  In pyrust we treat the absence of `__hash__`
@@ -2307,6 +2360,23 @@ impl Interpreter {
             })();
             self.eq_cycle_exit(a, b);
             return result;
+        }
+
+        // Issue #1939: a container subclass (list/tuple/dict/set/frozenset
+        // subclass) with no user `__eq__` override inherits the base type's
+        // equality, so `L([1,2]) == [1,2]`, `D({1:'a'}) == {1:'a'}`, and
+        // `St({1,2}) == {1,2}` compare by backing value.  The concrete-
+        // container fast paths above have already returned, so this only runs
+        // when a `PyInstance` operand reaches the bottom — no cost on the hot
+        // `[1,2,3] == [1,2,3]` path.  Coerce the container backing(s) and
+        // recurse so the List/Tuple/Dict/Set/Frozenset arms above run; a user
+        // `__eq__` override is excluded by `coerce_subclass_backing`.
+        let a_cont = coerce_container_backing_for_eq(a);
+        let b_cont = coerce_container_backing_for_eq(b);
+        if a_cont.is_some() || b_cont.is_some() {
+            let a_c = a_cont.unwrap_or_else(|| a.clone());
+            let b_c = b_cont.unwrap_or_else(|| b.clone());
+            return self.values_user_eq(&a_c, &b_c);
         }
 
         // PyInstance (either side) — dispatch `__eq__`/reflected
@@ -3489,7 +3559,14 @@ impl Interpreter {
                 (None, None) => unreachable!(),
             }
         }
-        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
+        // Issue #1939: list/tuple subclasses inherit `__add__`, so `L([1]) +
+        // [2]` (and `[1] + L([2])`) concatenate via the backing list and yield
+        // a plain `list`.  Extract container backing (a user `__add__`/
+        // `__radd__` was already dispatched at `BinaryOp::Add` before reaching
+        // here, so no override check is needed); scalar backing continues
+        // through `coerce_numeric`.
+        let l = coerce_operand_backing(&left);
+        let r = coerce_operand_backing(&right);
         // Canonical numeric arithmetic via the NumericOps slot table
         // (issue #458): handles every numeric type pair in one site.
         // Non-numeric operands return None and fall through to the
@@ -3572,6 +3649,19 @@ impl Interpreter {
             Tag::Int => Ok(val),
             Tag::Other => Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'")),
             Tag::Instance(inst_rc) => {
+                // Issue #1929: an int/bool subclass is the int it already is, so `[0] * I(2)` and
+                // `"ab" * I(2)` repeat by the backing int.  Use the backing
+                // directly (the resulting Int/BigInt flows back into the
+                // repeat-count match in `mul`).
+                let val = Value::py_instance(Rc::clone(&inst_rc));
+                if let Some(backing) = coerce_subclass_backing(&val, &[]) {
+                    if matches!(
+                        backing.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    ) {
+                        return Ok(backing);
+                    }
+                }
                 let class = Rc::clone(&inst_rc.borrow().class);
                 let Some(method_val) = lookup_class_attr(&class, "__index__") else {
                     return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'"));
@@ -3643,7 +3733,12 @@ impl Interpreter {
             };
             return seq_repeat_bytearray(&data, n);
         }
-        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
+        // Issue #1939: list/tuple subclasses inherit `__mul__`, so `T((1,)) *
+        // 2` repeats via the backing tuple and yields a plain `tuple`.  Extract
+        // container backing (a user `__mul__`/`__rmul__` was already dispatched
+        // at `BinaryOp::Mul`); scalar backing continues through `coerce_numeric`.
+        let l = coerce_operand_backing(&left);
+        let r = coerce_operand_backing(&right);
         // Canonical numeric arithmetic via the NumericOps slot table
         // (#458).  Sequence repetition (Str/List/Tuple/Bytes × Int) and
         // the TypeError diagnostics stay below: at least one operand is a
@@ -4127,8 +4222,13 @@ impl Interpreter {
     ) -> Result<Value> {
         // Issue #1204: extract scalar primitive backing for subclasses of
         // int/float/str/bytes so that `MyInt(5) < 10` etc. works.
-        let left = coerce_numeric(&left);
-        let right = coerce_numeric(&right);
+        // Issue #1939: also extract container backing (list/tuple/dict/set
+        // subclasses) so `L([1]) < L([2])` compares the backing lists.  A user
+        // comparison override was already dispatched at the `BinaryOp::Lt..Ge`
+        // sites via `try_dunder_binary` before reaching `compare`, so an empty
+        // override list is safe here.
+        let left = coerce_operand_backing(&left);
+        let right = coerce_operand_backing(&right);
         if matches!(left.kind(), ValueKind::Float(f) if f.is_nan())
             || matches!(right.kind(), ValueKind::Float(f) if f.is_nan())
         {
@@ -5542,6 +5642,20 @@ fn is_callable_method(v: &Value) -> bool {
     )
 }
 
+/// Container-only backing extraction for the `==` path (`values_user_eq`):
+/// returns the backing list/tuple/dict/set/frozenset of a container subclass
+/// instance with no user `__eq__` override, or `None` otherwise.  Scalar
+/// backings are deliberately excluded — those are handled by the
+/// `coerce_numeric` step further down in `values_user_eq`.
+fn coerce_container_backing_for_eq(v: &Value) -> Option<Value> {
+    let backing = coerce_subclass_backing(v, &["__eq__"])?;
+    let is_container = matches!(
+        backing.kind(),
+        ValueKind::List(_) | ValueKind::Tuple(_) | ValueKind::Dict(_) | ValueKind::Set(_)
+    ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
+    is_container.then_some(backing)
+}
+
 pub(crate) fn coerce_numeric(v: &Value) -> Value {
     // Extract via kind() in a scope so the borrow is dropped before we
     // clone `v` in the fallthrough — #450 made `kind()`'s borrow
@@ -5570,6 +5684,126 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
         }
     }
     v.clone()
+}
+
+/// Like [`coerce_numeric`] but also unwraps *container* subclass backings
+/// (list/tuple/dict/set/frozenset).  Used by the `+`/`*`/`<` operator paths
+/// where a user dunder override was already dispatched upstream (so no
+/// override check is needed here) and the result type should follow the base
+/// type (`L([1]) + [2]` → plain `list`).
+///
+/// Hot-path: a single `as_py_instance_rc()` tag check.  Concrete operands
+/// (the common `[1,2] + [3,4]` / `5 + 6` case) take the `Bool`-then-clone
+/// fall-through with no extra instance probe — identical cost to the bare
+/// `coerce_numeric` it replaced.
+#[inline]
+pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
+    if let ValueKind::Bool(b) = v.kind() {
+        return Value::int(b as i64);
+    }
+    if let Some(inst_rc) = v.as_py_instance_rc() {
+        if let Some(backing) = instance_builtin_data(inst_rc) {
+            let is_primitive = matches!(
+                backing.kind(),
+                ValueKind::Int(_)
+                    | ValueKind::BigInt(_)
+                    | ValueKind::Float(_)
+                    | ValueKind::Str(_)
+                    | ValueKind::Bytes(_)
+                    | ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Dict(_)
+                    | ValueKind::Set(_)
+            ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
+            if is_primitive {
+                return backing;
+            }
+        }
+    }
+    v.clone()
+}
+
+/// Extract the primitive backing of a builtin-subclass `PyInstance` —
+/// scalars (int/float/str/bytes) AND containers (list/tuple/dict/set/
+/// frozenset) — but only when the subclass does NOT override the relevant
+/// dunder(s) with a user method.  Returns `Some(backing)` when the value is
+/// such a subclass using inherited builtin behaviour; `None` otherwise.
+///
+/// This is the container-aware analogue of [`coerce_numeric`] used by the
+/// `+`/`*`/`==`/ordering/hashing paths so that, e.g., `L([1]) + [2]` (where
+/// `L` subclasses `list`) operates on the backing list and yields a plain
+/// `list`, matching CPython's inherited-slot semantics (#1929/#1934/#1936/
+/// #1939).
+///
+/// `override_dunders` lists the user-method names that, if present on the
+/// subclass MRO, mean the subclass customises this operation and the backing
+/// must NOT be used (the override wins).  `lookup_class_attr` only finds
+/// *user*-defined dunders (builtin dunders aren't exposed as class attrs —
+/// #1909), so a `Some` result there reliably indicates an override.
+///
+/// Hot-path note: the only work for a non-`PyInstance` operand is the
+/// `as_py_instance_rc()` tag check, which returns `None` immediately — the
+/// dunder lookups run only for actual subclass instances.
+pub(crate) fn coerce_subclass_backing(v: &Value, override_dunders: &[&str]) -> Option<Value> {
+    let inst_rc = v.as_py_instance_rc()?;
+    let backing = instance_builtin_data(inst_rc)?;
+    let is_primitive_backing = matches!(
+        backing.kind(),
+        ValueKind::Int(_)
+            | ValueKind::BigInt(_)
+            | ValueKind::Bool(_)
+            | ValueKind::Float(_)
+            | ValueKind::Str(_)
+            | ValueKind::Bytes(_)
+            | ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+    );
+    if !is_primitive_backing {
+        // Frozenset backing lives inside a BuiltinObject.
+        let is_frozenset = pyrust_builtins::frozenset::as_items(&backing).is_some();
+        if !is_frozenset {
+            return None;
+        }
+    }
+    // Determine the backing's primitive type name so we can recognise the
+    // *inherited* builtin dunder sentinels (`int.__lt__`, `str.__add__`,
+    // `object.__hash__`, …) registered on the primitive/object class
+    // singletons (issue #1256).  Those are the inherited builtin behaviour we
+    // want to bypass — only a genuine *user* override (a Python `def` →
+    // `UserFunction`, or a `BuiltinFunction` from an intermediate user-derived
+    // builtin class) must veto the coercion.
+    let base_type_name = match backing.kind() {
+        ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Str(_) => "str",
+        ValueKind::Bytes(_) => "bytes",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) => "dict",
+        ValueKind::Set(_) => "set",
+        _ => "frozenset",
+    };
+    let class = Rc::clone(&inst_rc.borrow().class);
+    for dunder in override_dunders {
+        if let Some(method) = lookup_class_attr(&class, dunder) {
+            // An inherited builtin slot is a `BuiltinFunction("<type>.<dunder>")`
+            // sentinel for `object` or the backing's own base type — not an
+            // override.  Anything else (UserFunction, or a BuiltinFunction from
+            // a different builtin base) is treated as a real override.
+            let is_inherited_sentinel = matches!(
+                method.kind(),
+                ValueKind::BuiltinFunction(name)
+                    if name.strip_suffix(dunder).and_then(|p| p.strip_suffix('.'))
+                        .is_some_and(|ty| ty == "object" || ty == base_type_name)
+            );
+            if !is_inherited_sentinel {
+                return None;
+            }
+        }
+    }
+    Some(backing)
 }
 
 pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
