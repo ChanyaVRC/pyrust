@@ -603,14 +603,17 @@ impl NumericOps for NumericSlot {
                     Ok(Value::bigint(q))
                 }
             }
-            // At least one Float operand: float floor division.
+            // At least one Float operand: float floor division.  Use CPython's
+            // fmod-based float_divmod so infinities/signed zeros match and
+            // `a // b == divmod(a, b)[0]` (#2025).
             _ => (|| {
                 let a = slot_to_float(self)?;
                 let b = slot_to_float(&r)?;
                 if b == 0.0 {
                     return Err(zero_div("float floor division by zero"));
                 }
-                Ok(Value::float((a / b).floor()))
+                let (div, _) = float_divmod(a, b);
+                Ok(Value::float(div))
             })(),
         })
     }
