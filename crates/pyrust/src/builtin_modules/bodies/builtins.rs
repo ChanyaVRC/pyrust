@@ -4042,7 +4042,8 @@ pyrust_module! {
                                 ));
                             }
                             let key = _interp.value_to_pykey(&items[0])?;
-                            result.insert(key, items[1].clone());
+                            // #1914: dedup `PyKey::Object` keys via user `__eq__`.
+                            _interp.dict_insert(&mut result, key, items[1].clone())?;
                         }
                     }
                 }
@@ -4061,7 +4062,8 @@ pyrust_module! {
                             ));
                         }
                         let key = _interp.value_to_pykey(&items[0])?;
-                        result.insert(key, items[1].clone());
+                        // #1914: dedup `PyKey::Object` keys via user `__eq__`.
+                        _interp.dict_insert(&mut result, key, items[1].clone())?;
                     }
                 }
             }
@@ -6505,9 +6507,11 @@ pyrust_module! {
             indexmap::IndexMap::with_capacity(keys.len());
         for key in keys {
             let py_key = _interp.value_to_pykey(&key)?;
-            // Insert only if absent — preserves first-occurrence order for
-            // duplicate keys, matching CPython.
-            map.entry(py_key).or_insert_with(|| default_val.clone());
+            // #1914: `dict_insert` dedups `PyKey::Object` keys via user `__eq__`
+            // (raw `IndexMap` identity for primitive keys keeps the fast path).
+            // The value is always the same default, so last-wins == first-wins;
+            // `IndexMap::insert` preserves the first-occurrence position.
+            _interp.dict_insert(&mut map, py_key, default_val.clone())?;
         }
         Ok(Value::dict(map))
     }

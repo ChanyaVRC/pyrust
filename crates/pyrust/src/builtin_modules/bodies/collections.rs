@@ -88,11 +88,15 @@ pyrust_module! {
                 } else {
                     for v in _interp.collect_iterable(&arg.value)? {
                         let key = _interp.value_to_pykey(&v)?;
-                        let next = match counts.get(&key).map(|v| v.kind()) {
-                            Some(ValueKind::Int(n)) => n + 1,
+                        // #1919: `__eq__`-aware lookup/insert so equal user-keys
+                        // accumulate into one entry instead of duplicating.
+                        let next = match map_get_eq(_interp, &counts, &key)? {
+                            Some(v) if matches!(v.kind(), ValueKind::Int(_)) => {
+                                value_as_count(&v) + 1
+                            }
                             _ => 1,
                         };
-                        counts.insert(key, Value::int(next));
+                        map_insert_eq(_interp, &mut counts, key, Value::int(next))?;
                     }
                 }
             }
@@ -108,7 +112,8 @@ pyrust_module! {
         fn __getitem__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            Ok(counts.get(&key).cloned().unwrap_or_else(|| Value::int(0)))
+            // #1919: `__eq__`-aware lookup so equal user-keys hit.
+            Ok(map_get_eq(_interp, &counts, &key)?.unwrap_or_else(|| Value::int(0)))
         }
 
         /// `c[k] = v` — store any value under the key (CPython does not
@@ -124,7 +129,8 @@ pyrust_module! {
             let key = require_key(_interp, args, 1, FN_NAME)?;
             let value = args[2].value.clone();
             let mut counts = read_counts(args, FN_NAME)?;
-            counts.insert(key, value);
+            // #1919: `__eq__`-aware insert (overwrites the equal entry in place).
+            map_insert_eq(_interp, &mut counts, key, value)?;
             store_counts(&inst, counts);
             Ok(Value::none())
         }
@@ -133,7 +139,8 @@ pyrust_module! {
         fn __contains__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            Ok(Value::bool_(counts.contains_key(&key)))
+            // #1919: `__eq__`-aware membership.
+            Ok(Value::bool_(map_contains_eq(_interp, &counts, &key)?))
         }
 
         /// `len(c)` — number of stored entries.
@@ -306,8 +313,9 @@ pyrust_module! {
                 ));
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            match counts.get(&key) {
-                Some(v) => Ok(v.clone()),
+            // #1919: `__eq__`-aware lookup.
+            match map_get_eq(_interp, &counts, &key)? {
+                Some(v) => Ok(v),
                 None => Ok(user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none)),
             }
         }
@@ -346,24 +354,24 @@ pyrust_module! {
         /// any other type yields `NotImplemented` so the binary-op
         /// dispatch falls through to `__radd__` / `TypeError`.
         fn __add__(args) -> Result<Value> {
-            counter_binop(args, CounterOp::Add)
+            counter_binop(_interp, args, CounterOp::Add)
         }
 
         /// `c - d` — subtract counts (treat missing as 0), drop ≤ 0.
         fn __sub__(args) -> Result<Value> {
-            counter_binop(args, CounterOp::Sub)
+            counter_binop(_interp, args, CounterOp::Sub)
         }
 
         /// `c & d` — element-wise min over the union of keys (missing
         /// counts treated as 0), drop ≤ 0.  Multiset intersection.
         fn __and__(args) -> Result<Value> {
-            counter_binop(args, CounterOp::And)
+            counter_binop(_interp, args, CounterOp::And)
         }
 
         /// `c | d` — element-wise max over the union of keys (missing
         /// counts treated as 0), drop ≤ 0.  Multiset union.
         fn __or__(args) -> Result<Value> {
-            counter_binop(args, CounterOp::Or)
+            counter_binop(_interp, args, CounterOp::Or)
         }
 
         /// `c += d` — mutate `self._counts` in place and return `self`,
@@ -373,19 +381,19 @@ pyrust_module! {
         /// also returns `NotImplemented` and ultimately raises
         /// `TypeError`.
         fn __iadd__(args) -> Result<Value> {
-            counter_inplace_op(args, CounterOp::Add)
+            counter_inplace_op(_interp, args, CounterOp::Add)
         }
 
         fn __isub__(args) -> Result<Value> {
-            counter_inplace_op(args, CounterOp::Sub)
+            counter_inplace_op(_interp, args, CounterOp::Sub)
         }
 
         fn __iand__(args) -> Result<Value> {
-            counter_inplace_op(args, CounterOp::And)
+            counter_inplace_op(_interp, args, CounterOp::And)
         }
 
         fn __ior__(args) -> Result<Value> {
-            counter_inplace_op(args, CounterOp::Or)
+            counter_inplace_op(_interp, args, CounterOp::Or)
         }
     }
 
@@ -440,8 +448,9 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
             let items = read_items(args, FN_NAME)?;
-            if let Some(v) = items.get(&key) {
-                return Ok(v.clone());
+            // #1919: `__eq__`-aware lookup so equal user-keys hit.
+            if let Some(v) = map_get_eq(_interp, &items, &key)? {
+                return Ok(v);
             }
             // Miss → __missing__.  Resolved via the class so that
             // user-defined subclasses (when pyrust grows them) can
@@ -480,7 +489,8 @@ pyrust_module! {
             let new_val = _interp.call_function_expanded(factory, &[])?;
             let pk = _interp.value_to_pykey(&key_arg.value)?;
             let mut items = read_items(args, FN_NAME)?;
-            items.insert(pk, new_val.clone());
+            // #1919: `__eq__`-aware insert (no duplicate equal user-key).
+            map_insert_eq(_interp, &mut items, pk, new_val.clone())?;
             store_items(&inst, items);
             Ok(new_val)
         }
@@ -495,7 +505,8 @@ pyrust_module! {
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
             let mut items = read_items(args, FN_NAME)?;
-            items.insert(key, args[2].value.clone());
+            // #1919: `__eq__`-aware insert (overwrites equal entry in place).
+            map_insert_eq(_interp, &mut items, key, args[2].value.clone())?;
             store_items(&inst, items);
             Ok(Value::none())
         }
@@ -503,7 +514,8 @@ pyrust_module! {
         fn __contains__(args) -> Result<Value> {
             let items = read_items(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            Ok(Value::bool_(items.contains_key(&key)))
+            // #1919: `__eq__`-aware membership.
+            Ok(Value::bool_(map_contains_eq(_interp, &items, &key)?))
         }
 
         fn __len__(args) -> Result<Value> {
@@ -550,8 +562,9 @@ pyrust_module! {
                 ));
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            Ok(match items.get(&key) {
-                Some(v) => v.clone(),
+            // #1919: `__eq__`-aware lookup.
+            Ok(match map_get_eq(_interp, &items, &key)? {
+                Some(v) => v,
                 None => user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none),
             })
         }
@@ -1420,6 +1433,41 @@ fn require_key(
     interp.value_to_pykey(&v.value)
 }
 
+/// `__eq__`-aware `get` against an owned `_counts`/`_items` snapshot map
+/// (issue #1919).  Routes `PyKey::Object` keys through the interpreter's
+/// `dict_lookup_in` (the same `__hash__`-then-`__eq__` path the builtin dict
+/// uses); primitive keys hit the raw `IndexMap::get` fast path inside
+/// `dict_lookup_in`.  The snapshot is a local copy, so running user `__eq__`
+/// against it cannot alias the live store.
+fn map_get_eq(
+    interp: &mut crate::Interpreter,
+    map: &IndexMap<PyKey, Value>,
+    key: &PyKey,
+) -> Result<Option<Value>> {
+    Ok(interp.dict_lookup_in(map, key)?.map(|(_, v)| v))
+}
+
+/// `__eq__`-aware `contains_key` against an owned snapshot map (issue #1919).
+fn map_contains_eq(
+    interp: &mut crate::Interpreter,
+    map: &IndexMap<PyKey, Value>,
+    key: &PyKey,
+) -> Result<bool> {
+    Ok(interp.dict_lookup_in(map, key)?.is_some())
+}
+
+/// `__eq__`-aware `insert` into an owned snapshot map (issue #1919): overwrites
+/// an existing `__eq__`-equal entry in place rather than appending a duplicate
+/// `PyKey::Object`.  Delegates to `Interpreter::dict_insert`.
+fn map_insert_eq(
+    interp: &mut crate::Interpreter,
+    map: &mut IndexMap<PyKey, Value>,
+    key: PyKey,
+    value: Value,
+) -> Result<()> {
+    interp.dict_insert(map, key, value)
+}
+
 /// Method-body convention: `keys()`, `values()`, `items()` etc. take no
 /// args beyond `self`.  Centralised so the error message is uniform.
 fn require_no_args(args: &[ExpandedCallArg], method: &str) -> Result<()> {
@@ -1467,8 +1515,8 @@ fn apply_delta(
                     "Counter delta values must be integers".to_string(),
                 )),
             };
-            let cur = counts.get(k).map(value_as_count).unwrap_or(0);
-            counts.insert(k.clone(), Value::int(cur + sign * delta));
+            let cur = map_get_eq(interp, &counts, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
+            map_insert_eq(interp, &mut counts, k.clone(), Value::int(cur + sign * delta))?;
         }
     } else if let Some(other_counts) = counts_of(other) {
         // `other` is a Counter (PyInstance with `_counts`) — treat its
@@ -1487,15 +1535,15 @@ fn apply_delta(
                     ))
                 }
             };
-            let cur = counts.get(k).map(value_as_count).unwrap_or(0);
-            counts.insert(k.clone(), Value::int(cur + sign * delta));
+            let cur = map_get_eq(interp, &counts, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
+            map_insert_eq(interp, &mut counts, k.clone(), Value::int(cur + sign * delta))?;
         }
     } else {
         // Iterable form — each element contributes ±1.
         for v in interp.collect_iterable(&other)? {
             let key = interp.value_to_pykey(&v)?;
-            let cur = counts.get(&key).map(value_as_count).unwrap_or(0);
-            counts.insert(key, Value::int(cur + sign));
+            let cur = map_get_eq(interp, &counts, &key)?.map(|v| value_as_count(&v)).unwrap_or(0);
+            map_insert_eq(interp, &mut counts, key, Value::int(cur + sign))?;
         }
     }
     store_counts(&inst, counts);
@@ -1602,24 +1650,27 @@ fn counts_of(other: &Value) -> Option<IndexMap<PyKey, Value>> {
 /// the result back to `self._counts` while the regular `__add__`/etc.
 /// return a fresh Counter.
 fn merge_counts(
+    interp: &mut crate::Interpreter,
     lhs: &IndexMap<PyKey, Value>,
     rhs: &IndexMap<PyKey, Value>,
     op: CounterOp,
-) -> IndexMap<PyKey, Value> {
+) -> Result<IndexMap<PyKey, Value>> {
     let mut out: IndexMap<PyKey, Value> = IndexMap::new();
     // Walk LHS first so the output preserves LHS insertion order for
     // shared keys — matches CPython, where `(c + d).keys()` lists
     // c-only and shared keys in c's order, then d-only keys.
     for (k, v) in lhs.iter() {
         let a = value_as_count(v);
-        let b = rhs.get(k).map(value_as_count).unwrap_or(0);
+        // #1919: `__eq__`-aware lookup so an equal user-key in `rhs` is found.
+        let b = map_get_eq(interp, rhs, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
         let result = op.apply(a, b);
         if result > 0 {
             out.insert(k.clone(), Value::int(result));
         }
     }
     for (k, v) in rhs.iter() {
-        if lhs.contains_key(k) {
+        // #1919: `__eq__`-aware membership against `lhs` to skip shared keys.
+        if map_contains_eq(interp, lhs, k)? {
             continue;
         }
         let b = value_as_count(v);
@@ -1628,12 +1679,16 @@ fn merge_counts(
             out.insert(k.clone(), Value::int(result));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Shared body for `__add__` / `__sub__` / `__and__` / `__or__`.
 /// Returns a *new* Counter PyInstance with the merged counts.
-fn counter_binop(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
+fn counter_binop(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    op: CounterOp,
+) -> Result<Value> {
     let lhs = read_counts(args, "Counter.__binop__")?;
     let inst = expect_self(args, "Counter.__binop__")?;
     let user = &args[1..];
@@ -1647,7 +1702,7 @@ fn counter_binop(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
         Some(m) => m,
         None => return Ok(Value::not_implemented()),
     };
-    let merged = merge_counts(&lhs, &rhs, op);
+    let merged = merge_counts(interp, &lhs, &rhs, op)?;
     let class = Rc::clone(&inst.borrow().class);
     let mut attrs: IndexMap<String, Value> = IndexMap::new();
     attrs.insert("_counts".to_string(), Value::dict(merged));
@@ -1659,7 +1714,11 @@ fn counter_binop(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
 
 /// Shared body for `__iadd__` / `__isub__` / `__iand__` / `__ior__`.
 /// Mutates `self._counts` and returns `self` (identity-preserving).
-fn counter_inplace_op(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
+fn counter_inplace_op(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    op: CounterOp,
+) -> Result<Value> {
     let lhs = read_counts(args, "Counter.__inplace__")?;
     let inst = expect_self(args, "Counter.__inplace__")?;
     let user = &args[1..];
@@ -1673,7 +1732,7 @@ fn counter_inplace_op(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> 
         Some(m) => m,
         None => return Ok(Value::not_implemented()),
     };
-    let merged = merge_counts(&lhs, &rhs, op);
+    let merged = merge_counts(interp, &lhs, &rhs, op)?;
     store_counts(&inst, merged);
     Ok(Value::py_instance(inst))
 }
