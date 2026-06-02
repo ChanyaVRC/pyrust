@@ -59,16 +59,17 @@ pyrust_module! {
         if let Some(r) = try_math_dunder(_interp, val, "__floor__") {
             return r;
         }
-        // int.__floor__ returns self unchanged — no float coercion needed and
-        // coercing a large int to f64 would silently lose precision (e.g.
-        // math.floor(2**53+1) must return 2**53+1, not 2**53).
-        match val.kind() {
-            ValueKind::Int(n) => return Ok(Value::int(n)),
-            ValueKind::BigInt(b) => return Ok(Value::bigint(b.clone())),
-            ValueKind::Bool(b) => return Ok(Value::int(b as i64)),
-            _ => {}
+        // int.__floor__ returns self unchanged (covers concrete ints and int
+        // subclasses) — no float coercion needed, and coercing a large int to
+        // f64 would silently lose precision (e.g. math.floor(2**53+1) must
+        // return 2**53+1, not 2**53).
+        if let Some(n) = math_integral_exact(val) {
+            return Ok(n);
         }
-        let x = math_coerce_float(val)?;
+        // Otherwise coerce via __float__/__index__ (CPython's PyFloat_AsDouble)
+        // and apply f64::floor. A value reached via __index__ is rounded
+        // through f64 here, matching CPython (it does not preserve precision).
+        let x = math_arg_to_float(_interp, val)?;
         // Guard nan/inf before applying floor — NaN comparisons are always false
         // so the range check below would silently fall through to `as i64`.
         if x.is_nan() {
@@ -110,13 +111,11 @@ pyrust_module! {
         }
         // int.__ceil__ returns self unchanged — same precision reasoning as
         // floor above.
-        match val.kind() {
-            ValueKind::Int(n) => return Ok(Value::int(n)),
-            ValueKind::BigInt(b) => return Ok(Value::bigint(b.clone())),
-            ValueKind::Bool(b) => return Ok(Value::int(b as i64)),
-            _ => {}
+        if let Some(n) = math_integral_exact(val) {
+            return Ok(n);
         }
-        let x = math_coerce_float(val)?;
+        // Otherwise coerce via __float__/__index__ and apply f64::ceil.
+        let x = math_arg_to_float(_interp, val)?;
         // Guard nan/inf before applying ceil — same reasoning as floor above.
         if x.is_nan() {
             return Err(PyError::named(
@@ -140,11 +139,13 @@ pyrust_module! {
 
     /// CPython: math.trunc(x) → Integral.  <https://docs.python.org/3/library/math.html#math.trunc>
     ///
-    /// Protocol: first try `type(x).__trunc__(x)`.  For `int` / `bool` the
-    /// value is returned unchanged (CPython's numeric tower: int.__trunc__
-    /// returns self).  For `float` the fractional part is discarded and the
-    /// result is an `int`.  For any other type without `__trunc__`, raises
-    /// `TypeError: type X doesn't define __trunc__ method`.
+    /// Protocol: first try `type(x).__trunc__(x)`.  For `int` / `bool` and `int`
+    /// subclasses the value is returned unchanged (CPython's numeric tower:
+    /// int.__trunc__ returns self).  For `float` and `float` subclasses the
+    /// fractional part is discarded and the result is an `int` (inherited
+    /// float.__trunc__).  Unlike floor/ceil, trunc does NOT fall back to
+    /// __index__/__float__ on plain objects: any other type without __trunc__
+    /// raises `TypeError: type X doesn't define __trunc__ method`.
     fn trunc(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -159,13 +160,23 @@ pyrust_module! {
         if let Some(r) = try_math_dunder(_interp, val, "__trunc__") {
             return r;
         }
-        match val.kind() {
-            // int and bool: trunc(x) == x (already an integer).
-            ValueKind::Int(n) => Ok(Value::int(n)),
-            ValueKind::BigInt(b) => Ok(Value::bigint(b.clone())),
-            ValueKind::Bool(b) => Ok(Value::int(b as i64)),
-            // float: truncate toward zero.
-            ValueKind::Float(f) => {
+        // int and int subclasses: trunc(x) == x (already an integer), returned
+        // exactly without an f64 round-trip.
+        if let Some(n) = math_integral_exact(val) {
+            return Ok(n);
+        }
+        // float and float subclasses (inherited float.__trunc__): truncate the
+        // backing value toward zero. Other types fall through to the TypeError.
+        let f = match val.kind() {
+            ValueKind::Float(f) => Some(f),
+            ValueKind::PyInstance(inst) => match instance_builtin_data(inst).as_ref().map(|b| b.kind()) {
+                Some(ValueKind::Float(f)) => Some(f),
+                _ => None,
+            },
+            _ => None,
+        };
+        match f {
+            Some(f) => {
                 // Guard nan/inf before trunc — NaN comparisons are always false
                 // so the range check below would silently fall through to `as i64`.
                 if f.is_nan() {
@@ -188,7 +199,7 @@ pyrust_module! {
                 }
             }
             // Everything else: raise CPython's exact TypeError message.
-            _ => Err(PyError::named(
+            None => Err(PyError::named(
                 "TypeError",
                 format!(
                     "type {} doesn't define __trunc__ method",
@@ -992,21 +1003,6 @@ fn check_math_overflow(arg: f64, result: f64) -> Result<f64> {
     Ok(result)
 }
 
-/// Coerce `val` to `f64` for the `math.floor` / `math.ceil` fallback path.
-///
-/// CPython's error text for non-real types in those functions is
-/// `"must be real number, not {type}"`, which differs from the
-/// `"math.floor: a float is required, not …"` text that `value_to_float`
-/// emits.  We call `value_to_float` and remap any error to the CPython form.
-fn math_coerce_float(val: &Value) -> Result<f64> {
-    value_to_float(val, "__SENTINEL__").map_err(|_| {
-        PyError::named(
-            "TypeError",
-            format!("must be real number, not {}", value_type_name_str(val)),
-        )
-    })
-}
-
 /// Interpreter-aware coercion of a math float-argument to `f64`, matching
 /// CPython's `PyFloat_AsDouble` / `Modules/mathmodule.c` argument handling.
 ///
@@ -1101,6 +1097,31 @@ fn math_arg_to_float(interp: &mut crate::Interpreter, val: &Value) -> Result<f64
             "TypeError",
             format!("must be real number, not {}", value_type_name_str(val)),
         )),
+    }
+}
+
+/// If `val` is already integral — a concrete `int`/`bool`/`BigInt`, or an
+/// `int` subclass instance — return that exact integer `Value` so
+/// `math.floor`/`ceil`/`trunc` can hand it back unchanged.
+///
+/// CPython's `math_floor_impl`/`math_ceil_impl`/`math_trunc_impl` short-circuit
+/// any `PyLong` (including subclasses) to avoid the f64 round-trip that would
+/// silently drop precision for large integers (e.g. `math.floor(I(2**60+1))`).
+/// An `int` subclass's exact value is used even when the subclass defines a
+/// `__float__` override — matching CPython, where the inherited integer path
+/// wins over `__float__` for floor/ceil/trunc.
+fn math_integral_exact(val: &Value) -> Option<Value> {
+    match val.kind() {
+        ValueKind::Int(n) => Some(Value::int(n)),
+        ValueKind::BigInt(b) => Some(Value::bigint(b.clone())),
+        ValueKind::Bool(b) => Some(Value::int(b as i64)),
+        ValueKind::PyInstance(inst) => match instance_builtin_data(inst).as_ref().map(|b| b.kind()) {
+            Some(ValueKind::Int(n)) => Some(Value::int(n)),
+            Some(ValueKind::BigInt(b)) => Some(Value::bigint(b.clone())),
+            Some(ValueKind::Bool(b)) => Some(Value::int(b as i64)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
