@@ -2668,7 +2668,16 @@ impl Interpreter {
                         _ => vm_try!(Err(pyrust_core::type_err!("'{}' object is not a mapping",
                                 value_type_name_str(&src_val)))),
                     };
-                    vm_try!(regs[*dict_reg as usize].dict_extend(pairs));
+                    // #1914: route through `dict_extend_value_dedup` so user
+                    // `__eq__` deduplicates `PyKey::Object` keys (`dict.update`,
+                    // `|=`).  Clone the dict Value (cheap Rc bump) so the helper
+                    // can drop the dict borrow before running user code; it
+                    // mutates the same backing store in place.
+                    let dict_val = regs[*dict_reg as usize]
+                        .as_some()
+                        .cloned()
+                        .unwrap_or(Value::none());
+                    vm_try!(self.dict_extend_value_dedup(&dict_val, pairs));
                 }
 
                 // ── Generator yield ──────────────────────────────────────

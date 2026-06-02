@@ -666,7 +666,7 @@ impl Interpreter {
                     "dict" => self.call_dict_method(method, self_val, pos, &kw),
                     "set" => self.call_set_method(method, self_val, pos),
                     "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
-                    "frozenset" => pyrust_builtins::frozenset::call(method, &self_val, pos),
+                    "frozenset" => self.call_frozenset_method(method, self_val, pos),
                     _ => unreachable!("guard matched type_name above"),
                 }
             }
@@ -940,6 +940,24 @@ impl Interpreter {
         // (Tuple, Complex, BuiltinObject, PyInstance) keep
         // working off the live Ref because they don't move
         // the receiver.
+        // #1907: frozenset set-algebra method forms must dispatch user
+        // `__eq__`.  Intercept here (before the `match receiver.kind()` borrow
+        // scrutinee, which would otherwise block moving `receiver`) so a
+        // frozenset receiver routes to the `__eq__`-aware interpreter path.
+        // `call_frozenset_method` keeps the raw fast path for primitive keys.
+        if !has_kw
+            && matches!(
+                method,
+                "union" | "intersection" | "difference" | "symmetric_difference"
+                    | "issubset"
+                    | "issuperset"
+                    | "isdisjoint"
+            )
+            && pyrust_builtins::frozenset::as_items(&receiver).is_some()
+        {
+            let args_vec: Vec<Value> = std::mem::take(pos);
+            return self.call_frozenset_method(method, receiver, args_vec);
+        }
         enum Kind {
             Int,
             Float,
@@ -1328,11 +1346,7 @@ impl Interpreter {
                                     self.call_set_method(method, backing, args_vec)
                                 }
                                 BkKind::Frozenset => {
-                                    pyrust_builtins::frozenset::call(
-                                        method,
-                                        &backing,
-                                        args_vec,
-                                    )
+                                    self.call_frozenset_method(method, backing, args_vec)
                                 }
                                 BkKind::Tuple => match backing.kind() {
                                     ValueKind::Tuple(items) => {

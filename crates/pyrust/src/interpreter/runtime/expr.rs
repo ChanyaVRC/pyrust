@@ -2017,6 +2017,82 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Bulk-insert `(key, value)` pairs into a dict with last-value-wins
+    /// dedup, dispatching user `__eq__` for `PyKey::Object` keys (issues
+    /// #1914 / #1919).  This is the shared mechanism behind `dict.update`,
+    /// `|`/`|=`, `dict.fromkeys`, `dict(pairs)`, and the collections
+    /// `Counter`/`defaultdict` bulk paths.
+    ///
+    /// Fast path: when neither the destination map nor any incoming key is a
+    /// `PyKey::Object` (the overwhelmingly common primitive-key case), this is
+    /// a plain `IndexMap::extend` — no `__eq__` dispatch, no per-key scan.  The
+    /// slow path engages only when an `Object` key is present on either side,
+    /// routing each insert through `dict_insert` (which dedups via
+    /// `dict_lookup_in`'s `__hash__`-then-`__eq__` scan).
+    pub(crate) fn dict_extend_dedup(
+        &mut self,
+        dict: &mut indexmap::IndexMap<PyKey, Value>,
+        pairs: Vec<(PyKey, Value)>,
+    ) -> Result<()> {
+        let dest_has_object = dict.keys().any(|k| matches!(k, PyKey::Object { .. }));
+        let src_has_object = pairs.iter().any(|(k, _)| matches!(k, PyKey::Object { .. }));
+        if !dest_has_object && !src_has_object {
+            // Primitive-key fast path: raw IndexMap::extend (last value wins).
+            dict.extend(pairs);
+            return Ok(());
+        }
+        for (key, value) in pairs {
+            self.dict_insert(dict, key, value)?;
+        }
+        Ok(())
+    }
+
+    /// In-place bulk-update of a dict *receiver* `Value` with last-value-wins
+    /// dedup, dispatching user `__eq__` for `PyKey::Object` keys (issue #1914).
+    /// This is the receiver-based companion to [`Self::dict_extend_dedup`],
+    /// used where the dict must be mutated in place (`dict.update`, `|=`) so
+    /// aliasing references observe the change.
+    ///
+    /// Fast path: when neither the receiver nor any incoming key is a
+    /// `PyKey::Object`, a single `dict_with_mut` raw `extend` (last value wins).
+    /// Slow path: per-pair `dict_lookup` on the receiver (which drops the dict
+    /// borrow before running user `__eq__`) followed by a scoped `dict_with_mut`
+    /// insert that overwrites the `__eq__`-equal entry in place.
+    pub(crate) fn dict_extend_value_dedup(
+        &mut self,
+        receiver: &Value,
+        pairs: Vec<(PyKey, Value)>,
+    ) -> Result<()> {
+        let dest_has_object = receiver
+            .dict_with(|d| d.keys().any(|k| matches!(k, PyKey::Object { .. })))
+            .unwrap_or(false);
+        let src_has_object = pairs.iter().any(|(k, _)| matches!(k, PyKey::Object { .. }));
+        if !dest_has_object && !src_has_object {
+            // Primitive-key fast path: raw IndexMap::extend (last value wins).
+            receiver
+                .dict_with_mut(|dict| dict.extend(pairs))
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            return Ok(());
+        }
+        for (key, value) in pairs {
+            let existing = self.dict_lookup(receiver, &key)?;
+            receiver
+                .dict_with_mut(|dict| {
+                    if let Some((idx, _)) = existing {
+                        // Overwrite the matching entry in place, keeping the
+                        // existing (stored) key object and its position.
+                        if let Some(k) = dict.get_index(idx).map(|(k, _)| k.clone()) {
+                            dict.insert(k, value);
+                            return;
+                        }
+                    }
+                    dict.insert(key, value);
+                })
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Insert `key` into a set, dispatching user `__eq__` for dedup.
     /// Handles both `Object` keys and `None` keys for cross-variant dedup
     /// (issue #906): inserting None into a set that already holds an Object
@@ -2364,18 +2440,47 @@ impl Interpreter {
                 if args.len() > 1 {
                     return Err(pyrust_core::type_err!("update expected at most 1 argument, got {}", args.len()));
                 }
+                // #1914: when the update source is a `dict` (the common
+                // `d.update(other_dict)` and `**kwargs`-into-dict path), route
+                // through `dict_extend_value_dedup` so `PyKey::Object` keys
+                // deduplicate via user `__eq__` (last value wins).  The helper
+                // keeps the raw fast path for all-primitive keys.  kwargs are
+                // string keys, always primitive — append them after.
+                if let Some(arg) = args.first() {
+                    // Snapshot the source pairs in a scoped block so the `Dict`
+                    // `Ref` borrow is dropped before `dict_extend_value_dedup`
+                    // takes a `borrow_mut` — critical for the self-aliased
+                    // `d.update(d)` case where `arg` IS `receiver` (#448).
+                    let src_pairs: Option<Vec<(PyKey, Value)>> = match arg.kind() {
+                        ValueKind::Dict(src) => {
+                            Some(src.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                        }
+                        _ => None,
+                    };
+                    if let Some(pairs) = src_pairs {
+                        self.dict_extend_value_dedup(&receiver, pairs)?;
+                        if !kwargs.is_empty() {
+                            let kw_pairs: Vec<(PyKey, Value)> = kwargs
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            self.dict_extend_value_dedup(&receiver, kw_pairs)?;
+                        }
+                        return Ok(Value::none());
+                    }
+                }
                 // Check whether we need to intercept.  If the single positional
                 // arg is a primitive type that pyrust_builtins::dict::call already
-                // handles correctly, delegate.
+                // handles correctly, delegate.  `List`/`Tuple` (iterable of
+                // pairs) go through the interpreter slow path below so that
+                // PyInstance keys hash via user `__hash__` and dedup via user
+                // `__eq__` (#1914); `Str`/`Bytes` pairs are always char/byte
+                // primitives and stay on the fast builtin path.
                 let needs_interp = match args.first() {
                     None => false,
                     Some(arg) => !matches!(
                         arg.kind(),
-                        ValueKind::Dict(_)
-                            | ValueKind::List(_)
-                            | ValueKind::Tuple(_)
-                            | ValueKind::Str(_)
-                            | ValueKind::Bytes(_)
+                        ValueKind::Dict(_) | ValueKind::Str(_) | ValueKind::Bytes(_)
                     ),
                 };
                 if !needs_interp {
@@ -2432,13 +2537,10 @@ impl Interpreter {
                         }
                     };
                     let pk = self.value_to_pykey(&k_val)?;
-                    receiver
-                        .dict_with_mut(|dict| {
-                            dict.insert(pk, v_val);
-                        })
-                        .ok_or_else(|| {
-                            PyError::Runtime("internal: expected dict".to_string())
-                        })?;
+                    // #1914: dedup `PyKey::Object` keys via user `__eq__` (the
+                    // dict-arg fast path above and `dict_extend_value_dedup`
+                    // share this last-value-wins semantics).
+                    self.dict_extend_value_dedup(&receiver, vec![(pk, v_val)])?;
                     idx += 1;
                 }
                 // Apply keyword arguments after the positional iterable,
@@ -2574,7 +2676,205 @@ impl Interpreter {
                 }
                 Ok(Value::none())
             }
+            // Set-algebra method forms (issue #1907).  When the receiver or any
+            // operand holds user-instance keys, fold through the `__eq__`-aware
+            // `set_binary_op` / `set_subset_cmp`; otherwise fall through to the
+            // fast interpreter-free builtin path below.
+            "union" | "intersection" | "difference" | "symmetric_difference"
+            | "issubset" | "issuperset" | "isdisjoint"
+                if self.set_algebra_needs_eq(&receiver, &args)? =>
+            {
+                self.set_algebra_method_eq(method, receiver, args)
+            }
             _ => pyrust_builtins::set::call(method, &receiver, args),
+        }
+    }
+
+    /// `frozenset` method dispatch — mirror of [`Self::call_set_method`] for the
+    /// frozen variant (issue #1907).  Intercepts the set-algebra method forms
+    /// when user `__eq__` is required, folds through the shared
+    /// `set_binary_op`/`set_subset_cmp` mechanism, and coerces the algebra
+    /// results back to `frozenset` (CPython: `frozenset.union(...)` returns a
+    /// `frozenset`).  All other methods (and the all-primitive fast path) go
+    /// straight to the interpreter-free builtin implementation.
+    pub(crate) fn call_frozenset_method(
+        &mut self,
+        method: &str,
+        receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match method {
+            "union" | "intersection" | "difference" | "symmetric_difference"
+                if self.set_algebra_needs_eq(&receiver, &args)? =>
+            {
+                let result = self.set_algebra_method_eq(method, receiver, args)?;
+                // `set_algebra_method_eq` returns a `set`; re-freeze for the
+                // frozenset receiver (the algebra result type follows CPython).
+                match result.set_with(|s| pyrust_builtins::frozenset::frozenset(s.clone())) {
+                    Some(fz) => Ok(fz),
+                    None => Ok(result),
+                }
+            }
+            "issubset" | "issuperset" | "isdisjoint"
+                if self.set_algebra_needs_eq(&receiver, &args)? =>
+            {
+                self.set_algebra_method_eq(method, receiver, args)
+            }
+            _ => pyrust_builtins::frozenset::call(method, &receiver, args),
+        }
+    }
+
+    /// True when a set-algebra method form (`union`/`intersection`/…) must
+    /// dispatch user `__eq__`: the receiver or any operand iterable contains a
+    /// `PyKey::Object` element (issue #1907).  All-primitive operands return
+    /// false and keep the fast interpreter-free builtin path.
+    fn set_algebra_needs_eq(&mut self, receiver: &Value, args: &[Value]) -> Result<bool> {
+        let recv_has_obj = receiver
+            .set_with(set_has_object_key)
+            .or_else(|| {
+                pyrust_builtins::frozenset::as_items(receiver)
+                    .map(|rc| set_has_object_key(&rc))
+            })
+            .unwrap_or(false);
+        if recv_has_obj {
+            return Ok(true);
+        }
+        // Cheap operand scan: detect a user instance (or already-`Object` set
+        // key) without building any `PyKey` — keeps the all-primitive method
+        // forms (`s.union(other)` etc.) on a borrow-only fast path.
+        for arg in args {
+            if value_iterable_has_object(arg) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Materialise an arbitrary iterable operand into a deduplicated
+    /// `IndexSet<PyKey>`, dispatching user `__hash__`/`__eq__` so that two
+    /// `__eq__`-equal instances collapse to a single entry (issue #1907).
+    fn materialize_set_operand(&mut self, arg: &Value) -> Result<indexmap::IndexSet<PyKey>> {
+        let items = self.collect_iterable(arg)?;
+        let mut out = indexmap::IndexSet::new();
+        for item in items {
+            let pk = self.value_to_pykey(&item)?;
+            self.set_insert(&mut out, pk)?;
+        }
+        Ok(out)
+    }
+
+    /// `__eq__`-aware implementation of the set-algebra method forms.  Folds the
+    /// receiver against each operand via `set_binary_op` (union/intersection/
+    /// difference/symmetric_difference) or `set_subset_cmp` (issubset/
+    /// issuperset).  Operands are materialised into `set` values so the shared
+    /// `set_binary_op`/`set_subset_cmp` mechanism is reused (issue #1907).
+    fn set_algebra_method_eq(
+        &mut self,
+        method: &str,
+        receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match method {
+            "union" | "intersection" | "difference" => {
+                let op = match method {
+                    "union" => SetOp::Or,
+                    "intersection" => SetOp::And,
+                    "difference" => SetOp::Sub,
+                    _ => unreachable!(),
+                };
+                // Start from a plain `set` copy of the receiver (CPython returns
+                // a `set` from these method forms, never a frozenset).
+                let recv_items = receiver
+                    .set_with(|s| s.clone())
+                    .or_else(|| {
+                        pyrust_builtins::frozenset::as_items(&receiver).map(|rc| (*rc).clone())
+                    })
+                    .ok_or_else(|| {
+                        PyError::named("TypeError", format!("set.{method} receiver is not a set"))
+                    })?;
+                let mut acc = Value::set(recv_items);
+                for arg in &args {
+                    let operand = Value::set(self.materialize_set_operand(arg)?);
+                    acc = match set_binary_op(self, &acc, &operand, op, method) {
+                        Some(r) => r?,
+                        None => unreachable!("acc is always a set"),
+                    };
+                }
+                Ok(acc)
+            }
+            "symmetric_difference" => {
+                let arg = args.first().ok_or_else(|| {
+                    PyError::Runtime(
+                        "set.symmetric_difference() requires 1 argument".to_string(),
+                    )
+                })?;
+                let recv_items = receiver
+                    .set_with(|s| s.clone())
+                    .or_else(|| {
+                        pyrust_builtins::frozenset::as_items(&receiver).map(|rc| (*rc).clone())
+                    })
+                    .ok_or_else(|| {
+                        PyError::named(
+                            "TypeError",
+                            "set.symmetric_difference receiver is not a set".to_string(),
+                        )
+                    })?;
+                let lhs = Value::set(recv_items);
+                let rhs = Value::set(self.materialize_set_operand(arg)?);
+                match set_binary_op(self, &lhs, &rhs, SetOp::Xor, method) {
+                    Some(r) => r,
+                    None => unreachable!("lhs is always a set"),
+                }
+            }
+            "issubset" | "issuperset" => {
+                let arg = args.first().ok_or_else(|| {
+                    PyError::Runtime(format!("set.{method}() requires 1 argument"))
+                })?;
+                let recv_items = receiver
+                    .set_with(|s| s.clone())
+                    .or_else(|| {
+                        pyrust_builtins::frozenset::as_items(&receiver).map(|rc| (*rc).clone())
+                    })
+                    .ok_or_else(|| {
+                        PyError::named("TypeError", format!("set.{method} receiver is not a set"))
+                    })?;
+                let lhs = Value::set(recv_items);
+                let rhs = Value::set(self.materialize_set_operand(arg)?);
+                let op = if method == "issubset" {
+                    BinaryOp::Le
+                } else {
+                    BinaryOp::Ge
+                };
+                match set_subset_cmp(self, &lhs, &rhs, op) {
+                    Some(r) => r,
+                    None => unreachable!("both operands are sets"),
+                }
+            }
+            "isdisjoint" => {
+                // `a.isdisjoint(b)` is True when the two sets share no
+                // `__eq__`-equal element (issue #1907).  Probe each receiver
+                // element against the materialised operand via `set_lookup_in`,
+                // which dispatches user `__hash__`-then-`__eq__`.
+                let arg = args.first().ok_or_else(|| {
+                    PyError::Runtime("set.isdisjoint() requires 1 argument".to_string())
+                })?;
+                let recv_items = receiver
+                    .set_with(|s| s.clone())
+                    .or_else(|| {
+                        pyrust_builtins::frozenset::as_items(&receiver).map(|rc| (*rc).clone())
+                    })
+                    .ok_or_else(|| {
+                        PyError::named("TypeError", "set.isdisjoint receiver is not a set".to_string())
+                    })?;
+                let other = self.materialize_set_operand(arg)?;
+                for k in recv_items.iter() {
+                    if self.set_lookup_in(&other, k)?.is_some() {
+                        return Ok(Value::bool_(false));
+                    }
+                }
+                Ok(Value::bool_(true))
+            }
+            _ => unreachable!("set_algebra_method_eq called with non-algebra method"),
         }
     }
 
@@ -2799,7 +3099,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__sub__", "__rsub__") {
                     return r;
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::Sub, "-") {
+                if let Some(r) = set_binary_op(self, &left, &right, SetOp::Sub, "-") {
                     return r;
                 }
                 self.sub(left, right)
@@ -2906,7 +3206,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {
                     return r;
                 }
-                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Lt) {
+                if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Lt) {
                     return r;
                 }
                 self.compare(left, right, "<", |o| o.is_lt())
@@ -2915,7 +3215,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__le__", "__ge__") {
                     return r;
                 }
-                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Le) {
+                if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Le) {
                     return r;
                 }
                 self.compare(left, right, "<=", |o| o.is_le())
@@ -2924,7 +3224,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__gt__", "__lt__") {
                     return r;
                 }
-                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Gt) {
+                if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Gt) {
                     return r;
                 }
                 self.compare(left, right, ">", |o| o.is_gt())
@@ -2933,7 +3233,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ge__", "__le__") {
                     return r;
                 }
-                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Ge) {
+                if let Some(r) = set_subset_cmp(self, &left, &right, BinaryOp::Ge) {
                     return r;
                 }
                 self.compare(left, right, ">=", |o| o.is_ge())
@@ -2968,7 +3268,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__and__", "__rand__") {
                     return r;
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::And, "&") {
+                if let Some(r) = set_binary_op(self, &left, &right, SetOp::And, "&") {
                     return r;
                 }
                 // CPython keeps the `bool` type for `bool & bool` (only `&`,
@@ -3006,13 +3306,15 @@ impl Interpreter {
                     let Some(rhs_entries) = dict_entries_from_value(&right) else {
                         return Err(pyrust_core::type_err!("unsupported operand type(s) for |: '{left_type}' and '{right_type}'"));
                     };
-                    let mut merged: IndexMap<PyKey, Value> = lhs_entries.into_iter().collect();
-                    for (k, v) in rhs_entries {
-                        merged.insert(k, v);
-                    }
+                    // #1914: dedup via user `__eq__` for `PyKey::Object` keys.
+                    // `dict_extend_dedup` keeps the raw fast path for the common
+                    // all-primitive case; later values win on duplicate keys.
+                    let mut merged: IndexMap<PyKey, Value> = IndexMap::new();
+                    self.dict_extend_dedup(&mut merged, lhs_entries)?;
+                    self.dict_extend_dedup(&mut merged, rhs_entries)?;
                     return Ok(Value::dict(merged));
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::Or, "|") {
+                if let Some(r) = set_binary_op(self, &left, &right, SetOp::Or, "|") {
                     return r;
                 }
                 // PEP 604: `type | type` (and `None | type`, `type | None`,
@@ -3057,7 +3359,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
                     return r;
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::Xor, "^") {
+                if let Some(r) = set_binary_op(self, &left, &right, SetOp::Xor, "^") {
                     return r;
                 }
                 // CPython keeps the `bool` type for `bool ^ bool`.  Catch this
@@ -3603,6 +3905,13 @@ impl Interpreter {
             // operand names.  For |= the full dict.update() semantics apply
             // (accepts dicts and iterables of pairs).
             if is_augmented_assign || dict_entries_from_value(right).is_some() {
+                // #1914: `|=` must dedup `PyKey::Object` keys via user `__eq__`.
+                // `dict_entries_from_value` handles plain dicts and dict
+                // subclasses; iterables-of-pairs fall through to update() below.
+                if let Some(entries) = dict_entries_from_value(right) {
+                    self.dict_extend_value_dedup(left, entries)?;
+                    return Ok(Some(left.clone()));
+                }
                 let empty_kw = indexmap::IndexMap::new();
                 pyrust_builtins::dict::call("update", left, vec![right.clone()], &empty_kw)?;
                 return Ok(Some(left.clone()));
@@ -3642,6 +3951,11 @@ impl Interpreter {
                 if let Some(backing) = instance_builtin_data(inst_rc) {
                     if matches!(backing.kind(), ValueKind::Dict(_)) {
                         if is_augmented_assign || dict_entries_from_value(right).is_some() {
+                            // #1914: dedup `PyKey::Object` keys via user `__eq__`.
+                            if let Some(entries) = dict_entries_from_value(right) {
+                                self.dict_extend_value_dedup(&backing, entries)?;
+                                return Ok(Some(left.clone()));
+                            }
                             let empty_kw = indexmap::IndexMap::new();
                             pyrust_builtins::dict::call("update", &backing, vec![right.clone()], &empty_kw)?;
                             return Ok(Some(left.clone()));
@@ -5513,7 +5827,52 @@ fn set_items_from_value(v: &Value) -> Option<(indexmap::IndexSet<PyKey>, bool)> 
 /// fall through to the next handler).  Returns `Some(Err(...))` when the left
 /// operand is a set/frozenset but the right operand is not — CPython raises
 /// `TypeError: unsupported operand type(s) for OP: 'X' and 'Y'` in that case.
-fn set_binary_op(left: &Value, right: &Value, op: SetOp, op_sym: &str) -> Option<Result<Value>> {
+/// True if the set holds any `PyKey::Object` element, i.e. a user instance
+/// whose membership/equality requires `__hash__`/`__eq__` dispatch rather than
+/// raw `IndexSet` identity comparison (issue #1907).  All-primitive sets take
+/// the fast raw path.
+fn set_has_object_key(s: &indexmap::IndexSet<PyKey>) -> bool {
+    s.iter().any(|k| matches!(k, PyKey::Object { .. }))
+}
+
+/// Cheap, borrow-only check for whether an iterable operand to a set-algebra
+/// method form *may* contain a user instance (and thus require `__eq__`
+/// dispatch).  Used to keep all-primitive operands on the fast path without
+/// materialising `PyKey`s (issue #1907).  Conservatively returns `true` for any
+/// element / set key that is a `PyInstance` or already an `Object` key, and for
+/// iterables whose contents cannot be cheaply inspected (Generators, custom
+/// `BuiltinObject`s) so correctness is never sacrificed for speed.
+fn value_iterable_has_object(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::Set(s) => set_has_object_key(&s),
+        ValueKind::List(items) => {
+            items.iter().any(|x| matches!(x.kind(), ValueKind::PyInstance(_)))
+        }
+        ValueKind::Tuple(items) => {
+            items.iter().any(|x| matches!(x.kind(), ValueKind::PyInstance(_)))
+        }
+        ValueKind::Dict(d) => d.keys().any(|k| matches!(k, PyKey::Object { .. })),
+        // Primitive flat iterables can never hold user instances.
+        ValueKind::Str(_) | ValueKind::Bytes(_) | ValueKind::Range { .. } => false,
+        _ => {
+            if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
+                set_has_object_key(&rc)
+            } else {
+                // Unknown / opaque iterable: be conservative and dispatch
+                // `__eq__` (still correct for primitive elements — just slower).
+                true
+            }
+        }
+    }
+}
+
+fn set_binary_op(
+    interp: &mut Interpreter,
+    left: &Value,
+    right: &Value,
+    op: SetOp,
+    op_sym: &str,
+) -> Option<Result<Value>> {
     let lhs_items = set_items_from_value(left)?;
     // LHS is a set/frozenset; if RHS is not, emit the CPython-format TypeError.
     let Some(rhs_items) = set_items_from_value(right) else {
@@ -5523,40 +5882,92 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp, op_sym: &str) -> Option
     };
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
-    let mut out = indexmap::IndexSet::new();
-    match op {
-        SetOp::Or => {
-            for k in a.iter().chain(b.iter()) {
-                out.insert(k.clone());
-            }
-        }
-        SetOp::And => {
-            for k in a.iter() {
-                if b.contains(k) {
+    // Fast path: neither operand contains user-instance keys, so raw
+    // `IndexSet` identity comparison is exact (issue #1907).  Most sets are
+    // primitive, so keep this allocation-cheap path with no `__eq__` dispatch.
+    let needs_eq = set_has_object_key(&a) || set_has_object_key(&b);
+    let result: Result<indexmap::IndexSet<PyKey>> = if !needs_eq {
+        let mut out = indexmap::IndexSet::new();
+        match op {
+            SetOp::Or => {
+                for k in a.iter().chain(b.iter()) {
                     out.insert(k.clone());
                 }
             }
-        }
-        SetOp::Sub => {
-            for k in a.iter() {
-                if !b.contains(k) {
-                    out.insert(k.clone());
+            SetOp::And => {
+                for k in a.iter() {
+                    if b.contains(k) {
+                        out.insert(k.clone());
+                    }
+                }
+            }
+            SetOp::Sub => {
+                for k in a.iter() {
+                    if !b.contains(k) {
+                        out.insert(k.clone());
+                    }
+                }
+            }
+            SetOp::Xor => {
+                for k in a.iter() {
+                    if !b.contains(k) {
+                        out.insert(k.clone());
+                    }
+                }
+                for k in b.iter() {
+                    if !a.contains(k) {
+                        out.insert(k.clone());
+                    }
                 }
             }
         }
-        SetOp::Xor => {
-            for k in a.iter() {
-                if !b.contains(k) {
-                    out.insert(k.clone());
+        Ok(out)
+    } else {
+        // Slow path: at least one operand holds user instances.  Membership
+        // (`contains`) and insertion (`insert`) go through `set_lookup_in` /
+        // `set_insert`, which dispatch user `__hash__`-then-`__eq__`.
+        (|| -> Result<indexmap::IndexSet<PyKey>> {
+            let mut out = indexmap::IndexSet::new();
+            match op {
+                SetOp::Or => {
+                    for k in a.iter().chain(b.iter()) {
+                        interp.set_insert(&mut out, k.clone())?;
+                    }
+                }
+                SetOp::And => {
+                    for k in a.iter() {
+                        if interp.set_lookup_in(&b, k)?.is_some() {
+                            interp.set_insert(&mut out, k.clone())?;
+                        }
+                    }
+                }
+                SetOp::Sub => {
+                    for k in a.iter() {
+                        if interp.set_lookup_in(&b, k)?.is_none() {
+                            interp.set_insert(&mut out, k.clone())?;
+                        }
+                    }
+                }
+                SetOp::Xor => {
+                    for k in a.iter() {
+                        if interp.set_lookup_in(&b, k)?.is_none() {
+                            interp.set_insert(&mut out, k.clone())?;
+                        }
+                    }
+                    for k in b.iter() {
+                        if interp.set_lookup_in(&a, k)?.is_none() {
+                            interp.set_insert(&mut out, k.clone())?;
+                        }
+                    }
                 }
             }
-            for k in b.iter() {
-                if !a.contains(k) {
-                    out.insert(k.clone());
-                }
-            }
-        }
-    }
+            Ok(out)
+        })()
+    };
+    let out = match result {
+        Ok(out) => out,
+        Err(e) => return Some(Err(e)),
+    };
     Some(Ok(if l_frozen || r_frozen {
         pyrust_builtins::frozenset::frozenset(out)
     } else {
@@ -5577,11 +5988,45 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp, op_sym: &str) -> Option
 /// - `a >= b` — superset: every element of `b` is in `a`
 ///
 /// Mixed `set`/`frozenset` comparisons are supported, as in CPython.
-fn set_subset_cmp(left: &Value, right: &Value, op: BinaryOp) -> Option<Result<Value>> {
+fn set_subset_cmp(
+    interp: &mut Interpreter,
+    left: &Value,
+    right: &Value,
+    op: BinaryOp,
+) -> Option<Result<Value>> {
     let (a, _) = set_items_from_value(left)?;
     let (b, _) = set_items_from_value(right)?;
-    let is_subset = a.iter().all(|k| b.contains(k));
-    let is_superset = b.iter().all(|k| a.contains(k));
+    // Fast path: all-primitive operands — raw `contains` is exact (issue #1907).
+    let needs_eq = set_has_object_key(&a) || set_has_object_key(&b);
+    let (is_subset, is_superset) = if !needs_eq {
+        (
+            a.iter().all(|k| b.contains(k)),
+            b.iter().all(|k| a.contains(k)),
+        )
+    } else {
+        // Slow path: membership via `set_lookup_in` so user `__eq__` decides.
+        let compute = (|| -> Result<(bool, bool)> {
+            let mut subset = true;
+            for k in a.iter() {
+                if interp.set_lookup_in(&b, k)?.is_none() {
+                    subset = false;
+                    break;
+                }
+            }
+            let mut superset = true;
+            for k in b.iter() {
+                if interp.set_lookup_in(&a, k)?.is_none() {
+                    superset = false;
+                    break;
+                }
+            }
+            Ok((subset, superset))
+        })();
+        match compute {
+            Ok(pair) => pair,
+            Err(e) => return Some(Err(e)),
+        }
+    };
     let result = match op {
         BinaryOp::Lt => is_subset && !is_superset,
         BinaryOp::Le => is_subset,
