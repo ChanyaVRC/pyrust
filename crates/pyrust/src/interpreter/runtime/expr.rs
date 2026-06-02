@@ -1530,6 +1530,24 @@ impl Interpreter {
                         | ValueKind::Tuple(_)
                 ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
                 if hashable {
+                    // A user `__eq__` override means equality must NOT be
+                    // decided structurally by the backing's PyKey (that path
+                    // never dispatches the override on lookup).  Keep the
+                    // instance as a `PyKey::Object` so the dict/set runtime
+                    // dispatches the user comparison, but reuse the backing's
+                    // value-based hash so `hash(E(5)) == hash(5)` still holds and
+                    // same-value keys land in the same bucket (CPython parity).
+                    // Dict/set membership uses `__eq__` only (not `__ne__`), so a
+                    // `__ne__`-only subclass stays backing-keyed/interchangeable.
+                    if coerce_subclass_backing(value, &["__eq__"]).is_none() {
+                        let hash = crate::builtin_modules::builtins::hash_value_with_interp(
+                            self, &backing,
+                        )? as u64;
+                        return Ok(PyKey::Object {
+                            hash,
+                            value: value.clone(),
+                        });
+                    }
                     return self.value_to_pykey(&backing);
                 }
             }

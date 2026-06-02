@@ -56,3 +56,21 @@ try:
     print("hashable")
 except TypeError:
     print("unhashable")
+
+
+# A user __eq__ override (with the inherited __hash__) must still be dispatched
+# on dict/set lookup — the key may NOT collapse to its backing PyKey, or the
+# override would be bypassed.  `hash(E(5)) == hash(5)` (so same bucket), but
+# `E(5).__eq__` decides membership.
+class IEq(int):
+    def __eq__(self, other):
+        return False
+
+    __hash__ = int.__hash__
+
+
+print(hash(IEq(5)) == hash(5))
+print({IEq(5): "a"}.get(5))
+print({IEq(5): "a"}.get(IEq(5)))
+print(5 in {IEq(5)})
+print(len({1, IEq(1)}))
