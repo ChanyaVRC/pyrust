@@ -10738,8 +10738,8 @@ impl Compiler {
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         self.fn_protos.push(FnProto {
-            name: "<genexp>".to_string(),
-            qualname: "<genexp>".to_string(),
+            name: "<genexpr>".to_string(),
+            qualname: "<genexpr>".to_string(),
             param_spec: Rc::new(FnParamSpec {
                 names: params.iter().map(|p| p.name.clone()).collect(),
                 has_default: params.iter().map(|p| p.default.is_some()).collect(),

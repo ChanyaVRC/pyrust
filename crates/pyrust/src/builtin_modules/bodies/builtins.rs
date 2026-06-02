@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, EnumerateIter, FilterIter, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
@@ -9004,10 +9004,35 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             }
             Ok(format!("frozenset({{{}}})", parts.join(", ")))
         }
+        // Generators and built-in iterators (#2019): the pure
+        // `Value::repr()` cannot tell the concrete iterator kind apart
+        // (all are `ValueKind::Generator`), so it returns a fixed
+        // `<generator object>`.  Reconstruct CPython's real repr here:
+        //   - true generators (def-generator / genexpr):
+        //         `<generator object {qualname} at 0x...>`
+        //   - everything else (map/filter/zip/enumerate/list_iterator/…):
+        //         `<{type_name} object at 0x...>`
+        ValueKind::Generator(_) => Ok(generator_repr(value)),
         // For all other value types (int, float, str, bool, None, …), the
         // pure `Value::repr()` is correct and needs no interpreter.
         _ => Ok(value.repr()),
     }
+}
+
+/// Render the CPython-compatible repr of a `ValueKind::Generator` value
+/// (#2019).  True generator frames carry a qualname
+/// (`<generator object {qualname} at 0x...>`); built-in iterators use their
+/// type name (`<{type_name} object at 0x...>`).  The address is the identity
+/// of the underlying generator state, matching `id()` / `Value::value_id`.
+fn generator_repr(value: &Value) -> String {
+    let addr = value.value_id().unwrap_or(0) as usize;
+    if let ValueKind::Generator(state_rc) = value.kind() {
+        if let Some(frame) = state_rc.borrow().downcast_ref::<GeneratorFrame>() {
+            return format!("<generator object {} at 0x{addr:x}>", frame.qualname);
+        }
+    }
+    let type_name = full_type_name_str(value);
+    format!("<{type_name} object at 0x{addr:x}>")
 }
 
 /// Render a `PyKey` dict key or set element to its repr string, honouring

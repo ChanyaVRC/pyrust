@@ -213,8 +213,9 @@ impl BuiltinTypeOps for ReversedOps {
         REVERSED_TYPE_NAME
     }
 
-    fn repr(&self, _state: &BuiltinState) -> String {
-        "<list_reverseiterator object>".to_string()
+    fn repr(&self, state: &BuiltinState) -> String {
+        let addr = std::rc::Rc::as_ptr(state) as usize;
+        format!("<list_reverseiterator object at 0x{addr:x}>")
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
@@ -284,8 +285,9 @@ impl BuiltinTypeOps for ChainOps {
         CHAIN_TYPE_NAME
     }
 
-    fn repr(&self, _state: &BuiltinState) -> String {
-        "<itertools.chain object>".to_string()
+    fn repr(&self, state: &BuiltinState) -> String {
+        let addr = std::rc::Rc::as_ptr(state) as usize;
+        format!("<itertools.chain object at 0x{addr:x}>")
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {

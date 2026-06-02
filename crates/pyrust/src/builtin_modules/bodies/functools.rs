@@ -180,6 +180,32 @@ pyrust_module! {
             }
             _interp.call_function_expanded(func, &combined)
         }
+
+        /// `repr(partial(f, ...))` — `functools.partial(<func repr>, arg, kw=val)`.
+        /// The embedded `func` repr carries an address in CPython
+        /// (`<function f at 0x...>`).  Positional args and keyword values are
+        /// each rendered via the interpreter-aware repr so user `__repr__`
+        /// is honoured; keyword args keep their insertion order.
+        fn __repr__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let (func, bound_pos, bound_kw) = read_partial_state(&inst, FN_NAME)?;
+            let mut parts: Vec<String> =
+                Vec::with_capacity(1 + bound_pos.len() + bound_kw.len());
+            parts.push(crate::builtin_modules::builtins::render_value_repr(_interp, &func)?);
+            for v in &bound_pos {
+                parts.push(crate::builtin_modules::builtins::render_value_repr(_interp, v)?);
+            }
+            for (k, v) in &bound_kw {
+                let name = match k {
+                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                    _ => continue,
+                };
+                let val_repr =
+                    crate::builtin_modules::builtins::render_value_repr(_interp, v)?;
+                parts.push(format!("{name}={val_repr}"));
+            }
+            Ok(Value::string(format!("functools.partial({})", parts.join(", "))))
+        }
     }
 
     /// CPython: functools.lru_cache(maxsize=128, typed=False).

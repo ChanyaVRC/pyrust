@@ -285,6 +285,28 @@ pyrust_module! {
             inst.borrow_mut().attrs.insert("_cur".to_string(), next);
             Ok(cur)
         }
+
+        /// `repr(count(...))` — `count(start)` or `count(start, step)`.
+        /// CPython omits the step when it is the default integer `1`
+        /// (a float `1.0` step is always shown).  No address (CPython's
+        /// `count_repr` formats only the numeric fields).
+        fn __repr__(args) -> Result<Value> {
+            let _ = _interp;
+            let inst = expect_self(args, FN_NAME)?;
+            let a = inst.borrow();
+            let cur = a.attrs.get("_cur").cloned().ok_or_else(|| internal(FN_NAME))?;
+            let step = a.attrs.get("_step").cloned().ok_or_else(|| internal(FN_NAME))?;
+            // CPython's count_repr omits the step only when it is an *integer*
+            // (incl. bool, a PyLong subclass) equal to 1.  A float `1.0` is
+            // always shown.
+            let omit_step =
+                matches!(step.kind(), ValueKind::Int(1) | ValueKind::Bool(true));
+            if omit_step {
+                Ok(Value::string(format!("count({})", cur.repr())))
+            } else {
+                Ok(Value::string(format!("count({}, {})", cur.repr(), step.repr())))
+            }
+        }
     }
 
     /// CPython: itertools.repeat(object[, times]) — yield `object`
@@ -354,6 +376,29 @@ pyrust_module! {
                     Ok(object)
                 }
                 _ => Err(PyError::named("StopIteration", String::new())),
+            }
+        }
+
+        /// `repr(repeat(...))` — `repeat(obj)` for an unbounded repeat, or
+        /// `repeat(obj, n)` when a `times` limit was given.  The count shown
+        /// is the *remaining* number of items (matches CPython, which stores
+        /// and decrements `cnt`).  No address.
+        fn __repr__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let (object, remaining) = {
+                let a = inst.borrow();
+                (
+                    a.attrs.get("_object").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    a.attrs.get("_remaining").cloned().ok_or_else(|| internal(FN_NAME))?,
+                )
+            };
+            let obj_repr =
+                crate::builtin_modules::builtins::render_value_repr(_interp, &object)?;
+            match remaining.kind() {
+                ValueKind::Int(n) => {
+                    Ok(Value::string(format!("repeat({obj_repr}, {n})")))
+                }
+                _ => Ok(Value::string(format!("repeat({obj_repr})"))),
             }
         }
     }
