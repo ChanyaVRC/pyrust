@@ -42,6 +42,16 @@ use crate::value::{PyInstance, PyKey, Value, ValueKind, key_repr};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
+/// Attribute name under which `Counter` and `defaultdict` keep their backing
+/// dict (issue #2010).  Both are real `dict` subclasses (their `PyClass.base`
+/// is the `dict` singleton, set in `env.rs::load_module`), so the instance's
+/// mapping must live under the same `__builtin_data__` key that the generic
+/// dict-subclass machinery (`call_class_expanded`'s backing-store
+/// pre-initialisation, `dict(instance)` conversion, subscript fallback) reads
+/// and writes.  Storing the map here — rather than a private `_counts` /
+/// `_items` attr — keeps the subclass coherent end-to-end.
+const COUNTER_BACKING: &str = "__builtin_data__";
+
 pyrust_module! {
     constants {
         // Expose the `collections.abc` submodule as `collections.abc` so that
@@ -53,56 +63,36 @@ pyrust_module! {
     }
 
     class Counter {
-        /// CPython: Counter([iterable_or_mapping]) — tally elements.
+        /// CPython: Counter([iterable_or_mapping], **kwds) — tally elements.
+        /// A positional iterable/mapping is tallied first, then any keyword
+        /// arguments are *added* on top as string-keyed counts (#2013).
         /// <https://docs.python.org/3/library/collections.html#collections.Counter>
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::Runtime(format!(
-                    "{FN_NAME}() takes at most one argument",
-                )));
+            let positional: Vec<&ExpandedCallArg> =
+                user.iter().filter(|a| a.name.is_none()).collect();
+            let kwargs: Vec<&ExpandedCallArg> =
+                user.iter().filter(|a| a.name.is_some()).collect();
+            if positional.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{FN_NAME}() takes at most one positional argument ({} given)",
+                        positional.len(),
+                    ),
+                ));
             }
-            let mut counts: IndexMap<PyKey, Value> = if let Some(arg) = user.first() {
-                if let ValueKind::Dict(map) = arg.value.kind() {
-                    IndexMap::with_capacity(map.len())
-                } else {
-                    IndexMap::new()
-                }
-            } else {
-                IndexMap::new()
-            };
-            if let Some(arg) = user.first() {
-                if let ValueKind::Dict(map) = arg.value.kind() {
-                    for (k, v) in map.iter() {
-                        match v.kind() {
-                            ValueKind::Int(_) | ValueKind::Bool(_) => {
-                                counts.insert(k.clone(), v.clone());
-                            }
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!("{FN_NAME}() mapping values must be integers"),
-                            )),
-                        }
-                    }
-                } else {
-                    for v in _interp.collect_iterable(&arg.value)? {
-                        let key = _interp.value_to_pykey(&v)?;
-                        // #1919: `__eq__`-aware lookup/insert so equal user-keys
-                        // accumulate into one entry instead of duplicating.
-                        let next = match map_get_eq(_interp, &counts, &key)? {
-                            Some(v) if matches!(v.kind(), ValueKind::Int(_)) => {
-                                value_as_count(&v) + 1
-                            }
-                            _ => 1,
-                        };
-                        map_insert_eq(_interp, &mut counts, key, Value::int(next))?;
-                    }
-                }
+            let mut counts: IndexMap<PyKey, Value> = IndexMap::new();
+            if let Some(arg) = positional.first() {
+                counter_tally_into(_interp, &mut counts, &arg.value, FN_NAME, 1)?;
             }
+            // Keyword arguments become string-keyed counts, added on top
+            // (CPython `Counter('ab', a=10)` → a:11, b:1).
+            counter_apply_kwargs(_interp, &mut counts, &kwargs, 1)?;
             inst.borrow_mut()
                 .attrs
-                .insert("_counts".to_string(), Value::dict(counts));
+                .insert(COUNTER_BACKING.to_string(), Value::dict(counts));
             Ok(Value::none())
         }
 
@@ -264,16 +254,27 @@ pyrust_module! {
             Ok(Value::list(out))
         }
 
-        /// `c.update(iterable_or_mapping)` — add to counts (mapping form
-        /// uses values as deltas; iterable form adds 1 per element).
+        /// `c.update([iterable_or_mapping], **kwds)` — add to counts (mapping
+        /// form uses values as deltas; iterable form adds 1 per element; any
+        /// keyword arguments are added on top as string-keyed counts, #2013).
         fn update(args) -> Result<Value> {
             apply_delta(_interp, args, FN_NAME, /* sign = */ 1)
         }
 
-        /// `c.subtract(iterable_or_mapping)` — subtract counts; the
-        /// result can go below zero (`elements()` then skips them).
+        /// `c.subtract([iterable_or_mapping], **kwds)` — subtract counts; the
+        /// result can go below zero (`elements()` then skips them).  Keyword
+        /// arguments are subtracted as string-keyed counts (#2013).
         fn subtract(args) -> Result<Value> {
             apply_delta(_interp, args, FN_NAME, /* sign = */ -1)
+        }
+
+        /// `c.total()` — sum of the counts (Python 3.10+).
+        /// <https://docs.python.org/3/library/collections.html#collections.Counter.total>
+        fn total(args) -> Result<Value> {
+            let counts = read_counts(args, FN_NAME)?;
+            require_no_args(args, "total")?;
+            let sum: i64 = counts.values().map(value_as_count).sum();
+            Ok(Value::int(sum))
         }
 
         /// `c.copy()` — return a new Counter with the same counts.
@@ -287,13 +288,13 @@ pyrust_module! {
                 ));
             }
             // Construct a fresh instance with the receiver's class and an
-            // independent `_counts` payload.  Cheaper than going through
+            // independent backing payload.  Cheaper than going through
             // `Counter.__init__` again (which would re-tally from
             // scratch) — `c.copy()` is one of the hot paths.
             let inst = expect_self(args, FN_NAME)?;
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs: IndexMap<String, Value> = IndexMap::new();
-            attrs.insert("_counts".to_string(), Value::dict(counts));
+            attrs.insert(COUNTER_BACKING.to_string(), Value::dict(counts));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -436,7 +437,7 @@ pyrust_module! {
             attrs.attrs.insert("default_factory".to_string(), factory);
             attrs
                 .attrs
-                .insert("_items".to_string(), Value::dict(IndexMap::new()));
+                .insert(COUNTER_BACKING.to_string(), Value::dict(IndexMap::new()));
             Ok(Value::none())
         }
 
@@ -607,7 +608,7 @@ pyrust_module! {
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs: IndexMap<String, Value> = IndexMap::new();
             attrs.insert("default_factory".to_string(), factory);
-            attrs.insert("_items".to_string(), Value::dict(items));
+            attrs.insert(COUNTER_BACKING.to_string(), Value::dict(items));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -1325,6 +1326,51 @@ pyrust_module! {
             }
             Ok(Value::bool_(true))
         }
+
+        /// `d + other` — concatenate two deques into a new deque (#2011).
+        /// The result inherits `self`'s `maxlen` and is trimmed to it (keeping
+        /// the rightmost elements), matching CPython.  A non-deque RHS raises
+        /// `TypeError` directly (CPython's `deque.__add__` does not defer to
+        /// `__radd__`).
+        fn __add__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if args.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            let other = &args[1].value;
+            let other_items = match deque_items_of(other) {
+                Some(v) => v,
+                None => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "can only concatenate deque (not \"{}\") to deque",
+                            crate::interpreter::value_type_name_str(other),
+                        ),
+                    ));
+                }
+            };
+            let mut items = deque_items_snapshot(&inst)?;
+            items.extend(other_items);
+            let maxlen = deque_maxlen(&inst);
+            Ok(deque_from_items(&inst, items, maxlen))
+        }
+
+        /// `d * n` — repeat the deque `n` times into a new deque (#2011).
+        /// `n <= 0` yields an empty deque.  The result inherits `self`'s
+        /// `maxlen` and is trimmed to it (keeping rightmost), matching CPython.
+        /// A non-int `n` raises `TypeError`.
+        fn __mul__(args) -> Result<Value> {
+            deque_repeat(_interp, args, FN_NAME)
+        }
+
+        /// `n * d` — reflected multiply, identical to `d * n` (#2011).
+        fn __rmul__(args) -> Result<Value> {
+            deque_repeat(_interp, args, FN_NAME)
+        }
     }
 }
 
@@ -1362,13 +1408,13 @@ fn read_counts(
 ) -> Result<IndexMap<PyKey, Value>> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
-    match borrow.attrs.get("_counts") {
+    match borrow.attrs.get(COUNTER_BACKING) {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Ok(map.clone()),
             _ => Err(PyError::named(
                 "TypeError",
                 format!(
-                    "{fn_name}: Counter._counts has been overwritten with a non-dict; \
+                    "{fn_name}: Counter backing store has been overwritten with a non-dict; \
                      don't assign to internal attributes",
                 ),
             )),
@@ -1377,31 +1423,31 @@ fn read_counts(
     }
 }
 
-/// Write `counts` back to `self._counts`.  Used by any method that
+/// Write `counts` back to `self`'s backing dict.  Used by any method that
 /// mutates the underlying tally (the `__init__` path inserts directly).
 fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: IndexMap<PyKey, Value>) {
     inst.borrow_mut()
         .attrs
-        .insert("_counts".to_string(), Value::dict(counts));
+        .insert(COUNTER_BACKING.to_string(), Value::dict(counts));
 }
 
-/// `defaultdict`'s storage accessor.  Same shape as `read_counts` but
-/// against `self._items` (the dict slot defaultdict keeps the user's
-/// data in — separate from `self.default_factory`).  TypeError on
-/// external corruption, empty-map fallback when `__init__` hasn't run.
+/// `defaultdict`'s storage accessor.  Same shape as `read_counts` — the
+/// backing dict (`__builtin_data__`) holds the user's data, separate from
+/// `self.default_factory`.  TypeError on external corruption, empty-map
+/// fallback when `__init__` hasn't run.
 fn read_items(
     args: &[ExpandedCallArg],
     fn_name: &str,
 ) -> Result<IndexMap<PyKey, Value>> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
-    match borrow.attrs.get("_items") {
+    match borrow.attrs.get(COUNTER_BACKING) {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Ok(map.clone()),
             _ => Err(PyError::named(
                 "TypeError",
                 format!(
-                    "{fn_name}: defaultdict._items has been overwritten with a non-dict; \
+                    "{fn_name}: defaultdict backing store has been overwritten with a non-dict; \
                      don't assign to internal attributes",
                 ),
             )),
@@ -1413,7 +1459,7 @@ fn read_items(
 fn store_items(inst: &Rc<RefCell<PyInstance>>, items: IndexMap<PyKey, Value>) {
     inst.borrow_mut()
         .attrs
-        .insert("_items".to_string(), Value::dict(items));
+        .insert(COUNTER_BACKING.to_string(), Value::dict(items));
 }
 
 /// Hashable-key extraction at index `i` with a uniform TypeError on
@@ -1481,9 +1527,10 @@ fn require_no_args(args: &[ExpandedCallArg], method: &str) -> Result<()> {
     }
 }
 
-/// Apply `update`/`subtract` semantics: for each element of `other`,
-/// adjust the count by `sign`.  `other` can be an iterable (counts as
-/// +1/-1 per element) or a mapping (uses the mapping's integer values).
+/// Apply `update`/`subtract` semantics: tally an optional positional
+/// iterable/mapping plus any keyword counts into `self._counts`, scaled by
+/// `sign` (+1 for `update`, -1 for `subtract`).  At most one positional is
+/// allowed; keyword arguments are string-keyed counts added on top (#2013).
 ///
 /// Takes `interp` so user `__iter__` classes are honoured via
 /// `collect_iterable` (issue #446).
@@ -1494,36 +1541,72 @@ fn apply_delta(
     sign: i64,
 ) -> Result<Value> {
     let user = &args[1..];
-    if user.len() != 1 {
+    let positional: Vec<&ExpandedCallArg> =
+        user.iter().filter(|a| a.name.is_none()).collect();
+    let kwargs: Vec<&ExpandedCallArg> =
+        user.iter().filter(|a| a.name.is_some()).collect();
+    if positional.len() > 1 {
         return Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() takes exactly 1 argument"),
+            format!(
+                "{fn_name}() takes at most one positional argument ({} given)",
+                positional.len(),
+            ),
         ));
     }
     let inst = expect_self(args, fn_name)?;
     let mut counts = read_counts(args, fn_name)?;
-    let other = &user[0].value;
+    if let Some(arg) = positional.first() {
+        counter_tally_into(interp, &mut counts, &arg.value, fn_name, sign)?;
+    }
+    counter_apply_kwargs(interp, &mut counts, &kwargs, sign)?;
+    store_counts(&inst, counts);
+    Ok(Value::none())
+}
 
-    // `other` is a plain dict — use its values as deltas directly.
+/// Tally `other` into `counts`, scaled by `sign`.  `other` may be a plain
+/// `dict` (values are integer deltas), a `Counter` (its stored counts are
+/// deltas), or any other iterable (each element contributes `sign`).  Shared
+/// by `Counter.__init__`, `update`, and `subtract` (#2013).
+///
+/// Value-type preservation (issue #930): CPython's `Counter.update(mapping)`
+/// short-circuits to a plain `dict.update` (copying values verbatim, so a
+/// `Bool` count stays `Bool`) when `self` is *empty*; otherwise every key is
+/// re-added as an `int` (`count + self.get(key, 0)`).  We replicate that with
+/// `preserve` = "add into an empty map with `sign == 1`", evaluated once
+/// before the mapping is walked.
+fn counter_tally_into(
+    interp: &mut crate::Interpreter,
+    counts: &mut IndexMap<PyKey, Value>,
+    other: &Value,
+    fn_name: &str,
+    sign: i64,
+) -> Result<()> {
+    // CPython's `if self:` check — emptiness is sampled once, up front.
+    let preserve = sign == 1 && counts.is_empty();
     if let ValueKind::Dict(map) = other.kind() {
         for (k, v) in map.iter() {
             let delta = match v.kind() {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "Counter delta values must be integers".to_string(),
-                )),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{fn_name}() mapping values must be integers"),
+                    ));
+                }
             };
-            let cur = map_get_eq(interp, &counts, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
-            map_insert_eq(interp, &mut counts, k.clone(), Value::int(cur + sign * delta))?;
+            if preserve {
+                map_insert_eq(interp, counts, k.clone(), v.clone())?;
+            } else {
+                let cur = map_get_eq(interp, counts, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
+                map_insert_eq(interp, counts, k.clone(), Value::int(cur + sign * delta))?;
+            }
         }
     } else if let Some(other_counts) = counts_of(other) {
-        // `other` is a Counter (PyInstance with `_counts`) — treat its
-        // stored counts as deltas, exactly like the plain-dict branch.
-        // This fixes the case where `Counter.update(another_counter)` was
-        // falling through to the iterable path (contributing +1 per key
-        // rather than the actual stored count).
+        // `other` is a Counter — treat its stored counts as deltas, exactly
+        // like the plain-dict branch (issue: `Counter.update(another_counter)`
+        // was falling through to the iterable path).
         for (k, v) in other_counts.iter() {
             let delta = match v.kind() {
                 ValueKind::Int(n) => n,
@@ -1531,23 +1614,56 @@ fn apply_delta(
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
-                        "Counter delta values must be integers".to_string(),
-                    ))
+                        format!("{fn_name}() mapping values must be integers"),
+                    ));
                 }
             };
-            let cur = map_get_eq(interp, &counts, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
-            map_insert_eq(interp, &mut counts, k.clone(), Value::int(cur + sign * delta))?;
+            if preserve {
+                map_insert_eq(interp, counts, k.clone(), v.clone())?;
+            } else {
+                let cur = map_get_eq(interp, counts, k)?.map(|v| value_as_count(&v)).unwrap_or(0);
+                map_insert_eq(interp, counts, k.clone(), Value::int(cur + sign * delta))?;
+            }
         }
     } else {
         // Iterable form — each element contributes ±1.
-        for v in interp.collect_iterable(&other)? {
+        for v in interp.collect_iterable(other)? {
             let key = interp.value_to_pykey(&v)?;
-            let cur = map_get_eq(interp, &counts, &key)?.map(|v| value_as_count(&v)).unwrap_or(0);
-            map_insert_eq(interp, &mut counts, key, Value::int(cur + sign))?;
+            let cur = map_get_eq(interp, counts, &key)?.map(|v| value_as_count(&v)).unwrap_or(0);
+            map_insert_eq(interp, counts, key, Value::int(cur + sign))?;
         }
     }
-    store_counts(&inst, counts);
-    Ok(Value::none())
+    Ok(())
+}
+
+/// Add keyword-argument counts (string keys, integer deltas) into `counts`,
+/// scaled by `sign`.  Shared by `Counter.__init__`/`update`/`subtract` (#2013).
+///
+/// Like [`counter_tally_into`], CPython routes kwargs through
+/// `update(dict(kwds))`, so the same empty-`self` value-preservation rule
+/// applies (`Counter(a=True)` → `{'a': True}`, issue #930).
+fn counter_apply_kwargs(
+    interp: &mut crate::Interpreter,
+    counts: &mut IndexMap<PyKey, Value>,
+    kwargs: &[&ExpandedCallArg],
+    sign: i64,
+) -> Result<()> {
+    if kwargs.is_empty() {
+        return Ok(());
+    }
+    let preserve = sign == 1 && counts.is_empty();
+    for kw in kwargs {
+        let name = kw.name.as_deref().unwrap_or("");
+        let key = PyKey::str_from(name);
+        if preserve {
+            map_insert_eq(interp, counts, key, kw.value.clone())?;
+        } else {
+            let delta = value_as_count(&kw.value);
+            let cur = map_get_eq(interp, counts, &key)?.map(|v| value_as_count(&v)).unwrap_or(0);
+            map_insert_eq(interp, counts, key, Value::int(cur + sign * delta))?;
+        }
+    }
+    Ok(())
 }
 
 fn value_as_count(v: &Value) -> i64 {
@@ -1636,7 +1752,7 @@ fn counts_of(other: &Value) -> Option<IndexMap<PyKey, Value>> {
     if borrow.class.borrow().name != "Counter" {
         return None;
     }
-    match borrow.attrs.get("_counts") {
+    match borrow.attrs.get(COUNTER_BACKING) {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Some(map.clone()),
             _ => Some(IndexMap::new()),
@@ -1705,7 +1821,7 @@ fn counter_binop(
     let merged = merge_counts(interp, &lhs, &rhs, op)?;
     let class = Rc::clone(&inst.borrow().class);
     let mut attrs: IndexMap<String, Value> = IndexMap::new();
-    attrs.insert("_counts".to_string(), Value::dict(merged));
+    attrs.insert(COUNTER_BACKING.to_string(), Value::dict(merged));
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,
         attrs,
@@ -1823,4 +1939,68 @@ fn deque_resolve_index(kind: ValueKind<'_>, len: usize, fn_name: &str) -> Result
         ));
     }
     Ok(idx)
+}
+
+/// Build a new deque `PyInstance` (same class as `proto`) holding `items`,
+/// with the given `maxlen`.  If `maxlen` is set and `items` is longer, the
+/// rightmost `maxlen` elements are kept — matching CPython's `+`/`*` result
+/// trimming (#2011).
+fn deque_from_items(
+    proto: &Rc<RefCell<PyInstance>>,
+    mut items: Vec<Value>,
+    maxlen: Option<usize>,
+) -> Value {
+    if let Some(ml) = maxlen {
+        if items.len() > ml {
+            let drop = items.len() - ml;
+            items.drain(..drop);
+        }
+    }
+    let maxlen_val = match maxlen {
+        Some(n) => Value::int(n as i64),
+        None => Value::none(),
+    };
+    let class = Rc::clone(&proto.borrow().class);
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    attrs.insert("_items".to_string(), Value::list(items));
+    attrs.insert("maxlen".to_string(), maxlen_val);
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Shared body for deque `__mul__` / `__rmul__` (#2011).  Repeats the deque
+/// `n` times into a new deque; `n <= 0` yields empty.  The result inherits
+/// `self`'s maxlen (trimmed).  A non-int multiplier raises `TypeError`.
+fn deque_repeat(
+    _interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly 1 argument"),
+        ));
+    }
+    let n: i64 = match args[1].value.kind() {
+        ValueKind::Int(v) => v,
+        ValueKind::Bool(b) => b as i64,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "can't multiply sequence by non-int of type '{}'",
+                    crate::interpreter::value_type_name_str(&args[1].value),
+                ),
+            ));
+        }
+    };
+    let base = deque_items_snapshot(&inst)?;
+    let reps = n.max(0) as usize;
+    let mut items: Vec<Value> = Vec::with_capacity(base.len().saturating_mul(reps));
+    for _ in 0..reps {
+        items.extend(base.iter().cloned());
+    }
+    let maxlen = deque_maxlen(&inst);
+    Ok(deque_from_items(&inst, items, maxlen))
 }

@@ -1887,12 +1887,15 @@ result = fact(10)
 
     #[test]
     fn collections_counter_corrupted_counts_surfaces_type_error() {
-        // `c._counts = "lol"` overwrites the internal storage with a
-        // non-dict.  The next `c[k]` access should surface a TypeError
-        // pointing at the user's tampering — not a `Runtime("internal:
-        // …")` that looks like an interpreter bug.
+        // `c.__builtin_data__ = "lol"` overwrites the internal storage with
+        // a non-dict.  (Issue #2010 moved the backing dict to the
+        // `__builtin_data__` slot that the generic dict-subclass machinery
+        // reads, since Counter is now a real `dict` subclass.)  The next
+        // `c[k]` access should surface a TypeError pointing at the user's
+        // tampering — not a `Runtime("internal: …")` that looks like an
+        // interpreter bug.
         let err = run_program_expect_error(
-            "from collections import Counter\nc = Counter('a')\nc._counts = 'lol'\nc['a']\n",
+            "from collections import Counter\nc = Counter('a')\nc.__builtin_data__ = 'lol'\nc['a']\n",
         );
         let msg = err.to_string();
         assert!(
@@ -1900,8 +1903,8 @@ result = fact(10)
             "expected TypeError diagnostic, got: {msg}"
         );
         assert!(
-            msg.contains("_counts"),
-            "error should name the offending attribute, got: {msg}"
+            msg.contains("backing store"),
+            "error should describe the corrupted backing store, got: {msg}"
         );
     }
 

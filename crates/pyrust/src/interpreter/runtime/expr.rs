@@ -7308,6 +7308,44 @@ impl Interpreter {
                             ValueKind::List(_) => BkKind::List,
                             _ => BkKind::Other,
                         };
+                        // Issue #2010: a dict subclass that *overrides*
+                        // `__setitem__` (e.g. `collections.Counter` /
+                        // `defaultdict`, whose stores are `__eq__`-aware) must
+                        // have its override called rather than the raw
+                        // backing-dict insert — but the two paths only diverge
+                        // for object keys (`PyKey::Object`), where user
+                        // `__eq__` dedup matters.  Primitive keys (int / str /
+                        // …) insert identically either way, so the override
+                        // probe is gated on a `PyInstance` index: a plain
+                        // `class D(dict)` doing `d[i] = v` with int keys keeps
+                        // the allocation- and walk-free hot path, while
+                        // `counter[obj] = v` routes through the override.
+                        if matches!(bk_kind, BkKind::Dict)
+                            && matches!(idx_val.kind(), ValueKind::PyInstance(_))
+                        {
+                            let class = Rc::clone(&inst_rc.borrow().class);
+                            let user_setitem =
+                                lookup_class_attr(&class, "__setitem__").filter(|v| {
+                                    !matches!(
+                                        v.kind(),
+                                        ValueKind::BuiltinFunction(
+                                            "dict.__setitem__" | "list.__setitem__"
+                                        )
+                                    )
+                                });
+                            if let Some(method_val) = user_setitem {
+                                invoke_class_method(
+                                    self,
+                                    method_val,
+                                    Value::py_instance(inst_rc),
+                                    &[
+                                        ExpandedCallArg { name: None, value: idx_val },
+                                        ExpandedCallArg { name: None, value: val_val },
+                                    ],
+                                )?;
+                                return Ok(());
+                            }
+                        }
                         match bk_kind {
                             BkKind::Dict => {
                                 let key = self.value_to_pykey(&idx_val)?;
