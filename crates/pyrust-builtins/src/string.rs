@@ -5,6 +5,8 @@ use pyrust_core::{
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
+use crate::unicode_data;
+
 /// Compute the byte offset of a subslice `sub` within its parent `parent`.
 ///
 /// `sub` must be a contiguous subslice of `parent` (i.e. produced by Rust's
@@ -274,18 +276,15 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphanumeric())
                 } else {
-                    cesu8_codepoints(s)
-                        .all(|n| char::from_u32(n).map_or(false, |c| c.is_alphanumeric()))
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_alnum))
                 },
         )),
         "isspace" => Ok(Value::bool_(
             !s.is_empty()
                 && if s.is_ascii() {
-                    s.bytes()
-                        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+                    s.bytes().all(|b| is_python_space_ascii(b))
                 } else {
-                    cesu8_codepoints(s)
-                        .all(|n| char::from_u32(n).map_or(false, |c| c.is_whitespace()))
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_space))
                 },
         )),
         "isdecimal" => Ok(Value::bool_(
@@ -305,7 +304,8 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
-                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_numeric))
+                    cesu8_codepoints(s)
+                        .all(|n| char::from_u32(n).map_or(false, unicode_data::is_numeric))
                 },
         )),
         "islower" => Ok(Value::bool_(str_islower(s))),
@@ -608,20 +608,12 @@ fn unicode_casefold(s: &str) -> String {
     }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        match c {
-            'ß' => out.push_str("ss"),
-            'ẞ' => out.push_str("ss"),
-            'ﬀ' => out.push_str("ff"),
-            'ﬁ' => out.push_str("fi"),
-            'ﬂ' => out.push_str("fl"),
-            'ﬃ' => out.push_str("ffi"),
-            'ﬄ' => out.push_str("ffl"),
-            'ﬅ' | 'ﬆ' => out.push_str("st"),
-            _ => {
-                for lc in c.to_lowercase() {
-                    out.push(lc);
-                }
-            }
+        // CaseFolding.txt full folding: for most characters the fold equals the
+        // lowercase mapping, so use to_lowercase and override only the documented
+        // exceptions (µ→μ, ς→σ, ß→ss, ﬆ→st, Cherokee, …) where fold ≠ lowercase.
+        match unicode_data::casefold_exception(c) {
+            Some(folded) => out.push_str(folded),
+            None => out.extend(c.to_lowercase()),
         }
     }
     out
@@ -681,7 +673,7 @@ fn titlecase(s: &str) -> String {
             if prev_cased {
                 out.extend(c.to_lowercase());
             } else {
-                out.extend(c.to_uppercase());
+                push_titlecase(&mut out, c);
             }
             prev_cased = true;
         } else {
@@ -690,6 +682,17 @@ fn titlecase(s: &str) -> String {
         }
     }
     out
+}
+
+/// Push the Unicode titlecase form of `c` onto `out`. Unlike `char::to_uppercase`,
+/// this maps Lt digraphs to their titlecase form (ǆ→ǅ, ǳ→ǲ, …) and applies the
+/// SpecialCasing titlecase entries (ß→Ss, ﬀ→Ff, …); for all other characters the
+/// titlecase mapping equals the uppercase mapping.
+fn push_titlecase(out: &mut String, c: char) {
+    match unicode_data::to_titlecase(c) {
+        Some(t) => out.push_str(t),
+        None => out.extend(c.to_uppercase()),
+    }
 }
 
 fn str_islower(s: &str) -> bool {
@@ -813,26 +816,57 @@ fn str_isidentifier(s: &str) -> bool {
     }
     // Use cesu8_codepoints to avoid chars() panicking on surrogate bytes.
     // A surrogate codepoint is not a valid identifier character → return false.
+    //
+    // Python identifiers use the Unicode XID_Start / XID_Continue properties
+    // (plus `_`), not is_alphabetic / is_alphanumeric. Combining marks (Mn/Mc)
+    // are XID_Continue but not alphanumeric; superscripts (²) are alphanumeric
+    // but not XID_Continue.
     let mut codepoints = cesu8_codepoints(s);
     let first = match codepoints.next().and_then(char::from_u32) {
         Some(c) => c,
         None => return false, // empty or surrogate first codepoint
     };
-    if !first.is_alphabetic() && first != '_' {
+    if !unicode_data::is_xid_start(first) {
         return false;
     }
-    codepoints.all(|n| char::from_u32(n).map_or(false, |c| c.is_alphanumeric() || c == '_'))
+    codepoints.all(|n| char::from_u32(n).map_or(false, unicode_data::is_xid_continue))
 }
 
-/// Python's str.isnumeric(): includes Nd (decimal), No (other number like fractions,
-/// superscript), and Nl (letter number). For ASCII this is the same as isdigit.
-fn is_python_numeric(c: char) -> bool {
+/// ASCII whitespace per Python's `str.isspace()` / `Py_UNICODE_ISSPACE`. In
+/// addition to the usual ` \t\n\r\x0b\x0c`, CPython treats the C0 information
+/// separators `\x1c`–`\x1f` (bidirectional class B/S) as whitespace.
+#[inline]
+fn is_python_space_ascii(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c | 0x1c..=0x1f)
+}
+
+/// Python's `str.isspace()`: the fixed whitespace set used by CPython's
+/// `Py_UNICODE_ISSPACE` (Unicode 15.0). This differs from Rust's
+/// `char::is_whitespace`, which omits `\x1c`–`\x1f` and `\x85`.
+fn is_python_space(c: char) -> bool {
     matches!(
-        c.general_category(),
-        GeneralCategory::DecimalNumber
-            | GeneralCategory::OtherNumber
-            | GeneralCategory::LetterNumber
+        c as u32,
+        0x09..=0x0D
+            | 0x1C..=0x1F
+            | 0x20
+            | 0x85
+            | 0xA0
+            | 0x1680
+            | 0x2000..=0x200A
+            | 0x2028
+            | 0x2029
+            | 0x202F
+            | 0x205F
+            | 0x3000
     )
+}
+
+/// Python's `str.isalnum()`: a character is alphanumeric when it is alphabetic
+/// (`isalpha`), or has Numeric_Type Decimal (`isdecimal`), Digit (`isdigit`), or
+/// Numeric (`isnumeric`). Symbol categories such as circled letters (So) are
+/// none of these and are correctly excluded.
+fn is_python_alnum(c: char) -> bool {
+    is_python_alpha(c) || is_python_digit(c) || unicode_data::is_numeric(c)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1382,7 +1416,10 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(first) => {
             let mut out = String::with_capacity(s.len());
-            out.extend(first.to_uppercase());
+            // CPython titlecases the first character (so Lt digraphs become their
+            // titlecase form, e.g. "ǆabc".capitalize() == "ǅabc"), then lowercases
+            // the remainder.
+            push_titlecase(&mut out, first);
             out.extend(chars.as_str().chars().flat_map(char::to_lowercase));
             out
         }

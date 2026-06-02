@@ -25,6 +25,7 @@ pub mod string;
 pub mod super_bound_builtin;
 pub mod traceback;
 pub mod tuple;
+pub mod unicode_data;
 pub mod union_type;
 
 /// Look up `BuiltinTypeOps` by stable type-name.  Installed in pyrust-core's
