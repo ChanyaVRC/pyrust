@@ -184,6 +184,40 @@ impl Interpreter {
             }
         }
 
+        // Issue #1909: type-level unbound container protocol dunders
+        // (`list.__getitem__([1,2], 0)`, `list.__setitem__(l, 0, 9)`,
+        // `list.__add__([1], [2])`, …).  Route through the shared dispatcher so
+        // the result matches the bound form and the operator behaviour.  A
+        // `PyInstance` first argument (a `dict`/`list`/… *subclass* instance,
+        // or a `super().__getitem__(...)` call) is left to the registry bodies
+        // below, which unwrap `__builtin_data__` and support `super()`.
+        if let ValueKind::BuiltinFunction(name) = function.kind()
+            && let Some((type_name, method)) = name.split_once('.')
+            && method.starts_with("__")
+            && builtin_protocol_dunders(type_name).contains(&method)
+        {
+            if let Some(self_arg) = args.first() {
+                let recv = self_arg.value.clone();
+                let recv_is_match = !matches!(recv.kind(), ValueKind::PyInstance(_))
+                    && pyrust_core::builtin_type_name(&recv) == type_name;
+                if recv_is_match {
+                    let rest: Vec<Value> = args[1..]
+                        .iter()
+                        .filter(|a| a.name.is_none())
+                        .map(|a| a.value.clone())
+                        .collect();
+                    if args[1..].iter().any(|a| a.name.is_some()) {
+                        return Err(pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments"));
+                    }
+                    // `method` borrows `name` from the matched `function.kind()`
+                    // Ref; clone to a small owned str so the dispatcher can run
+                    // without holding that borrow.
+                    let method = method.to_string();
+                    return self.dispatch_builtin_protocol_dunder(&method, recv, rest);
+                }
+            }
+        }
+
         if let ValueKind::BuiltinFunction(name) = function.kind()
             && let Some(dispatch) = crate::builtin_registry::lookup(name)
         {
@@ -1017,6 +1051,19 @@ impl Interpreter {
                 return dispatch(self, &[iter_arg]);
             }
         }
+        // Issue #1909: container/sequence protocol dunders exposed as bound
+        // method-wrappers (`obj.__getitem__(i)`, `obj.__add__(o)`, …).  The
+        // receiver here is a built-in primitive (the bound-method wrapper was
+        // constructed by `get_attr` only for `builtin_protocol_dunders`
+        // names), so dispatch straight through the operator machinery.
+        if method.starts_with("__")
+            && builtin_protocol_dunders(&pyrust_core::builtin_type_name(&receiver))
+                .contains(&method)
+        {
+            reject_kwargs!(kw, "{}", method);
+            let args_vec: Vec<Value> = std::mem::take(pos);
+            return self.dispatch_builtin_protocol_dunder(method, receiver, args_vec);
+        }
         // Arms that accept `&[Value]` (Int, Float, Bytes) borrow `pos`
         // directly — the buf's capacity is fully preserved on return.
         // Arms that need `Vec<Value>` ownership hand the buffer to the
@@ -1253,6 +1300,24 @@ impl Interpreter {
                             | "str" | "int" | "float" | "bytes")
                     }) {
                         if let Some(backing) = instance_builtin_data(&inst) {
+                            // Issue #1909: container protocol dunders
+                            // (`MyList().__len__()`, `MyDict().__getitem__(k)`)
+                            // operate on the backing primitive — route through
+                            // the shared dispatcher so they match the
+                            // plain-primitive form instead of leaking a
+                            // `RuntimeError` from the per-type `call`.
+                            if method.starts_with("__")
+                                && builtin_protocol_dunders(
+                                    &pyrust_core::builtin_type_name(&backing),
+                                )
+                                .contains(&method)
+                            {
+                                reject_kwargs!(kw, "{}", method);
+                                let args_vec: Vec<Value> = std::mem::take(pos);
+                                return self.dispatch_builtin_protocol_dunder(
+                                    method, backing, args_vec,
+                                );
+                            }
                             enum BkKind {
                                 Dict, List, Set, Frozenset, Tuple,
                                 Str, Int, Float, Bytes, Other,
@@ -1882,6 +1947,143 @@ impl Interpreter {
             Ok(items)
         } else {
             iter_values(val)
+        }
+    }
+
+    /// Issue #1909: execute a container/sequence protocol dunder on a built-in
+    /// primitive receiver, routing through the same operator machinery the
+    /// implicit operators use so results and error messages match CPython 3.12
+    /// exactly.  `method` must be one of the names in
+    /// [`builtin_protocol_dunders`] for `receiver`'s type; `args` are the
+    /// positional arguments after the receiver (so `l.__getitem__(0)` arrives
+    /// as `["__getitem__", l, [0]]`).  `__iter__` is handled separately by the
+    /// callers (it is in each type's `METHODS` slice, not the dunder set).
+    pub(crate) fn dispatch_builtin_protocol_dunder(
+        &mut self,
+        method: &str,
+        receiver: Value,
+        mut args: Vec<Value>,
+    ) -> Result<Value> {
+        let type_name = pyrust_core::builtin_type_name(&receiver);
+        // Arity check up front so the error matches CPython 3.12's slot-wrapper
+        // messages rather than a downstream operator error.  CPython's wording
+        // is slot-dependent (verified against `python3.12`):
+        //   - `mp_subscript` (dict/list `__getitem__`) and `sq_contains`
+        //     (dict/set/frozenset `__contains__`) are *named* method-wrappers:
+        //     `{type}.{name}() takes exactly one argument ({n} given)`.
+        //   - the anonymous sequence slots (`sq_item`/`sq_concat`/`sq_ass_item`
+        //     /…) use `expected N argument(s), got M`; `sq_repeat` (`__mul__`)
+        //     and `sq_ass_item` (`__setitem__`) carry a leading space.
+        let want: usize = match method {
+            "__len__" => 0,
+            "__setitem__" => 2,
+            _ => 1,
+        };
+        if args.len() != want {
+            let named_wrapper = matches!(
+                (method, &*type_name),
+                ("__getitem__", "list" | "dict")
+                    | ("__contains__", "dict" | "set" | "frozenset")
+            );
+            if named_wrapper {
+                return Err(pyrust_core::type_err!("{type_name}.{method}() takes exactly one argument ({} given)",
+                        args.len()));
+            }
+            // `__mul__` (sq_repeat) and `__setitem__` (sq_ass_item) print a
+            // leading space before "expected" in CPython 3.12.
+            let lead = if matches!(method, "__mul__" | "__setitem__") { " " } else { "" };
+            let plural = if want == 1 { "argument" } else { "arguments" };
+            return Err(pyrust_core::type_err!("{lead}expected {want} {plural}, got {}",
+                    args.len()));
+        }
+        match method {
+            "__len__" => {
+                let arg = ExpandedCallArg {
+                    name: None,
+                    value: receiver,
+                };
+                let dispatch = crate::builtin_registry::lookup("len")
+                    .expect("len must be in the registry");
+                dispatch(self, &[arg])
+            }
+            "__getitem__" => {
+                let index = args.pop().unwrap();
+                self.eval_index(&receiver, index)
+            }
+            "__contains__" => {
+                let item = args.pop().unwrap();
+                self.eval_in(receiver, item)
+            }
+            "__add__" => {
+                let other = args.pop().unwrap();
+                self.eval_binary(receiver, crate::ast::BinaryOp::Add, other)
+            }
+            "__mul__" => {
+                // CPython's `sq_repeat` slot wrapper (`list.__mul__`,
+                // `str.__mul__`, …) requires the repeat count to be int-like
+                // and raises `'X' object cannot be interpreted as an integer`
+                // for anything else — stricter than the `*` operator, which
+                // says "can't multiply sequence by non-int".  Resolve the
+                // count through `__index__` so the dunder matches CPython, then
+                // delegate to the same repetition machinery as `*`.
+                let other = args.pop().unwrap();
+                let inst_rc = match other.kind() {
+                    ValueKind::PyInstance(inst) => Some(Rc::clone(inst)),
+                    _ => None,
+                };
+                let is_int_like = matches!(
+                    other.kind(),
+                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                );
+                let has_index = is_int_like
+                    || inst_rc.as_ref().is_some_and(|inst| {
+                        let class = Rc::clone(&inst.borrow().class);
+                        lookup_class_attr(&class, "__index__").is_some()
+                            || instance_builtin_data(inst).is_some_and(|b| {
+                                matches!(
+                                    b.kind(),
+                                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                                )
+                            })
+                    });
+                if !has_index {
+                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&other)));
+                }
+                let count = if inst_rc.is_some() {
+                    self.call_index_protocol(&other, "")?
+                } else {
+                    other
+                };
+                self.eval_binary(receiver, crate::ast::BinaryOp::Mul, count)
+            }
+            "__setitem__" => {
+                let value = args.pop().unwrap();
+                let index = args.pop().unwrap();
+                // Reuse the VM item-assign machinery (slice assignment, dict
+                // key dedup, bytearray __index__ resolution) via a scratch
+                // register file: obj@0, idx@1, val@2.  The receiver is not the
+                // module globals dict, so the globals write-through in
+                // `exec_set_item` stays inert.
+                let mut scratch = vec![receiver, index, value];
+                let mut regs = unsafe {
+                    RegSlice::from_raw(scratch.as_mut_ptr(), scratch.len())
+                };
+                self.exec_set_item(&mut regs, 0, 0, 1, 2)?;
+                Ok(Value::none())
+            }
+            "__delitem__" => {
+                let index = args.pop().unwrap();
+                let mut scratch = vec![receiver, index];
+                let mut regs = unsafe {
+                    RegSlice::from_raw(scratch.as_mut_ptr(), scratch.len())
+                };
+                self.exec_delete_item(&mut regs, 0, 0, 1)?;
+                Ok(Value::none())
+            }
+            other => Err(PyError::Runtime(format!(
+                "internal: unhandled builtin protocol dunder '{other}'"
+            ))),
         }
     }
 
@@ -5797,16 +5999,62 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
     }
 }
 
+/// Sequence / mapping / container protocol dunders that CPython 3.12 exposes
+/// as bound method-wrappers on each built-in type, beyond `__iter__` (which is
+/// already listed in every type's `METHODS` slice).  Single source of truth for
+/// issue #1909: `dir()` / `hasattr` advertise exactly these names, the instance
+/// `get_attr` path returns a bound wrapper for each, and the bound-method /
+/// unbound-descriptor call paths dispatch them through the matching operator
+/// machinery (`eval_index`, `eval_in`, `eval_binary`, `len`, item-assign /
+/// item-delete).  Mirrors `python3.12`'s `hasattr(obj, name)` answers exactly,
+/// including the asymmetries (no `__setitem__` on str/tuple, no `__add__` on
+/// dict/set, no `__getitem__` on set/frozenset).
+/// `true` if `name` is one of the container/sequence protocol dunder names
+/// managed by [`builtin_protocol_dunders`] (issue #1909).  Used to decide
+/// whether a `__dunder__` method call on a tagged container should route
+/// through the protocol dispatcher (or raise `AttributeError` when the name is
+/// valid for other types but not the receiver's) — without disturbing the
+/// dispatch of object-level dunders like `__repr__` / `__eq__`.
+fn is_container_protocol_dunder_name(name: &str) -> bool {
+    matches!(
+        name,
+        "__len__"
+            | "__getitem__"
+            | "__setitem__"
+            | "__delitem__"
+            | "__contains__"
+            | "__add__"
+            | "__mul__"
+    )
+}
+
+pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
+    match type_name {
+        "list" => &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
+            "__add__", "__mul__",
+        ],
+        "tuple" | "str" | "bytes" => &[
+            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+        ],
+        "bytearray" => &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
+            "__add__", "__mul__",
+        ],
+        "dict" => &["__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__"],
+        "set" | "frozenset" => &["__len__", "__contains__"],
+        _ => &[],
+    }
+}
+
 /// Public method names per built-in type for `dir()`.
 ///
 /// Derives the list from each type's canonical `METHODS` slice in
 /// `pyrust_builtins`, so adding a new method there automatically surfaces
-/// it via `dir()` without a parallel table to maintain.
-///
-/// TODO: also include the dunder methods CPython exposes via `dir([])` /
-/// `dir("")` etc. (`__iter__`, `__len__`, `__getitem__`, `__contains__`,
-/// `__add__`, …). Programs that introspect protocol support via `dir()`
-/// currently get a partial answer.  Tracked separately.
+/// it via `dir()` without a parallel table to maintain.  The container
+/// protocol dunders CPython exposes (`__len__`, `__getitem__`,
+/// `__contains__`, `__add__`, …) come from `builtin_protocol_dunders`
+/// (issue #1909); `__iter__` is already part of each `METHODS` slice.
 fn builtin_method_names(type_name: &str) -> Vec<String> {
     let names: &[&str] = match type_name {
         "int" => pyrust_builtins::int::METHODS,
@@ -5817,10 +6065,14 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         "dict" => pyrust_builtins::dict::METHODS,
         "set" => pyrust_builtins::set::METHODS,
         "frozenset" => pyrust_builtins::frozenset::METHODS,
+        "bytearray" => pyrust_builtins::bytearray::METHODS,
         "slice" => pyrust_builtins::slice::METHODS,
         _ => &[],
     };
     let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+    for &d in builtin_protocol_dunders(type_name) {
+        out.push(d.to_string());
+    }
     if type_name == "str" {
         out.push("format".to_string());
         out.push("format_map".to_string());
@@ -7341,6 +7593,29 @@ impl Interpreter {
         pos: Vec<Value>,
         kw: &IndexMap<PyKey, Value>,
     ) -> Result<Value> {
+        // Issue #1909: container/sequence protocol dunders called directly via
+        // the `obj.__getitem__(i)` method-call opcode (not through the
+        // bound-method value).  Route through the shared dispatcher so the
+        // result matches the operator behaviour.  `__iter__` is handled by the
+        // callers before this point.
+        if is_container_protocol_dunder_name(method) {
+            let type_name = pyrust_core::builtin_type_name(&receiver);
+            if builtin_protocol_dunders(&type_name).contains(&method) {
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
+                }
+                return self.dispatch_builtin_protocol_dunder(method, receiver, pos);
+            }
+            // A protocol-dunder name that is valid for *other* types but not
+            // this one (e.g. `set().__getitem__`, `"".__setitem__`) is
+            // genuinely absent: raise a proper `AttributeError` rather than
+            // letting the per-type `call` leak a `RuntimeError` (issue #1909).
+            return Err(PyError::attribute_error(
+                format!("'{type_name}' object has no attribute '{method}'"),
+                Some(method.to_string()),
+                Some(receiver),
+            ));
+        }
         match obj_kind_tag {
             1 => {
                 if pyrust_builtins::list::requires_interpreter(method) {
@@ -7600,6 +7875,16 @@ impl Interpreter {
         backing: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
+        // Issue #1909: container protocol dunders on a `list`/`dict`/`set`
+        // *subclass* instance (`MyList().__len__()`) operate on the backing
+        // primitive — route through the shared dispatcher so they match the
+        // plain-primitive form rather than leaking a `RuntimeError` from the
+        // per-type `call`.
+        if prim_method.starts_with("__")
+            && builtin_protocol_dunders(prim_type).contains(&prim_method)
+        {
+            return self.dispatch_builtin_protocol_dunder(prim_method, backing, args);
+        }
         match prim_type {
             "list" => {
                 if prim_method == "remove" {

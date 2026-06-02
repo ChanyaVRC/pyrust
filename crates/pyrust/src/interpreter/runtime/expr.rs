@@ -4470,7 +4470,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
+    pub(crate) fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
         // Handle Dict/Set separately so the temporary `&IndexMap`/`&IndexSet`
         // from `container.kind()` doesn't outlive the call into
         // `dict_lookup`/`set_lookup` (which may run user `__eq__`).

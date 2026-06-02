@@ -706,6 +706,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // Each sentinel registers as `BuiltinFunction("<type>.<dunder>")` in the
     // class attrs and must have a matching entry in the builtin registry
     // (bodies/builtins.rs).
+    //
+    // Issue #1909: the container/sequence protocol dunders (`__getitem__`,
+    // `__setitem__`, `__delitem__`, `__contains__`, `__add__`, `__mul__`,
+    // `__len__`) are also registered here so the unbound type-level form
+    // (`list.__setitem__(l, 0, 9)`, `list.__add__([1], [2])`) resolves and
+    // dispatches through `dispatch_builtin_protocol_dunder`.  The names per
+    // type mirror `calls.rs::builtin_protocol_dunders`.
     for (cls, type_name, dunders) in [
         (&int_class, "int", &[
             "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
@@ -714,15 +721,28 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
         ][..]),
         (&str_class, "str", &[
-            "__len__", "__add__", "__mul__",
+            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
             "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
         ][..]),
-        (&list_class, "list", &["__len__"][..]),
-        (&tuple_class, "tuple", &["__len__"][..]),
-        (&dict_class, "dict", &["__len__"][..]),
-        (&set_class, "set", &["__len__"][..]),
-        (&frozenset_class, "frozenset", &["__len__"][..]),
-        (&bytes_class, "bytes", &["__len__"][..]),
+        (&list_class, "list", &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__",
+            "__contains__", "__add__", "__mul__",
+        ][..]),
+        (&tuple_class, "tuple", &[
+            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+        ][..]),
+        (&dict_class, "dict", &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
+        ][..]),
+        (&set_class, "set", &["__len__", "__contains__"][..]),
+        (&frozenset_class, "frozenset", &["__len__", "__contains__"][..]),
+        (&bytes_class, "bytes", &[
+            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+        ][..]),
+        (&bytearray_class, "bytearray", &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__",
+            "__contains__", "__add__", "__mul__",
+        ][..]),
         (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
     ] {
         for &dunder in dunders {
@@ -1612,6 +1632,34 @@ pub(crate) fn invoke_class_method(
             interp.call_user_function_expanded(func, args, &[instance])
         }
         ValueKind::BuiltinFunction(name) => {
+            // Issue #1909: container protocol-dunder sentinels
+            // (`dict.__contains__`, `list.__setitem__`, …) registered on the
+            // primitive class objects have no registry body — they dispatch
+            // through the operator machinery.  Route them here (covering the
+            // implicit `in` / `[]` operator dispatch on a primitive *subclass*
+            // and `super().__contains__(...)` calls) before the registry probe.
+            if let Some((type_name, method)) = name.split_once('.') {
+                if method.starts_with("__")
+                    && builtin_protocol_dunders(type_name).contains(&method)
+                {
+                    // Resolve the receiver to its backing primitive when the
+                    // instance is a builtin-subclass PyInstance; a plain
+                    // primitive (super() from a non-subclass) is used directly.
+                    let receiver = match instance.kind() {
+                        ValueKind::PyInstance(inst) => {
+                            instance_builtin_data(inst).unwrap_or_else(|| instance.clone())
+                        }
+                        _ => instance.clone(),
+                    };
+                    let method = method.to_string();
+                    let rest: Vec<Value> = args
+                        .iter()
+                        .filter(|a| a.name.is_none())
+                        .map(|a| a.value.clone())
+                        .collect();
+                    return interp.dispatch_builtin_protocol_dunder(&method, receiver, rest);
+                }
+            }
             let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
                 PyError::Runtime(format!(
                     "internal: builtin method '{name}' not in registry"
