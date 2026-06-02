@@ -7,11 +7,16 @@
 # implementation.name/cache_tag/hexversion) are asserted by TYPE only so
 # the fixture stays stable across versions and platforms.
 
+import os
 import sys
 
 # --- deterministic scalars ---
 print("maxunicode", sys.maxunicode)
-print("abiflags", repr(sys.abiflags))
+# sys.abiflags only exists on POSIX CPython builds (AttributeError on
+# Windows). pyrust always exposes it, so guard the assertion under posix to
+# keep this fixture byte-identical with CPython on both platforms.
+if os.name == "posix":
+    print("abiflags", repr(sys.abiflags))
 print("getdefaultencoding", sys.getdefaultencoding())
 print("is_finalizing", sys.is_finalizing())
 

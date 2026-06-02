@@ -93,26 +93,35 @@ pyrust_module! {
         // writes (`os.environ.foo = …` if the user reaches for it)
         // don't leak across re-imports.
         "environ" => make_environ_instance(),
-        // CPython: os.name — the OS-dependent module name. pyrust targets
-        // POSIX semantics. <https://docs.python.org/3/library/os.html#os.name>
-        "name" => Value::string("posix"),
+        // CPython: os.name — the OS-dependent module name. Matches the host
+        // OS so parity with CPython holds on both POSIX ("posix") and
+        // Windows ("nt"). <https://docs.python.org/3/library/os.html#os.name>
+        "name" => Value::string(if cfg!(windows) { "nt" } else { "posix" }),
         // CPython: os.linesep — the string used to separate lines on the
-        // current platform. POSIX is "\n".
-        "linesep" => Value::string("\n"),
+        // current platform: "\r\n" on Windows, "\n" on POSIX.
+        "linesep" => Value::string(if cfg!(windows) { "\r\n" } else { "\n" }),
         // CPython: os.curdir / os.pardir — the string the OS uses for the
-        // current / parent directory.
+        // current / parent directory. Same on POSIX and Windows.
         "curdir" => Value::string("."),
         "pardir" => Value::string(".."),
         // CPython: os.extsep — the character separating the base name from
-        // the extension.
+        // the extension. Same on POSIX and Windows.
         "extsep" => Value::string("."),
-        // CPython: os.pathsep — the separator in $PATH-style lists (":" on
-        // POSIX).
-        "pathsep" => Value::string(":"),
-        // CPython: os.altsep — the alternate path separator; None on POSIX.
-        "altsep" => Value::none(),
-        // CPython: os.devnull — the path of the null device.
-        "devnull" => Value::string("/dev/null"),
+        // CPython: os.pathsep — the separator in $PATH-style lists:
+        // ";" on Windows, ":" on POSIX.
+        "pathsep" => Value::string(if cfg!(windows) { ";" } else { ":" }),
+        // CPython: os.altsep — the alternate path separator; "/" on Windows,
+        // None on POSIX.
+        "altsep" => {
+            if cfg!(windows) {
+                Value::string("/")
+            } else {
+                Value::none()
+            }
+        },
+        // CPython: os.devnull — the path of the null device: "nul" on
+        // Windows, "/dev/null" on POSIX.
+        "devnull" => Value::string(if cfg!(windows) { "nul" } else { "/dev/null" }),
     }
 
     // ── working directory ────────────────────────────────────────────
