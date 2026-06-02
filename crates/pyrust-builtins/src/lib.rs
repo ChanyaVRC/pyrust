@@ -3,6 +3,7 @@ pub mod bytearray;
 pub mod bytes;
 pub mod cached_property;
 pub mod classmethod;
+pub mod code;
 pub mod complex;
 pub mod dict;
 pub mod dict_views;
@@ -54,6 +55,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         classmethod::STATIC_TYPE_NAME => Some(classmethod::STATIC_METHOD_ANY_OPS),
         classmethod::CLASS_BINDER_TYPE_NAME => Some(classmethod::CLASS_METHOD_GET_BINDER_OPS),
         classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
+        code::TYPE_NAME => Some(code::CODE_OPS),
         traceback::TYPE_NAME => Some(traceback::TRACEBACK_OPS),
         union_type::TYPE_NAME => Some(union_type::UNION_TYPE_OPS),
         numeric_attrs_descriptor::GETSET_TYPE_NAME => {

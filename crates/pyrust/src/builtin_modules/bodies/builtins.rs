@@ -4441,6 +4441,7 @@ pyrust_module! {
         let mut fget = Value::none();
         let mut fset = Value::none();
         let mut fdel = Value::none();
+        let mut doc: Option<Value> = None;
         for (i, arg) in args.iter().enumerate() {
             let name_ref = arg.name.as_deref();
             let idx = match name_ref {
@@ -4458,10 +4459,17 @@ pyrust_module! {
                 0 => fget = arg.value.clone(),
                 1 => fset = arg.value.clone(),
                 2 => fdel = arg.value.clone(),
-                _ => {} // doc: ignore
+                // doc: store an explicit doc unless it is None (CPython treats
+                // `doc=None` as "no explicit doc", falling back to fget's
+                // docstring). Issue #1961.
+                _ => {
+                    if !arg.value.is_none() {
+                        doc = Some(arg.value.clone());
+                    }
+                }
             }
         }
-        Ok(pyrust_builtins::property::property(fget, fset, fdel))
+        Ok(pyrust_builtins::property::property_with_doc(fget, fset, fdel, doc))
     }
 
     /// CPython: super(class, instance) — two-argument form only.

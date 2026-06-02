@@ -228,9 +228,14 @@ impl Interpreter {
             _ if pyrust_builtins::property::property_partial_slot(&target)
                 == Some(None) =>
             {
-                let (fget_val, fset_val, fdel_val) =
+                let (fget_val, fset_val, fdel_val, doc_val) =
                     pyrust_builtins::property::with_property(&target, |s| {
-                        ((*s.fget).clone(), (*s.fset).clone(), (*s.fdel).clone())
+                        (
+                            (*s.fget).clone(),
+                            (*s.fset).clone(),
+                            (*s.fdel).clone(),
+                            s.doc.clone(),
+                        )
                     })
                     .expect("guard checked above");
                 match name {
@@ -246,6 +251,17 @@ impl Interpreter {
                     "fget" => Ok(fget_val),
                     "fset" => Ok(fset_val),
                     "fdel" => Ok(fdel_val),
+                    // `property.__doc__` is the explicit `doc=` argument if one
+                    // was given, otherwise the getter's docstring (CPython
+                    // copies `fget.__doc__` into the property).  `None` when
+                    // neither is available (issue #1961).
+                    "__doc__" => Ok(match doc_val {
+                        Some(d) => d,
+                        None => match fget_val.kind() {
+                            ValueKind::UserFunction(func) => func.doc.borrow().clone(),
+                            _ => Value::none(),
+                        },
+                    }),
                     // Descriptor-protocol dunders.  Accessing `p.__get__` etc.
                     // yields a bound method-wrapper (so `hasattr(p, "__get__")`
                     // is True and `f = p.__get__; f(obj, owner)` works); the
@@ -400,6 +416,91 @@ impl Interpreter {
                         // repeated reads yield the same object identity, matching
                         // CPython: `f.__annotations__ is f.__annotations__` is True.
                         return Ok(func.annotations.borrow().clone());
+                    }
+                    "__defaults__" => {
+                        // Tuple of defaults for the positional (non-keyword-only)
+                        // parameters, in declaration order.  `None` when no
+                        // positional parameter has a default (CPython semantics).
+                        let defs: Vec<Value> = func
+                            .params
+                            .iter()
+                            .filter(|p| {
+                                !p.is_args && !p.is_kwargs && !p.is_keyword_only
+                            })
+                            .filter_map(|p| p.default.clone())
+                            .collect();
+                        return Ok(if defs.is_empty() {
+                            Value::none()
+                        } else {
+                            Value::tuple(defs)
+                        });
+                    }
+                    "__kwdefaults__" => {
+                        // Dict of defaults for keyword-only parameters.  `None`
+                        // when there are no keyword-only defaults (CPython
+                        // returns `None`, not an empty dict).
+                        let mut d: IndexMap<PyKey, Value> = IndexMap::new();
+                        for p in &func.params {
+                            if p.is_keyword_only {
+                                if let Some(def) = &p.default {
+                                    d.insert(PyKey::str_from(&p.name), def.clone());
+                                }
+                            }
+                        }
+                        return Ok(if d.is_empty() {
+                            Value::none()
+                        } else {
+                            Value::dict(d)
+                        });
+                    }
+                    "__globals__" => {
+                        // The module global namespace dict.  pyrust keeps a single
+                        // live module-globals dict; CPython returns the same dict
+                        // object each access (identity preserved).
+                        return Ok(self.module_globals_dict.clone());
+                    }
+                    "__closure__" => {
+                        // pyrust does not model cell objects; free variables are
+                        // resolved through the captured `env` chain.  CPython
+                        // returns `None` for functions with no free variables;
+                        // we return `None` for all functions (cell modelling is
+                        // tracked separately).
+                        return Ok(Value::none());
+                    }
+                    "__code__" => {
+                        // A lightweight code object carrying the introspection
+                        // attributes most consumers read: co_name / co_argcount /
+                        // co_varnames.  CPython orders co_varnames as positional
+                        // params, then keyword-only, then *args, then **kwargs.
+                        let co_name = func
+                            .user_name
+                            .borrow()
+                            .as_deref()
+                            .unwrap_or(&func.name)
+                            .to_string();
+                        let argcount = func
+                            .params
+                            .iter()
+                            .filter(|p| {
+                                !p.is_args && !p.is_kwargs && !p.is_keyword_only
+                            })
+                            .count() as i64;
+                        let mut varnames: Vec<Value> = Vec::with_capacity(func.params.len());
+                        for p in func.params.iter().filter(|p| {
+                            !p.is_args && !p.is_kwargs && !p.is_keyword_only
+                        }) {
+                            varnames.push(Value::string(p.name.clone()));
+                        }
+                        for p in func.params.iter().filter(|p| p.is_keyword_only) {
+                            varnames.push(Value::string(p.name.clone()));
+                        }
+                        for p in func.params.iter().filter(|p| p.is_args) {
+                            varnames.push(Value::string(p.name.clone()));
+                        }
+                        for p in func.params.iter().filter(|p| p.is_kwargs) {
+                            varnames.push(Value::string(p.name.clone()));
+                        }
+                        return Ok(pyrust_builtins::code::code(co_name, argcount, varnames));
                     }
                     "__func__" if matches!(
                         func.kind,
@@ -779,7 +880,11 @@ impl Interpreter {
         if name == "__bases__" {
             // `__bases__` reports all immediate parents in declaration
             // order.  If no explicit base was given, CPython reports
-            // `(object,)`.
+            // `(object,)` — except for `object` itself, which has no bases
+            // and reports `()` (issue #1969).
+            if Rc::ptr_eq(&class, &object_class_singleton()) {
+                return Ok(Value::tuple(Vec::new()));
+            }
             let (base, extra_bases) = {
                 let borrowed = class.borrow();
                 (borrowed.base.clone(), borrowed.extra_bases.clone())
@@ -795,6 +900,19 @@ impl Interpreter {
                 }
             }
             return Ok(Value::tuple(items));
+        }
+        if name == "__base__" {
+            // `__base__` is the single primary base used for instance layout.
+            // For typical single/multiple inheritance this is `bases[0]`.
+            // `object` itself has no base and reports `None` (issue #1969).
+            if Rc::ptr_eq(&class, &object_class_singleton()) {
+                return Ok(Value::none());
+            }
+            let base = class.borrow().base.clone();
+            return Ok(match base {
+                Some(b) => Value::py_class(b),
+                None => Value::py_class(object_class_singleton()),
+            });
         }
         if name == "__mro__" {
             return Ok(Value::tuple(class_mro_items(&class)?));

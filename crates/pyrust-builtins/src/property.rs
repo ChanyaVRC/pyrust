@@ -26,6 +26,11 @@ pub struct PropertyState {
     /// `__set__`/`__delete__` errors then use the unnamed `property of '...'`
     /// form, matching CPython.
     pub name: Option<String>,
+    /// Explicit `doc=` argument passed to `property(...)`.  `None` means no
+    /// explicit doc was given, in which case `property.__doc__` falls back to
+    /// the getter's docstring (issue #1961).  Stored as a `Value` so any object
+    /// can be supplied as the doc, matching CPython.
+    pub doc: Option<Value>,
 }
 
 pub struct PropertyOps;
@@ -51,14 +56,21 @@ impl BuiltinTypeOps for PropertyOps {
 }
 
 /// Construct a new `@property` value.  Pass `Value::none()` for any
-/// accessor that is not set.
+/// accessor that is not set.  `__doc__` falls back to the getter's docstring.
 pub fn property(fget: Value, fset: Value, fdel: Value) -> Value {
+    property_with_doc(fget, fset, fdel, None)
+}
+
+/// Construct a `@property` with an explicit `doc=` value (or `None` to fall
+/// back to the getter's docstring).  See [`property`].
+pub fn property_with_doc(fget: Value, fset: Value, fdel: Value, doc: Option<Value>) -> Value {
     let state: Box<dyn Any> = Box::new(PropertyState {
         fget: Rc::new(fget),
         fset: Rc::new(fset),
         fdel: Rc::new(fdel),
         partial_slot: None,
         name: None,
+        doc,
     });
     Value::builtin_object(PROPERTY_OPS, state)
 }
@@ -85,6 +97,7 @@ fn accessor_partial(slot: u8, fget: Value, fset: Value, fdel: Value) -> Value {
         fdel: Rc::new(fdel),
         partial_slot: Some(slot),
         name: None,
+        doc: None,
     });
     Value::builtin_object(PROPERTY_OPS, state)
 }
