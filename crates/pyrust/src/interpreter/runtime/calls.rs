@@ -7248,7 +7248,7 @@ impl Interpreter {
         let (base, extra_bases_vec) =
             self.make_class_resolve_bases(regs, num_locals, bases_base, bases_n)?;
 
-        let slots = make_class_extract_slots(&mut attrs);
+        let slots = make_class_extract_slots(&mut attrs)?;
         let class = Rc::new(RefCell::new(PyClass {
             name: class_name,
             qualname,
@@ -7567,8 +7567,10 @@ fn make_class_finalize_attrs(
 /// so slotted instances have no per-instance dict (CPython parity).
 fn make_class_extract_slots(
     attrs: &mut IndexMap<String, Value>,
-) -> Option<indexmap::IndexSet<String>> {
-    let slots_val = attrs.get("__slots__")?;
+) -> Result<Option<indexmap::IndexSet<String>>> {
+    let Some(slots_val) = attrs.get("__slots__") else {
+        return Ok(None);
+    };
     let collect = |items: &[Value]| -> Vec<String> {
         items
             .iter()
@@ -7585,10 +7587,25 @@ fn make_class_extract_slots(
         _ => vec![],
     };
     let set: indexmap::IndexSet<String> = slot_names.into_iter().collect();
+    // Issue #1971: a slot name that also has a class-variable assignment in
+    // the class body is an error (CPython raises ValueError at type creation).
+    // `__dict__` / `__weakref__` are handled specially by CPython before the
+    // conflict loop, so they are exempt.  The `__dict__` sentinel below is
+    // inserted only after this check so it never counts as a class variable.
+    for slot in &set {
+        if slot == "__dict__" || slot == "__weakref__" {
+            continue;
+        }
+        if attrs.contains_key(slot) {
+            return Err(pyrust_core::value_err!(
+                "'{slot}' in __slots__ conflicts with class variable"
+            ));
+        }
+    }
     if !set.contains("__dict__") {
         attrs.insert("__dict__".to_string(), Value::none());
     }
-    Some(set)
+    Ok(Some(set))
 }
 
 impl Interpreter {
