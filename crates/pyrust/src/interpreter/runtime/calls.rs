@@ -997,6 +997,19 @@ impl Interpreter {
             let args_vec: Vec<Value> = std::mem::take(pos);
             return self.call_frozenset_method(method, receiver, args_vec);
         }
+        // #1891: set-like dict views (`dict_keys` / `dict_items`) expose
+        // `isdisjoint`, which accepts any iterable and returns True when no
+        // element of the argument is in the view.  Iterating the argument (and
+        // probing the view's `__contains__`) means a `dict_items` view whose
+        // own values are unhashable still works, matching CPython.
+        if !has_kw && method == "isdisjoint" {
+            if let Some(kind) = pyrust_builtins::dict_views::view_kind(&receiver) {
+                if kind == 0 || kind == 2 {
+                    let args_vec: Vec<Value> = std::mem::take(pos);
+                    return self.dict_view_isdisjoint(receiver, args_vec);
+                }
+            }
+        }
         enum Kind {
             Int,
             Float,

@@ -55,6 +55,13 @@ impl BuiltinTypeOps for DictKeysOps {
             None => Err(pyrust_core::PyError::Runtime("unhashable type".to_string())),
         }
     }
+
+    // `dict_keys` is set-like: `isdisjoint` is dispatched on the interpreter
+    // side (it iterates the argument and probes this view's membership), but
+    // `hasattr`/attribute access must surface it as a method (issue #1891).
+    fn has_method(&self, name: &str) -> bool {
+        name == "isdisjoint"
+    }
 }
 
 pub fn dict_keys(rc: DictRc) -> Value {
@@ -148,6 +155,12 @@ impl BuiltinTypeOps for DictItemsOps {
             }
             _ => Ok(false),
         }
+    }
+
+    // `dict_items` is set-like: `isdisjoint` is dispatched on the interpreter
+    // side; expose it for `hasattr`/attribute access (issue #1891).
+    fn has_method(&self, name: &str) -> bool {
+        name == "isdisjoint"
     }
 }
 

@@ -2380,6 +2380,42 @@ impl Interpreter {
             return result;
         }
 
+        // Issue #1891: the set-like dict views `dict_keys` / `dict_items`
+        // compare as sets against any other set-like operand (`set`,
+        // `frozenset`, or another set-like view).  CPython's view `__eq__`
+        // returns `False` (not TypeError) when the other operand is *not*
+        // set-like — including `dict_values`, lists, and dicts.  `dict_items`
+        // with an unhashable value raises `TypeError: unhashable type: …`,
+        // which `coerce_set_operand` surfaces.
+        if is_setlike_view(a) || is_setlike_view(b) {
+            let a_set = self.coerce_set_operand(a);
+            let b_set = self.coerce_set_operand(b);
+            match (a_set, b_set) {
+                (Some(a_res), Some(b_res)) => {
+                    let (sa, _) = a_res?;
+                    let (sb, _) = b_res?;
+                    if sa.len() != sb.len() {
+                        return Ok(false);
+                    }
+                    let needs_eq = set_has_object_key(&sa) || set_has_object_key(&sb);
+                    if !needs_eq {
+                        return Ok(sa.iter().all(|k| sb.contains(k)));
+                    }
+                    for k in sa.iter() {
+                        if self.set_lookup_in(&sb, k)?.is_none() {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
+                }
+                // A view vs a non-set-like operand: not equal (CPython returns
+                // False without building the set, so an unhashable `dict_items`
+                // value does *not* raise here — `items == [..]` is just False).
+                (Some(_), None) | (None, Some(_)) => return Ok(false),
+                (None, None) => unreachable!("is_setlike_view implies a set-like operand"),
+            }
+        }
+
         // Issue #1939: a container subclass (list/tuple/dict/set/frozenset
         // subclass) with no user `__eq__` override inherits the base type's
         // equality, so `L([1,2]) == [1,2]`, `D({1:'a'}) == {1:'a'}`, and
@@ -2776,6 +2812,33 @@ impl Interpreter {
             }
             _ => pyrust_builtins::set::call(method, &receiver, args),
         }
+    }
+
+    /// `isdisjoint` for the set-like dict views `dict_keys` / `dict_items`
+    /// (issue #1891).  Accepts any iterable and returns `True` when no element
+    /// of the argument is a member of the view.  Iterating the *argument* (and
+    /// probing the view's `__contains__`) — rather than building a set from the
+    /// view — matches CPython's `dictviews_isdisjoint`: a `dict_items` view with
+    /// unhashable values still works because its own values are never hashed.
+    pub(crate) fn dict_view_isdisjoint(
+        &mut self,
+        receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        let view_name = value_type_name_str(&receiver);
+        if args.len() != 1 {
+            let n = args.len();
+            return Err(pyrust_core::type_err!(
+                "{view_name}.isdisjoint() takes exactly one argument ({n} given)"
+            ));
+        }
+        let other = self.collect_iterable(&args[0])?;
+        for item in other {
+            if self.eval_in(receiver.clone(), item)?.truthy() {
+                return Ok(Value::bool_(false));
+            }
+        }
+        Ok(Value::bool_(true))
     }
 
     /// `frozenset` method dispatch — mirror of [`Self::call_set_method`] for the
@@ -5658,6 +5721,56 @@ impl Interpreter {
             )),
         }
     }
+
+    /// Coerce a set-algebra operand to its `(IndexSet<PyKey>, frozen)` items.
+    ///
+    /// Recognises `set` / `frozenset` / `PyInstance` subclasses thereof (via
+    /// the free `set_items_from_value`) **and** the set-like dict views
+    /// `dict_keys` / `dict_items` (issue #1891).  `dict_values` is *not*
+    /// set-like, so it returns `None` (caller falls through to TypeError).
+    ///
+    /// - `None`         — operand is not a set-like type.
+    /// - `Some(Ok(..))` — coerced items; `frozen` is `false` for views (CPython
+    ///   set ops on views return a `set`).
+    /// - `Some(Err(..))`— operand is set-like but coercion failed, e.g. a
+    ///   `dict_items` view whose value is unhashable (`unhashable type: 'list'`).
+    pub(crate) fn coerce_set_operand(
+        &mut self,
+        v: &Value,
+    ) -> Option<Result<(indexmap::IndexSet<PyKey>, bool)>> {
+        if let Some(items) = set_items_from_value(v) {
+            return Some(Ok(items));
+        }
+        match pyrust_builtins::dict_views::view_kind(v) {
+            // dict_keys: keys are already `PyKey`s in the backing IndexMap.
+            Some(0) => {
+                let rc = pyrust_builtins::dict_views::as_dict_rc(v)?;
+                let keys: indexmap::IndexSet<PyKey> = rc.borrow().keys().cloned().collect();
+                Some(Ok((keys, false)))
+            }
+            // dict_items: each pair becomes a `(key, value)` tuple `PyKey`; the
+            // value must be hashable (matches CPython, which builds a set).
+            Some(2) => {
+                let rc = pyrust_builtins::dict_views::as_dict_rc(v)?;
+                let pairs: Vec<(PyKey, Value)> = rc
+                    .borrow()
+                    .iter()
+                    .map(|(k, val)| (k.clone(), val.clone()))
+                    .collect();
+                let mut out = indexmap::IndexSet::new();
+                for (k, val) in pairs {
+                    let val_key = match self.value_to_pykey(&val) {
+                        Ok(vk) => vk,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    out.insert(PyKey::Tuple(vec![k, val_key]));
+                }
+                Some(Ok((out, false)))
+            }
+            // dict_values (Some(1)) and non-views: not set-like.
+            _ => None,
+        }
+    }
 }
 
 /// Append `data` to `out`, applying printf width padding with spaces.
@@ -6444,6 +6557,12 @@ fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
 }
 
 
+/// True if `v` is a set-like dict view: `dict_keys` or `dict_items`
+/// (issue #1891).  `dict_values` is deliberately *not* set-like.
+fn is_setlike_view(v: &Value) -> bool {
+    matches!(pyrust_builtins::dict_views::view_kind(v), Some(0) | Some(2))
+}
+
 /// Extract a set's items and frozen flag from a value that is a `set`,
 /// `frozenset`, or a `PyInstance` subclass backed by either.  Returns
 /// `None` when the value is none of those.
@@ -6517,12 +6636,21 @@ fn set_binary_op(
     op: SetOp,
     op_sym: &str,
 ) -> Option<Result<Value>> {
-    let lhs_items = set_items_from_value(left)?;
-    // LHS is a set/frozenset; if RHS is not, emit the CPython-format TypeError.
-    let Some(rhs_items) = set_items_from_value(right) else {
-        let lt = value_type_name_str(left);
-        let rt = value_type_name_str(right);
-        return Some(Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")));
+    // LHS must be set-like (set/frozenset/subclass or a set-like dict view,
+    // issue #1891); otherwise this isn't a set op and the caller falls through.
+    let lhs_items = match interp.coerce_set_operand(left)? {
+        Ok(items) => items,
+        Err(e) => return Some(Err(e)),
+    };
+    // LHS is set-like; if RHS is not, emit the CPython-format TypeError.
+    let rhs_items = match interp.coerce_set_operand(right) {
+        Some(Ok(items)) => items,
+        Some(Err(e)) => return Some(Err(e)),
+        None => {
+            let lt = value_type_name_str(left);
+            let rt = value_type_name_str(right);
+            return Some(Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")));
+        }
     };
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
@@ -6612,7 +6740,12 @@ fn set_binary_op(
         Ok(out) => out,
         Err(e) => return Some(Err(e)),
     };
-    Some(Ok(if l_frozen || r_frozen {
+    // Result type: a frozenset operand promotes the result to `frozenset`
+    // (CPython) — *unless* a dict view is involved, in which case the view's
+    // own `__and__`/`__or__`/… always returns a plain `set` regardless of the
+    // other operand's type (issue #1891).
+    let view_involved = is_setlike_view(left) || is_setlike_view(right);
+    Some(Ok(if (l_frozen || r_frozen) && !view_involved {
         pyrust_builtins::frozenset::frozenset(out)
     } else {
         Value::set(out)
@@ -6638,8 +6771,17 @@ fn set_subset_cmp(
     right: &Value,
     op: BinaryOp,
 ) -> Option<Result<Value>> {
-    let (a, _) = set_items_from_value(left)?;
-    let (b, _) = set_items_from_value(right)?;
+    // Both operands must be set-like (set/frozenset/subclass or a set-like dict
+    // view, issue #1891); otherwise fall through to the normal comparison path
+    // so it raises the `'<=' not supported between …` TypeError.
+    let (a, _) = match interp.coerce_set_operand(left)? {
+        Ok(items) => items,
+        Err(e) => return Some(Err(e)),
+    };
+    let (b, _) = match interp.coerce_set_operand(right)? {
+        Ok(items) => items,
+        Err(e) => return Some(Err(e)),
+    };
     // Fast path: all-primitive operands — raw `contains` is exact (issue #1907).
     let needs_eq = set_has_object_key(&a) || set_has_object_key(&b);
     let (is_subset, is_superset) = if !needs_eq {
