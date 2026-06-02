@@ -3484,8 +3484,13 @@ impl Interpreter {
         // ("NameError()" / "ImportError()"), even when the actual class is a
         // subclass like UnboundLocalError or ModuleNotFoundError.
         let class_name = class.borrow().name.clone();
-        let is_name_error_class = class_chain_contains_name(&class, "NameError");
-        let is_import_error_class = class_chain_contains_name(&class, "ImportError");
+        // Classify the class against every special exception name in a single
+        // non-cloning MRO walk (issue #1967) instead of one cloning walk per
+        // name.  Identical result to the prior per-name `class_chain_contains_name`
+        // calls.
+        let kinds = classify_exception_class(&class);
+        let is_name_error_class = kinds.name_error;
+        let is_import_error_class = kinds.import_error;
         let mut kw_name: Option<Value> = None;
         let mut kw_path: Option<Value> = None;
         let mut values = Vec::with_capacity(args.len());
@@ -3530,7 +3535,7 @@ impl Interpreter {
         // CPython 3.12 SyntaxError.__init__ validates args[1] if present:
         // it must be an iterable that yields exactly 4 or 6 elements.
         // Non-iterables raise TypeError; the wrong number raises TypeError.
-        if class_chain_contains_name(&class, "SyntaxError") && values.len() >= 2 {
+        if kinds.syntax_error && values.len() >= 2 {
             let second = &values[1];
             let items_opt: Option<Vec<Value>> = second
                 .as_tuple()
@@ -3567,11 +3572,11 @@ impl Interpreter {
         // Also validate argument types (encoding must be str, object must be
         // bytes for Decode / str for Encode, start/end must be int-like,
         // reason must be str).
-        if class_chain_contains_name(&class, "UnicodeDecodeError") {
+        if kinds.unicode_decode_error {
             Self::validate_unicode_decode_args(&values)?;
-        } else if class_chain_contains_name(&class, "UnicodeEncodeError") {
+        } else if kinds.unicode_encode_error {
             Self::validate_unicode_encode_args(&values)?;
-        } else if class_chain_contains_name(&class, "UnicodeTranslateError") {
+        } else if kinds.unicode_translate_error {
             Self::validate_unicode_translate_args(&values)?;
         }
         // PEP 654 (Python 3.11+): BaseExceptionGroup and ExceptionGroup validation.
@@ -3581,7 +3586,7 @@ impl Interpreter {
         //  - If calling ExceptionGroup, all exceptions must be Exception subclasses
         //  - If calling BaseExceptionGroup and all exceptions are Exception subclasses,
         //    the returned type is silently promoted to ExceptionGroup.
-        let is_base_exception_group = class_chain_contains_name(&class, "BaseExceptionGroup");
+        let is_base_exception_group = kinds.base_exception_group;
         if is_base_exception_group {
             // Validate arg count.
             if values.len() != 2 {

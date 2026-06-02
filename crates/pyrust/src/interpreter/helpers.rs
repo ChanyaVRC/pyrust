@@ -1970,17 +1970,85 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// the given `name`.  Used to check subclass relationships by class name when
 /// the `Rc` singleton for the expected class is not in scope.
 pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
-    let (class_name, base, extra_bases) = {
+    // Walk the base chain by reference — each node is a distinct `RefCell`, so
+    // recursing while the current borrow is held never conflicts.  Avoids the
+    // per-node `String`/`Rc`/`Vec` clones that made this hot helper costly
+    // (issue #1967).
+    let borrowed = class.borrow();
+    if borrowed.name == name {
+        return true;
+    }
+    if let Some(base) = &borrowed.base {
+        if class_chain_contains_name(base, name) {
+            return true;
+        }
+    }
+    borrowed
+        .extra_bases
+        .iter()
+        .any(|b| class_chain_contains_name(b, name))
+}
+
+/// Set of special-exception classifications a class may inherit, all derived
+/// in a single non-cloning MRO walk (issue #1967).  Previously
+/// `instantiate_exception` ran ~12 separate cloning base-chain scans per
+/// constructed exception; this collects every match in one pass.
+///
+/// The classification result is identical to running
+/// [`class_chain_contains_name`] once per name: a flag is `true` iff the
+/// corresponding name appears anywhere in the class's base chain (so user
+/// subclasses of `OSError`, `StopIteration`, … inherit the special handling,
+/// preserving the behaviour from issue #612).
+#[derive(Default)]
+pub(crate) struct ExcClassKinds {
+    pub(crate) stop_iteration: bool,
+    pub(crate) syntax_error: bool,
+    pub(crate) os_error: bool,
+    pub(crate) system_exit: bool,
+    pub(crate) unicode_decode_error: bool,
+    pub(crate) unicode_encode_error: bool,
+    pub(crate) unicode_translate_error: bool,
+    pub(crate) name_error: bool,
+    pub(crate) import_error: bool,
+    pub(crate) attribute_error: bool,
+    pub(crate) base_exception_group: bool,
+}
+
+impl ExcClassKinds {
+    fn merge_name(&mut self, name: &str) {
+        match name {
+            "StopIteration" => self.stop_iteration = true,
+            "SyntaxError" => self.syntax_error = true,
+            "OSError" => self.os_error = true,
+            "SystemExit" => self.system_exit = true,
+            "UnicodeDecodeError" => self.unicode_decode_error = true,
+            "UnicodeEncodeError" => self.unicode_encode_error = true,
+            "UnicodeTranslateError" => self.unicode_translate_error = true,
+            "NameError" => self.name_error = true,
+            "ImportError" => self.import_error = true,
+            "AttributeError" => self.attribute_error = true,
+            "BaseExceptionGroup" => self.base_exception_group = true,
+            _ => {}
+        }
+    }
+}
+
+/// Classify `class` against every special built-in exception name in a single
+/// borrowing walk of its base chain (issue #1967).
+pub(crate) fn classify_exception_class(class: &Rc<RefCell<PyClass>>) -> ExcClassKinds {
+    let mut kinds = ExcClassKinds::default();
+    fn walk(class: &Rc<RefCell<PyClass>>, kinds: &mut ExcClassKinds) {
         let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone(), borrowed.extra_bases.clone())
-    };
-    if class_name == name {
-        return true;
+        kinds.merge_name(&borrowed.name);
+        if let Some(base) = &borrowed.base {
+            walk(base, kinds);
+        }
+        for b in &borrowed.extra_bases {
+            walk(b, kinds);
+        }
     }
-    if base.is_some_and(|base| class_chain_contains_name(&base, name)) {
-        return true;
-    }
-    extra_bases.iter().any(|b| class_chain_contains_name(b, name))
+    walk(class, &mut kinds);
+    kinds
 }
 
 /// Return `true` if any class in the MRO of `class` (including `class`
@@ -2145,38 +2213,42 @@ fn oserror_subclass_for_errno(errno: i64) -> Option<Rc<RefCell<PyClass>>> {
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = IndexMap::new();
+    // Classify the class against every special built-in exception name in a
+    // single non-cloning MRO walk (issue #1967), instead of running ~12
+    // separate cloning base-chain scans per constructed exception.  The result
+    // is identical to the previous per-name walks: each flag is true iff that
+    // name appears in the class's base chain, so user subclasses (e.g.
+    // `class MyStop(StopIteration)`) still inherit the special handling (#612).
+    let kinds = classify_exception_class(&class);
     // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
-    // Mirror that here so `except StopIteration as e: e.value` always works.
-    // Use a name-chain walk so subclasses (e.g. `class MyStop(StopIteration)`) also
-    // get the `.value` attribute set — fixes #612.
-    let is_stop_iteration = class_chain_contains_name(&class, "StopIteration");
-    let is_syntax_error = class_chain_contains_name(&class, "SyntaxError");
+    let is_stop_iteration = kinds.stop_iteration;
+    let is_syntax_error = kinds.syntax_error;
     // OSError is the canonical name; IOError and EnvironmentError are aliases that
     // share the same Rc, so checking for "OSError" in the chain suffices.
-    let is_os_error = class_chain_contains_name(&class, "OSError");
-    let is_system_exit = class_chain_contains_name(&class, "SystemExit");
-    let is_unicode_decode_error = class_chain_contains_name(&class, "UnicodeDecodeError");
-    let is_unicode_encode_error =
-        !is_unicode_decode_error && class_chain_contains_name(&class, "UnicodeEncodeError");
-    let is_unicode_translate_error = !is_unicode_decode_error
-        && !is_unicode_encode_error
-        && class_chain_contains_name(&class, "UnicodeTranslateError");
+    let is_os_error = kinds.os_error;
+    let is_system_exit = kinds.system_exit;
+    // Decode wins over encode wins over translate, matching the original
+    // short-circuiting precedence.
+    let is_unicode_decode_error = kinds.unicode_decode_error;
+    let is_unicode_encode_error = !is_unicode_decode_error && kinds.unicode_encode_error;
+    let is_unicode_translate_error =
+        !is_unicode_decode_error && !is_unicode_encode_error && kinds.unicode_translate_error;
     // CPython 3.12: NameError (and its subclass UnboundLocalError) have a `.name`
     // attribute.  User-constructed instances (`NameError('msg')`) have `name = None`.
     // Interpreter-raised instances set the name via `instantiate_name_error` instead.
-    let is_name_error = class_chain_contains_name(&class, "NameError");
+    let is_name_error = kinds.name_error;
     // CPython 3.12: ImportError (and its subclass ModuleNotFoundError) have `.name`
     // and `.path` attributes.  User-constructed instances (`ImportError('msg')`) have
     // both set to `None`.  Interpreter-raised instances set them via
     // `instantiate_import_error` instead.
-    let is_import_error = class_chain_contains_name(&class, "ImportError");
+    let is_import_error = kinds.import_error;
     // CPython 3.12: AttributeError has `.name` and `.obj` attributes.
     // User-constructed instances (`AttributeError('msg')`) have both set to `None`.
     // Interpreter-raised instances set them via `instantiate_attribute_error` instead.
-    let is_attribute_error = class_chain_contains_name(&class, "AttributeError");
+    let is_attribute_error = kinds.attribute_error;
     // PEP 654 (Python 3.11+): BaseExceptionGroup / ExceptionGroup.
     // Both have `.message` (str) and `.exceptions` (tuple of exceptions).
-    let is_base_exception_group = class_chain_contains_name(&class, "BaseExceptionGroup");
+    let is_base_exception_group = kinds.base_exception_group;
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     // CPython 3.12: every BaseException instance has __traceback__ initialised
     // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
