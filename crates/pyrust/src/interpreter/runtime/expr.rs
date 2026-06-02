@@ -865,6 +865,91 @@ pub(crate) fn dispatch_numeric_binop(
     }
 }
 
+/// Hash-bucket probe for collecting `PyKey::Object` / `PyKey::None` lookup
+/// candidates in O(bucket) instead of O(n) (issue #2060).
+///
+/// `PyKey::Object` keys can never resolve via `IndexMap::get` (their `PartialEq`
+/// is `Rc::ptr_eq`), so a distinct-but-`__eq__`-equal key always misses the
+/// fast path.  The old slow path then linear-scanned *every* entry to find
+/// same-hash candidates — O(n) per access, O(n²) to build a dict/set keyed on
+/// custom objects.
+///
+/// Instead, this probe drives `IndexMap`/`IndexSet::get_index_of`, which hashes
+/// the probe (placing it in the matching entries' bucket) and calls
+/// [`Equivalent::equivalent`] for each entry sharing that bucket's hash.  The
+/// probe records every entry its `is_match` predicate accepts as a side effect
+/// and always reports "not equivalent", so the walk covers the whole collision
+/// chain and returns `None`; the collected Vec then holds the candidates, which
+/// the caller confirms via user `__eq__`.  Only bucket entries are visited.
+///
+/// `probe_key` drives the hash: `PyKey::Object { hash, .. }` and (for the None
+/// cross-variant case, issue #906) `PyKey::None` both hash on a Python-level
+/// hash value, so matching entries collide into the same bucket.
+struct ObjectBucketProbe<'a, F: Fn(&PyKey) -> bool> {
+    probe_key: &'a PyKey,
+    is_match: F,
+    collected: std::cell::RefCell<Vec<PyKey>>,
+}
+
+impl<F: Fn(&PyKey) -> bool> std::hash::Hash for ObjectBucketProbe<'_, F> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.probe_key.hash(state);
+    }
+}
+
+impl<F: Fn(&PyKey) -> bool> indexmap::Equivalent<PyKey> for ObjectBucketProbe<'_, F> {
+    fn equivalent(&self, key: &PyKey) -> bool {
+        if (self.is_match)(key) {
+            self.collected.borrow_mut().push(key.clone());
+        }
+        // Never report equality: force the bucket walk to continue so we see
+        // every collision, and dispatch the real user `__eq__` afterwards.
+        false
+    }
+}
+
+/// Collect the candidate keys in a dict's hash bucket that `is_match` accepts,
+/// for later user-`__eq__` dispatch.  Returns each candidate's cloned key (an
+/// O(1) RC bump for `Object`/`None`); the caller recovers the entry on a hit
+/// via `get_full` (one O(bucket) probe).  See [`ObjectBucketProbe`].
+fn collect_object_bucket_keys_map(
+    dict: &indexmap::IndexMap<PyKey, Value>,
+    probe_key: &PyKey,
+    is_match: impl Fn(&PyKey) -> bool,
+) -> Vec<PyKey> {
+    let probe = ObjectBucketProbe {
+        probe_key,
+        is_match,
+        collected: std::cell::RefCell::new(Vec::new()),
+    };
+    let _ = dict.get_index_of(&probe);
+    probe.collected.into_inner()
+}
+
+/// `IndexSet` counterpart of [`collect_object_bucket_keys_map`].
+fn collect_object_bucket_keys_set(
+    set: &indexmap::IndexSet<PyKey>,
+    probe_key: &PyKey,
+    is_match: impl Fn(&PyKey) -> bool,
+) -> Vec<PyKey> {
+    let probe = ObjectBucketProbe {
+        probe_key,
+        is_match,
+        collected: std::cell::RefCell::new(Vec::new()),
+    };
+    let _ = set.get_index_of(&probe);
+    probe.collected.into_inner()
+}
+
+/// Extract the Python-level `Value` from an `Object`/`None` candidate key for
+/// dispatching user `__eq__`.  Bucket candidates are always `Object` or `None`.
+fn pykey_object_or_none_value(key: &PyKey) -> Value {
+    match key {
+        PyKey::Object { value, .. } => value.clone(),
+        _ => Value::none(),
+    }
+}
+
 impl Interpreter {
     pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
@@ -1695,95 +1780,71 @@ impl Interpreter {
             }
         }
         // Slow path — `Object` keys (and cross-variant None/Object matching,
-        // issue #906).  Extract candidates under a narrow borrow, then drop
-        // the borrow before user `__eq__` runs.
-        //
-        // Fast pre-check: skip the Vec allocation entirely when no entry
-        // with the same hash exists (the common case for non-adversarial inputs).
+        // issue #906).  Probe only the lookup key's hash bucket (issue #2060),
+        // collecting candidate keys under a narrow borrow, then drop the borrow
+        // before user `__eq__` runs.
         if let PyKey::Object {
             hash: target_hash,
             value: target,
         } = key
         {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            let has_candidate = {
+            let candidate_keys = {
                 let dict = receiver
                     .as_dict()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                dict.keys().any(|k| match k {
+                collect_object_bucket_keys_map(dict, key, |k| match k {
                     PyKey::Object { hash, .. } => hash == target_hash,
+                    // PyKey::None has Python-level hash py_hash_none().  When
+                    // the Object key hashes to the same value, check whether
+                    // __eq__ considers them equal (issue #906).
                     PyKey::None => *target_hash == none_hash,
                     _ => false,
                 })
             };
-            if has_candidate {
-                let candidates: Vec<(usize, Value, Value)> = {
-                    let dict = receiver
-                        .as_dict()
-                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                    dict.iter()
-                        .enumerate()
-                        .filter_map(|(i, (k, v))| match k {
-                            PyKey::Object { hash, value } if hash == target_hash => {
-                                Some((i, value.clone(), v.clone()))
-                            }
-                            // PyKey::None has Python-level hash py_hash_none().  When
-                            // the Object key hashes to the same value, check whether
-                            // __eq__ considers them equal (issue #906).
-                            PyKey::None if *target_hash == none_hash => {
-                                Some((i, Value::none(), v.clone()))
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                };
-                for (idx, candidate_key, value) in candidates {
-                    if self.values_user_eq(&candidate_key, target)? {
-                        return Ok(Some((idx, value)));
-                    }
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&cand_val, target)? {
+                    return self.dict_entry_by_key(receiver, &cand);
                 }
             }
         }
         // Cross-variant slow path: lookup key is PyKey::None but a stored
         // PyKey::Object with hash py_hash_none() may __eq__-match None (issue #906).
-        // Fast pre-check (issue #934): skip the full scan if the dict has no
-        // Object entries with hash == py_hash_none().  The common case exits here
-        // without building a candidates Vec.
         if matches!(key, PyKey::None) {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            let has_cross_variant = {
+            let candidate_keys = {
                 let dict = receiver
                     .as_dict()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                dict.keys()
-                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
+                collect_object_bucket_keys_map(dict, key, |k| {
+                    matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
+                })
             };
-            if has_cross_variant {
-                let candidates: Vec<(usize, Value, Value)> = {
-                    let dict = receiver
-                        .as_dict()
-                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                    dict.iter()
-                        .enumerate()
-                        .filter_map(|(i, (k, v))| match k {
-                            PyKey::Object { hash, value }
-                                if *hash == none_hash =>
-                            {
-                                Some((i, value.clone(), v.clone()))
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                };
-                let none_val = Value::none();
-                for (idx, candidate_key, value) in candidates {
-                    if self.values_user_eq(&none_val, &candidate_key)? {
-                        return Ok(Some((idx, value)));
-                    }
+            let none_val = Value::none();
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&none_val, &cand_val)? {
+                    return self.dict_entry_by_key(receiver, &cand);
                 }
             }
         }
         Ok(None)
+    }
+
+    /// Recover the `(index, value)` of an entry by its exact stored key.
+    /// `key` must be a key cloned from the dict's own bucket (so `Object`
+    /// matches by `Rc::ptr_eq` and `None` matches `None`), making this a
+    /// single O(bucket) probe rather than a full scan.
+    fn dict_entry_by_key(
+        &self,
+        receiver: &Value,
+        key: &PyKey,
+    ) -> Result<Option<(usize, Value)>> {
+        let dict = receiver
+            .as_dict()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        Ok(dict.get_full(key).map(|(idx, _, v)| (idx, v.clone())))
     }
 
     /// `dict_lookup` variant that takes the `IndexMap` directly.  Used by
@@ -1804,52 +1865,35 @@ impl Interpreter {
             value: target,
         } = key
         {
-            let candidates: Vec<(usize, Value, Value)> = dict
-                .iter()
-                .enumerate()
-                .filter_map(|(i, (k, v))| match k {
-                    PyKey::Object { hash, value } if hash == target_hash => {
-                        Some((i, value.clone(), v.clone()))
-                    }
-                    // Cross-variant: PyKey::None has Python-level hash py_hash_none();
-                    // include it as a candidate when the Object also hashes to that
-                    // value so that __eq__ can confirm the match (issue #906).
-                    PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => {
-                        Some((i, Value::none(), v.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
-            for (idx, candidate_key, value) in candidates {
-                if self.values_user_eq(&candidate_key, target)? {
-                    return Ok(Some((idx, value)));
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            // Probe only the lookup key's hash bucket (issue #2060).
+            let candidate_keys = collect_object_bucket_keys_map(dict, key, |k| match k {
+                PyKey::Object { hash, .. } => hash == target_hash,
+                // Cross-variant: PyKey::None has Python-level hash py_hash_none();
+                // include it as a candidate when the Object also hashes to that
+                // value so that __eq__ can confirm the match (issue #906).
+                PyKey::None => *target_hash == none_hash,
+                _ => false,
+            });
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&cand_val, target)? {
+                    return Ok(dict.get_full(&cand).map(|(idx, _, v)| (idx, v.clone())));
                 }
             }
         }
         // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
-        // (issue #906).  Fast pre-check (issue #934): skip the full scan if no
-        // Object entry with hash == py_hash_none() exists (common case, no alloc).
+        // (issue #906).
         if matches!(key, PyKey::None) {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            if dict
-                .keys()
-                .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
-            {
-                let candidates: Vec<(usize, Value, Value)> = dict
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, (k, v))| match k {
-                        PyKey::Object { hash, value } if *hash == none_hash => {
-                            Some((i, value.clone(), v.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let none_val = Value::none();
-                for (idx, candidate_key, value) in candidates {
-                    if self.values_user_eq(&none_val, &candidate_key)? {
-                        return Ok(Some((idx, value)));
-                    }
+            let candidate_keys = collect_object_bucket_keys_map(dict, key, |k| {
+                matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
+            });
+            let none_val = Value::none();
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&none_val, &cand_val)? {
+                    return Ok(dict.get_full(&cand).map(|(idx, _, v)| (idx, v.clone())));
                 }
             }
         }
@@ -1896,86 +1940,64 @@ impl Interpreter {
                 return Ok(Some(idx));
             }
         }
-        // Fast pre-check for the Object-key slow path: skip the Vec allocation
-        // when no entry with the same hash exists (the common case).
+        // Slow path: probe only the lookup key's hash bucket (issue #2060),
+        // dispatching user __eq__ to the few candidates that share its hash.
         if let PyKey::Object {
             hash: target_hash,
             value: target,
         } = key
         {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            let has_candidate = {
+            let candidate_keys = {
                 let set = receiver
                     .as_set()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                set.iter().any(|k| match k {
+                collect_object_bucket_keys_set(set, key, |k| match k {
                     PyKey::Object { hash, .. } => hash == target_hash,
+                    // PyKey::None has Python-level hash py_hash_none(); include it
+                    // as a candidate when the Object key hashes to the same value
+                    // so that __eq__ can confirm the match (issue #906).
                     PyKey::None => *target_hash == none_hash,
                     _ => false,
                 })
             };
-            if has_candidate {
-                let candidates: Vec<(usize, Value)> = {
-                    let set = receiver
-                        .as_set()
-                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                    set.iter()
-                        .enumerate()
-                        .filter_map(|(i, k)| match k {
-                            PyKey::Object { hash, value } if hash == target_hash => {
-                                Some((i, value.clone()))
-                            }
-                            // PyKey::None has Python-level hash py_hash_none(); include it
-                            // as a candidate when the Object key hashes to the same value
-                            // so that __eq__ can confirm the match (issue #906).
-                            PyKey::None if *target_hash == none_hash => Some((i, Value::none())),
-                            _ => None,
-                        })
-                        .collect()
-                };
-                for (idx, candidate) in candidates {
-                    if self.values_user_eq(&candidate, target)? {
-                        return Ok(Some(idx));
-                    }
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&cand_val, target)? {
+                    return Ok(self.set_index_by_key(receiver, &cand)?);
                 }
             }
         }
         // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
-        // (issue #906).  Fast pre-check (issue #934): skip the full scan if no
-        // Object entry with hash == py_hash_none() exists (common case, no alloc).
+        // (issue #906).
         if matches!(key, PyKey::None) {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            let has_cross_variant = {
+            let candidate_keys = {
                 let set = receiver
                     .as_set()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                set.iter()
-                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
+                collect_object_bucket_keys_set(set, key, |k| {
+                    matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
+                })
             };
-            if has_cross_variant {
-                let candidates: Vec<(usize, Value)> = {
-                    let set = receiver
-                        .as_set()
-                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                    set.iter()
-                        .enumerate()
-                        .filter_map(|(i, k)| match k {
-                            PyKey::Object { hash, value } if *hash == none_hash => {
-                                Some((i, value.clone()))
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                };
-                let none_val = Value::none();
-                for (idx, candidate) in candidates {
-                    if self.values_user_eq(&none_val, &candidate)? {
-                        return Ok(Some(idx));
-                    }
+            let none_val = Value::none();
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&none_val, &cand_val)? {
+                    return Ok(self.set_index_by_key(receiver, &cand)?);
                 }
             }
         }
         Ok(None)
+    }
+
+    /// Recover the index of a set entry by its exact stored key (a key cloned
+    /// from the set's own bucket).  A single O(bucket) probe, not a full scan.
+    fn set_index_by_key(&self, receiver: &Value, key: &PyKey) -> Result<Option<usize>> {
+        let set = receiver
+            .as_set()
+            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+        Ok(set.get_index_of(key))
     }
 
     /// `set_lookup` variant that takes the `IndexSet` directly — for
@@ -1994,50 +2016,35 @@ impl Interpreter {
             value: target,
         } = key
         {
-            let candidates: Vec<(usize, Value)> = set
-                .iter()
-                .enumerate()
-                .filter_map(|(i, k)| match k {
-                    PyKey::Object { hash, value } if hash == target_hash => {
-                        Some((i, value.clone()))
-                    }
-                    // Cross-variant: PyKey::None has Python-level hash py_hash_none();
-                    // include it as a candidate when the Object hashes to the same
-                    // value (issue #906).
-                    PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => Some((i, Value::none())),
-                    _ => None,
-                })
-                .collect();
-            for (idx, candidate) in candidates {
-                if self.values_user_eq(&candidate, target)? {
-                    return Ok(Some(idx));
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            // Probe only the lookup key's hash bucket (issue #2060).
+            let candidate_keys = collect_object_bucket_keys_set(set, key, |k| match k {
+                PyKey::Object { hash, .. } => hash == target_hash,
+                // Cross-variant: PyKey::None has Python-level hash py_hash_none();
+                // include it as a candidate when the Object hashes to the same
+                // value (issue #906).
+                PyKey::None => *target_hash == none_hash,
+                _ => false,
+            });
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&cand_val, target)? {
+                    return Ok(set.get_index_of(&cand));
                 }
             }
         }
         // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
-        // (issue #906).  Fast pre-check (issue #934): skip the full scan if no
-        // Object entry with hash == py_hash_none() exists (common case, no alloc).
+        // (issue #906).
         if matches!(key, PyKey::None) {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            if set
-                .iter()
-                .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
-            {
-                let candidates: Vec<(usize, Value)> = set
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, k)| match k {
-                        PyKey::Object { hash, value } if *hash == none_hash => {
-                            Some((i, value.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let none_val = Value::none();
-                for (idx, candidate) in candidates {
-                    if self.values_user_eq(&none_val, &candidate)? {
-                        return Ok(Some(idx));
-                    }
+            let candidate_keys = collect_object_bucket_keys_set(set, key, |k| {
+                matches!(k, PyKey::Object { hash, .. } if *hash == none_hash)
+            });
+            let none_val = Value::none();
+            for cand in candidate_keys {
+                let cand_val = pykey_object_or_none_value(&cand);
+                if self.values_user_eq(&none_val, &cand_val)? {
+                    return Ok(set.get_index_of(&cand));
                 }
             }
         }
