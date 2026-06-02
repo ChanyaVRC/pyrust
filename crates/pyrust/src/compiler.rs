@@ -5368,7 +5368,7 @@ impl Compiler {
             // after alloc_temp() for `base` the next regs would conflict.
             // The simplest safe approach: copy all TypeVar values into a fresh
             // contiguous range.
-            let n = type_params.len() as u8;
+            let n = type_params.len() as Reg;
             // base is the first slot of the contiguous block we'll pass to
             // BuildTuple.  Allocate n-1 more slots after it.
             for _ in 1..n as usize {
@@ -5448,7 +5448,7 @@ impl Compiler {
     /// (generic classes).  `obj_reg` must be live and writable after this call.
     /// All temporary registers allocated inside are fully freed before returning.
     fn emit_type_params_attr(&mut self, obj_reg: Reg, type_params: &[String]) {
-        let n = type_params.len() as u8;
+        let n = type_params.len() as Reg;
         let saved_next = self.next_temp;
         // Allocate a contiguous block of n registers for the TypeVar objects,
         // then one more for the tuple destination.
@@ -8575,7 +8575,11 @@ impl Compiler {
             self.next_temp = saved;
         }
         let bases_tuple_reg = self.alloc_temp();
-        self.emit(Insn::BuildTuple(bases_tuple_reg, tup_base, bases_n));
+        self.emit(Insn::BuildTuple(
+            bases_tuple_reg,
+            tup_base,
+            Reg::from(bases_n),
+        ));
         // Note: we keep the [tup_base..bases_tuple_reg] region allocated so
         // bases_tuple_reg isn't clobbered by subsequent temp allocations.
 
@@ -11156,9 +11160,9 @@ impl Compiler {
     }
 
     fn compile_collection(&mut self, items: &[Expr], is_tuple: bool) -> Reg {
-        let n = items.len() as u8;
+        let n = items.len() as Reg;
         let base = self.next_temp;
-        if base.checked_add(Reg::from(n)).is_none() {
+        if base.checked_add(n).is_none() {
             self.failed = true;
             if self.error_msg.is_none() {
                 self.error_msg = Some(format!(
@@ -11168,10 +11172,10 @@ impl Compiler {
             }
             return 0;
         }
-        self.next_temp = base + Reg::from(n);
+        self.next_temp = base + n;
         // Always update max_reg with `base` — BuildList/BuildTuple always writes
         // to `base` regardless of element count (even empty collections).
-        let max_used = if n > 0 { base + Reg::from(n) - 1 } else { base };
+        let max_used = if n > 0 { base + n - 1 } else { base };
         if max_used > self.max_reg {
             self.max_reg = max_used;
         }
@@ -11260,34 +11264,34 @@ impl Compiler {
         let has_splat = items.iter().any(|e| matches!(e, Expr::Starred(_)));
         if !has_splat {
             // Fast path: no splat — same code shape as the original.
-            let n = items.len() as u8;
+            let n = items.len() as Reg;
             let frame = self.next_temp;
-            if frame.checked_add(1 + Reg::from(n)).is_none() {
+            if frame.checked_add(1 + n).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many elements in set literal".to_string());
                 }
                 return 0;
             }
-            self.next_temp = frame + 1 + Reg::from(n);
-            if frame + Reg::from(n) > self.max_reg {
-                self.max_reg = frame + Reg::from(n);
+            self.next_temp = frame + 1 + n;
+            if frame + n > self.max_reg {
+                self.max_reg = frame + n;
             }
             let set_name_idx = self.intern_name("set");
             self.emit(Insn::LoadGlobal(frame, set_name_idx));
             let list_r = frame + 1;
             let saved = self.next_temp;
             let list_base = self.next_temp;
-            if list_base.checked_add(Reg::from(n)).is_none() {
+            if list_base.checked_add(n).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many elements in set literal".to_string());
                 }
                 return 0;
             }
-            self.next_temp = list_base + Reg::from(n);
-            if list_base + Reg::from(n) - 1 > self.max_reg {
-                self.max_reg = list_base + Reg::from(n) - 1;
+            self.next_temp = list_base + n;
+            if list_base + n - 1 > self.max_reg {
+                self.max_reg = list_base + n - 1;
             }
             for (i, item) in (0u32..).zip(items.iter()) {
                 let slot = list_base + i;
@@ -11359,9 +11363,9 @@ impl Compiler {
     fn compile_dict_literal(&mut self, items: &[DictItem]) -> Reg {
         let has_splat = items.iter().any(|i| matches!(i, DictItem::DoubleSplat(_)));
         if !has_splat {
-            let n = items.len() as u8;
+            let n = items.len() as Reg;
             let base = self.next_temp;
-            let slots_needed = Reg::from(n).saturating_mul(2);
+            let slots_needed = n.saturating_mul(2);
             if base.checked_add(slots_needed).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
@@ -11372,7 +11376,7 @@ impl Compiler {
             if base > self.max_reg {
                 self.max_reg = base;
             }
-            self.next_temp = base + Reg::from(n).saturating_mul(2);
+            self.next_temp = base + n.saturating_mul(2);
             if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }

@@ -199,9 +199,9 @@ pub enum Insn {
     /// return None
     ReturnNone,
     /// R[dst] = [R[base], R[base+1], ..., R[base+n-1]]
-    BuildList(Reg, Reg, u8),
+    BuildList(Reg, Reg, u32),
     /// R[dst] = (R[base], R[base+1], ..., R[base+n-1])
-    BuildTuple(Reg, Reg, u8),
+    BuildTuple(Reg, Reg, u32),
     /// R[dst] = R[base] ++ R[base+1] ++ ... ++ R[base+n-1]
     /// Concatenates `n` consecutive `str` registers into a single string in one
     /// pass over a preallocated buffer. Emitted only by f-string lowering
@@ -224,7 +224,7 @@ pub enum Insn {
     /// in `unpack_slice_key` (issue #931).
     BuildSlice(Reg, Reg),
     /// R[dst] = {R[base]: R[base+1], R[base+2]: R[base+3], ...}  (n key-value pairs)
-    BuildDict(Reg, Reg, u8),
+    BuildDict(Reg, Reg, u32),
     /// R[base..base+n] = iter_values(R[src])
     Unpack(Reg, Reg, u32),
     /// Extended unpack: R[src] is an iterable; store first `before` elements into
