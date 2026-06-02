@@ -154,7 +154,23 @@ impl Interpreter {
                         return Ok(match user_fn {
                             Some(f) => match f.kind {
                                 UserFunctionKind::Regular => {
-                                    Value::user_function(Rc::clone(&f))
+                                    // Metaclass-method super(): `obj_class` (the
+                                    // class being operated on) is the receiver
+                                    // — it is an "instance" of the metaclass — so
+                                    // `super().describe()` inside a metaclass
+                                    // method must bind it, mirroring how a plain
+                                    // `cls.describe()` binds `cls`.  The
+                                    // classmethod-super case (`class_in_own_mro`)
+                                    // keeps the unbound function, matching the
+                                    // existing instance/classmethod behaviour.
+                                    if class_in_own_mro {
+                                        Value::user_function(Rc::clone(&f))
+                                    } else {
+                                        Value::class_bound_method(
+                                            Rc::clone(&f),
+                                            Rc::clone(&obj_class),
+                                        )
+                                    }
                                 }
                                 UserFunctionKind::ClassMethod => {
                                     Value::class_bound_method(Rc::clone(&f), Rc::clone(&obj_class))

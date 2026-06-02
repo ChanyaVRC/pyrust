@@ -104,3 +104,28 @@ class P:
 
 print(P().y)  # 7
 print(type(W).__name__, isinstance(W, SubMeta))  # SubMeta True
+
+
+# super() inside a *regular* metaclass method (not __call__) binds the class
+# being operated on as the receiver, so super().method() chains across the
+# metaclass MRO with `cls` available.
+class M0(type):
+    def info(cls):
+        return cls.__name__
+
+
+class M1(M0):
+    def info(cls):
+        return "M1->" + super().info()
+
+
+class M2(M1):
+    def info(cls):
+        return "M2->" + super().info()
+
+
+class Z(metaclass=M2):
+    pass
+
+
+print(Z.info())  # M2->M1->Z
