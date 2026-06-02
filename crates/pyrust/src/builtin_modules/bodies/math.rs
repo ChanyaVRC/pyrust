@@ -398,12 +398,11 @@ pyrust_module! {
     #[pure]
     fn hypot(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        let mut sum_sq = 0.0f64;
+        let mut coords = Vec::with_capacity(args.len());
         for arg in args.iter() {
-            let x = math_arg_to_float(_interp, &arg.value)?;
-            sum_sq += x * x;
+            coords.push(math_arg_to_float(_interp, &arg.value)?);
         }
-        Ok(Value::float(sum_sq.sqrt()))
+        Ok(Value::float(vector_norm(&mut coords)))
     }
 
     /// CPython: math.dist(p, q) → float.  Euclidean distance between two points.
@@ -425,13 +424,13 @@ pyrust_module! {
                 "both points must have the same number of dimensions".to_string(),
             ));
         }
-        let mut sum_sq = 0.0f64;
+        let mut diffs = Vec::with_capacity(p_items.len());
         for (pv, qv) in p_items.iter().zip(q_items.iter()) {
             let a = math_arg_to_float(_interp, pv)?;
             let b = math_arg_to_float(_interp, qv)?;
-            sum_sq += (a - b) * (a - b);
+            diffs.push(a - b);
         }
-        Ok(Value::float(sum_sq.sqrt()))
+        Ok(Value::float(vector_norm(&mut diffs)))
     }
 
     /// CPython: math.gcd(*integers) → int.  Greatest common divisor.
@@ -1285,6 +1284,82 @@ fn ldexp_f64(x: f64, exp: i32) -> f64 {
         }
     }
     r * 2f64.powi(e)
+}
+
+/// Overflow/underflow-safe Euclidean norm of `vec`, used by `math.hypot` and
+/// `math.dist`.  A faithful port of CPython 3.12's `vector_norm`
+/// (`Modules/mathmodule.c`): it scales by the largest magnitude so the squares
+/// never overflow, then accumulates the sum of scaled squares with a
+/// double-length (compensated) running total plus a final differential
+/// correction step.  This reproduces CPython's result byte-for-byte.
+///
+/// `vec` is taken by `&mut` because the subnormal-rescaling branch rewrites it
+/// in place, mirroring the C code.
+fn vector_norm(vec: &mut [f64]) -> f64 {
+    // Algorithm 1.1: compensated sum of two doubles with |a| >= |b|.
+    fn dl_fast_sum(a: f64, b: f64) -> (f64, f64) {
+        let x = a + b;
+        let y = (a - x) + b;
+        (x, y)
+    }
+    // Algorithm 3.5: error-free transformation of a product (uses fused mul-add).
+    fn dl_mul(x: f64, y: f64) -> (f64, f64) {
+        let z = x * y;
+        let zz = x.mul_add(y, -z);
+        (z, zz)
+    }
+
+    let n = vec.len();
+    let mut max = 0.0f64;
+    let mut found_nan = false;
+    for v in vec.iter_mut() {
+        *v = v.abs();
+        if *v > max {
+            max = *v;
+        }
+        if v.is_nan() {
+            found_nan = true;
+        }
+    }
+    if max.is_infinite() {
+        return max;
+    }
+    if found_nan {
+        return f64::NAN;
+    }
+    if max == 0.0 || n <= 1 {
+        return max;
+    }
+    let (_, max_e) = frexp_f64(max);
+    if max_e < -1023 {
+        // ldexp(1.0, -max_e) would overflow; convert subnormals to normals
+        // by dividing through by DBL_MIN, recurse, then scale the result back.
+        for v in vec.iter_mut() {
+            *v /= f64::MIN_POSITIVE;
+        }
+        return f64::MIN_POSITIVE * vector_norm(vec);
+    }
+    let scale = ldexp_f64(1.0, -max_e);
+    let mut csum = 1.0f64;
+    let mut frac1 = 0.0f64;
+    let mut frac2 = 0.0f64;
+    for &v in vec.iter() {
+        let x = v * scale; // lossless scaling
+        let pr = dl_mul(x, x); // lossless squaring
+        let sm = dl_fast_sum(csum, pr.0); // lossless addition
+        csum = sm.0;
+        frac1 += pr.1; // lossy addition
+        frac2 += sm.1; // lossy addition
+    }
+    let mut h = (csum - 1.0 + (frac1 + frac2)).sqrt();
+    let pr = dl_mul(-h, h);
+    let sm = dl_fast_sum(csum, pr.0);
+    csum = sm.0;
+    frac1 += pr.1;
+    frac2 += sm.1;
+    let x = csum - 1.0 + (frac1 + frac2);
+    h += x / (2.0 * h); // differential correction
+    h / scale
 }
 
 /// The `steps`-th representable double after `x` toward `y`, matching CPython's
