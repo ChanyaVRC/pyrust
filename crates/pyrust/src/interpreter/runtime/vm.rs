@@ -2515,14 +2515,14 @@ impl Interpreter {
                 // ── Collection builders ──────────────────────────────────
                 Insn::BuildList(dst, base, n) => {
                     let mut items: Vec<Value> = Vec::with_capacity(*n as usize);
-                    for i in 0..crate::bytecode::Reg::from(*n) {
+                    for i in 0..*n {
                         items.push(vm_try!(vm_read(&regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Value::list(items);
                 }
                 Insn::BuildTuple(dst, base, n) => {
                     let mut items = Vec::with_capacity(*n as usize);
-                    for i in 0..crate::bytecode::Reg::from(*n) {
+                    for i in 0..*n {
                         items.push(vm_try!(vm_read(&regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Value::tuple(items);
@@ -2567,7 +2567,7 @@ impl Interpreter {
                 }
                 Insn::BuildDict(dst, base, n) => {
                     let mut dict = indexmap::IndexMap::with_capacity(*n as usize);
-                    for i in 0..crate::bytecode::Reg::from(*n) {
+                    for i in 0..*n {
                         let k_val = vm_try!(vm_read(&regs, *base + i * 2, num_locals));
                         let v_val = vm_try!(vm_read(&regs, *base + i * 2 + 1, num_locals));
                         let key = vm_try!(self.value_to_pykey(&k_val));

@@ -1747,14 +1747,13 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         TailCall { args_base, nargs } => {
             r == *args_base - 1 || (r >= *args_base && r < *args_base + *nargs as u32)
         }
-        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildString(_, base, n) => {
-            r >= *base && r < *base + *n as u32
-        }
+        BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n,
+        BuildString(_, base, n) => r >= *base && r < *base + *n as u32,
         // BuildSlice always reads exactly 3 registers: start, stop, step.
         BuildSlice(_, base) => r >= *base && r < *base + 3,
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
         // so the live range is base .. base + 2*n (not base + n).
-        BuildDict(_, base, n) => r >= *base && r < *base + 2 * *n as u32,
+        BuildDict(_, base, n) => r >= *base && r < *base + 2 * *n,
 
         CallMethod {
             obj,
@@ -1904,7 +1903,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
                 reads.insert(r);
             }
         }
-        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildString(_, base, n) => {
+        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+            for r in *base..*base + *n {
+                reads.insert(r);
+            }
+        }
+        BuildString(_, base, n) => {
             for r in *base..*base + *n as u32 {
                 reads.insert(r);
             }
@@ -1915,7 +1919,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             }
         }
         BuildDict(_, base, n) => {
-            for r in *base..*base + 2 * *n as u32 {
+            for r in *base..*base + 2 * *n {
                 reads.insert(r);
             }
         }
@@ -6126,7 +6130,12 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
         }
-        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildString(_, base, n) => {
+        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+            for r in *base..*base + *n {
+                f(r);
+            }
+        }
+        BuildString(_, base, n) => {
             for r in *base..*base + *n as u32 {
                 f(r);
             }
@@ -6137,7 +6146,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             }
         }
         BuildDict(_, base, n) => {
-            for r in *base..*base + 2 * *n as u32 {
+            for r in *base..*base + 2 * *n {
                 f(r);
             }
         }
