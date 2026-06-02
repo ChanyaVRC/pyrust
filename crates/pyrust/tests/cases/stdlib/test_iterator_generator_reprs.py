@@ -55,6 +55,8 @@ print(norm(iter("é")))  # non-ascii -> str_iterator
 print(norm(iter(range(1))))
 print(norm(iter({1})))
 print(norm(iter({1: 2})))
+print(norm(reversed([1])))   # list_reverseiterator
+print(norm(itertools.chain([1], [2])))  # itertools.chain
 
 # ── #2019: generators (genexpr keeps <genexpr>, def-gen keeps its qualname) ──
 print(norm(x for x in [1]))
