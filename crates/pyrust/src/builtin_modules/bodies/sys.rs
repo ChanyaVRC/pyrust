@@ -84,6 +84,30 @@ pyrust_module! {
         // their default zero values, matching the normal-run state in CPython.
         // <https://docs.python.org/3/library/sys.html#sys.flags>
         "flags"        => make_flags(),
+        // CPython: sys.maxunicode — the largest Unicode code point,
+        // 0x10FFFF (1114111) for the wide build that 3.12 always uses.
+        // <https://docs.python.org/3/library/sys.html#sys.maxunicode>
+        "maxunicode"   => Value::int(1_114_111),
+        // CPython: sys.abiflags — ABI flags string; empty on a normal
+        // CPython build.
+        // <https://docs.python.org/3/library/sys.html#sys.abiflags>
+        "abiflags"     => Value::string(""),
+        // CPython: sys.float_info — struct-sequence of float limits
+        // (IEEE 754 double). Values are platform-stable.
+        // <https://docs.python.org/3/library/sys.html#sys.float_info>
+        "float_info"   => make_float_info(),
+        // CPython: sys.int_info — struct-sequence describing the int
+        // implementation.
+        // <https://docs.python.org/3/library/sys.html#sys.int_info>
+        "int_info"     => make_int_info(),
+        // CPython: sys.implementation — namespace describing the running
+        // interpreter (name / version / hexversion / cache_tag).
+        // <https://docs.python.org/3/library/sys.html#sys.implementation>
+        "implementation" => make_implementation(),
+        // CPython: sys.builtin_module_names — tuple of module names
+        // compiled into the interpreter.
+        // <https://docs.python.org/3/library/sys.html#sys.builtin_module_names>
+        "builtin_module_names" => make_builtin_module_names(),
     }
 
     /// CPython: sys.exit([arg]) — raises `SystemExit(arg)`.
@@ -219,6 +243,86 @@ pyrust_module! {
             ));
         }
         Ok(_interp.active_exception.clone().unwrap_or_else(Value::none))
+    }
+
+    /// CPython: sys.intern(string) — enter `string` in the interned-string
+    /// table and return the canonical (interned) object.  pyrust does not
+    /// maintain a separate intern table, so we return a str equal to the
+    /// input, satisfying the contract `sys.intern(s) == s`.
+    /// <https://docs.python.org/3/library/sys.html#sys.intern>
+    fn intern(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("intern() takes exactly one argument ({} given)", args.len()),
+            ));
+        }
+        match args[0].value.kind() {
+            ValueKind::Str(_) => Ok(args[0].value.clone()),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "intern() argument 1 must be str, not {}",
+                    value_type_name_str(&args[0].value),
+                ),
+            )),
+        }
+    }
+
+    /// CPython: sys.getsizeof(object[, default]) — size of `object` in
+    /// bytes.  Exact sizes are implementation-specific; pyrust returns a
+    /// plausible positive size so callers don't hit AttributeError.  The
+    /// value is NOT parity-stable and should not be compared against
+    /// CPython.
+    /// <https://docs.python.org/3/library/sys.html#sys.getsizeof>
+    fn getsizeof(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getsizeof() takes 1 or 2 arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::int(approximate_sizeof(&args[0].value)))
+    }
+
+    /// CPython: sys.getdefaultencoding() — the default string encoding,
+    /// always 'utf-8' on Python 3.
+    /// <https://docs.python.org/3/library/sys.html#sys.getdefaultencoding>
+    fn getdefaultencoding(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getdefaultencoding() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::string("utf-8"))
+    }
+
+    /// CPython: sys.is_finalizing() — True if the interpreter is shutting
+    /// down.  pyrust is never observably finalizing from user code, so
+    /// this always returns False.
+    /// <https://docs.python.org/3/library/sys.html#sys.is_finalizing>
+    fn is_finalizing(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "is_finalizing() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::bool_(false))
     }
 
     // ── version_info rich-comparison and sequence methods ────────────────────
@@ -507,6 +611,111 @@ fn normalise_index(i: i64, len: usize) -> Result<usize> {
         ));
     }
     Ok(idx as usize)
+}
+
+// ── float_info / int_info / implementation singletons ────────────────────────
+//
+// These are CPython "struct sequences" (tuple subclasses with named
+// fields).  pyrust models them as plain PyInstances exposing the named
+// attributes, which is enough for the common `sys.float_info.max` /
+// `sys.int_info.bits_per_digit` access patterns.  The numeric values are
+// IEEE-754 / build constants and match CPython 3.12 byte-for-byte.
+
+/// Build a simple named-attribute PyInstance under a fresh anonymous
+/// class with the given class name.  Used for the namespace-like sys
+/// members that only need attribute access.
+fn make_named_struct(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
+    let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+    for (k, v) in fields {
+        attrs.insert(k.to_string(), v);
+    }
+    let class = Rc::new(RefCell::new(PyClass {
+        name: class_name.to_string(),
+        qualname: class_name.to_string(),
+        base: None,
+        extra_bases: vec![],
+        attrs: indexmap::IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
+        subclasses: std::cell::RefCell::new(vec![]),
+        metatype: None,
+        slots: None,
+    }));
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Build `sys.float_info` — IEEE-754 double-precision limits.
+fn make_float_info() -> Value {
+    make_named_struct(
+        "sys.float_info",
+        vec![
+            ("max", Value::float(f64::MAX)),
+            ("max_exp", Value::int(1024)),
+            ("max_10_exp", Value::int(308)),
+            ("min", Value::float(f64::MIN_POSITIVE)),
+            ("min_exp", Value::int(-1021)),
+            ("min_10_exp", Value::int(-307)),
+            ("dig", Value::int(15)),
+            ("mant_dig", Value::int(53)),
+            ("epsilon", Value::float(f64::EPSILON)),
+            ("radix", Value::int(2)),
+            ("rounds", Value::int(1)),
+        ],
+    )
+}
+
+/// Build `sys.int_info`.
+fn make_int_info() -> Value {
+    make_named_struct(
+        "sys.int_info",
+        vec![
+            ("bits_per_digit", Value::int(30)),
+            ("sizeof_digit", Value::int(4)),
+            ("default_max_str_digits", Value::int(4300)),
+            ("str_digits_check_threshold", Value::int(640)),
+        ],
+    )
+}
+
+/// Build `sys.implementation`.  Reports `cpython` (pyrust emulates the
+/// CPython 3.12 reference) so version-sniffing user code behaves.  The
+/// name / cache_tag are NOT parity-stable values to assert against.
+fn make_implementation() -> Value {
+    let version = make_version_info();
+    make_named_struct(
+        "sys.implementation",
+        vec![
+            ("name", Value::string("cpython")),
+            ("version", version),
+            ("hexversion", Value::int(0x030c_00f0)),
+            ("cache_tag", Value::string("cpython-312")),
+        ],
+    )
+}
+
+/// Build `sys.builtin_module_names` — a tuple of the names of modules
+/// compiled into the interpreter.  pyrust reports the core C-level
+/// modules CPython 3.12 also lists; this is informational and not
+/// parity-asserted against an exact set.
+fn make_builtin_module_names() -> Value {
+    let names = ["builtins", "sys", "_thread", "errno", "time", "gc"];
+    Value::tuple(names.iter().map(|n| Value::string(*n)).collect())
+}
+
+/// Rough in-memory size estimate for `sys.getsizeof`.  CPython sizes are
+/// implementation-specific; this returns a plausible positive number so
+/// callers don't hit AttributeError, but the value must not be compared
+/// against CPython in parity tests.
+fn approximate_sizeof(value: &Value) -> i64 {
+    match value.kind() {
+        ValueKind::Str(s) => 49 + s.len() as i64,
+        ValueKind::Bytes(b) => 33 + b.len() as i64,
+        ValueKind::List(items) => 56 + (items.len() as i64) * 8,
+        ValueKind::Tuple(items) => 40 + (items.len() as i64) * 8,
+        ValueKind::Int(_) | ValueKind::Bool(_) => 28,
+        ValueKind::Float(_) => 24,
+        ValueKind::None => 16,
+        _ => 16,
+    }
 }
 
 // ── flags class singleton ────────────────────────────────────────────────────

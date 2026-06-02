@@ -93,6 +93,35 @@ pyrust_module! {
         // writes (`os.environ.foo = …` if the user reaches for it)
         // don't leak across re-imports.
         "environ" => make_environ_instance(),
+        // CPython: os.name — the OS-dependent module name. Matches the host
+        // OS so parity with CPython holds on both POSIX ("posix") and
+        // Windows ("nt"). <https://docs.python.org/3/library/os.html#os.name>
+        "name" => Value::string(if cfg!(windows) { "nt" } else { "posix" }),
+        // CPython: os.linesep — the string used to separate lines on the
+        // current platform: "\r\n" on Windows, "\n" on POSIX.
+        "linesep" => Value::string(if cfg!(windows) { "\r\n" } else { "\n" }),
+        // CPython: os.curdir / os.pardir — the string the OS uses for the
+        // current / parent directory. Same on POSIX and Windows.
+        "curdir" => Value::string("."),
+        "pardir" => Value::string(".."),
+        // CPython: os.extsep — the character separating the base name from
+        // the extension. Same on POSIX and Windows.
+        "extsep" => Value::string("."),
+        // CPython: os.pathsep — the separator in $PATH-style lists:
+        // ";" on Windows, ":" on POSIX.
+        "pathsep" => Value::string(if cfg!(windows) { ";" } else { ":" }),
+        // CPython: os.altsep — the alternate path separator; "/" on Windows,
+        // None on POSIX.
+        "altsep" => {
+            if cfg!(windows) {
+                Value::string("/")
+            } else {
+                Value::none()
+            }
+        },
+        // CPython: os.devnull — the path of the null device: "nul" on
+        // Windows, "/dev/null" on POSIX.
+        "devnull" => Value::string(if cfg!(windows) { "nul" } else { "/dev/null" }),
     }
 
     // ── working directory ────────────────────────────────────────────
@@ -420,6 +449,199 @@ pyrust_module! {
         let mut results: Vec<Value> = Vec::new();
         walk_collect(&top, &mut results)?;
         Ok(Value::list(results))
+    }
+
+    // ── process / system ─────────────────────────────────────────────
+
+    /// CPython: os.getpid() → int — the current process id.
+    /// <https://docs.python.org/3/library/os.html#os.getpid>
+    fn getpid(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        Ok(Value::int(std::process::id() as i64))
+    }
+
+    /// CPython: os.getppid() → int — the parent process id.
+    /// <https://docs.python.org/3/library/os.html#os.getppid>
+    fn getppid(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        Ok(Value::int(get_parent_pid()))
+    }
+
+    /// CPython: os.cpu_count() → int | None — number of logical CPUs.
+    /// <https://docs.python.org/3/library/os.html#os.cpu_count>
+    fn cpu_count(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        match std::thread::available_parallelism() {
+            Ok(n) => Ok(Value::int(n.get() as i64)),
+            Err(_) => Ok(Value::none()),
+        }
+    }
+
+    /// CPython: os.urandom(size) → bytes — `size` cryptographically
+    /// random bytes from the OS entropy source.
+    /// <https://docs.python.org/3/library/os.html#os.urandom>
+    fn urandom(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+            ));
+        }
+        let n = require_int(FN_NAME, &args[0].value, "size")?;
+        if n < 0 {
+            return Err(PyError::named(
+                "ValueError",
+                "negative argument not allowed".to_string(),
+            ));
+        }
+        let bytes = os_urandom(n as usize)?;
+        Ok(Value::bytes(bytes))
+    }
+
+    /// CPython: os.strerror(code) → str — the error message for `code`.
+    /// <https://docs.python.org/3/library/os.html#os.strerror>
+    fn strerror(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+            ));
+        }
+        let code = require_int(FN_NAME, &args[0].value, "code")?;
+        // `std::io::Error::from_raw_os_error(..).to_string()` appends a
+        // " (os error N)" suffix that CPython's strerror does not produce;
+        // strip it so the message matches the libc text.
+        let raw = std::io::Error::from_raw_os_error(code as i32).to_string();
+        let msg = match raw.rfind(" (os error ") {
+            Some(idx) => raw[..idx].to_string(),
+            None => raw,
+        };
+        Ok(Value::string(msg))
+    }
+
+    /// CPython: os.get_terminal_size(fd=STDOUT_FILENO) → os.terminal_size.
+    /// pyrust reads the COLUMNS / LINES environment variables, falling
+    /// back to the conventional 80×24 default when they are unset.
+    /// <https://docs.python.org/3/library/os.html#os.get_terminal_size>
+    fn get_terminal_size(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 1 argument ({} given)", args.len()),
+            ));
+        }
+        let columns = std::env::var("COLUMNS")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|&c| c > 0)
+            .unwrap_or(80);
+        let lines = std::env::var("LINES")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|&l| l > 0)
+            .unwrap_or(24);
+        Ok(make_terminal_size(columns, lines))
+    }
+
+    /// CPython: os.fspath(path) — return `path` unchanged if it is str or
+    /// bytes, otherwise return the result of `type(path).__fspath__(path)`
+    /// (which must itself be str or bytes), else raise TypeError.
+    /// <https://docs.python.org/3/library/os.html#os.fspath>
+    fn fspath(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+            ));
+        }
+        let obj = args[0].value.clone();
+        let is_path = matches!(obj.kind(), ValueKind::Str(_) | ValueKind::Bytes(_));
+        if is_path {
+            return Ok(obj);
+        }
+        // PathLike protocol: call obj.__fspath__().
+        if let Ok(method) = _interp.get_attr(&obj, "__fspath__") {
+            let result = _interp.call_function_expanded(method, &[])?;
+            let result_ok = matches!(result.kind(), ValueKind::Str(_) | ValueKind::Bytes(_));
+            if result_ok {
+                return Ok(result);
+            }
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "expected {}.__fspath__() to return str or bytes, not {}",
+                    value_type_name_str(&obj),
+                    value_type_name_str(&result),
+                ),
+            ));
+        }
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "expected str, bytes or os.PathLike object, not {}",
+                value_type_name_str(&obj),
+            ),
+        ))
+    }
+
+    /// CPython: os.stat(path) → os.stat_result — filesystem metadata.
+    /// pyrust populates the commonly-used fields (st_mode/st_size/st_mtime
+    /// /st_ctime/st_atime/st_ino/st_nlink/st_uid/st_gid/st_dev); other
+    /// fields default to 0.
+    /// <https://docs.python.org/3/library/os.html#os.stat>
+    fn stat(args) -> Result<Value> {
+        let path = single_path_arg(FN_NAME, args)?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
+        Ok(make_stat_result(&meta))
+    }
+
+    /// `repr(os.get_terminal_size())` — `os.terminal_size(columns=…, lines=…)`.
+    #[py_name = "terminal_size_repr"]
+    fn terminal_size_repr(args) -> Result<Value> {
+        require_self(args, FN_NAME)?;
+        let inst = match args[0].value.kind() {
+            ValueKind::PyInstance(i) => Rc::clone(i),
+            _ => {
+                return Err(PyError::Runtime(
+                    "terminal_size_repr() expected a terminal_size instance".to_string(),
+                ))
+            }
+        };
+        let borrow = inst.borrow();
+        let get = |name: &str| -> i64 {
+            match borrow.attrs.get(name).map(|v| v.kind()) {
+                Some(ValueKind::Int(n)) => n,
+                _ => 0,
+            }
+        };
+        Ok(Value::string(format!(
+            "os.terminal_size(columns={}, lines={})",
+            get("columns"),
+            get("lines"),
+        )))
     }
 
     // ── _Environ dunders + dict-like API ────────────────────────────
@@ -800,6 +1022,194 @@ const ENVIRON_METHODS: &[(&str, &str)] = &[
     ("values", "os._Environ.values"),
     ("items", "os._Environ.items"),
 ];
+
+// ── process / system helpers ────────────────────────────────────────
+
+/// Parent-process id.  `std` has no portable `getppid`, so we call the
+/// platform primitive directly: `getppid(2)` on Unix, and a Toolhelp
+/// process snapshot on Windows (which has no direct PPID syscall — the
+/// snapshot's `PROCESSENTRY32::th32ParentProcessID` is the supported way).
+#[cfg(unix)]
+fn get_parent_pid() -> i64 {
+    // SAFETY: `getppid` takes no arguments, never fails, and has no
+    // preconditions; it always returns the caller's parent pid.
+    (unsafe { libc::getppid() }) as i64
+}
+
+#[cfg(windows)]
+fn get_parent_pid() -> i64 {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let me = std::process::id();
+    // SAFETY: the Toolhelp APIs are pure FFI with documented contracts; we
+    // check the snapshot handle for INVALID_HANDLE_VALUE before use, zero-init
+    // the entry and set `dwSize` as required, and close the handle on exit.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return 0;
+        }
+        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut ppid: i64 = 0;
+        if Process32First(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ProcessID == me {
+                    ppid = entry.th32ParentProcessID as i64;
+                    break;
+                }
+                if Process32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+        ppid
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn get_parent_pid() -> i64 {
+    0
+}
+
+/// Read `n` random bytes from the OS cryptographically-secure RNG.
+///
+/// Uses the `getrandom` crate, which is the de-facto cross-platform
+/// CSPRNG shim: it reads `getrandom(2)` / `/dev/urandom` on Linux,
+/// `getentropy` on macOS/BSD, and `BCryptGenRandom` on Windows — the
+/// same OS entropy sources CPython's `os.urandom` draws from.
+fn os_urandom(n: usize) -> Result<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    if n == 0 {
+        return Ok(buf);
+    }
+    getrandom::getrandom(&mut buf).map_err(|e| {
+        // `getrandom::Error` carries a raw OS error code when the failure
+        // originated in the platform RNG; surface it as an OSError the same
+        // way a `/dev/urandom` read failure would have.
+        match e.raw_os_error() {
+            Some(code) => {
+                let io = std::io::Error::from_raw_os_error(code);
+                PyError::from_io_error(&io, None)
+            }
+            None => PyError::named("OSError", e.to_string()),
+        }
+    })?;
+    Ok(buf)
+}
+
+// ── terminal_size struct-sequence ───────────────────────────────────
+
+thread_local! {
+    static TERMINAL_SIZE_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        attrs.insert(
+            "__repr__".to_string(),
+            Value::builtin_function("os.terminal_size_repr"),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: "terminal_size".to_string(),
+            qualname: "os.terminal_size".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+            slots: None,
+        }))
+    };
+}
+
+/// Build an `os.terminal_size(columns, lines)` instance.
+fn make_terminal_size(columns: i64, lines: i64) -> Value {
+    TERMINAL_SIZE_CLASS.with(|class| {
+        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        attrs.insert("columns".to_string(), Value::int(columns));
+        attrs.insert("lines".to_string(), Value::int(lines));
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class),
+            attrs,
+        })))
+    })
+}
+
+// ── stat_result struct-sequence ─────────────────────────────────────
+
+thread_local! {
+    static STAT_RESULT_CLASS: Rc<RefCell<PyClass>> = {
+        Rc::new(RefCell::new(PyClass {
+            name: "stat_result".to_string(),
+            qualname: "os.stat_result".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs: indexmap::IndexMap::new(),
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+            slots: None,
+        }))
+    };
+}
+
+/// Build an `os.stat_result` from filesystem metadata.  The commonly
+/// used fields are populated; the rest default to 0.
+fn make_stat_result(meta: &std::fs::Metadata) -> Value {
+    fn secs(t: std::io::Result<std::time::SystemTime>) -> f64 {
+        t.ok()
+            .and_then(|st| st.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0)
+    }
+    let mtime = secs(meta.modified());
+    let atime = secs(meta.accessed());
+    let ctime = secs(meta.created());
+
+    #[cfg(unix)]
+    let (mode, ino, nlink, uid, gid, dev) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            meta.mode() as i64,
+            meta.ino() as i64,
+            meta.nlink() as i64,
+            meta.uid() as i64,
+            meta.gid() as i64,
+            meta.dev() as i64,
+        )
+    };
+    #[cfg(not(unix))]
+    let (mode, ino, nlink, uid, gid, dev) = (
+        if meta.is_dir() { 0o040000_i64 } else { 0o100000_i64 },
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+        0_i64,
+    );
+
+    STAT_RESULT_CLASS.with(|class| {
+        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        attrs.insert("st_mode".to_string(), Value::int(mode));
+        attrs.insert("st_ino".to_string(), Value::int(ino));
+        attrs.insert("st_dev".to_string(), Value::int(dev));
+        attrs.insert("st_nlink".to_string(), Value::int(nlink));
+        attrs.insert("st_uid".to_string(), Value::int(uid));
+        attrs.insert("st_gid".to_string(), Value::int(gid));
+        attrs.insert("st_size".to_string(), Value::int(meta.len() as i64));
+        attrs.insert("st_atime".to_string(), Value::float(atime));
+        attrs.insert("st_mtime".to_string(), Value::float(mtime));
+        attrs.insert("st_ctime".to_string(), Value::float(ctime));
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class),
+            attrs,
+        })))
+    })
+}
 
 /// Construct the `os.environ` singleton.  Called from the constants
 /// block on every `module()` invocation, which the interpreter calls
