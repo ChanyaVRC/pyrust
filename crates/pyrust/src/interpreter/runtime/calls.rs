@@ -581,6 +581,7 @@ impl Interpreter {
                 }
                 match type_name {
                     "int" => {
+                        self.resolve_to_bytes_length(method, &mut pos, &mut kw)?;
                         pyrust_builtins::int::call(method, &self_val, &pos, &kw)
                     }
                     "bytes" => {
@@ -1028,7 +1029,8 @@ impl Interpreter {
         // to `bound_method_pos_buf` below.  Error paths also restore it.
         let result = match kind_tag {
             Kind::Int => {
-                pyrust_builtins::int::call(method, &receiver, &pos, &kw)
+                self.resolve_to_bytes_length(method, pos, &mut kw)?;
+                pyrust_builtins::int::call(method, &receiver, &pos[..], &kw)
             }
             Kind::Float => {
                 let f = match receiver.kind() {
@@ -1416,10 +1418,16 @@ impl Interpreter {
                                     self.call_str_method(method, backing, args_vec)
                                 }
                                 BkKind::Int => {
+                                    let mut int_args = args_vec;
+                                    self.resolve_to_bytes_length(
+                                        method,
+                                        &mut int_args,
+                                        &mut kw,
+                                    )?;
                                     pyrust_builtins::int::call(
                                         method,
                                         &backing,
-                                        &args_vec,
+                                        &int_args,
                                         &kw,
                                     )
                                 }
@@ -3904,6 +3912,24 @@ impl Interpreter {
             Tag::BigIntI64(Some(v)) => Ok(v),
             Tag::BigIntI64(None) => Err(pyrust_core::overflow_err!("Python int too large to convert to C ssize_t")),
             Tag::Instance(inst_rc) => {
+                // Issue #1929: an int/bool subclass is the int it already is, so `range(I(2))`, `hex(I)`,
+                // `chr(I)`, `(255).to_bytes(I(2), ...)` accept it as an integer.
+                // Extract the backing int directly (mirrors `coerce_numeric` for
+                // arithmetic) before relying on the user-`__index__` lookup.
+                let val = Value::py_instance(Rc::clone(&inst_rc));
+                if let Some(backing) = coerce_subclass_backing(&val, &[]) {
+                    match backing.kind() {
+                        ValueKind::Int(v) => return Ok(v),
+                        ValueKind::Bool(b) => return Ok(b as i64),
+                        ValueKind::BigInt(b) => {
+                            return match b.to_i64() {
+                                Some(v) => Ok(v),
+                                None => Err(pyrust_core::overflow_err!("Python int too large to convert to C ssize_t")),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__index__") {
                     let result = invoke_class_method(
@@ -3956,6 +3982,19 @@ impl Interpreter {
         match tag {
             Tag::Int => Ok(val),
             Tag::Instance(inst_rc) => {
+                // Issue #1929: an int/bool subclass is accepted as an
+                // index/slice bound by its int value.  CPython uses the C int
+                // value directly here (the object already *is* an int), so the
+                // backing wins even over a user `__index__` override.
+                let inst_val = Value::py_instance(Rc::clone(&inst_rc));
+                if let Some(backing) = coerce_subclass_backing(&inst_val, &[]) {
+                    if matches!(
+                        backing.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    ) {
+                        return Ok(backing);
+                    }
+                }
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__index__") {
                     let result = invoke_class_method(
@@ -4296,6 +4335,20 @@ impl Interpreter {
         match tag {
             Tag::Int => Ok(val.clone()),
             Tag::Instance(inst_rc) => {
+                // Issue #1929: an int/bool subclass is accepted as a sequence
+                // index (`[10,20,30][I(2)]`, `"abc"[I(1)]`, `b"abc"[I(0)]`) by
+                // its int value.  CPython uses the C int value directly (the
+                // object already *is* an int), so the backing wins even over a
+                // user `__index__` override.
+                let inst_val = Value::py_instance(Rc::clone(&inst_rc));
+                if let Some(backing) = coerce_subclass_backing(&inst_val, &[]) {
+                    if matches!(
+                        backing.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    ) {
+                        return Ok(backing);
+                    }
+                }
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__index__") {
                     let result = invoke_class_method(
@@ -4324,6 +4377,73 @@ impl Interpreter {
                 Err(pyrust_core::type_err!(seq_index_type_error(label, &type_name)))
             }
         }
+    }
+
+    /// Resolve the integer `length` argument of `int.to_bytes` through the
+    /// `__index__` protocol when it is a `PyInstance` (issue #1929: an int
+    /// subclass, e.g. `(255).to_bytes(I(2), "big")`, or a custom `__index__`
+    /// object).  Other args (`byteorder` str, `signed` bool) and the
+    /// no-instance fast path are left untouched so the receiver-side
+    /// `pyrust_builtins::int::to_bytes` validation is unchanged.
+    fn resolve_to_bytes_length(
+        &mut self,
+        method: &str,
+        pos: &mut [Value],
+        kw: &mut IndexMap<PyKey, Value>,
+    ) -> Result<()> {
+        if method != "to_bytes" {
+            return Ok(());
+        }
+        if let Some(first) = pos.first().cloned() {
+            if let Some(resolved) = self.try_resolve_index_value(&first)? {
+                pos[0] = resolved;
+            }
+        }
+        // Keyword `length=` form.
+        let length_key = PyKey::Str(Value::string("length"));
+        if let Some(v) = kw.get(&length_key).cloned() {
+            if let Some(resolved) = self.try_resolve_index_value(&v)? {
+                kw.insert(length_key, resolved);
+            }
+        }
+        Ok(())
+    }
+
+    /// If `v` is a `PyInstance` resolvable as an integer — either an int/bool
+    /// subclass (use the backing int, which wins over any `__index__` since the
+    /// object already *is* an int) or an object defining `__index__` (call it)
+    /// — return the resolved integer.  Returns `Ok(None)` for any non-instance
+    /// value and for instances that are not integer-like, so the caller leaves
+    /// the original value in place and the receiver-side validation raises the
+    /// canonical TypeError.
+    fn try_resolve_index_value(&mut self, v: &Value) -> Result<Option<Value>> {
+        if !matches!(v.kind(), ValueKind::PyInstance(_)) {
+            return Ok(None);
+        }
+        if let Some(backing) = coerce_subclass_backing(v, &[]) {
+            if matches!(
+                backing.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ) {
+                return Ok(Some(backing));
+            }
+        }
+        let class = match v.kind() {
+            ValueKind::PyInstance(inst) => Rc::clone(&inst.borrow().class),
+            _ => return Ok(None),
+        };
+        if let Some(method) = lookup_class_attr(&class, "__index__") {
+            let result = invoke_class_method(self, method, v.clone(), &[])?;
+            if matches!(
+                result.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ) {
+                return Ok(Some(result));
+            }
+            return Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
+                    value_type_name_str(&result),));
+        }
+        Ok(None)
     }
 }
 

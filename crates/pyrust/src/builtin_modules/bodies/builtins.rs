@@ -22,7 +22,7 @@ use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyIn
 use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
-    compare_values, compare_values_with_op, coerce_numeric, dir_names,
+    compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
@@ -76,6 +76,22 @@ pyrust_module! {
         // bool is handled by the typed overloads above; here we resolve a
         // user object's __index__ (mirroring bin/oct/hex), then apply the
         // same range check as the PyInt path. __int__ alone is not enough.
+        // Issue #1929: an int/bool subclass with no user `__index__` override
+        // inherits `int.__index__`, so `chr(I(65))` is accepted.  Resolve the
+        // backing int before the user-`__index__` dispatch below.
+        if let Some(backing) = coerce_subclass_backing(&i.0, &[]) {
+            match backing.kind() {
+                ValueKind::Bool(b) => return chr_from_code_point(if b { 1 } else { 0 }),
+                ValueKind::Int(v) => return chr_from_code_point(v),
+                ValueKind::BigInt(_) => {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "Python int too large to convert to C int".to_string(),
+                    ))
+                }
+                _ => {}
+            }
+        }
         if let ValueKind::PyInstance(inst) = i.0.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -204,6 +220,15 @@ pyrust_module! {
     }
 
     fn bin(#[positional_only] x: PyValue) -> Result<Value> {
+        // Issue #1929: int/bool subclass with inherited `int.__index__`.
+        if let Some(backing) = coerce_subclass_backing(&x.0, &[]) {
+            match backing.kind() {
+                ValueKind::Bool(b) => return Ok(Value::string(format_bin_i64(if b { 1 } else { 0 }))),
+                ValueKind::Int(v) => return Ok(Value::string(format_bin_i64(v))),
+                ValueKind::BigInt(b) => return Ok(Value::string(format_bigint_radix(b, 2, "0b"))),
+                _ => {}
+            }
+        }
         if let ValueKind::PyInstance(inst) = x.0.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -258,6 +283,15 @@ pyrust_module! {
     }
 
     fn oct(#[positional_only] x: PyValue) -> Result<Value> {
+        // Issue #1929: int/bool subclass with inherited `int.__index__`.
+        if let Some(backing) = coerce_subclass_backing(&x.0, &[]) {
+            match backing.kind() {
+                ValueKind::Bool(b) => return Ok(Value::string(format_oct_i64(if b { 1 } else { 0 }))),
+                ValueKind::Int(v) => return Ok(Value::string(format_oct_i64(v))),
+                ValueKind::BigInt(b) => return Ok(Value::string(format_bigint_radix(b, 8, "0o"))),
+                _ => {}
+            }
+        }
         if let ValueKind::PyInstance(inst) = x.0.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -316,6 +350,15 @@ pyrust_module! {
     }
 
     fn hex(#[positional_only] x: PyValue) -> Result<Value> {
+        // Issue #1929: int/bool subclass with inherited `int.__index__`.
+        if let Some(backing) = coerce_subclass_backing(&x.0, &[]) {
+            match backing.kind() {
+                ValueKind::Bool(b) => return Ok(Value::string(format_hex_i64(if b { 1 } else { 0 }))),
+                ValueKind::Int(v) => return Ok(Value::string(format_hex_i64(v))),
+                ValueKind::BigInt(b) => return Ok(Value::string(format_bigint_radix(b, 16, "0x"))),
+                _ => {}
+            }
+        }
         if let ValueKind::PyInstance(inst) = x.0.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -7859,6 +7902,25 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             slice_hash_cpython([hstart, hstop, hstep].into_iter().map(Ok))
         }
         ValueKind::PyInstance(inst) => {
+            // Issue #1936: a builtin-subclass instance (int/str/float/bytes/
+            // tuple/frozenset subclass) with no user `__hash__` override hashes
+            // by its backing value (`hash(I(5)) == hash(5)`).  Mirror the
+            // `value_to_pykey` path so `hash()` and dict/set keying agree.
+            if let Some(backing) = coerce_subclass_backing(value, &["__hash__"]) {
+                let hashable = matches!(
+                    backing.kind(),
+                    ValueKind::Int(_)
+                        | ValueKind::BigInt(_)
+                        | ValueKind::Bool(_)
+                        | ValueKind::Float(_)
+                        | ValueKind::Str(_)
+                        | ValueKind::Bytes(_)
+                        | ValueKind::Tuple(_)
+                ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
+                if hashable {
+                    return hash_value_with_interp(interp, &backing);
+                }
+            }
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             let class_name = class.borrow().name.clone();
