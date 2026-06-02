@@ -583,7 +583,11 @@ impl Interpreter {
                     "int" => {
                         pyrust_builtins::int::call(method, &self_val, &pos, &kw)
                     }
-                    "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos, &kw),
+                    "bytes" => {
+                        // Accept bytes-subclass / bytearray args (#1928).
+                        let pos = coerce_bytes_subclass_method_args(method, pos);
+                        pyrust_builtins::bytes::call(method, &self_val, &pos, &kw)
+                    }
                     "str" => {
                         if kw.is_empty() || method == "format" {
                             self.call_str_method(method, self_val, pos)
@@ -1039,7 +1043,12 @@ impl Interpreter {
                     let args_vec: Vec<Value> = std::mem::take(pos);
                     self.call_bytes_join(receiver, args_vec)
                 } else {
-                    pyrust_builtins::bytes::call(method, &receiver, &pos, &kw)
+                    // Accept bytes-subclass / bytearray args (#1928).
+                    let args_vec = coerce_bytes_subclass_method_args(
+                        method,
+                        std::mem::take(pos),
+                    );
+                    pyrust_builtins::bytes::call(method, &receiver, &args_vec, &kw)
                 }
             }
             Kind::Str => {
@@ -1177,7 +1186,23 @@ impl Interpreter {
                 pyrust_builtins::complex::call(method, &receiver, args_vec)
             }
             ValueKind::BuiltinObject { ops, state } => {
-                let args_vec: Vec<Value> = std::mem::take(pos);
+                let mut args_vec: Vec<Value> = std::mem::take(pos);
+                // bytearray methods accept bytes-subclass / bytearray args
+                // (#1928); coerce them to a real `Bytes` value before the
+                // receiver-only ops extractors (which match exact `Bytes`) see
+                // them.  Other BuiltinObject types (frozenset) are untouched.
+                if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME {
+                    if method == "join" {
+                        // join's single iterable arg holds the items to join;
+                        // coerce its bytes-subclass / bytearray elements.
+                        args_vec = args_vec
+                            .into_iter()
+                            .map(coerce_bytes_subclass_join_iterable)
+                            .collect();
+                    } else {
+                        args_vec = coerce_bytes_subclass_method_args(method, args_vec);
+                    }
+                }
                 // Thread any keyword arguments through to the builtin object
                 // (e.g. `bytearray.split(maxsplit=1)`); `call_method` keeps its
                 // kwargs `String`-keyed.
@@ -1406,6 +1431,11 @@ impl Interpreter {
                                     pyrust_builtins::float::call(method, f, &args_vec)
                                 }
                                 BkKind::Bytes => {
+                                    // Accept bytes-subclass / bytearray args
+                                    // (#1928).
+                                    let args_vec = coerce_bytes_subclass_method_args(
+                                        method, args_vec,
+                                    );
                                     pyrust_builtins::bytes::call(
                                         method,
                                         &backing,
@@ -1654,9 +1684,10 @@ impl Interpreter {
             },
         };
         // Restore the positional-args buffer.  For borrow arms (Int,
-        // Float, Bytes, Str::format) pos still holds all elements with
-        // full capacity.  For mem::take arms pos is an empty zero-cap Vec
-        // (its old buffer went to the callee); it re-grows on next call.
+        // Float, Str::format) pos still holds all elements with full
+        // capacity.  For mem::take arms (Bytes, Str, List, …) pos is an
+        // empty zero-cap Vec (its old buffer went to the callee); it
+        // re-grows on next call.
         result
     }
 
