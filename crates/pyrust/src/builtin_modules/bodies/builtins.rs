@@ -25,10 +25,10 @@ use crate::interpreter::{
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-    float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
+    float_divmod, float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
     invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
-    py_hash_int, py_mod_i64, py_round_half_even, round_float_ndigits,
+    py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
     sync_module_env_to_globals_dict, type_class_singleton,
@@ -2676,7 +2676,7 @@ pyrust_module! {
                 }
             }
             NumKind::Float(v) => match ndigits_i32 {
-                None => Ok(Value::int(py_round_half_even(v))),
+                None => Ok(Value::int(py_round_half_even_checked(v)?)),
                 Some(n) => round_float_ndigits(v, n),
             },
             NumKind::Other => {
@@ -2801,7 +2801,7 @@ pyrust_module! {
                             _ => Ok(Value::bigint(b.clone())),
                         },
                         ValueKind::Float(v) => return match ndigits_i32_coerced {
-                            None => Ok(Value::int(py_round_half_even(v))),
+                            None => Ok(Value::int(py_round_half_even_checked(v)?)),
                             Some(n) => round_float_ndigits(v, n),
                         },
                         _ => {}
@@ -7364,8 +7364,9 @@ fn divmod_float_float(a: f64, b: f64) -> crate::error::Result<Value> {
             "float divmod()".to_string(),
         ));
     }
-    let quotient = (a / b).floor();
-    let modulo = a - b * quotient;
+    // CPython's fmod-based float_divmod handles infinities and signed zeros
+    // correctly and keeps divmod consistent with `//` and `%` (#2025).
+    let (quotient, modulo) = float_divmod(a, b);
     Ok(Value::tuple(vec![Value::float(quotient), Value::float(modulo)]))
 }
 

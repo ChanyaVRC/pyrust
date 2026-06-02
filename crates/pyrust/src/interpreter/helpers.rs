@@ -1815,6 +1815,44 @@ pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
     remainder
 }
 
+/// Port of CPython's `float_divmod` (Objects/floatobject.c).
+///
+/// Returns `(floordiv, mod)` for non-zero divisor `b`, using `fmod` so that
+/// infinities and signed zeros propagate exactly as in CPython:
+///   - `divmod(inf, 1)` → `(nan, nan)` (the `(a - mod)/b` quotient is nan)
+///   - `divmod(5.0, inf)` → `(0.0, 5.0)`, `divmod(-5.0, inf)` → `(-1.0, inf)`
+///
+/// The remainder matches the `%` operator and the quotient matches `//`,
+/// keeping `divmod(a, b) == (a // b, a % b)` for floats.  The caller is
+/// responsible for raising `ZeroDivisionError` when `b == 0`.
+pub(crate) fn float_divmod(a: f64, b: f64) -> (f64, f64) {
+    let mut mod_ = a % b; // fmod(a, b)
+    let mut div = (a - mod_) / b;
+    if mod_ != 0.0 {
+        // Snap the remainder's sign to the divisor's, adjusting the quotient.
+        if (b < 0.0) != (mod_ < 0.0) {
+            mod_ += b;
+            div -= 1.0;
+        }
+    } else {
+        // The remainder is zero; ensure it has the sign of the divisor.
+        mod_ = 0.0_f64.copysign(b);
+    }
+    let floordiv = if div != 0.0 {
+        let fl = div.floor();
+        // Round-half-up on the quotient boundary, as CPython does.
+        if div - fl > 0.5 {
+            fl + 1.0
+        } else {
+            fl
+        }
+    } else {
+        // div is zero; ensure it has the sign of a/b.
+        0.0_f64.copysign(a / b)
+    };
+    (floordiv, mod_)
+}
+
 /// CPython's Py_HASH_MODULUS = 2^61 - 1 (Mersenne prime).
 ///
 /// Used by `py_hash_int` and `py_hash_bigint` to reduce hash values the
@@ -4845,6 +4883,30 @@ pub(crate) fn py_round_half_even(v: f64) -> i64 {
             floor_i + 1
         }
     }
+}
+
+/// Round a float to the nearest integer (banker's rounding) for `round(x)`
+/// with no `ndigits`, which returns an `int`.  Non-finite inputs cannot be
+/// converted to an integer, so they raise the same errors as `int(float)` /
+/// `math.floor` / `math.ceil`:
+/// - `OverflowError("cannot convert float infinity to integer")` for ±inf
+/// - `ValueError("cannot convert float NaN to integer")` for NaN
+///
+/// Finite inputs delegate to [`py_round_half_even`].
+pub(crate) fn py_round_half_even_checked(v: f64) -> crate::error::Result<i64> {
+    if v.is_nan() {
+        return Err(crate::error::PyError::named(
+            "ValueError",
+            "cannot convert float NaN to integer".to_string(),
+        ));
+    }
+    if v.is_infinite() {
+        return Err(crate::error::PyError::named(
+            "OverflowError",
+            "cannot convert float infinity to integer".to_string(),
+        ));
+    }
+    Ok(py_round_half_even(v))
 }
 
 /// Round an f64 to `ndigits` decimal places using CPython's half-even semantics.

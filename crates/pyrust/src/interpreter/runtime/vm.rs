@@ -336,7 +336,10 @@ fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
                 // ZeroDivisionError — fall through to eval_binary.
                 None
             } else {
-                Some(Value::float((a / b).floor()))
+                // CPython's fmod-based float_divmod: handles inf/nan/signed-zero
+                // and keeps `//` consistent with `divmod`/`%` (#2025).
+                let (div, _) = float_divmod(a, b);
+                Some(Value::float(div))
             }
         }
         BinaryOp::Mod => {
