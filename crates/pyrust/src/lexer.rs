@@ -572,6 +572,47 @@ fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate underscore placement in a decimal/float literal slice (PEP 515).
+///
+/// Unlike [`validate_underscores`] (which permits a leading underscore right
+/// after a base prefix, as in `0x_FF`), a decimal/float literal requires every
+/// `_` to sit **between two ASCII digits**.  This single rule rejects every
+/// misplaced case CPython rejects: leading (`_1`), trailing (`1_`), doubled
+/// (`1__0`), and any underscore adjacent to `.`, `e`/`E`, or a sign (`1_.5`,
+/// `1.5_`, `1.0_e5`, `1.e_5`, `1e_5`, `1e5_`, `1e+_5`).
+///
+/// `raw` is the full literal slice (digits, `.`, `e`/`E`, `+`/`-`); the value
+/// is parsed only after stripping the `_`s.
+fn validate_decimal_underscores(raw: &[char]) -> Result<()> {
+    for (i, &c) in raw.iter().enumerate() {
+        if c == '_' {
+            let prev_digit = i > 0 && raw[i - 1].is_ascii_digit();
+            let next_digit = raw.get(i + 1).is_some_and(|n| n.is_ascii_digit());
+            if !prev_digit || !next_digit {
+                return Err(PyError::Lex("invalid decimal literal".to_string()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject leading zeros in a decimal integer literal (CPython rule).
+///
+/// `raw` is the integer literal slice (decimal digits and `_` only — no `.`,
+/// `e`, or `j`).  A literal that starts with `0` is only valid if every digit
+/// is `0` (`0`, `00`, `0_0`); any nonzero digit (`0123`, `09`, `0_1`) is a
+/// `SyntaxError`.  Underscore placement is assumed already validated.
+fn check_leading_zero(raw: &[char]) -> Result<()> {
+    if raw.first() == Some(&'0') && raw.iter().any(|&c| c.is_ascii_digit() && c != '0') {
+        return Err(PyError::Lex(
+            "leading zeros in decimal integer literals are not permitted; \
+             use an 0o prefix for octal integers"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Lex a leading-dot float literal: `.DIGITS[e[+-]DIGITS]` or `.DIGITSj`.
 /// `start` points at the `.` character.  The caller has already verified that
 /// the character at `start+1` is a decimal digit.
@@ -580,17 +621,19 @@ fn lex_leading_dot_float(chars: &[char], start: usize) -> Result<(Token, usize)>
     while matches!(chars.get(pos), Some('0'..='9' | '_')) {
         pos += 1;
     }
-    // Optional exponent
+    // Optional exponent (underscores permitted between digits per PEP 515).
     if matches!(chars.get(pos), Some(&'e') | Some(&'E')) {
         pos += 1;
         if matches!(chars.get(pos), Some(&'+') | Some(&'-')) {
             pos += 1;
         }
-        while matches!(chars.get(pos), Some('0'..='9')) {
+        while matches!(chars.get(pos), Some('0'..='9' | '_')) {
             pos += 1;
         }
     }
-    let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
+    let raw = &chars[start..pos];
+    validate_decimal_underscores(raw)?;
+    let text: String = raw.iter().filter(|&&c| c != '_').collect();
     let val = text
         .parse::<f64>()
         .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
@@ -677,6 +720,10 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
     while matches!(chars.get(pos), Some('0'..='9' | '_')) {
         pos += 1;
     }
+    // End of the integer-part digit run; needed for the leading-zero check on a
+    // pure decimal integer literal (the `.`/`e`/`j` cases below are floats /
+    // complex and are exempt from the leading-zero rule).
+    let int_end = pos;
 
     // Accept DIGITS. (trailing-dot float: `1.`, `1.e5`) as well as DIGITS.DIGITS
     // (standard float: `1.5`).  In CPython, `1.` tokenises as float `1.0` and
@@ -685,32 +732,28 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
     // consume the dot is when the first character of the integer part indicates a
     // non-decimal literal (0x / 0o / 0b) — those are handled above and never
     // reach here.
-    // Consume the dot only when the character immediately after it is a digit,
-    // an exponent marker, an imaginary suffix, or end-of-significant-input.
-    // Specifically, do NOT consume it when the next character is `_`: `1._5` is a
-    // SyntaxError in CPython because an underscore may not follow the decimal point
-    // directly (it must separate digit groups, not start one).
-    if chars.get(pos) == Some(&'.') && !matches!(chars.get(pos + 1), Some(&'_')) {
+    if chars.get(pos) == Some(&'.') {
         pos += 1; // consume the dot
-        // Optional fractional digits — first character must be a decimal digit, not `_`.
-        // Subsequent characters may include `_` as a group separator.
-        if matches!(chars.get(pos), Some('0'..='9')) {
+        // Optional fractional digit run.  We greedily consume `_` here too (e.g.
+        // the leading `_` of `1._5`) so PEP 515 validation over the whole slice
+        // can reject misplaced underscores rather than silently splitting them
+        // into a separate token.
+        while matches!(chars.get(pos), Some('0'..='9' | '_')) {
             pos += 1;
-            while matches!(chars.get(pos), Some('0'..='9' | '_')) {
-                pos += 1;
-            }
         }
-        // Optional exponent
+        // Optional exponent (underscores permitted between digits per PEP 515).
         if matches!(chars.get(pos), Some(&'e') | Some(&'E')) {
             pos += 1;
             if matches!(chars.get(pos), Some(&'+') | Some(&'-')) {
                 pos += 1;
             }
-            while matches!(chars.get(pos), Some('0'..='9')) {
+            while matches!(chars.get(pos), Some('0'..='9' | '_')) {
                 pos += 1;
             }
         }
-        let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
+        let raw = &chars[start..pos];
+        validate_decimal_underscores(raw)?;
+        let text: String = raw.iter().filter(|&&c| c != '_').collect();
         let val = text
             .parse::<f64>()
             .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
@@ -720,18 +763,21 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         Ok((Token::Float(val), pos))
     } else {
-        // Optional exponent on integer-looking floats like 1e5
+        // Optional exponent on integer-looking floats like 1e5 (underscores
+        // permitted between digits per PEP 515).
         if matches!(chars.get(pos), Some(&'e') | Some(&'E')) {
             pos += 1;
             if matches!(chars.get(pos), Some(&'+') | Some(&'-')) {
                 pos += 1;
             }
             let exp_start = pos;
-            while matches!(chars.get(pos), Some('0'..='9')) {
+            while matches!(chars.get(pos), Some('0'..='9' | '_')) {
                 pos += 1;
             }
             if pos > exp_start {
-                let text: String = chars[start..pos].iter().collect();
+                let raw = &chars[start..pos];
+                validate_decimal_underscores(raw)?;
+                let text: String = raw.iter().filter(|&&c| c != '_').collect();
                 let val = text
                     .parse::<f64>()
                     .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
@@ -741,18 +787,20 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
                 return Ok((Token::Float(val), pos));
             }
         }
-        // Imaginary suffix on bare int: 5j
+        // Imaginary suffix on bare int: 5j.  Exempt from the leading-zero rule
+        // (`01j` is a valid complex literal in CPython).
         if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
             let raw_imag = &chars[start..pos];
-            validate_underscores(raw_imag, "decimal")?;
+            validate_decimal_underscores(raw_imag)?;
             let text: String = raw_imag.iter().filter(|&&c| c != '_').collect();
             let val = text
                 .parse::<f64>()
                 .map_err(|_| PyError::Lex(format!("invalid imaginary literal '{text}j'")))?;
             return Ok((Token::Imag(val), pos + 1));
         }
-        let raw_dec = &chars[start..pos];
-        validate_underscores(raw_dec, "decimal")?;
+        let raw_dec = &chars[start..int_end];
+        validate_decimal_underscores(raw_dec)?;
+        check_leading_zero(raw_dec)?;
         let text: String = raw_dec.iter().filter(|&&c| c != '_').collect();
         match text.parse::<i64>() {
             Ok(val) => Ok((Token::Int(val), pos)),
