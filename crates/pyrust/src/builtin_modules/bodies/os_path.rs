@@ -96,12 +96,11 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/os.path.html#os.path.dirname>
     fn dirname(args) -> Result<Value> {
         let path = single_path(FN_NAME, args)?;
-        let p = Path::new(&path);
-        let dir = match p.parent() {
-            Some(parent) => parent.to_string_lossy().into_owned(),
-            None => String::new(),
-        };
-        Ok(Value::string(dir))
+        // CPython: `dirname(p) == split(p)[0]`.  Rust's `Path::parent`
+        // diverges on trailing/repeated slashes (`dirname('/')` should be
+        // `'/'`, `dirname('a/')` should be `'a'`), so reuse `posix_split`.
+        let (head, _) = posix_split(&path);
+        Ok(Value::string(head))
     }
 
     /// CPython: os.path.basename(path) — final path component, or `""`
