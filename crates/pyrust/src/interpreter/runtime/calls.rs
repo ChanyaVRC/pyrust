@@ -2775,24 +2775,6 @@ impl Interpreter {
             // argument: 'x'" rather than the bare "__new__()".
             check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
 
-            // Memoization: build cache key by borrowing from bound_args — no extra clone.
-            // MemoKey wraps PyKey and includes the ValueKind discriminant so that
-            // Float(1.0) and Int(1) — equal as PyKey but distinct types — are never
-            // treated as the same cache entry (fixes #562).
-            let cache_key: Option<(u64, Vec<MemoKey>)> = if function.is_pure {
-                bound_args
-                    .iter()
-                    .map(|v| v.as_ref().unwrap().to_key().map(MemoKey))
-                    .collect::<Option<Vec<MemoKey>>>()
-                    .map(|keys| (function.id, keys))
-            } else {
-                None
-            };
-            if let Some(ref ck) = cache_key
-                && let Some(cached) = self.fn_cache.get(ck).cloned() {
-                    return Ok(cached);
-                }
-
             // Tier-0: register-VM path — try compiled bytecode before any env allocation.
             if let Some(code) = self.get_or_compile_bytecode(&function) {
                 let num_regs = code.num_regs as usize;
@@ -2828,24 +2810,40 @@ impl Interpreter {
                         e.local_names = Rc::clone(&function.local_names);
                         e.global_names = Rc::clone(&function.global_names);
                         e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                        for (param, slot) in function.params.iter().zip(bound_args.iter_mut()) {
+                        for ((param, bind), slot) in function
+                            .params
+                            .iter()
+                            .zip(function.param_binds.iter())
+                            .zip(bound_args.iter_mut())
+                        {
                             let val = slot.take().unwrap();
-                            if code.cell_vars.contains(&param.name) {
-                                e.values.insert(param.name.clone(), val);
-                            } else if let Some(&reg) = function.local_index.get(&param.name) {
-                                if reg as usize >= num_regs {
-                                    return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
-                                            param.name, reg, num_regs));
+                            match *bind {
+                                pyrust_core::ParamBind::Cell => {
+                                    e.values.insert(param.name.clone(), val);
                                 }
-                                regs[reg as usize] = val;
+                                pyrust_core::ParamBind::Reg(reg) => {
+                                    if reg as usize >= num_regs {
+                                        return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
+                                                param.name, reg, num_regs));
+                                    }
+                                    regs[reg as usize] = val;
+                                }
+                                pyrust_core::ParamBind::None => {}
                             }
                         }
                     }
                     std::mem::replace(&mut self.env, local_env)
                 } else {
-                    for (param, slot) in function.params.iter().zip(bound_args.iter_mut()) {
+                    for ((param, bind), slot) in function
+                        .params
+                        .iter()
+                        .zip(function.param_binds.iter())
+                        .zip(bound_args.iter_mut())
+                    {
                         let val = slot.take().unwrap();
-                        if let Some(&reg) = function.local_index.get(&param.name) {
+                        // `needs_local_env` is false here, so no parameter is a
+                        // cell var; only `Reg` / `None` are possible.
+                        if let pyrust_core::ParamBind::Reg(reg) = *bind {
                             if reg as usize >= num_regs {
                                 return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
                                         param.name, reg, num_regs));
@@ -2856,15 +2854,15 @@ impl Interpreter {
                     std::mem::replace(&mut self.env, Rc::clone(&function.env))
                 };
 
-                // Self-reference for recursive calls (only if not a cell var).
-                if !code.cell_vars.contains(&function.name)
-                    && let Some(&slot) = function.local_index.get(&function.name) {
-                        if slot as usize >= num_regs {
-                            return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
-                                    slot, num_regs));
-                        }
-                        regs[slot as usize] = Value::user_function(Rc::clone(&function));
+                // Self-reference for recursive calls (only if not a cell var) —
+                // bind slot precomputed at compile time (#1918).
+                if let Some(slot) = function.self_bind {
+                    if slot as usize >= num_regs {
+                        return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
+                                slot, num_regs));
                     }
+                    regs[slot as usize] = Value::user_function(Rc::clone(&function));
+                }
 
                 // Generator function: create a frame rather than executing.
                 if code.is_generator {
@@ -2958,9 +2956,6 @@ impl Interpreter {
                     self.free_env(used_env);
                 }
                 let value = vm_result?;
-                if let Some(ck) = cache_key {
-                    self.fn_cache.insert(ck, value.clone());
-                }
                 return Ok(value);
             }
 
@@ -3112,26 +3107,30 @@ impl Interpreter {
             let num_regs = code.num_regs as usize;
             let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
 
-            // Bind non-cell params into register file using fastlocals slot indices.
-            for (param, val) in function.params.iter().zip(param_vals.iter()) {
-                if !code.cell_vars.contains(&param.name)
-                    && let Some(&slot) = function.local_index.get(&param.name) {
-                        if (slot as usize) >= num_regs {
-                            return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
-                                    param.name, slot, num_regs));
-                        }
-                        regs[slot as usize] = val.clone();
+            // Bind non-cell params into register file using precomputed slots
+            // (#1918).  Cell-var params are inserted into the env below.
+            for ((param, bind), val) in function
+                .params
+                .iter()
+                .zip(function.param_binds.iter())
+                .zip(param_vals.iter())
+            {
+                if let pyrust_core::ParamBind::Reg(slot) = *bind {
+                    if (slot as usize) >= num_regs {
+                        return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
+                                param.name, slot, num_regs));
                     }
+                    regs[slot as usize] = val.clone();
+                }
             }
             // Self-reference for recursive calls (only if not a cell var).
-            if !code.cell_vars.contains(&function.name)
-                && let Some(&slot) = function.local_index.get(&function.name) {
-                    if (slot as usize) >= num_regs {
-                        return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
-                                slot, num_regs));
-                    }
-                    regs[slot as usize] = Value::user_function(Rc::clone(&function));
+            if let Some(slot) = function.self_bind {
+                if (slot as usize) >= num_regs {
+                    return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
+                            slot, num_regs));
                 }
+                regs[slot as usize] = Value::user_function(Rc::clone(&function));
+            }
 
             let _depth_guard = CallDepthGuard::enter();
             if call_depth() > max_call_depth() {
@@ -3162,8 +3161,13 @@ impl Interpreter {
                     e.global_names = Rc::clone(&function.global_names);
                     e.nonlocal_names = Rc::clone(&function.nonlocal_names);
                     // Store cell var params in the env so inner closures can capture them.
-                    for (param, val) in function.params.iter().zip(param_vals.iter()) {
-                        if code.cell_vars.contains(&param.name) {
+                    for ((param, bind), val) in function
+                        .params
+                        .iter()
+                        .zip(function.param_binds.iter())
+                        .zip(param_vals.iter())
+                    {
+                        if *bind == pyrust_core::ParamBind::Cell {
                             e.values.insert(param.name.clone(), val.clone());
                         }
                     }
@@ -7128,6 +7132,8 @@ impl Interpreter {
         let proto_name = proto.name.clone();
         let proto_qualname = proto.qualname.clone();
         let proto_local_index = Rc::clone(&proto.local_index);
+        let proto_param_binds = Rc::clone(&proto.param_binds);
+        let proto_self_bind = proto.self_bind;
         let proto_local_names = Rc::clone(&proto.local_names);
         let proto_global_names = Rc::clone(&proto.global_names);
         let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
@@ -7178,6 +7184,8 @@ impl Interpreter {
             attrs: std::cell::RefCell::new(None),
             annotations: std::cell::RefCell::new(annotations),
             params,
+            param_binds: proto_param_binds,
+            self_bind: proto_self_bind,
             local_names: proto_local_names,
             local_index: proto_local_index,
             global_names: proto_global_names,

@@ -45,6 +45,16 @@ pub struct FnProto {
     pub param_spec: Rc<FnParamSpec>,
     pub code: Rc<FnCode>,
     pub local_index: Rc<HashMap<String, Reg>>,
+    /// Precomputed bind target for each parameter (parallel to
+    /// `param_spec.names`), resolved once at compile time so the call path binds
+    /// positional arguments by register index instead of hashing the parameter
+    /// name on every call (issue #1918).  Shared via `Rc` onto every
+    /// `UserFunction` built from this prototype.
+    pub param_binds: Rc<Vec<pyrust_core::ParamBind>>,
+    /// Precomputed self-reference register (the slot the recursive-call name
+    /// binds to), or `None` when the function name has no local register slot
+    /// or is a cell var.
+    pub self_bind: Option<Reg>,
     /// Pre-computed set of local variable names (keys of `local_index`).
     /// Avoids an O(n) `HashSet` rebuild on every `MakeFunction` call.
     pub local_names: Rc<HashSet<String>>,
@@ -69,6 +79,49 @@ pub struct FnProto {
     /// `SmallVec<[_; 2]>` avoids heap allocation for the typical case of
     /// zero to two keyword arguments in a class header.
     pub class_kwarg_names: SmallVec<[String; 2]>,
+}
+
+/// Resolve each parameter's static bind target once at compile time
+/// (issue #1918).  A parameter that is captured as a cell var binds into the
+/// local env by name; otherwise it binds into its register slot; a parameter
+/// with no local slot (an unused variadic placeholder) binds to nothing.
+///
+/// Mirrors the per-call decision the binding loop used to make, hoisted out of
+/// the hot path so the call only does a direct `match` on the precomputed slot.
+pub fn compute_param_binds(
+    param_spec: &FnParamSpec,
+    local_index: &HashMap<String, Reg>,
+    cell_vars: &[CellVar],
+) -> Vec<pyrust_core::ParamBind> {
+    use pyrust_core::ParamBind;
+    param_spec
+        .names
+        .iter()
+        .map(|name| {
+            if cell_vars.iter().any(|c| c == name) {
+                ParamBind::Cell
+            } else if let Some(&reg) = local_index.get(name) {
+                ParamBind::Reg(reg)
+            } else {
+                ParamBind::None
+            }
+        })
+        .collect()
+}
+
+/// Resolve the self-reference register for recursive calls once at compile
+/// time: the slot the function's own name binds to, unless that name is a cell
+/// var or has no local register.
+pub fn compute_self_bind(
+    name: &str,
+    local_index: &HashMap<String, Reg>,
+    cell_vars: &[CellVar],
+) -> Option<Reg> {
+    if cell_vars.iter().any(|c| c == name) {
+        None
+    } else {
+        local_index.get(name).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -179,7 +232,10 @@ pub enum Insn {
     CmpJumpIfTrueConst(Reg, BinaryOp, u16, i32),
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
-    /// Like Call but VM tries fn_cache before dispatching (emitted for known-pure callees).
+    /// Marks a call to a statically-pure callee (emitted for known-pure
+    /// callees).  Executes identically to `Call`; the variant is retained so
+    /// the optimizer can use the purity guarantee for DCE / TCO.  (The former
+    /// result-memoization was removed in #1987.)
     CallMemo(Reg, u8),
     /// R[dst] = R[obj].names[name_idx](R[args_base..args_base+nargs])
     /// Dispatches directly to pyrust_builtins without going through GetAttr.
