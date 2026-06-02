@@ -1547,6 +1547,16 @@ impl Interpreter {
                 _ => {}
             }
         }
+        // Issue #1957: `obj.__class__ = NewType` re-types the instance rather
+        // than storing a literal attribute.  CPython requires the value to be
+        // a class; anything else raises TypeError.  For pyrust's attrs-map
+        // instance model, retyping is just pointing the instance at the new
+        // class (the layout is always compatible).  `__class__` is a type-level
+        // slot, not a per-instance attribute, so this is handled *before*
+        // `__slots__` enforcement — a slotted instance can still be re-typed.
+        if name == "__class__" {
+            return self.retype_instance(&instance, value);
+        }
         // Issue #1106: if the class declares `__slots__`, only allow assignment
         // to names in the slot set.  CPython raises AttributeError for names not
         // listed in `__slots__` (when the class has no __dict__ slot).
@@ -1576,6 +1586,38 @@ impl Interpreter {
             return replace_instance_dict(&instance, &value);
         }
         instance.borrow_mut().attrs.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    /// Re-type an instance via `obj.__class__ = NewType` (issue #1957).
+    /// Validates that the value is a re-typable (mutable, non-primitive) class
+    /// and repoints the instance's `class` field.  Shared by the public and
+    /// raw setattr paths.
+    fn retype_instance(
+        &mut self,
+        instance: &Rc<RefCell<PyInstance>>,
+        value: Value,
+    ) -> Result<()> {
+        let new_class = match value.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                let type_name = pyrust_core::builtin_type_name(&value);
+                return Err(pyrust_core::type_err!(
+                    "__class__ must be set to a class, not '{type_name}' object"
+                ));
+            }
+        };
+        // CPython only allows __class__ reassignment between mutable
+        // (heap) types.  Re-typing to a built-in immutable class
+        // (int / str / list / object / …) raises TypeError.
+        if crate::interpreter::is_primitive_class(&new_class)
+            || Rc::ptr_eq(&new_class, &object_class_singleton())
+        {
+            return Err(pyrust_core::type_err!(
+                "__class__ assignment only supported for mutable types or ModuleType subclasses"
+            ));
+        }
+        instance.borrow_mut().class = new_class;
         Ok(())
     }
 
@@ -1855,6 +1897,14 @@ impl Interpreter {
                     _ => {}
                 }
             }
+            // Issue #1957: `obj.__class__ = NewType` re-types the instance
+            // rather than storing a literal attribute (see `retype_instance`).
+            // `__class__` is a type-level slot, not a per-instance attribute,
+            // so it is handled *before* `__slots__` enforcement — a slotted
+            // instance can still be re-typed.
+            if name == "__class__" {
+                return self.retype_instance(instance, value);
+            }
             // Issue #1106: if the class declares `__slots__`, only allow
             // assignment to names in the slot set.  When `__dict__` is
             // explicitly listed as a slot, arbitrary attribute assignment
@@ -1905,6 +1955,31 @@ impl Interpreter {
             // raises AttributeError on direct assignment.
             if name == "__dict__" {
                 return Err(pyrust_core::py_err!("AttributeError", "attribute '__dict__' of 'type' objects is not writable"));
+            }
+            // Issue #1970: __name__ is a type-level descriptor on `type` in
+            // CPython — assigning it renames the class (updating the field the
+            // __name__ getter and repr read), not the class attrs dict.
+            // CPython requires a str; anything else raises TypeError.
+            if name == "__name__" {
+                let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
+                    Some(s.to_string())
+                } else {
+                    None
+                };
+                match as_str {
+                    Some(s) => {
+                        class.borrow_mut().name = s;
+                        return Ok(());
+                    }
+                    None => {
+                        let type_name = pyrust_core::builtin_type_name(&value).into_owned();
+                        return Err(pyrust_core::type_err!(
+                            "can only assign string to {}.__name__, not '{}'",
+                            class.borrow().name,
+                            type_name,
+                        ));
+                    }
+                }
             }
             // Issue #553: __qualname__ is a type-level descriptor on `type`
             // in CPython — assigning it updates the descriptor slot, not the

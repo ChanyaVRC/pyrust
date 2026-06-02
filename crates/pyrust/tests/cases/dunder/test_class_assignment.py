@@ -1,0 +1,76 @@
+# Issue #1957: `obj.__class__ = NewType` re-types the instance.
+class X:
+    pass
+
+
+class Y:
+    pass
+
+
+o = X()
+o.__class__ = Y
+print(type(o).__name__)
+print(isinstance(o, Y))
+print(isinstance(o, X))
+print(o.__class__.__name__)
+
+# Re-typing preserves the instance's existing attributes.
+o2 = X()
+o2.tag = 7
+o2.__class__ = Y
+print(o2.tag)
+
+# Round-trip back to the original class.
+o2.__class__ = X
+print(type(o2).__name__)
+
+# Assigning a non-class raises TypeError with CPython's message.
+try:
+    o.__class__ = 5
+except TypeError as e:
+    print(e)
+
+try:
+    o.__class__ = "str"
+except TypeError as e:
+    print(e)
+
+# Re-typing to a built-in immutable class is rejected (CPython parity).
+for T in (int, str, list, tuple, dict, object):
+    try:
+        X().__class__ = T
+        print(T.__name__, "unexpected OK")
+    except TypeError as e:
+        print(T.__name__, e)
+
+
+# Re-typing works even when the instance's class declares __slots__:
+# __class__ is a type-level slot, not subject to __slots__ enforcement.
+class SA:
+    __slots__ = ("x",)
+
+
+class SB:
+    __slots__ = ("x",)
+
+
+sa = SA()
+sa.x = 11
+sa.__class__ = SB
+print(type(sa).__name__, sa.x)
+
+# Methods resolve through the new class after re-typing.
+class WhoA:
+    def who(self):
+        return "A"
+
+
+class WhoB:
+    def who(self):
+        return "B"
+
+
+w = WhoA()
+print(w.who())
+w.__class__ = WhoB
+print(w.who())
