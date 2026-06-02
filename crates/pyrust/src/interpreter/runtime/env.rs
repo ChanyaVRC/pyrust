@@ -3084,6 +3084,17 @@ fn class_direct_subclasses(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {
 /// Returns `true` if `name` is a built-in method on `target`'s type.
 /// Used by `get_attr` to produce `BuiltinBoundMethod` values.
 fn builtin_has_method(target: &Value, name: &str) -> bool {
+    // Issue #1909: container/sequence protocol dunders (`__len__`,
+    // `__getitem__`, `__contains__`, `__add__`, …) are advertised by
+    // `dir`/`hasattr` and resolvable as bound method-wrappers.  Gated on the
+    // `__` prefix so the common method-name lookup (`lst.append`, `s.upper`)
+    // pays only a cheap byte comparison before the per-type table below.
+    if name.starts_with("__") {
+        let type_name = pyrust_core::builtin_type_name(target);
+        if builtin_protocol_dunders(&type_name).contains(&name) {
+            return true;
+        }
+    }
     match target.kind() {
         // bool is a subclass of int; hasattr(True, "bit_length") must return True.
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
