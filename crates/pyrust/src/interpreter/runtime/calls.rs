@@ -8056,6 +8056,12 @@ impl Interpreter {
                     };
                 }
             }
+            // InstanceAttr / SetInstanceAttr are GetAttr / SetAttr-only entries
+            // (#1912 / #1998).  A CallMethod site never produces them, but be
+            // defensive: drop to Empty so the next pass can refill correctly.
+            AttrCacheEntry::InstanceAttr { .. } | AttrCacheEntry::SetInstanceAttr { .. } => {
+                cache[call_site_pc] = AttrCacheEntry::Empty;
+            }
         }
     }
     /// Inline-cache fast path for `obj.method(...)` on a user-defined

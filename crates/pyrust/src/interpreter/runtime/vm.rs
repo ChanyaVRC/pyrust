@@ -1589,8 +1589,39 @@ impl Interpreter {
                     }
                     let fast = {
                         let cache = code.attr_cache.borrow();
-                        if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
-                            &cache[pc - 1]
+                        match &cache[pc - 1] {
+                          // Instance-attribute read cache (#1912): the name has
+                          // no data-descriptor shadow on the class, so the
+                          // instance __dict__ takes priority.  Probe it directly,
+                          // skipping the MRO walk in get_attr_instance_raw.
+                          AttrCacheEntry::InstanceAttr { class_ptr, class_version, epoch } => {
+                            if let Some(inst_rc) = regs[*obj as usize].as_py_instance_rc() {
+                                let inst = inst_rc.borrow();
+                                let same_class =
+                                    Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                                let version_ok = inst.class.borrow().mutation_version.get()
+                                    == *class_version;
+                                let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                                if same_class && version_ok && epoch_ok {
+                                    let name = code
+                                        .names
+                                        .get(*name_idx as usize)
+                                        .map(|s| s.as_str());
+                                    match name.and_then(|n| inst.attrs.get(n)) {
+                                        Some(v) => AttrFastResult::Hit(v.clone()),
+                                        // Not in the instance dict — fall to the
+                                        // slow path (method / non-data descriptor
+                                        // / __getattr__ / AttributeError).
+                                        None => AttrFastResult::Miss,
+                                    }
+                                } else {
+                                    AttrFastResult::Miss
+                                }
+                            } else {
+                                AttrFastResult::Miss
+                            }
+                          }
+                          AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =>
                         {
                             // Check: object is a PyInstance, same class, no
                             // instance shadow, class not mutated, and the global
@@ -1694,8 +1725,8 @@ impl Interpreter {
                             } else {
                                 AttrFastResult::Miss
                             }
-                        } else {
-                            AttrFastResult::Miss
+                        }
+                          _ => AttrFastResult::Miss,
                         }
                     };
                     match fast {
@@ -1715,7 +1746,8 @@ impl Interpreter {
                                 let mut cache = code.attr_cache.borrow_mut();
                                 match &cache[pc - 1] {
                                     AttrCacheEntry::Megamorphic => {}
-                                    AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
+                                    AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. }
+                                    | AttrCacheEntry::InstanceAttr { class_ptr: existing_ptr, .. } => {
                                         if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                                             let new_ptr =
                                                 Rc::as_ptr(&inst_rc.borrow().class) as *const ();
@@ -1723,27 +1755,65 @@ impl Interpreter {
                                                 // Different class at this call site — go megamorphic.
                                                 cache[pc - 1] = AttrCacheEntry::Megamorphic;
                                             } else {
-                                                // Same class but version changed (or instance
-                                                // shadow exists).  Reset to Empty so the next
-                                                // slow-path execution refills with the current
-                                                // version and value.
+                                                // Same class but version changed, or the
+                                                // resolution flipped between instance/class
+                                                // attr (e.g. an instance attr was deleted and
+                                                // now resolves to a method).  Reset to Empty so
+                                                // the next slow-path execution refills.
                                                 cache[pc - 1] = AttrCacheEntry::Empty;
                                             }
                                         }
                                     }
+                                    AttrCacheEntry::SetInstanceAttr { .. } => {
+                                        // A SetAttr-only entry should never appear at a
+                                        // GetAttr site; if it somehow does, drop it.
+                                        cache[pc - 1] = AttrCacheEntry::Empty;
+                                    }
                                     AttrCacheEntry::Empty => {
-                                        // Try to fill: only for PyInstance with no instance
-                                        // shadow and with a class-attr resolution.
+                                        // Try to fill: for PyInstance targets, either an
+                                        // instance-dict resolution (#1912 InstanceAttr) or a
+                                        // class-attr resolution (ClassAttr).
                                         if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                                             let inst = inst_rc.borrow();
-                                            if !inst.attrs.contains_key(name) {
+                                            let has_custom_getattribute =
+                                                lookup_class_attr(&inst.class, "__getattribute__")
+                                                    .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+                                            if inst.attrs.contains_key(name) {
+                                                // Instance attr.  Cache the fast path only when
+                                                // no data descriptor on the MRO shadows it
+                                                // (data descriptors take priority over the
+                                                // instance dict in CPython's lookup order) and
+                                                // there is no custom __getattribute__.  The
+                                                // numeric-tower names are read-only data
+                                                // descriptors on int/float, so exclude them too.
+                                                let is_numeric_tower = matches!(
+                                                    name.as_str(),
+                                                    "real" | "imag" | "numerator" | "denominator"
+                                                );
+                                                let shadowed_by_data_desc = lookup_class_attr(
+                                                    &inst.class, name,
+                                                )
+                                                .is_some_and(|v| is_data_descriptor(&v));
+                                                if !has_custom_getattribute
+                                                    && !is_numeric_tower
+                                                    && !shadowed_by_data_desc
+                                                {
+                                                    cache[pc - 1] = AttrCacheEntry::InstanceAttr {
+                                                        class_ptr: Rc::as_ptr(&inst.class) as *const (),
+                                                        class_version: inst
+                                                            .class
+                                                            .borrow()
+                                                            .mutation_version
+                                                            .get(),
+                                                        epoch: pyrust_core::class_epoch(),
+                                                    };
+                                                }
+                                            } else {
+                                                // No instance attr — resolve via the class.
                                                 // Don't cache when the class has a user-defined
                                                 // __getattribute__ — the cache bypasses get_attr
                                                 // entirely and would skip the __getattribute__
                                                 // dispatch (issue #1254).
-                                                let has_custom_getattribute =
-                                                    lookup_class_attr(&inst.class, "__getattribute__")
-                                                        .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
                                                 if !has_custom_getattribute {
                                                     // No property — we only cache the
                                                     // straightforward class-attr case.
@@ -1835,10 +1905,113 @@ impl Interpreter {
                     }
                 }
                 Insn::SetAttr(obj, name_idx, val) => {
+                    use crate::bytecode::AttrCacheEntry;
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
-                    vm_try!(self.assign_attr(obj_val, name, val_val));
+
+                    // Write inline cache fast path (#1998): a monomorphic site
+                    // proven to be a plain instance-dict write (no __setattr__
+                    // override, no __set__ data descriptor on the MRO, no
+                    // __slots__ restriction, not __class__/__dict__) writes
+                    // straight into inst.attrs, skipping the MRO walk in
+                    // assign_attr_instance.
+                    let mut handled = false;
+                    {
+                        let cache = code.attr_cache.borrow();
+                        if let AttrCacheEntry::SetInstanceAttr {
+                            class_ptr,
+                            class_version,
+                            epoch,
+                        } = &cache[pc - 1]
+                        {
+                            if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                                let (same_class, version_ok) = {
+                                    let inst = inst_rc.borrow();
+                                    (
+                                        Rc::as_ptr(&inst.class) as *const () == *class_ptr,
+                                        inst.class.borrow().mutation_version.get() == *class_version,
+                                    )
+                                };
+                                let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                                if same_class && version_ok && epoch_ok {
+                                    inst_rc
+                                        .borrow_mut()
+                                        .attrs
+                                        .insert(name.to_string(), val_val.clone());
+                                    handled = true;
+                                }
+                            }
+                        }
+                    }
+                    if !handled {
+                        vm_try!(self.assign_attr(obj_val.clone(), name, val_val.clone()));
+                        // Fill / update the cache after the slow path.
+                        if name != "__class__" && name != "__dict__" {
+                            let mut cache = code.attr_cache.borrow_mut();
+                            match &cache[pc - 1] {
+                                AttrCacheEntry::Megamorphic => {}
+                                AttrCacheEntry::SetInstanceAttr { class_ptr: existing_ptr, .. } => {
+                                    if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                                        let new_ptr =
+                                            Rc::as_ptr(&inst_rc.borrow().class) as *const ();
+                                        if new_ptr != *existing_ptr {
+                                            cache[pc - 1] = AttrCacheEntry::Megamorphic;
+                                        } else {
+                                            cache[pc - 1] = AttrCacheEntry::Empty;
+                                        }
+                                    }
+                                }
+                                AttrCacheEntry::Empty => {
+                                    // Cache only a plain instance-dict write: no
+                                    // __setattr__ override, no __set__ data
+                                    // descriptor for this name on the MRO, the
+                                    // class has no __slots__ (would restrict
+                                    // assignment), and is not the bare object()
+                                    // singleton or an exception class (slot-type
+                                    // validation must keep running).
+                                    if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                                        let class = Rc::clone(&inst_rc.borrow().class);
+                                        let no_setattr_override = lookup_class_attr(
+                                            &class,
+                                            "__setattr__",
+                                        )
+                                        .is_none_or(|v| {
+                                            matches!(
+                                                v.kind(),
+                                                ValueKind::BuiltinFunction(n)
+                                                    if n == "object.__setattr__"
+                                            )
+                                        });
+                                        let no_data_desc = lookup_class_attr(&class, name)
+                                            .is_none_or(|v| !is_data_descriptor(&v));
+                                        let no_slots = class.borrow().slots.is_none();
+                                        let is_object_singleton =
+                                            Rc::ptr_eq(&class, &object_class_singleton());
+                                        let is_exc = is_exception_class(&class);
+                                        if no_setattr_override
+                                            && no_data_desc
+                                            && no_slots
+                                            && !is_object_singleton
+                                            && !is_exc
+                                        {
+                                            cache[pc - 1] = AttrCacheEntry::SetInstanceAttr {
+                                                class_ptr: Rc::as_ptr(&class) as *const (),
+                                                class_version: class
+                                                    .borrow()
+                                                    .mutation_version
+                                                    .get(),
+                                                epoch: pyrust_core::class_epoch(),
+                                            };
+                                        }
+                                    }
+                                }
+                                // ClassAttr / InstanceAttr are GetAttr-only
+                                // entries; a SetAttr site never produces them.
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 Insn::DeleteAttr(obj, name_idx) => {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));

@@ -458,6 +458,40 @@ pub enum AttrCacheEntry {
         /// The unbound class-attr value from `lookup_class_attr`.
         value: Value,
     },
+    /// Monomorphic instance-attribute read cache (mirrors CPython's
+    /// `LOAD_ATTR_INSTANCE_VALUE`).  Filled when a `GetAttr` site resolves to
+    /// the instance `__dict__` with **no data descriptor** shadowing the name
+    /// on the class MRO, no custom `__getattribute__`, and no numeric-tower /
+    /// `__slots__` complications.  On a hit (same class pointer + version +
+    /// epoch) the VM probes `inst.attrs.get(name)` directly, skipping the full
+    /// `lookup_class_attr` MRO walk in `get_attr_instance_raw`.
+    ///
+    /// Correctness: the cached fact is "no data descriptor named `name` exists
+    /// on this class's MRO".  That fact is invalidated by the existing
+    /// `mutation_version` (this class mutated) + `class_epoch` (any ancestor
+    /// mutated) guards.  The instance's class pointer is also part of the guard,
+    /// so `__class__` reassignment (#1957/#2102) → different pointer → miss.
+    /// If on a hit the name is *not* in the instance dict, the VM falls through
+    /// to the slow path (the name may resolve to a method / non-data descriptor
+    /// / `__getattr__`), so a missing attribute is always handled correctly.
+    InstanceAttr {
+        class_ptr: *const (),
+        class_version: u64,
+        epoch: u64,
+    },
+    /// Monomorphic instance-attribute write cache (mirrors CPython's
+    /// `STORE_ATTR_INSTANCE_VALUE`).  Filled when a `SetAttr` site resolves to a
+    /// plain instance `__dict__` write: no `__setattr__` override, no `__set__`
+    /// data descriptor on the MRO, not bare `object()`, not an exception slot,
+    /// no `__slots__` restriction, and the name is not `__class__` / `__dict__`.
+    /// On a hit the VM inserts straight into `inst.attrs`, skipping the
+    /// `lookup_class_attr` MRO walk in `assign_attr_instance`.  Same invalidation
+    /// as `InstanceAttr`.
+    SetInstanceAttr {
+        class_ptr: *const (),
+        class_version: u64,
+        epoch: u64,
+    },
     /// More than one class seen at this site — disable caching.
     Megamorphic,
 }
@@ -517,6 +551,23 @@ impl std::fmt::Debug for AttrCacheEntry {
                 ..
             } => {
                 write!(f, "ClassAttr({class_ptr:?}, v{class_version}, e{epoch})")
+            }
+            AttrCacheEntry::InstanceAttr {
+                class_ptr,
+                class_version,
+                epoch,
+            } => {
+                write!(f, "InstanceAttr({class_ptr:?}, v{class_version}, e{epoch})")
+            }
+            AttrCacheEntry::SetInstanceAttr {
+                class_ptr,
+                class_version,
+                epoch,
+            } => {
+                write!(
+                    f,
+                    "SetInstanceAttr({class_ptr:?}, v{class_version}, e{epoch})"
+                )
             }
             AttrCacheEntry::Megamorphic => write!(f, "Megamorphic"),
         }
