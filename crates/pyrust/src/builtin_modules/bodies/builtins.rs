@@ -4483,18 +4483,17 @@ pyrust_module! {
                     // e.g. super(Base, Derived) in a classmethod.
                     return Ok(Value::super_proxy_class(class, obj_class));
                 }
-                // Issue #1385: metaclass case — super(Meta, cls) where Meta is
-                // a subclass of type and cls is any class (an "instance" of the
-                // metaclass).  In CPython, type(cls).__mro__ is walked starting
-                // after Meta; in pyrust we approximate by walking Meta's own MRO
-                // (Meta.__mro__ = [Meta, type, object]) starting after Meta.
-                // This allows super().__new__() and super().__init__() inside
-                // metaclass methods to resolve type.__new__ / type.__init__.
+                // Issue #1385 / #1956: metaclass case — super(Meta, cls) where
+                // Meta is a subclass of `type` and `cls` is any class (an
+                // "instance" of the metaclass).  In CPython, `type(cls).__mro__`
+                // is walked starting after Meta.  We keep `cls` as the proxy's
+                // `obj_class` (so e.g. `super().__call__(*a)` binds `cls` as the
+                // construction target); env.rs detects the metaclass-method case
+                // — Meta is in `type(cls)`'s MRO, not `cls`'s own MRO — and walks
+                // the metaclass MRO ([Meta, type, object]) accordingly.
                 let type_cls = type_class_singleton();
                 if class_is_subclass_of(&class, &type_cls) {
-                    // Use class itself as obj_class so the MRO walk is over
-                    // the metaclass hierarchy: [Meta, type, object].
-                    return Ok(Value::super_proxy_class(Rc::clone(&class), class));
+                    return Ok(Value::super_proxy_class(Rc::clone(&class), obj_class));
                 }
                 Err(PyError::named(
                     "TypeError",
@@ -5504,6 +5503,36 @@ pyrust_module! {
     #[py_name = "type.__init__"]
     fn type_init_dunder(_args) -> Result<Value> {
         Ok(Value::none())
+    }
+
+    /// Issue #1956: `type.__call__(cls, *args, **kwargs)` — the default
+    /// instance-construction protocol.  Runs `cls.__new__` + `cls.__init__`.
+    /// Reached when `super().__call__(*args)` inside a metaclass `__call__`
+    /// override chains (via the metaclass MRO) to the default `type.__call__`
+    /// bound to the class being constructed.  This is the same default-construct
+    /// path as a plain `Cls()` (both go through `Interpreter::default_construct`).
+    ///
+    /// CPython signature: `type.__call__(self, /, *args, **kwargs)` where
+    /// `self` is the class being instantiated.
+    #[py_name = "type.__call__"]
+    fn type_call_dunder(args) -> Result<Value> {
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "type.__call__(): not enough arguments".to_string(),
+            ));
+        }
+        let cls_val = args[0].value.clone();
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "type.__call__(): first argument must be a type".to_string(),
+                ));
+            }
+        };
+        _interp.default_construct(class, &args[1..])
     }
 
     /// Issue #1143: `tuple.__new__(cls, iterable=())` — allocator for tuple
@@ -8094,6 +8123,27 @@ fn isinstance_check(
     // giving abc_instancecheck([cls, obj]).  This also makes
     // `Iterable.__instancecheck__(x)` callable directly.
     if let ValueKind::PyClass(cls_rc) = cls.kind() {
+        // Issue #1955: a metaclass `__instancecheck__` override takes
+        // precedence, mirroring CPython's `type(cls).__instancecheck__(cls, x)`
+        // dispatch.  `metaclass_dunder` returns `Some` only for a user
+        // override, so ordinary classes skip this and keep the fast path.
+        if let Some(ic_fn) = crate::interpreter::metaclass_dunder(cls_rc, "__instancecheck__") {
+            if let ValueKind::UserFunction(f) = ic_fn.kind() {
+                let func = Rc::clone(f);
+                let call_args = [crate::interpreter::ExpandedCallArg {
+                    name: None,
+                    value: obj.clone(),
+                }];
+                let result = interp.call_user_function_expanded(
+                    func,
+                    &call_args,
+                    &[Value::py_class(Rc::clone(cls_rc))],
+                )?;
+                return Ok(interp.truthy_value(&result)?);
+            }
+        }
+        // Legacy ABC path: ABC classes store `__instancecheck__` directly in
+        // their own attrs dict (not on a metaclass).
         let has_ic = cls_rc.borrow().attrs.contains_key("__instancecheck__");
         if has_ic {
             let cls_val = Value::py_class(Rc::clone(cls_rc));
@@ -8145,6 +8195,28 @@ fn issubclass_check(
     // for `issubclass(UserClass, Iterable)` and tuple forms like
     // `issubclass(UserClass, (Iterable, Hashable))` (fixes #1799).
     if let ValueKind::PyClass(classinfo_rc) = classinfo.kind() {
+        // Issue #1955: a metaclass `__subclasscheck__` override takes
+        // precedence, mirroring CPython's
+        // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.
+        if let Some(sc_fn) =
+            crate::interpreter::metaclass_dunder(classinfo_rc, "__subclasscheck__")
+        {
+            if let ValueKind::UserFunction(f) = sc_fn.kind() {
+                let func = Rc::clone(f);
+                let call_args = [crate::interpreter::ExpandedCallArg {
+                    name: None,
+                    value: cls.clone(),
+                }];
+                let result = interp.call_user_function_expanded(
+                    func,
+                    &call_args,
+                    &[Value::py_class(Rc::clone(classinfo_rc))],
+                )?;
+                return Ok(interp.truthy_value(&result)?);
+            }
+        }
+        // Legacy ABC path: ABC classes store `__subclasscheck__` directly in
+        // their own attrs dict (not on a metaclass).
         let has_sc = classinfo_rc.borrow().attrs.contains_key("__subclasscheck__");
         if has_sc {
             let classinfo_val = Value::py_class(Rc::clone(classinfo_rc));
