@@ -7303,6 +7303,13 @@ impl Interpreter {
         pos: Vec<Value>,
         kw: &IndexMap<PyKey, Value>,
     ) -> Result<Value> {
+        // `list.sort` is keyword-only in CPython 3.12 — `sort(*, key=None,
+        // reverse=False)`.  Any positional arg is a TypeError, and the list is
+        // left unchanged (#1949).  Enforced centrally so every dispatch site
+        // (bound-method, subclass, …) inherits the rejection.
+        if !pos.is_empty() {
+            return Err(pyrust_core::type_err!("sort() takes no positional arguments"));
+        }
         // StrKey probes (issue #506): zero-alloc borrowed-str lookup — no
         // PyKey::Str(Value) RC bump on every sort call.
         for k in kw.keys() {
