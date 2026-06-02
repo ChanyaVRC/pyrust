@@ -42,3 +42,35 @@ for T in (int, str, list, tuple, dict, object):
         print(T.__name__, "unexpected OK")
     except TypeError as e:
         print(T.__name__, e)
+
+
+# Re-typing works even when the instance's class declares __slots__:
+# __class__ is a type-level slot, not subject to __slots__ enforcement.
+class SA:
+    __slots__ = ("x",)
+
+
+class SB:
+    __slots__ = ("x",)
+
+
+sa = SA()
+sa.x = 11
+sa.__class__ = SB
+print(type(sa).__name__, sa.x)
+
+# Methods resolve through the new class after re-typing.
+class WhoA:
+    def who(self):
+        return "A"
+
+
+class WhoB:
+    def who(self):
+        return "B"
+
+
+w = WhoA()
+print(w.who())
+w.__class__ = WhoB
+print(w.who())
