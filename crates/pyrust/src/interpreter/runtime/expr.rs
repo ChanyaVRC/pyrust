@@ -4935,7 +4935,7 @@ impl Interpreter {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
-                    let mut s = format_general_float(f, prec, conv == 'G');
+                    let mut s = format_general_float(f, prec, conv == 'G', flag_hash);
                     if f.is_sign_positive() && flag_plus {
                         s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
@@ -5467,11 +5467,11 @@ fn format_scientific(f: f64, prec: usize, upper: bool) -> String {
     }
 }
 
-/// Format a float in "general" notation matching CPython's `%g`/`%G`.
-///
-/// Uses scientific notation when exp < -4 or exp >= prec; fixed otherwise.
-/// Trailing zeros are stripped in both cases.
-fn format_general_float(f: f64, prec: usize, upper: bool) -> String {
+/// `%g` / `%G` printf conversion. Delegates the digit/exponent logic to the
+/// shared `format_g` so the `%`-printf path and `str.format` path agree
+/// on rounding-then-exponent (#2000) and `#`-alternate trailing zeros (#1950).
+/// `alt` is the printf `#` flag.
+fn format_general_float(f: f64, prec: usize, upper: bool, alt: bool) -> String {
     if f.is_nan() {
         return if upper { "NAN".to_string() } else { "nan".to_string() };
     }
@@ -5484,43 +5484,11 @@ fn format_general_float(f: f64, prec: usize, upper: bool) -> String {
             "-inf".to_string()
         };
     }
-    let abs_f = f.abs();
-    let use_exp = abs_f != 0.0 && {
-        let exp = abs_f.log10().floor() as i64;
-        exp < -4 || exp >= prec as i64
-    };
-    if use_exp {
-        let raw = format_scientific(f, prec.saturating_sub(1), upper);
-        strip_trailing_zeros_exp(&raw)
+    let body = format_g(f.abs(), prec, upper, alt);
+    if f.is_sign_negative() {
+        format!("-{body}")
     } else {
-        let exp = if abs_f == 0.0 {
-            0i64
-        } else {
-            abs_f.log10().floor() as i64
-        };
-        let decimal_places = (prec as i64 - 1 - exp).max(0) as usize;
-        let raw = format!("{:.prec$}", f, prec = decimal_places);
-        strip_trailing_zeros_fixed(&raw)
-    }
-}
-
-fn strip_trailing_zeros_fixed(s: &str) -> String {
-    if !s.contains('.') {
-        return s.to_string();
-    }
-    let s = s.trim_end_matches('0');
-    s.trim_end_matches('.').to_string()
-}
-
-fn strip_trailing_zeros_exp(s: &str) -> String {
-    let e_pos = s.find('e').or_else(|| s.find('E'));
-    match e_pos {
-        None => strip_trailing_zeros_fixed(s),
-        Some(pos) => {
-            let mantissa = &s[..pos];
-            let exp_part = &s[pos..];
-            format!("{}{}", strip_trailing_zeros_fixed(mantissa), exp_part)
-        }
+        body
     }
 }
 
