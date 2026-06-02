@@ -102,8 +102,9 @@ def wrapper(x):
     return original(x) + 1
 
 # `wrapper.__name__` after `@wraps(original)` reflects the original's
-# name.  pyrust's minimal `wraps` synthesises a wrapper object that
-# carries `__name__` (and `__doc__`) from the original.
+# name.  `wraps` mutates the wrapper function in place (copying the
+# WRAPPER_ASSIGNMENTS attrs and `__dict__`), so it stays a real
+# function; see `test_wraps.py` for the full attr-copy coverage.
 print("wraps-name", wrapper.__name__)   # "original"
 # Wrapper still callable, delegates to the wrapped function.
 print("wraps-call", wrapper(5))         # 5*2+1 = 11

@@ -19,14 +19,17 @@
 //   `property` keeps the hot attribute-lookup path tight; see
 //   `env.rs::get_attr`.
 //
-// - `wraps(orig)` returns a `_wraps_partial` callable.  Calling it
-//   with a wrapper function returns a `_wrapper_attrs` instance that
-//   delegates `__call__` to the wrapper and exposes
-//   `__name__` / `__doc__` from the original.  UserFunction's name
-//   field is shared through an `Rc` and not in-place mutable, so we
-//   wrap rather than mutate — that's the "minimal `wraps`" the
-//   issue spec authorises (only `__name__` + `__doc__`, no full
-//   attr-copy).
+// - `wraps(orig)` returns a `_wraps_partial` callable.  Calling it with
+//   the wrapper function mutates that wrapper in place — copying the
+//   WRAPPER_ASSIGNMENTS attrs (`__module__`/`__name__`/`__qualname__`/
+//   `__annotations__`/`__doc__`, skipping any the original lacks),
+//   merging `orig.__dict__`, and setting `__wrapped__` — then returns
+//   the wrapper.  UserFunction exposes mutable overrides for all these
+//   (`user_name`/`user_qualname`/`module`/`doc`/`attrs`/`annotations`
+//   in `pyrust-core`; see `env.rs::assign_attr_function`), so the
+//   wrapper stays a real function (`type(w).__name__ == "function"`).
+//   `update_wrapper(wrapper, wrapped)` is the same operation exposed
+//   directly.
 //
 // Reference: <https://docs.python.org/3/library/functools.html>
 
@@ -308,16 +311,18 @@ pyrust_module! {
             };
             if let Some(v) = hit {
                 promote_key(&inst, &key);
+                bump_counter(&inst, "_hits");
                 return Ok(v);
             }
             // Miss: compute, insert, evict if over capacity.
+            bump_counter(&inst, "_misses");
             let result = _interp.call_function_expanded(func, user)?;
             insert_cache(&inst, key, key_pykey, result.clone(), maxsize);
             Ok(result)
         }
 
-        /// `wrapper.cache_clear()` — drop all cached entries.  Matches
-        /// CPython's API.
+        /// `wrapper.cache_clear()` — drop all cached entries and reset the
+        /// hit/miss counters.  Matches CPython's API.
         fn cache_clear(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let mut borrow = inst.borrow_mut();
@@ -327,8 +332,35 @@ pyrust_module! {
             borrow
                 .attrs
                 .insert("_order".to_string(), Value::list(Vec::new()));
+            borrow.attrs.insert("_hits".to_string(), Value::int(0));
+            borrow.attrs.insert("_misses".to_string(), Value::int(0));
             let _ = _interp;
             Ok(Value::none())
+        }
+
+        /// `wrapper.cache_info()` — return a `CacheInfo(hits, misses,
+        /// maxsize, currsize)` named-tuple.  `currsize` is the number of
+        /// live cache entries; `maxsize` is the configured bound (`None`
+        /// for unbounded / `functools.cache`).
+        fn cache_info(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let (hits, misses, maxsize, currsize) = {
+                let borrow = inst.borrow();
+                let hits = counter_value(&borrow.attrs, "_hits");
+                let misses = counter_value(&borrow.attrs, "_misses");
+                let maxsize = borrow
+                    .attrs
+                    .get("_maxsize")
+                    .cloned()
+                    .unwrap_or_else(Value::none);
+                let currsize = borrow
+                    .attrs
+                    .get("_cache")
+                    .and_then(|v| v.as_dict().map(|d| d.len()))
+                    .unwrap_or(0) as i64;
+                (hits, misses, maxsize, currsize)
+            };
+            make_cache_info(_interp, hits, misses, maxsize, currsize)
         }
     }
 
@@ -377,17 +409,35 @@ pyrust_module! {
         }
     }
 
+    /// CPython: functools.update_wrapper(wrapper, wrapped,
+    /// assigned=WRAPPER_ASSIGNMENTS, updated=WRAPPER_UPDATES).
+    /// Mutates `wrapper` to look like `wrapped`: copies the
+    /// WRAPPER_ASSIGNMENTS attrs (skipping any the wrapped object lacks),
+    /// merges `wrapped.__dict__` into `wrapper.__dict__`, sets
+    /// `wrapper.__wrapped__ = wrapped`, and returns `wrapper`.
+    /// <https://docs.python.org/3/library/functools.html#functools.update_wrapper>
+    fn update_wrapper(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        // CPython's `assigned` / `updated` parameters are rarely overridden;
+        // we accept the common 2-argument form and use the standard
+        // WRAPPER_ASSIGNMENTS / WRAPPER_UPDATES.
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes 2 arguments ({} given)", args.len()),
+            ));
+        }
+        let wrapper = args[0].value.clone();
+        let wrapped = args[1].value.clone();
+        do_update_wrapper(_interp, &wrapper, &wrapped)?;
+        Ok(wrapper)
+    }
+
     /// CPython: functools.wraps(wrapped).
-    /// Returns a decorator that, when applied to `wrapper`, copies
-    /// `wrapped.__name__` and `wrapped.__doc__` onto the wrapper.
-    ///
-    /// **Minimal implementation** — pyrust's `UserFunction.name` is
-    /// shared through an `Rc` and not in-place mutable, so we return a
-    /// wrapper-class instance that *exposes* the original's `__name__`
-    /// and `__doc__` via attribute access and forwards `__call__` to
-    /// the original wrapper.  This is the "good enough" shape called
-    /// out in the issue spec (#329); the full attr-copy variant
-    /// (`__module__`, `__qualname__`, `__dict__`) is out of scope here.
+    /// Returns a decorator that, applied to `wrapper`, runs
+    /// `update_wrapper(wrapper, wrapped)` and returns the (mutated)
+    /// wrapper.  Equivalent to `partial(update_wrapper, wrapped=wrapped)`.
+    /// <https://docs.python.org/3/library/functools.html#functools.wraps>
     fn wraps(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -396,16 +446,14 @@ pyrust_module! {
                 format!("{FN_NAME}() takes exactly 1 argument"),
             ));
         }
-        let orig = args[0].value.clone();
-        let name = function_name(&orig).unwrap_or_else(|| "wrapper".to_string());
-        let doc = function_doc(&orig);
         let _ = _interp;
-        Ok(make_wraps_partial(Value::string(name), doc))
+        Ok(make_wraps_partial(args[0].value.clone()))
     }
 
-    /// `wraps(orig)` returns one of these.  Calling it with a wrapper
-    /// returns a `_wrapper_attrs` instance carrying the original's
-    /// metadata and forwarding `__call__` to the wrapper.
+    /// `wraps(wrapped)` returns one of these.  Calling it with the
+    /// wrapper function mutates that wrapper (copying `wrapped`'s
+    /// metadata) and returns it — so the decorated name stays a real
+    /// function.
     class _wraps_partial {
         fn __init__(args) -> Result<Value> {
             let _ = _interp;
@@ -431,54 +479,15 @@ pyrust_module! {
                     format!("{FN_NAME} expected exactly 1 argument"),
                 ));
             }
-            let (name, doc) = {
-                let borrow = inst.borrow();
-                (
-                    borrow
-                        .attrs
-                        .get("__wraps_name")
-                        .cloned()
-                        .unwrap_or_else(|| Value::string("wrapper")),
-                    borrow
-                        .attrs
-                        .get("__wraps_doc")
-                        .cloned()
-                        .unwrap_or_else(Value::none),
-                )
-            };
-            let _ = _interp;
-            Ok(make_wrapper_attrs(user[0].value.clone(), name, doc))
-        }
-    }
-
-    /// The actual wrapper produced by `@wraps(orig) def wrapper(...)`.
-    /// Exposes `__name__` and `__doc__` from `orig`; delegates the call
-    /// to the inner wrapper function.
-    class _wrapper_attrs {
-        fn __init__(args) -> Result<Value> {
-            let _ = _interp;
-            // Private constructor — `_wraps_partial.__call__` seeds the
-            // attrs directly via `make_wrapper_attrs`.  Reject user args
-            // so a stray `_wrapper_attrs(...)` call fails loudly.
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
-                ));
-            }
-            Ok(Value::none())
-        }
-
-        fn __call__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            let func = inst
+            let wrapped = inst
                 .borrow()
                 .attrs
                 .get("__wraps_func")
                 .cloned()
                 .ok_or_else(|| internal(FN_NAME))?;
-            _interp.call_function_expanded(func, user)
+            let wrapper = user[0].value.clone();
+            do_update_wrapper(_interp, &wrapper, &wrapped)?;
+            Ok(wrapper)
         }
     }
 
@@ -915,6 +924,9 @@ fn insert_cache(
 /// `maxsize` / `typed`.
 fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
     let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    // `wrapper.__wrapped__` exposes the original function (CPython sets this
+    // on the wrapper so `inspect.unwrap` / introspection can reach it).
+    attrs.insert("__wrapped__".to_string(), func.clone());
     attrs.insert("_func".to_string(), func);
     attrs.insert(
         "_maxsize".to_string(),
@@ -923,6 +935,8 @@ fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
     attrs.insert("_typed".to_string(), Value::bool_(typed));
     attrs.insert("_cache".to_string(), Value::dict(IndexMap::new()));
     attrs.insert("_order".to_string(), Value::list(Vec::new()));
+    attrs.insert("_hits".to_string(), Value::int(0));
+    attrs.insert("_misses".to_string(), Value::int(0));
     make_instance("_lru_cache_wrapper", attrs)
 }
 
@@ -938,28 +952,156 @@ fn make_lru_factory(maxsize: Option<i64>, typed: bool) -> Value {
     make_instance("_lru_cache_factory", attrs)
 }
 
+/// Increment the integer counter stored under `key` on the wrapper
+/// instance (`_hits` / `_misses`).  Missing/non-int treated as 0.
+fn bump_counter(inst: &Rc<RefCell<PyInstance>>, key: &str) {
+    let mut borrow = inst.borrow_mut();
+    let cur = match borrow.attrs.get(key).map(|v| v.kind()) {
+        Some(ValueKind::Int(n)) => n,
+        _ => 0,
+    };
+    borrow
+        .attrs
+        .insert(key.to_string(), Value::int(cur.wrapping_add(1)));
+}
+
+/// Read an integer counter from the instance attrs, defaulting to 0.
+fn counter_value(attrs: &IndexMap<String, Value>, key: &str) -> i64 {
+    match attrs.get(key).map(|v| v.kind()) {
+        Some(ValueKind::Int(n)) => n,
+        _ => 0,
+    }
+}
+
+/// Build a `CacheInfo(hits, misses, maxsize, currsize)` named-tuple
+/// instance.  `CacheInfo` is a `tuple` subclass (matching CPython:
+/// `isinstance(info, tuple)` is `True`, fields are indexable, and the
+/// repr is `CacheInfo(hits=.., misses=.., maxsize=.., currsize=..)`).
+/// The class is defined once via interpreter `exec` and cached.
+fn make_cache_info(
+    interp: &mut Interpreter,
+    hits: i64,
+    misses: i64,
+    maxsize: Value,
+    currsize: i64,
+) -> Result<Value> {
+    let class = cache_info_class(interp)?;
+    interp.call_function_expanded(
+        class,
+        &[
+            ExpandedCallArg { name: None, value: Value::int(hits) },
+            ExpandedCallArg { name: None, value: Value::int(misses) },
+            ExpandedCallArg { name: None, value: maxsize },
+            ExpandedCallArg { name: None, value: Value::int(currsize) },
+        ],
+    )
+}
+
+thread_local! {
+    /// Cached `CacheInfo` class, built once per thread on first
+    /// `cache_info()` call.
+    static CACHE_INFO_CLASS: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
+
+/// Lazily define and return the `CacheInfo` named-tuple class.
+fn cache_info_class(interp: &mut Interpreter) -> Result<Value> {
+    if let Some(cls) = CACHE_INFO_CLASS.with(|c| c.borrow().clone()) {
+        return Ok(cls);
+    }
+    let ns = Value::dict(IndexMap::new());
+    interp.exec_source(CACHE_INFO_SOURCE, Some(ns.clone()), None)?;
+    let cls = ns
+        .as_dict()
+        .and_then(|d| d.get(&PyKey::str_from("CacheInfo")).cloned())
+        .ok_or_else(|| internal("cache_info"))?;
+    CACHE_INFO_CLASS.with(|c| *c.borrow_mut() = Some(cls.clone()));
+    Ok(cls)
+}
+
+/// Python source for the `CacheInfo` named-tuple, transcribed to match
+/// CPython's `collections.namedtuple('CacheInfo', [...])` behaviour
+/// (tuple subclass, indexable, attribute access, custom repr).
+const CACHE_INFO_SOURCE: &str = "\
+class CacheInfo(tuple):
+    __slots__ = ()
+    def __new__(cls, hits, misses, maxsize, currsize):
+        return tuple.__new__(cls, (hits, misses, maxsize, currsize))
+    @property
+    def hits(self):
+        return self[0]
+    @property
+    def misses(self):
+        return self[1]
+    @property
+    def maxsize(self):
+        return self[2]
+    @property
+    def currsize(self):
+        return self[3]
+    def __repr__(self):
+        return f'CacheInfo(hits={self[0]}, misses={self[1]}, maxsize={self[2]}, currsize={self[3]})'
+";
+
 // ── wraps helpers ────────────────────────────────────────────────────────────
 
-fn make_wraps_partial(name: Value, doc: Value) -> Value {
+fn make_wraps_partial(wrapped: Value) -> Value {
     let mut attrs: IndexMap<String, Value> = IndexMap::new();
-    attrs.insert("__wraps_name".to_string(), name);
-    attrs.insert("__wraps_doc".to_string(), doc);
+    attrs.insert("__wraps_func".to_string(), wrapped);
     make_instance("_wraps_partial", attrs)
 }
 
-fn make_wrapper_attrs(func: Value, name: Value, doc: Value) -> Value {
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
-    attrs.insert("__wraps_func".to_string(), func);
-    // Stash the orig's name/doc under their dunder forms so
-    // `wrapper.__name__` / `wrapper.__doc__` hit the instance-attrs
-    // check in `env.rs::get_attr` (PyInstance arm, line ~37) and
-    // return our cached value.
-    attrs.insert("__name__".to_string(), name);
-    attrs.insert("__doc__".to_string(), doc);
-    make_instance("_wrapper_attrs", attrs)
+/// The attributes copied directly from `wrapped` to `wrapper`, mirroring
+/// CPython's `functools.WRAPPER_ASSIGNMENTS`.  (CPython 3.12 also lists
+/// `__type_params__`, but pyrust does not expose that attribute on
+/// functions, so copying it would be a no-op on every supported type;
+/// omitting it keeps the observable behaviour identical.)
+const WRAPPER_ASSIGNMENTS: [&str; 5] =
+    ["__module__", "__name__", "__qualname__", "__annotations__", "__doc__"];
+
+/// Core of `update_wrapper` / `wraps`.  Mutates `wrapper` in place to
+/// look like `wrapped`, mirroring CPython's pure-Python `update_wrapper`:
+///   1. copy each WRAPPER_ASSIGNMENTS attr present on `wrapped`
+///      (skipping any that raise `AttributeError`),
+///   2. update `wrapper.__dict__` with `wrapped.__dict__`,
+///   3. set `wrapper.__wrapped__ = wrapped` (last, so it isn't clobbered
+///      by the `__dict__` merge).
+fn do_update_wrapper(
+    interp: &mut Interpreter,
+    wrapper: &Value,
+    wrapped: &Value,
+) -> Result<()> {
+    for attr in WRAPPER_ASSIGNMENTS {
+        // CPython does `try: value = getattr(wrapped, attr) except
+        // AttributeError: pass`.  Any *other* error propagates.
+        match interp.get_attr(wrapped, attr) {
+            Ok(value) => interp.assign_attr(wrapper.clone(), attr, value)?,
+            Err(PyError::AttributeError { .. }) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    // `wrapper.__dict__.update(wrapped.__dict__)`.  CPython merges into the
+    // wrapper's existing dict rather than replacing it.
+    if let Ok(dst) = interp.get_attr(wrapper, "__dict__") {
+        let src = match interp.get_attr(wrapped, "__dict__") {
+            Ok(d) => d,
+            Err(PyError::AttributeError { .. }) => Value::dict(IndexMap::new()),
+            Err(e) => return Err(e),
+        };
+        if let (Some(src_dict), Some(_)) = (src.as_dict(), dst.as_dict()) {
+            for (k, v) in src_dict.iter() {
+                let k = k.clone();
+                let v = v.clone();
+                let _ = dst.dict_with_mut(|d| {
+                    d.insert(k, v);
+                });
+            }
+        }
+    }
+    // Set `__wrapped__` last (CPython issue #17482).
+    interp.assign_attr(wrapper.clone(), "__wrapped__", wrapped.clone())
 }
 
-/// Best-effort `__name__` extractor for `wraps`/`cached_property`.
+/// Best-effort `__name__` extractor for `cached_property`.
 /// UserFunctions carry the name in the struct; built-in functions
 /// carry it in the kind tag.  Returns `None` for unknown kinds — the
 /// caller substitutes a default.
@@ -971,14 +1113,6 @@ fn function_name(v: &Value) -> Option<String> {
         ValueKind::PyClass(c) => Some(c.borrow().name.clone()),
         _ => None,
     }
-}
-
-/// `function.__doc__` placeholder.  pyrust doesn't currently surface
-/// docstrings on `UserFunction`, so we return `None` — the wrapper
-/// then carries `__doc__ == None`.  That matches CPython's behaviour
-/// when the wrapped function has no docstring.
-fn function_doc(_v: &Value) -> Value {
-    Value::none()
 }
 
 // ── cmp_to_key helpers ───────────────────────────────────────────────────────
