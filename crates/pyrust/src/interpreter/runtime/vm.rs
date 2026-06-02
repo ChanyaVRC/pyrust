@@ -2563,7 +2563,7 @@ impl Interpreter {
                     regs[*dst as usize] = pyrust_builtins::slice::make_slice(lo, hi, st);
                 }
                 Insn::BuildDict(dst, base, n) => {
-                    let mut dict = indexmap::IndexMap::new();
+                    let mut dict = indexmap::IndexMap::with_capacity(*n as usize);
                     for i in 0..crate::bytecode::Reg::from(*n) {
                         let k_val = vm_try!(vm_read(&regs, *base + i * 2, num_locals));
                         let v_val = vm_try!(vm_read(&regs, *base + i * 2 + 1, num_locals));
