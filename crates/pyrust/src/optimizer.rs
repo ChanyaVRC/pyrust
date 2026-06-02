@@ -136,9 +136,24 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_forcount_unroll(insns, &mut consts, code.is_generator);
     let insns = pass_linear_loop_fold(insns, &mut consts);
     let insns = pass_loadnone_merge(insns);
+
+    // Remap line numbers BEFORE compacting constants.  `pass_compact_consts`
+    // reindexes constant-pool slots, which mutates the `idx` field of every
+    // `LoadConst`/`BinOpConst`/etc.  `remap_linenos` matches new instructions to
+    // the (un-reindexed) original stream by structural equality, so running it on
+    // the post-compaction stream lets a reindexed constant spuriously match an
+    // unrelated original instruction that happened to use the same raw index.
+    // That false match advances the greedy scan cursor past the correct
+    // occurrence, so a later raising instruction (e.g. a division that overflows)
+    // inherits the wrong line number — attributing an exception to a later
+    // statement than the one that actually raised (issue #1962).
+    //
+    // `pass_compact_consts` is a 1:1 instruction-count- and order-preserving
+    // transformation, so the line numbers computed against the pre-compaction
+    // stream apply unchanged to the post-compaction stream.
+    let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
-    let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
     let insns_len = insns.len();
     let names_len = names.len();
     FnCode {
@@ -6510,6 +6525,27 @@ mod tests {
         crate::compiler::compile_script(&stmts, local_index, false).unwrap()
     }
 
+    /// Like `compile_fn`, but supplies a per-top-level-statement line-number
+    /// slice so the resulting `FnCode::lineno_table` is populated (the plain
+    /// `compile_script` path leaves it all zeros).
+    fn compile_script_with_linenos_for_test(src: &str, stmt_linenos: &[u32]) -> FnCode {
+        use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
+        use std::collections::HashSet;
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let stmts = parser.parse_program().unwrap();
+        let empty: HashSet<String> = HashSet::new();
+        let names = collect_local_names(&[], &stmts, &empty, &empty);
+        let local_index = std::rc::Rc::new(
+            (0u32..)
+                .zip(names.iter())
+                .map(|(i, n)| (n.clone(), i))
+                .collect(),
+        );
+        crate::compiler::compile_script_with_linenos(&stmts, local_index, false, stmt_linenos)
+            .unwrap()
+    }
+
     // ── pass_binop_const_fusion ───────────────────────────────────────────────
 
     #[test]
@@ -10594,6 +10630,48 @@ elif x == 2:
             has_cmpjump_false_const,
             "optimizer should introduce CmpJumpIfFalseConst at loop tail; insns: {:?}",
             inner.insns
+        );
+    }
+
+    // ── line-number remap across equal-valued constants (issue #1962) ─────────
+
+    #[test]
+    fn equal_valued_const_statements_keep_distinct_linenos() {
+        use crate::ast::BinaryOp;
+        // Two statements whose constant expressions fold to the SAME value.
+        // `2 ** 1024` and `(2 ** 512) * (2 ** 512)` both fold to the same BigInt;
+        // the optimizer dedups the constant-pool slot.  The `/ 1` divisions are
+        // left as runtime BinOps (folding them would raise OverflowError).  The
+        // surviving division for the FIRST statement must retain line 1, not
+        // inherit the second statement's line — otherwise an exception raised on
+        // line 1 is mis-attributed to line 2 (the bug: remap_linenos ran after
+        // constant-pool compaction reindexed the LoadConst slots).
+        let code = compile_script_with_linenos_for_test(
+            "(2 ** 1024) / 1\n(2 ** 512) * (2 ** 512) / 1\n",
+            &[1, 2],
+        );
+        let optimized = optimize(code);
+
+        // Collect the line number of every surviving Div BinOp, in order.
+        let div_linenos: Vec<u32> = optimized
+            .insns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ins)| match ins {
+                Insn::BinOp(_, _, BinaryOp::Div, _)
+                | Insn::BinOpConst(_, _, BinaryOp::Div, _, _) => {
+                    Some(optimized.lineno_table.get(i).copied().unwrap_or(0))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            div_linenos,
+            vec![1, 2],
+            "each statement's division must keep its own source line; insns: {:?}, linenos: {:?}",
+            optimized.insns,
+            optimized.lineno_table
         );
     }
 }
