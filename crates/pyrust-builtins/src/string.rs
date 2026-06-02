@@ -1197,16 +1197,50 @@ fn pykey_type_name(k: &PyKey) -> std::borrow::Cow<'static, str> {
     }
 }
 
+/// Build the joined string from an iterator that yields each element as a
+/// validated `&str`. Validation happens in the first pass (so a non-str element
+/// raises before any work), then the result is allocated exactly once with the
+/// precise capacity and each element pushed in directly — no owned `String` per
+/// element. The closure is called per element to keep the collection's borrow
+/// guard (`kind()` returns a `Ref`) alive across both passes.
+fn join_borrowed<'a, I>(sep: &str, parts: I) -> Result<Value>
+where
+    I: ExactSizeIterator<Item = Result<&'a str>> + Clone,
+{
+    let n = parts.len();
+    if n == 0 {
+        return Ok(Value::string(String::new()));
+    }
+    // First pass: validate every element and sum the byte lengths.
+    let mut body_len = 0usize;
+    for part in parts.clone() {
+        body_len += part?.len();
+    }
+    let total = body_len + sep.len() * (n - 1);
+    // Second pass: push directly into the single result allocation. The
+    // elements already validated above, so the `?` here cannot fail.
+    let mut out = String::with_capacity(total);
+    for (i, part) in parts.enumerate() {
+        if i != 0 {
+            out.push_str(sep);
+        }
+        out.push_str(part?);
+    }
+    Ok(Value::string(out))
+}
+
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let iterable = args
         .first()
         .ok_or_else(|| PyError::Runtime("str.join() requires 1 argument".to_string()))?;
-    let parts: Vec<String> = match iterable.kind() {
-        ValueKind::List(items) => items
-            .iter()
-            .enumerate()
-            .map(|(i, v)| match v.kind() {
-                ValueKind::Str(s) => Ok(s.to_string()),
+    // Borrow each element as &str (no owned String per element); the result
+    // string is allocated exactly once. The borrow guard from `kind()` must
+    // stay alive across the build, so do it inside each arm.
+    match iterable.kind() {
+        ValueKind::List(items) => join_borrowed(
+            sep,
+            items.iter().enumerate().map(|(i, v)| match v.kind() {
+                ValueKind::Str(s) => Ok(s),
                 _ => Err(PyError::named(
                     "TypeError",
                     format!(
@@ -1214,13 +1248,12 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
                         builtin_type_name(v),
                     ),
                 )),
-            })
-            .collect::<Result<_>>()?,
-        ValueKind::Tuple(items) => items
-            .iter()
-            .enumerate()
-            .map(|(i, v)| match v.kind() {
-                ValueKind::Str(s) => Ok(s.to_string()),
+            }),
+        ),
+        ValueKind::Tuple(items) => join_borrowed(
+            sep,
+            items.iter().enumerate().map(|(i, v)| match v.kind() {
+                ValueKind::Str(s) => Ok(s),
                 _ => Err(PyError::named(
                     "TypeError",
                     format!(
@@ -1228,17 +1261,12 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
                         builtin_type_name(v),
                     ),
                 )),
-            })
-            .collect::<Result<_>>()?,
-        ValueKind::Str(s) => s
-            .chars()
-            .map(|c| Ok(c.to_string()))
-            .collect::<Result<_>>()?,
-        ValueKind::Dict(d) => d
-            .keys()
-            .enumerate()
-            .map(|(i, k)| match k {
-                PyKey::Str(s) => Ok(s.as_str().unwrap_or("").to_owned()),
+            }),
+        ),
+        ValueKind::Dict(d) => join_borrowed(
+            sep,
+            d.keys().enumerate().map(|(i, k)| match k {
+                PyKey::Str(s) => Ok(s.as_str().unwrap_or("")),
                 _ => Err(PyError::named(
                     "TypeError",
                     format!(
@@ -1246,16 +1274,30 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
                         pykey_type_name(k),
                     ),
                 )),
-            })
-            .collect::<Result<_>>()?,
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                "can only join an iterable".to_string(),
-            ));
+            }),
+        ),
+        ValueKind::Str(s) => {
+            // Iterating a str yields single chars; join them with `sep`
+            // between each, allocating the result once.
+            let n = s.chars().count();
+            if n == 0 {
+                return Ok(Value::string(String::new()));
+            }
+            let total = s.len() + sep.len() * (n - 1);
+            let mut out = String::with_capacity(total);
+            for (i, c) in s.chars().enumerate() {
+                if i != 0 {
+                    out.push_str(sep);
+                }
+                out.push(c);
+            }
+            Ok(Value::string(out))
         }
-    };
-    Ok(Value::string(parts.join(sep)))
+        _ => Err(PyError::named(
+            "TypeError",
+            "can only join an iterable".to_string(),
+        )),
+    }
 }
 
 fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
