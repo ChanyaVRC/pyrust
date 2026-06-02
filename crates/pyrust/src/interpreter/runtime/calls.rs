@@ -4923,13 +4923,9 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
             let upper = t == 'G';
             let prec = fs.precision.unwrap_or(6);
             let prec = if prec == 0 { 1 } else { prec };
-            let s = format_g(abs_f, prec, upper);
-            // Alternate '#': keep trailing zeros / decimal point.
-            let s = if fs.alt {
-                ensure_g_trailing_zeros(s, prec, upper, abs_f)
-            } else {
-                s
-            };
+            // `format_g` keeps trailing zeros and the decimal point when the
+            // alternate '#' form is requested (#1950).
+            let s = format_g(abs_f, prec, upper, fs.alt);
             (s, "")
         }
         '%' => {
@@ -5272,31 +5268,6 @@ fn ensure_alt_float(s: String, alt: bool, precision: Option<usize>) -> String {
     }
 }
 
-/// For 'g'/'G' with '#': keep the trailing zeros that Python's '#g' preserves.
-fn ensure_g_trailing_zeros(s: String, prec: usize, _upper: bool, _abs_f: f64) -> String {
-    // For exponential form we already keep zeros via the format string; trim
-    // happens only in the trailing-zero pass which `#g` opts out of.
-    if s.contains('e') || s.contains('E') {
-        return s;
-    }
-    if !s.contains('.') {
-        // Append decimal point and pad zeros to `prec` significant figures.
-        let total_digits: usize = s.chars().filter(|c| c.is_ascii_digit()).count();
-        let zeros_needed = prec.saturating_sub(total_digits);
-        let mut out = s;
-        if zeros_needed == 0 && prec > total_digits {
-            out.push('.');
-        } else {
-            out.push('.');
-            for _ in 0..zeros_needed {
-                out.push('0');
-            }
-        }
-        return out;
-    }
-    s
-}
-
 /// Pad a string-typed value per the format spec.
 fn pad_value(raw: &str, fs: &FormatSpec, default_align: char, fill: char) -> String {
     let raw_len = raw.chars().count();
@@ -5463,32 +5434,100 @@ fn format_no_type_with_prec(f: f64, prec: usize) -> String {
     }
 }
 
-fn format_g(f: f64, prec: usize, upper: bool) -> String {
-    // Python's %g: use exponential notation if exponent < -4 or >= precision.
+/// CPython's `%g` / `format(_, 'g')` algorithm, shared by `str.format`/`format()`
+/// and `%`-printf (`expr.rs::format_general_float` delegates here).
+///
+/// Faithful port of CPython's general-format rounding rule:
+///   1. Round the value to `prec` significant digits FIRST (via Rust's `{:.Ne}`,
+///      which itself rounds).
+///   2. Read the decimal exponent X of the *rounded* value — rounding can bump
+///      the magnitude across a power of ten (e.g. `999999.5` -> `1e+06`), which
+///      must change the fixed-vs-exponent decision (#2000).
+///   3. Use fixed notation iff `-4 <= X < prec`, else exponential.
+///   4. `alt` (the `#` form) keeps trailing zeros out to `prec` significant
+///      figures and always keeps the decimal point; otherwise strip them (#1950).
+///
+/// `f` must be finite and non-NaN; callers handle inf/nan/sign separately.
+fn format_g(f: f64, prec: usize, upper: bool, alt: bool) -> String {
     if f == 0.0 {
+        // Zero's exponent is taken as 0, so it is always fixed notation.
+        if alt {
+            let mut out = String::from("0.");
+            if prec > 1 {
+                for _ in 0..prec - 1 {
+                    out.push('0');
+                }
+            }
+            return out;
+        }
         return "0".to_string();
     }
-    let exp = f.abs().log10().floor() as i32;
-    if exp < -(4_i32) || exp >= prec as i32 {
-        // Use exponential notation.
-        let sig_digits = prec.saturating_sub(1);
+
+    // Round to `prec` significant digits via exponential formatting, then read
+    // the rounded exponent. This correctly handles rounding that crosses a
+    // power of ten (#2000).
+    let sig_digits = prec.saturating_sub(1);
+    let exp_str = format!("{:.sig_digits$e}", f);
+    let rounded_exp = if let Some(pos) = exp_str.find('e') {
+        exp_str[pos + 1..].parse::<i32>().unwrap_or(0)
+    } else {
+        0
+    };
+
+    if rounded_exp < -(4_i32) || rounded_exp >= prec as i32 {
+        // Exponential notation. Reuse the already-rounded mantissa string.
         let s = if upper {
             format!("{:.sig_digits$E}", f)
         } else {
-            format!("{:.sig_digits$e}", f)
+            exp_str
         };
-        // Trim trailing zeros from mantissa, then normalise exponent.
-        trim_g_trailing_zeros(normalise_exp_str(s, f, None))
-    } else {
-        // Fixed notation.  sig_digits significant figures.
-        let decimal_digits = if exp >= 0 {
-            prec.saturating_sub(exp as usize + 1)
+        let s = normalise_exp_str(s, f, None);
+        if alt {
+            ensure_exp_alt_zeros(s, prec)
         } else {
-            prec + (-exp - 1) as usize
+            trim_g_trailing_zeros(s)
+        }
+    } else {
+        // Fixed notation: `prec` significant figures means
+        //   decimal_digits = prec - 1 - exp (clamped at 0).
+        let decimal_digits = if rounded_exp >= 0 {
+            prec.saturating_sub(rounded_exp as usize + 1)
+        } else {
+            prec + (-rounded_exp - 1) as usize
         };
         let s = format!("{:.decimal_digits$}", f);
-        trim_g_trailing_zeros(s)
+        if alt {
+            // The rounded fixed string already carries exactly `prec`
+            // significant digits; just guarantee a trailing decimal point.
+            if s.contains('.') {
+                s
+            } else {
+                format!("{s}.")
+            }
+        } else {
+            trim_g_trailing_zeros(s)
+        }
     }
+}
+
+/// Pad an already-normalised exponential string (`mantissa` + `e[+-]NN`) so its
+/// mantissa carries `prec` significant digits, for the `#g`/`#G` alternate
+/// form.  CPython keeps trailing zeros and the decimal point in this mode.
+fn ensure_exp_alt_zeros(s: String, prec: usize) -> String {
+    let e_pos = match s.find(|c: char| c == 'e' || c == 'E') {
+        Some(p) => p,
+        None => return s,
+    };
+    let (mantissa, exp_part) = s.split_at(e_pos);
+    let sig: usize = mantissa.chars().filter(|c| c.is_ascii_digit()).count();
+    let mut m = mantissa.to_string();
+    if !m.contains('.') {
+        m.push('.');
+    }
+    for _ in sig..prec {
+        m.push('0');
+    }
+    format!("{m}{exp_part}")
 }
 
 fn trim_g_trailing_zeros(s: String) -> String {
