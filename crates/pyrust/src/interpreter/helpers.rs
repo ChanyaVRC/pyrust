@@ -1382,6 +1382,193 @@ pub(crate) fn extract_str_value(v: &Value) -> String {
     }
 }
 
+/// Coerce a `str`-subclass instance argument to its backing `Str` value so the
+/// receiver-only `pyrust_builtins::string` arg extractors (which match an exact
+/// `ValueKind::Str`) accept it — CPython's `str` methods accept any `str`
+/// subclass argument (an `isinstance` relationship), #1927.
+///
+/// The common case (an exact `str`, or any non-`PyInstance` value) is returned
+/// untouched after a single cheap tag check, so genuinely-wrong-type arguments
+/// still reach the extractor and raise the existing `TypeError`.  Only a
+/// `PyInstance` whose `__builtin_data__` backing is `Str` is rewritten.
+pub(crate) fn coerce_str_subclass_arg(v: Value) -> Value {
+    let backing = if let ValueKind::PyInstance(inst) = v.kind() {
+        inst.borrow()
+            .attrs
+            .get(BUILTIN_DATA_ATTR)
+            .filter(|b| matches!(b.kind(), ValueKind::Str(_)))
+            .cloned()
+    } else {
+        None
+    };
+    backing.unwrap_or(v)
+}
+
+/// Coerce a `bytes`-subclass instance argument to its backing `Bytes` value so
+/// the `pyrust_builtins::bytes` arg extractors (which match an exact
+/// `ValueKind::Bytes`) accept it — CPython's `bytes`/`bytearray` methods accept
+/// any `bytes` subclass argument, #1928.
+///
+/// Like [`coerce_str_subclass_arg`], the common case is returned untouched
+/// after a single tag check; only a `PyInstance` with a `Bytes` backing (a
+/// `bytes` subclass) or a `bytearray` is rewritten to a real `Bytes` value.
+/// CPython treats both as bytes-like objects accepted by `bytes` methods.
+pub(crate) fn coerce_bytes_subclass_arg(v: Value) -> Value {
+    enum Kind {
+        Instance,
+        Builtin,
+        Other,
+    }
+    let kind = match v.kind() {
+        ValueKind::PyInstance(_) => Kind::Instance,
+        ValueKind::BuiltinObject { .. } => Kind::Builtin,
+        _ => Kind::Other,
+    };
+    match kind {
+        Kind::Instance => {
+            let backing = v.as_py_instance_rc().and_then(|inst| {
+                inst.borrow()
+                    .attrs
+                    .get(BUILTIN_DATA_ATTR)
+                    .filter(|b| matches!(b.kind(), ValueKind::Bytes(_)))
+                    .cloned()
+            });
+            backing.unwrap_or(v)
+        }
+        Kind::Builtin => match pyrust_builtins::bytearray::as_bytearray_snapshot(&v) {
+            Some(snapshot) => Value::bytes(snapshot),
+            None => v,
+        },
+        Kind::Other => v,
+    }
+}
+
+/// Coerce a `startswith`/`endswith` first argument, which may be either a
+/// single prefix/suffix or a *tuple* of them.  A tuple has each element coerced
+/// (and is rebuilt); any other value is coerced directly via `coerce` (a no-op
+/// for non-subclass values).  Shared by the str and bytes coercion paths.
+fn coerce_prefix_arg(v: Value, coerce: fn(Value) -> Value) -> Value {
+    let tuple_items: Option<Vec<Value>> = match v.kind() {
+        ValueKind::Tuple(items) => Some(items.to_vec()),
+        _ => None,
+    };
+    match tuple_items {
+        Some(items) => Value::tuple(items.into_iter().map(coerce).collect()),
+        None => coerce(v),
+    }
+}
+
+/// Coerce the positional arguments of a `str` method so str-subclass instances
+/// are accepted (#1927).  Every top-level argument is run through
+/// [`coerce_str_subclass_arg`] (a no-op for the common exact-str / int / None
+/// cases).  For `startswith`/`endswith` the first argument may be a *tuple* of
+/// prefixes; its elements are coerced too.
+pub(crate) fn coerce_str_subclass_method_args(method: &str, mut args: Vec<Value>) -> Vec<Value> {
+    // Hot path: the overwhelmingly common case is exact-str (or int / None)
+    // arguments with no `PyInstance` and no tuple to descend into.  Bail out
+    // after a single scan so a normal `"x".count("y")` pays nothing beyond it —
+    // no per-element coercion, no Vec rebuild.
+    if !args
+        .iter()
+        .any(|a| matches!(a.kind(), ValueKind::PyInstance(_) | ValueKind::Tuple(_)))
+    {
+        return args;
+    }
+    let tuple_arg0 = matches!(method, "startswith" | "endswith");
+    for (i, a) in args.iter_mut().enumerate() {
+        let taken = std::mem::replace(a, Value::none());
+        *a = if tuple_arg0 && i == 0 {
+            coerce_prefix_arg(taken, coerce_str_subclass_arg)
+        } else {
+            coerce_str_subclass_arg(taken)
+        };
+    }
+    args
+}
+
+/// Coerce the positional arguments of a `bytes`/`bytearray` method so
+/// bytes-subclass and bytearray instances are accepted (#1928).  Mirror of
+/// [`coerce_str_subclass_method_args`].
+pub(crate) fn coerce_bytes_subclass_method_args(
+    method: &str,
+    mut args: Vec<Value>,
+) -> Vec<Value> {
+    // Hot path: exact-bytes / int args need no coercion.  A bytes-subclass is a
+    // `PyInstance`; a bytearray is a `BuiltinObject`; the tuple form is a
+    // `Tuple`.  Anything else (Bytes, Int, Bool, …) is left untouched.
+    if !args.iter().any(|a| {
+        matches!(
+            a.kind(),
+            ValueKind::PyInstance(_) | ValueKind::BuiltinObject { .. } | ValueKind::Tuple(_)
+        )
+    }) {
+        return args;
+    }
+    let tuple_arg0 = matches!(method, "startswith" | "endswith");
+    for (i, a) in args.iter_mut().enumerate() {
+        let taken = std::mem::replace(a, Value::none());
+        *a = if tuple_arg0 && i == 0 {
+            coerce_prefix_arg(taken, coerce_bytes_subclass_arg)
+        } else {
+            coerce_bytes_subclass_arg(taken)
+        };
+    }
+    args
+}
+
+/// Coerce the elements of a `join` iterable (`str.join`) so str-subclass items
+/// join by their str value (#1927).  Only `List`/`Tuple` fast-path containers
+/// are rewritten, and only when an element actually needs coercing — an
+/// all-exact-str container is returned untouched after a scan.  Any other
+/// iterable kind is returned unchanged for the builtins join fn to handle.
+pub(crate) fn coerce_str_subclass_join_iterable(iterable: Value) -> Value {
+    let snapshot: Option<Vec<Value>> = match iterable.kind() {
+        ValueKind::List(items) => Some(items.iter().cloned().collect()),
+        ValueKind::Tuple(items) => Some(items.to_vec()),
+        _ => None,
+    };
+    let Some(items) = snapshot else {
+        return iterable;
+    };
+    let needs = items.iter().any(|v| {
+        matches!(v.kind(), ValueKind::PyInstance(inst)
+            if matches!(
+                inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
+                Some(ValueKind::Str(_))
+            ))
+    });
+    if !needs {
+        return iterable;
+    }
+    Value::list(items.into_iter().map(coerce_str_subclass_arg).collect())
+}
+
+/// Coerce the elements of a `bytes.join` iterable so bytes-subclass / bytearray
+/// items join by their bytes value (#1928).  Mirror of
+/// [`coerce_str_subclass_join_iterable`].
+pub(crate) fn coerce_bytes_subclass_join_iterable(iterable: Value) -> Value {
+    let snapshot: Option<Vec<Value>> = match iterable.kind() {
+        ValueKind::List(items) => Some(items.iter().cloned().collect()),
+        ValueKind::Tuple(items) => Some(items.to_vec()),
+        _ => None,
+    };
+    let Some(items) = snapshot else {
+        return iterable;
+    };
+    let needs = items.iter().any(|v| match v.kind() {
+        ValueKind::PyInstance(inst) => matches!(
+            inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
+            Some(ValueKind::Bytes(_))
+        ),
+        ValueKind::BuiltinObject { ops, .. } => ops.type_name() == "bytearray",
+        _ => false,
+    });
+    if !needs {
+        return iterable;
+    }
+    Value::list(items.into_iter().map(coerce_bytes_subclass_arg).collect())
+}
+
 pub(crate) struct PrintOptions {
     pub(crate) values: Vec<Value>,
     pub(crate) sep: String,

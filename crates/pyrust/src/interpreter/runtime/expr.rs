@@ -2590,6 +2590,15 @@ impl Interpreter {
         receiver: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
+        // CPython's str methods accept any str subclass wherever a str argument
+        // is expected (#1927).  The receiver-only `pyrust_builtins::string`
+        // extractors match an exact `ValueKind::Str`, so coerce str-subclass
+        // instances to their backing here before delegating.  Coercion is a
+        // cheap no-op for exact-str / non-instance args (the common case) and
+        // for non-str-backed instances, so wrong-type args still raise the
+        // existing TypeError.  startswith/endswith also accept a *tuple* of str
+        // prefixes/suffixes — coerce each element of a tuple arg too.
+        let args = coerce_str_subclass_method_args(method, args);
         if method == "format_map" {
             if args.len() != 1 {
                 return Err(pyrust_core::type_err!("str.format_map() takes exactly one argument ({} given)",
@@ -2639,9 +2648,13 @@ impl Interpreter {
                         e
                     }
                 })?;
-                Value::list(items)
+                Value::list(items.into_iter().map(coerce_str_subclass_arg).collect())
             } else {
-                iterable
+                // Fast-path containers (List/Tuple) may hold str-subclass items;
+                // CPython joins them by their str value (#1927).  Materialise a
+                // coerced copy only when an item actually needs coercing so the
+                // common all-exact-str list pays nothing but a scan.
+                coerce_str_subclass_join_iterable(iterable)
             };
             return pyrust_builtins::string::call("join", &receiver, vec![iterable]);
         }
@@ -2775,9 +2788,11 @@ impl Interpreter {
                     e
                 }
             })?;
-            Value::list(items)
+            Value::list(items.into_iter().map(coerce_bytes_subclass_arg).collect())
         } else {
-            iterable
+            // List/Tuple fast path may hold bytes-subclass / bytearray items;
+            // CPython joins them by their bytes value (#1928).
+            coerce_bytes_subclass_join_iterable(iterable)
         };
         pyrust_builtins::bytes::call(
             "join",
@@ -4119,9 +4134,23 @@ impl Interpreter {
             ValueKind::List(_) | ValueKind::Tuple(_) => unreachable!("handled above"),
             ValueKind::Set(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
-                ops.contains(state, &item).map(Value::bool_)
+                // bytearray accepts any bytes-like object (bytes subclass,
+                // bytearray) as the left operand of `in` (#1928).  Coerce the
+                // item for bytearray; other BuiltinObjects (frozenset) keep the
+                // original value so their hashing / equality is unaffected.
+                if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME {
+                    let item = coerce_bytes_subclass_arg(item);
+                    ops.contains(state, &item).map(Value::bool_)
+                } else {
+                    ops.contains(state, &item).map(Value::bool_)
+                }
             }
             ValueKind::Bytes(rc) => {
+                // CPython accepts any bytes-like object (bytes subclass,
+                // bytearray) as the left operand of `in` (#1928).  Coerce the
+                // item to its `Bytes` backing before the match; non-bytes-like
+                // values are returned untouched and hit the error arm.
+                let item = coerce_bytes_subclass_arg(item);
                 match item.kind() {
                     ValueKind::Int(n) if (0..=255).contains(&n) => Ok(Value::bool_(rc.contains(&(n as u8)))),
                     // bool is a subclass of int in Python; True==1 and False==0 are
@@ -4136,6 +4165,9 @@ impl Interpreter {
                 }
             }
             ValueKind::Str(s) => {
+                // CPython accepts any str subclass as the left operand of `in`
+                // (#1927).  Coerce the item to its `Str` backing first.
+                let item = coerce_str_subclass_arg(item);
                 match item.kind() {
                     ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub))),
                     _ => Err(pyrust_core::type_err!("'in <string>' requires string as left operand, not {}",
