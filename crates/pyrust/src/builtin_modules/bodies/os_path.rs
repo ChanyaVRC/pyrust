@@ -178,6 +178,295 @@ pyrust_module! {
             ])),
         }
     }
+
+    /// CPython: os.path.split(path) → (head, tail) — split into the
+    /// directory part and the final component.  `tail` never contains a
+    /// slash; if `path` ends with a slash `tail` is empty.  Trailing
+    /// slashes are stripped from `head` unless `head` is all slashes
+    /// (the root).  POSIX semantics.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.split>
+    fn split(args) -> Result<Value> {
+        let path = single_path(FN_NAME, args)?;
+        let (head, tail) = posix_split(&path);
+        Ok(Value::tuple(vec![Value::string(head), Value::string(tail)]))
+    }
+
+    /// CPython: os.path.isabs(path) — true if `path` begins with a slash.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.isabs>
+    fn isabs(args) -> Result<Value> {
+        let path = single_path(FN_NAME, args)?;
+        Ok(Value::bool_(path.starts_with('/')))
+    }
+
+    /// CPython: os.path.normpath(path) — collapse redundant separators
+    /// and up-level references (`.` / `..`).  POSIX semantics, including
+    /// the special case where exactly two leading slashes are preserved.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.normpath>
+    fn normpath(args) -> Result<Value> {
+        let path = single_path(FN_NAME, args)?;
+        Ok(Value::string(posix_normpath(&path)))
+    }
+
+    /// CPython: os.path.splitdrive(path) → (drive, tail).  On POSIX the
+    /// drive is always empty, so this returns `("", path)`.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.splitdrive>
+    fn splitdrive(args) -> Result<Value> {
+        let path = single_path(FN_NAME, args)?;
+        Ok(Value::tuple(vec![Value::string(String::new()), Value::string(path)]))
+    }
+
+    /// CPython: os.path.commonprefix(list) — longest common leading
+    /// substring (character-by-character, NOT path-component aware) of
+    /// the supplied paths.  Returns `""` for an empty list.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.commonprefix>
+    fn commonprefix(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument ({} given)", args.len()),
+            ));
+        }
+        // CPython coerces each element via os.fspath / str; we accept the
+        // common case of a list/tuple of str (what the parity tests and
+        // real callers use). Non-str elements raise TypeError, mirroring
+        // the failure a caller would hit when the items aren't strings.
+        let items = _interp.collect_iterable(&args[0].value)?;
+        if items.is_empty() {
+            return Ok(Value::string(String::new()));
+        }
+        let mut strs: Vec<String> = Vec::with_capacity(items.len());
+        for it in &items {
+            match it.kind() {
+                ValueKind::Str(s) => strs.push(s.to_string()),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() argument must be a sequence of str, not {}",
+                            crate::interpreter::value_type_name_str(it),
+                        ),
+                    ))
+                }
+            }
+        }
+        // Longest common prefix over Unicode scalar values. CPython
+        // compares the strings directly (min vs max suffices because
+        // string ordering makes the shared prefix bounded by both).
+        let min = strs.iter().min().unwrap();
+        let max = strs.iter().max().unwrap();
+        let prefix_len = min
+            .chars()
+            .zip(max.chars())
+            .take_while(|(a, b)| a == b)
+            .map(|(a, _)| a.len_utf8())
+            .sum::<usize>();
+        Ok(Value::string(min[..prefix_len].to_string()))
+    }
+
+    /// CPython: os.path.relpath(path, start=os.curdir) — relative path
+    /// from `start` to `path`.  Both are made absolute (via the process
+    /// cwd) before the common-prefix computation, matching posixpath.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.relpath>
+    fn relpath(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes 1 or 2 arguments ({} given)", args.len()),
+            ));
+        }
+        let path = match args[0].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument must be str"),
+                ))
+            }
+        };
+        // CPython raises ValueError for an empty `path`.
+        if path.is_empty() {
+            return Err(PyError::named(
+                "ValueError",
+                "no path specified".to_string(),
+            ));
+        }
+        let start = match args.get(1).map(|a| a.value.kind()) {
+            Some(ValueKind::Str(s)) => s.to_string(),
+            None => ".".to_string(),
+            Some(_) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument must be str"),
+                ))
+            }
+        };
+        Ok(Value::string(posix_relpath(&path, &start)?))
+    }
+
+    /// CPython: os.path.expanduser(path) — expand a leading `~` (current
+    /// user) or `~user` to the corresponding home directory.  Uses the
+    /// `HOME` environment variable; if `HOME` is unset or the path has
+    /// no leading `~`, the path is returned unchanged.  `~user` is not
+    /// resolved (returned unchanged) since pyrust does not query the
+    /// password database.
+    /// <https://docs.python.org/3/library/os.path.html#os.path.expanduser>
+    fn expanduser(args) -> Result<Value> {
+        let path = single_path(FN_NAME, args)?;
+        Ok(Value::string(posix_expanduser(&path)))
+    }
+
+    /// CPython: os.path.realpath(path) — canonical path, resolving
+    /// symlinks where possible.  pyrust resolves via the filesystem when
+    /// the path exists, otherwise falls back to `abspath` + `normpath`
+    /// (which is what posixpath does for non-existent components).
+    /// <https://docs.python.org/3/library/os.path.html#os.path.realpath>
+    fn realpath(args) -> Result<Value> {
+        let path = single_path(FN_NAME, args)?;
+        let abs = posix_abspath(&path)?;
+        match std::fs::canonicalize(&abs) {
+            Ok(p) => Ok(Value::string(p.to_string_lossy().into_owned())),
+            Err(_) => Ok(Value::string(posix_normpath(&abs))),
+        }
+    }
+}
+
+/// POSIX `os.path.split` — split at the last slash.  The head has its
+/// trailing slashes stripped unless it consists entirely of slashes.
+fn posix_split(path: &str) -> (String, String) {
+    let i = path.rfind('/').map_or(0, |i| i + 1);
+    let head = &path[..i];
+    let tail = &path[i..];
+    // Strip trailing slashes from head unless it's all slashes (root).
+    let head = if !head.is_empty() && head.bytes().any(|b| b != b'/') {
+        head.trim_end_matches('/')
+    } else {
+        head
+    };
+    (head.to_string(), tail.to_string())
+}
+
+/// POSIX `os.path.normpath`.  Mirrors CPython's posixpath.normpath,
+/// including the "exactly two leading slashes" special case.
+fn posix_normpath(path: &str) -> String {
+    if path.is_empty() {
+        return ".".to_string();
+    }
+    // POSIX: a path beginning with exactly two slashes is implementation
+    // defined and preserved; three-or-more collapse to one.
+    let initial_slashes = if path.starts_with('/') {
+        if path.starts_with("//") && !path.starts_with("///") {
+            2
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+    let mut new_comps: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        if comp.is_empty() || comp == "." {
+            continue;
+        }
+        if comp != ".."
+            || (initial_slashes == 0 && new_comps.is_empty())
+            || new_comps.last() == Some(&"..")
+        {
+            new_comps.push(comp);
+        } else if !new_comps.is_empty() {
+            new_comps.pop();
+        }
+    }
+    let mut result = "/".repeat(initial_slashes);
+    result.push_str(&new_comps.join("/"));
+    if result.is_empty() {
+        ".".to_string()
+    } else {
+        result
+    }
+}
+
+/// POSIX `os.path.abspath` — join with cwd if relative, then normpath.
+fn posix_abspath(path: &str) -> Result<String> {
+    let joined = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| {
+            PyError::named("OSError", format!("could not resolve cwd: {e}"))
+        })?;
+        let mut s = cwd.to_string_lossy().into_owned();
+        if !s.ends_with('/') {
+            s.push('/');
+        }
+        s.push_str(path);
+        s
+    };
+    Ok(posix_normpath(&joined))
+}
+
+/// POSIX `os.path.relpath` — relative path from `start` to `path`.
+fn posix_relpath(path: &str, start: &str) -> Result<String> {
+    let abs_path = posix_abspath(path)?;
+    let abs_start = posix_abspath(start)?;
+    let path_parts: Vec<&str> = abs_path.split('/').filter(|s| !s.is_empty()).collect();
+    let start_parts: Vec<&str> = abs_start.split('/').filter(|s| !s.is_empty()).collect();
+    // Length of the shared leading component run.
+    let common = path_parts
+        .iter()
+        .zip(start_parts.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel: Vec<&str> = Vec::new();
+    for _ in common..start_parts.len() {
+        rel.push("..");
+    }
+    rel.extend_from_slice(&path_parts[common..]);
+    if rel.is_empty() {
+        Ok(".".to_string())
+    } else {
+        Ok(rel.join("/"))
+    }
+}
+
+/// POSIX `os.path.expanduser` — expand a leading `~` using `$HOME`.
+fn posix_expanduser(path: &str) -> String {
+    if !path.starts_with('~') {
+        return path.to_string();
+    }
+    // Find the end of the user part (`~` or `~user`): up to the first slash.
+    let rest_start = path.find('/').unwrap_or(path.len());
+    let user_part = &path[1..rest_start];
+    if !user_part.is_empty() {
+        // `~user` — pyrust does not resolve other users' home dirs.
+        return path.to_string();
+    }
+    let home = match std::env::var_os("HOME") {
+        Some(h) => h.to_string_lossy().into_owned(),
+        None => return path.to_string(),
+    };
+    // CPython strips a trailing slash from HOME unless HOME == "/".
+    let home = if home.len() > 1 {
+        home.trim_end_matches('/').to_string()
+    } else {
+        home
+    };
+    let mut result = if home.is_empty() { "/".to_string() } else { home };
+    let rest = &path[rest_start..];
+    if rest.is_empty() {
+        // `~` alone → home (which may be "/").
+        if result == "/" {
+            // Avoid returning "" when home was "/".
+            return "/".to_string();
+        }
+        result
+    } else {
+        if result == "/" {
+            result.clear();
+        }
+        result.push_str(rest);
+        result
+    }
 }
 
 /// Common preamble for the single-`str`-arg variants.  Rejects kwargs,
