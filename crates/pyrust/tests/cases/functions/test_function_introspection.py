@@ -19,6 +19,14 @@ print(myf.__code__.co_name)          # myf
 print(myf.__code__.co_argcount)      # 2
 print(myf.__code__.co_varnames)      # ('a', 'b', 'c', 'args', 'kw')
 
+# Reassigning __name__ does not change the (immutable) code object's co_name.
+def renamed_fn():
+    pass
+
+renamed_fn.__name__ = "other"
+print(renamed_fn.__name__)            # other
+print(renamed_fn.__code__.co_name)    # renamed_fn
+
 # A function with no defaults / no keyword-only params reports None for both.
 def g():
     pass

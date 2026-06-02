@@ -472,12 +472,11 @@ impl Interpreter {
                         // attributes most consumers read: co_name / co_argcount /
                         // co_varnames.  CPython orders co_varnames as positional
                         // params, then keyword-only, then *args, then **kwargs.
-                        let co_name = func
-                            .user_name
-                            .borrow()
-                            .as_deref()
-                            .unwrap_or(&func.name)
-                            .to_string();
+                        // co_name is the original declared name baked into the
+                        // (immutable) code object; reassigning `f.__name__` does
+                        // not change `f.__code__.co_name`, so use `func.name`
+                        // rather than the mutable `user_name`.
+                        let co_name = func.name.clone();
                         let argcount = func
                             .params
                             .iter()
