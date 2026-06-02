@@ -739,6 +739,10 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         (&bytes_class, "bytes", &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
         ][..]),
+        (&bytearray_class, "bytearray", &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__",
+            "__contains__", "__add__", "__mul__",
+        ][..]),
         (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
     ] {
         for &dunder in dunders {
