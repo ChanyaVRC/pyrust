@@ -2321,8 +2321,15 @@ impl Parser {
 
     fn parse_subscript(&mut self, target: Expr) -> Result<Expr> {
         // Inside [ already consumed. Parse optional slice or index.
+        // A leading `*` (PEP 646 starred subscript, e.g. `m[*idx]`) forces the
+        // index to be a tuple even with a single element.
+        let mut saw_star = false;
         let first = if self.is(&Token::Colon) {
             None
+        } else if self.is(&Token::Star) {
+            self.bump();
+            saw_star = true;
+            Some(Expr::Starred(Box::new(self.parse_or()?)))
         } else {
             Some(self.parse_expr()?)
         };
@@ -2363,9 +2370,17 @@ impl Parser {
                     if self.is(&Token::RBracket) {
                         break;
                     }
-                    items.push(self.parse_expr()?);
+                    if self.is(&Token::Star) {
+                        self.bump();
+                        items.push(Expr::Starred(Box::new(self.parse_or()?)));
+                    } else {
+                        items.push(self.parse_expr()?);
+                    }
                 }
                 Expr::Tuple(items)
+            } else if saw_star {
+                // A single starred index still forms a 1-tuple: `m[*xs]` -> `m[(*xs,)]`.
+                Expr::Tuple(vec![first])
             } else {
                 first
             };
@@ -2763,31 +2778,27 @@ impl Parser {
                 false
             };
             self.bump(); // consume `for`
-            // Parse possibly-tuple target (same as for-loop)
-            let first = self.expect_ident("comprehension variable")?;
-            let target = if self.is(&Token::Comma) {
-                let mut names = vec![AssignTarget::Name(first)];
-                while self.is(&Token::Comma) {
-                    self.bump();
-                    if self.is(&Token::In) {
-                        break;
-                    }
-                    names.push(AssignTarget::Name(
-                        self.expect_ident("comprehension variable")?,
-                    ));
-                }
-                AssignTarget::Tuple(names)
-            } else {
-                AssignTarget::Name(first)
-            };
+            // Parse the loop target with the same parser the `for` statement uses,
+            // so comprehensions accept parenthesized / nested / starred targets.
+            let target = self.parse_for_target()?;
             self.expect(&Token::In)?;
             let iter = self.parse_or()?; // parse iterable (no comma-list at this level)
-            let cond = if self.is(&Token::If) {
+            // Consume any number of chained `if` filters (`for ... if A if B`).
+            // They AND together with short-circuit semantics, so fold them into a
+            // left-associated `and` chain matching CPython's `comp_if` grammar.
+            let mut cond: Option<Expr> = None;
+            while self.is(&Token::If) {
                 self.bump();
-                Some(self.parse_or()?)
-            } else {
-                None
-            };
+                let filter = self.parse_or()?;
+                cond = Some(match cond {
+                    None => filter,
+                    Some(prev) => Expr::Binary {
+                        left: Box::new(prev),
+                        op: BinaryOp::And,
+                        right: Box::new(filter),
+                    },
+                });
+            }
             clauses.push(CompClause {
                 target,
                 iter,
