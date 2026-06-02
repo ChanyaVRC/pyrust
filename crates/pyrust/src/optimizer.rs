@@ -3280,23 +3280,36 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     let mut keep = vec![true; n];
 
-    // Pre-scan: count global reads for every temp register (>= num_locals).
-    // A temp with a zero global read count is provably dead everywhere in the
-    // function — it cannot be live on a loop back-edge because temps are
-    // single-assignment (by the compiler) and are never shared across
-    // iterations or external frames.  This lets us remove dead LoadConst /
-    // Move / CopyReg / LoadNone stores that are hoisted before a loop by
-    // pass_licm but still have a back-edge visible after them.
-    let mut global_read_count: HashMap<u32, usize> = HashMap::new();
+    // Pre-scan: record every temp register (>= num_locals) that is read at least
+    // once anywhere in the function, and the highest register index seen (used to
+    // size the per-register liveness arrays below).  A temp that is read nowhere
+    // is provably dead everywhere — it cannot be live on a loop back-edge because
+    // temps are single-assignment (by the compiler) and are never shared across
+    // iterations or external frames.  This lets us remove dead LoadConst / Move /
+    // CopyReg / LoadNone stores that are hoisted before a loop by pass_licm but
+    // still have a back-edge visible after them.
+    let mut read_anywhere: HashSet<u32> = HashSet::new();
+    let mut max_reg: u32 = num_locals;
     {
         let mut reads_buf: HashSet<u32> = HashSet::new();
         for insn in &insns {
             reads_buf.clear();
             collect_reads(insn, &mut reads_buf);
             for &r in &reads_buf {
+                max_reg = max_reg.max(r);
                 if r >= num_locals {
-                    *global_read_count.entry(r).or_insert(0) += 1;
+                    read_anywhere.insert(r);
                 }
+            }
+            if let Some(w) = writable_dst(insn) {
+                max_reg = max_reg.max(w);
+            }
+            match insn {
+                Insn::LoadConst(d, _) | Insn::Move(d, _) => max_reg = max_reg.max(*d),
+                Insn::LoadNoneRange { start, count } => {
+                    max_reg = max_reg.max(start + count.saturating_sub(1) as u32)
+                }
+                _ => {}
             }
         }
     }
@@ -3311,34 +3324,96 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         back_edge_after[i] = back_edge_after[i + 1] || insn_is_back_edge(&insns[i]);
     }
 
-    for i in 0..n {
+    // The dead-store decision for a store at index `i` to register `r` mirrors
+    // `reg_is_read_before_next_write(&insns[i + 1..], r)`, which returns at the
+    // first instruction `j > i` matching, in priority order: (1) reads r → true,
+    // (2) terminator → false, (3) control-flow → true, (4) kills r → false; with
+    // a read taking priority over a kill/control-flow at the same instruction.
+    //
+    // A single reverse pass computes everything needed in O(1) per store: the
+    // nearest control-flow/terminator at-or-after each index (register-
+    // independent) plus, per register, the nearest upcoming read and kill.  This
+    // replaces the original per-store O(n) tail scan that made the pass O(n²) on
+    // long single blocks (a large literal whose elements are all read once by a
+    // single trailing `BuildList`/`BuildDict` — issue #2004).
+    // `n` sentinel = "no such position".
+    let reg_slots = (max_reg as usize) + 1;
+    let mut next_read = vec![n; reg_slots];
+    let mut next_kill = vec![n; reg_slots];
+    // Nearest control-flow/terminator strictly after the current scan position,
+    // updated as we walk backwards; `cf_pos == n` means none.
+    let mut cf_pos = n;
+    let mut cf_is_cf = false;
+
+    let mut reads_buf: HashSet<u32> = HashSet::new();
+    for i in (0..n).rev() {
+        // At index `i`, `next_read`/`next_kill`/`cf_*` describe positions `> i`,
+        // i.e. exactly the slice `&insns[i + 1..]` that the original scan walked.
         let dst = match &insns[i] {
             Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
                 if *r >= num_locals =>
             {
-                *r
+                Some(*r)
             }
             // Pure-callee calls: the compiler emits CallMemo only for #[pure]
             // functions, so a dead result has no observable side effect.
-            Insn::CallMemo(r, _) if *r >= num_locals => *r,
-            _ => continue,
+            Insn::CallMemo(r, _) if *r >= num_locals => Some(*r),
+            _ => None,
         };
-
-        // Fast path: if the register has zero reads anywhere in the function,
-        // the store is provably dead regardless of back-edges.
-        if global_read_count.get(&dst).copied().unwrap_or(0) == 0 {
-            keep[i] = false;
-            continue;
+        if let Some(r) = dst {
+            // Fast path: register read nowhere in the function ⇒ provably dead.
+            if !read_anywhere.contains(&r) {
+                keep[i] = false;
+            } else if back_edge_after[i + 1] {
+                // A back-edge could carry the value into the next iteration.
+            } else {
+                let read = next_read[r as usize];
+                let kill = next_kill[r as usize];
+                let dead = if read < cf_pos && read <= kill {
+                    false // read first (ties to read) ⇒ value is live
+                } else if kill < cf_pos && kill < read {
+                    true // killed before any read / control-flow ⇒ dead
+                } else if read == cf_pos && cf_pos < n {
+                    false // a read on the control-flow/terminator wins ⇒ live
+                } else if cf_pos == n {
+                    true // fell off the end with no read ⇒ dead
+                } else {
+                    // Decided by the control-flow instruction: control-flow ⇒
+                    // conservatively live; terminator ⇒ dead.
+                    !cf_is_cf
+                };
+                if dead {
+                    keep[i] = false;
+                }
+            }
         }
 
-        // Conservative: skip if a back-edge could carry the value into the
-        // next loop iteration (the forward scan below would miss that use).
-        if back_edge_after[i + 1] {
-            continue;
+        // Fold instruction `i` into the running state for the next (lower) index.
+        // Reads first so a same-instruction read+kill records the read position
+        // (matching the original scan's read-before-write priority).
+        reads_buf.clear();
+        collect_reads(&insns[i], &mut reads_buf);
+        for &r in &reads_buf {
+            next_read[r as usize] = i;
         }
-
-        if !reg_is_read_before_next_write(&insns[i + 1..], dst) {
-            keep[i] = false;
+        if let Some(w) = writable_dst(&insns[i]) {
+            next_kill[w as usize] = i;
+        }
+        match &insns[i] {
+            Insn::LoadConst(d, _) | Insn::Move(d, _) => next_kill[*d as usize] = i,
+            Insn::LoadNoneRange { start, count } => {
+                for r in *start..start + *count as u32 {
+                    next_kill[r as usize] = i;
+                }
+            }
+            _ => {}
+        }
+        if is_terminator(&insns[i]) {
+            cf_pos = i;
+            cf_is_cf = false;
+        } else if is_control_flow(&insns[i]) {
+            cf_pos = i;
+            cf_is_cf = true;
         }
     }
 
@@ -3404,6 +3479,108 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         UnaryOp(crate::ast::UnaryOp, u32),
     }
 
+    impl CseKey {
+        /// The single source register referenced by this key, or `None` for
+        /// `LoadConst` (which has no register operand).
+        fn src(&self) -> Option<u32> {
+            match self {
+                CseKey::LoadConst(_) => None,
+                CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => Some(*src),
+                CseKey::UnaryOp(_, src) => Some(*src),
+            }
+        }
+    }
+
+    /// CSE table with reverse indices so per-register eviction touches only the
+    /// affected entries instead of scanning the whole table.  A plain
+    /// `HashMap::retain` per written register is O(table) and degenerates to
+    /// O(n²) inside a long single basic block (e.g. a large literal whose
+    /// elements each emit a fresh `LoadConst` into a new temp — issue #2004).
+    ///
+    /// `by_output[w]` lists keys whose *result* register is `w`; `by_src[w]`
+    /// lists keys whose *source* register is `w`.  Both may contain stale keys
+    /// (already removed from `map`); evicting a register drains its index vecs
+    /// and the `map.remove(..).is_some()` guard makes re-processing a no-op, so
+    /// total eviction work stays O(total inserts).
+    struct CseTable {
+        map: HashMap<CseKey, u32>,
+        by_output: HashMap<u32, Vec<CseKey>>,
+        by_src: HashMap<u32, Vec<CseKey>>,
+    }
+
+    impl CseTable {
+        fn new() -> Self {
+            CseTable {
+                map: HashMap::new(),
+                by_output: HashMap::new(),
+                by_src: HashMap::new(),
+            }
+        }
+        fn clear(&mut self) {
+            self.map.clear();
+            self.by_output.clear();
+            self.by_src.clear();
+        }
+        fn get(&self, k: &CseKey) -> Option<u32> {
+            self.map.get(k).copied()
+        }
+        fn insert(&mut self, k: CseKey, dst: u32) {
+            self.by_output.entry(dst).or_default().push(k.clone());
+            if let Some(src) = k.src() {
+                self.by_src.entry(src).or_default().push(k.clone());
+            }
+            self.map.insert(k, dst);
+        }
+        /// Evict every entry whose result register or source register is `w`.
+        fn evict_reg(&mut self, w: u32) {
+            if let Some(keys) = self.by_output.remove(&w) {
+                for k in keys {
+                    // Only remove if this key's *current* result register is `w`.
+                    // A stale index entry can survive a remove-then-reinsert that
+                    // assigned the key a different output register; removing it
+                    // here would wrongly evict an entry whose output is not `w`.
+                    if self.map.get(&k) == Some(&w) {
+                        self.map.remove(&k);
+                    }
+                }
+            }
+            if let Some(keys) = self.by_src.remove(&w) {
+                // Every key indexed under `by_src[w]` has `src() == Some(w)` by
+                // construction, so any still-live entry must be evicted on a
+                // write to `w`.  Stale (already-removed) keys are a no-op.
+                for k in keys {
+                    self.map.remove(&k);
+                }
+            }
+        }
+        /// Evict every entry whose result or source register falls in `lo..hi`.
+        fn evict_range(&mut self, lo: u32, hi: u32) {
+            for w in lo..hi {
+                self.evict_reg(w);
+            }
+        }
+        /// Evict every entry whose source register is a named local
+        /// (`src < num_locals`) — call-boundary invalidation.  Rebuilds the
+        /// reverse indices from the survivors; only runs on call instructions.
+        fn evict_local_srcs(&mut self, num_locals: u32) {
+            self.map.retain(|k, _| match k.src() {
+                Some(src) => src >= num_locals,
+                None => true,
+            });
+            self.rebuild_indices();
+        }
+        fn rebuild_indices(&mut self) {
+            self.by_output.clear();
+            self.by_src.clear();
+            for (k, &dst) in self.map.iter() {
+                self.by_output.entry(dst).or_default().push(k.clone());
+                if let Some(src) = k.src() {
+                    self.by_src.entry(src).or_default().push(k.clone());
+                }
+            }
+        }
+    }
+
     let n = insns.len();
     if n == 0 {
         return insns;
@@ -3440,7 +3617,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     }
 
     // `table`: CSE key → (original dst register that holds the result).
-    let mut table: HashMap<CseKey, u32> = HashMap::new();
+    let mut table = CseTable::new();
     let mut result: Vec<Insn> = Vec::with_capacity(n);
 
     for (i, insn) in insns.into_iter().enumerate() {
@@ -3492,46 +3669,11 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // We do this BEFORE the CSE match check so the new entry (if any) is
         // not immediately invalidated by its own write.
         if let Insn::LoadNoneRange { start, count } = &insn {
-            let lo = *start;
-            let hi = start + *count as u32;
-            table.retain(|k, prev_dst| {
-                if *prev_dst >= lo && *prev_dst < hi {
-                    return false;
-                }
-                match k {
-                    CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
-                        *src < lo || *src >= hi
-                    }
-                    CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
-                }
-            });
+            table.evict_range(*start, start + *count as u32);
         } else if let Insn::Unpack(base, _, n) = &insn {
-            let lo = *base;
-            let hi = base + n;
-            table.retain(|k, prev_dst| {
-                if *prev_dst >= lo && *prev_dst < hi {
-                    return false;
-                }
-                match k {
-                    CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
-                        *src < lo || *src >= hi
-                    }
-                    CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
-                }
-            });
+            table.evict_range(*base, base + n);
         } else if let Some(w) = written_reg {
-            table.retain(|k, prev_dst| {
-                if *prev_dst == w {
-                    return false;
-                }
-                match k {
-                    CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => *src != w,
-                    CseKey::UnaryOp(_, src) => *src != w,
-                }
-            });
+            table.evict_reg(w);
         }
         // UnpackEx writes dst_base..dst_base+before+1+after.  writable_dst
         // returns None for it (multi-register write), so evict the full range
@@ -3549,18 +3691,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         {
             let lo = *dst_base;
             let hi = dst_base + *before as u32 + 1 + *after as u32;
-            table.retain(|k, prev_dst| {
-                if *prev_dst >= lo && *prev_dst < hi {
-                    return false;
-                }
-                match k {
-                    CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
-                        *src < lo || *src >= hi
-                    }
-                    CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
-                }
-            });
+            table.evict_range(lo, hi);
         }
         // YieldFrom writes both result_reg and sent_reg on resume.  Neither
         // register is in writable_dst (which is single-register), so evict
@@ -3571,20 +3702,8 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             ..
         } = &insn
         {
-            let rr = *result_reg;
-            let sr = *sent_reg;
-            table.retain(|k, prev_dst| {
-                if *prev_dst == rr || *prev_dst == sr {
-                    return false;
-                }
-                match k {
-                    CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
-                        *src != rr && *src != sr
-                    }
-                    CseKey::UnaryOp(_, src) => *src != rr && *src != sr,
-                }
-            });
+            table.evict_reg(*result_reg);
+            table.evict_reg(*sent_reg);
         }
 
         // Call-boundary invalidation: any user-defined callee may update
@@ -3603,16 +3722,12 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
         ) {
-            table.retain(|k, _| match k {
-                CseKey::LoadConst(_) => true,
-                CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => *src >= num_locals,
-                CseKey::UnaryOp(_, src) => *src >= num_locals,
-            });
+            table.evict_local_srcs(num_locals);
         }
 
         // Check for a previous matching computation.
         let replaced = if let Some((ref k, dst)) = key {
-            if let Some(&prev_dst) = table.get(k) {
+            if let Some(prev_dst) = table.get(k) {
                 if prev_dst != dst {
                     // Replace this instruction with a register copy from the
                     // earlier result.  The original instruction is discarded.
@@ -9041,6 +9156,361 @@ mod tests {
             matches!(out[2], Insn::UnaryOp(4, UnaryOp::Neg, 1)),
             "UnaryOp after YieldFrom must not use stale result_reg as CopyReg source: {:?}",
             out[2]
+        );
+    }
+
+    // ── linearized-pass equivalence (issue #2004) ──────────────────────────────
+
+    /// Reference dead-store elimination that uses the original O(n) tail-scan
+    /// (`reg_is_read_before_next_write`).  Used to confirm the linearized
+    /// `pass_dead_store_elim` produces byte-identical output.
+    fn dead_store_elim_reference(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+        let n = insns.len();
+        let mut keep = vec![true; n];
+        let mut global_read_count: HashMap<u32, usize> = HashMap::new();
+        let mut reads_buf: HashSet<u32> = HashSet::new();
+        for insn in &insns {
+            reads_buf.clear();
+            collect_reads(insn, &mut reads_buf);
+            for &r in &reads_buf {
+                if r >= num_locals {
+                    *global_read_count.entry(r).or_insert(0) += 1;
+                }
+            }
+        }
+        for i in 0..n {
+            let dst = match &insns[i] {
+                Insn::LoadConst(r, _)
+                | Insn::LoadNone(r)
+                | Insn::Move(r, _)
+                | Insn::CopyReg(r, _)
+                    if *r >= num_locals =>
+                {
+                    *r
+                }
+                Insn::CallMemo(r, _) if *r >= num_locals => *r,
+                _ => continue,
+            };
+            if global_read_count.get(&dst).copied().unwrap_or(0) == 0 {
+                keep[i] = false;
+                continue;
+            }
+            if slice_has_back_edge(&insns[i + 1..]) {
+                continue;
+            }
+            if !reg_is_read_before_next_write(&insns[i + 1..], dst) {
+                keep[i] = false;
+            }
+        }
+        compact(insns, &keep)
+    }
+
+    /// A small library of random-ish instruction streams that exercise the
+    /// dead-store / CSE eviction logic: loads, moves, copies, fused ops, reads,
+    /// control flow (terminators, back-edges), and range writes.
+    fn sample_streams() -> Vec<Vec<Insn>> {
+        use crate::ast::{BinaryOp, UnaryOp};
+        vec![
+            // Long single block of distinct LoadConsts feeding one BuildList
+            // (the #2004 literal shape).
+            {
+                let mut v: Vec<Insn> = (0..40u16)
+                    .map(|i| Insn::LoadConst(2 + i as u32, i))
+                    .collect();
+                v.push(Insn::BuildList(2, 2, 40));
+                v.push(Insn::Return(2));
+                v
+            },
+            // Move chain with a read in the middle.
+            vec![
+                Insn::LoadConst(2, 0),
+                Insn::Move(3, 2),
+                Insn::UnaryOp(4, UnaryOp::Neg, 3),
+                Insn::Move(3, 4),
+                Insn::Return(3),
+            ],
+            // Read-then-write of the same reg in one instruction (BinOp(r,r,..)).
+            vec![
+                Insn::LoadConst(2, 0),
+                Insn::BinOpConst(2, 2, BinaryOp::Add, 1, false),
+                Insn::Return(2),
+            ],
+            // Store with a terminator before any read.
+            vec![Insn::LoadConst(2, 0), Insn::ReturnNone],
+            // Store, control-flow (forward jump), then read.
+            vec![Insn::LoadConst(2, 0), Insn::Jump(0), Insn::Return(2)],
+            // Back-edge after a store (loop-carried).
+            vec![
+                Insn::LoadConst(2, 0),
+                Insn::BinOpConst(2, 2, BinaryOp::Add, 1, false),
+                Insn::Jump(-2),
+            ],
+            // LoadNoneRange overwriting a previously loaded temp.
+            vec![
+                Insn::LoadConst(2, 0),
+                Insn::LoadNoneRange { start: 2, count: 3 },
+                Insn::Return(2),
+            ],
+            // CopyReg dead store (never read).
+            vec![Insn::LoadConst(2, 0), Insn::CopyReg(3, 2), Insn::Return(2)],
+            // Duplicate LoadConst (CSE target) with intervening write.
+            vec![
+                Insn::LoadConst(2, 0),
+                Insn::Move(2, 3),
+                Insn::LoadConst(4, 0),
+                Insn::Return(4),
+            ],
+            // Duplicate fused op separated by an unrelated write.
+            vec![
+                Insn::BinOpConst(2, 0, BinaryOp::Add, 1, false),
+                Insn::LoadConst(5, 7),
+                Insn::BinOpConst(3, 0, BinaryOp::Add, 1, false),
+                Insn::Return(3),
+            ],
+            // Fused op whose source is overwritten between two occurrences.
+            vec![
+                Insn::BinOpConst(2, 0, BinaryOp::Add, 1, false),
+                Insn::Move(0, 9),
+                Insn::BinOpConst(3, 0, BinaryOp::Add, 1, false),
+                Insn::Return(3),
+            ],
+        ]
+    }
+
+    #[test]
+    fn dead_store_elim_matches_reference() {
+        for stream in sample_streams() {
+            for num_locals in [0u32, 2, 3] {
+                let a = pass_dead_store_elim(stream.clone(), num_locals);
+                let b = dead_store_elim_reference(stream.clone(), num_locals);
+                assert_eq!(
+                    a, b,
+                    "dead_store_elim diverged from reference (num_locals={num_locals}) on {stream:?}"
+                );
+            }
+        }
+    }
+
+    /// Reference CSE using a plain `HashMap` with full-table `retain` eviction
+    /// (the pre-#2004 algorithm).  Confirms the reverse-indexed `CseTable`
+    /// produces byte-identical output.
+    fn cse_reference(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+        #[derive(Eq, PartialEq, Hash, Clone)]
+        enum K {
+            LoadConst(u16),
+            BinOpConst(u32, crate::ast::BinaryOp, u16),
+            BinOpImm(u32, crate::ast::BinaryOp, i16),
+            UnaryOp(crate::ast::UnaryOp, u32),
+        }
+        let n = insns.len();
+        if n == 0 {
+            return insns;
+        }
+        let mut is_bb_start = vec![false; n + 1];
+        is_bb_start[0] = true;
+        for (i, insn) in insns.iter().enumerate() {
+            let k: Option<i32> = match insn {
+                Insn::Jump(k)
+                | Insn::JumpIfFalse(_, k)
+                | Insn::JumpIfTrue(_, k)
+                | Insn::CmpJumpIfFalse(_, _, _, k)
+                | Insn::CmpJumpIfTrue(_, _, _, k)
+                | Insn::CmpJumpIfFalseConst(_, _, _, k)
+                | Insn::CmpJumpIfTrueConst(_, _, _, k)
+                | Insn::ForIter(_, _, k)
+                | Insn::ForCountReg(_, _, _, _, k)
+                | Insn::ForCountConst(_, _, _, _, k)
+                | Insn::ForCountConstInline(_, _, _, _, k)
+                | Insn::SetupExcept(k)
+                | Insn::MatchExcept(_, k)
+                | Insn::MatchExceptStar(_, _, _, k) => Some(*k),
+                _ => None,
+            };
+            if let Some(k) = k {
+                let target = (i as i64 + 1 + k as i64) as usize;
+                if target <= n {
+                    is_bb_start[target] = true;
+                }
+            }
+        }
+        let mut table: HashMap<K, u32> = HashMap::new();
+        let mut result: Vec<Insn> = Vec::with_capacity(n);
+        for (i, insn) in insns.into_iter().enumerate() {
+            if is_bb_start[i] {
+                table.clear();
+            }
+            let key: Option<(K, u32)> = match &insn {
+                Insn::LoadConst(dst, idx) => Some((K::LoadConst(*idx), *dst)),
+                Insn::BinOpConst(dst, src, op, idx, false) => {
+                    Some((K::BinOpConst(*src, *op, *idx), *dst))
+                }
+                Insn::BinOpImm(dst, src, op, imm, false) => {
+                    Some((K::BinOpImm(*src, *op, *imm), *dst))
+                }
+                Insn::UnaryOp(dst, op, src) => Some((K::UnaryOp(*op, *src), *dst)),
+                _ => None,
+            };
+            let written_reg: Option<u32> = match &insn {
+                Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::LoadGlobal(r, _) => Some(*r),
+                Insn::Move(dst, _) => Some(*dst),
+                Insn::Unpack(..) | Insn::LoadNoneRange { .. } => None,
+                _ => writable_dst(&insn),
+            };
+            let evict_range = |table: &mut HashMap<K, u32>, lo: u32, hi: u32| {
+                table.retain(|k, prev_dst| {
+                    if *prev_dst >= lo && *prev_dst < hi {
+                        return false;
+                    }
+                    match k {
+                        K::LoadConst(_) => true,
+                        K::BinOpConst(src, _, _) | K::BinOpImm(src, _, _) => {
+                            *src < lo || *src >= hi
+                        }
+                        K::UnaryOp(_, src) => *src < lo || *src >= hi,
+                    }
+                });
+            };
+            if let Insn::LoadNoneRange { start, count } = &insn {
+                evict_range(&mut table, *start, start + *count as u32);
+            } else if let Insn::Unpack(base, _, m) = &insn {
+                evict_range(&mut table, *base, base + m);
+            } else if let Some(w) = written_reg {
+                table.retain(|k, prev_dst| {
+                    if *prev_dst == w {
+                        return false;
+                    }
+                    match k {
+                        K::LoadConst(_) => true,
+                        K::BinOpConst(src, _, _) | K::BinOpImm(src, _, _) => *src != w,
+                        K::UnaryOp(_, src) => *src != w,
+                    }
+                });
+            }
+            if let Insn::UnpackEx {
+                dst_base,
+                before,
+                after,
+                ..
+            } = &insn
+            {
+                let lo = *dst_base;
+                let hi = dst_base + *before as u32 + 1 + *after as u32;
+                evict_range(&mut table, lo, hi);
+            }
+            if let Insn::YieldFrom {
+                result_reg,
+                sent_reg,
+                ..
+            } = &insn
+            {
+                let rr = *result_reg;
+                let sr = *sent_reg;
+                table.retain(|k, prev_dst| {
+                    if *prev_dst == rr || *prev_dst == sr {
+                        return false;
+                    }
+                    match k {
+                        K::LoadConst(_) => true,
+                        K::BinOpConst(src, _, _) | K::BinOpImm(src, _, _) => {
+                            *src != rr && *src != sr
+                        }
+                        K::UnaryOp(_, src) => *src != rr && *src != sr,
+                    }
+                });
+            }
+            if matches!(
+                insn,
+                Insn::Call(..)
+                    | Insn::CallMemo(..)
+                    | Insn::CallMethod { .. }
+                    | Insn::CallMethodExpanded { .. }
+                    | Insn::MakeClass(..)
+            ) {
+                table.retain(|k, _| match k {
+                    K::LoadConst(_) => true,
+                    K::BinOpConst(src, _, _) | K::BinOpImm(src, _, _) => *src >= num_locals,
+                    K::UnaryOp(_, src) => *src >= num_locals,
+                });
+            }
+            let replaced = if let Some((ref k, dst)) = key {
+                if let Some(&prev_dst) = table.get(k) {
+                    if prev_dst != dst {
+                        result.push(Insn::CopyReg(dst, prev_dst));
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !replaced {
+                if let Some((k, dst)) = key {
+                    table.insert(k, dst);
+                }
+                result.push(insn);
+            }
+            let is_terminator = matches!(
+                result.last().unwrap(),
+                Insn::Jump(_)
+                    | Insn::JumpIfFalse(..)
+                    | Insn::JumpIfTrue(..)
+                    | Insn::CmpJumpIfFalse(..)
+                    | Insn::CmpJumpIfTrue(..)
+                    | Insn::CmpJumpIfFalseConst(..)
+                    | Insn::CmpJumpIfTrueConst(..)
+                    | Insn::ForIter(..)
+                    | Insn::ForCountReg(..)
+                    | Insn::ForCountConst(..)
+                    | Insn::ForCountConstInline(..)
+                    | Insn::SetupExcept(_)
+                    | Insn::MatchExcept(..)
+                    | Insn::MatchExceptStar(..)
+                    | Insn::Return(_)
+                    | Insn::ReturnNone
+                    | Insn::RaiseValue(_)
+                    | Insn::RaiseFrom(..)
+                    | Insn::RaiseReRaise
+                    | Insn::RaiseAssert(_)
+                    | Insn::RaiseAssertNoMsg
+            );
+            if is_terminator {
+                table.clear();
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn cse_linearized_matches_reference() {
+        for stream in sample_streams() {
+            for num_locals in [0u32, 1, 2, 3] {
+                let a = pass_cse(stream.clone(), num_locals);
+                let b = cse_reference(stream.clone(), num_locals);
+                assert_eq!(
+                    a, b,
+                    "cse diverged from reference (num_locals={num_locals}) on {stream:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cse_linearized_matches_small_cases() {
+        // The dedicated cse_* tests above lock in the expected output for each
+        // eviction path; re-run them through the linearized table on the literal
+        // shape to confirm the indexed eviction still dedups within one block.
+        let mut v: Vec<Insn> = vec![Insn::LoadConst(2, 0), Insn::LoadConst(3, 0)];
+        v.push(Insn::BuildList(2, 2, 2));
+        v.push(Insn::Return(2));
+        let out = pass_cse(v, 0);
+        // The second LoadConst(_, 0) must become CopyReg(3, 2).
+        assert!(
+            matches!(out[1], Insn::CopyReg(3, 2)),
+            "duplicate LoadConst within a block should CSE: {:?}",
+            out[1]
         );
     }
 
