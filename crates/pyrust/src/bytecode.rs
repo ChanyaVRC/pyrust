@@ -142,6 +142,12 @@ pub enum Insn {
     DeleteAttr(Reg, u16),
     /// R[dst] = R[obj][R[idx]]
     GetItem(Reg, Reg, Reg),
+    /// R[dst] = R[obj][R[base] : R[base+1] : R[base+2]]  (rvalue slice read).
+    /// CPython's BINARY_SLICE analogue: reads the three contiguous bound
+    /// registers (start, stop, step; `None` = absent) and slices `obj` directly,
+    /// without materialising a `slice` object for built-in sequences (#1964).
+    /// User `__getitem__` / BuiltinObject paths still receive a real `slice`.
+    GetSlice(Reg, Reg, Reg),
     /// R[obj][R[idx]] = R[val]
     SetItem(Reg, Reg, Reg),
     /// del R[obj][R[idx]]

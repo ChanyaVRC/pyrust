@@ -7565,9 +7565,12 @@ impl Compiler {
         }
     }
 
-    /// Build the 3-element slice-key tuple `(lo, hi, step)` used by GetItem/SetItem/DeleteItem.
-    /// Each missing bound is represented as `None`. Returns the register holding the tuple.
-    fn compile_slice_key(
+    /// Emit code that fills three *contiguous* registers with the slice bounds
+    /// `(lo, hi, step)` — each missing bound becomes `LoadNone`. Returns the base
+    /// register; the bounds occupy `[base, base+3)`. Shared by `compile_slice_key`
+    /// (which wraps them in a `slice` object via `BuildSlice`) and the rvalue
+    /// `GetSlice` fast path (which reads them directly).
+    fn compile_slice_bounds(
         &mut self,
         lower: Option<&Expr>,
         upper: Option<&Expr>,
@@ -7605,7 +7608,18 @@ impl Compiler {
         fill_slot(self, lo_slot, lower);
         fill_slot(self, hi_slot, upper);
         fill_slot(self, st_slot, step);
+        lo_slot
+    }
 
+    /// Build the 3-element slice-key object `(lo, hi, step)` used by GetItem/SetItem/DeleteItem.
+    /// Each missing bound is represented as `None`. Returns the register holding the slice.
+    fn compile_slice_key(
+        &mut self,
+        lower: Option<&Expr>,
+        upper: Option<&Expr>,
+        step: Option<&Expr>,
+    ) -> Reg {
+        let lo_slot = self.compile_slice_bounds(lower, upper, step);
         // The three slots are already contiguous; BuildSlice reads [lo_slot .. lo_slot+3).
         // BuildSlice (not BuildTuple) so the VM can unambiguously distinguish a
         // compiler-generated slice key from a user 3-tuple (issue #931).
@@ -9609,12 +9623,18 @@ impl Compiler {
                 upper,
                 step,
             } => {
+                // Rvalue slice read `obj[lo:hi:step]`: emit GetSlice, which reads
+                // the three contiguous bound registers directly and slices `obj`
+                // without materialising a `slice` object on the built-in-sequence
+                // fast path (#1964, CPython BINARY_SLICE analogue).
                 let obj = self.compile_expr(target);
-                let slice_r =
-                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
                 let dst = self.ensure_dst(obj);
-                self.emit(Insn::GetItem(dst, obj, slice_r));
-                self.free_temp(slice_r);
+                let saved_next = self.next_temp;
+                let base =
+                    self.compile_slice_bounds(lower.as_deref(), upper.as_deref(), step.as_deref());
+                self.emit(Insn::GetSlice(dst, obj, base));
+                // The three bound slots [base, base+3) are consumed by GetSlice.
+                self.next_temp = saved_next;
                 dst
             }
             Expr::List(items) => {
