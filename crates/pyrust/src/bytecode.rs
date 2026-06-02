@@ -71,7 +71,7 @@ pub struct FnProto {
     pub class_kwarg_names: SmallVec<[String; 2]>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Insn {
     /// R[dst] = consts[idx]
     LoadConst(Reg, u16),
