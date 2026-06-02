@@ -2681,7 +2681,7 @@ impl Interpreter {
             // `set_binary_op` / `set_subset_cmp`; otherwise fall through to the
             // fast interpreter-free builtin path below.
             "union" | "intersection" | "difference" | "symmetric_difference"
-            | "issubset" | "issuperset"
+            | "issubset" | "issuperset" | "isdisjoint"
                 if self.set_algebra_needs_eq(&receiver, &args)? =>
             {
                 self.set_algebra_method_eq(method, receiver, args)
@@ -2715,7 +2715,9 @@ impl Interpreter {
                     None => Ok(result),
                 }
             }
-            "issubset" | "issuperset" if self.set_algebra_needs_eq(&receiver, &args)? => {
+            "issubset" | "issuperset" | "isdisjoint"
+                if self.set_algebra_needs_eq(&receiver, &args)? =>
+            {
                 self.set_algebra_method_eq(method, receiver, args)
             }
             _ => pyrust_builtins::frozenset::call(method, &receiver, args),
@@ -2847,6 +2849,30 @@ impl Interpreter {
                     Some(r) => r,
                     None => unreachable!("both operands are sets"),
                 }
+            }
+            "isdisjoint" => {
+                // `a.isdisjoint(b)` is True when the two sets share no
+                // `__eq__`-equal element (issue #1907).  Probe each receiver
+                // element against the materialised operand via `set_lookup_in`,
+                // which dispatches user `__hash__`-then-`__eq__`.
+                let arg = args.first().ok_or_else(|| {
+                    PyError::Runtime("set.isdisjoint() requires 1 argument".to_string())
+                })?;
+                let recv_items = receiver
+                    .set_with(|s| s.clone())
+                    .or_else(|| {
+                        pyrust_builtins::frozenset::as_items(&receiver).map(|rc| (*rc).clone())
+                    })
+                    .ok_or_else(|| {
+                        PyError::named("TypeError", "set.isdisjoint receiver is not a set".to_string())
+                    })?;
+                let other = self.materialize_set_operand(arg)?;
+                for k in recv_items.iter() {
+                    if self.set_lookup_in(&other, k)?.is_some() {
+                        return Ok(Value::bool_(false));
+                    }
+                }
+                Ok(Value::bool_(true))
             }
             _ => unreachable!("set_algebra_method_eq called with non-algebra method"),
         }

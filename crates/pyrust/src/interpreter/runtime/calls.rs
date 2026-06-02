@@ -951,6 +951,7 @@ impl Interpreter {
                 "union" | "intersection" | "difference" | "symmetric_difference"
                     | "issubset"
                     | "issuperset"
+                    | "isdisjoint"
             )
             && pyrust_builtins::frozenset::as_items(&receiver).is_some()
         {

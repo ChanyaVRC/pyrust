@@ -82,3 +82,13 @@ print(sorted({1, 2} | {2, 3}))         # [1, 2, 3]
 print(sorted({1, 2, 3} - {2}))         # [1, 3]
 print(sorted({1, 2} ^ {2, 3}))         # [1, 3]
 print({1, 2}.issubset({1, 2, 3}))      # True
+
+# isdisjoint also dispatches user __eq__ (set + frozenset, set/iterable arg).
+da = {E(1), E(2)}
+print(da.isdisjoint({E(1)}))           # False — E(1) shared
+print(da.isdisjoint({E(9)}))           # True
+print(da.isdisjoint([E(2)]))           # False — iterable operand
+print(frozenset({E(1), E(2)}).isdisjoint({E(1)}))  # False
+print(frozenset({E(1), E(2)}).isdisjoint([E(9)]))  # True
+print({1, 2}.isdisjoint({2, 3}))       # False — primitive fast path
+print({1, 2}.isdisjoint(range(3, 5)))  # True
