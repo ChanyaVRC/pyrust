@@ -1025,41 +1025,81 @@ const ENVIRON_METHODS: &[(&str, &str)] = &[
 
 // ── process / system helpers ────────────────────────────────────────
 
-/// Best-effort parent-process id.  std has no portable `getppid`, so on
-/// Linux we parse `/proc/self/status`; on other platforms we return 0
-/// (the value is environment-specific and only type-checked in tests).
+/// Parent-process id.  `std` has no portable `getppid`, so we call the
+/// platform primitive directly: `getppid(2)` on Unix, and a Toolhelp
+/// process snapshot on Windows (which has no direct PPID syscall — the
+/// snapshot's `PROCESSENTRY32::th32ParentProcessID` is the supported way).
+#[cfg(unix)]
 fn get_parent_pid() -> i64 {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
-            for line in status.lines() {
-                if let Some(rest) = line.strip_prefix("PPid:") {
-                    if let Ok(n) = rest.trim().parse::<i64>() {
-                        return n;
-                    }
+    // SAFETY: `getppid` takes no arguments, never fails, and has no
+    // preconditions; it always returns the caller's parent pid.
+    (unsafe { libc::getppid() }) as i64
+}
+
+#[cfg(windows)]
+fn get_parent_pid() -> i64 {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let me = std::process::id();
+    // SAFETY: the Toolhelp APIs are pure FFI with documented contracts; we
+    // check the snapshot handle for INVALID_HANDLE_VALUE before use, zero-init
+    // the entry and set `dwSize` as required, and close the handle on exit.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return 0;
+        }
+        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut ppid: i64 = 0;
+        if Process32First(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ProcessID == me {
+                    ppid = entry.th32ParentProcessID as i64;
+                    break;
+                }
+                if Process32Next(snapshot, &mut entry) == 0 {
+                    break;
                 }
             }
         }
-        0
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        0
+        CloseHandle(snapshot);
+        ppid
     }
 }
 
-/// Read `n` random bytes from the OS entropy source.  On Unix this reads
-/// `/dev/urandom`; if that fails we surface an OSError.
+#[cfg(not(any(unix, windows)))]
+fn get_parent_pid() -> i64 {
+    0
+}
+
+/// Read `n` random bytes from the OS cryptographically-secure RNG.
+///
+/// Uses the `getrandom` crate, which is the de-facto cross-platform
+/// CSPRNG shim: it reads `getrandom(2)` / `/dev/urandom` on Linux,
+/// `getentropy` on macOS/BSD, and `BCryptGenRandom` on Windows — the
+/// same OS entropy sources CPython's `os.urandom` draws from.
 fn os_urandom(n: usize) -> Result<Vec<u8>> {
-    use std::io::Read;
     let mut buf = vec![0u8; n];
     if n == 0 {
         return Ok(buf);
     }
-    let mut f = std::fs::File::open("/dev/urandom")
-        .map_err(|e| PyError::from_io_error(&e, None))?;
-    f.read_exact(&mut buf)
-        .map_err(|e| PyError::from_io_error(&e, None))?;
+    getrandom::getrandom(&mut buf).map_err(|e| {
+        // `getrandom::Error` carries a raw OS error code when the failure
+        // originated in the platform RNG; surface it as an OSError the same
+        // way a `/dev/urandom` read failure would have.
+        match e.raw_os_error() {
+            Some(code) => {
+                let io = std::io::Error::from_raw_os_error(code);
+                PyError::from_io_error(&io, None)
+            }
+            None => PyError::named("OSError", e.to_string()),
+        }
+    })?;
     Ok(buf)
 }
 

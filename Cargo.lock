@@ -255,7 +255,9 @@ dependencies = [
 name = "pyrust"
 version = "0.1.0"
 dependencies = [
+ "getrandom",
  "indexmap",
+ "libc",
  "num-bigint",
  "num-traits",
  "pyrust-builtins",
@@ -264,6 +266,7 @@ dependencies = [
  "rustyline",
  "smallvec",
  "unicode_names2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
