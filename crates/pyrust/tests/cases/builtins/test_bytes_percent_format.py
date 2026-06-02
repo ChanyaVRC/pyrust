@@ -92,3 +92,12 @@ show(lambda: b"%d %d" % (1,))  # not enough arguments
 show(lambda: b"%d" % (1, 2))  # not all arguments converted
 show(lambda: b"%(z)s" % {b"k": b"v"})  # KeyError with bytes key
 show(lambda: b"%w" % 1)  # unsupported conversion
+
+# Error wording differs from the str %-formatter: bytes reports
+# "float argument required" (not "must be real number") for float codes,
+# and normalises the %i alias to %d in the int message.
+show(lambda: b"%f" % "x")
+show(lambda: b"%e" % None)
+show(lambda: b"%g" % [1])
+show(lambda: b"%i" % "x")
+show(lambda: b"%d" % b"y")

@@ -4901,13 +4901,14 @@ impl Interpreter {
         flag_space: bool,
         flag_hash: bool,
         conv_index: usize,
+        bytes_mode: bool,
     ) -> Result<String> {
         Ok(match conv {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
                     let coerced_int = self.coerce_printf_int_arg(arg)?;
-                    match str_printf_to_int(&coerced_int, conv)? {
+                    match str_printf_to_int(&coerced_int, conv, bytes_mode)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 format!("{}", n)
@@ -4933,7 +4934,7 @@ impl Interpreter {
                 }
                 'o' => {
                     let coerced_int = self.coerce_printf_int_arg(arg)?;
-                    match str_printf_to_int(&coerced_int, conv)? {
+                    match str_printf_to_int(&coerced_int, conv, bytes_mode)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 // CPython uses sign-magnitude (not two's complement) for negative octal.
@@ -4967,7 +4968,7 @@ impl Interpreter {
                 }
                 'x' => {
                     let coerced_int = self.coerce_printf_int_arg(arg)?;
-                    match str_printf_to_int(&coerced_int, conv)? {
+                    match str_printf_to_int(&coerced_int, conv, bytes_mode)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 let u = (n as u64).wrapping_neg();
@@ -5000,7 +5001,7 @@ impl Interpreter {
                 }
                 'X' => {
                     let coerced_int = self.coerce_printf_int_arg(arg)?;
-                    match str_printf_to_int(&coerced_int, conv)? {
+                    match str_printf_to_int(&coerced_int, conv, bytes_mode)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 let u = (n as u64).wrapping_neg();
@@ -5033,7 +5034,7 @@ impl Interpreter {
                 }
                 'e' | 'E' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
-                    let f = str_printf_to_float(&coerced_float, conv)?;
+                    let f = str_printf_to_float(&coerced_float, conv, bytes_mode)?;
                     let prec = precision.unwrap_or(6);
                     let mut s = format_scientific(f, prec, conv == 'E');
                     if f.is_sign_positive() && flag_plus {
@@ -5045,7 +5046,7 @@ impl Interpreter {
                 }
                 'f' | 'F' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
-                    let f = str_printf_to_float(&coerced_float, conv)?;
+                    let f = str_printf_to_float(&coerced_float, conv, bytes_mode)?;
                     let upper = conv == 'F';
                     // Special-case NaN and Inf before calling format!(), which
                     // produces Rust-style 'NaN'/'inf' rather than CPython-style
@@ -5073,7 +5074,7 @@ impl Interpreter {
                 }
                 'g' | 'G' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
-                    let f = str_printf_to_float(&coerced_float, conv)?;
+                    let f = str_printf_to_float(&coerced_float, conv, bytes_mode)?;
                     let prec = precision.unwrap_or(6).max(1);
                     let mut s = format_general_float(f, prec, conv == 'G', flag_hash);
                     if f.is_sign_positive() && flag_plus {
@@ -5326,7 +5327,7 @@ impl Interpreter {
 
             // Format the argument according to the conversion code.
             let formatted = self.str_printf_convert(
-                conv, arg, precision, flag_plus, flag_space, flag_hash, i - 1,
+                conv, arg, precision, flag_plus, flag_space, flag_hash, i - 1, false,
             )?;
 
             // Apply width and alignment.
@@ -5568,7 +5569,7 @@ impl Interpreter {
                 }
                 _ => {
                     let formatted = self.str_printf_convert(
-                        conv, arg, precision, flag_plus, flag_space, flag_hash, i - 1,
+                        conv, arg, precision, flag_plus, flag_space, flag_hash, i - 1, true,
                     )?;
                     let padded = apply_printf_width(formatted, width, flag_minus, flag_zero, conv);
                     out.extend_from_slice(padded.as_bytes());
@@ -5739,14 +5740,18 @@ enum PrintfInt {
 /// CPython's `int(float)` semantics: NaN raises `ValueError`, infinity raises
 /// `OverflowError`, and finite floats larger than `i64::MAX` are promoted to
 /// `PrintfInt::Big` rather than being silently clamped.
-fn str_printf_to_int(v: &Value, conv: char) -> Result<PrintfInt> {
+fn str_printf_to_int(v: &Value, conv: char, bytes_mode: bool) -> Result<PrintfInt> {
+    // CPython's bytes %-formatter normalises the %i alias to %d in its error
+    // messages (the str formatter keeps %i); mirror that so the wording is
+    // byte-identical to CPython 3.12 for both receivers.
+    let disp = if bytes_mode && conv == 'i' { 'd' } else { conv };
     match v.kind() {
         ValueKind::Int(n) => Ok(PrintfInt::Small(n)),
         ValueKind::Bool(b) => Ok(PrintfInt::Small(b as i64)),
         ValueKind::Float(_) if matches!(conv, 'o' | 'x' | 'X') => {
             // CPython 3.12: %o/%x/%X reject float with "an integer is required".
             // %d/%i/%u accept float (truncating toward zero) for historical reasons.
-            Err(pyrust_core::type_err!("%{conv} format: an integer is required, not float"))
+            Err(pyrust_core::type_err!("%{disp} format: an integer is required, not float"))
         }
         ValueKind::Float(f) => {
             // CPython converts via PyLong_FromDouble: NaN → ValueError,
@@ -5766,12 +5771,12 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<PrintfInt> {
             // and "an integer is required" for %o/%x/%X.
             let msg = if matches!(conv, 'o' | 'x' | 'X') {
                 format!(
-                    "%{conv} format: an integer is required, not {}",
+                    "%{disp} format: an integer is required, not {}",
                     pyrust_core::builtin_type_name(v)
                 )
             } else {
                 format!(
-                    "%{conv} format: a real number is required, not {}",
+                    "%{disp} format: a real number is required, not {}",
                     pyrust_core::builtin_type_name(v)
                 )
             };
@@ -5831,14 +5836,23 @@ fn format_printf_bigint_radix(
 }
 
 /// Convert a `Value` to `f64` for float printf format codes.
-fn str_printf_to_float(v: &Value, _conv: char) -> Result<f64> {
+fn str_printf_to_float(v: &Value, _conv: char, bytes_mode: bool) -> Result<f64> {
     match v.kind() {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(n) => Ok(n as f64),
         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
         ValueKind::BigInt(b) => bigint_to_float_or_overflow(b),
-        _ => Err(pyrust_core::type_err!("must be real number, not {}",
-                pyrust_core::builtin_type_name(v))),
+        // CPython's bytes %-formatter reports "float argument required, not X"
+        // for the float codes (%e/%E/%f/%F/%g/%G), whereas the str formatter
+        // reports "must be real number, not X".
+        _ if bytes_mode => Err(pyrust_core::type_err!(
+            "float argument required, not {}",
+            pyrust_core::builtin_type_name(v)
+        )),
+        _ => Err(pyrust_core::type_err!(
+            "must be real number, not {}",
+            pyrust_core::builtin_type_name(v)
+        )),
     }
 }
 
