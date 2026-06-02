@@ -19,10 +19,35 @@ print(type(d.keys() & {"a"}).__name__)
 print(type(frozenset({"a"}) & d.keys()).__name__)
 print(type(d.keys() | frozenset({"a"})).__name__)
 
+# View set operators accept ANY iterable (list/str/dict/generator), not just a
+# set, on the other side — CPython's dictviews_and/_or/_sub/_xor build a set from
+# it.  Result is always a plain `set`; a non-iterable operand raises "not iterable".
+print(sorted(d.keys() & ["a", "b"]))
+print(sorted(d.keys() | ["x", "x"]))
+print(sorted(d.keys() - ["a", "z"]))
+print(sorted(d.keys() ^ ["a", "a", "x"]))
+print(sorted(d.keys() & "ab"))
+print(sorted(["a", "z"] & d.keys()))
+print(sorted(["x"] | d.keys()))
+print(sorted(["a", "z"] - d.keys()))
+print(sorted(d.keys() & {"a": 99}))
+print(sorted(d.keys() & (ch for ch in "ac")))
+print(type(d.keys() & ["a"]).__name__)
+print(type(["a"] & d.keys()).__name__)
+for expr in ("d.keys() & 5", "5 & d.keys()"):
+    try:
+        eval(expr)
+        print(expr, "no error")
+    except TypeError as ex:
+        print(expr, "->", ex)
+
 # --- dict_items set operators ---
 print(sorted({"a": 1}.items() & {("a", 1)}))
 print(sorted(d.items() | {("z", 9)}))
 print(sorted(d.items() - {("a", 1)}))
+print(sorted(d.items() & [("a", 1), ("z", 9)]))
+print(sorted(d.items() | [("z", 9)]))
+print(sorted(d.items() ^ [("a", 1), ("z", 9)]))
 
 # --- equality (the silent-False bug) ---
 print(d.keys() == {"a", "b", "c"})

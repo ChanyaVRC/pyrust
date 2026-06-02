@@ -5771,6 +5771,46 @@ impl Interpreter {
             _ => None,
         }
     }
+
+    /// Coerce an operand of a dict-view set operator (`&`/`|`/`-`/`^`) to its
+    /// `(IndexSet<PyKey>, frozen)` items (issue #1891).
+    ///
+    /// Unlike [`Self::coerce_set_operand`], when `allow_iterable` is set this
+    /// accepts *any* iterable — list, tuple, str, generator, dict, … — exactly
+    /// as CPython's `dictviews_and`/`_or`/`_sub`/`_xor` do (they build a set
+    /// from the iterable).  Returns `None` only for non-iterable operands, so
+    /// the caller falls through and the normal `__and__`/etc. path raises the
+    /// `unsupported operand type(s)` TypeError.
+    pub(crate) fn coerce_setop_operand(
+        &mut self,
+        v: &Value,
+        allow_iterable: bool,
+    ) -> Option<Result<(indexmap::IndexSet<PyKey>, bool)>> {
+        if let Some(res) = self.coerce_set_operand(v) {
+            return Some(res);
+        }
+        if !allow_iterable {
+            return None;
+        }
+        // Not set-like: treat as an arbitrary iterable (CPython builds a set
+        // from it).  A non-iterable operand surfaces the iterator protocol's
+        // own `'<type>' object is not iterable` TypeError — matching CPython,
+        // whose `dictviews_and`/etc. iterate the operand directly.
+        let items = match self.collect_iterable(v) {
+            Ok(items) => items,
+            Err(e) => return Some(Err(e)),
+        };
+        let mut out = indexmap::IndexSet::new();
+        for item in items {
+            match self.value_to_pykey(&item) {
+                Ok(k) => {
+                    out.insert(k);
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(Ok((out, false)))
+    }
 }
 
 /// Append `data` to `out`, applying printf width padding with spaces.
@@ -6636,6 +6676,25 @@ fn set_binary_op(
     op: SetOp,
     op_sym: &str,
 ) -> Option<Result<Value>> {
+    // CPython's dict-view set operators (`&`/`|`/`-`/`^`) accept *any* iterable
+    // on the other side, not just a set — `d.keys() & ['a']`, `['a'] & d.keys()`,
+    // `d.keys() | 'ab'`, `d.keys() - (g for g in …)` all work and return a plain
+    // `set` (issue #1891).  Real `set`/`frozenset` operators keep the strict
+    // "set operand required" rule, so only relax it when a view is involved.
+    let view_involved = is_setlike_view(left) || is_setlike_view(right);
+    if view_involved {
+        let lhs_items = match interp.coerce_setop_operand(left, true) {
+            Some(Ok(items)) => items,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return None,
+        };
+        let rhs_items = match interp.coerce_setop_operand(right, true) {
+            Some(Ok(items)) => items,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return None,
+        };
+        return set_binary_op_from_items(interp, lhs_items, rhs_items, op, true);
+    }
     // LHS must be set-like (set/frozenset/subclass or a set-like dict view,
     // issue #1891); otherwise this isn't a set op and the caller falls through.
     let lhs_items = match interp.coerce_set_operand(left)? {
@@ -6652,6 +6711,22 @@ fn set_binary_op(
             return Some(Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")));
         }
     };
+    set_binary_op_from_items(interp, lhs_items, rhs_items, op, false)
+}
+
+/// Shared set-algebra core for [`set_binary_op`].  Computes `lhs OP rhs` over
+/// already-coerced `(IndexSet<PyKey>, frozen)` operands and packages the result.
+///
+/// `force_set` forces a plain `set` result regardless of the operands' frozen
+/// flags — used for dict-view operators, which always return `set` (issue
+/// #1891); otherwise a `frozenset` operand promotes the result to `frozenset`.
+fn set_binary_op_from_items(
+    interp: &mut Interpreter,
+    lhs_items: (indexmap::IndexSet<PyKey>, bool),
+    rhs_items: (indexmap::IndexSet<PyKey>, bool),
+    op: SetOp,
+    force_set: bool,
+) -> Option<Result<Value>> {
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
     // Fast path: neither operand contains user-instance keys, so raw
@@ -6740,12 +6815,7 @@ fn set_binary_op(
         Ok(out) => out,
         Err(e) => return Some(Err(e)),
     };
-    // Result type: a frozenset operand promotes the result to `frozenset`
-    // (CPython) — *unless* a dict view is involved, in which case the view's
-    // own `__and__`/`__or__`/… always returns a plain `set` regardless of the
-    // other operand's type (issue #1891).
-    let view_involved = is_setlike_view(left) || is_setlike_view(right);
-    Some(Ok(if (l_frozen || r_frozen) && !view_involved {
+    Some(Ok(if (l_frozen || r_frozen) && !force_set {
         pyrust_builtins::frozenset::frozenset(out)
     } else {
         Value::set(out)
