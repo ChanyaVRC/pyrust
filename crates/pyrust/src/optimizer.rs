@@ -48,25 +48,45 @@ fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) ->
         })
         .collect();
 
+    // Index every old instruction by structural identity → ascending positions.
+    // The greedy scan below needs, for each `new_insn`, the first old position
+    // `>= old_pos` whose instruction equals it.  A naive forward re-scan is
+    // O(old) per new instruction and degenerates to O(n²) when the optimized
+    // stream is full of optimizer-created instructions that never match (e.g. a
+    // long const-folded accumulator chain — issue #2002).  With this index each
+    // lookup is a binary search over that instruction's position list, keeping
+    // the whole remap linear-ish (O((old + new) log old)) while producing
+    // byte-identical output to the original forward scan.
+    let mut positions: HashMap<&Insn, Vec<usize>> = HashMap::new();
+    for (i, insn) in old_insns.iter().enumerate() {
+        positions.entry(insn).or_default().push(i);
+    }
+
     let mut old_pos: usize = 0;
     let mut result = Vec::with_capacity(new_insns.len());
-    'outer: for new_insn in new_insns {
-        // Search forward from old_pos for the first matching instruction.
-        for i in old_pos..old_insns.len() {
-            if &old_insns[i] == new_insn {
+    for new_insn in new_insns {
+        // First old position `>= old_pos` matching `new_insn`, via the index.
+        let matched = positions.get(new_insn).and_then(|locs| {
+            // `locs` is ascending; find the first entry `>= old_pos`.
+            let k = locs.partition_point(|&p| p < old_pos);
+            locs.get(k).copied()
+        });
+        match matched {
+            Some(i) => {
                 let ln = old_linenos.get(i).copied().unwrap_or(0);
                 result.push(ln);
                 old_pos = i + 1;
-                continue 'outer;
+            }
+            None => {
+                // No match found (instruction was created by the optimizer, e.g.
+                // a fused BinOpConst from a BinOp that existed after a LoadConst).
+                // Use the "running" lineno at old_pos — the lineno of the next
+                // unmatched instruction in the original stream, the best
+                // approximation for the source location of this derived insn.
+                let approx = old_prefix.get(old_pos).copied().unwrap_or(0);
+                result.push(approx);
             }
         }
-        // No match found (instruction was created by the optimizer, e.g. a
-        // fused BinOpConst from a BinOp that existed after a LoadConst).
-        // Use the "running" lineno at old_pos — the lineno of the next unmatched
-        // instruction in the original stream, which is the best approximation
-        // for the source location of this derived instruction.
-        let approx = old_prefix.get(old_pos).copied().unwrap_or(0);
-        result.push(approx);
     }
     result
 }
@@ -257,6 +277,29 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let mut transformed = insns;
     let mut keep = vec![true; n];
 
+    // Precompute O(1) replacements for the two per-pair tail scans that would
+    // otherwise make this pass O(n²) on a long straight-line sequence (issue
+    // #2002):
+    //  * `back_edge_after[j]` — whether any instruction at index `>= j` is a
+    //    backward branch (equivalent to `slice_has_back_edge(&insns[j..])`).
+    //  * `last_read[r]` — the highest index at which register `r` is read, so
+    //    `reg_is_read_in(&insns[j..], r)` becomes `last_read[r] >= j`.
+    let mut back_edge_after = vec![false; n + 1];
+    for j in (0..n).rev() {
+        back_edge_after[j] = back_edge_after[j + 1] || insn_is_back_edge(&transformed[j]);
+    }
+    let mut last_read: HashMap<u32, usize> = HashMap::new();
+    {
+        let mut reads_buf: HashSet<u32> = HashSet::new();
+        for (j, insn) in transformed.iter().enumerate() {
+            reads_buf.clear();
+            collect_reads(insn, &mut reads_buf);
+            for &r in &reads_buf {
+                last_read.insert(r, j);
+            }
+        }
+    }
+
     let mut i = 0;
     while i + 1 < n {
         if let (Insn::LoadConst(lc_reg, c_idx), Insn::BinOp(dst, lhs, op, rhs)) =
@@ -265,11 +308,15 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             let (lc_reg, c_idx) = (*lc_reg, *c_idx);
             let (dst, lhs, op, rhs) = (*dst, *lhs, *op, *rhs);
             // Case 1: const is the RHS operand → BinOpConst(dst, lhs, op, c)
+            let read_after = last_read
+                .get(&lc_reg)
+                .copied()
+                .is_some_and(|last| last >= i + 2);
             if rhs == lc_reg
                 && lhs != lc_reg
                 && lc_reg >= num_locals
-                && !slice_has_back_edge(&transformed[i + 2..])
-                && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
+                && !back_edge_after[i + 2]
+                && (dst == lc_reg || !read_after)
             {
                 keep[i] = false;
                 // Fusing a plain BinOp (never augmented) → is_aug = false.
@@ -780,6 +827,11 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
 
     let mut known: HashMap<u32, u16> = HashMap::new();
     let mut out = Vec::with_capacity(insns.len());
+    // Hash index over the const pool so interning a folded constant is
+    // amortized O(1) instead of an O(pool) linear scan.  A long foldable chain
+    // (`x = x + i` × N) interns ~N fresh constants; the linear scan made the
+    // whole pass O(n²) (issue #2002).
+    let mut const_index = ConstIndex::build(consts);
 
     for (i, insn) in insns.into_iter().enumerate() {
         if bb_starts.contains(&i) {
@@ -802,10 +854,10 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                 out.push(Insn::Move(dst, src));
             }
             Insn::BinOp(dst, lhs, op, rhs) => {
-                let folded = known.get(&lhs).and_then(|&cl| {
-                    known.get(&rhs).and_then(|&cr| {
+                let folded = known.get(&lhs).copied().and_then(|cl| {
+                    known.get(&rhs).copied().and_then(|cr| {
                         crate::compiler::fold_binop(&consts[cl as usize], op, &consts[cr as usize])
-                            .and_then(|v| intern_const_in_pool(consts, v))
+                            .and_then(|v| const_index.intern(consts, v))
                     })
                 });
                 apply_const_fold(
@@ -817,9 +869,9 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                 );
             }
             Insn::BinOpConst(dst, lhs, op, c, is_aug) => {
-                let folded = known.get(&lhs).and_then(|&cl| {
+                let folded = known.get(&lhs).copied().and_then(|cl| {
                     crate::compiler::fold_binop(&consts[cl as usize], op, &consts[c as usize])
-                        .and_then(|v| intern_const_in_pool(consts, v))
+                        .and_then(|v| const_index.intern(consts, v))
                 });
                 apply_const_fold(
                     &mut known,
@@ -830,10 +882,10 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                 );
             }
             Insn::BinOpImm(dst, lhs, op, imm, is_aug) => {
-                let folded = known.get(&lhs).and_then(|&cl| {
+                let folded = known.get(&lhs).copied().and_then(|cl| {
                     let rhs_val = Value::int(imm as i64);
                     crate::compiler::fold_binop(&consts[cl as usize], op, &rhs_val)
-                        .and_then(|v| intern_const_in_pool(consts, v))
+                        .and_then(|v| const_index.intern(consts, v))
                 });
                 apply_const_fold(
                     &mut known,
@@ -979,6 +1031,95 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         // CopyReg is emitted by the CSE pass; it writes to dst just like Move.
         CopyReg(r, _) => Some(*r),
         _ => None,
+    }
+}
+
+/// A hashable, type-exact dedup key for a constant pool `Value`.
+///
+/// Mirrors the equality semantics of `intern_const_in_pool`'s linear scan:
+/// `Bool` and `Int` never collide (distinct variants), floats/complex compare
+/// by raw bits so NaN-keyed constants share a slot, and every other type
+/// returns `None` (no key → never deduplicated, exactly like the `_ => false`
+/// arm of the linear scan).
+#[derive(PartialEq, Eq, Hash)]
+enum ConstKey {
+    Int(i64),
+    BigInt(Vec<u8>),
+    FloatBits(u64),
+    ComplexBits(u64, u64),
+    Str(String),
+    Bytes(Vec<u8>),
+    Bool(bool),
+    None,
+}
+
+fn const_key(val: &Value) -> Option<ConstKey> {
+    Some(match val.kind() {
+        ValueKind::Int(a) => ConstKey::Int(a),
+        // BigInt has no `Hash`; key on its big-endian byte serialization, which
+        // is a 1:1 representation for the `==` used by the linear scan.
+        ValueKind::BigInt(a) => ConstKey::BigInt(a.to_signed_bytes_be()),
+        ValueKind::Float(a) => ConstKey::FloatBits(a.to_bits()),
+        ValueKind::Complex(ar, ai) => ConstKey::ComplexBits(ar.to_bits(), ai.to_bits()),
+        ValueKind::Str(a) => ConstKey::Str(a.to_owned()),
+        ValueKind::Bytes(a) => ConstKey::Bytes(a.as_ref().clone()),
+        ValueKind::Bool(a) => ConstKey::Bool(a),
+        ValueKind::None => ConstKey::None,
+        _ => return None,
+    })
+}
+
+/// Hash index over a constant pool for amortized-O(1) interning.
+///
+/// `intern_const_in_pool` is otherwise an O(pool) linear scan per call; a pass
+/// that folds a long def-use chain (`x = x + i` × N) interns ~N fresh constants,
+/// driving the whole pass to O(n²) (issue #2002).  This index maps each
+/// dedup-able `ConstKey` to the *first* (lowest) pool slot holding it, matching
+/// the linear scan's "first match wins" behaviour exactly, so the resulting pool
+/// indices are identical.
+struct ConstIndex {
+    map: HashMap<ConstKey, u16>,
+}
+
+impl ConstIndex {
+    /// Build the index from the existing pool contents.
+    fn build(consts: &[Value]) -> Self {
+        let mut map = HashMap::with_capacity(consts.len());
+        for (i, v) in consts.iter().enumerate() {
+            if let Some(k) = const_key(v) {
+                // First occurrence wins (matches linear-scan ordering).
+                map.entry(k).or_insert(i as u16);
+            }
+        }
+        ConstIndex { map }
+    }
+
+    /// Look up or insert `val`; returns its pool index (or `None` if the pool is
+    /// full or `val` is not a dedup-able type and the pool is full).
+    fn intern(&mut self, consts: &mut Vec<Value>, val: Value) -> Option<u16> {
+        match const_key(&val) {
+            Some(k) => {
+                if let Some(&idx) = self.map.get(&k) {
+                    return Some(idx);
+                }
+                if consts.len() >= u16::MAX as usize {
+                    return None;
+                }
+                let idx = consts.len() as u16;
+                consts.push(val);
+                self.map.insert(k, idx);
+                Some(idx)
+            }
+            // Non-dedup-able type: never shares a slot (matches `_ => false`).
+            None => {
+                if consts.len() >= u16::MAX as usize {
+                    return None;
+                }
+                let idx = consts.len() as u16;
+                consts.push(val);
+                Some(idx)
+            }
+        }
     }
 }
 
@@ -1638,23 +1779,27 @@ fn pass_const_branch_elim(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
 /// liveness scan alone cannot prove a register is dead — the register may be
 /// read on the next loop iteration.  Passes that would remove a `LoadConst`
 /// based solely on `reg_is_read_in` must guard with this check.
+/// Returns `true` if `insn` is a backward branch (offset `< 0`), i.e. a loop
+/// back-edge.
+fn insn_is_back_edge(insn: &Insn) -> bool {
+    matches!(insn,
+        Insn::Jump(k)
+        | Insn::JumpIfFalse(_, k)
+        | Insn::JumpIfTrue(_, k)
+        | Insn::ForIter(_, _, k)
+        | Insn::ForCountReg(_, _, _, _, k)
+        | Insn::ForCountConst(_, _, _, _, k)
+        | Insn::ForCountConstInline(_, _, _, _, k)
+        | Insn::CmpJumpIfFalse(_, _, _, k)
+        | Insn::CmpJumpIfTrue(_, _, _, k)
+        | Insn::CmpJumpIfFalseConst(_, _, _, k)
+        | Insn::CmpJumpIfTrueConst(_, _, _, k)
+        if *k < 0
+    )
+}
+
 fn slice_has_back_edge(insns: &[Insn]) -> bool {
-    insns.iter().any(|insn| {
-        matches!(insn,
-            Insn::Jump(k)
-            | Insn::JumpIfFalse(_, k)
-            | Insn::JumpIfTrue(_, k)
-            | Insn::ForIter(_, _, k)
-            | Insn::ForCountReg(_, _, _, _, k)
-            | Insn::ForCountConst(_, _, _, _, k)
-            | Insn::ForCountConstInline(_, _, _, _, k)
-            | Insn::CmpJumpIfFalse(_, _, _, k)
-            | Insn::CmpJumpIfTrue(_, _, _, k)
-            | Insn::CmpJumpIfFalseConst(_, _, _, k)
-            | Insn::CmpJumpIfTrueConst(_, _, _, k)
-            if *k < 0
-        )
-    })
+    insns.iter().any(insn_is_back_edge)
 }
 
 /// Used as a forward liveness guard before removing a `LoadConst` that produced `r`.
@@ -3145,6 +3290,16 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
     }
 
+    // Suffix back-edge map: `back_edge_after[i]` is true iff any instruction at
+    // index `> i` is a backward branch.  Computing this once turns the per-store
+    // `slice_has_back_edge(&insns[i + 1..])` lookup (an O(n) tail scan) into an
+    // O(1) array read, so this pass stays linear instead of O(n²) on long
+    // single-block instruction streams (issue #2002).
+    let mut back_edge_after = vec![false; n + 1];
+    for i in (0..n).rev() {
+        back_edge_after[i] = back_edge_after[i + 1] || insn_is_back_edge(&insns[i]);
+    }
+
     for i in 0..n {
         let dst = match &insns[i] {
             Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
@@ -3167,7 +3322,7 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 
         // Conservative: skip if a back-edge could carry the value into the
         // next loop iteration (the forward scan below would miss that use).
-        if slice_has_back_edge(&insns[i + 1..]) {
+        if back_edge_after[i + 1] {
             continue;
         }
 
@@ -10682,5 +10837,114 @@ elif x == 2:
             optimized.insns,
             optimized.lineno_table
         );
+    }
+
+    // ── issue #2002: linear compile on long single-variable def-use chains ──────
+
+    /// Brute-force reference for `remap_linenos`'s greedy forward scan.  The
+    /// indexed implementation must produce byte-identical output.
+    fn remap_linenos_reference(
+        old_insns: &[Insn],
+        old_linenos: &[u32],
+        new_insns: &[Insn],
+    ) -> Vec<u32> {
+        if old_linenos.is_empty() {
+            return vec![0u32; new_insns.len()];
+        }
+        let mut running = 0u32;
+        let old_prefix: Vec<u32> = old_linenos
+            .iter()
+            .map(|&ln| {
+                if ln != 0 {
+                    running = ln;
+                }
+                running
+            })
+            .collect();
+        let mut old_pos = 0usize;
+        let mut result = Vec::with_capacity(new_insns.len());
+        'outer: for new_insn in new_insns {
+            for i in old_pos..old_insns.len() {
+                if &old_insns[i] == new_insn {
+                    result.push(old_linenos.get(i).copied().unwrap_or(0));
+                    old_pos = i + 1;
+                    continue 'outer;
+                }
+            }
+            result.push(old_prefix.get(old_pos).copied().unwrap_or(0));
+        }
+        result
+    }
+
+    #[test]
+    fn remap_linenos_indexed_matches_reference() {
+        use crate::ast::BinaryOp;
+        // A stream with duplicate instructions, optimizer-created instructions
+        // that never match, and reordered survivors — the cases where the greedy
+        // cursor behaviour matters.
+        let old = vec![
+            Insn::LoadConst(2, 0),
+            Insn::BinOp(0, 0, BinaryOp::Add, 2),
+            Insn::LoadConst(2, 0),
+            Insn::BinOp(0, 0, BinaryOp::Add, 2),
+            Insn::LoadConst(2, 0),
+            Insn::Return(0),
+        ];
+        let old_ln = vec![1, 1, 2, 2, 3, 3];
+        let candidates = vec![
+            Insn::LoadConst(2, 0),               // matches first occurrence
+            Insn::BinOp(0, 0, BinaryOp::Add, 2), // matches
+            Insn::LoadConst(9, 5),               // never matches (optimizer-made)
+            Insn::LoadConst(2, 0),               // matches the next occurrence
+            Insn::Return(0),                     // matches
+        ];
+        let got = remap_linenos(&old, &old_ln, &candidates);
+        let want = remap_linenos_reference(&old, &old_ln, &candidates);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn const_fold_long_chain_folds_to_final_value() {
+        // x = x + 1 + 2 + ... folded across a straight-line chain must collapse
+        // every step and leave the correct final constant in the pool.
+        let mut src = String::from("x = 0\n");
+        for i in 1..=20 {
+            src.push_str(&format!("x = x + {i}\n"));
+        }
+        let code = compile_fn(&src);
+        let optimized = optimize(code);
+        // sum(1..=20) == 210 must appear as a folded Int constant.
+        assert!(
+            optimized
+                .consts
+                .iter()
+                .any(|v| matches!(v.kind(), ValueKind::Int(210))),
+            "folded chain must produce the constant 210; consts: {:?}",
+            optimized.consts
+        );
+    }
+
+    #[test]
+    fn const_index_intern_matches_linear_scan() {
+        // The hash-indexed interner must return the same slots as the original
+        // linear scan (first-occurrence-wins dedup), including for Bool vs Int
+        // (which must never collide) and float bit-equality.
+        let mut a = vec![Value::int(1), Value::bool_(true), Value::float(2.0)];
+        let mut b = a.clone();
+        let mut idx = ConstIndex::build(&a);
+        let vals = [
+            Value::int(1),       // dedup → 0
+            Value::bool_(true),  // dedup → 1 (not Int(1))
+            Value::int(5),       // new → 3
+            Value::float(2.0),   // dedup → 2
+            Value::bool_(false), // new → 4
+            Value::int(5),       // dedup → 3
+        ];
+        for v in vals {
+            let indexed = idx.intern(&mut a, v.clone());
+            let linear = intern_const_in_pool(&mut b, v);
+            assert_eq!(indexed, linear, "indexed vs linear intern diverged");
+        }
+        assert_eq!(a.len(), b.len());
     }
 }
