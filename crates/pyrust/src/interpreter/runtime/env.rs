@@ -121,8 +121,24 @@ impl Interpreter {
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);
                 let obj_class = Rc::clone(obj_class);
-                // classmethod super(): use MRO of obj_class, start after `class`.
-                let mro = class_mro_items(&obj_class)?;
+                // Two cases (issue #1956):
+                //   1. classmethod super(): `class` is in `obj_class`'s own MRO.
+                //      Walk `obj_class`'s MRO starting after `class`.
+                //   2. metaclass-method super(): `class` (a metaclass) is in
+                //      `type(obj_class)`'s MRO, not `obj_class`'s own MRO.  Walk
+                //      the metaclass MRO ([Meta, type, object]) starting after
+                //      `class`, but still bind `obj_class` (the class being
+                //      operated on) as the receiver.
+                let own_mro = class_mro_items(&obj_class)?;
+                let class_in_own_mro = own_mro.iter().any(|v| match v.kind() {
+                    ValueKind::PyClass(c) => Rc::ptr_eq(c, &class),
+                    _ => false,
+                });
+                let mro = if class_in_own_mro {
+                    own_mro
+                } else {
+                    class_mro_items(&metaclass_of(&obj_class))?
+                };
                 let start = mro_search_start(&mro, &class);
                 for mro_entry in mro.iter().skip(start) {
                     let entry_class = match mro_entry.kind() {
@@ -138,7 +154,23 @@ impl Interpreter {
                         return Ok(match user_fn {
                             Some(f) => match f.kind {
                                 UserFunctionKind::Regular => {
-                                    Value::user_function(Rc::clone(&f))
+                                    // Metaclass-method super(): `obj_class` (the
+                                    // class being operated on) is the receiver
+                                    // — it is an "instance" of the metaclass — so
+                                    // `super().describe()` inside a metaclass
+                                    // method must bind it, mirroring how a plain
+                                    // `cls.describe()` binds `cls`.  The
+                                    // classmethod-super case (`class_in_own_mro`)
+                                    // keeps the unbound function, matching the
+                                    // existing instance/classmethod behaviour.
+                                    if class_in_own_mro {
+                                        Value::user_function(Rc::clone(&f))
+                                    } else {
+                                        Value::class_bound_method(
+                                            Rc::clone(&f),
+                                            Rc::clone(&obj_class),
+                                        )
+                                    }
                                 }
                                 UserFunctionKind::ClassMethod => {
                                     Value::class_bound_method(Rc::clone(&f), Rc::clone(&obj_class))
@@ -161,10 +193,16 @@ impl Interpreter {
                             // a user-defined `__init_subclass__` (PEP 487 / issue #1080).
                             // Only wrap known builtin classmethods to avoid prepending
                             // a class where an instance is expected (e.g. __init__).
+                            //
+                            // Issue #1956: `type.__call__` is also bound to
+                            // `obj_class` so that `super().__call__(*a)` inside a
+                            // metaclass `__call__` override prepends the class
+                            // being constructed and runs the default __new__+__init__.
                             None => {
                                 let builtin_cm_name = match value.kind() {
                                     ValueKind::BuiltinFunction(fn_name)
-                                        if is_builtin_classmethod(fn_name) =>
+                                        if is_builtin_classmethod(fn_name)
+                                            || fn_name == "type.__call__" =>
                                     {
                                         Some(fn_name.to_string())
                                     }
@@ -1000,6 +1038,56 @@ impl Interpreter {
                 Some(doc) => Value::string(doc.to_string()),
                 None => Value::none(),
             });
+        }
+        // Issue #1956/#1960: on a miss in `cls`'s own MRO, consult the
+        // metaclass's MRO for the attribute, mirroring CPython's
+        // `type.__getattribute__` (which looks up `name` on `type(cls)` after
+        // the class's own dict).  This lets a metaclass method or attribute
+        // (e.g. a `_instances` cache used by a singleton `__call__`) be reached
+        // via `cls.attr`.  `metaclass_dunder` resolves user-defined attributes
+        // on the metaclass MRO, returning `None` for ordinary classes.
+        if name != "__getattr__" {
+            if let Some(meta_val) = metaclass_dunder(&class, name) {
+                if let ValueKind::UserFunction(f) = meta_val.kind() {
+                    // A metaclass method accessed via `cls.method` binds `cls`
+                    // as the receiver (cls is an "instance" of the metaclass),
+                    // so the dispatch prepends `cls` as the method's first arg.
+                    return Ok(match f.kind {
+                        UserFunctionKind::ClassMethod => {
+                            // A classmethod on the metaclass receives the
+                            // metaclass itself as `cls`.
+                            Value::class_bound_method(Rc::clone(f), metaclass_of(&class))
+                        }
+                        UserFunctionKind::StaticMethod => {
+                            if let Some(inner) = f.wrapped_func.as_ref() {
+                                Value::user_function(Rc::clone(inner))
+                            } else {
+                                Value::with_function_kind(Rc::clone(f), UserFunctionKind::Regular)
+                            }
+                        }
+                        _ => Value::class_bound_method(Rc::clone(f), Rc::clone(&class)),
+                    });
+                }
+                return Ok(meta_val);
+            }
+        }
+        // Issue #1960: on an MRO miss, fall back to the metaclass's
+        // `__getattr__` (CPython's `type.__getattribute__` ends by invoking
+        // `type(cls).__getattr__(cls, name)` if the metaclass defines one).
+        // `metaclass_dunder` returns `Some` only for a user override, so
+        // ordinary classes keep raising `AttributeError` directly.
+        if let Some(getattr_val) = metaclass_dunder(&class, "__getattr__") {
+            if let ValueKind::UserFunction(f) = getattr_val.kind() {
+                let func = Rc::clone(f);
+                return self.call_user_function_expanded(
+                    func,
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: Value::string(name.to_string()),
+                    }],
+                    &[Value::py_class(Rc::clone(&class))],
+                );
+            }
         }
         let class_name = class.borrow().name.clone();
         Err(PyError::attribute_error(

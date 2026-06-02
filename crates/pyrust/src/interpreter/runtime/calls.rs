@@ -3357,6 +3357,36 @@ impl Interpreter {
         class: Rc<RefCell<PyClass>>,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        // Issue #1956: `Cls(*args)` is uniformly `type(Cls).__call__(Cls, *args)`.
+        // If the metaclass defines a *user* `__call__` override, route through
+        // it; its `super().__call__(*args)` chains back to the default
+        // `type.__call__` (see `default_construct`).  Ordinary classes (metatype
+        // is the built-in `type`) return `None` here and fall through to the
+        // existing default construct, preserving the fast path.
+        if let Some(call_fn) = crate::interpreter::metaclass_dunder(&class, "__call__") {
+            if let ValueKind::UserFunction(f) = call_fn.kind() {
+                let func = Rc::clone(f);
+                return self.call_user_function_expanded(
+                    func,
+                    args,
+                    &[Value::py_class(Rc::clone(&class))],
+                );
+            }
+        }
+
+        self.default_construct(class, args)
+    }
+
+    /// The default `type.__call__` behaviour: allocate via `__new__` and run
+    /// `__init__`.  This is the single construction site reached both by a
+    /// plain `Cls(*args)` (when the metaclass does not override `__call__`) and
+    /// by `super().__call__(*args)` chaining from a metaclass `__call__`
+    /// override.  Issue #1956.
+    pub(crate) fn default_construct(
+        &mut self,
+        class: Rc<RefCell<PyClass>>,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
         if is_exception_class(&class) {
             return self.construct_exception_instance(class, args);
         }

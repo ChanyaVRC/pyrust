@@ -338,6 +338,13 @@ thread_local! {
             "__init__".to_string(),
             Value::builtin_function("type.__init__"),
         );
+        // Issue #1956: register `type.__call__` so that `super().__call__(*a)`
+        // inside a metaclass `__call__` override resolves (via the metaclass
+        // MRO super-walk) to the default construct.
+        attrs.insert(
+            "__call__".to_string(),
+            Value::builtin_function("type.__call__"),
+        );
         let cls = Rc::new(RefCell::new(PyClass {
             name: "type".to_string(),
             qualname: "type".to_string(),
@@ -879,6 +886,64 @@ pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
 /// mirrors the `object_class_singleton` pattern (issue #1312).
 pub(crate) fn type_class_singleton() -> Rc<RefCell<PyClass>> {
     TYPE_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Returns the metaclass (metatype) of `class`.  A class with no explicit
+/// metatype (the common case) is an instance of the built-in `type`
+/// singleton, so this returns the `type` singleton in that case.
+/// Issues #1955/#1956/#1960.
+pub(crate) fn metaclass_of(class: &Rc<RefCell<PyClass>>) -> Rc<RefCell<PyClass>> {
+    class
+        .borrow()
+        .metatype
+        .clone()
+        .unwrap_or_else(type_class_singleton)
+}
+
+/// Look up attribute `name` on the metaclass MRO of `class`, returning it only
+/// when it is a *user* override — i.e. the metaclass is something other than
+/// the built-in `type` singleton and the attribute is found before the walk
+/// reaches `type`/`object`.  Returns `None` for ordinary classes (metatype is
+/// `type`), so plain `Cls()` / `Cls.attr` / `isinstance` keep their fast
+/// paths and never recurse into the default `type` slot.  Used for both
+/// metaclass dunder hooks (`__call__` / `__instancecheck__` / `__getattr__`)
+/// and plain metaclass attributes reached via `cls.attr`.
+/// Issues #1955/#1956/#1960.
+pub(crate) fn metaclass_dunder(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
+    let meta = class.borrow().metatype.clone()?;
+    // A metatype that is the `type` singleton itself has no user override.
+    if Rc::ptr_eq(&meta, &type_class_singleton()) {
+        return None;
+    }
+    lookup_user_metaclass_attr(&meta, name)
+}
+
+/// Walk `meta`'s MRO looking for `name`, but stop short of the built-in
+/// `type` and `object` singletons — those carry the *default* slots, which
+/// must not be treated as user overrides (that would defeat the fast path
+/// and risk infinite recursion in `type.__call__` chaining).
+fn lookup_user_metaclass_attr(meta: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
+    if Rc::ptr_eq(meta, &type_class_singleton()) || Rc::ptr_eq(meta, &object_class_singleton()) {
+        return None;
+    }
+    let (value, base, extra_bases) = {
+        let borrowed = meta.borrow();
+        (borrowed.attrs.get(name).cloned(), borrowed.base.clone(), borrowed.extra_bases.clone())
+    };
+    if value.is_some() {
+        return value;
+    }
+    if let Some(base) = base {
+        if let Some(v) = lookup_user_metaclass_attr(&base, name) {
+            return Some(v);
+        }
+    }
+    for extra in &extra_bases {
+        if let Some(v) = lookup_user_metaclass_attr(extra, name) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 /// Returns the singleton `method` class.  In CPython, `type(instance.method)`
