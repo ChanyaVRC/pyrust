@@ -1636,19 +1636,15 @@ pub(crate) fn invoke_class_method(
         }
         _ => {
             // Resolved class attr is something other than a function —
-            // usually because the user did `Foo.method = 42` or similar.
-            // Surface the class name + the offending value's type so the
-            // diagnostic is actionable.
-            let class_name = match instance.kind() {
-                ValueKind::PyInstance(i) => i.borrow().class.borrow().name.clone(),
-                _ => "<unknown>".to_string(),
-            };
+            // usually because the user did `Foo.__len__ = 5` or similar.
+            // CPython surfaces the standard "object is not callable" keyed on
+            // the *resolved value's* type, not the owning class:
+            //   `len(D())` with `__len__ = 5` -> "'int' object is not callable".
+            // Match that exactly so every implicit-dunder dispatch path agrees
+            // with CPython 3.12.
             Err(PyError::named(
                 "TypeError",
-                format!(
-                    "'{class_name}' class attribute is not callable (got {})",
-                    value_type_name_str(&method_val),
-                ),
+                format!("'{}' object is not callable", value_type_name_str(&method_val)),
             ))
         }
     }
