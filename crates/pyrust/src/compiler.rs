@@ -8027,19 +8027,29 @@ impl Compiler {
             [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
             _ => None,
         };
+        let param_spec = Rc::new(FnParamSpec {
+            names: params.iter().map(|p| p.name.clone()).collect(),
+            has_default: params.iter().map(|p| p.default.is_some()).collect(),
+            is_args: params.iter().map(|p| p.is_args).collect(),
+            is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+            is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
+            is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
+        });
+        let param_binds = Rc::new(crate::bytecode::compute_param_binds(
+            &param_spec,
+            &inner_index_rc,
+            &inner_code.cell_vars,
+        ));
+        let self_bind =
+            crate::bytecode::compute_self_bind(name, &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
             name: name.to_string(),
             qualname: fn_qualname,
-            param_spec: Rc::new(FnParamSpec {
-                names: params.iter().map(|p| p.name.clone()).collect(),
-                has_default: params.iter().map(|p| p.default.is_some()).collect(),
-                is_args: params.iter().map(|p| p.is_args).collect(),
-                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
-                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
-                is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
-            }),
+            param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
+            param_binds,
+            self_bind,
             local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
@@ -8475,6 +8485,8 @@ impl Compiler {
             }),
             code: Rc::new(body_code),
             local_index: body_index_rc,
+            param_binds: Rc::new(Vec::new()),
+            self_bind: None,
             local_names,
             global_names: body_global,
             nonlocal_names: body_nonlocal_rc,
@@ -10336,19 +10348,29 @@ impl Compiler {
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         let display = format!("<{}>", comp_name);
+        let param_spec = Rc::new(FnParamSpec {
+            names: params.iter().map(|p| p.name.clone()).collect(),
+            has_default: params.iter().map(|p| p.default.is_some()).collect(),
+            is_args: params.iter().map(|p| p.is_args).collect(),
+            is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+            is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
+            is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
+        });
+        let param_binds = Rc::new(crate::bytecode::compute_param_binds(
+            &param_spec,
+            &inner_index_rc,
+            &inner_code.cell_vars,
+        ));
+        let self_bind =
+            crate::bytecode::compute_self_bind(&display, &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
             name: display.clone(),
             qualname: display,
-            param_spec: Rc::new(FnParamSpec {
-                names: params.iter().map(|p| p.name.clone()).collect(),
-                has_default: params.iter().map(|p| p.default.is_some()).collect(),
-                is_args: params.iter().map(|p| p.is_args).collect(),
-                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
-                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
-                is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
-            }),
+            param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
+            param_binds,
+            self_bind,
             local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
@@ -10757,19 +10779,29 @@ impl Compiler {
         }
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
+        let param_spec = Rc::new(FnParamSpec {
+            names: params.iter().map(|p| p.name.clone()).collect(),
+            has_default: params.iter().map(|p| p.default.is_some()).collect(),
+            is_args: params.iter().map(|p| p.is_args).collect(),
+            is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+            is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
+            is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
+        });
+        let param_binds = Rc::new(crate::bytecode::compute_param_binds(
+            &param_spec,
+            &inner_index_rc,
+            &inner_code.cell_vars,
+        ));
+        let self_bind =
+            crate::bytecode::compute_self_bind("<genexpr>", &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
             name: "<genexpr>".to_string(),
             qualname: "<genexpr>".to_string(),
-            param_spec: Rc::new(FnParamSpec {
-                names: params.iter().map(|p| p.name.clone()).collect(),
-                has_default: params.iter().map(|p| p.default.is_some()).collect(),
-                is_args: params.iter().map(|p| p.is_args).collect(),
-                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
-                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
-                is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
-            }),
+            param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
+            param_binds,
+            self_bind,
             local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,

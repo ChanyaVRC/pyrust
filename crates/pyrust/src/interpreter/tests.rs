@@ -535,15 +535,17 @@ result = count(200)
     }
 
     #[test]
-    fn pure_recursive_function_is_memoized() {
-        // fib(35) makes ~39 million calls without memoization — far too slow
-        // to finish in a test.  With memoization it needs only 35 unique calls.
+    fn pure_recursive_function_runs_correctly() {
+        // Pure self-recursive function correctness via the full Interpreter
+        // path.  (The fn_cache memoization that once collapsed this to 35
+        // unique calls was removed in #1987; keep n modest so the full call
+        // tree stays fast under the debug test build.)
         let src = "
 def fib(n):
     if n <= 1:
         return n
     return fib(n - 1) + fib(n - 2)
-result = fib(35)
+result = fib(30)
 ";
         let ok: bool = std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -552,7 +554,7 @@ result = fib(35)
                 let program = Parser::new(tokens).parse_program().unwrap();
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
-                interp.lookup_name("result").unwrap() == Some(Value::int(9227465))
+                interp.lookup_name("result").unwrap() == Some(Value::int(832040))
             })
             .unwrap()
             .join()
@@ -957,18 +959,20 @@ result = fact(10)
     }
 
     #[test]
-    fn vm_pure_fn_memoized_fib() {
-        // fib(35) without memoization requires ~29M recursive calls and takes seconds.
-        // With CallMemo, each unique n is computed once and cached — must finish fast.
-        // fib(35) reaches depth 35; debug frames are ~350 KB/level across the
+    fn vm_recursive_pure_fn_fib() {
+        // Recursive pure function correctness.  (The fn_cache memoization that
+        // once made this O(n) was removed in #1987 because it was net-negative
+        // for varying args and grew unbounded; recursion now runs the full call
+        // tree, so keep n modest to stay fast under the debug test build.)
+        // fib(30) reaches depth 30; debug frames are ~350 KB/level across the
         // full Rust call chain, so 16 MB gives comfortable headroom.
         let ok: bool = std::thread::Builder::new()
             .stack_size(16 * 1024 * 1024)
             .spawn(|| {
                 let interpreter = run_program(
-                    "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(35)\n",
+                    "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(30)\n",
                 );
-                interpreter.lookup_name("result").unwrap() == Some(Value::int(9227465))
+                interpreter.lookup_name("result").unwrap() == Some(Value::int(832040))
             })
             .unwrap()
             .join()
@@ -981,12 +985,10 @@ result = fact(10)
         // Regression test for issue #52.  A pure function that calls itself
         // recursively must:
         //  (a) still be marked is_pure = true (fixpoint assumption holds), and
-        //  (b) have its inner recursive calls compiled as CallMemo so that
-        //      repeated calls with the same argument hit the fn_cache without
-        //      re-entering call_function_expanded.
+        //  (b) have its inner recursive calls compiled as CallMemo (the
+        //      purity marker the optimizer relies on for DCE / TCO).
         //
-        // Verify correctness for several known Fibonacci values to confirm
-        // memoization is not returning stale/wrong cached results.
+        // Verify correctness for several known Fibonacci values.
         let ok: bool = std::thread::Builder::new()
             .stack_size(32 * 1024 * 1024)
             .spawn(|| {

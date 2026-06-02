@@ -2524,57 +2524,13 @@ impl Interpreter {
                 }
 
                 Insn::CallMemo(func_reg, argc) => {
-                    // Cache-first path for known-pure callees.
-                    let is_pure_fn = if let Some(fv) = regs[*func_reg as usize].as_some() {
-                        if let ValueKind::UserFunction(func) = fv.kind() {
-                            func.is_pure
-                        } else { false }
-                    } else { false };
-
-                    // Extract `fn_id` in a scoped block so the `kind()`
-                    // Ref drops before we assign into `regs[func_reg]`
-                    // on a cache hit (#450).
-                    let fn_id_opt: Option<u64> = if is_pure_fn {
-                        regs[*func_reg as usize].as_some().and_then(|fv| {
-                            match fv.kind() {
-                                ValueKind::UserFunction(func) => Some(func.id),
-                                _ => None,
-                            }
-                        })
-                    } else {
-                        None
-                    };
-                    // MemoKey wraps PyKey and includes the ValueKind discriminant so that
-                    // Float(1.0) and Int(1) — equal as PyKey but distinct types — are never
-                    // treated as the same cache entry (fixes #562).
-                    if let Some(fn_id) = fn_id_opt {
-                        let mut key = std::mem::take(&mut self.key_scratch);
-                        key.clear();
-                        let mut all_hashable = true;
-                        for i in 0..*argc as usize {
-                            match regs[*func_reg as usize + 1 + i].to_key() {
-                                Some(k) => key.push(MemoKey(k)),
-                                None => {
-                                    all_hashable = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if all_hashable {
-                            let lookup = (fn_id, key);
-                            let hit = self.fn_cache.get(&lookup).cloned();
-                            let (_, key) = lookup;
-                            self.key_scratch = key;
-                            if let Some(cached) = hit {
-                                regs[*func_reg as usize] = cached;
-                                continue;
-                            }
-                        } else {
-                            self.key_scratch = key;
-                        }
-                    }
-                    // Cache miss or unhashable args: normal call (call_function_expanded
-                    // will store the result in fn_cache on the way back).
+                    // `CallMemo` marks a call to a statically-pure callee — the
+                    // optimizer relies on that purity for DCE / TCO.  The former
+                    // result-memoization (fn_cache probe + store) was removed
+                    // (#1987): it was a net loss for the common varying-argument
+                    // case (it paid a key-build + hash every call for a cache
+                    // that essentially never hit) and grew the cache without
+                    // bound.  Execution is now identical to a plain `Call`.
                     let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();

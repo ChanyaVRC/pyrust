@@ -20,74 +20,6 @@ use crate::value::{
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
 
-/// A memoisation key that is type-aware: `Float(1.0)` and `Int(1)` are
-/// equal as `PyKey` (dict/set semantics) but must be distinct memo keys
-/// because a pure function may branch on `type(x)`.
-///
-/// We include the `PyKey` variant discriminant alongside the `PyKey` value so
-/// that two calls are only considered cache-equivalent when both the runtime
-/// type *and* the value agree.
-#[derive(Clone)]
-pub(crate) struct MemoKey(pub(crate) PyKey);
-
-/// Type-aware equality for a single `PyKey`, borrowing both sides to avoid
-/// unnecessary clones in the hot tuple/frozenset element comparison path.
-fn memo_key_eq(a: &PyKey, b: &PyKey) -> bool {
-    if std::mem::discriminant(a) != std::mem::discriminant(b) {
-        return false;
-    }
-    match (a, b) {
-        (PyKey::Tuple(xs), PyKey::Tuple(ys)) => {
-            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| memo_key_eq(x, y))
-        }
-        (PyKey::FrozenSet(xs), PyKey::FrozenSet(ys)) => {
-            // FrozenSet elements are stored in sorted canonical order by the
-            // PyKey constructor; element-wise comparison suffices.
-            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| memo_key_eq(x, y))
-        }
-        _ => a == b,
-    }
-}
-
-/// Type-aware hashing for a single `PyKey`, borrowing the key to avoid
-/// unnecessary clones in the hot tuple/frozenset element hashing path.
-fn hash_memo_key<H: std::hash::Hasher>(k: &PyKey, state: &mut H) {
-    use std::hash::Hash;
-    std::mem::discriminant(k).hash(state);
-    match k {
-        PyKey::Tuple(items) => {
-            items.len().hash(state);
-            for elem in items {
-                hash_memo_key(elem, state);
-            }
-        }
-        PyKey::FrozenSet(items) => {
-            for elem in items {
-                hash_memo_key(elem, state);
-            }
-        }
-        _ => k.hash(state),
-    }
-}
-
-impl PartialEq for MemoKey {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        memo_key_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for MemoKey {}
-
-impl std::hash::Hash for MemoKey {
-    #[inline]
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_memo_key(&self.0, state);
-    }
-}
-
-type FnCache = HashMap<(u64, Vec<MemoKey>), Value>;
-
 // MAX_CALL_DEPTH is now a thread-local managed by sys.setrecursionlimit().
 // The default value (1000) and the accessor functions are defined in
 // runtime/calls.rs (included below via runtime.rs).  The name
@@ -156,7 +88,6 @@ pub struct Interpreter {
     pub(crate) script_filename: Option<Arc<str>>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
-    fn_cache: FnCache,
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
@@ -173,9 +104,6 @@ pub struct Interpreter {
     /// Pattern: `std::mem::take`, clear, fill, use (borrow or drain), then
     /// restore so subsequent calls reuse the grown capacity.
     bound_method_pos_buf: Vec<Value>,
-    /// Reusable scratch buffer for building fn_cache probe keys — avoids a
-    /// per-probe heap allocation in CallMemo's cache-hit path.
-    key_scratch: Vec<MemoKey>,
     /// Stack of class-namespace store-order lists, pushed by `MakeClass` before
     /// running a class body and popped after.  Each entry tracks the slot numbers
     /// for class-body locals in the **order stores actually executed** at
@@ -414,11 +342,9 @@ impl Default for Interpreter {
             script_filename: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
-            fn_cache: HashMap::new(),
             call_arg_buf: Vec::new(),
             invoke_arg_buf: ExpandedArgBuf::new(),
             bound_method_pos_buf: Vec::new(),
-            key_scratch: Vec::new(),
             class_store_order: Vec::new(),
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),

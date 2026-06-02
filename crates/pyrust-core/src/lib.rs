@@ -940,6 +940,25 @@ pub struct UserFunctionParam {
     pub is_positional_only: bool,
 }
 
+/// Precomputed bind target for a parameter, resolved once at compile time
+/// (issue #1918).  The parameter→register mapping is static per function, so
+/// the call path can bind each positional argument by a direct slot lookup
+/// instead of hashing the parameter name into `local_index` (and linearly
+/// scanning `cell_vars`) on every call.
+///
+/// `param_binds[i]` is the target for `params[i]`:
+/// - `Reg(r)` → write the bound value into register `r`.
+/// - `Cell` → the parameter is a cell variable; insert it into the local env by
+///   name (rare; only closures that capture a parameter).
+/// - `None` → the parameter has no local slot (an unused `*args` / `**kwargs`
+///   placeholder); nothing to bind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamBind {
+    Reg(u32),
+    Cell,
+    None,
+}
+
 /// Discriminator for `UserFunction` semantics.  `@classmethod` and
 /// `@staticmethod` decorators produce a UserFunction whose body Rc-shares
 /// with the original, distinguished only by this tag — no wrapper variant.
@@ -1009,6 +1028,17 @@ pub struct UserFunction {
     /// CPython: `f.__annotations__ is f.__annotations__` is `True`.
     pub annotations: RefCell<Value>,
     pub params: Vec<UserFunctionParam>,
+    /// Precomputed bind target for each parameter (parallel to `params`),
+    /// resolved once at compile time so the call path binds positional args by
+    /// direct register index rather than hashing the parameter name on every
+    /// call (issue #1918).  Shared via `Rc` across all instances of the same
+    /// function prototype.
+    pub param_binds: Rc<Vec<ParamBind>>,
+    /// Precomputed bind target for the function's own name (the self-reference
+    /// register used by recursive calls), or `None` when the name has no local
+    /// slot / is a cell var.  Avoids a per-call `local_index` hash + `cell_vars`
+    /// scan for the recursion self-bind.
+    pub self_bind: Option<u32>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
     pub global_names: NameSet,
@@ -2143,6 +2173,8 @@ impl Value {
                 attrs: RefCell::new(None),
                 annotations: RefCell::new(Value::dict(IndexMap::new())),
                 params: Vec::new(),
+                param_binds: Rc::new(Vec::new()),
+                self_bind: None,
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
                 global_names: Rc::new(HashSet::new()),
@@ -2238,6 +2270,8 @@ impl Value {
             attrs: RefCell::new(f.attrs.borrow().as_ref().map(Rc::clone)),
             annotations: RefCell::new(f.annotations.borrow().clone()),
             params: f.params.clone(),
+            param_binds: Rc::clone(&f.param_binds),
+            self_bind: f.self_bind,
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),
             global_names: Rc::clone(&f.global_names),
@@ -5297,6 +5331,8 @@ mod tests {
             attrs: RefCell::new(None),
             annotations: RefCell::new(Value::dict(IndexMap::new())),
             params: Vec::new(),
+            param_binds: Rc::new(Vec::new()),
+            self_bind: None,
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),
             global_names: Rc::new(HashSet::new()),
