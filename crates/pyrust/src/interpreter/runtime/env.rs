@@ -2305,6 +2305,37 @@ impl Interpreter {
                     }
                 }
             }
+            // `collections` post-process (issue #2010): `Counter` and
+            // `defaultdict` are `dict` subclasses in CPython
+            // (`isinstance(Counter(), dict)`, `Counter.__mro__ == (Counter,
+            // dict, object)`).  The `pyrust_module!` macro builds every class
+            // with `base: None`, so we re-parent them onto the per-thread
+            // `dict` singleton here, where the singleton is reachable.  Their
+            // own dunders (`__getitem__`, `__iter__`, …) stay ahead of dict's
+            // in the MRO, so behaviour is unchanged; only the subclass
+            // relationship (and the `dict()` conversion path that keys off it)
+            // turns on.
+            if name == "collections"
+                && let ValueKind::PyModule(m) = val.kind()
+                && let Some(dict_class) = crate::interpreter::primitive_class_by_name("dict")
+            {
+                for cls_name in ["Counter", "defaultdict"] {
+                    let cls = m.borrow().attrs.get(cls_name).cloned();
+                    if let Some(cls_val) = cls
+                        && let ValueKind::PyClass(cls_rc) = cls_val.kind()
+                    {
+                        let already = cls_rc.borrow().base.is_some();
+                        if !already {
+                            cls_rc.borrow_mut().base = Some(Rc::clone(&dict_class));
+                            dict_class
+                                .borrow()
+                                .subclasses
+                                .borrow_mut()
+                                .push(Rc::downgrade(cls_rc));
+                        }
+                    }
+                }
+            }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via

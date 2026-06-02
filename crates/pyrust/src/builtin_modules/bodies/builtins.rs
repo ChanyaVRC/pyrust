@@ -4074,6 +4074,36 @@ pyrust_module! {
                                 format!("{FN_NAME}() argument must be a mapping or iterable"),
                             ));
                         }
+                    } else if is_dict_subclass_instance(&inst_rc) {
+                        // Dict subclasses that keep their mapping in a custom
+                        // backing attr rather than `__builtin_data__` — e.g.
+                        // `collections.Counter` / `defaultdict` (issue #2010).
+                        // CPython's `dict(mapping)` reads via `keys()` +
+                        // `__getitem__`; we iterate the keys and subscript via
+                        // the class's `__getitem__`.
+                        let class = Rc::clone(&inst_rc.borrow().class);
+                        let getitem = lookup_class_attr(&class, "__getitem__");
+                        let keys = _interp.collect_iterable(&arg.value)?;
+                        for k in keys {
+                            let v = match getitem.clone() {
+                                Some(m) => invoke_class_method(
+                                    _interp,
+                                    m,
+                                    Value::py_instance(Rc::clone(&inst_rc)),
+                                    &[ExpandedCallArg { name: None, value: k.clone() }],
+                                )?,
+                                None => {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "{FN_NAME}() argument must be a mapping or iterable"
+                                        ),
+                                    ));
+                                }
+                            };
+                            let key = _interp.value_to_pykey(&k)?;
+                            _interp.dict_insert(&mut result, key, v)?;
+                        }
                     } else {
                         // Treat as iterable of (key, value) pairs.
                         let pairs = _interp.collect_iterable(&arg.value)?;
@@ -8080,6 +8110,19 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             ops.type_name() == name
         }
         _ => false,
+    }
+}
+
+/// True if `inst`'s class is a (proper or improper) subclass of the built-in
+/// `dict` type.  Used by `dict()` to drive the `keys()` + `__getitem__`
+/// mapping-conversion path for dict subclasses (e.g. `collections.Counter`)
+/// that keep their backing map in a custom attr rather than
+/// `__builtin_data__` (issue #2010).
+fn is_dict_subclass_instance(inst: &Rc<RefCell<crate::value::PyInstance>>) -> bool {
+    let class = Rc::clone(&inst.borrow().class);
+    match crate::interpreter::primitive_class_by_name("dict") {
+        Some(dict_class) => class_is_subclass_of(&class, &dict_class),
+        None => false,
     }
 }
 
