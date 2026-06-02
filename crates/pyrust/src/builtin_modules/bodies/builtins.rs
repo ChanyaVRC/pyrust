@@ -504,7 +504,11 @@ pyrust_module! {
             ));
         }
         if let ValueKind::Complex(re, im) = val.kind() {
-            return Ok(Value::float((re * re + im * im).sqrt()));
+            // Overflow/underflow-safe magnitude (CPython's `_Py_c_abs` uses
+            // `hypot`): `(re*re + im*im).sqrt()` spuriously yields inf/0.0 for
+            // huge/tiny components.  `f64::hypot` matches CPython byte-for-byte,
+            // including inf-beats-nan on infinite components.
+            return Ok(Value::float(re.hypot(im)));
         }
         Err(PyError::named(
             "TypeError",
