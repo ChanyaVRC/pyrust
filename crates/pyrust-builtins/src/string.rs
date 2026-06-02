@@ -944,10 +944,7 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
     };
     let haystack = &s[start..end];
     match haystack.find(sub) {
-        Some(byte_pos) => {
-            let char_pos = s[..start + byte_pos].chars().count();
-            Ok(Value::int(char_pos as i64))
-        }
+        Some(byte_pos) => Ok(Value::int(byte_to_char_idx(s, start + byte_pos) as i64)),
         None => Err(PyError::named(
             "ValueError",
             "substring not found".to_string(),
@@ -963,7 +960,13 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
     };
     if sub.is_empty() {
         let haystack = &s[start..end];
-        return Ok(Value::int((haystack.chars().count() + 1) as i64));
+        // ASCII: char count == byte count (#2032).
+        let count = if haystack.is_ascii() {
+            haystack.len()
+        } else {
+            haystack.chars().count()
+        };
+        return Ok(Value::int((count + 1) as i64));
     }
     let haystack = &s[start..end];
     let n = haystack.match_indices(sub).count();
@@ -983,10 +986,7 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     };
     let haystack = &s[start..end];
     match haystack.find(sub) {
-        Some(byte_pos) => {
-            let char_pos = s[..start + byte_pos].chars().count();
-            Ok(Value::int(char_pos as i64))
-        }
+        Some(byte_pos) => Ok(Value::int(byte_to_char_idx(s, start + byte_pos) as i64)),
         None => {
             if raise_on_miss {
                 Err(PyError::named(
@@ -1013,10 +1013,7 @@ fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     };
     let haystack = &s[start..end];
     match haystack.rfind(sub) {
-        Some(byte_pos) => {
-            let char_pos = s[..start + byte_pos].chars().count();
-            Ok(Value::int(char_pos as i64))
-        }
+        Some(byte_pos) => Ok(Value::int(byte_to_char_idx(s, start + byte_pos) as i64)),
         None => {
             if raise_on_miss {
                 Err(PyError::named(
@@ -1491,6 +1488,21 @@ fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
         }
     };
     Ok((sep, maxsplit))
+}
+
+/// Convert a byte offset into a char (code-point) index within `s`.
+///
+/// ASCII fast path (#2032): when the prefix `s[..byte_off]` is all-ASCII the
+/// char index equals the byte offset, so no scan is needed.  `is_ascii()` is
+/// SIMD-accelerated and far cheaper than decoding via `chars().count()`.
+#[inline]
+fn byte_to_char_idx(s: &str, byte_off: usize) -> usize {
+    let prefix = &s[..byte_off];
+    if prefix.is_ascii() {
+        byte_off
+    } else {
+        prefix.chars().count()
+    }
 }
 
 /// Convert char-based start/end args (args[1], args[2]) to byte offsets.

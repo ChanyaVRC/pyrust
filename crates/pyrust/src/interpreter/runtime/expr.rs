@@ -1038,6 +1038,16 @@ impl Interpreter {
                 Ok(items[idx].clone())
             }
             ValueKind::Str(text) => {
+                // ASCII fast path (#2032): when every byte is ASCII, char index ==
+                // byte index, so length is `text.len()` and the i-th char is a
+                // single byte — O(1) index instead of an O(idx) char scan.
+                // `is_ascii()` is SIMD-accelerated (~memcmp speed), far cheaper
+                // than decoding UTF-8 via `chars()`.
+                if text.is_ascii() {
+                    let idx = normalize_index(&index, text.len(), "string")?;
+                    let b = text.as_bytes()[idx];
+                    return Ok(Value::string((b as char).encode_utf8(&mut [0u8; 4]) as &str));
+                }
                 let char_count = text.chars().count();
                 let idx = normalize_index(&index, char_count, "string")?;
                 // Use nth() to avoid collecting a Vec<char>; normalize_index
@@ -4515,9 +4525,17 @@ impl Interpreter {
         // For str, the slice bounds are char-based; computing `len` as the char
         // count is O(n), so the contiguous fast path below resolves char->byte
         // offsets in a single forward scan instead of materialising Vec<char>.
+        //
+        // ASCII fast path (#2032): an all-ASCII string has char index == byte
+        // index, so `len` is `s.len()` and every slice/index is direct byte
+        // arithmetic — no char scan at all.  `is_ascii()` is SIMD-accelerated,
+        // far cheaper than `chars().count()`; we compute it once here and reuse
+        // it for both the length and the contiguous/stepped slice arms below.
+        let str_is_ascii = matches!(target.kind(), ValueKind::Str(s) if s.is_ascii());
         let len = match target.kind() {
             ValueKind::List(items) => items.len() as i64,
             ValueKind::Tuple(items) => items.len() as i64,
+            ValueKind::Str(s) if str_is_ascii => s.len() as i64,
             ValueKind::Str(s) => s.chars().count() as i64,
             ValueKind::Bytes(rc) => rc.len() as i64,
             _ => {
@@ -4540,12 +4558,18 @@ impl Interpreter {
                 ValueKind::Tuple(items) => return Ok(Value::tuple(items[s..e].to_vec())),
                 ValueKind::Bytes(rc) => return Ok(Value::bytes(rc[s..e].to_vec())),
                 ValueKind::Str(string) => {
-                    // s/e are char indices; walk char_indices once to find the
-                    // corresponding byte offsets, then slice the &str (no
-                    // Vec<char> allocation, char-boundary correct for multibyte).
                     if s >= e {
                         return Ok(Value::string(String::new()));
                     }
+                    // ASCII fast path (#2032): char index == byte index, so the
+                    // slice bounds are already byte offsets — O(1) zero-copy
+                    // shared-buffer slice, no char_indices scan.
+                    if str_is_ascii {
+                        return Ok(target.string_slice(s, e));
+                    }
+                    // s/e are char indices; walk char_indices once to find the
+                    // corresponding byte offsets, then slice the &str (no
+                    // Vec<char> allocation, char-boundary correct for multibyte).
                     let mut byte_start = string.len();
                     let mut byte_end = string.len();
                     for (ci, (bi, _)) in string.char_indices().enumerate() {
@@ -4568,6 +4592,13 @@ impl Interpreter {
         match target.kind() {
             ValueKind::List(items) => Ok(Value::list(indices.into_iter().map(|ix| items[ix].clone()).collect::<Vec<Value>>())),
             ValueKind::Tuple(items) => Ok(Value::tuple(indices.into_iter().map(|ix| items[ix].clone()).collect::<Vec<Value>>())),
+            ValueKind::Str(s) if str_is_ascii => {
+                // ASCII fast path (#2032): char index == byte index, so index the
+                // bytes directly — no Vec<char> materialisation.
+                let bytes = s.as_bytes();
+                let out: String = indices.into_iter().map(|ix| bytes[ix] as char).collect();
+                Ok(Value::string(out))
+            }
             ValueKind::Str(s) => {
                 let chars: Vec<char> = s.chars().collect();
                 let mut out = String::new();
