@@ -117,3 +117,34 @@ def wm(*args, **kw):
 
 
 print("method-name", wm.__name__, "method-doc", repr(wm.__doc__))
+
+
+# Wrapping a built-in (whose missing attrs surface as AttributeError on a
+# different error path) must skip them, not raise.  CPython's `len` has no
+# __doc__-less / __annotations__ attribute exposed the same way pyrust does;
+# the copy should silently skip whatever is missing.
+def wl(*a):
+    return None
+
+
+wl = functools.wraps(len)(wl)
+print("builtin-name", wl.__name__, "builtin-qualname", wl.__qualname__)
+print("builtin-wrapped-is-len", wl.__wrapped__ is len)
+
+
+# __wrapped__ chain survives nested @wraps.
+def f0():
+    pass
+
+
+@functools.wraps(f0)
+def f1():
+    pass
+
+
+@functools.wraps(f1)
+def f2():
+    pass
+
+
+print("chain", f2.__wrapped__ is f1, f1.__wrapped__ is f0)

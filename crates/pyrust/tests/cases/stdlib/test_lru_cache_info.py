@@ -83,3 +83,11 @@ t(1)
 t(1.0)
 t(1)
 print("typed", repr(t.cache_info()))
+
+
+# CacheInfo is a full named tuple: _fields / _asdict / _replace / _make.
+info = h.cache_info()
+print("fields", info._fields)
+print("asdict", info._asdict())
+print("replace", repr(info._replace(hits=99)))
+print("make", repr(type(info)._make([1, 2, 3, 4])))

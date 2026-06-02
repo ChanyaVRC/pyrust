@@ -1024,8 +1024,22 @@ fn cache_info_class(interp: &mut Interpreter) -> Result<Value> {
 const CACHE_INFO_SOURCE: &str = "\
 class CacheInfo(tuple):
     __slots__ = ()
+    _fields = ('hits', 'misses', 'maxsize', 'currsize')
     def __new__(cls, hits, misses, maxsize, currsize):
         return tuple.__new__(cls, (hits, misses, maxsize, currsize))
+    @classmethod
+    def _make(cls, iterable):
+        return cls(*iterable)
+    def _asdict(self):
+        return {f: self[i] for i, f in enumerate(self._fields)}
+    def _replace(self, **kwds):
+        vals = list(self)
+        for i, f in enumerate(self._fields):
+            if f in kwds:
+                vals[i] = kwds.pop(f)
+        if kwds:
+            raise ValueError(f'Got unexpected field names: {list(kwds)!r}')
+        return self.__class__(*vals)
     @property
     def hits(self):
         return self[0]
@@ -1075,7 +1089,11 @@ fn do_update_wrapper(
         // AttributeError: pass`.  Any *other* error propagates.
         match interp.get_attr(wrapped, attr) {
             Ok(value) => interp.assign_attr(wrapper.clone(), attr, value)?,
-            Err(PyError::AttributeError { .. }) => {}
+            // A missing attribute may surface as the structured
+            // `AttributeError` variant *or* as `PyError::Named("AttributeError",
+            // …)` (e.g. built-ins / type objects raise the latter), so match by
+            // class name to cover both.
+            Err(e) if e.class_name_is("AttributeError") => {}
             Err(e) => return Err(e),
         }
     }
@@ -1084,7 +1102,7 @@ fn do_update_wrapper(
     if let Ok(dst) = interp.get_attr(wrapper, "__dict__") {
         let src = match interp.get_attr(wrapped, "__dict__") {
             Ok(d) => d,
-            Err(PyError::AttributeError { .. }) => Value::dict(IndexMap::new()),
+            Err(e) if e.class_name_is("AttributeError") => Value::dict(IndexMap::new()),
             Err(e) => return Err(e),
         };
         if let (Some(src_dict), Some(_)) = (src.as_dict(), dst.as_dict()) {
