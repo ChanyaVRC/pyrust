@@ -826,7 +826,10 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             let text_to_encode = s.write_buf.replace('\n', "\r\n");
             #[cfg(not(windows))]
             let text_to_encode: &str = &s.write_buf;
-            let text_bytes = encode_text_to_bytes(text_to_encode, enc)?;
+            // On Windows `text_to_encode` is an owned `String`, so the borrow is
+            // required there; on other platforms it is already a `&str`.
+            #[cfg_attr(not(windows), allow(clippy::needless_borrow))]
+            let text_bytes = encode_text_to_bytes(&text_to_encode, enc)?;
             std::fs::write(&s.path, &text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
@@ -846,7 +849,10 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             let text_to_encode = s.write_buf.replace('\n', "\r\n");
             #[cfg(not(windows))]
             let text_to_encode: &str = &s.write_buf;
-            let text_bytes = encode_text_to_bytes(text_to_encode, enc)?;
+            // On Windows `text_to_encode` is an owned `String`, so the borrow is
+            // required there; on other platforms it is already a `&str`.
+            #[cfg_attr(not(windows), allow(clippy::needless_borrow))]
+            let text_bytes = encode_text_to_bytes(&text_to_encode, enc)?;
             f.write_all(&text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
