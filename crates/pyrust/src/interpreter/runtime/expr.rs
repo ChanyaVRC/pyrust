@@ -6776,6 +6776,33 @@ fn set_binary_op(
         };
         return set_binary_op_from_items(interp, lhs_items, rhs_items, op, true);
     }
+    // Fast path: both operands are plain `set` / `frozenset` (or `PyInstance`
+    // subclasses backed by either) whose elements are all primitive (no
+    // `PyKey::Object` user instances).  Borrow the backing `IndexSet`s in place
+    // and clone only the elements that land in the result, instead of cloning
+    // both whole operands up front (issue #1978).
+    //
+    // Sets with object keys take the eq-aware path below: there, user
+    // `__hash__`/`__eq__` runs during the algebra and could re-enter and mutate
+    // an operand, so we must not hold a live borrow of the backing `RefCell`
+    // across it — the existing clone-then-compute path stays correct there.
+    // Dict views and other set-like shapes also fall through.
+    if let (Some((lhs_val, l_frozen)), Some((rhs_val, r_frozen))) =
+        (set_direct_value(left), set_direct_value(right))
+    {
+        let primitive = !with_set_items(&lhs_val, set_has_object_key)
+            && !with_set_items(&rhs_val, set_has_object_key);
+        if primitive {
+            let out = with_set_items(&lhs_val, |a| {
+                with_set_items(&rhs_val, |b| set_algebra_fast(a, b, op))
+            });
+            return Some(Ok(if l_frozen || r_frozen {
+                pyrust_builtins::frozenset::frozenset(out)
+            } else {
+                Value::set(out)
+            }));
+        }
+    }
     // LHS must be set-like (set/frozenset/subclass or a set-like dict view,
     // issue #1891); otherwise this isn't a set op and the caller falls through.
     let lhs_items = match interp.coerce_set_operand(left)? {
@@ -6793,6 +6820,89 @@ fn set_binary_op(
         }
     };
     set_binary_op_from_items(interp, lhs_items, rhs_items, op, false)
+}
+
+/// Resolve a value to the direct `set` / `frozenset` `Value` backing it (peeling
+/// a `PyInstance` subclass backing, possibly through several layers), together
+/// with whether that backing is frozen.  The returned `Value` shares storage
+/// with the original (an `Rc` bump, not an `IndexSet` clone), so callers can
+/// borrow its `IndexSet` without copying the whole operand (issue #1978).
+///
+/// Returns `None` for anything that is not a `set` / `frozenset` (or subclass
+/// thereof) — dict views, lists, etc. — leaving those to the materialising
+/// `coerce_set_operand` path.
+fn set_direct_value(v: &Value) -> Option<(Value, bool)> {
+    if matches!(v.kind(), ValueKind::Set(_)) {
+        return Some((v.clone(), false));
+    }
+    if pyrust_builtins::frozenset::as_items(v).is_some() {
+        return Some((v.clone(), true));
+    }
+    if let Some(inst_rc) = v.as_py_instance_rc() {
+        let backing = instance_builtin_data(inst_rc)?;
+        return set_direct_value(&backing);
+    }
+    None
+}
+
+/// Scoped borrow access to the backing `IndexSet` of a direct `set` /
+/// `frozenset` `Value` (as produced by [`set_direct_value`]).  Borrows in place;
+/// never clones the `IndexSet` (issue #1978).
+fn with_set_items<R>(v: &Value, f: impl FnOnce(&indexmap::IndexSet<PyKey>) -> R) -> R {
+    if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
+        return f(&rc);
+    }
+    v.set_with(f).expect("set_direct_value guarantees a set/frozenset value")
+}
+
+/// Primitive-key set algebra over borrowed operands: clones only the elements
+/// that land in the result and builds it with a capacity hint (issue #1978).
+fn set_algebra_fast(
+    a: &indexmap::IndexSet<PyKey>,
+    b: &indexmap::IndexSet<PyKey>,
+    op: SetOp,
+) -> indexmap::IndexSet<PyKey> {
+    let cap = match op {
+        SetOp::And => a.len().min(b.len()),
+        SetOp::Sub => a.len(),
+        SetOp::Or => a.len() + b.len(),
+        SetOp::Xor => a.len() + b.len(),
+    };
+    let mut out = indexmap::IndexSet::with_capacity(cap);
+    match op {
+        SetOp::Or => {
+            for k in a.iter().chain(b.iter()) {
+                out.insert(k.clone());
+            }
+        }
+        SetOp::And => {
+            for k in a.iter() {
+                if b.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+        }
+        SetOp::Sub => {
+            for k in a.iter() {
+                if !b.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+        }
+        SetOp::Xor => {
+            for k in a.iter() {
+                if !b.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+            for k in b.iter() {
+                if !a.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Shared set-algebra core for [`set_binary_op`].  Computes `lhs OP rhs` over
