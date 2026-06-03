@@ -4638,21 +4638,19 @@ pub struct FrameInfo {
 }
 
 thread_local! {
-    /// Active frame stack for the current interpreter thread.
+    /// The traceback frame chain for the error currently unwinding through the
+    /// call stack, built **lazily** as the error propagates outward.
     ///
-    /// Pushed by `call_user_function_expanded` before entering each user
-    /// function body and popped when the body returns (or errors).
-    static TRACEBACK_FRAME_STACK: RefCell<Vec<FrameInfo>> = RefCell::new(Vec::new());
-
-    /// The frame snapshot captured at the first point an error exits a user
-    /// function boundary during the current interpreter invocation.
+    /// The no-exception call path no longer touches any traceback thread-local
+    /// (the previous design pushed/popped a per-call frame eagerly, which cost
+    /// a heap `Arc::from` allocation + two thread-local borrows on *every*
+    /// call — see `perf: reduce per-call overhead`).  Instead, each call site
+    /// records its own `FrameInfo` here **only when its body returned `Err`**,
+    /// inserting at the front so the chain ends up outermost-first /
+    /// innermost-last (matching the old full-stack snapshot order).
     ///
-    /// `calls.rs::call_user_function_expanded` checks this BEFORE popping its
-    /// frame: if `None`, it snapshots the full frame stack (which still includes
-    /// the current frame) and stores it here.  Subsequent outer callers see
-    /// `Some(_)` and leave it intact, so the innermost error site wins.
-    ///
-    /// Reset to `None` at the top of each `try_exec_vm_script_with_index` run.
+    /// Reset to `None` at the top of each `try_exec_vm_script_with_index` run
+    /// and cleared on normal exception-handler exit (`vm.rs` `PopExcContext`).
     static CAPTURED_ERROR_FRAMES: RefCell<Option<Vec<FrameInfo>>> = RefCell::new(None);
 
     /// The 1-based source line number of the most recently executed instruction
@@ -4664,52 +4662,20 @@ thread_local! {
     static CURRENT_VM_LINE: RefCell<u32> = RefCell::new(0);
 }
 
-/// Push a frame onto the current thread's traceback stack.
+/// Record a traceback frame for an error unwinding out of a user-function body.
 ///
-/// Called by `calls.rs::call_user_function_expanded` immediately before
-/// entering each user-function body.
+/// Called by `calls.rs`/`vm.rs` **only when the function body returned `Err`**
+/// (the no-error common path skips this entirely).  Frames are inserted at the
+/// front so that, as the error propagates from innermost to outermost call, the
+/// resulting chain is ordered outermost-first / innermost-last — identical to
+/// the order the previous eager full-stack snapshot produced.
 #[inline]
-pub fn push_traceback_frame(frame: FrameInfo) {
-    TRACEBACK_FRAME_STACK.with(|s| s.borrow_mut().push(frame));
-}
-
-/// Pop the innermost frame from the current thread's traceback stack,
-/// optionally capturing the frame chain into `CAPTURED_ERROR_FRAMES` when
-/// the call returned an error, or clearing it when the call succeeded.
-///
-/// `is_error` — pass `true` when the `run_bytecode_for_fn` call returned
-/// `Err(_)`.
-///
-/// - When `true` and no frame snapshot has been captured yet: snapshots the
-///   current stack (including the frame being popped) into
-///   `CAPTURED_ERROR_FRAMES` before popping.  Subsequent outer frames see
-///   `Some(_)` and leave the snapshot intact so the innermost error site wins.
-///
-/// - When `false` (the call returned successfully): clears any stale
-///   `CAPTURED_ERROR_FRAMES`.  This handles the case where an inner call
-///   raised but the error was caught by a `try/except` inside that inner
-///   call — the outer call returns successfully, so the stale inner-frame
-///   snapshot must not pollute a subsequent error in the same outer call.
-#[inline]
-pub fn pop_traceback_frame(is_error: bool) {
-    TRACEBACK_FRAME_STACK.with(|stack| {
-        if is_error {
-            CAPTURED_ERROR_FRAMES.with(|captured| {
-                let mut cap = captured.borrow_mut();
-                if cap.is_none() {
-                    // First frame to see this error: snapshot the full stack
-                    // while it still contains the current frame.
-                    *cap = Some(stack.borrow().clone());
-                }
-            });
-        } else {
-            // Success path: clear any stale snapshot from a previously caught
-            // error inside this call stack so it does not pollute future errors.
-            CAPTURED_ERROR_FRAMES.with(|captured| {
-                *captured.borrow_mut() = None;
-            });
-        }
-        stack.borrow_mut().pop();
+pub fn record_traceback_frame(frame: FrameInfo) {
+    CAPTURED_ERROR_FRAMES.with(|captured| {
+        captured
+            .borrow_mut()
+            .get_or_insert_with(Vec::new)
+            .insert(0, frame);
     });
 }
 
