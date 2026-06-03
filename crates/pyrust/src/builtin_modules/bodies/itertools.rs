@@ -23,7 +23,6 @@
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::value_type_name_str;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::value::{PyInstance, Value, ValueKind};
 use indexmap::IndexMap;
@@ -155,16 +154,16 @@ pyrust_module! {
                     "TypeError",
                     "islice expected at least 2 arguments, got 1".to_string(),
                 )),
-                2 => (0i64, slice_arg(FN_NAME, &user[1].value, "stop")?, 1i64),
+                2 => (0i64, slice_arg(_interp, FN_NAME, &user[1].value, "stop")?, 1i64),
                 3 => (
-                    slice_arg(FN_NAME, &user[1].value, "start")?.unwrap_or(0),
-                    slice_arg(FN_NAME, &user[2].value, "stop")?,
+                    slice_arg(_interp, FN_NAME, &user[1].value, "start")?.unwrap_or(0),
+                    slice_arg(_interp, FN_NAME, &user[2].value, "stop")?,
                     1i64,
                 ),
                 4 => (
-                    slice_arg(FN_NAME, &user[1].value, "start")?.unwrap_or(0),
-                    slice_arg(FN_NAME, &user[2].value, "stop")?,
-                    slice_arg(FN_NAME, &user[3].value, "step")?.unwrap_or(1),
+                    slice_arg(_interp, FN_NAME, &user[1].value, "start")?.unwrap_or(0),
+                    slice_arg(_interp, FN_NAME, &user[2].value, "stop")?,
+                    slice_arg(_interp, FN_NAME, &user[3].value, "step")?.unwrap_or(1),
                 ),
                 _ => unreachable!("guarded above"),
             };
@@ -324,17 +323,15 @@ pyrust_module! {
                 ));
             }
             let object = user[0].value.clone();
-            let times: Option<i64> = match user.get(1).map(|a| a.value.kind()) {
+            // CPython 3.12: the `times` count honors the `__index__` protocol
+            // (an int-subclass or `__index__` object is accepted), and a bigint
+            // that overflows Py_ssize_t raises OverflowError (#2022).
+            let times: Option<i64> = match user.get(1) {
                 None => None,
-                Some(ValueKind::Int(n)) => Some(n),
-                Some(ValueKind::Bool(b)) => Some(b as i64),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(&user[1].value),
-                    ),
-                )),
+                Some(a) => Some(_interp.value_to_isize(
+                    &a.value,
+                    "Python int too large to convert to C ssize_t",
+                )?),
             };
             let mut a = inst.borrow_mut();
             a.attrs.insert("_object".to_string(), object);
@@ -795,17 +792,13 @@ pyrust_module! {
             let mut repeat: i64 = 1;
             for a in &args[1..] {
                 match a.name.as_deref() {
-                    Some("repeat") => match a.value.kind() {
-                        ValueKind::Int(n) => repeat = n,
-                        ValueKind::Bool(b) => repeat = b as i64,
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "'{}' object cannot be interpreted as an integer",
-                                value_type_name_str(&a.value),
-                            ),
-                        )),
-                    },
+                    // `repeat=` honors the `__index__` protocol (#2022).
+                    Some("repeat") => {
+                        repeat = _interp.value_to_isize(
+                            &a.value,
+                            "Python int too large to convert to C ssize_t",
+                        )?;
+                    }
                     Some(other) => return Err(PyError::named(
                         "TypeError",
                         format!("'{other}' is an invalid keyword argument for product()"),
@@ -1602,23 +1595,17 @@ pyrust_module! {
                 format!("tee expected at most 2 arguments, got {got}"),
             ));
         }
-        let n: usize = match positional.get(1).map(|v| v.kind()) {
+        // `n` honors the `__index__` protocol (#2022); a non-int raises the
+        // canonical TypeError, an overflowing bigint raises OverflowError, and
+        // `n < 0` raises `ValueError: n must be >= 0`.
+        let n: usize = match positional.get(1).cloned() {
             None => 2,
-            Some(ValueKind::Int(n)) if n >= 0 => n as usize,
-            Some(ValueKind::Bool(b)) => b as usize,
-            Some(ValueKind::Int(_)) => return Err(PyError::named(
-                "ValueError",
-                "n must be >= 0".to_string(),
-            )),
-            Some(_) => {
-                let n_val = positional.get(1).unwrap();
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(n_val),
-                    ),
-                ));
+            Some(v) => {
+                let n = _interp.value_to_isize(&v, "Python int too large to convert to C ssize_t")?;
+                if n < 0 {
+                    return Err(PyError::named("ValueError", "n must be >= 0".to_string()));
+                }
+                n as usize
             }
         };
         // Materialise the source into a list eagerly, then return n list_iterator
@@ -1734,24 +1721,16 @@ pyrust_module! {
                     format!("batched() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
-            let n = match user[1].value.kind() {
-                ValueKind::Int(n) if n >= 1 => n,
-                ValueKind::Bool(true) => 1,
-                ValueKind::Int(_) | ValueKind::Bool(false) => return Err(PyError::named(
-                    "ValueError",
-                    "n must be at least one".to_string(),
-                )),
-                _ => {
-                    let n_val = &user[1].value;
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            value_type_name_str(n_val),
-                        ),
-                    ));
-                }
-            };
+            // `n` honors the `__index__` protocol (#2022); a non-int raises the
+            // canonical TypeError, an overflowing bigint raises OverflowError,
+            // and `n < 1` raises `ValueError: n must be at least one`.
+            let n = _interp.value_to_isize(
+                &user[1].value,
+                "Python int too large to convert to C ssize_t",
+            )?;
+            if n < 1 {
+                return Err(PyError::named("ValueError", "n must be at least one".to_string()));
+            }
             let iter = make_iter(_interp, &user[0].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter".to_string(), iter);
@@ -1851,25 +1830,42 @@ fn read_islice_state(
 }
 
 /// Extract a non-negative `i64` (or `None`) from an `islice` slot.
-fn slice_arg(_fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
-    match v.kind() {
-        ValueKind::None => Ok(None),
-        ValueKind::Int(n) => Ok(Some(n)),
-        ValueKind::Bool(b) => Ok(Some(b as i64)),
-        _ => {
-            let msg = match slot {
-                "step" => "Step for islice() must be a positive integer or None.".to_string(),
-                "stop" => {
-                    "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
-                        .to_string()
-                }
-                _ => {
-                    "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize."
-                        .to_string()
-                }
-            };
-            Err(PyError::named("ValueError", msg))
+fn slice_arg(interp: &mut crate::Interpreter, _fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
+    // CPython's `evaluate_slice_index` honors the `__index__` protocol (an
+    // int-subclass or `__index__` object is accepted), but unlike the
+    // canonical index contexts it raises a *ValueError* — not a TypeError —
+    // for anything that isn't an integer (#2022).  Resolve `__index__` via the
+    // shared protocol; only the non-index case takes the ValueError path.
+    let resolved = match v.kind() {
+        ValueKind::None => return Ok(None),
+        ValueKind::Int(n) => return Ok(Some(n)),
+        ValueKind::Bool(b) => return Ok(Some(b as i64)),
+        ValueKind::PyInstance(_) => {
+            interp.value_to_index(v, |_| PyError::named("__pyrust_NotIndex__", String::new()))
         }
+        _ => Err(PyError::named("__pyrust_NotIndex__", String::new())),
+    };
+    let slice_value_err = || {
+        let msg = match slot {
+            "step" => "Step for islice() must be a positive integer or None.".to_string(),
+            "stop" => {
+                "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
+                    .to_string()
+            }
+            _ => "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.".to_string(),
+        };
+        PyError::named("ValueError", msg)
+    };
+    match resolved {
+        Ok(r) => match r.kind() {
+            ValueKind::Int(n) => Ok(Some(n)),
+            ValueKind::Bool(b) => Ok(Some(b as i64)),
+            // A bigint slice bound is out of the `0 <= x <= sys.maxsize` range.
+            ValueKind::BigInt(_) => Err(slice_value_err()),
+            _ => unreachable!("value_to_index guarantees an integer"),
+        },
+        Err(PyError::Named(name, _)) if name == "__pyrust_NotIndex__" => Err(slice_value_err()),
+        Err(e) => Err(e),
     }
 }
 
@@ -2149,23 +2145,18 @@ fn init_combo_state(
     }
     // `collect_iterable` walks generators / __iter__ classes.
     let pool: Vec<Value> = interp.collect_iterable(&user[0].value)?;
-    // Same split as `permutations`: negative-r is ValueError, non-int is
-    // TypeError — matches CPython's distinction.
-    let r = match user[1].value.kind() {
-        ValueKind::Int(n) if n >= 0 => n as usize,
-        ValueKind::Int(_) => return Err(PyError::named(
-            "ValueError",
-            "r must be non-negative".to_string(),
-        )),
-        ValueKind::Bool(b) => b as usize,
-        _ => return Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(&user[1].value),
-            ),
-        )),
-    };
+    // `r` honors the `__index__` protocol (#2022): a non-int raises the
+    // canonical TypeError, a bigint that overflows Py_ssize_t raises
+    // OverflowError, and a negative int raises `ValueError: r must be
+    // non-negative` — matching CPython 3.12's distinctions.
+    let r_i64 = interp.value_to_isize(
+        &user[1].value,
+        "Python int too large to convert to C ssize_t",
+    )?;
+    if r_i64 < 0 {
+        return Err(PyError::named("ValueError", "r must be non-negative".to_string()));
+    }
+    let r = r_i64 as usize;
     // For combinations (no replacement), `r > pool.len()` yields nothing.
     let n = pool.len();
     let exhausted = !with_replacement && r > n;

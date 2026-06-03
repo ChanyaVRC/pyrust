@@ -76,6 +76,19 @@ fn seq_index_type_error(label: &str, type_name: &str) -> String {
     }
 }
 
+/// Narrow an already-resolved index `Value` (guaranteed `Int`/`Bool`/`BigInt`
+/// by [`Interpreter::value_to_index`]) to `i64`, raising `OverflowError` with
+/// the caller's context message when a `BigInt` doesn't fit.
+fn index_value_to_i64(v: &Value, overflow_msg: &str) -> Result<i64> {
+    use crate::value::PyToPrimitive;
+    match v.kind() {
+        ValueKind::Int(n) => Ok(n),
+        ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::BigInt(b) => b.to_i64().ok_or_else(|| pyrust_core::overflow_err!("{}", overflow_msg)),
+        _ => unreachable!("index_value_to_i64: value_to_index guarantees an integer"),
+    }
+}
+
 impl Interpreter {
     /// Shared constructor for the `GeneratorFrame` wrapped in a
     /// `Value::generator`. Both call-site branches in
@@ -2040,34 +2053,13 @@ impl Interpreter {
                 // count through `__index__` so the dunder matches CPython, then
                 // delegate to the same repetition machinery as `*`.
                 let other = args.pop().unwrap();
-                let inst_rc = match other.kind() {
-                    ValueKind::PyInstance(inst) => Some(Rc::clone(inst)),
-                    _ => None,
-                };
-                let is_int_like = matches!(
-                    other.kind(),
-                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                );
-                let has_index = is_int_like
-                    || inst_rc.as_ref().is_some_and(|inst| {
-                        let class = Rc::clone(&inst.borrow().class);
-                        lookup_class_attr(&class, "__index__").is_some()
-                            || instance_builtin_data(inst).is_some_and(|b| {
-                                matches!(
-                                    b.kind(),
-                                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                                )
-                            })
-                    });
-                if !has_index {
-                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&other)));
-                }
-                let count = if inst_rc.is_some() {
-                    self.call_index_protocol(&other, "")?
-                } else {
-                    other
-                };
+                // Resolve the count through the shared index protocol (#2022):
+                // int/bool/bigint/int-subclass/`__index__` are accepted; float
+                // and `__int__`-only objects raise the canonical TypeError.
+                let count = self.value_to_index(&other, |v| {
+                    pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(v))
+                })?;
                 self.eval_binary(receiver, crate::ast::BinaryOp::Mul, count)
             }
             "__setitem__" => {
@@ -2949,9 +2941,23 @@ impl Interpreter {
         Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)))
     }
 
+    /// Resolve a `Unicode*Error` `start`/`end` positional through the shared
+    /// index protocol (#2022), storing the resolved int back into `args[idx]`.
+    /// CPython 3.12 accepts any `__index__` object here and stores the resulting
+    /// int as the `.start`/`.end` attribute; a non-integer raises the canonical
+    /// `'X' object cannot be interpreted as an integer` TypeError.
+    fn resolve_unicode_pos_arg(&mut self, args: &mut [Value], idx: usize) -> Result<()> {
+        let resolved = self.value_to_index(&args[idx], |v| {
+            pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(v))
+        })?;
+        args[idx] = resolved;
+        Ok(())
+    }
+
     /// Validate arguments for `UnicodeDecodeError(encoding, object, start, end, reason)`.
     /// Matches CPython 3.12's `UnicodeDecodeError_init` checks.
-    fn validate_unicode_decode_args(args: &[Value]) -> Result<()> {
+    fn validate_unicode_decode_args(&mut self, args: &mut [Value]) -> Result<()> {
         if args.len() != 5 {
             return Err(pyrust_core::type_err!("function takes exactly 5 arguments ({} given)", args.len()));
         }
@@ -2964,13 +2970,7 @@ impl Interpreter {
                     pyrust_core::builtin_type_name(&args[1])));
         }
         for idx in [2usize, 3usize] {
-            match args[idx].kind() {
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
-                _ => {
-                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&args[idx])));
-                }
-            }
+            self.resolve_unicode_pos_arg(args, idx)?;
         }
         if !matches!(args[4].kind(), ValueKind::Str(_)) {
             return Err(pyrust_core::type_err!("argument 5 must be str, not {}",
@@ -2981,7 +2981,7 @@ impl Interpreter {
 
     /// Validate arguments for `UnicodeEncodeError(encoding, object, start, end, reason)`.
     /// Matches CPython 3.12's `UnicodeEncodeError_init` checks.
-    fn validate_unicode_encode_args(args: &[Value]) -> Result<()> {
+    fn validate_unicode_encode_args(&mut self, args: &mut [Value]) -> Result<()> {
         if args.len() != 5 {
             return Err(pyrust_core::type_err!("function takes exactly 5 arguments ({} given)", args.len()));
         }
@@ -2994,13 +2994,7 @@ impl Interpreter {
                     pyrust_core::builtin_type_name(&args[1])));
         }
         for idx in [2usize, 3usize] {
-            match args[idx].kind() {
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
-                _ => {
-                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&args[idx])));
-                }
-            }
+            self.resolve_unicode_pos_arg(args, idx)?;
         }
         if !matches!(args[4].kind(), ValueKind::Str(_)) {
             return Err(pyrust_core::type_err!("argument 5 must be str, not {}",
@@ -3011,7 +3005,7 @@ impl Interpreter {
 
     /// Validate arguments for `UnicodeTranslateError(object, start, end, reason)`.
     /// Matches CPython 3.12's `UnicodeTranslateError_init` checks.
-    fn validate_unicode_translate_args(args: &[Value]) -> Result<()> {
+    fn validate_unicode_translate_args(&mut self, args: &mut [Value]) -> Result<()> {
         if args.len() != 4 {
             return Err(pyrust_core::type_err!("function takes exactly 4 arguments ({} given)", args.len()));
         }
@@ -3020,13 +3014,7 @@ impl Interpreter {
                     pyrust_core::builtin_type_name(&args[0])));
         }
         for idx in [1usize, 2usize] {
-            match args[idx].kind() {
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
-                _ => {
-                    return Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&args[idx])));
-                }
-            }
+            self.resolve_unicode_pos_arg(args, idx)?;
         }
         if !matches!(args[3].kind(), ValueKind::Str(_)) {
             return Err(pyrust_core::type_err!("argument 4 must be str, not {}",
@@ -3256,11 +3244,11 @@ impl Interpreter {
         // bytes for Decode / str for Encode, start/end must be int-like,
         // reason must be str).
         if kinds.unicode_decode_error {
-            Self::validate_unicode_decode_args(&values)?;
+            self.validate_unicode_decode_args(&mut values)?;
         } else if kinds.unicode_encode_error {
-            Self::validate_unicode_encode_args(&values)?;
+            self.validate_unicode_encode_args(&mut values)?;
         } else if kinds.unicode_translate_error {
-            Self::validate_unicode_translate_args(&values)?;
+            self.validate_unicode_translate_args(&mut values)?;
         }
         // PEP 654 (Python 3.11+): BaseExceptionGroup and ExceptionGroup validation.
         // CPython validates in BaseExceptionGroup.__new__:
@@ -3813,147 +3801,25 @@ impl Interpreter {
         Ok(Value::string(out))
     }
 
-    /// Coerce a single `range()` argument to `i64` through the `__index__`
-    /// protocol, matching CPython 3.12 semantics.
-    ///
-    /// - `Int` / `Bool`: returned directly as `i64`.
-    /// - `BigInt`: converted to `i64`; raises `OverflowError` if out of range.
-    /// - `PyInstance` with `__index__`: the method is called; its result is
-    ///   then coerced recursively (must be `Int`/`Bool`/`BigInt`).
-    /// - Anything else: `TypeError: 'X' object cannot be interpreted as an integer`.
+    /// Coerce a single `range()` argument to `i64` through the shared index
+    /// protocol, matching CPython 3.12.  Thin wrapper over
+    /// [`Interpreter::value_to_isize`]: accepts int/bool/bigint/int-subclass/
+    /// `__index__`; a non-integer raises `'X' object cannot be interpreted as an
+    /// integer`; an out-of-`i64` bigint raises `OverflowError`.
     fn coerce_range_arg(&mut self, val: Value) -> Result<i64> {
-        use crate::value::PyToPrimitive;
-        enum Tag {
-            Int(i64),
-            BigIntI64(Option<i64>),
-            Instance(Rc<RefCell<PyInstance>>),
-            Other,
-        }
-        // Probe inside a scoped block so the borrow from val.kind() drops
-        // before any mutable self borrow in the Instance arm.
-        let tag = {
-            match val.kind() {
-                ValueKind::Int(v) => Tag::Int(v),
-                ValueKind::Bool(b) => Tag::Int(b as i64),
-                ValueKind::BigInt(b) => Tag::BigIntI64(b.to_i64()),
-                ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
-                _ => Tag::Other,
-            }
-        };
-        match tag {
-            Tag::Int(v) => Ok(v),
-            Tag::BigIntI64(Some(v)) => Ok(v),
-            Tag::BigIntI64(None) => Err(pyrust_core::overflow_err!("Python int too large to convert to C ssize_t")),
-            Tag::Instance(inst_rc) => {
-                // Issue #1929: an int/bool subclass is the int it already is, so `range(I(2))`, `hex(I)`,
-                // `chr(I)`, `(255).to_bytes(I(2), ...)` accept it as an integer.
-                // Extract the backing int directly (mirrors `coerce_numeric` for
-                // arithmetic) before relying on the user-`__index__` lookup.
-                let val = Value::py_instance(Rc::clone(&inst_rc));
-                if let Some(backing) = coerce_subclass_backing(&val, &[]) {
-                    match backing.kind() {
-                        ValueKind::Int(v) => return Ok(v),
-                        ValueKind::Bool(b) => return Ok(b as i64),
-                        ValueKind::BigInt(b) => {
-                            return match b.to_i64() {
-                                Some(v) => Ok(v),
-                                None => Err(pyrust_core::overflow_err!("Python int too large to convert to C ssize_t")),
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__index__") {
-                    let result = invoke_class_method(
-                        self,
-                        method_val,
-                        Value::py_instance(Rc::clone(&inst_rc)),
-                        &[],
-                    )?;
-                    let result_ok = matches!(
-                        result.kind(),
-                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                    );
-                    if result_ok {
-                        self.coerce_range_arg(result)
-                    } else {
-                        Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
-                                value_type_name_str(&result),))
-                    }
-                } else {
-                    Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
-                            value_type_name_str(&Value::py_instance(inst_rc)),))
-                }
-            }
-            Tag::Other => Err(pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
-                    pyrust_core::builtin_type_name(&val),)),
-        }
+        self.value_to_isize(&val, "Python int too large to convert to C ssize_t")
     }
 
     /// Resolve a single start/stop argument for `list.index` / `tuple.index`
     /// through the `__index__` protocol, matching CPython 3.12 semantics.
     ///
-    /// - `Int` / `Bool` / `BigInt`: returned unchanged (`BigInt` is still `int`).
-    /// - `PyInstance` with `__index__`: the method is called; its return value
-    ///   must be `Int`, `Bool`, or `BigInt`, and is returned.
-    /// - Anything else: `TypeError: slice indices must be integers or have an
-    ///   __index__ method`.
+    /// Thin wrapper over [`Interpreter::value_to_index`]; on a non-integer
+    /// non-`__index__` value it raises `TypeError: slice indices must be
+    /// integers or have an __index__ method`.
     fn resolve_index_arg(&mut self, val: Value) -> Result<Value> {
-        // Probe the kind in a scoped block so the Ref guard drops before we
-        // may need to move `val`.
-        enum Tag {
-            Int,
-            Instance(Rc<RefCell<PyInstance>>),
-            Other,
-        }
-        let tag = match val.kind() {
-            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
-            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
-            _ => Tag::Other,
-        };
-        match tag {
-            Tag::Int => Ok(val),
-            Tag::Instance(inst_rc) => {
-                // Issue #1929: an int/bool subclass is accepted as an
-                // index/slice bound by its int value.  CPython uses the C int
-                // value directly here (the object already *is* an int), so the
-                // backing wins even over a user `__index__` override.
-                let inst_val = Value::py_instance(Rc::clone(&inst_rc));
-                if let Some(backing) = coerce_subclass_backing(&inst_val, &[]) {
-                    if matches!(
-                        backing.kind(),
-                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                    ) {
-                        return Ok(backing);
-                    }
-                }
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__index__") {
-                    let result = invoke_class_method(
-                        self,
-                        method_val,
-                        Value::py_instance(Rc::clone(&inst_rc)),
-                        &[],
-                    )?;
-                    // Check result kind in a scoped block to release the Ref.
-                    // BigInt is a valid int result (e.g. __index__ returning 2**100).
-                    let result_ok = matches!(
-                        result.kind(),
-                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                    );
-                    if result_ok {
-                        Ok(result)
-                    } else {
-                        Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
-                                value_type_name_str(&result),))
-                    }
-                } else {
-                    Err(pyrust_core::type_err!("slice indices must be integers or have an __index__ method"))
-                }
-            }
-            Tag::Other => Err(pyrust_core::type_err!("slice indices must be integers or have an __index__ method")),
-        }
+        self.value_to_index(&val, |_| {
+            pyrust_core::type_err!("slice indices must be integers or have an __index__ method")
+        })
     }
 
     /// For `list.index` / `tuple.index`, resolve start (pos[1]) and stop
@@ -4241,75 +4107,94 @@ impl Interpreter {
         )
     }
 
+    /// **The single source of truth for CPython's index protocol** (`operator.index`
+    /// / `PyNumber_Index`).  Resolve `val` to an integer `Value` (guaranteed
+    /// `Int`, `Bool`, or `BigInt`), honoring `__index__` uniformly:
+    ///
+    /// - `Int` / `Bool` / `BigInt`: returned unchanged (the common, branch-cheap
+    ///   path — checked first so plain-int indexing has no extra work).
+    /// - `PyInstance` that is an `int`/`bool` subclass (#1929): its primitive
+    ///   backing is returned directly (the object already *is* an int, so the
+    ///   backing wins even over a user `__index__` override, matching CPython).
+    /// - `PyInstance` with a user `__index__`: the method is called; its result
+    ///   must be `Int`/`Bool`/`BigInt`, else `TypeError: __index__ returned
+    ///   non-int (type X)`.
+    /// - Anything else (incl. `float`, `__int__`-only objects, instances without
+    ///   `__index__`): the caller-supplied `not_index_err` closure produces the
+    ///   context-specific `TypeError` (CPython varies the message per context:
+    ///   `"'X' object cannot be interpreted as an integer"`, `"list indices must
+    ///   be integers or slices, not X"`, etc.).
+    ///
+    /// Replaced ~40 open-coded coercions (issue #2022); the thin wrappers below
+    /// (`call_index_protocol`, `coerce_range_arg`, `resolve_index_arg`,
+    /// `try_resolve_index_value`, `try_index_for_seq_repeat`) all route here.
+    pub(crate) fn value_to_index(
+        &mut self,
+        val: &Value,
+        not_index_err: impl FnOnce(&Value) -> PyError,
+    ) -> Result<Value> {
+        // Fast path: a primitive integer is already its own index.  Checked
+        // before any class/dunder probe so plain `a[i]` stays branch-cheap.
+        match val.kind() {
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => return Ok(val.clone()),
+            ValueKind::PyInstance(_) => {}
+            _ => return Err(not_index_err(val)),
+        }
+        // Issue #1929: an int/bool subclass *is* the int it backs, so the
+        // backing value is used directly (it wins over a user `__index__`
+        // override, matching CPython's C-level int reuse).
+        if let Some(backing) = coerce_subclass_backing(val, &[]) {
+            if matches!(
+                backing.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ) {
+                return Ok(backing);
+            }
+        }
+        let inst_rc = match val.kind() {
+            ValueKind::PyInstance(inst) => Rc::clone(inst),
+            _ => unreachable!("value_to_index: kind() changed under us"),
+        };
+        let class = Rc::clone(&inst_rc.borrow().class);
+        let Some(method_val) = lookup_class_attr(&class, "__index__") else {
+            return Err(not_index_err(val));
+        };
+        let result = invoke_class_method(self, method_val, val.clone(), &[])?;
+        if matches!(
+            result.kind(),
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+        ) {
+            Ok(result)
+        } else {
+            Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
+                    value_type_name_str(&result),))
+        }
+    }
+
     /// Resolve an index argument for **sequence item access** (`a[i]`, `a[i] = v`,
     /// `del a[i]`) through the `__index__` protocol, matching CPython 3.12.
     ///
-    /// Differs from `resolve_index_arg` (used for slice bounds) only in the
-    /// error message when the object provides neither an integer type nor
-    /// `__index__`.  CPython's per-type messages:
+    /// Thin wrapper over [`Interpreter::value_to_index`] that supplies the
+    /// per-type error message via [`seq_index_type_error`]:
     /// - list/tuple/bytes: `"X indices must be integers or slices, not Y"`
     /// - string: `"string indices must be integers, not 'Y'"` (different!)
-    ///
-    /// - `Int` / `Bool` / `BigInt`: returned unchanged.
-    /// - `PyInstance` with `__index__`: called; result must be `Int`/`Bool`/`BigInt`.
-    /// - `PyInstance` without `__index__` / any other type: `TypeError` with the
-    ///   label-specific message.
     pub(crate) fn call_index_protocol(&mut self, val: &Value, label: &str) -> Result<Value> {
-        enum Tag {
-            Int,
-            Instance(Rc<RefCell<PyInstance>>),
-            Other,
-        }
-        let tag = match val.kind() {
-            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
-            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
-            _ => Tag::Other,
-        };
-        match tag {
-            Tag::Int => Ok(val.clone()),
-            Tag::Instance(inst_rc) => {
-                // Issue #1929: an int/bool subclass is accepted as a sequence
-                // index (`[10,20,30][I(2)]`, `"abc"[I(1)]`, `b"abc"[I(0)]`) by
-                // its int value.  CPython uses the C int value directly (the
-                // object already *is* an int), so the backing wins even over a
-                // user `__index__` override.
-                let inst_val = Value::py_instance(Rc::clone(&inst_rc));
-                if let Some(backing) = coerce_subclass_backing(&inst_val, &[]) {
-                    if matches!(
-                        backing.kind(),
-                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                    ) {
-                        return Ok(backing);
-                    }
-                }
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__index__") {
-                    let result = invoke_class_method(
-                        self,
-                        method_val,
-                        Value::py_instance(Rc::clone(&inst_rc)),
-                        &[],
-                    )?;
-                    let result_ok = matches!(
-                        result.kind(),
-                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                    );
-                    if result_ok {
-                        Ok(result)
-                    } else {
-                        Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
-                                value_type_name_str(&result),))
-                    }
-                } else {
-                    let type_name = value_type_name_str(&Value::py_instance(inst_rc));
-                    Err(pyrust_core::type_err!(seq_index_type_error(label, &type_name)))
-                }
-            }
-            Tag::Other => {
-                let type_name = value_type_name_str(&val);
-                Err(pyrust_core::type_err!(seq_index_type_error(label, &type_name)))
-            }
-        }
+        self.value_to_index(val, |v| {
+            pyrust_core::type_err!(seq_index_type_error(label, &value_type_name_str(v)))
+        })
+    }
+
+    /// Resolve `val` to an `i64` (a Py_ssize_t-sized count/index) through the
+    /// shared index protocol ([`Interpreter::value_to_index`]).  A non-integer
+    /// raises `'X' object cannot be interpreted as an integer`; a `BigInt` that
+    /// doesn't fit raises `OverflowError(overflow_msg)`.  Used by counted APIs
+    /// (`range`, `itertools.repeat`, …) that need a concrete `i64` (#2022).
+    pub(crate) fn value_to_isize(&mut self, val: &Value, overflow_msg: &str) -> Result<i64> {
+        let resolved = self.value_to_index(val, |v| {
+            pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(v))
+        })?;
+        index_value_to_i64(&resolved, overflow_msg)
     }
 
     /// Resolve the integer `length` argument of `int.to_bytes` through the
@@ -4349,34 +4234,20 @@ impl Interpreter {
     /// value and for instances that are not integer-like, so the caller leaves
     /// the original value in place and the receiver-side validation raises the
     /// canonical TypeError.
+    ///
+    /// Routes the actual `__index__` dispatch through
+    /// [`Interpreter::value_to_index`]; the `NotIndex` sentinel distinguishes
+    /// "this instance isn't integer-like" (→ `Ok(None)`) from a real error
+    /// raised inside `__index__`.
     fn try_resolve_index_value(&mut self, v: &Value) -> Result<Option<Value>> {
         if !matches!(v.kind(), ValueKind::PyInstance(_)) {
             return Ok(None);
         }
-        if let Some(backing) = coerce_subclass_backing(v, &[]) {
-            if matches!(
-                backing.kind(),
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-            ) {
-                return Ok(Some(backing));
-            }
+        match self.value_to_index(v, |_| PyError::named("__pyrust_NotIndex__", String::new())) {
+            Ok(resolved) => Ok(Some(resolved)),
+            Err(PyError::Named(name, _)) if name == "__pyrust_NotIndex__" => Ok(None),
+            Err(e) => Err(e),
         }
-        let class = match v.kind() {
-            ValueKind::PyInstance(inst) => Rc::clone(&inst.borrow().class),
-            _ => return Ok(None),
-        };
-        if let Some(method) = lookup_class_attr(&class, "__index__") {
-            let result = invoke_class_method(self, method, v.clone(), &[])?;
-            if matches!(
-                result.kind(),
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-            ) {
-                return Ok(Some(result));
-            }
-            return Err(pyrust_core::type_err!("__index__ returned non-int (type {})",
-                    value_type_name_str(&result),));
-        }
-        Ok(None)
     }
 }
 
@@ -7342,7 +7213,7 @@ impl Interpreter {
         obj_kind_tag: u8,
         receiver: Value,
         method: &str,
-        pos: Vec<Value>,
+        mut pos: Vec<Value>,
         kw: &IndexMap<PyKey, Value>,
     ) -> Result<Value> {
         // Issue #1909: container/sequence protocol dunders called directly via
@@ -7370,6 +7241,18 @@ impl Interpreter {
         }
         match obj_kind_tag {
             1 => {
+                // `list.insert(i, x)` / `list.pop([i])` accept any `__index__`
+                // object as the index (CPython 3.12).  The receiver-only
+                // `pyrust_builtins::list::call` cannot dispatch user dunders, so
+                // resolve the index through the shared protocol here (#2022)
+                // before delegating.
+                if (method == "insert" || method == "pop") && !pos.is_empty() {
+                    let idx = self.value_to_index(&pos[0], |v| {
+                        pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                                pyrust_core::builtin_type_name(v))
+                    })?;
+                    pos[0] = idx;
+                }
                 if pyrust_builtins::list::requires_interpreter(method) {
                     // `index` / `count` may fire user `__eq__`; `sort(key=)`
                     // runs a user callable.  The interpreter-free `call` cannot

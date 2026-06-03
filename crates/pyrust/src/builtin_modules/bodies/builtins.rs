@@ -74,59 +74,21 @@ pyrust_module! {
     fn chr(#[positional_only] i: PyValue) -> Result<Value> {
         // CPython 3.12: chr() honors the __index__ protocol. A plain int /
         // bool is handled by the typed overloads above; here we resolve a
-        // user object's __index__ (mirroring bin/oct/hex), then apply the
-        // same range check as the PyInt path. __int__ alone is not enough.
-        // Issue #1929: an int/bool subclass with no user `__index__` override
-        // inherits `int.__index__`, so `chr(I(65))` is accepted.  Resolve the
-        // backing int before the user-`__index__` dispatch below.
-        if let Some(backing) = coerce_subclass_backing(&i.0, &[]) {
-            match backing.kind() {
-                ValueKind::Bool(b) => return chr_from_code_point(if b { 1 } else { 0 }),
-                ValueKind::Int(v) => return chr_from_code_point(v),
-                ValueKind::BigInt(_) => {
-                    return Err(PyError::named(
-                        "OverflowError",
-                        "Python int too large to convert to C int".to_string(),
-                    ))
-                }
-                _ => {}
-            }
+        // user object's __index__ (mirroring bin/oct/hex) via the shared
+        // index protocol (issue #2022), then apply the same range check as
+        // the PyInt path. __int__ alone is not enough.
+        let resolved = _interp.value_to_index(&i.0, not_an_integer_err)?;
+        match resolved.kind() {
+            ValueKind::Bool(b) => chr_from_code_point(if b { 1 } else { 0 }),
+            ValueKind::Int(v) => chr_from_code_point(v),
+            // A bignum codepoint always exceeds the Unicode range; CPython's
+            // chr() converts via a C int first, so it overflows there.
+            ValueKind::BigInt(_) => Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C int".to_string(),
+            )),
+            _ => unreachable!("value_to_index guarantees an integer"),
         }
-        if let ValueKind::PyInstance(inst) = i.0.kind() {
-            let inst_rc = Rc::clone(inst);
-            let class = Rc::clone(&inst_rc.borrow().class);
-            let self_val = Value::py_instance(Rc::clone(&inst_rc));
-            if let Some(method) = lookup_class_attr(&class, "__index__") {
-                let result = invoke_class_method(_interp, method, self_val, &[])?;
-                let code_point = match result.kind() {
-                    ValueKind::Bool(b) => return chr_from_code_point(if b { 1 } else { 0 }),
-                    ValueKind::Int(v) => v,
-                    ValueKind::BigInt(_) => {
-                        return Err(PyError::named(
-                            "OverflowError",
-                            "Python int too large to convert to C int".to_string(),
-                        ))
-                    }
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "__index__ returned non-int (type {})",
-                                value_type_name_str(&result),
-                            ),
-                        ))
-                    }
-                };
-                return chr_from_code_point(code_point);
-            }
-        }
-        Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(&i.0),
-            ),
-        ))
     }
 
     /// CPython: ord(c) — return the Unicode codepoint of a one-character string.
@@ -220,44 +182,10 @@ pyrust_module! {
     }
 
     fn bin(#[positional_only] x: PyValue) -> Result<Value> {
-        // Issue #1929: int/bool subclass with inherited `int.__index__`.
-        if let Some(backing) = coerce_subclass_backing(&x.0, &[]) {
-            match backing.kind() {
-                ValueKind::Bool(b) => return Ok(Value::string(format_bin_i64(if b { 1 } else { 0 }))),
-                ValueKind::Int(v) => return Ok(Value::string(format_bin_i64(v))),
-                ValueKind::BigInt(b) => return Ok(Value::string(format_bigint_radix(b, 2, "0b"))),
-                _ => {}
-            }
-        }
-        if let ValueKind::PyInstance(inst) = x.0.kind() {
-            let inst_rc = Rc::clone(inst);
-            let class = Rc::clone(&inst_rc.borrow().class);
-            let self_val = Value::py_instance(Rc::clone(&inst_rc));
-            if let Some(method) = lookup_class_attr(&class, "__index__") {
-                let result = invoke_class_method(_interp, method, self_val, &[])?;
-                if let ValueKind::Bool(b) = result.kind() {
-                    return Ok(Value::string(format_bin_i64(if b { 1 } else { 0 })));
-                }
-                return match result.kind() {
-                    ValueKind::Int(v) => Ok(Value::string(format_bin_i64(v))),
-                    ValueKind::BigInt(b) => Ok(Value::string(format_bigint_radix(b, 2, "0b"))),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__index__ returned non-int (type {})",
-                            value_type_name_str(&result),
-                        ),
-                    )),
-                };
-            }
-        }
-        Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(&x.0),
-            ),
-        ))
+        // Issue #1929 / #2022: resolve int/bool subclasses and `__index__`
+        // objects uniformly via the shared index protocol, then format.
+        let resolved = _interp.value_to_index(&x.0, not_an_integer_err)?;
+        Ok(Value::string(format_index_radix(&resolved, 2, "0b", format_bin_i64)))
     }
 
     /// CPython: oct(x) — integer to '0o…' / '-0o…' string.
@@ -283,44 +211,9 @@ pyrust_module! {
     }
 
     fn oct(#[positional_only] x: PyValue) -> Result<Value> {
-        // Issue #1929: int/bool subclass with inherited `int.__index__`.
-        if let Some(backing) = coerce_subclass_backing(&x.0, &[]) {
-            match backing.kind() {
-                ValueKind::Bool(b) => return Ok(Value::string(format_oct_i64(if b { 1 } else { 0 }))),
-                ValueKind::Int(v) => return Ok(Value::string(format_oct_i64(v))),
-                ValueKind::BigInt(b) => return Ok(Value::string(format_bigint_radix(b, 8, "0o"))),
-                _ => {}
-            }
-        }
-        if let ValueKind::PyInstance(inst) = x.0.kind() {
-            let inst_rc = Rc::clone(inst);
-            let class = Rc::clone(&inst_rc.borrow().class);
-            let self_val = Value::py_instance(Rc::clone(&inst_rc));
-            if let Some(method) = lookup_class_attr(&class, "__index__") {
-                let result = invoke_class_method(_interp, method, self_val, &[])?;
-                if let ValueKind::Bool(b) = result.kind() {
-                    return Ok(Value::string(format_oct_i64(if b { 1 } else { 0 })));
-                }
-                return match result.kind() {
-                    ValueKind::Int(v) => Ok(Value::string(format_oct_i64(v))),
-                    ValueKind::BigInt(b) => Ok(Value::string(format_bigint_radix(b, 8, "0o"))),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__index__ returned non-int (type {})",
-                            value_type_name_str(&result),
-                        ),
-                    )),
-                };
-            }
-        }
-        Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(&x.0),
-            ),
-        ))
+        // Issue #1929 / #2022: resolve via the shared index protocol, format.
+        let resolved = _interp.value_to_index(&x.0, not_an_integer_err)?;
+        Ok(Value::string(format_index_radix(&resolved, 8, "0o", format_oct_i64)))
     }
 
     /// CPython: hex(x) — integer to '0x…' / '-0x…' string.
@@ -350,44 +243,9 @@ pyrust_module! {
     }
 
     fn hex(#[positional_only] x: PyValue) -> Result<Value> {
-        // Issue #1929: int/bool subclass with inherited `int.__index__`.
-        if let Some(backing) = coerce_subclass_backing(&x.0, &[]) {
-            match backing.kind() {
-                ValueKind::Bool(b) => return Ok(Value::string(format_hex_i64(if b { 1 } else { 0 }))),
-                ValueKind::Int(v) => return Ok(Value::string(format_hex_i64(v))),
-                ValueKind::BigInt(b) => return Ok(Value::string(format_bigint_radix(b, 16, "0x"))),
-                _ => {}
-            }
-        }
-        if let ValueKind::PyInstance(inst) = x.0.kind() {
-            let inst_rc = Rc::clone(inst);
-            let class = Rc::clone(&inst_rc.borrow().class);
-            let self_val = Value::py_instance(Rc::clone(&inst_rc));
-            if let Some(method) = lookup_class_attr(&class, "__index__") {
-                let result = invoke_class_method(_interp, method, self_val, &[])?;
-                if let ValueKind::Bool(b) = result.kind() {
-                    return Ok(Value::string(format_hex_i64(if b { 1 } else { 0 })));
-                }
-                return match result.kind() {
-                    ValueKind::Int(v) => Ok(Value::string(format_hex_i64(v))),
-                    ValueKind::BigInt(b) => Ok(Value::string(format_bigint_radix(b, 16, "0x"))),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__index__ returned non-int (type {})",
-                            value_type_name_str(&result),
-                        ),
-                    )),
-                };
-            }
-        }
-        Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(&x.0),
-            ),
-        ))
+        // Issue #1929 / #2022: resolve via the shared index protocol, format.
+        let resolved = _interp.value_to_index(&x.0, not_an_integer_err)?;
+        Ok(Value::string(format_index_radix(&resolved, 16, "0x", format_hex_i64)))
     }
 
     /// CPython: ascii(object) — ASCII-only escaped repr.
@@ -8488,6 +8346,33 @@ fn format_bigint_radix(b: &crate::value::PyBigInt, radix: u32, prefix: &str) -> 
         format!("-{prefix}{digits}")
     } else {
         format!("{prefix}{digits}")
+    }
+}
+
+/// The canonical `TypeError` for a value that is not an integer and has no
+/// `__index__` — `"'X' object cannot be interpreted as an integer"`.  Passed as
+/// the `not_index_err` closure to `Interpreter::value_to_index` from the
+/// `bin`/`oct`/`hex`/`chr` catch-alls (#2022).
+fn not_an_integer_err(v: &Value) -> PyError {
+    PyError::named(
+        "TypeError",
+        format!(
+            "'{}' object cannot be interpreted as an integer",
+            value_type_name_str(v),
+        ),
+    )
+}
+
+/// Format an already-resolved index `Value` (guaranteed `Int`/`Bool`/`BigInt`
+/// by `value_to_index`) as a radix string for `bin`/`oct`/`hex`.  Small ints go
+/// through `small_fmt` (`format_bin_i64` etc.); `BigInt` uses
+/// `format_bigint_radix`.
+fn format_index_radix(v: &Value, radix: u32, prefix: &str, small_fmt: fn(i64) -> String) -> String {
+    match v.kind() {
+        ValueKind::Bool(b) => small_fmt(if b { 1 } else { 0 }),
+        ValueKind::Int(n) => small_fmt(n),
+        ValueKind::BigInt(b) => format_bigint_radix(b, radix, prefix),
+        _ => unreachable!("format_index_radix: value_to_index guarantees an integer"),
     }
 }
 

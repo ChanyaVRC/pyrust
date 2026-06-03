@@ -846,7 +846,7 @@ pyrust_module! {
         let y = math_arg_to_float(_interp, &positional[1].value)?;
         let steps = match args.iter().find(|a| a.name.as_deref() == Some("steps")) {
             Some(a) => {
-                let s = value_to_steps_int(FN_NAME, &a.value)?;
+                let s = value_to_steps_int(_interp, FN_NAME, &a.value)?;
                 if s < 0 {
                     return Err(PyError::named(
                         "ValueError",
@@ -1182,8 +1182,21 @@ fn value_to_exp_int(_fn_name: &str, val: &Value) -> Result<i32> {
 /// out-of-range magnitude (the result is bounded by the distance to `y`
 /// anyway, so a saturated huge value still lands exactly on `y`).
 /// Rejects floats with TypeError; accepts bool (int subclass).
-fn value_to_steps_int(_fn_name: &str, val: &Value) -> Result<i64> {
-    match val.kind() {
+fn value_to_steps_int(interp: &mut crate::Interpreter, _fn_name: &str, val: &Value) -> Result<i64> {
+    // `steps` honors the `__index__` protocol (#2022); a non-int raises the
+    // canonical TypeError.  A bigint magnitude saturates to i64::MIN/MAX (the
+    // result is bounded by the distance to `y`, so a saturated huge value still
+    // lands exactly on `y` — matching CPython).
+    let resolved = interp.value_to_index(val, |v| {
+        PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(v)
+            ),
+        )
+    })?;
+    match resolved.kind() {
         ValueKind::Int(n) => Ok(n),
         ValueKind::Bool(b) => Ok(b as i64),
         ValueKind::BigInt(b) => {
@@ -1191,13 +1204,7 @@ fn value_to_steps_int(_fn_name: &str, val: &Value) -> Result<i64> {
             Ok(b.to_i64()
                 .unwrap_or(if b.is_negative() { i64::MIN } else { i64::MAX }))
         }
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                value_type_name_str(val)
-            ),
-        )),
+        _ => unreachable!("value_to_index guarantees an integer"),
     }
 }
 
@@ -1441,48 +1448,26 @@ fn value_to_bigint_int(
     _fn_name: &str,
     val: &Value,
 ) -> Result<PyBigInt> {
-    match val.kind() {
-        ValueKind::Int(n) => return Ok(PyBigInt::from(n)),
-        ValueKind::BigInt(b) => return Ok(b.clone()),
-        ValueKind::Bool(b) => return Ok(PyBigInt::from(b as i64)),
-        ValueKind::PyInstance(inst) => {
-            let inst_rc = Rc::clone(inst);
-            let class = Rc::clone(&inst_rc.borrow().class);
-            // int subclass: use the primitive backing directly.
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
-                match backing.kind() {
-                    ValueKind::Int(n) => return Ok(PyBigInt::from(n)),
-                    ValueKind::BigInt(b) => return Ok(b.clone()),
-                    ValueKind::Bool(b) => return Ok(PyBigInt::from(b as i64)),
-                    _ => {}
-                }
-            }
-            if let Some(method) = lookup_class_attr(&class, "__index__") {
-                let self_val = Value::py_instance(Rc::clone(&inst_rc));
-                let result = invoke_class_method(interp, method, self_val, &[])?;
-                return match result.kind() {
-                    ValueKind::Int(n) => Ok(PyBigInt::from(n)),
-                    ValueKind::BigInt(b) => Ok(b.clone()),
-                    ValueKind::Bool(b) => Ok(PyBigInt::from(b as i64)),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__index__ returned non-int (type {})",
-                            value_type_name_str(&result)
-                        ),
-                    )),
-                };
-            }
-        }
-        _ => {}
+    // Route the int / int-subclass / `__index__` resolution through the shared
+    // index protocol (#2022), then widen to `PyBigInt` (math functions need
+    // arbitrary precision).  `__float__` is NOT consulted — CPython's
+    // integer-argument functions reject float-only objects with the canonical
+    // `'X' object cannot be interpreted as an integer`.
+    let resolved = interp.value_to_index(val, |v| {
+        PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(v)
+            ),
+        )
+    })?;
+    match resolved.kind() {
+        ValueKind::Int(n) => Ok(PyBigInt::from(n)),
+        ValueKind::BigInt(b) => Ok(b.clone()),
+        ValueKind::Bool(b) => Ok(PyBigInt::from(b as i64)),
+        _ => unreachable!("value_to_index guarantees an integer"),
     }
-    Err(PyError::named(
-        "TypeError",
-        format!(
-            "'{}' object cannot be interpreted as an integer",
-            value_type_name_str(val)
-        ),
-    ))
 }
 
 /// Integer coercion for `factorial()`.  CPython's `factorial` accepts the same
