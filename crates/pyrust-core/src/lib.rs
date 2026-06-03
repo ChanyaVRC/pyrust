@@ -1147,6 +1147,21 @@ const TAG_TUPLE: u16 = 0xFFFD;
 const TAG_LIST: u16 = 0xFFFE;
 const TAG_OPAQUE: u16 = 0xFFFF;
 
+// String header `rc_type` (offset 0, u32) bit layout:
+//   bit 0      — layout discriminant: 0 = Layout A (owned), 1 = Layout B (slice)
+//   bit 1      — `is_ascii`: cached ASCII-ness (valid only when bit 2 is set)
+//   bit 2      — `ascii_computed`: 1 once the ASCII flag has been determined
+//   bits 31:3  — reference count (one ref == `STR_RC_ONE`)
+//
+// Strings are immutable, so a computed ASCII flag never invalidates.  The flag
+// is set eagerly in `Value::string` (it already touches every byte) and
+// propagated cheaply for ASCII parents in `string_slice`; otherwise
+// `str_is_ascii` computes it lazily on first query and caches it in-place.
+const STR_TYPE_B: u32 = 0b001; // bit 0 — Layout B (slice)
+const STR_IS_ASCII: u32 = 0b010; // bit 1 — cached ASCII-ness
+const STR_ASCII_COMPUTED: u32 = 0b100; // bit 2 — flag has been computed
+const STR_RC_ONE: u32 = 0b1000; // rc in bits 31:3; one reference
+
 /// Convert a ryu decimal string like `"0.00009999"` (or `"-0.00001"`) to
 /// CPython-style scientific notation like `"9.999e-05"`.  Only called when
 /// the value's absolute magnitude is known to be in (0, 1e-4), so the string
@@ -1961,8 +1976,17 @@ impl Value {
         //            offset 0     offset 4     offset 8     offset 16
         let layout = Layout::from_size_align(16 + len, 8).unwrap();
         let ptr = unsafe { alloc(layout) };
+        // Compute ASCII-ness once, here, where every byte is about to be touched
+        // by the memcpy anyway.  This covers ~all string construction (concat,
+        // join, format, decode, chr, repeat, upper, replace, … all funnel
+        // through `Value::string`), so the cached flag is set eagerly.
+        let ascii_flag = if s.is_ascii() {
+            STR_IS_ASCII | STR_ASCII_COMPUTED
+        } else {
+            STR_ASCII_COMPUTED
+        };
         unsafe {
-            (ptr as *mut u32).write(2u32); // rc=1, type=0
+            (ptr as *mut u32).write(STR_RC_ONE | ascii_flag); // rc=1, type=A
             (ptr.add(4) as *mut u32).write(len as u32);
             // Store the self-referential pointer as *const u8 (immutable bytes).
             (ptr.add(8) as *mut *const u8).write(ptr.add(16)); // ref → own bytes
@@ -1995,7 +2019,7 @@ impl Value {
         // For Layout B→B chains the stored_offset already encodes the distance from A's
         // bytes[0] to this slice's bytes[0], so subtracting it (plus the 16-byte header)
         // from self_ref always recovers A_ptr without underflow.
-        let (a_ptr, new_offset): (*mut u8, usize) = if rc_type & 1 == 0 {
+        let (a_ptr, new_offset): (*mut u8, usize) = if rc_type & STR_TYPE_B == 0 {
             (hdr as *mut u8, byte_start)
         } else {
             let base = unsafe { *(hdr.add(16) as *const u32) as usize };
@@ -2017,15 +2041,28 @@ impl Value {
         // backing buffer, but u32::MAX/2 simultaneous slice references is unreachable.
         unsafe {
             let hdr_a = a_ptr as *mut u32;
-            *hdr_a = (*hdr_a).saturating_add(2);
+            *hdr_a = (*hdr_a).saturating_add(STR_RC_ONE);
         }
+
+        // Propagate ASCII-ness: a substring of an all-ASCII string is itself
+        // all-ASCII, so we can mark the slice ASCII for free.  If the parent is
+        // non-ASCII (or not yet computed), the slice *may* still be ASCII, so we
+        // leave it uncomputed and let `str_is_ascii` resolve it lazily — never
+        // mark a slice non-ASCII here, that would be a correctness bug.
+        let ascii_flag = if rc_type & (STR_ASCII_COMPUTED | STR_IS_ASCII)
+            == (STR_ASCII_COMPUTED | STR_IS_ASCII)
+        {
+            STR_IS_ASCII | STR_ASCII_COMPUTED
+        } else {
+            0
+        };
 
         // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
         //            offset 0     offset 4     offset 8     offset 16
         // ref points directly to this slice's bytes[0]; ref - offset - 16 = A_ptr
         let ptr = unsafe { pool_b_alloc() };
         unsafe {
-            (ptr as *mut u32).write(3u32); // rc=1, type=1
+            (ptr as *mut u32).write(STR_RC_ONE | STR_TYPE_B | ascii_flag); // rc=1, type=B
             (ptr.add(4) as *mut u32).write(sub_len as u32);
             *(ptr.add(8) as *mut *const u8) = new_ref;
             (ptr.add(16) as *mut u32).write(new_offset as u32);
@@ -2542,6 +2579,41 @@ impl Value {
         } else {
             None
         }
+    }
+
+    /// O(1) cached ASCII-ness for a string value.
+    ///
+    /// The flag is computed eagerly at construction (`Value::string`) for almost
+    /// every string, and propagated for ASCII parents in `string_slice`.  When a
+    /// header carries no computed flag yet (a slice of a non-ASCII string), it is
+    /// computed on first call and cached in-place so subsequent queries are O(1).
+    /// Strings are immutable, so the cached flag never goes stale.
+    ///
+    /// Returns `false` for non-string values (the debug_assert guards misuse).
+    pub fn str_is_ascii(&self) -> bool {
+        debug_assert!(
+            self.is_str(),
+            "Value::str_is_ascii() called on a non-string value"
+        );
+        if !self.is_str() {
+            return false;
+        }
+        let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
+        let rc_type = unsafe { *hdr };
+        if rc_type & STR_ASCII_COMPUTED != 0 {
+            return rc_type & STR_IS_ASCII != 0;
+        }
+        // Uncomputed (only reachable for slices of a non-ASCII parent): scan once
+        // and cache the result.  Single-threaded runtime, so the in-place header
+        // write through the raw pointer is sound.
+        let is_ascii = unsafe { self.str_as_str() }.is_ascii();
+        let new_flag = if is_ascii {
+            STR_IS_ASCII | STR_ASCII_COMPUTED
+        } else {
+            STR_ASCII_COMPUTED
+        };
+        unsafe { *hdr = rc_type | new_flag };
+        is_ascii
     }
 
     /// Borrow the list's elements as a shared slice.
@@ -3347,12 +3419,13 @@ impl Clone for Value {
             TAG_STR => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
                 unsafe {
-                    // rc is stored in bits 31:1; increment by 2 (the type bit stays in bit 0).
-                    // Saturate instead of wrapping: a saturated rc means we never free the
-                    // backing buffer (acceptable memory leak for absurdly-shared strings).
+                    // rc is stored in bits 31:3; increment by `STR_RC_ONE` (the type and
+                    // ASCII flag bits 2:0 stay put).  Saturate instead of wrapping: a
+                    // saturated rc means we never free the backing buffer (acceptable
+                    // memory leak for absurdly-shared strings).
                     let old = *hdr;
-                    *hdr = old.saturating_add(2);
-                } // rc++ (bits 31:1)
+                    *hdr = old.saturating_add(STR_RC_ONE);
+                } // rc++ (bits 31:3)
                 Value(self.0) // same bits, 0 allocations
             }
             // Tuple — copy the stored obj_id so the clone shares the same identity
@@ -3392,10 +3465,10 @@ impl Drop for Value {
             TAG_STR => unsafe {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
                 let rc_type_ptr = hdr as *mut u32;
-                *rc_type_ptr -= 2; // rc--
-                if *rc_type_ptr >> 1 == 0 {
+                *rc_type_ptr -= STR_RC_ONE; // rc--
+                if *rc_type_ptr >> 3 == 0 {
                     // rc reached 0
-                    if *rc_type_ptr & 1 == 0 {
+                    if *rc_type_ptr & STR_TYPE_B == 0 {
                         // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes...]
                         let len = *(hdr.add(4) as *const u32) as usize;
                         dealloc(hdr, Layout::from_size_align(16 + len, 8).unwrap());
@@ -3405,8 +3478,8 @@ impl Drop for Value {
                         let ref_ptr = *(hdr.add(8) as *const *mut u8);
                         let offset = *(hdr.add(16) as *const u32) as usize;
                         let a_ptr = ref_ptr.sub(offset + 16);
-                        *(a_ptr as *mut u32) -= 2; // A.rc--
-                        if *(a_ptr as *const u32) >> 1 == 0 {
+                        *(a_ptr as *mut u32) -= STR_RC_ONE; // A.rc--
+                        if *(a_ptr as *const u32) >> 3 == 0 {
                             let root_len = *(a_ptr.add(4) as *const u32) as usize;
                             dealloc(a_ptr, Layout::from_size_align(16 + root_len, 8).unwrap());
                         }
