@@ -154,7 +154,7 @@ thread_local! {
 
 fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
+        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),

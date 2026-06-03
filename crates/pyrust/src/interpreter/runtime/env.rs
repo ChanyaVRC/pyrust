@@ -21,7 +21,7 @@ impl Interpreter {
                                 Value::py_instance(Rc::clone(&instance)),
                                 &[ExpandedCallArg {
                                     name: None,
-                                    value: Value::string(name.to_string()),
+                                    value: Value::string(name),
                                 }],
                             );
                             return match result {
@@ -38,7 +38,7 @@ impl Interpreter {
                                             Value::py_instance(Rc::clone(&instance)),
                                             &[ExpandedCallArg {
                                                 name: None,
-                                                value: Value::string(name.to_string()),
+                                                value: Value::string(name),
                                             }],
                                         )
                                     } else {
@@ -225,11 +225,11 @@ impl Interpreter {
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.
             // These return a new property with the respective accessor replaced.
-            _ if pyrust_builtins::property::property_partial_slot(&target)
+            _ if pyrust_builtins::property::property_partial_slot(target)
                 == Some(None) =>
             {
                 let (fget_val, fset_val, fdel_val, doc_val) =
-                    pyrust_builtins::property::with_property(&target, |s| {
+                    pyrust_builtins::property::with_property(target, |s| {
                         (
                             (*s.fget).clone(),
                             (*s.fset).clone(),
@@ -294,7 +294,7 @@ impl Interpreter {
                     .borrow()
                     .attrs
                     .get("__name__")
-                    .map_or(false, |v| v.is_unset());
+                    .is_some_and(|v| v.is_unset());
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
                     // A stored Value::unset() is a deletion tombstone written by
                     // delete_attr for synthetic dunders.  Treat it as absent.
@@ -349,7 +349,7 @@ impl Interpreter {
                         let is_absent = |key: &str| !attrs_snapshot.contains_key(key);
                         let name_key = PyKey::str_from("__name__");
                         if is_absent("__name__") {
-                            d.insert(name_key, Value::string(mod_name.clone()));
+                            d.insert(name_key, Value::string(mod_name));
                         }
                         let pkg_key = PyKey::str_from("__package__");
                         if is_absent("__package__") {
@@ -673,7 +673,7 @@ impl Interpreter {
                 // (which previously fell through to _ and paid the check cost
                 // on every method lookup like lst.append).
                 if let Some((method_name, receiver)) =
-                    pyrust_builtins::bound_method::as_bound_method(&target)
+                    pyrust_builtins::bound_method::as_bound_method(target)
                 {
                     match name {
                         "__name__" => return Ok(Value::string(method_name.as_str())),
@@ -698,13 +698,13 @@ impl Interpreter {
                         return Ok(val);
                     }
                 }
-                if builtin_has_method(&target, name) {
+                if builtin_has_method(target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name,
                         target.clone(),
                     ));
                 }
-                let type_name = pyrust_core::builtin_type_name(&target);
+                let type_name = pyrust_core::builtin_type_name(target);
                 Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
                     Some(name.to_string()),
@@ -810,9 +810,9 @@ impl Interpreter {
                 // .conjugate, numeric-tower real/imag/numerator/denominator,
                 // range start/stop/step) live in pyrust-builtins so this
                 // dispatcher holds no per-type knowledge.
-                if let Some(v) = pyrust_builtins::numeric_attrs_descriptor::complex_attr(&target, name)
-                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&target, name))
-                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::range_attr(&target, name))
+                if let Some(v) = pyrust_builtins::numeric_attrs_descriptor::complex_attr(target, name)
+                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(target, name))
+                    .or_else(|| pyrust_builtins::numeric_attrs_descriptor::range_attr(target, name))
                 {
                     return Ok(v);
                 }
@@ -826,7 +826,7 @@ impl Interpreter {
                     }
                 }
                 // Built-in type instance method lookup: list.append, str.upper, etc.
-                if builtin_has_method(&target, name) {
+                if builtin_has_method(target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name,
                         target.clone(),
@@ -834,12 +834,12 @@ impl Interpreter {
                 }
                 // Fallback: check the primitive class attrs for classmethods
                 // accessible on instances (e.g. `(1.0).fromhex`).
-                if let Some(cls) = crate::interpreter::primitive_class_for_value(&target) {
+                if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
                     if let Some(val) = lookup_class_attr(&cls, name) {
                         return Ok(val);
                     }
                 }
-                let type_name = pyrust_core::builtin_type_name(&target);
+                let type_name = pyrust_core::builtin_type_name(target);
                 Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
                     Some(name.to_string()),
@@ -1147,12 +1147,12 @@ impl Interpreter {
             || Rc::ptr_eq(&class, &crate::interpreter::method_type_singleton())
             || Rc::ptr_eq(&class, &crate::interpreter::function_type_singleton());
         if name == "__module__" && is_builtin_class {
-            return Ok(Value::string("builtins".to_string()));
+            return Ok(Value::string("builtins"));
         }
         if name == "__doc__" && is_builtin_class {
             let class_name = class.borrow().name.clone();
             return Ok(match builtin_class_doc(&class_name) {
-                Some(doc) => Value::string(doc.to_string()),
+                Some(doc) => Value::string(doc),
                 None => Value::none(),
             });
         }
@@ -1200,7 +1200,7 @@ impl Interpreter {
                     func,
                     &[ExpandedCallArg {
                         name: None,
-                        value: Value::string(name.to_string()),
+                        value: Value::string(name),
                     }],
                     &[Value::py_class(Rc::clone(&class))],
                 );
@@ -1235,7 +1235,7 @@ impl Interpreter {
             Value::py_instance(Rc::clone(instance)),
             &[ExpandedCallArg {
                 name: None,
-                value: Value::string(name.to_string()),
+                value: Value::string(name),
             }],
         ))
     }
@@ -1831,7 +1831,7 @@ impl Interpreter {
                         &[
                             ExpandedCallArg {
                                 name: None,
-                                value: Value::string(name.to_string()),
+                                value: Value::string(name),
                             },
                             ExpandedCallArg { name: None, value },
                         ],
@@ -2335,7 +2335,7 @@ impl Interpreter {
                         Value::py_instance(Rc::clone(instance)),
                         &[ExpandedCallArg {
                             name: None,
-                            value: Value::string(name.to_string()),
+                            value: Value::string(name),
                         }],
                     )
                     .map(|_| ());

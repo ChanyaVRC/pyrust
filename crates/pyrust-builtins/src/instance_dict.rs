@@ -178,16 +178,13 @@ impl BuiltinTypeOps for InstanceDictOps {
         };
         // Hidden exception C-level slots must not be accessible via subscript.
         if s.is_hidden(key_str) {
-            return Err(PyError::named(
-                "KeyError",
-                Value::string(key_str.to_string()).repr(),
-            ));
+            return Err(PyError::named("KeyError", Value::string(key_str).repr()));
         }
         let inst = s.instance.borrow();
         inst.attrs
             .get(key_str)
             .cloned()
-            .ok_or_else(|| PyError::named("KeyError", Value::string(key_str.to_string()).repr()))
+            .ok_or_else(|| PyError::named("KeyError", Value::string(key_str).repr()))
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {

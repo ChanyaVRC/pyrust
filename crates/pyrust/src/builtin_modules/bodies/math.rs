@@ -529,7 +529,7 @@ pyrust_module! {
         }
         // comb(n, k) = n! / (k! * (n-k)!)  — computed iteratively to avoid
         // materialising full factorials.  Use the smaller of k and n-k.
-        let k_small = k.clone().min(n.clone() - k.clone());
+        let k_small = k.clone().min(n.clone() - k);
         let k_u64: u64 = k_small.to_u64().ok_or_else(|| {
             PyError::named(
                 "OverflowError",

@@ -545,7 +545,7 @@ fn expect_self(
     fn_name: &str,
 ) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
+        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
@@ -573,7 +573,7 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
     };
     let class_val = m.borrow().attrs.get(name).cloned()?;
     match class_val.kind() {
-        ValueKind::PyClass(c) => Some(Rc::clone(&c)),
+        ValueKind::PyClass(c) => Some(Rc::clone(c)),
         _ => None,
     }
 }

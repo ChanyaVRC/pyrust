@@ -1316,7 +1316,7 @@ pyrust_module! {
             // Lazily fetch the next element only if the shared cursor was
             // consumed — matching CPython, where `_grouper_next` pulls from
             // the source iterator only when `gbo->currvalue == NULL`.
-            if !groupby_ensure_curr(_interp, &parent, FN_NAME)? {
+            if !groupby_ensure_curr(_interp, parent, FN_NAME)? {
                 return Err(PyError::named("StopIteration", String::new()));
             }
             let currkey = {
@@ -1334,7 +1334,7 @@ pyrust_module! {
                 let a = parent.borrow();
                 a.attrs.get("_currvalue").cloned().ok_or_else(|| internal(FN_NAME))?
             };
-            groupby_clear_curr(&parent);
+            groupby_clear_curr(parent);
             Ok(currvalue)
         }
     }
@@ -1782,7 +1782,7 @@ fn expect_self(
     fn_name: &str,
 ) -> Result<Rc<std::cell::RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
+        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
@@ -2068,7 +2068,7 @@ fn make_itertools_instance(name: &str, attrs: IndexMap<String, Value>) -> Result
         )));
     };
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
-        class: Rc::clone(&class),
+        class: Rc::clone(class),
         attrs,
     }))))
 }

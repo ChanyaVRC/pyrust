@@ -686,7 +686,7 @@ impl Interpreter {
                                 ValueKind::Tuple(items) => {
                                     let needs_dispatch = pos
                                         .first()
-                                        .map(|t| Self::seq_search_needs_dispatch(t, &items))
+                                        .map(|t| Self::seq_search_needs_dispatch(t, items))
                                         .unwrap_or(false);
                                     let pos = if method == "index" {
                                         self.resolve_seq_index_pos(pos)?
@@ -1110,7 +1110,7 @@ impl Interpreter {
                     ValueKind::Float(f) => f,
                     _ => unreachable!("kind_tag guard above"),
                 };
-                pyrust_builtins::float::call(method, f, &pos)
+                pyrust_builtins::float::call(method, f, pos)
             }
             Kind::Bytes => {
                 if method == "join" {
@@ -1148,7 +1148,7 @@ impl Interpreter {
                         })
                         .collect();
                     // Borrow pos; capacity retained in the buf below.
-                    self.format_str_template(&template, &pos, &keyword)
+                    self.format_str_template(&template, pos, &keyword)
                 } else if !kw.is_empty() {
                     // Resolve kwargs for str methods before passing to
                     // call_str_method, which only accepts positional args.
@@ -1228,7 +1228,7 @@ impl Interpreter {
                 if method == "index" || method == "count" {
                     let needs_dispatch = args_vec
                         .first()
-                        .map(|t| Self::seq_search_needs_dispatch(t, &items))
+                        .map(|t| Self::seq_search_needs_dispatch(t, items))
                         .unwrap_or(false);
                     let args_vec = if method == "index" {
                         match self.resolve_seq_index_pos(args_vec) {
@@ -1325,7 +1325,7 @@ impl Interpreter {
                         matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
                             | "str" | "int" | "float" | "bytes")
                     }) {
-                        if let Some(backing) = instance_builtin_data(&inst) {
+                        if let Some(backing) = instance_builtin_data(inst) {
                             // Issue #1909: container protocol dunders
                             // (`MyList().__len__()`, `MyDict().__getitem__(k)`)
                             // operate on the backing primitive — route through
@@ -1473,7 +1473,7 @@ impl Interpreter {
                                                 .first()
                                                 .map(|t| {
                                                     Self::seq_search_needs_dispatch(
-                                                        t, &items,
+                                                        t, items,
                                                     )
                                                 })
                                                 .unwrap_or(false);
@@ -1741,8 +1741,7 @@ impl Interpreter {
                                         9_223_372_036_854_775_808.0_f64;
                                     if f.is_finite()
                                         && f.fract() == 0.0
-                                        && f >= I64_MIN_F
-                                        && f < I64_MAX_PLUS1_F
+                                        && (I64_MIN_F..I64_MAX_PLUS1_F).contains(&f)
                                     {
                                         Some(f as i64)
                                     } else {
@@ -2267,7 +2266,7 @@ impl Interpreter {
         {
             Self::step_or_stop(ops.iter_next(state)?, default)
         } else {
-            Err(pyrust_core::type_err!("'{}' object is not an iterator", value_type_name_str(&val)))
+            Err(pyrust_core::type_err!("'{}' object is not an iterator", value_type_name_str(val)))
         }
     }
 
@@ -3105,7 +3104,7 @@ impl Interpreter {
                             let result = invoke_class_method(
                                 self,
                                 init_val,
-                                Value::py_instance(Rc::clone(&inst_rc)),
+                                Value::py_instance(Rc::clone(inst_rc)),
                                 args,
                             )?;
                             if !result.is_none() {
@@ -3440,7 +3439,7 @@ impl Interpreter {
                             let result = invoke_class_method(
                                 self,
                                 init_val,
-                                Value::py_instance(Rc::clone(&inst_rc)),
+                                Value::py_instance(Rc::clone(inst_rc)),
                                 args,
                             )?;
                             if !result.is_none() {
@@ -3705,7 +3704,7 @@ impl Interpreter {
                 }
                 // Look up the named key in the mapping via __getitem__.
                 let base =
-                    self.eval_index(&mapping, Value::string(head.to_string()))?;
+                    self.eval_index(&mapping, Value::string(head))?;
 
                 let value = apply_field_accessors(self, base, rest)?;
                 let value = match conversion {
@@ -3758,7 +3757,7 @@ impl Interpreter {
                                 }
                                 let sv = self.eval_index(
                                     &mapping,
-                                    Value::string(inner.to_string()),
+                                    Value::string(inner),
                                 )?;
                                 spec_out.push_str(&sv.to_py_str());
                             }
@@ -3889,8 +3888,7 @@ impl Interpreter {
                 const I64_MAX_PLUS1_F: f64 = 9_223_372_036_854_775_808.0_f64;
                 f.is_finite()
                     && f.fract() == 0.0
-                    && f >= I64_MIN_F
-                    && f < I64_MAX_PLUS1_F
+                    && (I64_MIN_F..I64_MAX_PLUS1_F).contains(&f)
                     && range_contains_i64(f as i64)
             }
             _ => false,
@@ -4625,7 +4623,7 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         if fs.sign.is_some() || fs.alt || fs.grouping.is_some() {
             return Err(pyrust_core::value_err!("Cannot specify ',' or '_', sign, or '#' with 'c'."));
         }
-        if n < 0 || n > 0x10FFFF {
+        if !(0..=0x10FFFF).contains(&n) {
             return Err(pyrust_core::overflow_err!("%c arg not in range(0x110000)"));
         }
         let ch = char::from_u32(n as u32).ok_or_else(|| {
@@ -5092,7 +5090,7 @@ fn assemble_numeric(
         return format!("{sign_prefix}{alt_prefix}{body}");
     }
     let pad = fs.width - raw_len;
-    let fill_str: String = std::iter::repeat(effective_fill).take(pad).collect();
+    let fill_str: String = std::iter::repeat_n(effective_fill, pad).collect();
 
     match effective_align {
         '=' => {
@@ -5116,8 +5114,8 @@ fn assemble_numeric(
         '^' => {
             let left = pad / 2;
             let right = pad - left;
-            let left_fill: String = std::iter::repeat(effective_fill).take(left).collect();
-            let right_fill: String = std::iter::repeat(effective_fill).take(right).collect();
+            let left_fill: String = std::iter::repeat_n(effective_fill, left).collect();
+            let right_fill: String = std::iter::repeat_n(effective_fill, right).collect();
             format!("{left_fill}{sign_prefix}{alt_prefix}{body}{right_fill}")
         }
         _ => format!("{sign_prefix}{alt_prefix}{body}"),
@@ -5146,7 +5144,7 @@ fn regroup_with_zero_pad(
     // For decimal / float (group_size == 3) the body may contain `.`, `e`,
     // `E`, or `%` which mark the end of the integer portion.
     let (int_part, rest) = if group_size == 3 {
-        match body.find(|c: char| matches!(c, '.' | 'e' | 'E' | '%')) {
+        match body.find(['.', 'e', 'E', '%']) {
             Some(i) => (&body[..i], &body[i..]),
             None => (body, ""),
         }
@@ -5181,7 +5179,7 @@ fn ensure_alt_float(s: String, alt: bool, precision: Option<usize>) -> String {
     }
     if precision == Some(0) && !s.contains('.') {
         // Insert '.' before exponent if present, else append.
-        if let Some(e_pos) = s.find(|c: char| matches!(c, 'e' | 'E')) {
+        if let Some(e_pos) = s.find(['e', 'E']) {
             let (a, b) = s.split_at(e_pos);
             format!("{a}.{b}")
         } else {
@@ -5200,15 +5198,15 @@ fn pad_value(raw: &str, fs: &FormatSpec, default_align: char, fill: char) -> Str
     }
     let pad = fs.width - raw_len;
     let align = fs.align.unwrap_or(default_align);
-    let fill_str: String = std::iter::repeat(fill).take(pad).collect();
+    let fill_str: String = std::iter::repeat_n(fill, pad).collect();
     match align {
         '>' => format!("{fill_str}{raw}"),
         '<' => format!("{raw}{fill_str}"),
         '^' => {
             let left = pad / 2;
             let right = pad - left;
-            let left_fill: String = std::iter::repeat(fill).take(left).collect();
-            let right_fill: String = std::iter::repeat(fill).take(right).collect();
+            let left_fill: String = std::iter::repeat_n(fill, left).collect();
+            let right_fill: String = std::iter::repeat_n(fill, right).collect();
             format!("{left_fill}{raw}{right_fill}")
         }
         _ => format!("{raw}{fill_str}"),
@@ -5218,7 +5216,7 @@ fn pad_value(raw: &str, fs: &FormatSpec, default_align: char, fill: char) -> Str
 /// Normalise Rust's e-notation digits to Python's: always at least two
 /// exponent digits and an explicit sign.
 fn normalise_exp_digits(s: String) -> String {
-    let e_pos = match s.find(|c: char| matches!(c, 'e' | 'E')) {
+    let e_pos = match s.find(['e', 'E']) {
         Some(p) => p,
         None => return s,
     };
@@ -5438,7 +5436,7 @@ fn format_g(f: f64, prec: usize, upper: bool, alt: bool) -> String {
 /// mantissa carries `prec` significant digits, for the `#g`/`#G` alternate
 /// form.  CPython keeps trailing zeros and the decimal point in this mode.
 fn ensure_exp_alt_zeros(s: String, prec: usize) -> String {
-    let e_pos = match s.find(|c: char| c == 'e' || c == 'E') {
+    let e_pos = match s.find(['e', 'E']) {
         Some(p) => p,
         None => return s,
     };
@@ -5800,7 +5798,7 @@ impl Interpreter {
                 {
                     let class_name = class.borrow().name.clone();
                     let items = pyrust_builtins::frozenset::as_items(&backing);
-                    let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                    let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
                     if is_empty {
                         return Ok(format!("{class_name}()"));
                     }
@@ -5986,7 +5984,7 @@ fn format_str_template(
                     .iter()
                     .find(|(k, _)| k == head)
                     .map(|(_, v)| v.clone())
-                    .ok_or_else(|| PyError::key_error(Value::string(head.to_string())))?
+                    .ok_or_else(|| PyError::key_error(Value::string(head)))?
             };
 
             // Apply field accessors (`.attr` / `[key]`) for any subscriptable type.
@@ -6116,7 +6114,7 @@ fn apply_field_accessors(
                 }
                 Value::int(idx as i64)
             } else {
-                Value::string(key_str.to_string())
+                Value::string(key_str)
             };
             value = interp.eval_index(&value, key)?;
         } else {
@@ -6200,7 +6198,7 @@ fn expand_format_spec_positional(
                         .iter()
                         .find(|(k, _)| k == inner)
                         .map(|(_, v)| v.clone())
-                        .ok_or_else(|| PyError::key_error(Value::string(inner.to_string())))?
+                        .ok_or_else(|| PyError::key_error(Value::string(inner)))?
                 };
                 out.push_str(&value.to_py_str());
             }
@@ -6299,7 +6297,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     let ValueKind::PyInstance(inst) = value.kind() else {
         return Ok(value.repr());
     };
-    let inst_rc = Rc::clone(&inst);
+    let inst_rc = Rc::clone(inst);
     let class = Rc::clone(&inst_rc.borrow().class);
     if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
         // Issue #1537: primitive types now expose `object` as an explicit
@@ -6359,7 +6357,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
             {
                 let class_name = class.borrow().name.clone();
                 let items = pyrust_builtins::frozenset::as_items(&backing);
-                let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
                 if is_empty {
                     return Ok(format!("{class_name}()"));
                 }
@@ -6434,7 +6432,7 @@ fn str_merge_kwargs(
                 };
                 match key_str.as_str() {
                     "sep" => {
-                        if pos.first().is_some() {
+                        if !pos.is_empty() {
                             return Err(pyrust_core::type_err!("argument for {method}() given by name ('sep') and position (1)"));
                         }
                         sep = Some(v);
@@ -6481,7 +6479,7 @@ fn str_merge_kwargs(
                 };
                 match key_str.as_str() {
                     "keepends" => {
-                        if pos.first().is_some() {
+                        if !pos.is_empty() {
                             return Err(pyrust_core::type_err!("argument for splitlines() given by name ('keepends') and position (1)"));
                         }
                         keepends = Some(v);
@@ -6517,7 +6515,7 @@ fn str_merge_kwargs(
                 };
                 match key_str.as_str() {
                     "encoding" => {
-                        if pos.first().is_some() {
+                        if !pos.is_empty() {
                             return Err(pyrust_core::type_err!("argument for encode() given by name ('encoding') and position (1)"));
                         }
                         encoding = Some(v);
@@ -6562,7 +6560,7 @@ fn str_merge_kwargs(
                 };
                 match key_str.as_str() {
                     "tabsize" => {
-                        if pos.first().is_some() {
+                        if !pos.is_empty() {
                             return Err(pyrust_core::type_err!("argument for expandtabs() given by name ('tabsize') and position (1)"));
                         }
                         tabsize = Some(v);
@@ -6729,7 +6727,7 @@ impl Interpreter {
             qualname: proto_qualname,
             user_name: std::cell::RefCell::new(None),
             user_qualname: std::cell::RefCell::new(None),
-            module: std::cell::RefCell::new(Value::string("__main__".to_string())),
+            module: std::cell::RefCell::new(Value::string("__main__")),
             doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
             attrs: std::cell::RefCell::new(None),
             annotations: std::cell::RefCell::new(annotations),
@@ -6856,10 +6854,10 @@ impl Interpreter {
         let module_slot = local_index.get("__module__").copied();
         let annotations_slot = local_index.get("__annotations__").copied();
         seed_class_reg(&mut class_regs, qualname_slot, || {
-            Value::string(proto_qualname.to_string())
+            Value::string(proto_qualname)
         });
         seed_class_reg(&mut class_regs, module_slot, || {
-            Value::string("__main__".to_string())
+            Value::string("__main__")
         });
         seed_class_reg(&mut class_regs, annotations_slot, || {
             Value::dict(indexmap::IndexMap::new())
@@ -7100,10 +7098,10 @@ fn make_class_finalize_attrs(
     };
     attrs
         .entry("__module__".to_string())
-        .or_insert_with(|| Value::string("__main__".to_string()));
+        .or_insert_with(|| Value::string("__main__"));
     attrs.entry("__doc__".to_string()).or_insert_with(|| {
         class_docstring
-            .map(|s| Value::string(s.to_string()))
+            .map(Value::string)
             .unwrap_or_else(Value::none)
     });
     // A class defining __eq__ but not __hash__ is unhashable (CPython rule).
@@ -7139,7 +7137,7 @@ fn make_class_extract_slots(
     };
     let slot_names: Vec<String> = match slots_val.kind() {
         ValueKind::Str(s) => vec![s.to_string()],
-        ValueKind::Tuple(items) => collect(&items),
+        ValueKind::Tuple(items) => collect(items),
         ValueKind::List(items) => collect(&items),
         _ => vec![],
     };

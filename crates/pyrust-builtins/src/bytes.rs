@@ -304,7 +304,7 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
     //   → "0001:0203:04"
     let n = bytes.len();
     if n == 0 {
-        return Ok(Value::string("".to_string()));
+        return Ok(Value::string(""));
     }
 
     // Render all bytes as hex pairs first.
@@ -407,7 +407,7 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
     };
 
     // Validate that a keyword isn't also supplied positionally.
-    if args.first().is_some() && kw_encoding.is_some() {
+    if !args.is_empty() && kw_encoding.is_some() {
         return Err(PyError::named(
             "TypeError",
             "argument for decode() given by name ('encoding') and position (1)".to_string(),
@@ -579,10 +579,10 @@ fn decode_utf8_with_errors(bytes: &[u8], errors: &str, codec_name: &str) -> Resu
                 reason: reason.to_string(),
             })
         }
-        "ignore" => Ok(Value::string(&bytes_decode_utf8_ignore(bytes))),
+        "ignore" => Ok(Value::string(bytes_decode_utf8_ignore(bytes))),
         "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
-        "backslashreplace" => Ok(Value::string(&bytes_decode_utf8_backslashreplace(bytes))),
-        "surrogateescape" => Ok(Value::string(&bytes_decode_utf8_surrogateescape(bytes))),
+        "backslashreplace" => Ok(Value::string(bytes_decode_utf8_backslashreplace(bytes))),
+        "surrogateescape" => Ok(Value::string(bytes_decode_utf8_surrogateescape(bytes))),
         _ => Err(PyError::named(
             "LookupError",
             format!("unknown error handler name '{errors}'"),
@@ -2228,7 +2228,7 @@ fn bytes_join(sep: &[u8], args: &[Value]) -> Result<Value> {
 
     let items: Vec<Vec<u8>> = match iterable.kind() {
         ValueKind::List(list_items) => collect_items(&list_items)?,
-        ValueKind::Tuple(tuple_items) => collect_items(&tuple_items)?,
+        ValueKind::Tuple(tuple_items) => collect_items(tuple_items)?,
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -2360,9 +2360,9 @@ fn bytes_center(bytes: &[u8], args: &[Value]) -> Result<Value> {
     let left = marg / 2 + (marg & width & 1);
     let right = marg - left;
     let mut out = Vec::with_capacity(width);
-    out.extend(std::iter::repeat(fill).take(left));
+    out.extend(std::iter::repeat_n(fill, left));
     out.extend_from_slice(bytes);
-    out.extend(std::iter::repeat(fill).take(right));
+    out.extend(std::iter::repeat_n(fill, right));
     Ok(Value::bytes(out))
 }
 
@@ -2376,7 +2376,7 @@ fn bytes_ljust(bytes: &[u8], args: &[Value]) -> Result<Value> {
     let width = width as usize;
     let mut out = Vec::with_capacity(width);
     out.extend_from_slice(bytes);
-    out.extend(std::iter::repeat(fill).take(width - len));
+    out.extend(std::iter::repeat_n(fill, width - len));
     Ok(Value::bytes(out))
 }
 
@@ -2389,7 +2389,7 @@ fn bytes_rjust(bytes: &[u8], args: &[Value]) -> Result<Value> {
     }
     let width = width as usize;
     let mut out = Vec::with_capacity(width);
-    out.extend(std::iter::repeat(fill).take(width - len));
+    out.extend(std::iter::repeat_n(fill, width - len));
     out.extend_from_slice(bytes);
     Ok(Value::bytes(out))
 }
@@ -2419,10 +2419,10 @@ fn bytes_zfill(bytes: &[u8], args: &[Value]) -> Result<Value> {
     // If the first byte is '+' or '-', keep it at the front and pad after it.
     if len > 0 && (bytes[0] == b'+' || bytes[0] == b'-') {
         out.push(bytes[0]);
-        out.extend(std::iter::repeat(b'0').take(pad));
+        out.extend(std::iter::repeat_n(b'0', pad));
         out.extend_from_slice(&bytes[1..]);
     } else {
-        out.extend(std::iter::repeat(b'0').take(pad));
+        out.extend(std::iter::repeat_n(b'0', pad));
         out.extend_from_slice(bytes);
     }
     Ok(Value::bytes(out))
@@ -2676,7 +2676,7 @@ fn bytes_expandtabs(bytes: &[u8], args: &[Value]) -> Result<Value> {
             b'\t' => {
                 if tabsize > 0 {
                     let spaces = tabsize - (col % tabsize);
-                    out.extend(std::iter::repeat(b' ').take(spaces));
+                    out.extend(std::iter::repeat_n(b' ', spaces));
                     col += spaces;
                 }
                 // tabsize == 0: tab is silently removed (col unchanged)

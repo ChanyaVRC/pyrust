@@ -522,7 +522,7 @@ fn fast_slice_contiguous(target: &Value, start: i64, end: i64, str_is_ascii: boo
                     break;
                 }
             }
-            Ok(Value::string(string[byte_start..byte_end].to_string()))
+            Ok(Value::string(&string[byte_start..byte_end]))
         }
         _ => unreachable!(),
     }
@@ -875,7 +875,7 @@ impl Interpreter {
         // eval_binary while keeping the cache Specialized so subsequent calls
         // still hit the fast path.
         let cache_slot = pc - 1;
-        let cache_entry = code.binop_cache.borrow()[cache_slot].clone();
+        let cache_entry = code.binop_cache.borrow()[cache_slot];
         match cache_entry {
             BinOpCacheEntry::Megamorphic => {
                 // Permanently polymorphic site: skip classification, go straight
@@ -1054,7 +1054,7 @@ impl Interpreter {
                         // invariant violation), treat as a shadow present —
                         // forces slow path.
                         let no_shadow =
-                            name_opt.map_or(false, |n| !inst.attrs.contains_key(n));
+                            name_opt.is_some_and(|n| !inst.attrs.contains_key(n));
                         let version_ok =
                             inst.class.borrow().mutation_version.get() == *class_version;
                         let epoch_ok = pyrust_core::class_epoch() == *epoch;
@@ -1092,10 +1092,10 @@ impl Interpreter {
                                     },
                                 },
                                 ValueKind::BuiltinFunction(fn_name) => Tag::Builtin {
-                                    fn_name_matches: name_opt.map_or(false, |n| {
+                                    fn_name_matches: name_opt.is_some_and(|n| {
                                         fn_name
                                             .rfind('.')
-                                            .map_or(false, |i| &fn_name[i + 1..] == n)
+                                            .is_some_and(|i| &fn_name[i + 1..] == n)
                                     }),
                                 },
                                 _ => Tag::Other,
@@ -1225,7 +1225,7 @@ impl Interpreter {
             }
         }
         if !handled {
-            self.assign_attr(obj_val.clone(), name, val_val.clone())?;
+            self.assign_attr(obj_val.clone(), name, val_val)?;
             // Fill / update the cache after the slow path.
             if name != "__class__" && name != "__dict__" {
                 let mut cache = code.attr_cache.borrow_mut();

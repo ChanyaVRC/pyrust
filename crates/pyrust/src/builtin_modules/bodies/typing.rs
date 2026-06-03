@@ -166,7 +166,7 @@ pyrust_module! {
     #[py_name = "_Any.__repr__"]
     fn any_repr(args) -> Result<Value> {
         let _ = (_interp, args);
-        Ok(Value::string("typing.Any".to_string()))
+        Ok(Value::string("typing.Any"))
     }
 
     // ── _TypingAlias dispatch fns ─────────────────────────────────────────────
@@ -353,7 +353,7 @@ pyrust_module! {
 
 fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
+        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),

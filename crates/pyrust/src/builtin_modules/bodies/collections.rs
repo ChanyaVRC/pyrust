@@ -157,7 +157,7 @@ pyrust_module! {
         fn __repr__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
             if counts.is_empty() {
-                return Ok(Value::string("Counter()".to_string()));
+                return Ok(Value::string("Counter()"));
             }
             // Collect as (key, value) preserving the actual stored value so
             // non-integer entries repr correctly (issue #920).
@@ -1304,7 +1304,7 @@ fn expect_self(
         PyError::Runtime(format!("internal: {fn_name}() called without self"))
     })?;
     match first.value.kind() {
-        ValueKind::PyInstance(rc) => Ok(Rc::clone(&rc)),
+        ValueKind::PyInstance(rc) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),

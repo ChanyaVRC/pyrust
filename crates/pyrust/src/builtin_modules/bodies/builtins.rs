@@ -783,8 +783,8 @@ pyrust_module! {
         // where `MyInt` does not define its own `__divmod__` — CPython delegates
         // through the `nb_divmod` slot inherited from `int`; pyrust mirrors that
         // with explicit coercion here.
-        let ca = coerce_numeric(&a);
-        let cb = coerce_numeric(&b);
+        let ca = coerce_numeric(a);
+        let cb = coerce_numeric(b);
         let ca_is_numeric = matches!(
             ca.kind(),
             ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Float(_) | ValueKind::Bool(_)
@@ -1581,7 +1581,7 @@ pyrust_module! {
         // kind (BuiltinFunction, UserFunction, BoundMethod, PyClass, …)
         // raises the correct error type and message instead of the old
         // catch-all "delattr() object has no writable attributes".
-        _interp.delete_attr(obj.0, &*name)?;
+        _interp.delete_attr(obj.0, &name)?;
         Ok(Value::none())
     }
 
@@ -1873,7 +1873,7 @@ pyrust_module! {
         #[positional_only] name: PyStr,
         #[positional_only] value: PyValue,
     ) -> Result<Value> {
-        _interp.assign_attr(obj.0, &*name, value.0)?;
+        _interp.assign_attr(obj.0, &name, value.0)?;
         Ok(Value::none())
     }
 
@@ -3193,7 +3193,7 @@ pyrust_module! {
             1 => match args[0].value.kind() {
                 ValueKind::Complex(re, im) => Ok(Value::complex(re, im)),
                 ValueKind::Str(s) => {
-                    let (re, im) = parse_complex_str(&s).ok_or_else(|| {
+                    let (re, im) = parse_complex_str(s).ok_or_else(|| {
                         PyError::named("ValueError", "complex() arg is a malformed string")
                     })?;
                     Ok(Value::complex(re, im))
@@ -3900,7 +3900,7 @@ pyrust_module! {
                             ValueKind::Bool(b) => {
                                 return Ok(Value::float(if b { 1.0 } else { 0.0 }));
                             }
-                            ValueKind::BigInt(ref b) => {
+                            ValueKind::BigInt(b) => {
                                 return b
                                     .to_f64()
                                     .filter(|f| f.is_finite())
@@ -4268,11 +4268,11 @@ pyrust_module! {
         let _ = errors;    // accepted, not yet implemented
         let _ = newline;   // accepted, not yet implemented
         // `closefd` defaults to True when not supplied (None means absent).
-        let closefd_bool = closefd.map_or(true, |v| v.0.truthy());
+        let closefd_bool = closefd.is_none_or(|v| v.0.truthy());
         pyrust_builtins::file::open(
             &path,
             &mode,
-            encoding.as_deref().map(|s| s.as_ref()),
+            encoding.as_deref().map(|s| s),
             closefd_bool,
         )
     }
@@ -5057,7 +5057,7 @@ pyrust_module! {
                     {
                         let class_name = class.borrow().name.clone();
                         let items = pyrust_builtins::frozenset::as_items(&backing);
-                        let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                        let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
                         if is_empty {
                             format!("{class_name}()")
                         } else {
@@ -7572,11 +7572,11 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
             }
         }
         IterKind::Other => {
-            let iter_type_name = builtin_iter_type_name(&v);
-            let items = iter_values(&v).map_err(|_| {
+            let iter_type_name = builtin_iter_type_name(v);
+            let items = iter_values(v).map_err(|_| {
                 PyError::named(
                     "TypeError",
-                    format!("'{}' object is not iterable", value_type_name_str(&v)),
+                    format!("'{}' object is not iterable", value_type_name_str(v)),
                 )
             })?;
             Ok(Value::generator(Box::new(NativeIterFrame {
@@ -7620,7 +7620,7 @@ const XX_PRIME5: u64 = 2870177450012600261;
 #[inline(always)]
 fn xxstep(acc: u64, lane: u64) -> u64 {
     let acc = acc.wrapping_add(lane.wrapping_mul(XX_PRIME2));
-    let acc = (acc << 31) | (acc >> 33); // rotl31
+    let acc = acc.rotate_left(31); // rotl31
     acc.wrapping_mul(XX_PRIME1)
 }
 
@@ -8269,7 +8269,7 @@ fn issubclass_check(
     match (cls.kind(), classinfo.kind()) {
         // User-defined → user-defined: walk the `base` chain.
         (ValueKind::PyClass(c), ValueKind::PyClass(expected)) => {
-            Ok(class_is_subclass_of(&c, &expected))
+            Ok(class_is_subclass_of(c, expected))
         }
         // User-defined → builtin type token: never a match in PyRust
         // (user classes don't inherit from built-in types here).
@@ -8833,7 +8833,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 {
                     let class_name = class.borrow().name.clone();
                     let items = pyrust_builtins::frozenset::as_items(&backing);
-                    let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                    let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
                     if is_empty {
                         return Ok(format!("{class_name}()"));
                     }
@@ -8872,7 +8872,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 return Ok(value.repr());
             }
             let id = value.value_id();
-            let already_in = id.map_or(false, |id| {
+            let already_in = id.is_some_and(|id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
             });
             if already_in {
@@ -8906,7 +8906,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 return Ok(value.repr());
             }
             let id = value.value_id();
-            let already_in = id.map_or(false, |id| {
+            let already_in = id.is_some_and(|id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
             });
             if already_in {
@@ -8916,7 +8916,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
             }
             // Tuple items are `&[Value]` — no Ref guard to drop.
-            let snapshot: Vec<Value> = items.iter().cloned().collect();
+            let snapshot: Vec<Value> = items.to_vec();
             let mut parts = Vec::with_capacity(snapshot.len());
             for item in &snapshot {
                 parts.push(render_value_repr(interp, item)?);
@@ -8947,7 +8947,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 return Ok(value.repr());
             }
             let id = value.value_id();
-            let already_in = id.map_or(false, |id| {
+            let already_in = id.is_some_and(|id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
             });
             if already_in {
@@ -8994,7 +8994,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 return Ok(value.repr());
             }
             let id = value.value_id();
-            let already_in = id.map_or(false, |id| {
+            let already_in = id.is_some_and(|id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
             });
             if already_in {
@@ -9038,7 +9038,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 return Ok(value.repr());
             }
             let id = value.value_id();
-            let already_in = id.map_or(false, |id| {
+            let already_in = id.is_some_and(|id| {
                 REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
             });
             if already_in {
@@ -9160,7 +9160,7 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             _ => Ok(value.to_py_str()),
         };
     };
-    let inst_rc = Rc::clone(&inst);
+    let inst_rc = Rc::clone(inst);
     let class = Rc::clone(&inst_rc.borrow().class);
     // For exception instances, fall back to built-in exception formatting only
     // when the class has no user-defined __str__.  A user-defined __str__ is
@@ -9266,7 +9266,7 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             {
                 let class_name = class.borrow().name.clone();
                 let items = pyrust_builtins::frozenset::as_items(&backing);
-                let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                let is_empty = items.as_ref().is_none_or(|rc| rc.is_empty());
                 if is_empty {
                     return Ok(format!("{class_name}()"));
                 }

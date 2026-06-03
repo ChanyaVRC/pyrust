@@ -157,7 +157,7 @@ impl Interpreter {
             // inserted (the rare path on first execution of a module).
             let has_key = self
                 .module_globals_dict
-                .dict_with(|d| d.contains_key(&StrKey(*name)))
+                .dict_with(|d| d.contains_key(&StrKey(name)))
                 .unwrap_or(false);
             if !has_key {
                 if let Some(v) = me.values.get(*name).cloned() {
@@ -333,7 +333,7 @@ impl Interpreter {
                         reason,
                     } => {
                         let msg = pyrust_core::format_unicode_decode_str(
-                            &encoding, &object, *start, *end, &reason,
+                            encoding, object, *start, *end, reason,
                         );
                         format!("UnicodeDecodeError: {msg}")
                     }
@@ -345,7 +345,7 @@ impl Interpreter {
                         reason,
                     } => {
                         let msg = pyrust_core::format_unicode_encode_str(
-                            &encoding, &object, *start, *end, &reason,
+                            encoding, object, *start, *end, reason,
                         );
                         format!("UnicodeEncodeError: {msg}")
                     }
