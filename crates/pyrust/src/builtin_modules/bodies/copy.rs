@@ -38,17 +38,12 @@ thread_local! {
     static COPY_ERROR_CLASS: Rc<RefCell<PyClass>> = {
         let exception_base = crate::interpreter::lookup_exc_class("Exception")
             .expect("EXC_CLASS_CACHE must contain Exception");
-        let class = Rc::new(RefCell::new(PyClass {
-            name: "Error".to_string(),
-            qualname: "Error".to_string(),
-            base: Some(Rc::clone(&exception_base)),
-            extra_bases: vec![],
-            attrs: IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }));
+        let class = Rc::new(RefCell::new(PyClass::new(
+            "Error",
+            "Error",
+            Some(Rc::clone(&exception_base)),
+            IndexMap::new(),
+        )));
         exception_base.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
         class
     };

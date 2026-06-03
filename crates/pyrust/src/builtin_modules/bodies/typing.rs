@@ -66,17 +66,7 @@ thread_local! {
         for (method, reg_name) in ANY_METHODS {
             attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
         }
-        Rc::new(RefCell::new(PyClass {
-            name: "_Any".to_string(),
-            qualname: "_Any".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("_Any", "_Any", None, attrs)))
     };
 
     static TYPING_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
@@ -84,17 +74,12 @@ thread_local! {
         for (method, reg_name) in TYPING_ALIAS_METHODS {
             attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
         }
-        Rc::new(RefCell::new(PyClass {
-            name: "_TypingAlias".to_string(),
-            qualname: "_TypingAlias".to_string(),
-            base: None,
-            extra_bases: vec![],
+        Rc::new(RefCell::new(PyClass::new(
+            "_TypingAlias",
+            "_TypingAlias",
+            None,
             attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        )))
     };
 
     // `Generic` must be a real `PyClass` so that `class Stack(Generic[T]): pass`
@@ -109,17 +94,7 @@ thread_local! {
             "__class_getitem__".to_string(),
             Value::builtin_function("typing._generic_cgi"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "Generic".to_string(),
-            qualname: "Generic".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("Generic", "Generic", None, attrs)))
     };
 
     // `Protocol` follows the same pattern as `Generic`.
@@ -129,17 +104,7 @@ thread_local! {
             "__class_getitem__".to_string(),
             Value::builtin_function("typing._protocol_cgi"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "Protocol".to_string(),
-            qualname: "Protocol".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("Protocol", "Protocol", None, attrs)))
     };
 }
 
@@ -448,17 +413,7 @@ thread_local! {
                 "__class_getitem__".to_string(),
                 Value::builtin_function(reg_name),
             );
-            let class = Rc::new(RefCell::new(PyClass {
-                name: (*name).to_string(),
-                qualname: (*name).to_string(),
-                base: None,
-                extra_bases: vec![],
-                attrs,
-                mutation_version: std::cell::Cell::new(0),
-                subclasses: std::cell::RefCell::new(vec![]),
-                metatype: None,
-                slots: None,
-            }));
+            let class = Rc::new(RefCell::new(PyClass::new(*name, *name, None, attrs)));
             map.insert(*name, class);
         }
         map

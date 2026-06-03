@@ -629,17 +629,12 @@ fn make_named_struct(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
     for (k, v) in fields {
         attrs.insert(k.to_string(), v);
     }
-    let class = Rc::new(RefCell::new(PyClass {
-        name: class_name.to_string(),
-        qualname: class_name.to_string(),
-        base: None,
-        extra_bases: vec![],
-        attrs: indexmap::IndexMap::new(),
-        mutation_version: std::cell::Cell::new(0),
-        subclasses: std::cell::RefCell::new(vec![]),
-        metatype: None,
-        slots: None,
-    }));
+    let class = Rc::new(RefCell::new(PyClass::new(
+        class_name,
+        class_name,
+        None,
+        indexmap::IndexMap::new(),
+    )));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -728,17 +723,12 @@ fn approximate_sizeof(value: &Value) -> i64 {
 
 thread_local! {
     static FLAGS_CLASS: Rc<RefCell<PyClass>> = {
-        Rc::new(RefCell::new(PyClass {
-            name: "flags".to_string(),
-            qualname: "flags".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs: indexmap::IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new(
+            "flags",
+            "flags",
+            None,
+            indexmap::IndexMap::new(),
+        )))
     };
 }
 
@@ -821,17 +811,12 @@ thread_local! {
             "__len__".to_string(),
             Value::builtin_function("sys.version_info_len"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "version_info".to_string(),
-            qualname: "version_info".to_string(),
-            base: None,
-            extra_bases: vec![],
+        Rc::new(RefCell::new(PyClass::new(
+            "version_info",
+            "version_info",
+            None,
             attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        )))
     };
 }
 
