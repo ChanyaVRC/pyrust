@@ -1038,15 +1038,15 @@ impl Interpreter {
                 Ok(items[idx].clone())
             }
             ValueKind::Str(text) => {
-                // ASCII fast path (#2032): when every byte is ASCII, char index ==
-                // byte index, so length is `text.len()` and the i-th char is a
-                // single byte — O(1) index instead of an O(idx) char scan.
-                // ASCII-ness is cached on the string header (#2124), so the check
-                // is O(1) — no per-op rescan, no penalty for non-ASCII strings.
+                // ASCII fast path (#2032 / #2116 / #2136): when every byte is
+                // ASCII, char index == byte index, so length is `text.len()` and
+                // the i-th char is a single byte — O(1) index instead of an
+                // O(idx) char scan.  ASCII-ness is cached on the string header
+                // (#2124), so the check is O(1) — no per-op rescan, no penalty
+                // for non-ASCII strings.  The fast-path body lives in
+                // `fast_path.rs::fast_str_ascii_index`.
                 if target.str_is_ascii() {
-                    let idx = normalize_index(&index, text.len(), "string")?;
-                    let b = text.as_bytes()[idx];
-                    return Ok(Value::string((b as char).encode_utf8(&mut [0u8; 4]) as &str));
+                    return fast_str_ascii_index(text, &index);
                 }
                 let char_count = text.chars().count();
                 let idx = normalize_index(&index, char_count, "string")?;
@@ -4546,45 +4546,11 @@ impl Interpreter {
         let (start, end, step) = Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
 
         // Contiguous fast path: `step == 1` produces the contiguous run
-        // `[start, end)`.  resolve_slice_bounds clamps both bounds to `[0, len]`
-        // for positive step, so `start..end.max(start)` is always in range; copy
-        // the run directly (memcpy for bytes, range clone for list/tuple) instead
-        // of building a full index Vec and copying element-by-element (#2066).
+        // `[start, end)` (memcpy for bytes, range clone for list/tuple, zero-copy
+        // shared-buffer slice for ASCII str) — see #2066 / #2111 / #2116 / #2136.
+        // The body lives in `fast_path.rs::fast_slice_contiguous`.
         if step == 1 {
-            let s = start as usize;
-            let e = (end.max(start)) as usize;
-            match target.kind() {
-                ValueKind::List(items) => return Ok(Value::list(items[s..e].to_vec())),
-                ValueKind::Tuple(items) => return Ok(Value::tuple(items[s..e].to_vec())),
-                ValueKind::Bytes(rc) => return Ok(Value::bytes(rc[s..e].to_vec())),
-                ValueKind::Str(string) => {
-                    if s >= e {
-                        return Ok(Value::string(String::new()));
-                    }
-                    // ASCII fast path (#2032): char index == byte index, so the
-                    // slice bounds are already byte offsets — O(1) zero-copy
-                    // shared-buffer slice, no char_indices scan.
-                    if str_is_ascii {
-                        return Ok(target.string_slice(s, e));
-                    }
-                    // s/e are char indices; walk char_indices once to find the
-                    // corresponding byte offsets, then slice the &str (no
-                    // Vec<char> allocation, char-boundary correct for multibyte).
-                    let mut byte_start = string.len();
-                    let mut byte_end = string.len();
-                    for (ci, (bi, _)) in string.char_indices().enumerate() {
-                        if ci == s {
-                            byte_start = bi;
-                        }
-                        if ci == e {
-                            byte_end = bi;
-                            break;
-                        }
-                    }
-                    return Ok(Value::string(string[byte_start..byte_end].to_string()));
-                }
-                _ => unreachable!(),
-            }
+            return fast_slice_contiguous(target, start, end, str_is_ascii);
         }
 
         let indices = Self::slice_target_indices(len, start, end, step);
@@ -6822,88 +6788,9 @@ fn set_binary_op(
     set_binary_op_from_items(interp, lhs_items, rhs_items, op, false)
 }
 
-/// Resolve a value to the direct `set` / `frozenset` `Value` backing it (peeling
-/// a `PyInstance` subclass backing, possibly through several layers), together
-/// with whether that backing is frozen.  The returned `Value` shares storage
-/// with the original (an `Rc` bump, not an `IndexSet` clone), so callers can
-/// borrow its `IndexSet` without copying the whole operand (issue #1978).
-///
-/// Returns `None` for anything that is not a `set` / `frozenset` (or subclass
-/// thereof) — dict views, lists, etc. — leaving those to the materialising
-/// `coerce_set_operand` path.
-fn set_direct_value(v: &Value) -> Option<(Value, bool)> {
-    if matches!(v.kind(), ValueKind::Set(_)) {
-        return Some((v.clone(), false));
-    }
-    if pyrust_builtins::frozenset::as_items(v).is_some() {
-        return Some((v.clone(), true));
-    }
-    if let Some(inst_rc) = v.as_py_instance_rc() {
-        let backing = instance_builtin_data(inst_rc)?;
-        return set_direct_value(&backing);
-    }
-    None
-}
-
-/// Scoped borrow access to the backing `IndexSet` of a direct `set` /
-/// `frozenset` `Value` (as produced by [`set_direct_value`]).  Borrows in place;
-/// never clones the `IndexSet` (issue #1978).
-fn with_set_items<R>(v: &Value, f: impl FnOnce(&indexmap::IndexSet<PyKey>) -> R) -> R {
-    if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
-        return f(&rc);
-    }
-    v.set_with(f).expect("set_direct_value guarantees a set/frozenset value")
-}
-
-/// Primitive-key set algebra over borrowed operands: clones only the elements
-/// that land in the result and builds it with a capacity hint (issue #1978).
-fn set_algebra_fast(
-    a: &indexmap::IndexSet<PyKey>,
-    b: &indexmap::IndexSet<PyKey>,
-    op: SetOp,
-) -> indexmap::IndexSet<PyKey> {
-    let cap = match op {
-        SetOp::And => a.len().min(b.len()),
-        SetOp::Sub => a.len(),
-        SetOp::Or => a.len() + b.len(),
-        SetOp::Xor => a.len() + b.len(),
-    };
-    let mut out = indexmap::IndexSet::with_capacity(cap);
-    match op {
-        SetOp::Or => {
-            for k in a.iter().chain(b.iter()) {
-                out.insert(k.clone());
-            }
-        }
-        SetOp::And => {
-            for k in a.iter() {
-                if b.contains(k) {
-                    out.insert(k.clone());
-                }
-            }
-        }
-        SetOp::Sub => {
-            for k in a.iter() {
-                if !b.contains(k) {
-                    out.insert(k.clone());
-                }
-            }
-        }
-        SetOp::Xor => {
-            for k in a.iter() {
-                if !b.contains(k) {
-                    out.insert(k.clone());
-                }
-            }
-            for k in b.iter() {
-                if !a.contains(k) {
-                    out.insert(k.clone());
-                }
-            }
-        }
-    }
-    out
-}
+// The set-op no-clone fast-path helpers — `set_direct_value`, `with_set_items`,
+// and `set_algebra_fast` — were moved to `runtime/fast_path.rs` (issue #1978).
+// `set_binary_op` above still calls them; they live in the same `include!` scope.
 
 /// Shared set-algebra core for [`set_binary_op`].  Computes `lhs OP rhs` over
 /// already-coerced `(IndexSet<PyKey>, frozen)` operands and packages the result.
