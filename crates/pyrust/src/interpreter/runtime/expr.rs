@@ -3755,70 +3755,20 @@ impl Interpreter {
     /// Raises `TypeError` if `__index__` returns non-int, or if the instance
     /// has no `__index__` at all, matching CPython 3.12 sequence repetition.
     fn try_index_for_seq_repeat(&mut self, val: Value) -> Result<Value> {
-        // Use a Tag enum so the Ref guard from val.kind() drops before we
-        // need to move `val` (same pattern as resolve_index_arg in calls.rs).
-        enum Tag {
-            Int,
-            Instance(Rc<RefCell<PyInstance>>),
-            Other,
-        }
+        // CPython's repeat-count message names the *original* object's type
+        // (both for the non-index TypeError and the BigInt OverflowError), so
+        // capture it before `value_to_index` may resolve through `__index__`.
         let type_name_for_err = value_type_name_str(&val).to_string();
-        let tag = match val.kind() {
-            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
-            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
-            _ => Tag::Other,
-        };
-        match tag {
-            Tag::Int => Ok(val),
-            Tag::Other => Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'")),
-            Tag::Instance(inst_rc) => {
-                // Issue #1929: an int/bool subclass is the int it already is, so `[0] * I(2)` and
-                // `"ab" * I(2)` repeat by the backing int.  Use the backing
-                // directly (the resulting Int/BigInt flows back into the
-                // repeat-count match in `mul`).
-                let val = Value::py_instance(Rc::clone(&inst_rc));
-                if let Some(backing) = coerce_subclass_backing(&val, &[]) {
-                    if matches!(
-                        backing.kind(),
-                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                    ) {
-                        return Ok(backing);
-                    }
-                }
-                let class = Rc::clone(&inst_rc.borrow().class);
-                let Some(method_val) = lookup_class_attr(&class, "__index__") else {
-                    return Err(pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'"));
-                };
-                let result = invoke_class_method(
-                    self,
-                    method_val,
-                    Value::py_instance(Rc::clone(&inst_rc)),
-                    &[],
-                )?;
-                // Classify the result before consuming it so the borrow on
-                // result.kind() ends before we move `result` into Ok(_).
-                enum ResultTag {
-                    SmallInt,
-                    BigInt,
-                    Other,
-                }
-                let result_type_name = value_type_name_str(&result).to_string();
-                let result_tag = match result.kind() {
-                    ValueKind::Int(_) | ValueKind::Bool(_) => ResultTag::SmallInt,
-                    ValueKind::BigInt(_) => ResultTag::BigInt,
-                    _ => ResultTag::Other,
-                };
-                match result_tag {
-                    ResultTag::SmallInt => Ok(result),
-                    ResultTag::BigInt => {
-                        // CPython's PyNumber_AsSsize_t raises OverflowError using
-                        // the *original* object's type name, not "int".
-                        Err(pyrust_core::overflow_err!("cannot fit '{type_name_for_err}' into an index-sized integer"))
-                    }
-                    ResultTag::Other => Err(pyrust_core::type_err!("__index__ returned non-int (type {result_type_name})")),
-                }
-            }
+        let resolved = self.value_to_index(&val, |_| {
+            pyrust_core::type_err!("can't multiply sequence by non-int of type '{type_name_for_err}'")
+        })?;
+        // `value_to_index` guarantees Int/Bool/BigInt.  A BigInt count is too
+        // large to fit a Py_ssize_t; CPython's PyNumber_AsSsize_t raises
+        // OverflowError using the *original* object's type name, not "int".
+        if matches!(resolved.kind(), ValueKind::BigInt(_)) {
+            return Err(pyrust_core::overflow_err!("cannot fit '{type_name_for_err}' into an index-sized integer"));
         }
+        Ok(resolved)
     }
 
     fn mul(&self, left: Value, right: Value) -> Result<Value> {
@@ -4401,26 +4351,17 @@ impl Interpreter {
     /// `__int__`-only objects — is returned unchanged so the receiver-side
     /// `value_to_byte` produces the correct range / type error verbatim.
     fn resolve_byte_value(&mut self, v: Value) -> Result<Value> {
-        let ValueKind::PyInstance(inst) = v.kind() else {
+        if !matches!(v.kind(), ValueKind::PyInstance(_)) {
             return Ok(v);
-        };
-        let inst_rc = Rc::clone(inst);
-        let class = Rc::clone(&inst_rc.borrow().class);
-        let Some(method) = lookup_class_attr(&class, "__index__") else {
-            return Ok(v);
-        };
-        let result = invoke_class_method(self, method, Value::py_instance(inst_rc), &[])?;
-        let is_int = matches!(
-            result.kind(),
-            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-        );
-        if is_int {
-            Ok(result)
-        } else {
-            Err(pyrust_core::type_err!(
-                "__index__ returned non-int (type {})",
-                value_type_name_str(&result)
-            ))
+        }
+        // Route the `__index__` dispatch through the shared protocol (#2022).
+        // The `NotIndex` sentinel maps "instance isn't integer-like" back to the
+        // original value, so the receiver-side `value_to_byte` raises the
+        // canonical range / type error.
+        match self.value_to_index(&v, |_| PyError::named("__pyrust_NotIndex__", String::new())) {
+            Ok(resolved) => Ok(resolved),
+            Err(PyError::Named(name, _)) if name == "__pyrust_NotIndex__" => Ok(v),
+            Err(e) => Err(e),
         }
     }
 

@@ -160,19 +160,13 @@ pyrust_module! {
                 ),
             ));
         }
-        let n = match args[0].value.kind() {
-            ValueKind::Int(i) => i,
-            ValueKind::Bool(b) => b as i64,
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(&args[0].value)
-                    ),
-                ));
-            }
-        };
+        // The limit honors the `__index__` protocol (#2022); a non-int raises
+        // the canonical TypeError and an overflowing bigint raises
+        // `OverflowError: Python int too large to convert to C int`.
+        let n = _interp.value_to_isize(
+            &args[0].value,
+            "Python int too large to convert to C int",
+        )?;
         if n < 1 {
             return Err(PyError::named(
                 "ValueError",

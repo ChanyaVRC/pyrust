@@ -37,6 +37,31 @@ check("step=0", lambda: list(itertools.islice(range(10), 0, 10, 0)))
 # Negative step
 check("step=-1", lambda: list(itertools.islice(range(10), 0, 10, -1)))
 
+# An __index__ object that returns a non-int, or raises, is reported with the
+# slot ValueError (CPython clears the inner error) — not the generic
+# "__index__ returned non-int" TypeError that the other index contexts use.
+class NonIntIndex:
+    def __index__(self):
+        return "x"
+
+
+class RaisingIndex:
+    def __index__(self):
+        raise ValueError("boom")
+
+
+class NegIndex:
+    def __index__(self):
+        return -2
+
+
+check("stop=NonIntIndex", lambda: list(itertools.islice(range(10), NonIntIndex())))
+check("start=NonIntIndex", lambda: list(itertools.islice(range(10), NonIntIndex(), 5)))
+check("step=NonIntIndex", lambda: list(itertools.islice(range(10), 0, 10, NonIntIndex())))
+check("stop=RaisingIndex", lambda: list(itertools.islice(range(10), RaisingIndex())))
+check("stop=NegIndex", lambda: list(itertools.islice(range(10), NegIndex())))
+check("start=NegIndex", lambda: list(itertools.islice(range(10), NegIndex(), 5)))
+
 # Happy paths — ensure they still work
 print(list(itertools.islice(range(10), 3)))
 print(list(itertools.islice(range(10), 2, 5)))
