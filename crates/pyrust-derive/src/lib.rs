@@ -215,6 +215,12 @@ struct ModuleClass {
     attrs: Vec<syn::Attribute>,
     name: Ident,
     methods: Vec<ModuleFn>,
+    /// `true` when the class body opens with the contextual marker
+    /// `iter_self;`.  The macro then injects the standard return-self
+    /// `__iter__` (`Ok(args[0].value.clone())`) so iterator classes that
+    /// only differ in `__next__` don't each redeclare the identical
+    /// `__iter__` body.  Used by the `itertools` module (#1895).
+    iter_self: bool,
 }
 
 impl Parse for ModuleInput {
@@ -577,6 +583,22 @@ impl ModuleInput {
         let name: Ident = input.parse()?;
         let content;
         syn::braced!(content in input);
+        // Optional contextual marker `iter_self;` at the head of the class
+        // body.  Opts the class into the macro-injected return-self
+        // `__iter__` so iterator classes whose only iterator-protocol
+        // difference is `__next__` don't redeclare the identical
+        // `Ok(args[0].value.clone())` body (#1895).  `iter_self` is not a
+        // Rust keyword, so it parses as a plain ident — treat it as a
+        // contextual marker, consumed only at the very start of the body.
+        let mut iter_self = false;
+        if content.peek(Ident) {
+            let lookahead: Ident = content.fork().parse()?;
+            if lookahead == "iter_self" {
+                let _: Ident = content.parse()?;
+                let _: Token![;] = content.parse()?;
+                iter_self = true;
+            }
+        }
         let mut methods: Vec<ModuleFn> = Vec::new();
         // Track method names within this class so we can flag duplicates
         // at macro-expand time.  Without this guard, two methods sharing
@@ -585,6 +607,12 @@ impl ModuleInput {
         // `builtin_registry::REGISTRY` catches it at first lookup, but
         // the macro-time error is far more actionable.
         let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // `iter_self` provides `__iter__`; an explicit `fn __iter__` then
+        // collides through the same duplicate-name path below, surfacing a
+        // clear macro-time error instead of a silent double-register.
+        if iter_self {
+            seen_names.insert("__iter__".to_string());
+        }
         while !content.is_empty() {
             let method_attrs = content.call(syn::Attribute::parse_outer)?;
             let method = Self::parse_fn(&content, method_attrs)?;
@@ -610,7 +638,7 @@ impl ModuleInput {
             }
             methods.push(method);
         }
-        if methods.is_empty() {
+        if methods.is_empty() && !iter_self {
             return Err(syn::Error::new(
                 name.span(),
                 format!(
@@ -622,6 +650,7 @@ impl ModuleInput {
             attrs,
             name,
             methods,
+            iter_self,
         })
     }
 }
@@ -703,6 +732,24 @@ fn emit_fn_artefacts(
     };
 
     (fn_item, reg_entry, name_static_ident)
+}
+
+/// Synthesize the `ModuleFn` for an `iter_self` class's injected
+/// `__iter__`.  Body is the canonical iterator return-self
+/// (`Ok(args[0].value.clone())`); it flows through `emit_fn_artefacts`
+/// exactly like a hand-written legacy-dialect method so registration and
+/// attr-insert are byte-identical to the declarations it replaces (#1895).
+fn synthesized_iter_self(span: Span) -> ModuleFn {
+    let args_ident = Ident::new("args", span);
+    let body: Block = syn::parse_quote!({ Ok(args[0].value.clone()) });
+    ModuleFn {
+        attrs: Vec::new(),
+        short_name: Ident::new("__iter__", span),
+        py_name_override: None,
+        is_pure: false,
+        args: ModuleFnArgs::Legacy { args_ident },
+        body,
+    }
 }
 
 /// Emit the prelude that validates + binds typed parameters before the
@@ -1490,7 +1537,15 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         let class_attrs = &class.attrs;
 
         let mut method_attr_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
-        for method in &class.methods {
+        // `iter_self` classes get a synthesized return-self `__iter__`,
+        // emitted through the exact same `emit_fn_artefacts` path as a
+        // hand-written method so registration / attr-insert stay identical.
+        let injected_iter: Option<ModuleFn> = if class.iter_self {
+            Some(synthesized_iter_self(class_name_ident.span()))
+        } else {
+            None
+        };
+        for method in class.methods.iter().chain(injected_iter.iter()) {
             let (py_short, rust_short) = py_short_and_rust_short(method);
             let method_short = &method.short_name;
             let short_lit = LitStr::new(&py_short, method_short.span());
