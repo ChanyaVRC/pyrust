@@ -206,20 +206,24 @@ pub(crate) fn compare_values_with_op(
 }
 
 pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
-    let (value, base, extra_bases) = {
-        let borrowed = class.borrow();
-        (borrowed.attrs.get(name).cloned(), borrowed.base.clone(), borrowed.extra_bases.clone())
-    };
-    if value.is_some() {
-        return value;
+    // Borrow the class to read its own attrs and recurse into the base chain by
+    // reference, cloning out only the matched `Value`.  Distinct classes are
+    // distinct `RefCell`s, so recursing under the current borrow never
+    // conflicts (same pattern as `class_chain_contains_name`, #1967).  Avoiding
+    // the previous per-node `base`/`extra_bases` `Rc`+`Vec` clones removes the
+    // dominant allocation churn on the exception-construction path, where this
+    // is called twice per `raise` (for `__new__` and `__init__`).
+    let borrowed = class.borrow();
+    if let Some(v) = borrowed.attrs.get(name) {
+        return Some(v.clone());
     }
-    let has_explicit_base = base.is_some();
-    if let Some(base) = base {
-        if let Some(v) = lookup_class_attr(&base, name) {
+    let has_explicit_base = borrowed.base.is_some();
+    if let Some(base) = &borrowed.base {
+        if let Some(v) = lookup_class_attr(base, name) {
             return Some(v);
         }
     }
-    for extra in &extra_bases {
+    for extra in &borrowed.extra_bases {
         if let Some(v) = lookup_class_attr(extra, name) {
             return Some(v);
         }
@@ -1972,6 +1976,18 @@ pub(crate) struct ExcClassKinds {
     pub(crate) import_error: bool,
     pub(crate) attribute_error: bool,
     pub(crate) base_exception_group: bool,
+    /// `true` if any class in the MRO defines a user (Python) `__new__`.
+    /// Plain built-in exceptions and their attribute-only subclasses leave this
+    /// `false`, letting `construct_exception_instance` skip the `__new__` MRO
+    /// lookup entirely on the hot `raise ValueError("x")` path.  A built-in
+    /// `__new__` can never shadow a user `__new__` (built-in `__new__` only
+    /// lives on base classes, which are less derived), so a node-wise "any user
+    /// `__new__`" test matches the prior MRO-first `.filter(UserFunction)` check.
+    pub(crate) has_user_new: bool,
+    /// `true` if any class in the MRO defines a user (Python) `__init__`.
+    /// Same rationale as [`has_user_new`](Self::has_user_new): `BaseException`
+    /// supplies a built-in `__init__`, so plain built-in exceptions stay `false`.
+    pub(crate) has_user_init: bool,
 }
 
 impl ExcClassKinds {
@@ -2000,6 +2016,24 @@ pub(crate) fn classify_exception_class(class: &Rc<RefCell<PyClass>>) -> ExcClass
     fn walk(class: &Rc<RefCell<PyClass>>, kinds: &mut ExcClassKinds) {
         let borrowed = class.borrow();
         kinds.merge_name(&borrowed.name);
+        // Detect user-defined __new__/__init__ in the same walk so the caller
+        // can skip the dedicated MRO lookups for plain built-in exceptions.
+        if !kinds.has_user_new
+            && matches!(
+                borrowed.attrs.get("__new__").map(Value::kind),
+                Some(ValueKind::UserFunction(_))
+            )
+        {
+            kinds.has_user_new = true;
+        }
+        if !kinds.has_user_init
+            && matches!(
+                borrowed.attrs.get("__init__").map(Value::kind),
+                Some(ValueKind::UserFunction(_))
+            )
+        {
+            kinds.has_user_init = true;
+        }
         if let Some(base) = &borrowed.base {
             walk(base, kinds);
         }
@@ -2172,7 +2206,6 @@ fn oserror_subclass_for_errno(errno: i64) -> Option<Rc<RefCell<PyClass>>> {
 }
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
-    let mut attrs = InstanceAttrs::new();
     // Classify the class against every special built-in exception name in a
     // single non-cloning MRO walk (issue #1967), instead of running ~12
     // separate cloning base-chain scans per constructed exception.  The result
@@ -2180,6 +2213,19 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // name appears in the class's base chain, so user subclasses (e.g.
     // `class MyStop(StopIteration)`) still inherit the special handling (#612).
     let kinds = classify_exception_class(&class);
+    instantiate_exception_with_kinds(class, args, &kinds)
+}
+
+/// Like [`instantiate_exception`] but takes a pre-computed [`ExcClassKinds`].
+/// `construct_exception_instance` already classifies the class once to handle
+/// keyword args / argument validation; threading that result through here
+/// avoids a second redundant MRO classification walk per constructed exception.
+pub(crate) fn instantiate_exception_with_kinds(
+    class: Rc<RefCell<PyClass>>,
+    args: Vec<Value>,
+    kinds: &ExcClassKinds,
+) -> Value {
+    let mut attrs = InstanceAttrs::new();
     // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
     let is_stop_iteration = kinds.stop_iteration;
     let is_syntax_error = kinds.syntax_error;
