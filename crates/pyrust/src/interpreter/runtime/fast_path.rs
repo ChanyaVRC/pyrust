@@ -22,11 +22,16 @@
 //     `eval_index` / `eval_slice`; #2032 / #2066 / #2111 / #2116 / #2136.
 //   - the frame-binding fast path (`bind_param`), from
 //     `call_user_function_expanded`; #2123 / #2137.
+//   - the BinOp / comparison primitive fast paths (`int_int_fast` /
+//     `float_float_fast` / `str_str_fast` / `classify_binop_tag` / `int_cmp` /
+//     `str_cmp`), from the `vm.rs` `run_bytecode_inner` dispatch loop.
 //
 // What deliberately stayed inline at its dispatch site (extracting would change
 // logic or hurt the hot path, not move it):
-//   - the attr inline-cache match arms in the `vm.rs` GetAttr/SetAttr dispatch
-//     loop, fused into the hot dispatch loop (extracting risks the hot path).
+//   - the attr inline-cache HIT arms in the `vm.rs` GetAttr / SetAttr /
+//     LoadGlobal dispatch loop, fused into the loop body with `continue` out of
+//     the dispatch `match` (extracting would restructure control flow, a logic
+//     change rather than a move).
 //   - `pyrust-builtins/string.rs` internal ASCII helpers (a separate crate;
 //     no cross-crate move).
 //   - the stepped (`step != 1`) slice final-match arms in `eval_slice`, which
@@ -565,4 +570,229 @@ fn bind_param(
         pyrust_core::ParamBind::None => {}
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// BinOp / comparison primitive fast paths, extracted from `vm.rs`'s
+// `run_bytecode_inner` dispatch loop.
+//
+// These six free functions are the type-specialized inner fast branches the
+// hot `Insn::BinOp` / `BinOpImm` / `JumpCmp*` arms consult before falling
+// through to the general `eval_binary` slow path:
+//   - `int_int_fast`     — int×int arithmetic / bitwise / shift / comparison.
+//   - `float_float_fast` — float×float arithmetic / comparison.
+//   - `str_str_fast`     — str×str concat / comparison.
+//   - `classify_binop_tag` — the inline-cache type-tag classifier.
+//   - `int_cmp` / `str_cmp` — comparison-only fast arms for `JumpCmp*`.
+//
+// They are `#[inline(always)]` so the file boundary is zero-cost: codegen at
+// every dispatch site is byte-identical to when these lived inline in `vm.rs`
+// (Rust inlines freely within a crate; verified perf-neutral, see the PR
+// bench table).  Pure relocation — no logic change.
+//
+// CLAUDE.md flags int-int Move/BinOp as extremely perf-sensitive (PR #478: an
+// Int-specialized "fast path" was a 15% loss).  This is NOT that: the move
+// keeps `#[inline(always)]` and changes no logic, so the optimizer produces
+// identical machine code; the bench table confirms zero regression.
+//
+// The `vm.rs` GetAttr / SetAttr / LoadGlobal inline-cache HIT arms stay inline
+// at their dispatch sites: they are fused into the loop body with `continue`
+// out of the dispatch `match` and share `regs` / `code` / `self`, so they
+// cannot become an `Option`-returning helper without restructuring control
+// flow (a logic change, not a move).  #2138 documented the same decision.
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add    => a.checked_add(b).map(Value::int),
+        BinaryOp::Sub    => a.checked_sub(b).map(Value::int),
+        BinaryOp::Mul    => a.checked_mul(b).map(Value::int),
+        BinaryOp::BitAnd => Some(Value::int(a & b)),
+        BinaryOp::BitOr  => Some(Value::int(a | b)),
+        BinaryOp::BitXor => Some(Value::int(a ^ b)),
+        BinaryOp::LShift => {
+            if b < 0 {
+                // Negative shift → ValueError; fall through to eval_binary.
+                None
+            } else if b >= 64 {
+                // Shift count ≥ 64: result is BigInt (or 0 for a==0).
+                // Fall through to eval_binary which handles BigInt promotion.
+                None
+            } else {
+                let n = b as u32;
+                // Shift left then shift right; if we get back the original
+                // value no significant bits were lost and the result fits i64.
+                let r = a.wrapping_shl(n);
+                if r.wrapping_shr(n) == a {
+                    Some(Value::int(r))
+                } else {
+                    // Overflow: fall through for BigInt promotion.
+                    None
+                }
+            }
+        }
+        BinaryOp::RShift => {
+            if b < 0 {
+                // Negative shift → ValueError; fall through to eval_binary.
+                None
+            } else if b >= 64 {
+                // Saturate to sign bit (0 for non-negative, -1 for negative).
+                // This is safe to handle here without BigInt.
+                Some(Value::int(if a < 0 { -1 } else { 0 }))
+            } else {
+                Some(Value::int(a >> b))
+            }
+        }
+        BinaryOp::Eq  => Some(Value::bool_(a == b)),
+        BinaryOp::Ne  => Some(Value::bool_(a != b)),
+        BinaryOp::Lt  => Some(Value::bool_(a < b)),
+        BinaryOp::Le  => Some(Value::bool_(a <= b)),
+        BinaryOp::Gt  => Some(Value::bool_(a > b)),
+        BinaryOp::Ge  => Some(Value::bool_(a >= b)),
+        _ => None,
+    }
+}
+
+/// Float-float fast path for arithmetic and comparison BinOps.
+///
+/// Returns `None` for:
+/// - Ops that don't apply to floats (e.g. `BitAnd`).
+/// - Cases where the Rust float result would diverge from CPython's
+///   exception-raising behaviour: `Div`/`FloorDiv`/`Mod` by zero, and
+///   `0.0 ** negative` for `Pow`.  The caller falls through to
+///   `eval_binary` which raises the correct `ZeroDivisionError`.
+///
+/// NaN comparisons are handled correctly: Rust float comparisons with NaN
+/// always return `false`, matching CPython's `float('nan') < x == False`.
+#[inline(always)]
+fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add => Some(Value::float(a + b)),
+        BinaryOp::Sub => Some(Value::float(a - b)),
+        BinaryOp::Mul => Some(Value::float(a * b)),
+        BinaryOp::Div => {
+            if b == 0.0 {
+                // ZeroDivisionError: "float division by zero" — fall through.
+                None
+            } else {
+                Some(Value::float(a / b))
+            }
+        }
+        BinaryOp::FloorDiv => {
+            if b == 0.0 {
+                // ZeroDivisionError — fall through to eval_binary.
+                None
+            } else {
+                // CPython's fmod-based float_divmod: handles inf/nan/signed-zero
+                // and keeps `//` consistent with `divmod`/`%` (#2025).
+                let (div, _) = float_divmod(a, b);
+                Some(Value::float(div))
+            }
+        }
+        BinaryOp::Mod => {
+            if b == 0.0 {
+                None
+            } else {
+                let mut r = a % b;
+                // Match CPython float_rem: zero result copies sign of divisor;
+                // non-zero result is adjusted so sign matches divisor.
+                if r == 0.0 {
+                    r = r.copysign(b);
+                } else if r.signum() != b.signum() {
+                    r += b;
+                }
+                Some(Value::float(r))
+            }
+        }
+        BinaryOp::Pow => {
+            // 0.0 ** negative → ZeroDivisionError in CPython; Rust returns ±inf.
+            if a == 0.0 && b < 0.0 {
+                None
+            } else {
+                Some(Value::float(a.powf(b)))
+            }
+        }
+        BinaryOp::Eq => Some(Value::bool_(a == b)),
+        BinaryOp::Ne => Some(Value::bool_(a != b)),
+        BinaryOp::Lt => Some(Value::bool_(a < b)),
+        BinaryOp::Le => Some(Value::bool_(a <= b)),
+        BinaryOp::Gt => Some(Value::bool_(a > b)),
+        BinaryOp::Ge => Some(Value::bool_(a >= b)),
+        _ => None,
+    }
+}
+
+/// String fast path for BinOps that apply to `str`.
+///
+/// Currently handles `Add` (concatenation) and comparison operators.
+/// Returns `None` for any op that doesn't apply to strings.
+#[inline(always)]
+fn str_str_fast(a: &str, b: &str, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add => {
+            let mut s = String::with_capacity(a.len() + b.len());
+            s.push_str(a);
+            s.push_str(b);
+            Some(Value::string(s))
+        }
+        BinaryOp::Eq => Some(Value::bool_(a == b)),
+        BinaryOp::Ne => Some(Value::bool_(a != b)),
+        BinaryOp::Lt => Some(Value::bool_(a < b)),
+        BinaryOp::Le => Some(Value::bool_(a <= b)),
+        BinaryOp::Gt => Some(Value::bool_(a > b)),
+        BinaryOp::Ge => Some(Value::bool_(a >= b)),
+        _ => None,
+    }
+}
+
+/// Classify two `Value` operands into a `BinopTypeTag` for the inline cache.
+///
+/// `Int` is returned only when both values tag as `TAG_INT` (or `BigInt`
+/// that fits in i64 via `as_int()`).  `Float` requires both to be true floats
+/// (`is_float()`).  `Str` requires both to be strings.  Everything else maps
+/// to `Other`.  The tags are mutually exclusive because `as_int()` returns
+/// `None` for floats and strings.
+#[inline(always)]
+fn classify_binop_tag(a: &Value, b: &Value) -> crate::bytecode::BinopTypeTag {
+    use crate::bytecode::BinopTypeTag;
+    // is_float() is a fast bit-mask check; check it first so Float beats Int
+    // for Bool operands (Bool's tag is TAG_BOOL, not TAG_INT, so as_int won't
+    // fire for bools, and this branch won't trip for them either).
+    if a.is_float() && b.is_float() {
+        return BinopTypeTag::Float;
+    }
+    if a.as_int().is_some() && b.as_int().is_some() {
+        return BinopTypeTag::Int;
+    }
+    if a.is_str() && b.is_str() {
+        return BinopTypeTag::Str;
+    }
+    BinopTypeTag::Other
+}
+
+#[inline(always)]
+fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
+    match op {
+        BinaryOp::Eq => Some(a == b),
+        BinaryOp::Ne => Some(a != b),
+        BinaryOp::Lt => Some(a < b),
+        BinaryOp::Le => Some(a <= b),
+        BinaryOp::Gt => Some(a > b),
+        BinaryOp::Ge => Some(a >= b),
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn str_cmp(a: &str, b: &str, op: BinaryOp) -> Option<bool> {
+    match op {
+        BinaryOp::Eq => Some(a == b),
+        BinaryOp::Ne => Some(a != b),
+        BinaryOp::Lt => Some(a < b),
+        BinaryOp::Le => Some(a <= b),
+        BinaryOp::Gt => Some(a > b),
+        BinaryOp::Ge => Some(a >= b),
+        _ => None,
+    }
 }

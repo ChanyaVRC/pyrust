@@ -410,7 +410,7 @@ fn seq_repeat_tuple(items: &[Value], n: i64) -> Result<Value> {
 /// table once rather than touching every `match (lhs, rhs)` arm.  All
 /// binary numeric operators route here — arithmetic (`+ - * / // % **`),
 /// shifts (`<< >>`), and bitwise (`& | ^`).  The pure-`Int`/`Int` and
-/// `Float`/`Float` VM hot paths (`vm.rs::int_int_fast`,
+/// `Float`/`Float` VM hot paths (`fast_path.rs::int_int_fast`,
 /// `float_float_fast`) are intentionally left untouched — they
 /// short-circuit before any slot lookup.
 ///
