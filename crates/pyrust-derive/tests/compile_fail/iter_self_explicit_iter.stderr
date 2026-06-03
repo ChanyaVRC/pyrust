@@ -1,0 +1,5 @@
+error: duplicate method `__iter__` in class `bad` (the second declaration would silently shadow the first)
+  --> tests/compile_fail/iter_self_explicit_iter.rs:15:12
+   |
+15 |         fn __iter__(args) -> Result<Value> {
+   |            ^^^^^^^^
