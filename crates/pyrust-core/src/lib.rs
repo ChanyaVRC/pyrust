@@ -4063,6 +4063,23 @@ pub fn format_unicode_translate_str(
     }
 }
 
+/// Read a `usize`-valued instance attribute (e.g. `start`/`end` on the
+/// `Unicode*Error` types): present, an int, coerced via `as usize`.
+fn attr_usize(b: &PyInstance, name: &str) -> Option<usize> {
+    b.attrs
+        .get(name)
+        .and_then(|v| v.as_int())
+        .map(|i| i as usize)
+}
+
+/// Read a `String`-valued instance attribute (e.g. `encoding`/`reason` on the
+/// `Unicode*Error` types): present and a `str`.
+fn attr_string(b: &PyInstance, name: &str) -> Option<String> {
+    b.attrs
+        .get(name)
+        .and_then(|v| v.as_str().map(str::to_owned))
+}
+
 fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     let args = exception_args(instance);
     // CPython's `KeyError.__str__` always uses repr of the single arg, so
@@ -4138,10 +4155,7 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     // five attributes are set (i.e. the exception was properly constructed).
     if class_chain_has_name(&instance.borrow().class, "UnicodeDecodeError") {
         let borrowed = instance.borrow();
-        let enc = borrowed
-            .attrs
-            .get("encoding")
-            .and_then(|v| v.as_str().map(str::to_owned));
+        let enc = attr_string(&borrowed, "encoding");
         let obj = borrowed.attrs.get("object").and_then(|v| {
             if let ValueKind::Bytes(rc) = v.kind() {
                 Some(rc.as_ref().clone())
@@ -4149,20 +4163,9 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
                 None
             }
         });
-        let start = borrowed
-            .attrs
-            .get("start")
-            .and_then(|v| v.as_int())
-            .map(|i| i as usize);
-        let end = borrowed
-            .attrs
-            .get("end")
-            .and_then(|v| v.as_int())
-            .map(|i| i as usize);
-        let reason = borrowed
-            .attrs
-            .get("reason")
-            .and_then(|v| v.as_str().map(str::to_owned));
+        let start = attr_usize(&borrowed, "start");
+        let end = attr_usize(&borrowed, "end");
+        let reason = attr_string(&borrowed, "reason");
         if let (Some(enc), Some(obj), Some(start), Some(end), Some(reason)) =
             (enc, obj, start, end, reason)
         {
@@ -4174,28 +4177,11 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     // structured attributes.
     if class_chain_has_name(&instance.borrow().class, "UnicodeEncodeError") {
         let borrowed = instance.borrow();
-        let enc = borrowed
-            .attrs
-            .get("encoding")
-            .and_then(|v| v.as_str().map(str::to_owned));
-        let obj = borrowed
-            .attrs
-            .get("object")
-            .and_then(|v| v.as_str().map(str::to_owned));
-        let start = borrowed
-            .attrs
-            .get("start")
-            .and_then(|v| v.as_int())
-            .map(|i| i as usize);
-        let end = borrowed
-            .attrs
-            .get("end")
-            .and_then(|v| v.as_int())
-            .map(|i| i as usize);
-        let reason = borrowed
-            .attrs
-            .get("reason")
-            .and_then(|v| v.as_str().map(str::to_owned));
+        let enc = attr_string(&borrowed, "encoding");
+        let obj = attr_string(&borrowed, "object");
+        let start = attr_usize(&borrowed, "start");
+        let end = attr_usize(&borrowed, "end");
+        let reason = attr_string(&borrowed, "reason");
         if let (Some(enc), Some(obj), Some(start), Some(end), Some(reason)) =
             (enc, obj, start, end, reason)
         {
@@ -4207,24 +4193,10 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     // structured attributes (no encoding).
     if class_chain_has_name(&instance.borrow().class, "UnicodeTranslateError") {
         let borrowed = instance.borrow();
-        let obj = borrowed
-            .attrs
-            .get("object")
-            .and_then(|v| v.as_str().map(str::to_owned));
-        let start = borrowed
-            .attrs
-            .get("start")
-            .and_then(|v| v.as_int())
-            .map(|i| i as usize);
-        let end = borrowed
-            .attrs
-            .get("end")
-            .and_then(|v| v.as_int())
-            .map(|i| i as usize);
-        let reason = borrowed
-            .attrs
-            .get("reason")
-            .and_then(|v| v.as_str().map(str::to_owned));
+        let obj = attr_string(&borrowed, "object");
+        let start = attr_usize(&borrowed, "start");
+        let end = attr_usize(&borrowed, "end");
+        let reason = attr_string(&borrowed, "reason");
         if let (Some(obj), Some(start), Some(end), Some(reason)) = (obj, start, end, reason) {
             return format_unicode_translate_str(&obj, start, end, &reason);
         }
