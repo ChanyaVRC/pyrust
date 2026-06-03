@@ -1041,9 +1041,9 @@ impl Interpreter {
                 // ASCII fast path (#2032): when every byte is ASCII, char index ==
                 // byte index, so length is `text.len()` and the i-th char is a
                 // single byte — O(1) index instead of an O(idx) char scan.
-                // `is_ascii()` is SIMD-accelerated (~memcmp speed), far cheaper
-                // than decoding UTF-8 via `chars()`.
-                if text.is_ascii() {
+                // ASCII-ness is cached on the string header (#2124), so the check
+                // is O(1) — no per-op rescan, no penalty for non-ASCII strings.
+                if target.str_is_ascii() {
                     let idx = normalize_index(&index, text.len(), "string")?;
                     let b = text.as_bytes()[idx];
                     return Ok(Value::string((b as char).encode_utf8(&mut [0u8; 4]) as &str));
@@ -4528,10 +4528,10 @@ impl Interpreter {
         //
         // ASCII fast path (#2032): an all-ASCII string has char index == byte
         // index, so `len` is `s.len()` and every slice/index is direct byte
-        // arithmetic — no char scan at all.  `is_ascii()` is SIMD-accelerated,
-        // far cheaper than `chars().count()`; we compute it once here and reuse
-        // it for both the length and the contiguous/stepped slice arms below.
-        let str_is_ascii = matches!(target.kind(), ValueKind::Str(s) if s.is_ascii());
+        // arithmetic — no char scan at all.  ASCII-ness is cached on the string
+        // header (#2124), so the check is O(1) and we reuse the flag for both the
+        // length and the contiguous/stepped slice arms below.
+        let str_is_ascii = target.is_str() && target.str_is_ascii();
         let len = match target.kind() {
             ValueKind::List(items) => items.len() as i64,
             ValueKind::Tuple(items) => items.len() as i64,

@@ -110,9 +110,11 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
     let s: &str = src.as_str().unwrap();
     let args = args.as_slice();
     match method {
-        // Common Sequence Operations (via char indexing)
-        "index" => str_index(s, args),
-        "count" => str_count(s, args),
+        // Common Sequence Operations (via char indexing).  ASCII-ness is cached
+        // O(1) on the string header (#2124), so the find/index/count fast paths
+        // no longer rescan the whole string on every call.
+        "index" => str_index(s, src.str_is_ascii(), args),
+        "count" => str_count(s, src.str_is_ascii(), args),
         // Splitting / joining
         "split" => split(src, s, args),
         "rsplit" => rsplit(src, s, args),
@@ -243,9 +245,9 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "swapcase" => Ok(Value::string(swapcase(s))),
         "title" => Ok(Value::string(titlecase(s))),
         // Searching
-        "find" => str_find(s, args, false),
-        "rfind" => str_rfind(s, args, false),
-        "rindex" => str_rfind(s, args, true),
+        "find" => str_find(s, src.str_is_ascii(), args, false),
+        "rfind" => str_rfind(s, src.str_is_ascii(), args, false),
+        "rindex" => str_rfind(s, src.str_is_ascii(), args, true),
         // Replacement
         "replace" => str_replace(s, args),
         // Testing
@@ -934,9 +936,9 @@ fn require_str_arg<'a>(args: &'a [Value], method: &str) -> Result<&'a str> {
     }
 }
 
-fn str_index(s: &str, args: &[Value]) -> Result<Value> {
+fn str_index(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
     let sub = require_str_arg(args, "index")?;
-    let Some((start, end)) = str_slice_args(s, args)? else {
+    let Some((start, end)) = str_slice_args(s, is_ascii, args)? else {
         return Err(PyError::named(
             "ValueError",
             "substring not found".to_string(),
@@ -944,7 +946,9 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
     };
     let haystack = &s[start..end];
     match haystack.find(sub) {
-        Some(byte_pos) => Ok(Value::int(byte_to_char_idx(s, start + byte_pos) as i64)),
+        Some(byte_pos) => Ok(Value::int(
+            byte_to_char_idx(s, is_ascii, start + byte_pos) as i64
+        )),
         None => Err(PyError::named(
             "ValueError",
             "substring not found".to_string(),
@@ -952,16 +956,17 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
     }
 }
 
-fn str_count(s: &str, args: &[Value]) -> Result<Value> {
+fn str_count(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
     let sub = require_str_arg(args, "count")?;
-    let Some((start, end)) = str_slice_args(s, args)? else {
+    let Some((start, end)) = str_slice_args(s, is_ascii, args)? else {
         // Inverted window: CPython returns 0 for all substrings including empty.
         return Ok(Value::int(0));
     };
     if sub.is_empty() {
         let haystack = &s[start..end];
-        // ASCII: char count == byte count (#2032).
-        let count = if haystack.is_ascii() {
+        // ASCII: char count == byte count (#2032).  A substring of an all-ASCII
+        // string is all-ASCII, so the cached whole-string flag applies directly.
+        let count = if is_ascii || haystack.is_ascii() {
             haystack.len()
         } else {
             haystack.chars().count()
@@ -973,9 +978,9 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::int(n as i64))
 }
 
-fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
+fn str_find(s: &str, is_ascii: bool, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     let sub = require_str_arg(args, "find")?;
-    let Some((start, end)) = str_slice_args(s, args)? else {
+    let Some((start, end)) = str_slice_args(s, is_ascii, args)? else {
         if raise_on_miss {
             return Err(PyError::named(
                 "ValueError",
@@ -986,7 +991,9 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     };
     let haystack = &s[start..end];
     match haystack.find(sub) {
-        Some(byte_pos) => Ok(Value::int(byte_to_char_idx(s, start + byte_pos) as i64)),
+        Some(byte_pos) => Ok(Value::int(
+            byte_to_char_idx(s, is_ascii, start + byte_pos) as i64
+        )),
         None => {
             if raise_on_miss {
                 Err(PyError::named(
@@ -1000,9 +1007,9 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     }
 }
 
-fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
+fn str_rfind(s: &str, is_ascii: bool, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     let sub = require_str_arg(args, "rfind")?;
-    let Some((start, end)) = str_slice_args(s, args)? else {
+    let Some((start, end)) = str_slice_args(s, is_ascii, args)? else {
         if raise_on_miss {
             return Err(PyError::named(
                 "ValueError",
@@ -1013,7 +1020,9 @@ fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     };
     let haystack = &s[start..end];
     match haystack.rfind(sub) {
-        Some(byte_pos) => Ok(Value::int(byte_to_char_idx(s, start + byte_pos) as i64)),
+        Some(byte_pos) => Ok(Value::int(
+            byte_to_char_idx(s, is_ascii, start + byte_pos) as i64
+        )),
         None => {
             if raise_on_miss {
                 Err(PyError::named(
@@ -1354,7 +1363,7 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
     // For a Str prefix, that is an immediate False.
     // For a Tuple, CPython still validates element types even on an inverted
     // window — TypeError takes priority over the inverted-range short-circuit.
-    let window = str_slice_args(s, args)?;
+    let window = str_slice_args(s, s.is_ascii(), args)?;
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => {
             let Some((start, end)) = window else {
@@ -1404,7 +1413,7 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
     // For a Str suffix, that is an immediate False.
     // For a Tuple, CPython still validates element types even on an inverted
     // window — TypeError takes priority over the inverted-range short-circuit.
-    let window = str_slice_args(s, args)?;
+    let window = str_slice_args(s, s.is_ascii(), args)?;
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => {
             let Some((start, end)) = window else {
@@ -1538,7 +1547,13 @@ fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
 /// char index equals the byte offset, so no scan is needed.  `is_ascii()` is
 /// SIMD-accelerated and far cheaper than decoding via `chars().count()`.
 #[inline]
-fn byte_to_char_idx(s: &str, byte_off: usize) -> usize {
+fn byte_to_char_idx(s: &str, is_ascii: bool, byte_off: usize) -> usize {
+    // When the whole string is ASCII (cached, #2124) the prefix is too, so the
+    // char index is the byte offset with no scan.  Otherwise fall back to the
+    // prefix `is_ascii()` check before decoding.
+    if is_ascii {
+        return byte_off;
+    }
     let prefix = &s[..byte_off];
     if prefix.is_ascii() {
         byte_off
@@ -1555,7 +1570,7 @@ fn byte_to_char_idx(s: &str, byte_off: usize) -> usize {
 /// This matches CPython's `adjust_indices` contract — an inverted window is
 /// distinct from a zero-length equal window (`start == stop`), which is
 /// represented as `Some((n, n))`.
-fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
+fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usize, usize)>> {
     // Fast path: no start/end args — common case for find/startswith/etc.
     let has_start = args.get(1).is_some();
     let has_end = args.get(2).is_some();
@@ -1563,8 +1578,10 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
         return Ok(Some((0, s.len())));
     }
 
-    // ASCII fast path: char index == byte index, no scanning needed
-    if s.is_ascii() {
+    // ASCII fast path: char index == byte index, no scanning needed.  `is_ascii`
+    // is the O(1) cached flag (#2124) when available; otherwise the caller passes
+    // `s.is_ascii()` directly.
+    if is_ascii {
         let byte_len = s.len();
         // Do NOT clamp start before the inverted-window check: if the caller
         // passes start > len(s), that must produce None (not found / 0 count),

@@ -9425,8 +9425,8 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
         ValueKind::Tuple(_) => "tuple_iterator",
         // CPython 3.12 uses "str_ascii_iterator" for pure-ASCII strings and
         // "str_iterator" for strings containing non-ASCII characters.
-        ValueKind::Str(s) => {
-            if s.is_ascii() {
+        ValueKind::Str(_) => {
+            if v.str_is_ascii() {
                 "str_ascii_iterator"
             } else {
                 "str_iterator"
