@@ -24,8 +24,7 @@
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
-use crate::value::{PyInstance, Value, ValueKind};
-use indexmap::IndexMap;
+use crate::value::{InstanceAttrs, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -74,7 +73,7 @@ pyrust_module! {
         // the first element is pulled on the first `__next__`, matching
         // CPython's lazy timing.
         let outer = make_iter(_interp, &args[0].value)?;
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("_outer".to_string(), outer);
         attrs.insert("_inner".to_string(), Value::none());
         make_itertools_instance("_chain_from_iterable", attrs)
@@ -1265,7 +1264,7 @@ pyrust_module! {
                 a.attrs.insert("_has_tgt".to_string(), Value::bool_(true));
             }
             // Hand out a lazy grouper bound to this group id + key.
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert("_parent".to_string(), parent);
             attrs.insert("_tgtkey".to_string(), currkey.clone());
             attrs.insert("_id".to_string(), Value::int(new_id));
@@ -2049,7 +2048,7 @@ fn groupby_clear_curr(inst: &Rc<RefCell<PyInstance>>) {
 /// and build a `PyInstance` of it carrying `attrs`, bypassing `__init__`.
 /// Used by `groupby.__next__` to mint a `_grouper` seeded with private
 /// state (parent back-reference, target key, group id).
-fn make_itertools_instance(name: &str, attrs: IndexMap<String, Value>) -> Result<Value> {
+fn make_itertools_instance(name: &str, attrs: InstanceAttrs) -> Result<Value> {
     let module_val = module();
     let ValueKind::PyModule(m) = module_val.kind() else {
         return Err(PyError::Runtime(

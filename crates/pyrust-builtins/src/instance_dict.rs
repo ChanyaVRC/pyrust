@@ -102,7 +102,7 @@ impl BuiltinTypeOps for InstanceDictOps {
             .attrs
             .iter()
             .filter(|(k, _)| !s.is_hidden(k))
-            .map(|(k, v)| (k.as_str(), v))
+            .map(|(k, v)| (k.as_ref(), v))
             .collect();
         match other.kind() {
             ValueKind::Dict(rhs) => {
@@ -137,7 +137,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                     .attrs
                     .iter()
                     .filter(|(k, _)| !rhs_s.is_hidden(k))
-                    .map(|(k, v)| (k.as_str(), v))
+                    .map(|(k, v)| (k.as_ref(), v))
                     .collect();
                 if lhs_pairs.len() != rhs_pairs.len() {
                     return false;
@@ -254,7 +254,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                     inst.attrs
                         .keys()
                         .filter(|k| !s.is_hidden(k))
-                        .cloned()
+                        .map(|k| k.to_string())
                         .collect(),
                 );
             }

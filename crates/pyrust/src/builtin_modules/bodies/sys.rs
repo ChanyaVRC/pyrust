@@ -14,7 +14,7 @@ use crate::interpreter::{
     get_call_depth, get_recursion_limit, instantiate_exception, lookup_name_in_module,
     reject_keyword_args_expanded, set_recursion_limit, value_type_name_str,
 };
-use crate::value::{PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -619,7 +619,7 @@ fn normalise_index(i: i64, len: usize) -> Result<usize> {
 /// class with the given class name.  Used for the namespace-like sys
 /// members that only need attribute access.
 fn make_named_struct(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
-    let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     for (k, v) in fields {
         attrs.insert(k.to_string(), v);
     }
@@ -729,7 +729,7 @@ thread_local! {
 /// Build the `sys.flags` singleton value.
 fn make_flags() -> Value {
     FLAGS_CLASS.with(|class| {
-        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         // Fields and their defaults match CPython's sys.flags for a normal run
         // with no command-line options (all optimization / debug flags are 0).
         // <https://docs.python.org/3/library/sys.html#sys.flags>
@@ -820,7 +820,7 @@ thread_local! {
 /// standard fields pre-set.
 fn make_version_info() -> Value {
     VERSION_INFO_CLASS.with(|class| {
-        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("major".to_string(), Value::int(3));
         // pyrust emulates Python 3.12 semantics.
         attrs.insert("minor".to_string(), Value::int(12));

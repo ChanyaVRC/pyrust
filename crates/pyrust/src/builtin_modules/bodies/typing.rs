@@ -48,7 +48,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::value::{PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -363,7 +363,7 @@ fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyI
 /// Construct a `_TypingAlias` instance carrying `form` and `subscript`.
 fn make_typing_alias(form: &str, subscript: Value) -> Value {
     TYPING_ALIAS_CLASS.with(|class| {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("_form".to_string(), Value::string(form));
         attrs.insert("_args".to_string(), subscript);
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
@@ -378,7 +378,7 @@ fn make_any_instance() -> Value {
     ANY_CLASS.with(|class| {
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
-            attrs: IndexMap::new(),
+            attrs: InstanceAttrs::new(),
         })))
     })
 }

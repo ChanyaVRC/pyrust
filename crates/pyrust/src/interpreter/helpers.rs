@@ -2172,7 +2172,7 @@ fn oserror_subclass_for_errno(errno: i64) -> Option<Rc<RefCell<PyClass>>> {
 }
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     // Classify the class against every special built-in exception name in a
     // single non-cloning MRO walk (issue #1967), instead of running ~12
     // separate cloning base-chain scans per constructed exception.  The result
@@ -2225,7 +2225,7 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         let code = match args.len() {
             0 => Value::none(),
             1 => args[0].clone(),
-            _ => attrs["args"].clone(),
+            _ => attrs.get("args").cloned().unwrap_or_else(Value::none),
         };
         attrs.insert("code".to_string(), code);
     } else if is_syntax_error {
@@ -2380,7 +2380,7 @@ pub(crate) fn instantiate_os_error(
     filename: Option<String>,
     filename2: Option<String>,
 ) -> Value {
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     let errno_val = Value::int(errno);
     let strerror_val = Value::string(strerror);
     attrs.insert(
@@ -2412,7 +2412,7 @@ pub(crate) fn instantiate_import_error(
     message: String,
     module_name: Option<String>,
 ) -> Value {
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
     let name_val = match module_name {
         Some(n) => Value::string(n),
@@ -2438,7 +2438,7 @@ pub(crate) fn instantiate_name_error(
     message: String,
     name: Option<String>,
 ) -> Value {
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
     attrs.insert("__traceback__".to_string(), Value::none());
     let name_val = match name {
@@ -2465,7 +2465,7 @@ pub(crate) fn instantiate_attribute_error(
     name: Option<String>,
     obj: Option<Value>,
 ) -> Value {
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
     attrs.insert("__traceback__".to_string(), Value::none());
     attrs.insert(
@@ -2490,7 +2490,7 @@ pub(crate) fn instantiate_attribute_error(
 /// If the arg count doesn't match the expected signature, this function is a
 /// no-op — arg count validation is the caller's responsibility.
 pub(crate) fn unicode_exc_set_attrs(
-    attrs: &mut IndexMap<String, Value>,
+    attrs: &mut InstanceAttrs,
     args: &[Value],
     has_encoding: bool,
 ) {
@@ -2531,7 +2531,7 @@ pub(crate) fn instantiate_unicode_decode_error(
     let start_val = Value::int(start as i64);
     let end_val = Value::int(end as i64);
     let reason_val = Value::string(&reason);
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert(
         "args".to_string(),
         Value::tuple(vec![
@@ -2568,7 +2568,7 @@ pub(crate) fn instantiate_unicode_encode_error(
     let start_val = Value::int(start as i64);
     let end_val = Value::int(end as i64);
     let reason_val = Value::string(&reason);
-    let mut attrs = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert(
         "args".to_string(),
         Value::tuple(vec![

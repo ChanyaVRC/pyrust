@@ -3324,7 +3324,7 @@ thread_local! {
 /// `typing.TypeVar` as created by PEP 695 type parameter syntax.
 pub(crate) fn make_typevar_instance(name: String) -> Value {
     TYPEVAR_CLASS.with(|cls| {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__".to_string(), Value::string(name));
         attrs.insert(
             "__constraints__".to_string(),
@@ -3343,7 +3343,7 @@ pub(crate) fn make_typevar_instance(name: String) -> Value {
 /// `typing.TypeAliasType`.
 pub(crate) fn make_type_alias_instance(name: String, value: Value, type_params: Value) -> Value {
     TYPE_ALIAS_CLASS.with(|cls| {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__".to_string(), Value::string(name));
         attrs.insert("__value__".to_string(), value);
         attrs.insert("__type_params__".to_string(), type_params);

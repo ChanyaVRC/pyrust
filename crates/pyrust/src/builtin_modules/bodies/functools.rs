@@ -41,7 +41,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::interpreter::{Interpreter, lookup_class_attr, object_class_singleton};
-use crate::value::{PyClass, PyInstance, PyKey, StrKey, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, StrKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -568,7 +568,7 @@ pyrust_module! {
             ));
         }
         let _ = _interp;
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("_cmp".to_string(), args[0].value.clone());
         Ok(make_instance("_cmp_to_key", attrs))
     }
@@ -601,7 +601,7 @@ pyrust_module! {
                 .cloned()
                 .ok_or_else(|| internal(FN_NAME))?;
             let _ = _interp;
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert("obj".to_string(), user[0].value.clone());
             attrs.insert("_cmp".to_string(), cmp);
             Ok(make_instance("_cmp_key", attrs))
@@ -726,7 +726,7 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
 /// Construct a `PyInstance` of class `name` with the supplied attrs,
 /// bypassing `__init__`.  Used by the LRU and wraps helpers below to
 /// seed private state without going through a public constructor.
-fn make_instance(name: &str, attrs: IndexMap<String, Value>) -> Value {
+fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
     match module_class(name) {
         Some(class) => {
             // CPython's `cmp_to_key` wrapper (`functools.K`) is unhashable: it
@@ -933,7 +933,7 @@ fn insert_cache(
 /// Construct a `_lru_cache_wrapper` instance seeded with `func` /
 /// `maxsize` / `typed`.
 fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     // `wrapper.__wrapped__` exposes the original function (CPython sets this
     // on the wrapper so `inspect.unwrap` / introspection can reach it).
     attrs.insert("__wrapped__".to_string(), func.clone());
@@ -953,7 +953,7 @@ fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
 /// Construct a `_lru_cache_factory` instance — the decorator returned
 /// by `lru_cache(maxsize=N)` / `lru_cache()`.
 fn make_lru_factory(maxsize: Option<i64>, typed: bool) -> Value {
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert(
         "_maxsize".to_string(),
         maxsize.map_or_else(Value::none, Value::int),
@@ -976,7 +976,7 @@ fn bump_counter(inst: &Rc<RefCell<PyInstance>>, key: &str) {
 }
 
 /// Read an integer counter from the instance attrs, defaulting to 0.
-fn counter_value(attrs: &IndexMap<String, Value>, key: &str) -> i64 {
+fn counter_value(attrs: &InstanceAttrs, key: &str) -> i64 {
     match attrs.get(key).map(|v| v.kind()) {
         Some(ValueKind::Int(n)) => n,
         _ => 0,
@@ -1069,7 +1069,7 @@ class CacheInfo(tuple):
 // ── wraps helpers ────────────────────────────────────────────────────────────
 
 fn make_wraps_partial(wrapped: Value) -> Value {
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert("__wraps_func".to_string(), wrapped);
     make_instance("_wraps_partial", attrs)
 }

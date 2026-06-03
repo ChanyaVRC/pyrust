@@ -38,7 +38,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
     NativeIterFrame, invoke_class_method, lookup_class_attr,
 };
-use crate::value::{PyInstance, PyKey, Value, ValueKind, key_repr};
+use crate::value::{InstanceAttrs, PyInstance, PyKey, Value, ValueKind, key_repr};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -293,7 +293,7 @@ pyrust_module! {
             // scratch) — `c.copy()` is one of the hot paths.
             let inst = expect_self(args, FN_NAME)?;
             let class = Rc::clone(&inst.borrow().class);
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert(COUNTER_BACKING.to_string(), Value::dict(counts));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
@@ -606,7 +606,7 @@ pyrust_module! {
                 .cloned()
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert("default_factory".to_string(), factory);
             attrs.insert(COUNTER_BACKING.to_string(), Value::dict(items));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
@@ -912,7 +912,7 @@ pyrust_module! {
                 .cloned()
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert("_items".to_string(), Value::list(items));
             attrs.insert("maxlen".to_string(), maxlen_val);
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
@@ -1772,7 +1772,7 @@ fn counter_binop(
     };
     let merged = merge_counts(interp, &lhs, &rhs, op)?;
     let class = Rc::clone(&inst.borrow().class);
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert(COUNTER_BACKING.to_string(), Value::dict(merged));
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,
@@ -1913,7 +1913,7 @@ fn deque_from_items(
         None => Value::none(),
     };
     let class = Rc::clone(&proto.borrow().class);
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert("_items".to_string(), Value::list(items));
     attrs.insert("maxlen".to_string(), maxlen_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))

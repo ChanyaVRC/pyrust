@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{lookup_exc_class, ExpandedCallArg};
-use crate::value::{PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -108,7 +108,7 @@ fn make_warning_message(
     lineno: i64,
 ) -> Value {
     WARNING_MESSAGE_CLASS.with(|class| {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("message".to_string(), message);
         attrs.insert(
             "category".to_string(),
