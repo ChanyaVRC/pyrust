@@ -293,13 +293,7 @@ pyrust_module! {
             // `make_lru_wrapper`).  Reject any user-provided arguments so
             // calling `_lru_cache_wrapper(...)` from outside this module
             // fails loudly rather than producing a broken instance.
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
-                ));
-            }
-            Ok(Value::none())
+            reject_extra_args(args, FN_NAME)
         }
 
         fn __call__(args) -> Result<Value> {
@@ -399,13 +393,7 @@ pyrust_module! {
             // Private constructor — `lru_cache(...)` constructs these
             // factories via `make_lru_factory`.  Reject user args so a
             // stray `_lru_cache_factory(...)` call fails loudly.
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
-                ));
-            }
-            Ok(Value::none())
+            reject_extra_args(args, FN_NAME)
         }
 
         fn __call__(args) -> Result<Value> {
@@ -487,13 +475,7 @@ pyrust_module! {
             // `make_wraps_partial`.  Reject user args so calling
             // `_wraps_partial(...)` from outside this module fails
             // loudly rather than producing a broken instance.
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
-                ));
-            }
-            Ok(Value::none())
+            reject_extra_args(args, FN_NAME)
         }
 
         fn __call__(args) -> Result<Value> {
@@ -600,13 +582,7 @@ pyrust_module! {
             // Private constructor — `cmp_to_key()` seeds `_cmp` directly via
             // `make_instance`.  Reject user args so a stray
             // `_cmp_to_key(...)` call fails loudly.
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
-                ));
-            }
-            Ok(Value::none())
+            reject_extra_args(args, FN_NAME)
         }
 
         fn __call__(args) -> Result<Value> {
@@ -638,13 +614,7 @@ pyrust_module! {
     class _cmp_key {
         fn __init__(args) -> Result<Value> {
             let _ = _interp;
-            if args.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
-                ));
-            }
-            Ok(Value::none())
+            reject_extra_args(args, FN_NAME)
         }
 
         fn __lt__(args) -> Result<Value> {
@@ -712,6 +682,20 @@ fn expect_self(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
+}
+
+/// Shared arity guard for this module's private no-op `__init__`s.
+/// These classes are constructed internally with their attrs seeded
+/// directly, so the `__init__` only needs to reject any user-provided
+/// arguments (everything past the implicit `self`) and return `None`.
+fn reject_extra_args(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    if args.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes no arguments (got {})", args.len() - 1),
+        ));
+    }
+    Ok(Value::none())
 }
 
 /// Internal-error shorthand.  Should never fire in practice; reaching
