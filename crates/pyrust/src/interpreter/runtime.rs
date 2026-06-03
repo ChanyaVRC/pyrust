@@ -10,3 +10,5 @@ include!("runtime/flow.rs");
 
 include!("runtime/vm.rs");
 include!("runtime/generators.rs");
+
+include!("runtime/fast_path.rs");
