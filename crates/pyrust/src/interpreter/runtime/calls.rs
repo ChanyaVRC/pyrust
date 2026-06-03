@@ -3069,12 +3069,24 @@ impl Interpreter {
         class: Rc<RefCell<PyClass>>,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        // Classify the class once up front: a single non-cloning MRO walk
+        // (issue #1967) that yields both the special-exception flags reused
+        // throughout this function (and threaded into `instantiate_exception`)
+        // and `has_user_new`/`has_user_init`.  The latter let the hot
+        // `raise ValueError("x")` path skip the dedicated `__new__`/`__init__`
+        // MRO lookups entirely — plain built-in exceptions have neither.
+        let kinds = classify_exception_class(&class);
+
         // Issue #1420: if the class has a user-defined __new__ (UserFunction in
         // the MRO), call it with `cls` as the first argument before falling
         // through to instantiate_exception.  This mirrors the non-exception
         // __new__ dispatch below (issue #1143).
-        let user_new = lookup_class_attr(&class, "__new__")
-            .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+        let user_new = if kinds.has_user_new {
+            lookup_class_attr(&class, "__new__")
+                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        } else {
+            None
+        };
         if let Some(new_val) = user_new {
             let func = match new_val.kind() {
                 ValueKind::UserFunction(f) => Rc::clone(f),
@@ -3120,8 +3132,12 @@ impl Interpreter {
         // .args and any special attrs like StopIteration.value from the constructor
         // args), then call the user's __init__ so it can override .args via
         // super().__init__(...) and set its own instance attributes.
-        let user_init = lookup_class_attr(&class, "__init__")
-            .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+        let user_init = if kinds.has_user_init {
+            lookup_class_attr(&class, "__init__")
+                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        } else {
+            None
+        };
         if let Some(init_val) = user_init {
             let values: Vec<Value> = args
                 .iter()
@@ -3149,11 +3165,6 @@ impl Interpreter {
         // ("NameError()" / "ImportError()"), even when the actual class is a
         // subclass like UnboundLocalError or ModuleNotFoundError.
         let class_name = class.borrow().name.clone();
-        // Classify the class against every special exception name in a single
-        // non-cloning MRO walk (issue #1967) instead of one cloning walk per
-        // name.  Identical result to the prior per-name `class_chain_contains_name`
-        // calls.
-        let kinds = classify_exception_class(&class);
         let is_name_error_class = kinds.name_error;
         let is_import_error_class = kinds.import_error;
         let mut kw_name: Option<Value> = None;
@@ -3342,7 +3353,10 @@ impl Interpreter {
             let instance = instantiate_exception(actual_class, values);
             return Ok(instance);
         }
-        let instance = instantiate_exception(class, values);
+        // Reuse the `kinds` classification computed above instead of running a
+        // second MRO walk inside `instantiate_exception` (perf: one classify per
+        // raise instead of two).
+        let instance = instantiate_exception_with_kinds(class, values, &kinds);
         // Apply keyword arguments extracted above for NameError and ImportError.
         // `instantiate_exception` already initialised `.name` (and `.path`) to
         // `None`; override them with the caller-supplied values when provided.
