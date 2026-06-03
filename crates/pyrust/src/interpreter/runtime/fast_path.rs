@@ -595,11 +595,26 @@ fn bind_param(
 // keeps `#[inline(always)]` and changes no logic, so the optimizer produces
 // identical machine code; the bench table confirms zero regression.
 //
-// The `vm.rs` GetAttr / SetAttr / LoadGlobal inline-cache HIT arms stay inline
-// at their dispatch sites: they are fused into the loop body with `continue`
-// out of the dispatch `match` and share `regs` / `code` / `self`, so they
-// cannot become an `Option`-returning helper without restructuring control
-// flow (a logic change, not a move).  #2138 documented the same decision.
+// The larger inline-cache machinery (the `BinOp` adaptive cache and the
+// `GetAttr` / `SetAttr` inline caches) is also extracted here, as
+// `#[inline(always)]` methods on `impl Interpreter` (see further below):
+//   - `exec_binop`     — full `Insn::BinOp` body: int fast path + adaptive
+//     float/str inline cache (Counting → Specialized → Megamorphic).
+//   - `exec_get_attr`  — full `Insn::GetAttr` body: InstanceAttr / ClassAttr
+//     cache hit + slow-path fill / invalidation.
+//   - `exec_set_attr`  — full `Insn::SetAttr` body: SetInstanceAttr write cache
+//     hit + slow-path fill / invalidation.
+// Each takes the loop state it touches (`regs`, `code`, `pc`, the instruction
+// operands, `num_locals`) and returns `Result<()>`; the dispatch arm just calls
+// `vm_try!(self.exec_*(...))`, routing any error through the handler stack
+// exactly as the inline `vm_try!` did.  The bodies are byte-for-byte the old
+// inline blocks (the `pool_get!` / `vm_try!` macros become plain `?`), so
+// codegen and behaviour are identical; `#[inline(always)]` keeps the file
+// boundary zero-cost.  The bench table confirms perf neutrality.
+//
+// `LoadGlobal`'s inline-cache hit is a two-line read (`entry.0 == cur_ver` →
+// clone) that shares `cur_ver` with its own slow path; it stays inline (a
+// helper would be larger than the code it replaces and gains nothing).
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
@@ -794,5 +809,607 @@ fn str_cmp(a: &str, b: &str, op: BinaryOp) -> Option<bool> {
         BinaryOp::Gt => Some(a > b),
         BinaryOp::Ge => Some(a >= b),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BinOp / GetAttr / SetAttr inline-cache machinery, extracted from the `vm.rs`
+// `run_bytecode_inner_impl` dispatch loop.
+//
+// These three `#[inline(always)]` methods carry the FULL body of the
+// `Insn::BinOp` / `Insn::GetAttr` / `Insn::SetAttr` dispatch arms — both the
+// cache-hit fast path and the slow-path cache fill / invalidation.  The dispatch
+// arm in `vm.rs` becomes a single `vm_try!(self.exec_*(...))` call, so any error
+// the slow path returns is routed through the active exception handler stack
+// exactly as the old inline `vm_try!(...)` did.
+//
+// The bodies are a mechanical relocation of the old inline blocks:
+//   - `vm_try!(expr)` → `expr?` (error propagation is now via `?`, and the
+//     caller's `vm_try!` does the handler-stack routing);
+//   - `pool_get!(code.names, idx, "name")` → an inline `code.names.get(..)`
+//     with the identical out-of-range `PyError::Runtime` message.
+// No cache-fill / invalidation / megamorphic logic changed — the inline caches
+// are correctness-critical (#1912 / #1998 / #2102 / #2108) and must stay
+// byte-identical.  `#[inline(always)]` keeps codegen at the dispatch site
+// identical to when these lived inline; the PR bench table confirms zero
+// regression on the hot int-arith / float / str / attr-read / attr-write paths.
+// ---------------------------------------------------------------------------
+
+impl Interpreter {
+    /// Full `Insn::BinOp` body: the unconditional int–int fast path followed by
+    /// the adaptive float/str inline cache (Empty → Counting → Specialized, with
+    /// Megamorphic deopt on a type mismatch).  See the original dispatch-arm
+    /// comments inlined below for the per-state rationale.
+    #[inline(always)]
+    fn exec_binop(
+        &mut self,
+        regs: &mut RegSlice,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        dst: crate::bytecode::Reg,
+        lhs: crate::bytecode::Reg,
+        op: BinaryOp,
+        rhs: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<()> {
+        use crate::bytecode::{BinOpCacheEntry, BinopTypeTag, BINOP_SPEC_THRESHOLD};
+        // Hot path: `as_int()` is a tagged-u64 check that bypasses `kind()`'s
+        // scoped RefCell borrow for the List/Dict/Set kinds (#450).  Unlike
+        // `Insn::Move` (where #441 showed the int specialization is a wash), the
+        // BinOp fast path also short-circuits the entire `eval_binary` dispatch
+        // for int–int ops, so the savings are real.  This check runs
+        // unconditionally (no cache overhead) so int-int loops pay nothing.
+        if let (Some(a), Some(b)) =
+            (regs[lhs as usize].as_int(), regs[rhs as usize].as_int())
+            && let Some(result) = int_int_fast(a, b, op)
+        {
+            regs[dst as usize] = result;
+            return Ok(());
+        }
+        // Adaptive inline cache for float / str specialisation.  Consulted after
+        // the int fast path misses, so int-int code never pays cache-lookup
+        // overhead.
+        //
+        // Deopt policy: only deopt (→ Megamorphic) on a *type* mismatch.
+        // Edge-case values (e.g. div-by-zero in the Float path) fall through to
+        // eval_binary while keeping the cache Specialized so subsequent calls
+        // still hit the fast path.
+        let cache_slot = pc - 1;
+        let cache_entry = code.binop_cache.borrow()[cache_slot].clone();
+        match cache_entry {
+            BinOpCacheEntry::Megamorphic => {
+                // Permanently polymorphic site: skip classification, go straight
+                // to eval_binary.
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Specialized(BinopTypeTag::Float) => {
+                let lv = &regs[lhs as usize];
+                let rv = &regs[rhs as usize];
+                if lv.is_float() && rv.is_float() {
+                    let a = lv.as_float_raw();
+                    let b = rv.as_float_raw();
+                    if let Some(result) = float_float_fast(a, b, op) {
+                        regs[dst as usize] = result;
+                        return Ok(());
+                    }
+                    // Fast path returned None (e.g. div-by-zero, unsupported
+                    // op): site is still Float/Float, so keep the Specialized
+                    // state and fall through to eval_binary for this edge case.
+                } else {
+                    // Actual type mismatch: deopt to Megamorphic.
+                    code.binop_cache.borrow_mut()[cache_slot] = BinOpCacheEntry::Megamorphic;
+                }
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Specialized(BinopTypeTag::Str) => {
+                let lv = &regs[lhs as usize];
+                let rv = &regs[rhs as usize];
+                if lv.is_str() && rv.is_str() {
+                    let a = lv.as_str().unwrap();
+                    let b = rv.as_str().unwrap();
+                    if let Some(result) = str_str_fast(a, b, op) {
+                        regs[dst as usize] = result;
+                        return Ok(());
+                    }
+                    // Unsupported op for str (e.g. str * str): keep Specialized,
+                    // fall through to eval_binary which will raise the proper
+                    // TypeError.
+                } else {
+                    // Type mismatch: deopt.
+                    code.binop_cache.borrow_mut()[cache_slot] = BinOpCacheEntry::Megamorphic;
+                }
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Specialized(BinopTypeTag::Int) => {
+                // int_int_fast already ran above and returned None (overflow or
+                // unsupported op such as FloorDiv/Mod/Div/Pow).  The types are
+                // still correct; keep Specialized so the fast path is retried
+                // next loop iteration.  Fall through to eval_binary for this
+                // invocation.
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Specialized(BinopTypeTag::Other) => {
+                // No fast path for 'Other' types.  If the types are still
+                // 'Other', stay Specialized (no deopt needed since there's no
+                // fast path to lose).  Fall through.
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Counting { tag, count } => {
+                let observed = classify_binop_tag(&regs[lhs as usize], &regs[rhs as usize]);
+                let new_entry = if observed == tag {
+                    let new_count = count + 1;
+                    if new_count >= BINOP_SPEC_THRESHOLD {
+                        BinOpCacheEntry::Specialized(tag)
+                    } else {
+                        BinOpCacheEntry::Counting {
+                            tag,
+                            count: new_count,
+                        }
+                    }
+                } else {
+                    BinOpCacheEntry::Megamorphic
+                };
+                code.binop_cache.borrow_mut()[cache_slot] = new_entry;
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Empty => {
+                let observed = classify_binop_tag(&regs[lhs as usize], &regs[rhs as usize]);
+                code.binop_cache.borrow_mut()[cache_slot] = BinOpCacheEntry::Counting {
+                    tag: observed,
+                    count: 1,
+                };
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Full `Insn::GetAttr` body: the InstanceAttr / ClassAttr inline-cache hit
+    /// path followed by the slow-path `get_attr` call + cache fill / invalidation.
+    /// The cache machinery (#1912, epoch/version guards #2102/#2108) is verbatim.
+    #[inline(always)]
+    fn exec_get_attr(
+        &mut self,
+        regs: &mut RegSlice,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        dst: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        name_idx: u16,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<()> {
+        use crate::bytecode::AttrCacheEntry;
+        use pyrust_core::UserFunctionKind;
+
+        // Inline cache fast path: only for PyInstance objects.  Properties,
+        // __class__, __dict__, cached_property, and megamorphic sites all fall
+        // through to the slow path.
+        enum AttrFastResult {
+            Hit(Value),
+            Miss,
+        }
+        let fast = {
+            let cache = code.attr_cache.borrow();
+            match &cache[pc - 1] {
+                // Instance-attribute read cache (#1912): the name has no
+                // data-descriptor shadow on the class, so the instance __dict__
+                // takes priority.  Probe it directly, skipping the MRO walk in
+                // get_attr_instance_raw.
+                AttrCacheEntry::InstanceAttr {
+                    class_ptr,
+                    class_version,
+                    epoch,
+                } => {
+                    if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                        let inst = inst_rc.borrow();
+                        let same_class = Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                        let version_ok =
+                            inst.class.borrow().mutation_version.get() == *class_version;
+                        let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                        if same_class && version_ok && epoch_ok {
+                            let name = code.names.get(name_idx as usize).map(|s| s.as_str());
+                            match name.and_then(|n| inst.attrs.get(n)) {
+                                Some(v) => AttrFastResult::Hit(v.clone()),
+                                // Not in the instance dict — fall to the slow
+                                // path (method / non-data descriptor /
+                                // __getattr__ / AttributeError).
+                                None => AttrFastResult::Miss,
+                            }
+                        } else {
+                            AttrFastResult::Miss
+                        }
+                    } else {
+                        AttrFastResult::Miss
+                    }
+                }
+                AttrCacheEntry::ClassAttr {
+                    class_ptr,
+                    class_version,
+                    epoch,
+                    value: unbound,
+                } => {
+                    // Check: object is a PyInstance, same class, no instance
+                    // shadow, class not mutated, and the global class-mutation
+                    // epoch unchanged (catches base-class mutations that don't
+                    // bump the leaf class version).
+                    if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                        let inst = inst_rc.borrow();
+                        let name_opt = code.names.get(name_idx as usize).map(|s| s.as_str());
+                        let same_class = Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                        // If name_idx is somehow out of range (bytecode
+                        // invariant violation), treat as a shadow present —
+                        // forces slow path.
+                        let no_shadow =
+                            name_opt.map_or(false, |n| !inst.attrs.contains_key(n));
+                        let version_ok =
+                            inst.class.borrow().mutation_version.get() == *class_version;
+                        let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                        if same_class && no_shadow && version_ok && epoch_ok {
+                            // Rebind the unbound class attr to this instance —
+                            // same logic as get_attr's regular path, but avoids
+                            // the MRO walk.
+                            let unbound = unbound.clone();
+                            let inst_rc_clone = Rc::clone(inst_rc);
+                            let class_rc = Rc::clone(&inst.class);
+                            drop(inst);
+                            enum Tag {
+                                Regular(std::rc::Rc<pyrust_core::UserFunction>),
+                                ClassMethod(std::rc::Rc<pyrust_core::UserFunction>),
+                                StaticMethod(std::rc::Rc<pyrust_core::UserFunction>),
+                                // fn_name_matches: true when the
+                                // BuiltinFunction's embedded name matches the
+                                // attribute name; see the env.rs
+                                // AttrKind::BuiltinFunction comment for the full
+                                // rationale.
+                                Builtin { fn_name_matches: bool },
+                                Other,
+                            }
+                            let tag = match unbound.kind() {
+                                ValueKind::UserFunction(f) => match f.kind {
+                                    UserFunctionKind::Regular => Tag::Regular(Rc::clone(f)),
+                                    UserFunctionKind::ClassMethod => {
+                                        Tag::ClassMethod(Rc::clone(f))
+                                    }
+                                    UserFunctionKind::StaticMethod => {
+                                        Tag::StaticMethod(Rc::clone(f))
+                                    }
+                                    UserFunctionKind::Builtin(_) => Tag::Builtin {
+                                        fn_name_matches: false,
+                                    },
+                                },
+                                ValueKind::BuiltinFunction(fn_name) => Tag::Builtin {
+                                    fn_name_matches: name_opt.map_or(false, |n| {
+                                        fn_name
+                                            .rfind('.')
+                                            .map_or(false, |i| &fn_name[i + 1..] == n)
+                                    }),
+                                },
+                                _ => Tag::Other,
+                            };
+                            let bound = match tag {
+                                Tag::Regular(f) => Value::bound_method(f, inst_rc_clone),
+                                Tag::ClassMethod(f) => Value::class_bound_method(f, class_rc),
+                                Tag::StaticMethod(f) => {
+                                    if let Some(inner) = f.wrapped_func.as_ref() {
+                                        Value::user_function(Rc::clone(inner))
+                                    } else {
+                                        Value::with_function_kind(
+                                            f,
+                                            pyrust_core::UserFunctionKind::Regular,
+                                        )
+                                    }
+                                }
+                                Tag::Builtin { fn_name_matches } => {
+                                    if fn_name_matches {
+                                        let n = name_opt.unwrap_or_default();
+                                        pyrust_builtins::bound_method::bound_method(
+                                            n.to_string(),
+                                            Value::py_instance(inst_rc_clone),
+                                        )
+                                    } else {
+                                        // The builtin was stored under a
+                                        // user-chosen alias (e.g. A.f = len).
+                                        // CPython does not bind it.
+                                        unbound
+                                    }
+                                }
+                                Tag::Other => unbound,
+                            };
+                            AttrFastResult::Hit(bound)
+                        } else {
+                            AttrFastResult::Miss
+                        }
+                    } else {
+                        AttrFastResult::Miss
+                    }
+                }
+                _ => AttrFastResult::Miss,
+            }
+        };
+        match fast {
+            AttrFastResult::Hit(result) => {
+                regs[dst as usize] = result;
+            }
+            AttrFastResult::Miss => {
+                let name = code.names.get(name_idx as usize).ok_or_else(|| {
+                    PyError::Runtime(format!(
+                        "bytecode error: name index {} out of range (pool size {})",
+                        name_idx,
+                        code.names.len()
+                    ))
+                })?;
+                let obj_val = vm_read(regs, obj, num_locals)?;
+                let result = self.get_attr(&obj_val, name)?;
+                regs[dst as usize] = result;
+                // Fill the cache after the slow path.  `fill_get_attr_cache` is
+                // `#[inline(always)]`, so this is byte-identical to the old
+                // inline `vm.rs` fill — a `#[cold]` out-of-line split was
+                // measured to *regress* the bound-method hot path by ~6% (it
+                // perturbed LLVM's codegen of the hot ClassAttr arm).
+                fill_get_attr_cache(code, pc, name, &obj_val);
+            }
+        }
+        Ok(())
+    }
+
+    /// Full `Insn::SetAttr` body: the SetInstanceAttr write-cache hit path
+    /// followed by the slow-path `assign_attr` call + cache fill / invalidation
+    /// (#1998).  The cache machinery is verbatim.
+    #[inline(always)]
+    fn exec_set_attr(
+        &mut self,
+        regs: &mut RegSlice,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        obj: crate::bytecode::Reg,
+        name_idx: u16,
+        val: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<()> {
+        use crate::bytecode::AttrCacheEntry;
+        let obj_val = vm_read(regs, obj, num_locals)?;
+        let val_val = vm_read(regs, val, num_locals)?;
+        let name = code.names.get(name_idx as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: name index {} out of range (pool size {})",
+                name_idx,
+                code.names.len()
+            ))
+        })?;
+
+        // Write inline cache fast path (#1998): a monomorphic site proven to be
+        // a plain instance-dict write (no __setattr__ override, no __set__ data
+        // descriptor on the MRO, no __slots__ restriction, not __class__/__dict__)
+        // writes straight into inst.attrs, skipping the MRO walk in
+        // assign_attr_instance.
+        let mut handled = false;
+        {
+            let cache = code.attr_cache.borrow();
+            if let AttrCacheEntry::SetInstanceAttr {
+                class_ptr,
+                class_version,
+                epoch,
+            } = &cache[pc - 1]
+            {
+                if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                    let (same_class, version_ok) = {
+                        let inst = inst_rc.borrow();
+                        (
+                            Rc::as_ptr(&inst.class) as *const () == *class_ptr,
+                            inst.class.borrow().mutation_version.get() == *class_version,
+                        )
+                    };
+                    let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                    if same_class && version_ok && epoch_ok {
+                        inst_rc
+                            .borrow_mut()
+                            .attrs
+                            .insert(name.to_string(), val_val.clone());
+                        handled = true;
+                    }
+                }
+            }
+        }
+        if !handled {
+            self.assign_attr(obj_val.clone(), name, val_val.clone())?;
+            // Fill / update the cache after the slow path.
+            if name != "__class__" && name != "__dict__" {
+                let mut cache = code.attr_cache.borrow_mut();
+                match &cache[pc - 1] {
+                    AttrCacheEntry::Megamorphic => {}
+                    AttrCacheEntry::SetInstanceAttr {
+                        class_ptr: existing_ptr,
+                        ..
+                    } => {
+                        if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                            let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
+                            if new_ptr != *existing_ptr {
+                                cache[pc - 1] = AttrCacheEntry::Megamorphic;
+                            } else {
+                                cache[pc - 1] = AttrCacheEntry::Empty;
+                            }
+                        }
+                    }
+                    AttrCacheEntry::Empty => {
+                        // Cache only a plain instance-dict write: no __setattr__
+                        // override, no __set__ data descriptor for this name on
+                        // the MRO, the class has no __slots__ (would restrict
+                        // assignment), and is not the bare object() singleton or
+                        // an exception class (slot-type validation must keep
+                        // running).
+                        if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                            let class = Rc::clone(&inst_rc.borrow().class);
+                            let no_setattr_override =
+                                lookup_class_attr(&class, "__setattr__").is_none_or(|v| {
+                                    matches!(
+                                        v.kind(),
+                                        ValueKind::BuiltinFunction(n)
+                                            if n == "object.__setattr__"
+                                    )
+                                });
+                            let no_data_desc = lookup_class_attr(&class, name)
+                                .is_none_or(|v| !is_data_descriptor(&v));
+                            let no_slots = class.borrow().slots.is_none();
+                            let is_object_singleton =
+                                Rc::ptr_eq(&class, &object_class_singleton());
+                            let is_exc = is_exception_class(&class);
+                            if no_setattr_override
+                                && no_data_desc
+                                && no_slots
+                                && !is_object_singleton
+                                && !is_exc
+                            {
+                                cache[pc - 1] = AttrCacheEntry::SetInstanceAttr {
+                                    class_ptr: Rc::as_ptr(&class) as *const (),
+                                    class_version: class.borrow().mutation_version.get(),
+                                    epoch: pyrust_core::class_epoch(),
+                                };
+                            }
+                        }
+                    }
+                    // ClassAttr / InstanceAttr are GetAttr-only entries; a
+                    // SetAttr site never produces them.
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Cache-fill for the `GetAttr` inline cache, called from `exec_get_attr`'s
+/// slow-path Miss arm.  Factored out only for readability; `#[inline(always)]`
+/// folds it straight back into `exec_get_attr`, so codegen is byte-identical to
+/// the old inline `vm.rs` fill block (a `#[cold]` out-of-line split was measured
+/// to *regress* the bound-method hot path by ~6%).  Fills `InstanceAttr`
+/// (#1912) / `ClassAttr`, deopts cross-class sites to `Megamorphic`, and resets
+/// stale same-class entries to `Empty`.
+#[inline(always)]
+fn fill_get_attr_cache(
+    code: &crate::bytecode::FnCode,
+    pc: usize,
+    name: &str,
+    obj_val: &Value,
+) {
+    use crate::bytecode::AttrCacheEntry;
+    // Fill the cache after the slow path, but only for PyInstance targets that
+    // resolve to a class attr (not an instance attr, not a property, not
+    // __class__ / __dict__, and not megamorphic already).
+    if name == "__class__" || name == "__dict__" {
+        return;
+    }
+    let mut cache = code.attr_cache.borrow_mut();
+    match &cache[pc - 1] {
+        AttrCacheEntry::Megamorphic => {}
+        AttrCacheEntry::ClassAttr {
+            class_ptr: existing_ptr,
+            ..
+        }
+        | AttrCacheEntry::InstanceAttr {
+            class_ptr: existing_ptr,
+            ..
+        } => {
+            if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
+                if new_ptr != *existing_ptr {
+                    // Different class at this call site — go megamorphic.
+                    cache[pc - 1] = AttrCacheEntry::Megamorphic;
+                } else {
+                    // Same class but version changed, or the resolution flipped
+                    // between instance/class attr (e.g. an instance attr was
+                    // deleted and now resolves to a method).  Reset to Empty so
+                    // the next slow-path execution refills.
+                    cache[pc - 1] = AttrCacheEntry::Empty;
+                }
+            }
+        }
+        AttrCacheEntry::SetInstanceAttr { .. } => {
+            // A SetAttr-only entry should never appear at a GetAttr site; if it
+            // somehow does, drop it.
+            cache[pc - 1] = AttrCacheEntry::Empty;
+        }
+        AttrCacheEntry::Empty => {
+            // Try to fill: for PyInstance targets, either an instance-dict
+            // resolution (#1912 InstanceAttr) or a class-attr resolution
+            // (ClassAttr).
+            if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                let inst = inst_rc.borrow();
+                let has_custom_getattribute =
+                    lookup_class_attr(&inst.class, "__getattribute__")
+                        .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+                if inst.attrs.contains_key(name) {
+                    // Instance attr.  Cache the fast path only when no data
+                    // descriptor on the MRO shadows it (data descriptors take
+                    // priority over the instance dict in CPython's lookup order)
+                    // and there is no custom __getattribute__.  The numeric-tower
+                    // names are read-only data descriptors on int/float, so
+                    // exclude them too.
+                    let is_numeric_tower = matches!(
+                        name,
+                        "real" | "imag" | "numerator" | "denominator"
+                    );
+                    let shadowed_by_data_desc = lookup_class_attr(&inst.class, name)
+                        .is_some_and(|v| is_data_descriptor(&v));
+                    if !has_custom_getattribute && !is_numeric_tower && !shadowed_by_data_desc {
+                        cache[pc - 1] = AttrCacheEntry::InstanceAttr {
+                            class_ptr: Rc::as_ptr(&inst.class) as *const (),
+                            class_version: inst.class.borrow().mutation_version.get(),
+                            epoch: pyrust_core::class_epoch(),
+                        };
+                    }
+                } else {
+                    // No instance attr — resolve via the class.  Don't cache when
+                    // the class has a user-defined __getattribute__ — the cache
+                    // bypasses get_attr entirely and would skip the
+                    // __getattribute__ dispatch (issue #1254).
+                    if !has_custom_getattribute {
+                        // No property — we only cache the straightforward
+                        // class-attr case.
+                        let unbound = lookup_class_attr(&inst.class, name);
+                        if let Some(unbound_val) = unbound {
+                            // Don't cache cached_property (it mutates
+                            // instance.attrs on first access and must go through
+                            // get_attr).
+                            let is_cached_prop =
+                                pyrust_builtins::cached_property::with_cached_property(
+                                    &unbound_val,
+                                    |_| (),
+                                )
+                                .is_some();
+                            let is_property = pyrust_builtins::property::with_property(
+                                &unbound_val,
+                                |_| (),
+                            )
+                            .is_some();
+                            if !is_cached_prop && !is_property {
+                                let class_ptr = Rc::as_ptr(&inst.class) as *const ();
+                                let class_version = inst.class.borrow().mutation_version.get();
+                                let epoch = pyrust_core::class_epoch();
+                                cache[pc - 1] = AttrCacheEntry::ClassAttr {
+                                    class_ptr,
+                                    class_version,
+                                    epoch,
+                                    value: unbound_val,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
