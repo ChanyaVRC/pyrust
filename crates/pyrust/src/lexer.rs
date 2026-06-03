@@ -246,14 +246,14 @@ impl Lexer {
                         && matches!(chars.get(pos + 2), Some('"') | Some('\''))
                     {
                         // Raw bytes literal: br"..." / bR"..." / BR"..." / Br"..."
-                        let (tok, next) = lex_bytes(&chars, pos + 2, true)?;
+                        let (tok, next) = lex_bytes(chars, pos + 2, true)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         // Raw string literal: r"..." / R"..."
-                        let (tok, next) = lex_string(&chars, pos + 1, true)?;
+                        let (tok, next) = lex_string(chars, pos + 1, true)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
@@ -261,7 +261,7 @@ impl Lexer {
                         && matches!(chars.get(pos + 2), Some('"') | Some('\''))
                     {
                         // Raw bytes literal: rb"..." / rB"..." / RB"..." / Rb"..."
-                        let (tok, next) = lex_bytes(&chars, pos + 2, true)?;
+                        let (tok, next) = lex_bytes(chars, pos + 2, true)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else if (c == 'u' || c == 'U')
@@ -270,7 +270,7 @@ impl Lexer {
                         // Unicode string literal: u"..." / U"..."
                         // In Python 3.3+, u"..." is identical to a plain string literal.
                         // Combinations like ur"", ub"" are not valid in Python 3.
-                        let (tok, next) = lex_string(&chars, pos + 1, false)?;
+                        let (tok, next) = lex_string(chars, pos + 1, false)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else {
@@ -667,7 +667,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
             Err(_) => {
                 // Overflow: parse as BigInt and store decimal representation.
                 let big = BigInt::parse_bytes(text.as_bytes(), 16)
-                    .ok_or_else(|| PyError::Lex(format!("invalid hexadecimal literal")))?;
+                    .ok_or_else(|| PyError::Lex("invalid hexadecimal literal".to_string()))?;
                 Ok((Token::BigInt(big.to_string()), pos))
             }
         };
@@ -817,9 +817,10 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
 
 fn lex_ident_or_keyword(chars: &[char], start: usize) -> (Token, usize) {
     let mut pos = start;
-    while chars.get(pos).map_or(false, |&c| {
-        c.is_alphabetic() || c.is_ascii_digit() || c == '_'
-    }) {
+    while chars
+        .get(pos)
+        .is_some_and(|&c| c.is_alphabetic() || c.is_ascii_digit() || c == '_')
+    {
         pos += 1;
     }
 
@@ -1444,7 +1445,7 @@ fn lex_fstring_expr(
                     && chars.get(pos + 1) != Some(&'=')
                     && !src.is_empty()
                     && !src
-                        .trim_end_matches(|c: char| c == ' ' || c == '\t')
+                        .trim_end_matches([' ', '\t'])
                         .ends_with(['!', '<', '>', '=']) =>
             {
                 // Build the verbatim debug-text label: the raw source (with

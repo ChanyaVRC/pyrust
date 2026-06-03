@@ -135,7 +135,7 @@ pub fn sort_with_precomputed_keys(
         PyError::named("TypeError", "list.sort receiver is not a list".to_string())
     })?;
     debug_assert_eq!(snapshot.len(), keys.len());
-    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(snapshot.into_iter()).collect();
+    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(snapshot).collect();
     let mut sort_err: Option<PyError> = None;
     keyed.sort_by(|(ka, _), (kb, _)| {
         if sort_err.is_some() {

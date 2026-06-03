@@ -229,7 +229,7 @@ pyrust_module! {
         // always a `str`.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         match std::env::var_os(&key) {
-            Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
+            Some(v) => Ok(Value::string(v.to_string_lossy())),
             None => Ok(default),
         }
     }
@@ -664,8 +664,8 @@ pyrust_module! {
         // Missing env var maps to KeyError (CPython parity — `os.environ`
         // is a Mapping, not a defaulting view).
         match std::env::var_os(&key) {
-            Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
-            None => Err(PyError::key_error(Value::string(key.clone()))),
+            Some(v) => Ok(Value::string(v.to_string_lossy())),
+            None => Err(PyError::key_error(Value::string(key))),
         }
     }
 
@@ -701,7 +701,7 @@ pyrust_module! {
         // interleaved with another pyrust-side write.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(&key).is_none() {
-            return Err(PyError::key_error(Value::string(key.clone())));
+            return Err(PyError::key_error(Value::string(key)));
         }
         unsafe { std::env::remove_var(&key) };
         Ok(Value::none())
@@ -782,7 +782,7 @@ pyrust_module! {
             .unwrap_or_else(Value::none);
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         match std::env::var_os(&key) {
-            Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
+            Some(v) => Ok(Value::string(v.to_string_lossy())),
             None => Ok(default),
         }
     }

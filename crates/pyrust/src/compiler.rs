@@ -1387,7 +1387,7 @@ fn collect_class_method_outer_refs(
                     if !inner_locals.contains(&name)
                         && !inner_globals.contains(&name)
                         && !inner_nonlocals.contains(&name)
-                        && class_locals_opt.map_or(true, |cl| !cl.contains(&name))
+                        && class_locals_opt.is_none_or(|cl| !cl.contains(&name))
                         && local_index.contains_key(&name)
                     {
                         cells.insert(name);
@@ -4382,7 +4382,7 @@ fn or_leading_capture(pat: &Pattern) -> Option<&str> {
 fn or_leading_is_wildcard(pat: &Pattern) -> bool {
     match pat {
         Pattern::Wildcard => true,
-        Pattern::Or(alts) => alts.first().map_or(false, or_leading_is_wildcard),
+        Pattern::Or(alts) => alts.first().is_some_and(or_leading_is_wildcard),
         _ => false,
     }
 }
@@ -5408,7 +5408,7 @@ impl Compiler {
         }
 
         // ── Step 5: intern the alias name and emit MakeTypeAlias ────────────
-        let name_str = crate::value::Value::string(name.to_string());
+        let name_str = crate::value::Value::string(name);
         let name_idx = self.intern_const(name_str);
         let dst = self.alloc_temp();
         self.emit(Insn::MakeTypeAlias(
@@ -7941,11 +7941,7 @@ impl Compiler {
             }
         }
 
-        let mut sub = Compiler::new(
-            Rc::clone(&inner_index_rc),
-            def_bound,
-            inner_cell_vars.clone(),
-        );
+        let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
         // Thread the enclosing function scope chain into the child compiler.
         // Since compile_def always produces a function scope, add self.local_index
         // (if self is a function scope) and mark the child as a function scope.

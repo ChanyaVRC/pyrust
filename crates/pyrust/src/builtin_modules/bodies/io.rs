@@ -43,7 +43,7 @@ fn expect_self(
     fn_name: &str,
 ) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
+        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
@@ -277,7 +277,7 @@ pyrust_module! {
             // Fill gap between pos and current end with NUL if pos > total
             if pos > total {
                 new_chars.extend_from_slice(&chars[..]);
-                new_chars.extend(std::iter::repeat('\0').take(pos - total));
+                new_chars.extend(std::iter::repeat_n('\0', pos - total));
             } else {
                 new_chars.extend_from_slice(&chars[..pos]);
             }
@@ -466,9 +466,9 @@ pyrust_module! {
             let closed = is_closed(&inst);
             let _ = _interp;
             if closed {
-                Ok(Value::string("<_io.StringIO [closed]>".to_string()))
+                Ok(Value::string("<_io.StringIO [closed]>"))
             } else {
-                Ok(Value::string("<_io.StringIO object>".to_string()))
+                Ok(Value::string("<_io.StringIO object>"))
             }
         }
     }
@@ -598,7 +598,7 @@ pyrust_module! {
             let mut new_buf: Vec<u8> = Vec::with_capacity(total.max(pos + n_written));
             if pos > total {
                 new_buf.extend_from_slice(&buf[..]);
-                new_buf.extend(std::iter::repeat(0u8).take(pos - total));
+                new_buf.extend(std::iter::repeat_n(0u8, pos - total));
             } else {
                 new_buf.extend_from_slice(&buf[..pos]);
             }
@@ -756,9 +756,9 @@ pyrust_module! {
             let closed = is_closed(&inst);
             let _ = _interp;
             if closed {
-                Ok(Value::string("<_io.BytesIO [closed]>".to_string()))
+                Ok(Value::string("<_io.BytesIO [closed]>"))
             } else {
-                Ok(Value::string("<_io.BytesIO object>".to_string()))
+                Ok(Value::string("<_io.BytesIO object>"))
             }
         }
     }

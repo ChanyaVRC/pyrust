@@ -313,7 +313,7 @@ thread_local! {
     /// explicit base lets `lookup_class_attr` walk to `object` so that
     /// `hasattr(type, '__init_subclass__')` returns True.
     static TYPE_CLASS: Rc<RefCell<PyClass>> = {
-        let obj = OBJECT_CLASS.with(|c| Rc::clone(c));
+        let obj = OBJECT_CLASS.with(Rc::clone);
         // Issue #1385: register type.__new__ and type.__init__ so that
         // `super().__new__(mcs, name, bases, namespace)` and
         // `super().__init__(name, bases, namespace)` inside custom metaclass
@@ -375,7 +375,7 @@ thread_local! {
     /// and enables `issubclass(range, Sequence)` via `extra_bases` registration
     /// in `register_abc_extra_bases`.  Issues #1793, #1800.
     static RANGE_CLASS: Rc<RefCell<PyClass>> = {
-        let obj = OBJECT_CLASS.with(|c| Rc::clone(c));
+        let obj = OBJECT_CLASS.with(Rc::clone);
         let cls = Rc::new(RefCell::new(PyClass::new(
             "range",
             "range",
@@ -837,7 +837,7 @@ fn populate_primitive_methods(
 /// this provides a stable, identity-comparable terminator so that
 /// `A.__mro__[-1] is B.__mro__[-1]` holds, matching CPython.
 pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
-    OBJECT_CLASS.with(|c| Rc::clone(c))
+    OBJECT_CLASS.with(Rc::clone)
 }
 
 /// Returns the singleton `type` metaclass.  In CPython `type(int)` returns
@@ -845,7 +845,7 @@ pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
 /// is an instance of `type` (the metaclass).  Using a per-thread singleton
 /// mirrors the `object_class_singleton` pattern (issue #1312).
 pub(crate) fn type_class_singleton() -> Rc<RefCell<PyClass>> {
-    TYPE_CLASS.with(|c| Rc::clone(c))
+    TYPE_CLASS.with(Rc::clone)
 }
 
 /// Returns the metaclass (metatype) of `class`.  A class with no explicit
@@ -911,14 +911,14 @@ fn lookup_user_metaclass_attr(meta: &Rc<RefCell<PyClass>>, name: &str) -> Option
 /// `method` is a proper `PyClass` (not a `BuiltinFunction` sentinel).
 /// Issue #1528.
 pub(crate) fn method_type_singleton() -> Rc<RefCell<PyClass>> {
-    METHOD_TYPE.with(|c| Rc::clone(c))
+    METHOD_TYPE.with(Rc::clone)
 }
 
 /// Returns the singleton `function` class.  In CPython, `type(lambda: None)`
 /// returns `<class 'function'>` and `type(type(lambda: None)) is type` holds.
 /// Issue #1528.
 pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
-    FUNCTION_TYPE.with(|c| Rc::clone(c))
+    FUNCTION_TYPE.with(Rc::clone)
 }
 
 /// Returns the singleton `range` class.  In CPython, `range` is a proper
@@ -928,7 +928,7 @@ pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
 /// is linked into ABC `extra_bases` so `issubclass(range, Sequence)` works.
 /// Issues #1793, #1800.
 pub(crate) fn range_class_singleton() -> Rc<RefCell<PyClass>> {
-    RANGE_CLASS.with(|c| Rc::clone(c))
+    RANGE_CLASS.with(Rc::clone)
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the migrated
@@ -5042,12 +5042,12 @@ pub(crate) fn round_float_ndigits(v: f64, n: i32) -> crate::error::Result<Value>
     let two_r = &r + &r;
     use std::cmp::Ordering;
     let q_rounded: PyBigInt = match two_r.cmp(&factor_scaled) {
-        Ordering::Less => q.clone(),
+        Ordering::Less => q,
         Ordering::Greater => &q + &PyBigInt::from(1u64),
         Ordering::Equal => {
             // Exactly at the halfway point: round to even.
             if (&q % &PyBigInt::from(2u64)).is_zero() {
-                q.clone()
+                q
             } else {
                 &q + &PyBigInt::from(1u64)
             }

@@ -36,7 +36,7 @@ fn seq_repeat_str(text: &str, n: i64) -> Result<Value> {
         // Only compute char_count here; CPython raises OverflowError when
         // char_count * n > Py_ssize_t_MAX, MemoryError otherwise.
         let char_count = text.chars().count();
-        if char_count.checked_mul(n).map_or(true, |t| t > isize::MAX as usize) {
+        if char_count.checked_mul(n).is_none_or(|t| t > isize::MAX as usize) {
             return Err(pyrust_core::overflow_err!("repeated string is too long"));
         }
         // char_count * n fits, but byte_total doesn't — OOM.
@@ -1002,10 +1002,10 @@ impl Interpreter {
             // Fast path for string keys (issue #506): probe via `StrKey` to
             // skip constructing a `PyKey::Str(Value)` (which bumps the RC).
             let lookup = if let Some(s) = index.as_str() {
-                self.dict_str_lookup(&target, s)?
+                self.dict_str_lookup(target, s)?
             } else {
                 let key = self.value_to_pykey(&index)?;
-                self.dict_lookup(&target, &key)?
+                self.dict_lookup(target, &key)?
             };
             return match lookup {
                 Some((_, v)) => Ok(v),
@@ -2283,7 +2283,7 @@ impl Interpreter {
                     (la.iter().cloned().collect(), lb.iter().cloned().collect())
                 }
                 (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => {
-                    (la.iter().cloned().collect(), lb.iter().cloned().collect())
+                    (la.to_vec(), lb.to_vec())
                 }
                 _ => unreachable!("needs_seq_dispatch implies a sequence pair"),
             };
@@ -3178,7 +3178,7 @@ impl Interpreter {
                         match v.kind() {
                             ValueKind::None => { /* delete */ }
                             ValueKind::Int(n) => {
-                                if n < 0 || n > 0x10FFFF {
+                                if !(0..=0x10FFFF).contains(&n) {
                                     return Err(pyrust_core::value_err!("character mapping must be in range(0x110000)"
                                             .to_string()));
                                 }
@@ -3208,7 +3208,7 @@ impl Interpreter {
                                 out.push(replacement);
                             }
                             ValueKind::Str(repl) => {
-                                out.push_str(&repl.to_string());
+                                out.push_str(repl);
                             }
                             _ => {
                                 return Err(pyrust_core::type_err!("character mapping must return integer, None or str"
@@ -3350,7 +3350,7 @@ impl Interpreter {
                 let str_backing = if matches!(left.kind(), ValueKind::Str(_)) {
                     Some(left.clone())
                 } else if let Some(inst_rc) = left.as_py_instance_rc() {
-                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    if let Some(backing) = instance_builtin_data(inst_rc) {
                         if matches!(backing.kind(), ValueKind::Str(_)) {
                             Some(backing)
                         } else {
@@ -3375,7 +3375,7 @@ impl Interpreter {
                     ValueKind::Bytes(rc) => Some(rc.to_vec()),
                     _ => left
                         .as_py_instance_rc()
-                        .and_then(|inst_rc| instance_builtin_data(&inst_rc))
+                        .and_then(instance_builtin_data)
                         .and_then(|backing| match backing.kind() {
                             ValueKind::Bytes(rc) => Some(rc.to_vec()),
                             _ => None,
@@ -3653,7 +3653,7 @@ impl Interpreter {
                     // bytearray + bytes → bytearray
                     if let ValueKind::Bytes(rc) = right.kind() {
                         let mut out = a;
-                        out.extend_from_slice(&rc);
+                        out.extend_from_slice(rc);
                         return Ok(pyrust_builtins::bytearray::bytearray(out));
                     }
                     return Err(pyrust_core::type_err!("can't concat {} to bytearray",
@@ -3832,17 +3832,17 @@ impl Interpreter {
             (ValueKind::Int(n), ValueKind::List(items)) => seq_repeat_list(&items, n),
             (ValueKind::List(_), ValueKind::BigInt(_))
             | (ValueKind::BigInt(_), ValueKind::List(_)) => Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer")),
-            (ValueKind::Bytes(data), ValueKind::Int(n)) => seq_repeat_bytes(&data, n),
-            (ValueKind::Int(n), ValueKind::Bytes(data)) => seq_repeat_bytes(&data, n),
+            (ValueKind::Bytes(data), ValueKind::Int(n)) => seq_repeat_bytes(data, n),
+            (ValueKind::Int(n), ValueKind::Bytes(data)) => seq_repeat_bytes(data, n),
             (ValueKind::Bytes(_), ValueKind::BigInt(_))
             | (ValueKind::BigInt(_), ValueKind::Bytes(_)) => Err(pyrust_core::overflow_err!("cannot fit 'int' into an index-sized integer")),
             // Tuple * Int / Int * Tuple — checked repeat, MemoryError on
             // overflow (matches CPython 3.12 `tuplerepeat` behaviour).
             (ValueKind::Tuple(items), ValueKind::Int(n)) => {
-                seq_repeat_tuple(&items[..], n)
+                seq_repeat_tuple(items, n)
             }
             (ValueKind::Int(n), ValueKind::Tuple(items)) => {
-                seq_repeat_tuple(&items[..], n)
+                seq_repeat_tuple(items, n)
             }
             // Tuple * BigInt / BigInt * Tuple — any BigInt is too large to
             // fit in a platform index; CPython raises OverflowError for both
@@ -3989,7 +3989,7 @@ impl Interpreter {
                     // set |= / &= / -= / ^= require RHS to be a set or frozenset.
                     // If RHS is neither, raise the CPython-format TypeError directly
                     // (the op symbol must include `=` for in-place operators).
-                    let rhs_items = match set_items_from_value(&right) {
+                    let rhs_items = match set_items_from_value(right) {
                         Some((items, _)) => items,
                         None => {
                             let op_sym = match op {
@@ -3999,8 +3999,8 @@ impl Interpreter {
                                 BinaryOp::BitXor => "^=",
                                 _ => unreachable!(),
                             };
-                            let lt = value_type_name_str(&left);
-                            let rt = value_type_name_str(&right);
+                            let lt = value_type_name_str(left);
+                            let rt = value_type_name_str(right);
                             return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                         }
                     };
@@ -4117,7 +4117,7 @@ impl Interpreter {
             BinaryOp::RShift => "__irshift__",
             _ => return Ok(None),
         };
-        let result = self.try_call_binary_method(&left, dunder, right.clone())?;
+        let result = self.try_call_binary_method(left, dunder, right.clone())?;
         if let Some(ref v) = result {
             if !is_not_implemented(v) {
                 return Ok(result);
@@ -4171,11 +4171,11 @@ impl Interpreter {
                             BinaryOp::BitXor => "^=",
                             _ => unreachable!(),
                         };
-                        let rhs_items = match set_items_from_value(&right) {
+                        let rhs_items = match set_items_from_value(right) {
                             Some((items, _)) => items,
                             None => {
-                                let lt = value_type_name_str(&left);
-                                let rt = value_type_name_str(&right);
+                                let lt = value_type_name_str(left);
+                                let rt = value_type_name_str(right);
                                 return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                             }
                         };
@@ -4213,7 +4213,7 @@ impl Interpreter {
             } else {
                 // Plain frozenset (BuiltinObject) — not caught by the is_set
                 // branch above (which only matches ValueKind::Set).
-                if set_items_from_value(&left).is_some() && set_items_from_value(&right).is_none()
+                if set_items_from_value(left).is_some() && set_items_from_value(right).is_none()
                 {
                     let op_sym = match op {
                         BinaryOp::BitOr => "|=",
@@ -4222,8 +4222,8 @@ impl Interpreter {
                         BinaryOp::BitXor => "^=",
                         _ => unreachable!(),
                     };
-                    let lt = value_type_name_str(&left);
-                    let rt = value_type_name_str(&right);
+                    let lt = value_type_name_str(left);
+                    let rt = value_type_name_str(right);
                     return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                 }
             }
@@ -4481,7 +4481,7 @@ impl Interpreter {
             ValueKind::Bytes(rc) => rc.len() as i64,
             _ => {
                 return Err(pyrust_core::type_err!("'{}' object is not subscriptable",
-                        pyrust_core::builtin_type_name(&target)));
+                        pyrust_core::builtin_type_name(target)));
             }
         };
         let (start, end, step) = Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
@@ -4716,8 +4716,7 @@ impl Interpreter {
                         const I64_MAX_PLUS1_F: f64 = 9_223_372_036_854_775_808.0_f64;
                         let in_range = f.is_finite()
                             && f.fract() == 0.0
-                            && f >= I64_MIN_F
-                            && f < I64_MAX_PLUS1_F
+                            && (I64_MIN_F..I64_MAX_PLUS1_F).contains(&f)
                             && range_contains_i64(f as i64);
                         Ok(Value::bool_(in_range))
                     }
@@ -4729,8 +4728,7 @@ impl Interpreter {
                         let in_range = im == 0.0
                             && re.is_finite()
                             && re.fract() == 0.0
-                            && re >= I64_MIN_F
-                            && re < I64_MAX_PLUS1_F
+                            && (I64_MIN_F..I64_MAX_PLUS1_F).contains(&re)
                             && range_contains_i64(re as i64);
                         Ok(Value::bool_(in_range))
                     }
@@ -5659,14 +5657,14 @@ impl Interpreter {
         }
         if let Some(inst_rc) = arg.as_py_instance_rc() {
             // bytes subclass: extract the backing bytes directly.
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if let Some(backing) = instance_builtin_data(inst_rc) {
                 if let ValueKind::Bytes(rc) = backing.kind() {
                     return Ok(rc.to_vec());
                 }
             }
             let class = Rc::clone(&inst_rc.borrow().class);
             if let Some(method) = lookup_class_attr(&class, "__bytes__") {
-                let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                let self_val = Value::py_instance(Rc::clone(inst_rc));
                 let result = invoke_class_method(self, method, self_val, &[])?;
                 return match result.kind() {
                     ValueKind::Bytes(rc) => Ok(rc.to_vec()),
@@ -5691,7 +5689,7 @@ impl Interpreter {
     fn bytes_printf_to_char(&mut self, arg: Value) -> Result<u8> {
         // Single-byte bytes-like: b"A" or bytes([65]).
         if let ValueKind::Bytes(rc) = arg.kind() {
-            return single_byte_or_err(&rc);
+            return single_byte_or_err(rc);
         }
         if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(&arg) {
             return single_byte_or_err(&data);
@@ -6341,13 +6339,13 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
             // materialise through their backing IndexMap; everything else
             // iterates via `iter_next`.
             // Bytearray: materialise as integers (same shape as bytes iteration).
-            if let Some(elems) = pyrust_builtins::bytearray::iter_elements(&value) {
+            if let Some(elems) = pyrust_builtins::bytearray::iter_elements(value) {
                 return Ok(elems);
             }
-            if let Some(rc) = pyrust_builtins::frozenset::as_items(&value) {
+            if let Some(rc) = pyrust_builtins::frozenset::as_items(value) {
                 return Ok(rc.iter().map(|k| key_to_value(k.clone())).collect());
             }
-            if let Some(kind) = pyrust_builtins::dict_views::view_kind(&value) {
+            if let Some(kind) = pyrust_builtins::dict_views::view_kind(value) {
                 // `view_kind` and `as_dict_rc` both check the same ops, so
                 // they should agree — but use a structured error rather than
                 // unwrap to avoid panicking if a future BuiltinObject impl
@@ -6355,7 +6353,7 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                 // Surface as TypeError so Python-level `except` blocks can
                 // catch it (the only way to reach this is a misregistered
                 // ops table, which is a type-mismatch error).
-                let rc = pyrust_builtins::dict_views::as_dict_rc(&value).ok_or_else(|| {
+                let rc = pyrust_builtins::dict_views::as_dict_rc(value).ok_or_else(|| {
                     pyrust_core::type_err!("dict-view state type mismatch")
                 })?;
                 let map = rc.borrow();
@@ -6368,7 +6366,7 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                         .collect(),
                 });
             }
-            if let Some(class_rc) = pyrust_builtins::mapping_proxy::as_class_rc(&value) {
+            if let Some(class_rc) = pyrust_builtins::mapping_proxy::as_class_rc(value) {
                 let class = class_rc.borrow();
                 return Ok(class
                     .attrs
@@ -6421,7 +6419,7 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                 Err(pyrust_core::type_err!("object is not iterable"))
             }
         }
-        _ => Err(pyrust_core::type_err!("'{}' object is not iterable", value_type_name_str(&value))),
+        _ => Err(pyrust_core::type_err!("'{}' object is not iterable", value_type_name_str(value))),
     }
 }
 

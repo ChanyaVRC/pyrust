@@ -1241,9 +1241,9 @@ impl Interpreter {
                         regs[*dst as usize] = Value::string(result);
                     } else {
                         // Fallback: sequential BinOp(Add) — correct but allocates intermediates.
-                        let mut acc = vm_try!(vm_read(&*regs, *base, num_locals));
+                        let mut acc = vm_try!(vm_read(&regs, *base, num_locals));
                         for k in 1..n {
-                            let next = vm_try!(vm_read(&*regs, *base + k as u32, num_locals));
+                            let next = vm_try!(vm_read(&regs, *base + k as u32, num_locals));
                             acc = vm_try!(self.eval_binary(acc, crate::ast::BinaryOp::Add, next));
                         }
                         regs[*dst as usize] = acc;
@@ -2598,7 +2598,7 @@ impl Interpreter {
                                 Some(Err(e)) => { vm_try!(Err(e)); }
                                 None => {
                                     vm_try!(Err(pyrust_core::type_err!("iter() returned non-iterator of type '{}'",
-                                            value_type_name_str(&iter_val),)));
+                                            value_type_name_str(iter_val),)));
                                 }
                             }
                         }

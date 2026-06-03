@@ -65,7 +65,7 @@ pyrust_module! {
                 out.push(p);
             }
         }
-        Ok(Value::string(out.to_string_lossy().into_owned()))
+        Ok(Value::string(out.to_string_lossy()))
     }
 
     /// CPython: os.path.exists(path) — true if `path` refers to an
@@ -138,7 +138,7 @@ pyrust_module! {
             })?;
             cwd.join(p)
         };
-        Ok(Value::string(abs.to_string_lossy().into_owned()))
+        Ok(Value::string(abs.to_string_lossy()))
     }
 
     /// CPython: os.path.splitext(path) → (root, ext) — split a path into
@@ -167,8 +167,8 @@ pyrust_module! {
             Some(rel_dot) => {
                 let abs_dot = basename_start + leading_dot_end + rel_dot;
                 Ok(Value::tuple(vec![
-                    Value::string(path[..abs_dot].to_string()),
-                    Value::string(path[abs_dot..].to_string()),
+                    Value::string(&path[..abs_dot]),
+                    Value::string(&path[abs_dot..]),
                 ]))
             }
             None => Ok(Value::tuple(vec![
@@ -260,7 +260,7 @@ pyrust_module! {
             .take_while(|(a, b)| a == b)
             .map(|(a, _)| a.len_utf8())
             .sum::<usize>();
-        Ok(Value::string(min[..prefix_len].to_string()))
+        Ok(Value::string(&min[..prefix_len]))
     }
 
     /// CPython: os.path.relpath(path, start=os.curdir) — relative path
@@ -325,7 +325,7 @@ pyrust_module! {
         let path = single_path(FN_NAME, args)?;
         let abs = posix_abspath(&path)?;
         match std::fs::canonicalize(&abs) {
-            Ok(p) => Ok(Value::string(p.to_string_lossy().into_owned())),
+            Ok(p) => Ok(Value::string(p.to_string_lossy())),
             Err(_) => Ok(Value::string(posix_normpath(&abs))),
         }
     }

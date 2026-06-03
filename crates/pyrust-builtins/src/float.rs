@@ -129,7 +129,7 @@ pub fn fromhex(s: &str) -> Result<f64> {
         .unwrap_or(rest);
 
     // Require 'p' or 'P' exponent marker
-    let p_pos = rest.find(|c| c == 'p' || c == 'P').ok_or_else(bad)?;
+    let p_pos = rest.find(['p', 'P']).ok_or_else(bad)?;
     let mant_str = &rest[..p_pos];
     let exp_str = &rest[p_pos + 1..];
 

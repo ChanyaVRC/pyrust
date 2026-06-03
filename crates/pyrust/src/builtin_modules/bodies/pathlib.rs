@@ -54,7 +54,7 @@ fn expect_self(
     fn_name: &str,
 ) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(&rc)),
+        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
@@ -270,10 +270,10 @@ pyrust_module! {
             ValueKind::Str(s) => s.to_string(),
             ValueKind::PyInstance(rc) => {
                 // Accept Path or PosixPath instances (any path-like instance).
-                if !is_path_instance(&rc) {
+                if !is_path_instance(rc) {
                     return Ok(Value::not_implemented());
                 }
-                get_path(&Rc::clone(&rc), FN_NAME)?
+                get_path(&Rc::clone(rc), FN_NAME)?
             }
             _ => return Ok(Value::not_implemented()),
         };
@@ -303,10 +303,10 @@ pyrust_module! {
             ValueKind::Str(_) => return Ok(Value::not_implemented()),
             ValueKind::PyInstance(rc) => {
                 // Only compare against Path or PosixPath instances.
-                if !is_path_instance(&rc) {
+                if !is_path_instance(rc) {
                     return Ok(Value::not_implemented());
                 }
-                match get_path(&Rc::clone(&rc), FN_NAME) {
+                match get_path(&Rc::clone(rc), FN_NAME) {
                     Ok(s) => s,
                     Err(_) => return Ok(Value::not_implemented()),
                 }
@@ -347,7 +347,7 @@ pyrust_module! {
             let part = match a.value.kind() {
                 ValueKind::Str(s) => s.to_string(),
                 ValueKind::PyInstance(rc) => {
-                    if !is_path_instance(&rc) {
+                    if !is_path_instance(rc) {
                         return Err(PyError::named(
                             "TypeError",
                             format!(
@@ -356,7 +356,7 @@ pyrust_module! {
                             ),
                         ));
                     }
-                    get_path(&Rc::clone(&rc), FN_NAME)?
+                    get_path(&Rc::clone(rc), FN_NAME)?
                 }
                 _ => return Err(PyError::named(
                     "TypeError",
@@ -440,7 +440,7 @@ pyrust_module! {
                 _ => name,
             }
         };
-        Ok(Value::string(stem.to_string()))
+        Ok(Value::string(stem))
     }
 
     /// `path.suffix()` — the final suffix including `.`, or `''` if none.
@@ -484,24 +484,24 @@ pyrust_module! {
         let mut components: Vec<Value> = Vec::new();
         if p.starts_with("//") && !p.starts_with("///") {
             // Double-slash UNC prefix — anchor is '//' per POSIX.1.
-            components.push(Value::string("//".to_string()));
+            components.push(Value::string("//"));
             for part in p[2..].split('/') {
                 if !part.is_empty() {
-                    components.push(Value::string(part.to_string()));
+                    components.push(Value::string(part));
                 }
             }
         } else if p.starts_with('/') {
-            components.push(Value::string("/".to_string()));
+            components.push(Value::string("/"));
             // Drop the leading slash then split.
             for part in p[1..].split('/') {
                 if !part.is_empty() {
-                    components.push(Value::string(part.to_string()));
+                    components.push(Value::string(part));
                 }
             }
         } else {
             for part in p.split('/') {
                 if !part.is_empty() {
-                    components.push(Value::string(part.to_string()));
+                    components.push(Value::string(part));
                 }
             }
         }
@@ -1167,7 +1167,7 @@ pyrust_module! {
         };
         // Compute the stem of the current name (same logic as path_stem).
         let stem = if name.chars().all(|c| c == '.') {
-            name.clone()
+            name
         } else {
             match name.rfind('.') {
                 Some(i) if i > 0 => name[..i].to_string(),

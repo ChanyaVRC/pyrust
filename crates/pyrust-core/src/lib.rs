@@ -835,7 +835,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             #[inline(always)]
             fn xxstep(acc: u64, lane: u64) -> u64 {
                 let acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
-                let acc = (acc << 31) | (acc >> 33); // rotl31
+                let acc = acc.rotate_left(31); // rotl31
                 acc.wrapping_mul(PRIME1)
             }
 
@@ -4117,9 +4117,7 @@ pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
     if base.is_some_and(|base| class_chain_contains_exception(&base)) {
         return true;
     }
-    extra_bases
-        .iter()
-        .any(|b| class_chain_contains_exception(b))
+    extra_bases.iter().any(class_chain_contains_exception)
 }
 
 /// Walk the class base chain and return `true` if any class in the chain has

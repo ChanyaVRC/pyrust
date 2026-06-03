@@ -249,7 +249,7 @@ fn deep_copy(
         ValueKind::Tuple(items) => {
             // Collect to owned Vec first so the borrow (&[Value]) is released
             // before we recursively call deep_copy (which may re-enter match).
-            let items_vec: Vec<Value> = items.iter().cloned().collect();
+            let items_vec: Vec<Value> = items.to_vec();
             // items is &[Value] — a raw reference, no Ref guard to drop.
             let mut new_items = Vec::with_capacity(items_vec.len());
             for item in items_vec {

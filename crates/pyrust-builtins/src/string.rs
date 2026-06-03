@@ -262,7 +262,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 } else {
                     // Use cesu8_codepoints so surrogate bytes don't reach chars().
                     // char::from_u32 returns None for surrogates; None → false → all() fails.
-                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_digit))
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_digit))
                 },
         )),
         "isalpha" => Ok(Value::bool_(
@@ -270,7 +270,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphabetic())
                 } else {
-                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_alpha))
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_alpha))
                 },
         )),
         "isalnum" => Ok(Value::bool_(
@@ -278,15 +278,15 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphanumeric())
                 } else {
-                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_alnum))
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_alnum))
                 },
         )),
         "isspace" => Ok(Value::bool_(
             !s.is_empty()
                 && if s.is_ascii() {
-                    s.bytes().all(|b| is_python_space_ascii(b))
+                    s.bytes().all(is_python_space_ascii)
                 } else {
-                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_space))
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_space))
                 },
         )),
         "isdecimal" => Ok(Value::bool_(
@@ -295,9 +295,8 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
                     cesu8_codepoints(s).all(|n| {
-                        char::from_u32(n).map_or(false, |c| {
-                            c.general_category() == GeneralCategory::DecimalNumber
-                        })
+                        char::from_u32(n)
+                            .is_some_and(|c| c.general_category() == GeneralCategory::DecimalNumber)
                     })
                 },
         )),
@@ -307,7 +306,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
                     cesu8_codepoints(s)
-                        .all(|n| char::from_u32(n).map_or(false, unicode_data::is_numeric))
+                        .all(|n| char::from_u32(n).is_some_and(unicode_data::is_numeric))
                 },
         )),
         "islower" => Ok(Value::bool_(str_islower(s))),
@@ -317,7 +316,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "isidentifier" => Ok(Value::bool_(str_isidentifier(s))),
         "isprintable" => Ok(Value::bool_(if s.is_ascii() {
             // Printable ASCII: 0x20 (space) through 0x7e (~). DEL (0x7f) is not printable.
-            s.bytes().all(|b| b >= 0x20 && b < 0x7f)
+            s.bytes().all(|b| (0x20..0x7f).contains(&b))
         } else {
             // Use cesu8_codepoints to handle surrogate bytes without invoking
             // chars(), which panics in debug builds on surrogate byte sequences.
@@ -529,7 +528,7 @@ fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
     // CPython coerces keepends via the standard truth protocol — any value is
     // accepted.  Delegate to Value::truthy() which covers all ValueKind arms
     // (including Dict, Set, BigInt, Range, Complex, BuiltinObject, etc.).
-    let keepends = args.first().map_or(false, |v| v.truthy());
+    let keepends = args.first().is_some_and(|v| v.truthy());
     let mut lines: Vec<Value> = Vec::new();
     let bytes = s.as_bytes();
     let len = bytes.len();
@@ -831,7 +830,7 @@ fn str_isidentifier(s: &str) -> bool {
     if !unicode_data::is_xid_start(first) {
         return false;
     }
-    codepoints.all(|n| char::from_u32(n).map_or(false, unicode_data::is_xid_continue))
+    codepoints.all(|n| char::from_u32(n).is_some_and(unicode_data::is_xid_continue))
 }
 
 /// ASCII whitespace per Python's `str.isspace()` / `Py_UNICODE_ISSPACE`. In
@@ -2066,7 +2065,7 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
             Some(v) => match v.kind() {
                 ValueKind::None => { /* delete */ }
                 ValueKind::Int(n) => {
-                    if n < 0 || n > 0x10FFFF {
+                    if !(0..=0x10FFFF).contains(&n) {
                         return Err(PyError::named(
                             "ValueError",
                             "character mapping must be in range(0x110000)".to_string(),
