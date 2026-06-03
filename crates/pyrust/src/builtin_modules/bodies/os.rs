@@ -988,17 +988,7 @@ thread_local! {
         for (short, py_full) in ENVIRON_METHODS {
             attrs.insert((*short).to_string(), Value::builtin_function(py_full));
         }
-        Rc::new(RefCell::new(PyClass {
-            name: "_Environ".to_string(),
-            qualname: "_Environ".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("_Environ", "_Environ", None, attrs)))
     };
 }
 
@@ -1112,17 +1102,12 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("os.terminal_size_repr"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "terminal_size".to_string(),
-            qualname: "os.terminal_size".to_string(),
-            base: None,
-            extra_bases: vec![],
+        Rc::new(RefCell::new(PyClass::new(
+            "terminal_size",
+            "os.terminal_size",
+            None,
             attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        )))
     };
 }
 
@@ -1143,17 +1128,12 @@ fn make_terminal_size(columns: i64, lines: i64) -> Value {
 
 thread_local! {
     static STAT_RESULT_CLASS: Rc<RefCell<PyClass>> = {
-        Rc::new(RefCell::new(PyClass {
-            name: "stat_result".to_string(),
-            qualname: "os.stat_result".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs: indexmap::IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new(
+            "stat_result",
+            "os.stat_result",
+            None,
+            indexmap::IndexMap::new(),
+        )))
     };
 }
 

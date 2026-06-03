@@ -6942,15 +6942,9 @@ impl Interpreter {
 
         let slots = make_class_extract_slots(&mut attrs)?;
         let class = Rc::new(RefCell::new(PyClass {
-            name: class_name,
-            qualname,
-            base: base.clone(),
             extra_bases: extra_bases_vec.clone(),
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
             slots,
+            ..PyClass::new(class_name, qualname, base.clone(), attrs)
         }));
         class_mro_items(&class).map(|_| ())?;
 

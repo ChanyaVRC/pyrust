@@ -1846,15 +1846,8 @@ pyrust_module! {
                 )),
             }
             let new_class = Rc::new(RefCell::new(PyClass {
-                qualname: name.clone(),
-                name,
-                base: base.clone(),
                 extra_bases: extra_bases.clone(),
-                attrs,
-                mutation_version: std::cell::Cell::new(0),
-                subclasses: std::cell::RefCell::new(vec![]),
-                metatype: None,
-                slots: None,
+                ..PyClass::new(name.clone(), name, base.clone(), attrs)
             }));
             if let Some(ref b) = base {
                 b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
@@ -5649,15 +5642,9 @@ pyrust_module! {
             }
         };
         let class = Rc::new(RefCell::new(PyClass {
-            name,
-            qualname,
-            base: base.clone(),
             extra_bases: extra_bases.clone(),
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
             metatype,
-            slots: None,
+            ..PyClass::new(name, qualname, base.clone(), attrs)
         }));
         // Register the new class as a direct subclass of each base so that
         // base.__subclasses__() includes it.

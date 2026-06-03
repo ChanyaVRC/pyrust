@@ -3300,17 +3300,12 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("builtins.TypeAliasType.__repr__"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "TypeAliasType".to_string(),
-            qualname: "TypeAliasType".to_string(),
-            base: None,
-            extra_bases: vec![],
+        Rc::new(RefCell::new(PyClass::new(
+            "TypeAliasType",
+            "TypeAliasType",
+            None,
             attrs,
-            mutation_version: Cell::new(0),
-            subclasses: RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        )))
     };
 
     /// Class singleton for `TypeVar` objects created by generic type params.
@@ -3320,17 +3315,7 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("builtins.TypeVar.__repr__"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "TypeVar".to_string(),
-            qualname: "TypeVar".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: Cell::new(0),
-            subclasses: RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("TypeVar", "TypeVar", None, attrs)))
     };
 }
 

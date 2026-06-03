@@ -283,17 +283,7 @@ thread_local! {
                 Box::leak(format!("object.{dunder}").into_boxed_str());
             attrs.insert((*dunder).to_string(), Value::builtin_function(qualified));
         }
-        Rc::new(RefCell::new(PyClass {
-            name: "object".to_string(),
-            qualname: "object".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("object", "object", None, attrs)))
     };
 
     /// Per-primitive `PyClass` singletons.  Issue #462 — `int`, `str`,
@@ -345,17 +335,12 @@ thread_local! {
             "__call__".to_string(),
             Value::builtin_function("type.__call__"),
         );
-        let cls = Rc::new(RefCell::new(PyClass {
-            name: "type".to_string(),
-            qualname: "type".to_string(),
-            base: Some(Rc::clone(&obj)),
-            extra_bases: vec![],
+        let cls = Rc::new(RefCell::new(PyClass::new(
+            "type",
+            "type",
+            Some(Rc::clone(&obj)),
             attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }));
+        )));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
     };
@@ -365,34 +350,24 @@ thread_local! {
     /// whose metatype is `type`, so `type(type(c.m)) is type` holds.
     /// Issue #1528: previously `type(c.m)` returned a `BuiltinFunction("method")`
     /// sentinel, so `type(type(c.m))` resolved to `builtin_function_or_method`.
-    static METHOD_TYPE: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
-        name: "method".to_string(),
-        qualname: "method".to_string(),
-        base: None,
-        extra_bases: vec![],
-        attrs: IndexMap::new(),
-        mutation_version: std::cell::Cell::new(0),
-        subclasses: std::cell::RefCell::new(vec![]),
-        metatype: None,
-        slots: None,
-    }));
+    static METHOD_TYPE: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass::new(
+        "method",
+        "method",
+        None,
+        IndexMap::new(),
+    )));
 
     /// Per-thread `PyClass` singleton for the `function` type.  In CPython,
     /// `type(lambda: None)` returns `<class 'function'>` — a proper class
     /// whose metatype is `type`, so `type(type(lambda: None)) is type` holds.
     /// Issue #1528: previously `type(f)` for a user-defined function returned
     /// a `BuiltinFunction("function")` sentinel.
-    static FUNCTION_TYPE: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
-        name: "function".to_string(),
-        qualname: "function".to_string(),
-        base: None,
-        extra_bases: vec![],
-        attrs: IndexMap::new(),
-        mutation_version: std::cell::Cell::new(0),
-        subclasses: std::cell::RefCell::new(vec![]),
-        metatype: None,
-        slots: None,
-    }));
+    static FUNCTION_TYPE: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass::new(
+        "function",
+        "function",
+        None,
+        IndexMap::new(),
+    )));
 
     /// Per-thread `PyClass` singleton for the `range` type.  In CPython,
     /// `range` is a proper class (`type(range(5)) is range`), not a builtin
@@ -401,17 +376,12 @@ thread_local! {
     /// in `register_abc_extra_bases`.  Issues #1793, #1800.
     static RANGE_CLASS: Rc<RefCell<PyClass>> = {
         let obj = OBJECT_CLASS.with(|c| Rc::clone(c));
-        let cls = Rc::new(RefCell::new(PyClass {
-            name: "range".to_string(),
-            qualname: "range".to_string(),
-            base: Some(Rc::clone(&obj)),
-            extra_bases: vec![],
-            attrs: IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }));
+        let cls = Rc::new(RefCell::new(PyClass::new(
+            "range",
+            "range",
+            Some(Rc::clone(&obj)),
+            IndexMap::new(),
+        )));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
     };
@@ -544,17 +514,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         // fresh `PyInstance` receiver and breaks the constructor signature
         // (`class S(int): pass; S(5)` → `int(PyInstance, 5)` argument
         // mismatch).  See Copilot review on #463.
-        let class = Rc::new(RefCell::new(PyClass {
-            name: name.to_string(),
-            qualname: name.to_string(),
-            base: base.clone(),
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }));
+        let class = Rc::new(RefCell::new(PyClass::new(name, name, base.clone(), attrs)));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
         }
@@ -2658,17 +2618,12 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     //                 ImportWarning, UnicodeWarning, BytesWarning, EncodingWarning
     //     SystemExit, GeneratorExit, KeyboardInterrupt (direct BaseException children)
     let mk = |name: &str, base: Option<Rc<RefCell<PyClass>>>| {
-        let class = Rc::new(RefCell::new(PyClass {
-            name: name.to_string(),
-            qualname: name.to_string(),
-            base: base.clone(),
-            extra_bases: vec![],
-            attrs: IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }));
+        let class = Rc::new(RefCell::new(PyClass::new(
+            name,
+            name,
+            base.clone(),
+            IndexMap::new(),
+        )));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
         }
@@ -2782,15 +2737,13 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     // ExceptionGroup uses multiple inheritance: primary base = BaseExceptionGroup,
     // extra base = Exception.  Build it manually so we can set extra_bases.
     let exception_group = Rc::new(RefCell::new(PyClass {
-        name: "ExceptionGroup".to_string(),
-        qualname: "ExceptionGroup".to_string(),
-        base: Some(Rc::clone(&base_exception_group)),
         extra_bases: vec![Rc::clone(&exception)],
-        attrs: IndexMap::new(),
-        mutation_version: std::cell::Cell::new(0),
-        subclasses: std::cell::RefCell::new(vec![]),
-        metatype: None,
-        slots: None,
+        ..PyClass::new(
+            "ExceptionGroup",
+            "ExceptionGroup",
+            Some(Rc::clone(&base_exception_group)),
+            IndexMap::new(),
+        )
     }));
     base_exception_group
         .borrow()

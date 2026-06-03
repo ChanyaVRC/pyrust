@@ -89,17 +89,12 @@ use pyrust_derive::pyrust_module;
 
 macro_rules! abc_class {
     ($name:expr) => {
-        Rc::new(RefCell::new(PyClass {
-            name: $name.to_string(),
-            qualname: $name.to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs: IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new(
+            $name,
+            $name,
+            None,
+            IndexMap::new(),
+        )))
     };
 }
 

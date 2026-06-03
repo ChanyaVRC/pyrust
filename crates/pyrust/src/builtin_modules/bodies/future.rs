@@ -41,17 +41,7 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("__future__._Feature.__repr__"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "_Feature".to_string(),
-            qualname: "_Feature".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("_Feature", "_Feature", None, attrs)))
     };
 }
 

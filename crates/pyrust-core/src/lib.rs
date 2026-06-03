@@ -1095,6 +1095,49 @@ pub struct PyClass {
     pub slots: Option<IndexSet<String>>,
 }
 
+impl Default for PyClass {
+    /// All-default `PyClass`: empty name/qualname, no bases, empty `attrs`,
+    /// fresh mutation version, no subclasses, default (`type`) metatype, no
+    /// `__slots__`.  Intended for struct-update construction
+    /// (`PyClass { name, attrs, ..Default::default() }`) so that adding a new
+    /// field only requires a default here, not an edit at every call site.
+    fn default() -> Self {
+        PyClass {
+            name: String::new(),
+            qualname: String::new(),
+            base: None,
+            extra_bases: Vec::new(),
+            attrs: IndexMap::new(),
+            mutation_version: Cell::new(0),
+            subclasses: RefCell::new(Vec::new()),
+            metatype: None,
+            slots: None,
+        }
+    }
+}
+
+impl PyClass {
+    /// Construct a `PyClass` from the four commonly-varying fields, defaulting
+    /// the rest (`extra_bases` empty, `metatype` `None`, `slots` `None`, fresh
+    /// `mutation_version`, empty `subclasses`).  Sites that need a non-default
+    /// `extra_bases` / `metatype` / `slots` use struct-update syntax on top of
+    /// [`PyClass::default`] instead.
+    pub fn new(
+        name: impl Into<String>,
+        qualname: impl Into<String>,
+        base: Option<Rc<RefCell<PyClass>>>,
+        attrs: IndexMap<String, Value>,
+    ) -> Self {
+        PyClass {
+            name: name.into(),
+            qualname: qualname.into(),
+            base,
+            attrs,
+            ..PyClass::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PyInstance {
     pub class: Rc<RefCell<PyClass>>,

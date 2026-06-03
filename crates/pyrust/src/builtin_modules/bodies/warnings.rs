@@ -91,17 +91,12 @@ fn matched_action(category_name: &str) -> String {
 
 thread_local! {
     static WARNING_MESSAGE_CLASS: Rc<RefCell<PyClass>> = {
-        Rc::new(RefCell::new(PyClass {
-            name: "WarningMessage".to_string(),
-            qualname: "WarningMessage".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs: IndexMap::new(),
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new(
+            "WarningMessage",
+            "WarningMessage",
+            None,
+            IndexMap::new(),
+        )))
     };
 }
 
@@ -146,17 +141,12 @@ thread_local! {
             "__exit__".to_string(),
             Value::builtin_function("warnings.CatchWarnings.__exit__"),
         );
-        Rc::new(RefCell::new(PyClass {
-            name: "catch_warnings".to_string(),
-            qualname: "catch_warnings".to_string(),
-            base: None,
-            extra_bases: vec![],
+        Rc::new(RefCell::new(PyClass::new(
+            "catch_warnings",
+            "catch_warnings",
+            None,
             attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        )))
     };
 }
 

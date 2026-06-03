@@ -1260,17 +1260,7 @@ thread_local! {
                 pyrust_builtins::property::property(getter, Value::none(), Value::none()),
             );
         }
-        Rc::new(RefCell::new(PyClass {
-            name: "Path".to_string(),
-            qualname: "Path".to_string(),
-            base: None,
-            extra_bases: vec![],
-            attrs,
-            mutation_version: std::cell::Cell::new(0),
-            subclasses: std::cell::RefCell::new(vec![]),
-            metatype: None,
-            slots: None,
-        }))
+        Rc::new(RefCell::new(PyClass::new("Path", "Path", None, attrs)))
     };
 
     /// The `PosixPath` class singleton — `base` points to `PATH_CLASS` so
@@ -1279,17 +1269,12 @@ thread_local! {
     /// instances the correct runtime type name (CPython parity on Linux).
     static POSIX_PATH_CLASS: Rc<RefCell<PyClass>> = {
         PATH_CLASS.with(|path_class| {
-            let posix = Rc::new(RefCell::new(PyClass {
-                name: "PosixPath".to_string(),
-                qualname: "PosixPath".to_string(),
-                base: Some(Rc::clone(path_class)),
-                extra_bases: vec![],
-                attrs: IndexMap::new(),
-                mutation_version: std::cell::Cell::new(0),
-                subclasses: std::cell::RefCell::new(vec![]),
-                metatype: None,
-                slots: None,
-            }));
+            let posix = Rc::new(RefCell::new(PyClass::new(
+                "PosixPath",
+                "PosixPath",
+                Some(Rc::clone(path_class)),
+                IndexMap::new(),
+            )));
             path_class.borrow().subclasses.borrow_mut().push(Rc::downgrade(&posix));
             posix
         })
