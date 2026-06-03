@@ -70,6 +70,55 @@ fn set_pos(inst: &Rc<RefCell<PyInstance>>, pos: i64) {
         .insert("_pos".to_string(), Value::int(pos));
 }
 
+// ── shared method prologue helpers ─────────────────────────────────────────────
+
+/// Resolve `self` and reject operations on a closed stream — the prologue
+/// shared by every read/write/seek-style method.
+fn open_self(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Rc<RefCell<PyInstance>>> {
+    let inst = expect_self(args, fn_name)?;
+    if is_closed(&inst) {
+        return Err(closed_error());
+    }
+    Ok(inst)
+}
+
+/// Slice off `self` and enforce the "takes at most 1 argument" arity used by
+/// `read` / `readline` / `readlines` / `truncate`.
+fn user_at_most_one<'a>(
+    args: &'a [ExpandedCallArg],
+    fn_name: &str,
+) -> Result<&'a [ExpandedCallArg]> {
+    let user = &args[1..];
+    if user.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes at most 1 argument"),
+        ));
+    }
+    Ok(user)
+}
+
+/// Parse the optional `size` argument of `read` / `readline`: `None`,
+/// negative, or omitted means "no limit"; bool/int give the limit.
+fn parse_optional_size(
+    user: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Option<usize>> {
+    match user.first().map(|a| a.value.kind()) {
+        None | Some(ValueKind::None) => Ok(None),
+        Some(ValueKind::Int(n)) if n < 0 => Ok(None),
+        Some(ValueKind::Int(n)) => Ok(Some(n as usize)),
+        Some(ValueKind::Bool(b)) => Ok(Some(b as usize)),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() size must be an integer"),
+        )),
+    }
+}
+
 // ── StringIO ─────────────────────────────────────────────────────────────────
 
 pyrust_module! {
@@ -125,25 +174,9 @@ pyrust_module! {
         /// `read([size=-1])` — read up to `size` characters from the current
         /// position.  If `size` is negative or omitted, read to end.
         fn read(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
-            let size: Option<usize> = match user.first().map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => None,
-                Some(ValueKind::Int(n)) if n < 0 => None,
-                Some(ValueKind::Int(n)) => Some(n as usize),
-                Some(ValueKind::Bool(b)) => Some(b as usize),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() size must be an integer"),
-                )),
-            };
+            let inst = open_self(args, FN_NAME)?;
+            let user = user_at_most_one(args, FN_NAME)?;
+            let size = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
             let buf = string_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -162,25 +195,9 @@ pyrust_module! {
         /// `readline([size=-1])` — read up to the next newline (inclusive)
         /// or `size` characters, whichever comes first.
         fn readline(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
-            let size_limit: Option<usize> = match user.first().map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => None,
-                Some(ValueKind::Int(n)) if n < 0 => None,
-                Some(ValueKind::Int(n)) => Some(n as usize),
-                Some(ValueKind::Bool(b)) => Some(b as usize),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() size must be an integer"),
-                )),
-            };
+            let inst = open_self(args, FN_NAME)?;
+            let user = user_at_most_one(args, FN_NAME)?;
+            let size_limit = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
             let buf = string_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -201,15 +218,8 @@ pyrust_module! {
 
         /// `readlines([hint])` — read all remaining lines into a list.
         fn readlines(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
+            let inst = open_self(args, FN_NAME)?;
+            user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = string_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -241,8 +251,7 @@ pyrust_module! {
         /// `write(s)` — write `s` at the current position, extending the
         /// buffer if needed.  Returns the number of characters written.
         fn write(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             if args.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -288,8 +297,7 @@ pyrust_module! {
         /// `getvalue()` — return the entire buffer contents regardless of
         /// current position.  `ValueError` if the stream is closed.
         fn getvalue(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             if args.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -306,8 +314,7 @@ pyrust_module! {
         /// offset=0 (jump to end) and whence=1 with offset=0 (no-op /
         /// current pos) — mirroring CPython's restrictions.
         fn seek(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             let user = &args[1..];
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
@@ -378,8 +385,7 @@ pyrust_module! {
 
         /// `tell()` — return the current stream position (character offset).
         fn tell(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             if args.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -394,15 +400,8 @@ pyrust_module! {
         /// characters.  The current position is unchanged.  Returns the
         /// new size.
         fn truncate(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
+            let inst = open_self(args, FN_NAME)?;
+            let user = user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = string_io_buf(&inst, FN_NAME)?;
             let chars: Vec<char> = buf.chars().collect();
@@ -447,8 +446,7 @@ pyrust_module! {
 
         /// `__enter__` — context manager support; returns `self`.
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             let _ = _interp;
             Ok(Value::py_instance(inst))
         }
@@ -512,25 +510,9 @@ pyrust_module! {
 
         /// `read([size=-1])` — read up to `size` bytes.
         fn read(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
-            let size: Option<usize> = match user.first().map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => None,
-                Some(ValueKind::Int(n)) if n < 0 => None,
-                Some(ValueKind::Int(n)) => Some(n as usize),
-                Some(ValueKind::Bool(b)) => Some(b as usize),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() size must be an integer"),
-                )),
-            };
+            let inst = open_self(args, FN_NAME)?;
+            let user = user_at_most_one(args, FN_NAME)?;
+            let size = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -547,25 +529,9 @@ pyrust_module! {
 
         /// `readline([size=-1])` — read up to the next `\n` byte (inclusive).
         fn readline(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
-            let size_limit: Option<usize> = match user.first().map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => None,
-                Some(ValueKind::Int(n)) if n < 0 => None,
-                Some(ValueKind::Int(n)) => Some(n as usize),
-                Some(ValueKind::Bool(b)) => Some(b as usize),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() size must be an integer"),
-                )),
-            };
+            let inst = open_self(args, FN_NAME)?;
+            let user = user_at_most_one(args, FN_NAME)?;
+            let size_limit = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -585,15 +551,8 @@ pyrust_module! {
 
         /// `readlines([hint])` — read all remaining lines into a list of bytes.
         fn readlines(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
+            let inst = open_self(args, FN_NAME)?;
+            user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -617,8 +576,7 @@ pyrust_module! {
 
         /// `write(b)` — write bytes at the current position.
         fn write(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             if args.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -658,8 +616,7 @@ pyrust_module! {
 
         /// `getvalue()` — return the full buffer regardless of position.
         fn getvalue(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             if args.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -674,8 +631,7 @@ pyrust_module! {
         /// `seek(pos[, whence=0])` — BytesIO supports all three whence modes
         /// with arbitrary offsets (unlike StringIO which restricts them).
         fn seek(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             let user = &args[1..];
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
@@ -725,8 +681,7 @@ pyrust_module! {
 
         /// `tell()` — return the current position (byte offset).
         fn tell(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             if args.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -739,15 +694,8 @@ pyrust_module! {
 
         /// `truncate([size=None])` — truncate to at most `size` bytes.
         fn truncate(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
-            let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 1 argument"),
-                ));
-            }
+            let inst = open_self(args, FN_NAME)?;
+            let user = user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
             let total = buf.len() as i64;
@@ -789,8 +737,7 @@ pyrust_module! {
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if is_closed(&inst) { return Err(closed_error()); }
+            let inst = open_self(args, FN_NAME)?;
             let _ = _interp;
             Ok(Value::py_instance(inst))
         }

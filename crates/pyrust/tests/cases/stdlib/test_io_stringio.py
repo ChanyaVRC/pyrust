@@ -106,3 +106,56 @@ except ValueError:
     pass
 
 print("io.BytesIO ok")
+
+# ── optional-size argument variants (read / readline) ───────────────────────────
+# None, negative, and omitted all mean "read to end"; bool/int give a limit.
+sio7 = io.StringIO("abcdef")
+assert sio7.read(None) == "abcdef"
+sio7.seek(0)
+assert sio7.read(-1) == "abcdef"
+sio7.seek(0)
+assert sio7.read(True) == "a"
+sio7.seek(0)
+assert sio7.read(3) == "abc"
+
+bio7 = io.BytesIO(b"abcdef")
+assert bio7.read(None) == b"abcdef"
+bio7.seek(0)
+assert bio7.read(-1) == b"abcdef"
+bio7.seek(0)
+assert bio7.read(True) == b"a"
+bio7.seek(0)
+assert bio7.read(3) == b"abc"
+
+# readline with a size limit
+assert io.StringIO("hello\nworld").readline(3) == "hel"
+assert io.BytesIO(b"hello\nworld").readline(3) == b"hel"
+
+# ── closed-file errors apply to every read/write/seek-style method ───────────────
+for make in (lambda: io.StringIO("x"), lambda: io.BytesIO(b"x")):
+    c = make()
+    c.close()
+    for op in (c.read, c.readline, c.readlines, c.tell, c.getvalue, c.truncate):
+        try:
+            op()
+            print("FAIL: expected ValueError on closed file")
+        except ValueError:
+            pass
+    for op, arg in ((c.write, "y" if isinstance(c, io.StringIO) else b"y"), (c.seek, 0)):
+        try:
+            op(arg)
+            print("FAIL: expected ValueError on closed file")
+        except ValueError:
+            pass
+
+# ── "takes at most 1 argument" arity guard ──────────────────────────────────────
+for make in (lambda: io.StringIO("x"), lambda: io.BytesIO(b"x")):
+    s = make()
+    for op in (s.read, s.readline, s.readlines, s.truncate):
+        try:
+            op(1, 2)
+            print("FAIL: expected TypeError for too many args")
+        except TypeError:
+            pass
+
+print("io optional-size / closed / arity ok")
