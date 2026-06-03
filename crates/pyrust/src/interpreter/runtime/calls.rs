@@ -2224,8 +2224,13 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        // Read func and source count; do NOT clone the sources Vec.
-        let (func, n_sources): (Value, usize) = {
+        // Snapshot func + source iterators with a SINGLE borrow+downcast.  The
+        // `func`/`sources` fields are immutable after construction (only `done`
+        // is mutated), so the clones — cheap Rc bumps — stay valid across the
+        // call_next / call_function_expanded callouts below.  The borrow is
+        // dropped before any callout so a re-entrant `next()` on the same map
+        // object can re-borrow the state.
+        let (func, sources): (Value, IterSrcBuf) = {
             let borrow = state_rc.borrow();
             let s = borrow
                 .downcast_ref::<MapIter>()
@@ -2233,18 +2238,14 @@ impl Interpreter {
             if s.done {
                 return Ok(None);
             }
-            (s.func.clone(), s.sources.len())
+            (s.func.clone(), s.sources.clone())
         };
-        // Advance each source iterator by one element.  Clone one Value at a
-        // time (cheap Rc bump) rather than snapshotting the whole sources Vec.
-        let mut row: Vec<Value> = Vec::with_capacity(n_sources);
-        for i in 0..n_sources {
-            let iter_val = {
-                let borrow = state_rc.borrow();
-                borrow.downcast_ref::<MapIter>().unwrap().sources[i].clone()
-            };
-            match self.call_next(&iter_val, None) {
-                Ok(v) => row.push(v),
+        // Advance each source iterator by one element into a stack-allocated arg
+        // buffer (no heap Vec for the common 1-/2-source case).
+        let mut args: ExpandedArgBuf = ExpandedArgBuf::with_capacity(sources.len());
+        for iter_val in &sources {
+            match self.call_next(iter_val, None) {
+                Ok(v) => args.push(ExpandedCallArg { name: None, value: v }),
                 Err(e) if e.class_name_is("StopIteration") => {
                     state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().done = true;
                     return Ok(None);
@@ -2252,8 +2253,6 @@ impl Interpreter {
                 Err(e) => return Err(e),
             }
         }
-        let args: Vec<ExpandedCallArg> =
-            row.into_iter().map(|v| ExpandedCallArg { name: None, value: v }).collect();
         let result = self.call_function_expanded(func, &args)?;
         Ok(Some(result))
     }
@@ -2270,19 +2269,23 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
+        // Snapshot func + source iterator ONCE with a single borrow+downcast.
+        // Both fields are immutable after construction (only `done` is mutated),
+        // so these clones — cheap Rc bumps — stay valid across the whole
+        // scan loop and every callout, avoiding a re-borrow/re-downcast/re-clone
+        // per candidate element.  The borrow is dropped before any callout so a
+        // re-entrant `next()` on the same filter object can re-borrow the state.
+        let (func_opt, iter_val): (Option<Value>, Value) = {
+            let borrow = state_rc.borrow();
+            let s = borrow.downcast_ref::<FilterIter>().ok_or_else(|| {
+                PyError::Runtime("step_filter_iter on non-FilterIter state".to_string())
+            })?;
+            if s.done {
+                return Ok(None);
+            }
+            (s.func.clone(), s.source.clone())
+        };
         loop {
-            // Snapshot source iterator and func; borrow released before
-            // call_next / call_function_expanded.
-            let (func_opt, iter_val): (Option<Value>, Value) = {
-                let borrow = state_rc.borrow();
-                let s = borrow.downcast_ref::<FilterIter>().ok_or_else(|| {
-                    PyError::Runtime("step_filter_iter on non-FilterIter state".to_string())
-                })?;
-                if s.done {
-                    return Ok(None);
-                }
-                (s.func.clone(), s.source.clone())
-            };
             // Advance the source by one element.
             let item = match self.call_next(&iter_val, None) {
                 Ok(v) => v,
@@ -2292,9 +2295,9 @@ impl Interpreter {
                 }
                 Err(e) => return Err(e),
             };
-            let keep = if let Some(func) = func_opt {
+            let keep = if let Some(func) = &func_opt {
                 let test = self.call_function_expanded(
-                    func,
+                    func.clone(),
                     &[ExpandedCallArg { name: None, value: item.clone() }],
                 )?;
                 self.truthy_value(&test)?
