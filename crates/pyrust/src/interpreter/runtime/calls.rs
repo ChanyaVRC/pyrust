@@ -2603,25 +2603,22 @@ impl Interpreter {
                 // runs; RegSlice (raw pointer + len) is used instead, removing
                 // the LLVM noalias constraint (issue #547).
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-                // Push a traceback frame so errors propagating out of this
-                // function body carry the correct `File / in <name>` entry.
-                // Cloning an `Arc<str>` is a cheap reference-count bump; no
-                // heap allocation per call.
-                let tb_filename = self
-                    .script_filename
-                    .clone()
-                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
-                pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
-                    filename: tb_filename,
-                    lineno: None,
-                    source_line: None,
-                    funcname: std::sync::Arc::from(function.name.as_str()),
-                });
                 let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
-                // Pop the frame, capturing the chain if an error occurred.
-                // `pop_traceback_frame(true)` snapshots the stack (including this
-                // frame) into CAPTURED_ERROR_FRAMES before removing this entry.
-                pyrust_core::pop_traceback_frame(vm_result.is_err());
+                // Lazy traceback: only build + record this frame's `FrameInfo`
+                // when the body actually errored.  The no-exception common path
+                // does no allocation and touches no traceback thread-local.
+                if vm_result.is_err() {
+                    let tb_filename = self
+                        .script_filename
+                        .clone()
+                        .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                    pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                        filename: tb_filename,
+                        lineno: None,
+                        source_line: None,
+                        funcname: std::sync::Arc::from(function.name.as_str()),
+                    });
+                }
                 self.vm_frame_views.pop();
 
                 let used_env = std::mem::replace(&mut self.env, previous_env);
@@ -2910,23 +2907,21 @@ impl Interpreter {
             // runs; RegSlice (raw pointer + len) is used instead, removing
             // the LLVM noalias constraint (issue #547).
             let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-            // Push a traceback frame so errors propagating out of this
-            // function body carry the correct `File / in <name>` entry.
-            // Cloning an `Arc<str>` is a cheap reference-count bump; no
-            // heap allocation per call.
-            let tb_filename = self
-                .script_filename
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
-            pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
-                filename: tb_filename,
-                lineno: None,
-                source_line: None,
-                funcname: std::sync::Arc::from(function.name.as_str()),
-            });
             let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
-            // Pop the frame, capturing the chain if an error occurred.
-            pyrust_core::pop_traceback_frame(vm_result.is_err());
+            // Lazy traceback: only build + record this frame's `FrameInfo`
+            // when the body actually errored (see the simple-call path above).
+            if vm_result.is_err() {
+                let tb_filename = self
+                    .script_filename
+                    .clone()
+                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                    filename: tb_filename,
+                    lineno: None,
+                    source_line: None,
+                    funcname: std::sync::Arc::from(function.name.as_str()),
+                });
+            }
             self.vm_frame_views.pop();
 
             let used_env = std::mem::replace(&mut self.env, previous_env);

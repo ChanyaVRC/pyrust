@@ -517,22 +517,6 @@ impl Interpreter {
         // pointer + len) is used instead, removing the LLVM noalias constraint
         // that made the VmFrameView dereferences UB (issue #547).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
-        // Push a traceback frame so that exceptions propagating out of the
-        // generator body carry the generator function's name in the chain
-        // (issue #908: the regular-call path in calls.rs does this for normal
-        // functions; the generator resume path was missing it).
-        // Cloning an `Arc<str>` is a cheap reference-count bump; no
-        // heap allocation per resume.
-        let tb_filename = self
-            .script_filename
-            .clone()
-            .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
-        pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
-            filename: tb_filename,
-            lineno: None,
-            source_line: None,
-            funcname: frame.fn_name.clone(),
-        });
         let result = self.run_bytecode_inner(
             &frame.code,
             regs_slice,
@@ -545,11 +529,21 @@ impl Interpreter {
             gen_active,
             gen_exc_saved_active,
         );
-        // Pop the traceback frame; capture the chain if an error occurred.
-        // On yield (Ok(Yielded)) the call succeeded from the traceback's
-        // perspective — the error has not propagated yet.
-        let is_err = matches!(result, Err(_));
-        pyrust_core::pop_traceback_frame(is_err);
+        // Lazy traceback: record the generator frame's `FrameInfo` only when an
+        // exception propagated out of the body (issue #908).  On yield
+        // (Ok(Yielded)) the body suspended successfully — nothing to record.
+        if result.is_err() {
+            let tb_filename = self
+                .script_filename
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+            pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                filename: tb_filename,
+                lineno: None,
+                source_line: None,
+                funcname: frame.fn_name.clone(),
+            });
+        }
         self.vm_frame_views.pop();
 
         // Restore env.
