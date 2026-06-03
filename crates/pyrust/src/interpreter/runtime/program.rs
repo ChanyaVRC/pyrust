@@ -143,7 +143,7 @@ impl Interpreter {
         seed_env!("__loader__", Value::none());
         seed_env!("__file__", Value::none());
         seed_env!("__cached__", Value::none());
-        seed_env!("__annotations__", Value::dict(IndexMap::new()));
+        seed_env!("__annotations__", Value::dict(PyDict::default()));
         seed_env!("__builtins__", builtins_val);
         // Mirror env values into module_globals_dict (issue #706: live globals dict).
         // Only insert keys not already present in the dict (REPL re-run safety).
@@ -238,12 +238,12 @@ impl Interpreter {
         // Issue #712: seed __annotations__ = {} in the module env so that module-level
         // annotated assignments can do LoadGlobal("__annotations__") and SetItem.
         {
-            use indexmap::IndexMap;
+            
             self.env
                 .borrow_mut()
                 .values
                 .entry("__annotations__".to_string())
-                .or_insert_with(|| crate::value::Value::dict(IndexMap::new()));
+                .or_insert_with(|| crate::value::Value::dict(PyDict::default()));
         }
         let vm_result = self.run_bytecode(&code, regs_slice);
         // Snapshot the traceback frame stack before the inner function frames

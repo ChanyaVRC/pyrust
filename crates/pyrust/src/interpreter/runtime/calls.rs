@@ -548,7 +548,7 @@ impl Interpreter {
                     .filter(|a| a.name.is_none())
                     .map(|a| a.value.clone())
                     .collect();
-                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                let mut kw: PyDict = PyDict::default();
                 for a in args {
                     if let Some(name) = &a.name {
                         kw.insert(PyKey::str_from(name.as_str()), a.value.clone());
@@ -574,7 +574,7 @@ impl Interpreter {
                     .map(|a| a.value.clone())
                     .ok_or_else(|| pyrust_core::type_err!("descriptor '{method}' of '{type_name}' object needs an argument"))?;
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
-                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                let mut kw: PyDict = PyDict::default();
                 for a in &args[1..] {
                     match &a.name {
                         Some(n) => { kw.insert(PyKey::str_from(n.as_str()), a.value.clone()); }
@@ -965,7 +965,7 @@ impl Interpreter {
         // construction entirely when all arguments are positional —
         // the common case for builtin bound methods.
         let has_kw = args.iter().any(|a| a.name.is_some());
-        let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+        let mut kw: PyDict = PyDict::default();
         if has_kw {
             for a in args {
                 match &a.name {
@@ -1665,8 +1665,8 @@ impl Interpreter {
                         // Collect keys before moving pos into bound_method_pos_buf
                         // so we can borrow &pos[0] without an extra clone.
                         let keys = self.collect_iterable(&pos[0])?;
-                        let mut map: indexmap::IndexMap<PyKey, Value> =
-                            indexmap::IndexMap::with_capacity(keys.len());
+                        let mut map: PyDict =
+                            PyDict::with_capacity_and_hasher(keys.len(), Default::default());
                         for key in &keys {
                             let py_key = self.value_to_pykey(key)?;
                             map.entry(py_key).or_insert_with(|| default_val.clone());
@@ -2703,7 +2703,7 @@ impl Interpreter {
                 pos_idx = positional_vals.len();
                 Value::tuple(rest)
             } else if param.is_kwargs {
-                let mut dict: indexmap::IndexMap<crate::value::PyKey, Value> = indexmap::IndexMap::new();
+                let mut dict: PyDict = PyDict::default();
                 for (k, v) in &keyword_vals {
                     if !consumed_keywords.contains(k)
                         && let Some(key) = Value::string(k.clone()).to_key() {
@@ -4214,7 +4214,7 @@ impl Interpreter {
         &mut self,
         method: &str,
         pos: &mut [Value],
-        kw: &mut IndexMap<PyKey, Value>,
+        kw: &mut PyDict,
     ) -> Result<()> {
         if method != "to_bytes" {
             return Ok(());
@@ -6428,7 +6428,7 @@ pub(crate) fn ascii_repr_interp(interp: &mut Interpreter, value: &Value) -> Resu
 fn str_merge_kwargs(
     method: &str,
     pos: &mut Vec<Value>,
-    kw: indexmap::IndexMap<PyKey, Value>,
+    kw: PyDict,
 ) -> Result<()> {
     match method {
         // split(sep=None, maxsplit=-1)
@@ -6719,7 +6719,7 @@ impl Interpreter {
                 is_positional_only: param_spec.is_positional_only[i],
             });
         }
-        let mut annotations_map = indexmap::IndexMap::new();
+        let mut annotations_map: PyDict = PyDict::default();
         for (i, key) in annotation_keys.iter().enumerate() {
             let val = vm_read(regs, annots_base + i as u32, num_locals)?;
             annotations_map.insert(PyKey::str_from(key.as_str()), val);
@@ -6870,7 +6870,7 @@ impl Interpreter {
             Value::string("__main__")
         });
         seed_class_reg(&mut class_regs, annotations_slot, || {
-            Value::dict(indexmap::IndexMap::new())
+            Value::dict(PyDict::default())
         });
         // __module__ and __annotations__ always flow into the attrs dict;
         // __qualname__ is intercepted in get_attr (issue #553) so it is not
@@ -7216,7 +7216,7 @@ impl Interpreter {
         receiver: Value,
         method: &str,
         mut pos: Vec<Value>,
-        kw: &IndexMap<PyKey, Value>,
+        kw: &PyDict,
     ) -> Result<Value> {
         // Issue #1909: container/sequence protocol dunders called directly via
         // the `obj.__getitem__(i)` method-call opcode (not through the
@@ -7372,7 +7372,7 @@ impl Interpreter {
         &mut self,
         receiver: &Value,
         pos: Vec<Value>,
-        kw: &IndexMap<PyKey, Value>,
+        kw: &PyDict,
     ) -> Result<Value> {
         // `list.sort` is keyword-only in CPython 3.12 — `sort(*, key=None,
         // reverse=False)`.  Any positional arg is a TypeError, and the list is
@@ -7465,7 +7465,7 @@ impl Interpreter {
         receiver: &Value,
         method: &str,
         pos: Vec<Value>,
-        kw: &IndexMap<PyKey, Value>,
+        kw: &PyDict,
     ) -> Result<Value> {
         match method {
             "format" => {
@@ -7550,16 +7550,16 @@ impl Interpreter {
                             self.call_seq_count(snapshot, &args, "list")
                         }
                     } else {
-                        let empty_kw = indexmap::IndexMap::new();
+                        let empty_kw = PyDict::default();
                         pyrust_builtins::list::call(prim_method, &backing, args, &empty_kw)
                     }
                 } else {
-                    let empty_kw = indexmap::IndexMap::new();
+                    let empty_kw = PyDict::default();
                     pyrust_builtins::list::call(prim_method, &backing, args, &empty_kw)
                 }
             }
             "dict" => {
-                let empty_kw = indexmap::IndexMap::new();
+                let empty_kw = PyDict::default();
                 self.call_dict_method(prim_method, backing, args, &empty_kw)
             }
             "set" => self.call_set_method(prim_method, backing, args),
@@ -7780,7 +7780,7 @@ impl Interpreter {
         // the hot path stays cheap.
         if obj_kind_tag != 0 {
             let receiver = regs[obj as usize].clone();
-            let empty_kw = IndexMap::new();
+            let empty_kw = PyDict::default();
             return self.dispatch_builtin_container_method(
                 obj_kind_tag,
                 receiver,

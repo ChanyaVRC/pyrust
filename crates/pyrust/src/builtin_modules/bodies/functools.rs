@@ -41,7 +41,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::interpreter::{Interpreter, lookup_class_attr, object_class_singleton};
-use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, StrKey, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, StrKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -125,7 +125,7 @@ pyrust_module! {
                 }
             };
             let mut bound_args: Vec<Value> = Vec::new();
-            let mut bound_kwargs: IndexMap<PyKey, Value> = IndexMap::new();
+            let mut bound_kwargs: PyDict = PyDict::default();
             for a in &user[1..] {
                 match &a.name {
                     Some(n) => {
@@ -348,7 +348,7 @@ pyrust_module! {
             let mut borrow = inst.borrow_mut();
             borrow
                 .attrs
-                .insert("_cache".to_string(), Value::dict(IndexMap::new()));
+                .insert("_cache".to_string(), Value::dict(PyDict::default()));
             borrow
                 .attrs
                 .insert("_order".to_string(), Value::list(Vec::new()));
@@ -768,7 +768,7 @@ fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
 fn read_partial_state(
     inst: &Rc<RefCell<PyInstance>>,
     fn_name: &str,
-) -> Result<(Value, Vec<Value>, IndexMap<PyKey, Value>)> {
+) -> Result<(Value, Vec<Value>, PyDict)> {
     let borrow = inst.borrow();
     let func = borrow
         .attrs
@@ -943,7 +943,7 @@ fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
         maxsize.map_or_else(Value::none, Value::int),
     );
     attrs.insert("_typed".to_string(), Value::bool_(typed));
-    attrs.insert("_cache".to_string(), Value::dict(IndexMap::new()));
+    attrs.insert("_cache".to_string(), Value::dict(PyDict::default()));
     attrs.insert("_order".to_string(), Value::list(Vec::new()));
     attrs.insert("_hits".to_string(), Value::int(0));
     attrs.insert("_misses".to_string(), Value::int(0));
@@ -1018,7 +1018,7 @@ fn cache_info_class(interp: &mut Interpreter) -> Result<Value> {
     if let Some(cls) = CACHE_INFO_CLASS.with(|c| c.borrow().clone()) {
         return Ok(cls);
     }
-    let ns = Value::dict(IndexMap::new());
+    let ns = Value::dict(PyDict::default());
     interp.exec_source(CACHE_INFO_SOURCE, Some(ns.clone()), None)?;
     let cls = ns
         .as_dict()
@@ -1112,7 +1112,7 @@ fn do_update_wrapper(
     if let Ok(dst) = interp.get_attr(wrapper, "__dict__") {
         let src = match interp.get_attr(wrapped, "__dict__") {
             Ok(d) => d,
-            Err(e) if e.class_name_is("AttributeError") => Value::dict(IndexMap::new()),
+            Err(e) if e.class_name_is("AttributeError") => Value::dict(PyDict::default()),
             Err(e) => return Err(e),
         };
         if let (Some(src_dict), Some(_)) = (src.as_dict(), dst.as_dict()) {
@@ -1254,7 +1254,7 @@ fn apply_total_ordering(
     // the ones not already defined directly onto the class (CPython's
     // `setattr(cls, opname, opfunc)`).
     let source = derivation_source(root);
-    let ns = Value::dict(IndexMap::new());
+    let ns = Value::dict(PyDict::default());
     interp.exec_source(source, Some(ns.clone()), None)?;
     for (opname, _) in convert_table(root) {
         if !ordering_op_is_root(class, opname) {

@@ -1212,7 +1212,7 @@ result = fact(10)
             "def merge(**kw): return kw\na = {'x': 1, 'y': 2}\nb = {'y': 99, 'z': 3}\nresult = merge(**a, **b)\n",
         );
         use crate::value::PyKey;
-        let mut expected = indexmap::IndexMap::new();
+        let mut expected = pyrust_core::PyDict::default();
         expected.insert(PyKey::str_from("x"), Value::int(1));
         expected.insert(PyKey::str_from("y"), Value::int(99));
         expected.insert(PyKey::str_from("z"), Value::int(3));

@@ -338,7 +338,7 @@ impl Interpreter {
                         // deleted dunders don't appear in __dict__.
                         let attrs_snapshot: HashMap<String, Value> =
                             module.borrow().attrs.clone();
-                        let mut d: IndexMap<PyKey, Value> = attrs_snapshot
+                        let mut d: PyDict = attrs_snapshot
                             .iter()
                             .filter(|(_, v)| !v.is_unset())
                             .map(|(k, v)| (PyKey::str_from(k), v.clone()))
@@ -439,7 +439,7 @@ impl Interpreter {
                         // Dict of defaults for keyword-only parameters.  `None`
                         // when there are no keyword-only defaults (CPython
                         // returns `None`, not an empty dict).
-                        let mut d: IndexMap<PyKey, Value> = IndexMap::new();
+                        let mut d: PyDict = PyDict::default();
                         for p in &func.params {
                             if p.is_keyword_only {
                                 if let Some(def) = &p.default {
@@ -943,7 +943,7 @@ impl Interpreter {
             if let Some(stored) = class.borrow().attrs.get("__annotations__").cloned() {
                 return Ok(stored);
             }
-            let empty = Value::dict(IndexMap::new());
+            let empty = Value::dict(PyDict::default());
             class
                 .borrow_mut()
                 .attrs
@@ -2084,7 +2084,7 @@ impl Interpreter {
                         Ok(())
                     } else if value.is_none() {
                         *func.annotations.borrow_mut() =
-                            Value::dict(indexmap::IndexMap::new());
+                            Value::dict(PyDict::default());
                         Ok(())
                     } else {
                         Err(pyrust_core::type_err!("__annotations__ must be set to a dict object"))
@@ -2165,7 +2165,7 @@ impl Interpreter {
                         // CPython allows `del f.__annotations__`; it resets the
                         // dict to a fresh empty dict (new object).
                         *func.annotations.borrow_mut() =
-                            Value::dict(indexmap::IndexMap::new());
+                            Value::dict(PyDict::default());
                         Ok(())
                     }
                     // CPython-matched behaviour for validated-but-unimplemented slots.
@@ -2811,7 +2811,7 @@ impl Interpreter {
 fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
     let mut slot = func.attrs.borrow_mut();
     if slot.is_none() {
-        *slot = Some(Rc::new(RefCell::new(Value::dict(IndexMap::new()))));
+        *slot = Some(Rc::new(RefCell::new(Value::dict(PyDict::default()))));
     }
     Rc::clone(slot.as_ref().unwrap())
 }
@@ -2868,7 +2868,7 @@ fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate
         "__kwdefaults__" => {
             // Collect defaults for keyword-only params.  Returns None if none
             // exist, matching CPython's `f.__kwdefaults__` semantics.
-            let kwdefaults: IndexMap<PyKey, Value> = function
+            let kwdefaults: PyDict = function
                 .params
                 .iter()
                 .filter(|p| p.is_keyword_only)

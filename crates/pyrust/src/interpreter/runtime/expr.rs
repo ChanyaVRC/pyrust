@@ -913,7 +913,7 @@ impl<F: Fn(&PyKey) -> bool> indexmap::Equivalent<PyKey> for ObjectBucketProbe<'_
 /// O(1) RC bump for `Object`/`None`); the caller recovers the entry on a hit
 /// via `get_full` (one O(bucket) probe).  See [`ObjectBucketProbe`].
 fn collect_object_bucket_keys_map(
-    dict: &indexmap::IndexMap<PyKey, Value>,
+    dict: &PyDict,
     probe_key: &PyKey,
     is_match: impl Fn(&PyKey) -> bool,
 ) -> Vec<PyKey> {
@@ -928,7 +928,7 @@ fn collect_object_bucket_keys_map(
 
 /// `IndexSet` counterpart of [`collect_object_bucket_keys_map`].
 fn collect_object_bucket_keys_set(
-    set: &indexmap::IndexSet<PyKey>,
+    set: &PySet,
     probe_key: &PyKey,
     is_match: impl Fn(&PyKey) -> bool,
 ) -> Vec<PyKey> {
@@ -1864,7 +1864,7 @@ impl Interpreter {
     /// scopes the dict borrow tightly without a whole-dict clone.
     pub(crate) fn dict_lookup_in(
         &mut self,
-        dict: &indexmap::IndexMap<PyKey, Value>,
+        dict: &PyDict,
         key: &PyKey,
     ) -> Result<Option<(usize, Value)>> {
         if let Some((idx, _, v)) = dict.get_full(key) {
@@ -1912,7 +1912,7 @@ impl Interpreter {
 
     /// Zero-allocation string key lookup in a dict receiver (issue #506).
     ///
-    /// Probes the `IndexMap<PyKey, Value>` using `StrKey`, which hashes
+    /// Probes the `PyDict` using `StrKey`, which hashes
     /// identically to `PyKey::Str` without constructing a `PyKey` (zero RC
     /// bump, zero allocation).  Use this in place of
     /// `dict_lookup(&PyKey::str_from(s))` whenever the lookup key is already
@@ -2015,7 +2015,7 @@ impl Interpreter {
     /// [`Self::set_lookup`] for new call sites.
     pub(crate) fn set_lookup_in(
         &mut self,
-        set: &indexmap::IndexSet<PyKey>,
+        set: &PySet,
         key: &PyKey,
     ) -> Result<Option<usize>> {
         if let Some(idx) = set.get_index_of(key) {
@@ -2070,7 +2070,7 @@ impl Interpreter {
     /// second one.
     pub(crate) fn dict_insert(
         &mut self,
-        dict: &mut indexmap::IndexMap<PyKey, Value>,
+        dict: &mut PyDict,
         key: PyKey,
         value: Value,
     ) -> Result<()> {
@@ -2122,7 +2122,7 @@ impl Interpreter {
     /// `dict_lookup_in`'s `__hash__`-then-`__eq__` scan).
     pub(crate) fn dict_extend_dedup(
         &mut self,
-        dict: &mut indexmap::IndexMap<PyKey, Value>,
+        dict: &mut PyDict,
         pairs: Vec<(PyKey, Value)>,
     ) -> Result<()> {
         let dest_has_object = dict.keys().any(|k| matches!(k, PyKey::Object { .. }));
@@ -2191,7 +2191,7 @@ impl Interpreter {
     /// duplicate.
     pub(crate) fn set_insert(
         &mut self,
-        set: &mut indexmap::IndexSet<PyKey>,
+        set: &mut PySet,
         key: PyKey,
     ) -> Result<()> {
         // Same fast pre-check as `dict_insert` (issue #934): for `PyKey::None`,
@@ -2387,7 +2387,7 @@ impl Interpreter {
                 return Ok(true);
             }
             let lhs_keys: Vec<PyKey> = lhs_rc.iter().cloned().collect();
-            let rhs_snap: indexmap::IndexSet<PyKey> = rhs_rc.iter().cloned().collect();
+            let rhs_snap: PySet = rhs_rc.iter().cloned().collect();
             let result = (|| -> Result<bool> {
                 for pk in lhs_keys {
                     if self.set_lookup_in(&rhs_snap, &pk)?.is_none() {
@@ -2522,7 +2522,7 @@ impl Interpreter {
         method: &str,
         receiver: Value,
         args: Vec<Value>,
-        kwargs: &IndexMap<PyKey, Value>,
+        kwargs: &PyDict,
     ) -> Result<Value> {
         match method {
             "get" | "__contains__" | "pop" | "setdefault" => {
@@ -2922,11 +2922,11 @@ impl Interpreter {
     }
 
     /// Materialise an arbitrary iterable operand into a deduplicated
-    /// `IndexSet<PyKey>`, dispatching user `__hash__`/`__eq__` so that two
+    /// `PySet`, dispatching user `__hash__`/`__eq__` so that two
     /// `__eq__`-equal instances collapse to a single entry (issue #1907).
-    fn materialize_set_operand(&mut self, arg: &Value) -> Result<indexmap::IndexSet<PyKey>> {
+    fn materialize_set_operand(&mut self, arg: &Value) -> Result<PySet> {
         let items = self.collect_iterable(arg)?;
-        let mut out = indexmap::IndexSet::new();
+        let mut out: PySet = PySet::default();
         for item in items {
             let pk = self.value_to_pykey(&item)?;
             self.set_insert(&mut out, pk)?;
@@ -3269,7 +3269,7 @@ impl Interpreter {
             "join",
             &receiver,
             &[iterable],
-            &indexmap::IndexMap::new(),
+            &PyDict::default(),
         )
     }
 
@@ -3517,7 +3517,7 @@ impl Interpreter {
                     // #1914: dedup via user `__eq__` for `PyKey::Object` keys.
                     // `dict_extend_dedup` keeps the raw fast path for the common
                     // all-primitive case; later values win on duplicate keys.
-                    let mut merged: IndexMap<PyKey, Value> = IndexMap::new();
+                    let mut merged: PyDict = PyDict::default();
                     self.dict_extend_dedup(&mut merged, lhs_entries)?;
                     self.dict_extend_dedup(&mut merged, rhs_entries)?;
                     return Ok(Value::dict(merged));
@@ -4095,7 +4095,7 @@ impl Interpreter {
                     self.dict_extend_value_dedup(left, entries)?;
                     return Ok(Some(left.clone()));
                 }
-                let empty_kw = indexmap::IndexMap::new();
+                let empty_kw = PyDict::default();
                 pyrust_builtins::dict::call("update", left, vec![right.clone()], &empty_kw)?;
                 return Ok(Some(left.clone()));
             }
@@ -4139,7 +4139,7 @@ impl Interpreter {
                                 self.dict_extend_value_dedup(&backing, entries)?;
                                 return Ok(Some(left.clone()));
                             }
-                            let empty_kw = indexmap::IndexMap::new();
+                            let empty_kw = PyDict::default();
                             pyrust_builtins::dict::call("update", &backing, vec![right.clone()], &empty_kw)?;
                             return Ok(Some(left.clone()));
                         }
@@ -5708,7 +5708,7 @@ impl Interpreter {
         }
     }
 
-    /// Coerce a set-algebra operand to its `(IndexSet<PyKey>, frozen)` items.
+    /// Coerce a set-algebra operand to its `(PySet, frozen)` items.
     ///
     /// Recognises `set` / `frozenset` / `PyInstance` subclasses thereof (via
     /// the free `set_items_from_value`) **and** the set-like dict views
@@ -5723,7 +5723,7 @@ impl Interpreter {
     pub(crate) fn coerce_set_operand(
         &mut self,
         v: &Value,
-    ) -> Option<Result<(indexmap::IndexSet<PyKey>, bool)>> {
+    ) -> Option<Result<(PySet, bool)>> {
         if let Some(items) = set_items_from_value(v) {
             return Some(Ok(items));
         }
@@ -5731,7 +5731,7 @@ impl Interpreter {
             // dict_keys: keys are already `PyKey`s in the backing IndexMap.
             Some(0) => {
                 let rc = pyrust_builtins::dict_views::as_dict_rc(v)?;
-                let keys: indexmap::IndexSet<PyKey> = rc.borrow().keys().cloned().collect();
+                let keys: PySet = rc.borrow().keys().cloned().collect();
                 Some(Ok((keys, false)))
             }
             // dict_items: each pair becomes a `(key, value)` tuple `PyKey`; the
@@ -5743,7 +5743,7 @@ impl Interpreter {
                     .iter()
                     .map(|(k, val)| (k.clone(), val.clone()))
                     .collect();
-                let mut out = indexmap::IndexSet::new();
+                let mut out: PySet = PySet::default();
                 for (k, val) in pairs {
                     let val_key = match self.value_to_pykey(&val) {
                         Ok(vk) => vk,
@@ -5759,7 +5759,7 @@ impl Interpreter {
     }
 
     /// Coerce an operand of a dict-view set operator (`&`/`|`/`-`/`^`) to its
-    /// `(IndexSet<PyKey>, frozen)` items (issue #1891).
+    /// `(PySet, frozen)` items (issue #1891).
     ///
     /// Unlike [`Self::coerce_set_operand`], when `allow_iterable` is set this
     /// accepts *any* iterable — list, tuple, str, generator, dict, … — exactly
@@ -5771,7 +5771,7 @@ impl Interpreter {
         &mut self,
         v: &Value,
         allow_iterable: bool,
-    ) -> Option<Result<(indexmap::IndexSet<PyKey>, bool)>> {
+    ) -> Option<Result<(PySet, bool)>> {
         if let Some(res) = self.coerce_set_operand(v) {
             return Some(res);
         }
@@ -5786,7 +5786,7 @@ impl Interpreter {
             Ok(items) => items,
             Err(e) => return Some(Err(e)),
         };
-        let mut out = indexmap::IndexSet::new();
+        let mut out: PySet = PySet::default();
         for item in items {
             match self.value_to_pykey(&item) {
                 Ok(k) => {
@@ -6592,7 +6592,7 @@ fn is_setlike_view(v: &Value) -> bool {
 /// Extract a set's items and frozen flag from a value that is a `set`,
 /// `frozenset`, or a `PyInstance` subclass backed by either.  Returns
 /// `None` when the value is none of those.
-fn set_items_from_value(v: &Value) -> Option<(indexmap::IndexSet<PyKey>, bool)> {
+fn set_items_from_value(v: &Value) -> Option<(PySet, bool)> {
     if let ValueKind::Set(s) = v.kind() {
         return Some((s.clone(), false));
     }
@@ -6620,7 +6620,7 @@ fn set_items_from_value(v: &Value) -> Option<(indexmap::IndexSet<PyKey>, bool)> 
 /// whose membership/equality requires `__hash__`/`__eq__` dispatch rather than
 /// raw `IndexSet` identity comparison (issue #1907).  All-primitive sets take
 /// the fast raw path.
-fn set_has_object_key(s: &indexmap::IndexSet<PyKey>) -> bool {
+fn set_has_object_key(s: &PySet) -> bool {
     s.iter().any(|k| matches!(k, PyKey::Object { .. }))
 }
 
@@ -6732,15 +6732,15 @@ fn set_binary_op(
 // `set_binary_op` above still calls them; they live in the same `include!` scope.
 
 /// Shared set-algebra core for [`set_binary_op`].  Computes `lhs OP rhs` over
-/// already-coerced `(IndexSet<PyKey>, frozen)` operands and packages the result.
+/// already-coerced `(PySet, frozen)` operands and packages the result.
 ///
 /// `force_set` forces a plain `set` result regardless of the operands' frozen
 /// flags — used for dict-view operators, which always return `set` (issue
 /// #1891); otherwise a `frozenset` operand promotes the result to `frozenset`.
 fn set_binary_op_from_items(
     interp: &mut Interpreter,
-    lhs_items: (indexmap::IndexSet<PyKey>, bool),
-    rhs_items: (indexmap::IndexSet<PyKey>, bool),
+    lhs_items: (PySet, bool),
+    rhs_items: (PySet, bool),
     op: SetOp,
     force_set: bool,
 ) -> Option<Result<Value>> {
@@ -6750,8 +6750,8 @@ fn set_binary_op_from_items(
     // `IndexSet` identity comparison is exact (issue #1907).  Most sets are
     // primitive, so keep this allocation-cheap path with no `__eq__` dispatch.
     let needs_eq = set_has_object_key(&a) || set_has_object_key(&b);
-    let result: Result<indexmap::IndexSet<PyKey>> = if !needs_eq {
-        let mut out = indexmap::IndexSet::new();
+    let result: Result<PySet> = if !needs_eq {
+        let mut out: PySet = PySet::default();
         match op {
             SetOp::Or => {
                 for k in a.iter().chain(b.iter()) {
@@ -6790,8 +6790,8 @@ fn set_binary_op_from_items(
         // Slow path: at least one operand holds user instances.  Membership
         // (`contains`) and insertion (`insert`) go through `set_lookup_in` /
         // `set_insert`, which dispatch user `__hash__`-then-`__eq__`.
-        (|| -> Result<indexmap::IndexSet<PyKey>> {
-            let mut out = indexmap::IndexSet::new();
+        (|| -> Result<PySet> {
+            let mut out: PySet = PySet::default();
             match op {
                 SetOp::Or => {
                     for k in a.iter().chain(b.iter()) {

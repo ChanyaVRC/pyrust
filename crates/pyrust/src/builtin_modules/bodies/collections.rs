@@ -38,8 +38,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
     NativeIterFrame, invoke_class_method, lookup_class_attr,
 };
-use crate::value::{InstanceAttrs, PyInstance, PyKey, Value, ValueKind, key_repr};
-use indexmap::IndexMap;
+use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, Value, ValueKind, key_repr};
 use pyrust_derive::pyrust_module;
 
 /// Attribute name under which `Counter` and `defaultdict` keep their backing
@@ -83,7 +82,7 @@ pyrust_module! {
                     ),
                 ));
             }
-            let mut counts: IndexMap<PyKey, Value> = IndexMap::new();
+            let mut counts: PyDict = PyDict::default();
             if let Some(arg) = positional.first() {
                 counter_tally_into(_interp, &mut counts, &arg.value, FN_NAME, 1)?;
             }
@@ -437,7 +436,7 @@ pyrust_module! {
             attrs.attrs.insert("default_factory".to_string(), factory);
             attrs
                 .attrs
-                .insert(COUNTER_BACKING.to_string(), Value::dict(IndexMap::new()));
+                .insert(COUNTER_BACKING.to_string(), Value::dict(PyDict::default()));
             Ok(Value::none())
         }
 
@@ -1357,7 +1356,7 @@ fn expect_self_one_arg<'a>(
 fn read_counts(
     args: &[ExpandedCallArg],
     fn_name: &str,
-) -> Result<IndexMap<PyKey, Value>> {
+) -> Result<PyDict> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
     match borrow.attrs.get(COUNTER_BACKING) {
@@ -1371,13 +1370,13 @@ fn read_counts(
                 ),
             )),
         },
-        None => Ok(IndexMap::new()),
+        None => Ok(PyDict::default()),
     }
 }
 
 /// Write `counts` back to `self`'s backing dict.  Used by any method that
 /// mutates the underlying tally (the `__init__` path inserts directly).
-fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: IndexMap<PyKey, Value>) {
+fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: PyDict) {
     inst.borrow_mut()
         .attrs
         .insert(COUNTER_BACKING.to_string(), Value::dict(counts));
@@ -1390,7 +1389,7 @@ fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: IndexMap<PyKey, Value>) 
 fn read_items(
     args: &[ExpandedCallArg],
     fn_name: &str,
-) -> Result<IndexMap<PyKey, Value>> {
+) -> Result<PyDict> {
     let inst = expect_self(args, fn_name)?;
     let borrow = inst.borrow();
     match borrow.attrs.get(COUNTER_BACKING) {
@@ -1404,11 +1403,11 @@ fn read_items(
                 ),
             )),
         },
-        None => Ok(IndexMap::new()),
+        None => Ok(PyDict::default()),
     }
 }
 
-fn store_items(inst: &Rc<RefCell<PyInstance>>, items: IndexMap<PyKey, Value>) {
+fn store_items(inst: &Rc<RefCell<PyInstance>>, items: PyDict) {
     inst.borrow_mut()
         .attrs
         .insert(COUNTER_BACKING.to_string(), Value::dict(items));
@@ -1439,7 +1438,7 @@ fn require_key(
 /// against it cannot alias the live store.
 fn map_get_eq(
     interp: &mut crate::Interpreter,
-    map: &IndexMap<PyKey, Value>,
+    map: &PyDict,
     key: &PyKey,
 ) -> Result<Option<Value>> {
     Ok(interp.dict_lookup_in(map, key)?.map(|(_, v)| v))
@@ -1448,7 +1447,7 @@ fn map_get_eq(
 /// `__eq__`-aware `contains_key` against an owned snapshot map (issue #1919).
 fn map_contains_eq(
     interp: &mut crate::Interpreter,
-    map: &IndexMap<PyKey, Value>,
+    map: &PyDict,
     key: &PyKey,
 ) -> Result<bool> {
     Ok(interp.dict_lookup_in(map, key)?.is_some())
@@ -1459,7 +1458,7 @@ fn map_contains_eq(
 /// `PyKey::Object`.  Delegates to `Interpreter::dict_insert`.
 fn map_insert_eq(
     interp: &mut crate::Interpreter,
-    map: &mut IndexMap<PyKey, Value>,
+    map: &mut PyDict,
     key: PyKey,
     value: Value,
 ) -> Result<()> {
@@ -1529,7 +1528,7 @@ fn apply_delta(
 /// before the mapping is walked.
 fn counter_tally_into(
     interp: &mut crate::Interpreter,
-    counts: &mut IndexMap<PyKey, Value>,
+    counts: &mut PyDict,
     other: &Value,
     fn_name: &str,
     sign: i64,
@@ -1596,7 +1595,7 @@ fn counter_tally_into(
 /// applies (`Counter(a=True)` → `{'a': True}`, issue #930).
 fn counter_apply_kwargs(
     interp: &mut crate::Interpreter,
-    counts: &mut IndexMap<PyKey, Value>,
+    counts: &mut PyDict,
     kwargs: &[&ExpandedCallArg],
     sign: i64,
 ) -> Result<()> {
@@ -1696,7 +1695,7 @@ impl CounterOp {
 /// and only "accepts" `|` because Counter inherits `dict.__or__` (a
 /// path we can't reproduce without dict subclassing).  Routing dict
 /// through here would diverge from CPython parity.
-fn counts_of(other: &Value) -> Option<IndexMap<PyKey, Value>> {
+fn counts_of(other: &Value) -> Option<PyDict> {
     let ValueKind::PyInstance(inst) = other.kind() else {
         return None;
     };
@@ -1707,9 +1706,9 @@ fn counts_of(other: &Value) -> Option<IndexMap<PyKey, Value>> {
     match borrow.attrs.get(COUNTER_BACKING) {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Some(map.clone()),
-            _ => Some(IndexMap::new()),
+            _ => Some(PyDict::default()),
         },
-        None => Some(IndexMap::new()),
+        None => Some(PyDict::default()),
     }
 }
 
@@ -1719,11 +1718,11 @@ fn counts_of(other: &Value) -> Option<IndexMap<PyKey, Value>> {
 /// return a fresh Counter.
 fn merge_counts(
     interp: &mut crate::Interpreter,
-    lhs: &IndexMap<PyKey, Value>,
-    rhs: &IndexMap<PyKey, Value>,
+    lhs: &PyDict,
+    rhs: &PyDict,
     op: CounterOp,
-) -> Result<IndexMap<PyKey, Value>> {
-    let mut out: IndexMap<PyKey, Value> = IndexMap::new();
+) -> Result<PyDict> {
+    let mut out: PyDict = PyDict::default();
     // Walk LHS first so the output preserves LHS insertion order for
     // shared keys — matches CPython, where `(c + d).keys()` lists
     // c-only and shared keys in c's order, then d-only keys.

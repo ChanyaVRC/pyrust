@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use pyrust_core::{
-    PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name, py_value_display_name,
+    PyDict, PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name,
+    py_value_display_name,
 };
 
 /// Canonical list of method names dispatched by `call`.
@@ -59,12 +60,7 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
-pub fn call(
-    method: &str,
-    receiver: &Value,
-    args: &[Value],
-    kwargs: &IndexMap<PyKey, Value>,
-) -> Result<Value> {
+pub fn call(method: &str, receiver: &Value, args: &[Value], kwargs: &PyDict) -> Result<Value> {
     let bytes: &[u8] = match receiver.kind() {
         ValueKind::Bytes(rc) => rc.as_slice(),
         _ => {
@@ -84,12 +80,7 @@ pub fn call(
 /// reuse bytes read-method implementations without constructing a temporary
 /// `Value::bytes`.  Results that produce new bytes values (upper, lower, etc.)
 /// return `Value::bytes`; the bytearray module wraps those into bytearray.
-pub fn call_on_slice(
-    method: &str,
-    bytes: &[u8],
-    args: &[Value],
-    kwargs: &IndexMap<PyKey, Value>,
-) -> Result<Value> {
+pub fn call_on_slice(method: &str, bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
     match method {
         "hex" => bytes_hex(bytes, args),
         "decode" => bytes_decode(bytes, args, kwargs),
@@ -343,7 +334,7 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // decode
 // ---------------------------------------------------------------------------
 
-fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
+fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
     // Signature: decode(encoding='utf-8', errors='strict')
     //
     // CPython checks the total argument count before individual duplicate checks.
@@ -1763,11 +1754,7 @@ fn bytes_removesuffix(bytes: &[u8], args: &[Value]) -> Result<Value> {
 /// and position, an unknown keyword, or more than two positionals all raise
 /// `TypeError`.  Error messages use the bare method name (`split()` /
 /// `rsplit()`), matching CPython's `Objects/bytesobject.c`.
-fn merge_split_kwargs(
-    method: &str,
-    args: &[Value],
-    kwargs: &IndexMap<PyKey, Value>,
-) -> Result<Vec<Value>> {
+fn merge_split_kwargs(method: &str, args: &[Value], kwargs: &PyDict) -> Result<Vec<Value>> {
     merge_split_kwargs_iter(
         method,
         args,
@@ -1889,7 +1876,7 @@ fn merge_single_kwarg(
     method: &str,
     keyword: &str,
     args: &[Value],
-    kwargs: &IndexMap<PyKey, Value>,
+    kwargs: &PyDict,
 ) -> Result<Vec<Value>> {
     merge_single_kwarg_iter(
         method,
@@ -2432,7 +2419,7 @@ fn bytes_zfill(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // translate
 // ---------------------------------------------------------------------------
 
-fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
+fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
     // CPython signature: bytes.translate(table, /, delete=b'')
     // table may be None or a 256-byte mapping (bytes).
     // When table is None: just delete bytes in the delete set.

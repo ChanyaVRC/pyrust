@@ -1,5 +1,4 @@
-use indexmap::IndexMap;
-use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind, compare_values_via_registry};
+use pyrust_core::{PyDict, PyError, Result, StrKey, Value, ValueKind, compare_values_via_registry};
 
 use crate::mutable_sequence as ms;
 use crate::sequence;
@@ -26,12 +25,7 @@ pub fn requires_interpreter(method: &str) -> bool {
     matches!(method, "sort" | "index" | "count" | "remove")
 }
 
-pub fn call(
-    method: &str,
-    receiver: &Value,
-    args: Vec<Value>,
-    kwargs: &IndexMap<PyKey, Value>,
-) -> Result<Value> {
+pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -> Result<Value> {
     match method {
         // Read-only sequence operations — borrow scoped to the call.
         "index" => receiver
@@ -67,12 +61,12 @@ pub fn call(
     }
 }
 
-fn sort(receiver: &Value, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
+fn sort(receiver: &Value, args: &[Value], kwargs: &PyDict) -> Result<Value> {
     let reverse_flag = extract_reverse(args, kwargs)?;
     sort_by_cmp(receiver, reverse_flag)
 }
 
-fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bool> {
+fn extract_reverse(args: &[Value], kwargs: &PyDict) -> Result<bool> {
     // StrKey probe (issue #506): zero-alloc borrowed-str lookup — no heap
     // allocation on every list.sort() call.
     Ok(

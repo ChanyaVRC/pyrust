@@ -3110,7 +3110,7 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
         PyKey::FrozenSet(items) => {
-            let mut set = indexmap::IndexSet::new();
+            let mut set: PySet = PySet::default();
             for k in items {
                 set.insert(k);
             }
@@ -3145,7 +3145,7 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
 /// The slice is read-only here.
 fn merge_frame_view_into_dict(
     view: &VmFrameView,
-    dict: &mut indexmap::IndexMap<PyKey, Value>,
+    dict: &mut PyDict,
 ) {
     // Stable iteration order: walk the fastlocal slot table sorted by
     // slot index, mirroring the compiler's name-allocation order.
@@ -3203,8 +3203,8 @@ fn merge_frame_view_into_dict(
 /// when no frame is published (e.g. evaluating in a non-VM context).
 pub(crate) fn snapshot_current_locals(
     interp: &Interpreter,
-) -> indexmap::IndexMap<PyKey, Value> {
-    let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+) -> PyDict {
+    let mut dict: PyDict = PyDict::default();
     match interp.vm_frame_views.last() {
         Some(view) if view.kind == FrameKind::Script => {
             // Module scope: include the module env (built-in

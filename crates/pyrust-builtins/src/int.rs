@@ -1,6 +1,5 @@
-use indexmap::IndexMap;
 use pyrust_core::{
-    PyBigInt, PyBigIntSign, PyError, PyKey, PyToPrimitive, Result, Value, ValueKind,
+    PyBigInt, PyBigIntSign, PyDict, PyError, PyKey, PyToPrimitive, Result, Value, ValueKind,
 };
 
 /// Canonical list of method names dispatched by `call`.
@@ -25,12 +24,7 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
-pub fn call(
-    method: &str,
-    receiver: &Value,
-    args: &[Value],
-    kw: &IndexMap<PyKey, Value>,
-) -> Result<Value> {
+pub fn call(method: &str, receiver: &Value, args: &[Value], kw: &PyDict) -> Result<Value> {
     match method {
         "conjugate" => {
             if !kw.is_empty() {
@@ -202,7 +196,7 @@ pub fn call(
 }
 
 /// Implements `int.to_bytes(length=1, byteorder='big', *, signed=False)`.
-fn int_to_bytes(receiver: &Value, args: &[Value], kw: &IndexMap<PyKey, Value>) -> Result<Value> {
+fn int_to_bytes(receiver: &Value, args: &[Value], kw: &PyDict) -> Result<Value> {
     if args.len() > 2 {
         return Err(PyError::named(
             "TypeError",
@@ -476,7 +470,7 @@ fn bigint_to_bytes(n: &PyBigInt, length: usize, big_endian: bool, signed: bool) 
 /// Implements `int.from_bytes(bytes, byteorder='big', *, signed=False)`.
 /// Called both as classmethod (`int.from_bytes(...)`) and as instance method
 /// (`(5).from_bytes(...)`); the receiver is always ignored.
-pub fn int_from_bytes(args: &[Value], kw: &IndexMap<PyKey, Value>) -> Result<Value> {
+pub fn int_from_bytes(args: &[Value], kw: &PyDict) -> Result<Value> {
     if args.len() > 2 {
         return Err(PyError::named(
             "TypeError",

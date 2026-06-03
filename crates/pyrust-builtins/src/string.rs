@@ -1,7 +1,7 @@
-use indexmap::IndexMap;
 use pyrust_core::{
-    PyError, PyKey, Result, Value, ValueKind, builtin_type_name, cesu8_codepoints, cp_is_printable,
-    expect_arg_count, extract_fill_char, extract_int, extract_optional_int, py_value_display_name,
+    PyDict, PyError, PyKey, Result, Value, ValueKind, builtin_type_name, cesu8_codepoints,
+    cp_is_printable, expect_arg_count, extract_fill_char, extract_int, extract_optional_int,
+    py_value_display_name,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -1949,7 +1949,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
         ));
     }
 
-    let mut table: IndexMap<PyKey, Value> = IndexMap::new();
+    let mut table: PyDict = PyDict::default();
 
     if args.len() == 1 {
         // 1-arg form: x must be a dict

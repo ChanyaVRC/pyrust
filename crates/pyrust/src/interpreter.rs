@@ -13,8 +13,8 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, InstanceAttrs, PyBigInt, PyBigIntSign, PyClass, PyInstance, PyKey,
-    PyModule, PyPow, PyToPrimitive, PyZero, StrKey, UserFunction, UserFunctionKind,
+    EnvRef, Environment, InstanceAttrs, PyBigInt, PyBigIntSign, PyClass, PyDict, PyInstance, PyKey,
+    PyModule, PyPow, PySet, PyToPrimitive, PyZero, StrKey, UserFunction, UserFunctionKind,
     UserFunctionParam, Value, ValueKind, intern_string, intern_string_value, range_len,
 };
 
@@ -349,7 +349,7 @@ impl Default for Interpreter {
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),
             exc_classes: ExcClasses::uninitialized(),
-            module_globals_dict: Value::dict(IndexMap::new()),
+            module_globals_dict: Value::dict(PyDict::default()),
             globals_accessed: false,
             global_env_version: Cell::new(0),
             push_exc_ctx_depth: 0,

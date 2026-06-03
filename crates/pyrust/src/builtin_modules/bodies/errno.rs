@@ -9,8 +9,7 @@
 //
 // Reference: <https://docs.python.org/3/library/errno.html>
 
-use crate::value::{PyKey, Value};
-use indexmap::IndexMap;
+use crate::value::{PyDict, PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 /// Build the `errorcode` dict: maps int error-code → canonical name string.
@@ -164,7 +163,7 @@ fn make_errorcode() -> Value {
         (131, "ENOTRECOVERABLE"),
         (132, "ERFKILL"),
     ];
-    let mut map: IndexMap<PyKey, Value> = IndexMap::new();
+    let mut map: PyDict = PyDict::default();
     for (code, name) in entries {
         map.insert(PyKey::Int(*code), Value::string(*name));
     }

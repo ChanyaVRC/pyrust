@@ -9,10 +9,9 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use indexmap::IndexMap;
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyKey, Result, Value, key_repr};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyDict, Result, Value, key_repr};
 
-pub type DictRc = Rc<RefCell<IndexMap<PyKey, Value>>>;
+pub type DictRc = Rc<RefCell<PyDict>>;
 
 pub struct DictView {
     pub items: DictRc,

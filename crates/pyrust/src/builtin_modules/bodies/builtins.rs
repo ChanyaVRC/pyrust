@@ -35,7 +35,7 @@ use crate::interpreter::{
     unicode_exc_set_attrs,
     value_to_float, value_type_name_str,
 };
-use crate::value::{InstanceAttrs, PyBigInt, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
+use crate::value::{InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -1914,7 +1914,7 @@ pyrust_module! {
                 ))
             }
             ValueKind::PyModule(module) => {
-                let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                let mut dict: PyDict = PyDict::default();
                 for (k, v) in module.borrow().attrs.iter() {
                     // Skip Value::unset() tombstones (deletion markers for
                     // synthetic dunders written by delete_attr).
@@ -3425,10 +3425,10 @@ pyrust_module! {
     fn set(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
-            0 => Ok(Value::set(indexmap::IndexSet::new())),
+            0 => Ok(Value::set(PySet::default())),
             1 => {
                 let items = _interp.collect_iterable(&args[0].value)?;
-                let mut set = indexmap::IndexSet::new();
+                let mut set: PySet = PySet::default();
                 for item in items {
                     let key = _interp.value_to_pykey(&item)?;
                     _interp.set_insert(&mut set, key)?;
@@ -3452,14 +3452,14 @@ pyrust_module! {
     fn frozenset(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
-            0 => Ok(pyrust_builtins::frozenset::frozenset(indexmap::IndexSet::new())),
+            0 => Ok(pyrust_builtins::frozenset::frozenset(PySet::default())),
             1 => {
                 // frozenset(frozenset_instance) returns the same object (per CPython).
                 if let Some(rc) = pyrust_builtins::frozenset::as_items(&args[0].value) {
                     return Ok(pyrust_builtins::frozenset::frozenset_rc(rc));
                 }
                 let items = _interp.collect_iterable(&args[0].value)?;
-                let mut set = indexmap::IndexSet::new();
+                let mut set: PySet = PySet::default();
                 for item in items {
                     let key = _interp.value_to_pykey(&item)?;
                     _interp.set_insert(&mut set, key)?;
@@ -4028,8 +4028,8 @@ pyrust_module! {
             ));
         }
 
-        let mut result: indexmap::IndexMap<PyKey, Value> =
-            indexmap::IndexMap::with_capacity(kw_pairs.len());
+        let mut result: PyDict =
+            PyDict::with_capacity_and_hasher(kw_pairs.len(), Default::default());
 
         // Process the optional positional argument.
         if let Some(arg) = pos_args.first() {
@@ -5642,10 +5642,10 @@ pyrust_module! {
             }
         };
         let backing = match rest {
-            [] => pyrust_builtins::frozenset::frozenset(indexmap::IndexSet::new()),
+            [] => pyrust_builtins::frozenset::frozenset(PySet::default()),
             [single] => {
                 let items = _interp.collect_iterable(&single.value)?;
-                let mut set = indexmap::IndexSet::new();
+                let mut set: PySet = PySet::default();
                 for item in items {
                     let key = _interp.value_to_pykey(&item)?;
                     _interp.set_insert(&mut set, key)?;
@@ -6598,8 +6598,8 @@ pyrust_module! {
             .unwrap_or_else(Value::none);
 
         let keys = _interp.collect_iterable(&iterable)?;
-        let mut map: indexmap::IndexMap<PyKey, Value> =
-            indexmap::IndexMap::with_capacity(keys.len());
+        let mut map: PyDict =
+            PyDict::with_capacity_and_hasher(keys.len(), Default::default());
         for key in keys {
             let py_key = _interp.value_to_pykey(&key)?;
             // #1914: `dict_insert` dedups `PyKey::Object` keys via user `__eq__`
