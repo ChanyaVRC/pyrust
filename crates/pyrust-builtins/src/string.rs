@@ -1203,35 +1203,58 @@ fn pykey_type_name(k: &PyKey) -> std::borrow::Cow<'static, str> {
 }
 
 /// Build the joined string from an iterator that yields each element as a
-/// validated `&str`. Validation happens in the first pass (so a non-str element
-/// raises before any work), then the result is allocated exactly once with the
-/// precise capacity and each element pushed in directly — no owned `String` per
-/// element. The closure is called per element to keep the collection's borrow
-/// guard (`kind()` returns a `Ref`) alive across both passes.
+/// validated `&str`. The single pass validates every element (so a non-str
+/// element raises before any work) and stashes the borrowed slices, summing
+/// their byte lengths. The result is then filled directly into the string's
+/// backing buffer via `string_from_fill` — no intermediate `String`, so the
+/// joined bytes are touched exactly once (the copy) instead of three times
+/// (push into a `String`, an `is_ascii` rescan, then the final memcpy).
 fn join_borrowed<'a, I>(sep: &str, parts: I) -> Result<Value>
 where
-    I: ExactSizeIterator<Item = Result<&'a str>> + Clone,
+    I: ExactSizeIterator<Item = Result<&'a str>>,
 {
     let n = parts.len();
     if n == 0 {
         return Ok(Value::string(String::new()));
     }
-    // First pass: validate every element and sum the byte lengths.
+    // Validate every element up front, stashing the borrowed slice and summing
+    // byte lengths.  Borrowing into a Vec keeps the build pass infallible.
+    let mut slices: Vec<&str> = Vec::with_capacity(n);
     let mut body_len = 0usize;
-    for part in parts.clone() {
-        body_len += part?.len();
+    for part in parts {
+        let s = part?;
+        body_len += s.len();
+        slices.push(s);
     }
     let total = body_len + sep.len() * (n - 1);
-    // Second pass: push directly into the single result allocation. The
-    // elements already validated above, so the `?` here cannot fail.
-    let mut out = String::with_capacity(total);
-    for (i, part) in parts.enumerate() {
-        if i != 0 {
-            out.push_str(sep);
-        }
-        out.push_str(part?);
-    }
-    Ok(Value::string(out))
+    // For short results the ASCII scan is cache-hot and benefits later index /
+    // find / slice ops, so compute it eagerly during the copy.  For large
+    // results that scan would roughly double the bytes touched, so leave the
+    // flag uncomputed (`None`) and let `str_is_ascii` resolve it lazily if ever
+    // queried.  256 bytes keeps the common small join eager.
+    let eager_ascii = total <= 256;
+    let sep_ascii = sep.is_ascii();
+    // SAFETY: every slice is a validated `&str` and `sep` is a `&str`, so the
+    // bytes written are valid UTF-8, and we write exactly `total` bytes.
+    Ok(unsafe {
+        Value::string_from_fill(total, |buf| {
+            let mut off = 0usize;
+            let mut all_ascii = sep_ascii;
+            for (i, s) in slices.iter().enumerate() {
+                if i != 0 {
+                    buf[off..off + sep.len()].copy_from_slice(sep.as_bytes());
+                    off += sep.len();
+                }
+                let b = s.as_bytes();
+                buf[off..off + b.len()].copy_from_slice(b);
+                off += b.len();
+                if eager_ascii {
+                    all_ascii &= s.is_ascii();
+                }
+            }
+            eager_ascii.then_some(all_ascii)
+        })
+    })
 }
 
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
