@@ -2669,9 +2669,73 @@ impl Interpreter {
                         function.name,
                         total_positional_given,));
             }
-            let mut bound_args: Vec<Option<Value>> = vec![None; function.params.len()];
+            // Tier-0: register-VM path — fetch compiled bytecode up front so we
+            // can bind arguments *directly* into the callee's new frame register
+            // file (like CPython's fastlocals), skipping the per-call
+            // `Vec<Option<Value>>` allocation + option-wrapping (#2123).
+            let Some(code) = self.get_or_compile_bytecode(&function) else {
+                // All user functions must have precompiled bytecode.
+                return Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)));
+            };
+            let num_regs = code.num_regs as usize;
+            let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+
+            // Create a local env when the function uses globals, nonlocals, or
+            // cell vars.  Determined here (before arg binding) so cell-var
+            // parameters can be written straight into the env rather than
+            // staged through an intermediate buffer.
+            let needs_local_env = !function.global_names.is_empty()
+                || !function.nonlocal_names.is_empty()
+                || !code.cell_vars.is_empty();
+            let local_env = if needs_local_env {
+                let env = self.alloc_env(Some(Rc::clone(&function.env)));
+                {
+                    let mut e = env.borrow_mut();
+                    e.local_names = Rc::clone(&function.local_names);
+                    e.global_names = Rc::clone(&function.global_names);
+                    e.nonlocal_names = Rc::clone(&function.nonlocal_names);
+                }
+                Some(env)
+            } else {
+                None
+            };
+
+            let nparams = function.params.len();
+            // Per-param "already bound" flags (stack-allocated for typical
+            // arity — replaces the heap `Vec<Option<Value>>` whose `Some`
+            // discriminant previously doubled as this flag).
+            let mut bound: smallvec::SmallVec<[bool; 16]> = smallvec![false; nparams];
+            // Routes one bound value to its compile-time destination: a frame
+            // register (the common case) or — for cell-var params under a local
+            // env — an env entry by name.  Marks the param bound.
+            macro_rules! bind_param {
+                ($param_index:expr, $value:expr) => {{
+                    let pi = $param_index;
+                    let val = $value;
+                    bound[pi] = true;
+                    match function.param_binds[pi] {
+                        pyrust_core::ParamBind::Reg(reg) => {
+                            if reg as usize >= num_regs {
+                                return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
+                                        function.params[pi].name, reg, num_regs));
+                            }
+                            regs[reg as usize] = val;
+                        }
+                        pyrust_core::ParamBind::Cell => {
+                            // Only reachable under `needs_local_env`.
+                            if let Some(env) = &local_env {
+                                env.borrow_mut()
+                                    .values
+                                    .insert(function.params[pi].name.clone(), val);
+                            }
+                        }
+                        pyrust_core::ParamBind::None => {}
+                    }
+                }};
+            }
+
             for (index, value) in bound_prefix.iter().enumerate() {
-                bound_args[index] = Some(value.clone());
+                bind_param!(index, value.clone());
             }
             let mut positional_index = bound_prefix.len();
             let mut posonly_violations: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
@@ -2704,20 +2768,20 @@ impl Interpreter {
                         posonly_violations.push(name.as_str());
                         continue;
                     }
-                    if bound_args[param_index].is_some() {
+                    if bound[param_index] {
                         return Err(pyrust_core::type_err!("{}() got multiple values for argument '{}'",
                                 function.name, name));
                     }
-                    bound_args[param_index] = Some(value);
+                    bind_param!(param_index, value);
                 } else {
                     // Skip already-bound slots and keyword-only params.
-                    while positional_index < bound_args.len()
-                        && (bound_args[positional_index].is_some()
+                    while positional_index < nparams
+                        && (bound[positional_index]
                             || function.params[positional_index].is_keyword_only)
                     {
                         positional_index += 1;
                     }
-                    if positional_index >= bound_args.len()
+                    if positional_index >= nparams
                         || function.params[positional_index].is_keyword_only
                     {
                         let given_word =
@@ -2742,7 +2806,7 @@ impl Interpreter {
                                 function.name,
                                 total_positional_given,));
                     }
-                    bound_args[positional_index] = Some(value);
+                    bind_param!(positional_index, value);
                     positional_index += 1;
                 }
             }
@@ -2754,19 +2818,20 @@ impl Interpreter {
             if let Some(name) = first_unknown_keyword {
                 return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'", function.name, name));
             }
-            // Resolve defaults: fill any still-empty bound_args slots in-place.
+            // Resolve defaults: bind any still-unbound params straight into their
+            // destination register/cell.
             // Collect all missing required positional and keyword-only args before
             // raising, so the error groups them all (CPython 3.12 parity).
             let mut missing_positional: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
             let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
-            for (index, param) in function.params.iter().enumerate() {
-                if bound_args[index].is_none() {
-                    if let Some(default) = param.default.clone() {
-                        bound_args[index] = Some(default);
-                    } else if param.is_keyword_only {
-                        missing_kwonly.push(&param.name);
+            for index in 0..nparams {
+                if !bound[index] {
+                    if let Some(default) = function.params[index].default.clone() {
+                        bind_param!(index, default);
+                    } else if function.params[index].is_keyword_only {
+                        missing_kwonly.push(&function.params[index].name);
                     } else {
-                        missing_positional.push(&param.name);
+                        missing_positional.push(&function.params[index].name);
                     }
                 }
             }
@@ -2775,11 +2840,9 @@ impl Interpreter {
             // argument: 'x'" rather than the bare "__new__()".
             check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
 
-            // Tier-0: register-VM path — try compiled bytecode before any env allocation.
-            if let Some(code) = self.get_or_compile_bytecode(&function) {
-                let num_regs = code.num_regs as usize;
-                let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
-
+            // Arguments are already bound directly into `regs` / `local_env`
+            // above (#2123).  Run the register-VM path.
+            {
                 let _depth_guard = CallDepthGuard::enter();
                 if call_depth() > max_call_depth() {
                     let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
@@ -2796,62 +2859,11 @@ impl Interpreter {
                     return Err(PyError::Raised(exc));
                 }
 
-                // Create a local env when the function uses globals, nonlocals, or cell vars.
-                let needs_local_env = !function.global_names.is_empty()
-                    || !function.nonlocal_names.is_empty()
-                    || !code.cell_vars.is_empty();
-
-                // Bind params: move each value from bound_args into a register or env
-                // cell — one pass, zero extra clones.
-                let previous_env = if needs_local_env {
-                    let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
-                    {
-                        let mut e = local_env.borrow_mut();
-                        e.local_names = Rc::clone(&function.local_names);
-                        e.global_names = Rc::clone(&function.global_names);
-                        e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                        for ((param, bind), slot) in function
-                            .params
-                            .iter()
-                            .zip(function.param_binds.iter())
-                            .zip(bound_args.iter_mut())
-                        {
-                            let val = slot.take().unwrap();
-                            match *bind {
-                                pyrust_core::ParamBind::Cell => {
-                                    e.values.insert(param.name.clone(), val);
-                                }
-                                pyrust_core::ParamBind::Reg(reg) => {
-                                    if reg as usize >= num_regs {
-                                        return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
-                                                param.name, reg, num_regs));
-                                    }
-                                    regs[reg as usize] = val;
-                                }
-                                pyrust_core::ParamBind::None => {}
-                            }
-                        }
-                    }
-                    std::mem::replace(&mut self.env, local_env)
-                } else {
-                    for ((param, bind), slot) in function
-                        .params
-                        .iter()
-                        .zip(function.param_binds.iter())
-                        .zip(bound_args.iter_mut())
-                    {
-                        let val = slot.take().unwrap();
-                        // `needs_local_env` is false here, so no parameter is a
-                        // cell var; only `Reg` / `None` are possible.
-                        if let pyrust_core::ParamBind::Reg(reg) = *bind {
-                            if reg as usize >= num_regs {
-                                return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
-                                        param.name, reg, num_regs));
-                            }
-                            regs[reg as usize] = val;
-                        }
-                    }
-                    std::mem::replace(&mut self.env, Rc::clone(&function.env))
+                // Swap in the callee's env (the local env built above, or the
+                // function's captured env when no local env is needed).
+                let previous_env = match local_env {
+                    Some(env) => std::mem::replace(&mut self.env, env),
+                    None => std::mem::replace(&mut self.env, Rc::clone(&function.env)),
                 };
 
                 // Self-reference for recursive calls (only if not a cell var) —
@@ -2958,9 +2970,6 @@ impl Interpreter {
                 let value = vm_result?;
                 return Ok(value);
             }
-
-            // All user functions must have precompiled bytecode
-            return Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)));
         }
 
         // Variadic path (*args / **kwargs) lives in a helper to keep this
