@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyClass, PyError, PyKey, Result, Value, ValueKind,
+    BuiltinState, BuiltinTypeOps, PyClass, PyDict, PyError, PyKey, Result, Value, ValueKind,
 };
 
 pub const TYPE_NAME: &str = "mappingproxy";
@@ -206,7 +206,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                     ));
                 }
                 let class = cls.borrow();
-                let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+                let mut dict: PyDict = PyDict::default();
                 for (k, v) in class.attrs.iter() {
                     dict.insert(PyKey::str_from(k), v.clone());
                 }

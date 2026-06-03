@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 pyrust-core = { path = "../pyrust-core" }
 indexmap = "2"
+rustc-hash = "2"
 unicode-properties = "0.1"
 unicode_names2 = "2.0.0"

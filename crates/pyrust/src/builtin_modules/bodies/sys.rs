@@ -14,7 +14,7 @@ use crate::interpreter::{
     get_call_depth, get_recursion_limit, instantiate_exception, lookup_name_in_module,
     reject_keyword_args_expanded, set_recursion_limit, value_type_name_str,
 };
-use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -52,7 +52,7 @@ pyrust_module! {
         // Starts empty; keeping it in sync with actual imports is out of
         // scope for this implementation.
         // <https://docs.python.org/3/library/sys.html#sys.modules>
-        "modules"      => Value::dict(indexmap::IndexMap::new()),
+        "modules"      => Value::dict(PyDict::default()),
         // CPython: sys.executable — string giving the absolute path of the
         // Python interpreter binary.  pyrust uses an empty string because
         // there is no single well-defined binary path.

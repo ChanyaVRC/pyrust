@@ -15,7 +15,24 @@ use std::sync::{
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
+use rustc_hash::FxBuildHasher;
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
+
+/// Build-hasher used by the `dict` and `set` backing stores.
+///
+/// An interpreter's internal dicts carry no DoS-resistance requirement (CPython
+/// itself uses a fast, non-cryptographic hash), so the stdlib's SipHash default
+/// is pure overhead on every insert/lookup/set-op.  `FxBuildHasher`
+/// (`rustc_hash`) replaces it with a fast multiply-xor hash.  This only changes
+/// bucket placement — `IndexMap`/`IndexSet` keep their insertion-ordered Vec, so
+/// dict/set iteration order is unaffected.  `PyKey`'s `Hash` impl is unchanged.
+pub type PyHasher = FxBuildHasher;
+
+/// Insertion-ordered backing store for a Python `dict`.
+pub type PyDict = IndexMap<PyKey, Value, PyHasher>;
+
+/// Insertion-ordered backing store for a Python `set` / `frozenset`.
+pub type PySet = IndexSet<PyKey, PyHasher>;
 
 pub use num_bigint::BigInt as PyBigInt;
 pub use num_bigint::Sign as PyBigIntSign;
@@ -1700,7 +1717,7 @@ pub struct ListInner {
 /// [`ListInner`]; `items` is an [`IndexSet`] (insertion-ordered) so iteration
 /// order matches the rest of the interpreter's set surface.
 pub struct SetInner {
-    pub items: RefCell<IndexSet<PyKey>>,
+    pub items: RefCell<PySet>,
     pub obj_id: u64,
 }
 
@@ -1710,7 +1727,7 @@ pub struct SetInner {
 
 pub enum Opaque {
     PyBigInt(Rc<BigInt>),
-    Dict(Rc<RefCell<IndexMap<PyKey, Value>>>),
+    Dict(Rc<RefCell<PyDict>>),
     /// Mutable `set` storage.  Shared via `Rc` so `Value::clone` produces an
     /// alias rather than a deep copy, matching Python's reference semantics.
     /// See [`SetInner`] and issue #305.
@@ -1892,10 +1909,10 @@ pub enum ValueKind<'a> {
     /// Borrowed view of a dict.  Like [`Self::List`], holds a
     /// `Ref<'_, IndexMap<...>>` guard so the `RefCell` borrow check
     /// catches concurrent mutation (#450).
-    Dict(std::cell::Ref<'a, IndexMap<PyKey, Value>>),
+    Dict(std::cell::Ref<'a, PyDict>),
     /// Borrowed view of a set.  Same `Ref` guard rationale as
     /// [`Self::List`] / [`Self::Dict`] (#450).
-    Set(std::cell::Ref<'a, IndexSet<PyKey>>),
+    Set(std::cell::Ref<'a, PySet>),
     Range {
         start: i64,
         stop: i64,
@@ -2362,11 +2379,11 @@ impl Value {
         unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, obj_id) }
     }
 
-    pub fn dict(d: IndexMap<PyKey, Value>) -> Self {
+    pub fn dict(d: PyDict) -> Self {
         Value::opaque(Opaque::Dict(Rc::new(RefCell::new(d))))
     }
 
-    pub fn set(s: IndexSet<PyKey>) -> Self {
+    pub fn set(s: PySet) -> Self {
         Value::opaque(Opaque::Set(Rc::new(SetInner {
             items: RefCell::new(s),
             obj_id: next_obj_id(),
@@ -2431,7 +2448,7 @@ impl Value {
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
                 attrs: RefCell::new(None),
-                annotations: RefCell::new(Value::dict(IndexMap::new())),
+                annotations: RefCell::new(Value::dict(PyDict::default())),
                 params: Vec::new(),
                 param_binds: Rc::new(Vec::new()),
                 self_bind: None,
@@ -2950,7 +2967,7 @@ impl Value {
     /// **For new code prefer [`Self::dict_with`] / [`Self::dict_with_mut`]
     /// (#448)** — these scope the borrow to the operation and prevent the
     /// aliasing class of bugs by construction.
-    pub fn as_dict(&self) -> Option<&IndexMap<PyKey, Value>> {
+    pub fn as_dict(&self) -> Option<&PyDict> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
                 Some(unsafe { &*rc.as_ref().as_ptr() })
@@ -2969,7 +2986,7 @@ impl Value {
     /// SAFETY CONTRACT: see [`Value::as_list`].  Set storage is `Rc<SetInner>`
     /// after #305; same Rc-aliasing concerns apply.  Prefer
     /// [`Self::set_with`] / [`Self::set_with_mut`] (#448) for new code.
-    pub fn as_set(&self) -> Option<&IndexSet<PyKey>> {
+    pub fn as_set(&self) -> Option<&PySet> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Set(rc) = o {
                 Some(unsafe { &*rc.items.as_ptr() })
@@ -2982,7 +2999,7 @@ impl Value {
     // `as_set_mut` removed in #448 — use `Value::set_with_mut`,
     // `set_add`, `set_discard`, `set_clear`, `set_extend` instead.
 
-    pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
+    pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<PyDict>>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
                 Some(rc)
@@ -3036,7 +3053,7 @@ impl Value {
     }
 
     /// Borrow the dict's `Rc<RefCell<IndexMap<...>>>`.
-    fn dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
+    fn dict_rc(&self) -> Option<&Rc<RefCell<PyDict>>> {
         self.get_dict_rc()
     }
 
@@ -3158,13 +3175,13 @@ impl Value {
     }
 
     /// Scoped read access to the set.
-    pub fn set_with<R>(&self, f: impl FnOnce(&IndexSet<PyKey>) -> R) -> Option<R> {
+    pub fn set_with<R>(&self, f: impl FnOnce(&PySet) -> R) -> Option<R> {
         let inner = self.set_inner_rc()?;
         Some(f(&inner.items.borrow()))
     }
 
     /// Scoped mutable access to the set.
-    pub fn set_with_mut<R>(&self, f: impl FnOnce(&mut IndexSet<PyKey>) -> R) -> Option<R> {
+    pub fn set_with_mut<R>(&self, f: impl FnOnce(&mut PySet) -> R) -> Option<R> {
         let inner = self.set_inner_rc()?;
         Some(f(&mut inner.items.borrow_mut()))
     }
@@ -3205,13 +3222,13 @@ impl Value {
     }
 
     /// Scoped read access to the dict.
-    pub fn dict_with<R>(&self, f: impl FnOnce(&IndexMap<PyKey, Value>) -> R) -> Option<R> {
+    pub fn dict_with<R>(&self, f: impl FnOnce(&PyDict) -> R) -> Option<R> {
         let rc = self.dict_rc()?;
         Some(f(&rc.borrow()))
     }
 
     /// Scoped mutable access to the dict.
-    pub fn dict_with_mut<R>(&self, f: impl FnOnce(&mut IndexMap<PyKey, Value>) -> R) -> Option<R> {
+    pub fn dict_with_mut<R>(&self, f: impl FnOnce(&mut PyDict) -> R) -> Option<R> {
         let rc = self.dict_rc()?;
         Some(f(&mut rc.borrow_mut()))
     }
@@ -5561,7 +5578,7 @@ mod tests {
             module: RefCell::new(Value::string("__main__".to_string())),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
-            annotations: RefCell::new(Value::dict(IndexMap::new())),
+            annotations: RefCell::new(Value::dict(PyDict::default())),
             params: Vec::new(),
             param_binds: Rc::new(Vec::new()),
             self_bind: None,
@@ -5650,7 +5667,7 @@ mod tests {
         // Same Rc-sharing invariant as list, exercised through set's mutating
         // accessor.
         let a = Value::set({
-            let mut s = IndexSet::new();
+            let mut s = PySet::default();
             s.insert(PyKey::Int(1));
             s
         });
@@ -5668,7 +5685,7 @@ mod tests {
         // the original Value, the clone (alias) sees it.  This pins both
         // directions of the Rc-shared backing post-#305.
         let a = Value::set({
-            let mut s = IndexSet::new();
+            let mut s = PySet::default();
             s.insert(PyKey::Int(1));
             s
         });
@@ -5684,7 +5701,7 @@ mod tests {
     #[test]
     fn set_clone_preserves_identity() {
         let a = Value::set({
-            let mut s = IndexSet::new();
+            let mut s = PySet::default();
             s.insert(PyKey::Int(1));
             s
         });
@@ -5692,7 +5709,7 @@ mod tests {
         assert_eq!(a.value_id(), b.value_id());
 
         let c = Value::set({
-            let mut s = IndexSet::new();
+            let mut s = PySet::default();
             s.insert(PyKey::Int(1));
             s
         });
@@ -5704,7 +5721,7 @@ mod tests {
         // Dict already used `Rc<RefCell<...>>` shared storage; #305 added an
         // `id()` surface for it via `value_id()`.  Pin the invariant.
         let a = Value::dict({
-            let mut m = IndexMap::new();
+            let mut m = PyDict::default();
             m.insert(PyKey::str_from("k"), Value::int(1));
             m
         });
@@ -5712,7 +5729,7 @@ mod tests {
         assert_eq!(a.value_id(), b.value_id());
 
         let c = Value::dict({
-            let mut m = IndexMap::new();
+            let mut m = PyDict::default();
             m.insert(PyKey::str_from("k"), Value::int(1));
             m
         });

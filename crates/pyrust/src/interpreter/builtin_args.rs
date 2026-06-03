@@ -59,11 +59,10 @@ use std::borrow::Cow;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use indexmap::{IndexMap, IndexSet};
 use smallvec::SmallVec;
 
 use crate::error::{PyError, Result};
-use crate::value::{PyBigInt, PyKey, PyToPrimitive, Value, ValueKind};
+use crate::value::{PyBigInt, PyToPrimitive, Value, ValueKind};
 
 use super::ExpandedCallArg;
 
@@ -470,7 +469,7 @@ pub(crate) struct PyDict(pub Value);
 
 #[allow(dead_code)] // #400 stub
 impl PyDict {
-    pub(crate) fn as_map(&self) -> &IndexMap<PyKey, Value> {
+    pub(crate) fn as_map(&self) -> &pyrust_core::PyDict {
         self.0.as_dict().expect("PyDict wraps a dict")
     }
 }
@@ -505,9 +504,9 @@ impl PySet {
     /// Run `f` against the underlying `IndexSet` view.  Returns the
     /// closure's result.  Post-#450 the `IndexSet` is reached via a
     /// scoped `Ref` borrow from `ValueKind::Set`, so the API now
-    /// passes a `&IndexSet<PyKey>` into the closure rather than
+    /// passes a `&PySet` into the closure rather than
     /// handing one back (which the borrow lifetimes can't express).
-    pub(crate) fn as_set<R>(&self, f: impl FnOnce(&IndexSet<PyKey>) -> R) -> R {
+    pub(crate) fn as_set<R>(&self, f: impl FnOnce(&pyrust_core::PySet) -> R) -> R {
         match self.0.kind() {
             ValueKind::Set(s) => f(&s),
             _ => panic!("PySet wraps a set"),
@@ -881,6 +880,7 @@ mod tests {
     //! tighter coverage than `try_from_value` alone.
 
     use super::*;
+    use crate::value::PyKey;
 
     // Helper — extract the `Named` exception class out of a PyError.
     fn err_class(e: &PyError) -> &str {
@@ -1052,14 +1052,14 @@ mod tests {
 
     #[test]
     fn pydict_strict() {
-        let v = Value::dict(indexmap::IndexMap::new());
+        let v = Value::dict(pyrust_core::PyDict::default());
         assert!(PyDict::matches(&v));
         assert!(!PyDict::matches(&Value::list(vec![])));
     }
 
     #[test]
     fn pyset_strict() {
-        let v = Value::set(indexmap::IndexSet::new());
+        let v = Value::set(pyrust_core::PySet::default());
         assert!(PySet::matches(&v));
         assert!(!PySet::matches(&Value::list(vec![])));
     }
@@ -1101,8 +1101,8 @@ mod tests {
         let cases = [
             Value::list(vec![Value::int(1)]),
             Value::tuple(vec![Value::int(1)]),
-            Value::dict(indexmap::IndexMap::new()),
-            Value::set(indexmap::IndexSet::new()),
+            Value::dict(pyrust_core::PyDict::default()),
+            Value::set(pyrust_core::PySet::default()),
             Value::string("abc"),
             Value::bytes(vec![1, 2, 3]),
             Value::range(0, 3, 1),
@@ -1164,7 +1164,7 @@ mod tests {
         // items.  The interpreter's `iter_values` already does this; the
         // wrapper inherits the behaviour.
         ensure_iter_registry_installed();
-        let mut map = indexmap::IndexMap::new();
+        let mut map = pyrust_core::PyDict::default();
         map.insert(PyKey::str_from("a"), Value::int(1));
         map.insert(PyKey::str_from("b"), Value::int(2));
         let v = Value::dict(map);
@@ -1179,7 +1179,7 @@ mod tests {
     #[test]
     fn pyiterable_materialises_set() {
         ensure_iter_registry_installed();
-        let mut s = indexmap::IndexSet::new();
+        let mut s = pyrust_core::PySet::default();
         s.insert(PyKey::Int(9));
         let v = Value::set(s);
         let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();

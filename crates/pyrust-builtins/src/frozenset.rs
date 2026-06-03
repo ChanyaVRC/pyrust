@@ -7,15 +7,16 @@
 use std::any::Any;
 use std::rc::Rc;
 
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyError, PyKey, Result, Value, ValueKind, key_repr, py_hash_pykey,
+    BuiltinState, BuiltinTypeOps, PyError, PyKey, PySet, Result, Value, ValueKind, key_repr,
+    py_hash_pykey,
 };
 
 /// Internal frozenset state.  `Rc` so that clones are cheap and so that
 /// the same backing storage can be shared via `Value::builtin_object_shared`.
 pub struct FrozenSetState {
-    pub items: Rc<IndexSet<PyKey>>,
+    pub items: Rc<PySet>,
 }
 
 pub struct FrozenSetOps;
@@ -199,21 +200,21 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
 }
 
 /// Construct a frozenset Value from an `IndexSet`.
-pub fn frozenset(items: IndexSet<PyKey>) -> Value {
+pub fn frozenset(items: PySet) -> Value {
     frozenset_rc(Rc::new(items))
 }
 
 /// Construct a frozenset Value from an existing `Rc<IndexSet>` — useful when
 /// converting from a `Set` value while sharing storage.
-pub fn frozenset_rc(items: Rc<IndexSet<PyKey>>) -> Value {
+pub fn frozenset_rc(items: Rc<PySet>) -> Value {
     let state: Box<dyn Any> = Box::new(FrozenSetState { items });
     Value::builtin_object(FROZENSET_OPS, state)
 }
 
-/// Extract the inner `Rc<IndexSet<PyKey>>` from a frozenset Value, or None if
+/// Extract the inner `Rc<PySet>` from a frozenset Value, or None if
 /// the value isn't a frozenset.  Used by interpreter code that needs direct
 /// content access (iteration, key conversion, etc.).
-pub fn as_items(value: &Value) -> Option<Rc<IndexSet<PyKey>>> {
+pub fn as_items(value: &Value) -> Option<Rc<PySet>> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
@@ -223,7 +224,7 @@ pub fn as_items(value: &Value) -> Option<Rc<IndexSet<PyKey>>> {
     borrow_items(state)
 }
 
-fn borrow_items(state: &BuiltinState) -> Option<Rc<IndexSet<PyKey>>> {
+fn borrow_items(state: &BuiltinState) -> Option<Rc<PySet>> {
     let borrow = state.borrow();
     borrow
         .downcast_ref::<FrozenSetState>()

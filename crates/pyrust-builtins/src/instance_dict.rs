@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyError, PyInstance, PyKey, Result, Value, ValueKind,
+    BuiltinState, BuiltinTypeOps, PyDict, PyError, PyInstance, PyKey, Result, Value, ValueKind,
 };
 
 pub const TYPE_NAME: &str = "instance_dict";
@@ -473,7 +473,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                     ));
                 }
                 let inst = s.instance.borrow();
-                let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+                let mut dict: PyDict = PyDict::default();
                 for (k, v) in inst.attrs.iter().filter(|(k, _)| !s.is_hidden(k)) {
                     dict.insert(PyKey::str_from(k), v.clone());
                 }

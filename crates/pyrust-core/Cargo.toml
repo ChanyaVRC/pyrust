@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 indexmap = "2"
+rustc-hash = "2"
 num-bigint = "0.4"
 num-traits = "0.2"
 ryu = "1"

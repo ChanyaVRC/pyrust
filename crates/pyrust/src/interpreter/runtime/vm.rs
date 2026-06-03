@@ -2007,7 +2007,7 @@ impl Interpreter {
                     regs[*dst as usize] = pyrust_builtins::slice::make_slice(lo, hi, st);
                 }
                 Insn::BuildDict(dst, base, n) => {
-                    let mut dict = indexmap::IndexMap::with_capacity(*n as usize);
+                    let mut dict = PyDict::with_capacity_and_hasher(*n as usize, Default::default());
                     for i in 0..*n {
                         let k_val = vm_try!(vm_read(&regs, *base + i * 2, num_locals));
                         let v_val = vm_try!(vm_read(&regs, *base + i * 2 + 1, num_locals));

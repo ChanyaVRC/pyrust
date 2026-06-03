@@ -86,8 +86,8 @@ mod method_table_drift_guard {
     //! fallback — argument-related errors are fine, they prove the dispatch
     //! reached the right arm.
 
-    use indexmap::{IndexMap, IndexSet};
-    use pyrust_core::{PyError, PyKey, Value};
+    use indexmap::IndexMap;
+    use pyrust_core::{PyDict, PyError, PySet, Value};
 
     fn is_fallback(e: &PyError) -> bool {
         matches!(e, PyError::Runtime(msg) if msg.contains("has no attribute"))
@@ -107,7 +107,7 @@ mod method_table_drift_guard {
     fn int_methods_dispatched() {
         let receiver = Value::int(5);
         for &name in super::int::METHODS {
-            let r = super::int::call(name, &receiver, &[], &indexmap::IndexMap::new());
+            let r = super::int::call(name, &receiver, &[], &PyDict::default());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "int::call({name}) hit fallback: {e:?}");
             }
@@ -129,7 +129,7 @@ mod method_table_drift_guard {
     fn list_methods_dispatched() {
         for &name in super::list::METHODS {
             let receiver = Value::list(Vec::new());
-            let r = super::list::call(name, &receiver, vec![], &IndexMap::new());
+            let r = super::list::call(name, &receiver, vec![], &PyDict::default());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "list::call({name}) hit fallback: {e:?}");
             }
@@ -139,8 +139,8 @@ mod method_table_drift_guard {
     #[test]
     fn dict_methods_dispatched() {
         for &name in super::dict::METHODS {
-            let receiver = Value::dict(IndexMap::<PyKey, Value>::new());
-            let r = super::dict::call(name, &receiver, vec![], &IndexMap::new());
+            let receiver = Value::dict(PyDict::default());
+            let r = super::dict::call(name, &receiver, vec![], &PyDict::default());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "dict::call({name}) hit fallback: {e:?}");
             }
@@ -161,7 +161,7 @@ mod method_table_drift_guard {
     #[test]
     fn set_methods_dispatched() {
         for &name in super::set::METHODS {
-            let receiver = Value::set(IndexSet::<PyKey>::new());
+            let receiver = Value::set(PySet::default());
             let r = super::set::call(name, &receiver, vec![]);
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "set::call({name}) hit fallback: {e:?}");
@@ -182,7 +182,7 @@ mod method_table_drift_guard {
 
     #[test]
     fn frozenset_methods_dispatched() {
-        let receiver = super::frozenset::frozenset(IndexSet::<PyKey>::new());
+        let receiver = super::frozenset::frozenset(PySet::default());
         for &name in super::frozenset::METHODS {
             let r = super::frozenset::call(name, &receiver, vec![]);
             if let Err(ref e) = r {
@@ -198,7 +198,7 @@ mod method_table_drift_guard {
     fn bytes_methods_dispatched() {
         let receiver = Value::bytes(vec![]);
         for &name in super::bytes::METHODS {
-            let r = super::bytes::call(name, &receiver, &[], &IndexMap::new());
+            let r = super::bytes::call(name, &receiver, &[], &PyDict::default());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "bytes::call({name}) hit fallback: {e:?}");
             }
@@ -237,18 +237,17 @@ mod method_table_drift_guard {
 mod cross_dispatch_tests {
     //! Regression tests for the BuiltinTypeOps dispatch paths added in #291.
 
-    use indexmap::IndexSet;
-    use pyrust_core::{PyKey, Value};
+    use pyrust_core::{PyKey, PySet, Value};
 
     #[test]
     fn set_eq_frozenset_dispatches_through_ops() {
         // `set == frozenset` must route through `BuiltinTypeOps::eq` on the
         // frozenset side so pyrust-core never needs to name the frozenset type.
-        let mut s: IndexSet<PyKey> = IndexSet::new();
+        let mut s: PySet = PySet::default();
         s.insert(PyKey::Int(1));
         s.insert(PyKey::Int(2));
 
-        let mut fs_items: IndexSet<PyKey> = IndexSet::new();
+        let mut fs_items: PySet = PySet::default();
         fs_items.insert(PyKey::Int(2));
         fs_items.insert(PyKey::Int(1));
 
@@ -263,7 +262,7 @@ mod cross_dispatch_tests {
     fn frozenset_eq_frozenset_uses_rc_fastpath() {
         // Two frozensets sharing the same backing Rc should compare equal
         // via the Rc::ptr_eq fast path inside FrozenSetOps::eq.
-        let mut items: IndexSet<PyKey> = IndexSet::new();
+        let mut items: PySet = PySet::default();
         items.insert(PyKey::Int(42));
         let rc = std::rc::Rc::new(items);
 

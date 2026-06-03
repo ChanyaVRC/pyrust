@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyDict, PyError, PyKey, Result, Value, ValueKind};
 
 pub const TYPE_NAME: &str = "bytearray";
 pub const BYTEARRAY_OPS: &ByteArrayOps = &ByteArrayOps;
@@ -385,7 +385,7 @@ impl BuiltinTypeOps for ByteArrayOps {
         };
 
         // Build an empty kwargs map for bytes::call_on_slice.
-        let empty_kw: IndexMap<PyKey, Value> = IndexMap::new();
+        let empty_kw: PyDict = PyDict::default();
 
         // Methods that return a new bytearray (wrapping the bytes result).
         match method {
@@ -602,7 +602,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             // (mirroring `bytes.decode`). The other delegated methods below take
             // only positional arguments.
             "decode" => {
-                let pk_kwargs: IndexMap<PyKey, Value> = kwargs
+                let pk_kwargs: PyDict = kwargs
                     .iter()
                     .map(|(k, v)| (PyKey::str_from(k), v.clone()))
                     .collect();

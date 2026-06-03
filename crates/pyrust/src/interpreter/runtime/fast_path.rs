@@ -74,7 +74,7 @@ fn set_direct_value(v: &Value) -> Option<(Value, bool)> {
 /// `frozenset` `Value` (as produced by [`set_direct_value`]).  Borrows in place;
 /// never clones the `IndexSet` (issue #1978).
 #[inline]
-fn with_set_items<R>(v: &Value, f: impl FnOnce(&indexmap::IndexSet<PyKey>) -> R) -> R {
+fn with_set_items<R>(v: &Value, f: impl FnOnce(&PySet) -> R) -> R {
     if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
         return f(&rc);
     }
@@ -85,10 +85,10 @@ fn with_set_items<R>(v: &Value, f: impl FnOnce(&indexmap::IndexSet<PyKey>) -> R)
 /// that land in the result and builds it with a capacity hint (issue #1978).
 #[inline]
 fn set_algebra_fast(
-    a: &indexmap::IndexSet<PyKey>,
-    b: &indexmap::IndexSet<PyKey>,
+    a: &PySet,
+    b: &PySet,
     op: SetOp,
-) -> indexmap::IndexSet<PyKey> {
+) -> PySet {
     // `Or` clones the LHS backing table wholesale — a raw bucket copy that
     // preserves every element's already-computed hash, so a's elements are NOT
     // re-hashed — then adds only the RHS elements (CPython's `set_or`: copy LHS,
@@ -109,7 +109,7 @@ fn set_algebra_fast(
         SetOp::Or => unreachable!(),
         SetOp::Xor => a.len() + b.len(),
     };
-    let mut out = indexmap::IndexSet::with_capacity(cap);
+    let mut out = PySet::with_capacity_and_hasher(cap, Default::default());
     match op {
         SetOp::Or => {}
         SetOp::And => {

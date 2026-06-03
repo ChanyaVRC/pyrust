@@ -1,5 +1,4 @@
-use indexmap::IndexSet;
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{PyError, PyKey, PySet, Result, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
@@ -141,11 +140,11 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
     }
 }
 
-/// Materialise each arg into an owned `IndexSet<PyKey>`.  Performed
+/// Materialise each arg into an owned `PySet`.  Performed
 /// before any `borrow_mut` on the receiver so a self-aliased call
 /// (`s.update(s)`) reads its own pre-update snapshot, exactly matching
 /// CPython's iterate-then-mutate semantics.
-fn collect_iterables(receiver: &Value, args: &[Value]) -> Result<Vec<IndexSet<PyKey>>> {
+fn collect_iterables(receiver: &Value, args: &[Value]) -> Result<Vec<PySet>> {
     args.iter()
         .map(|arg| snapshot_iterable(receiver, arg))
         .collect()
@@ -154,7 +153,7 @@ fn collect_iterables(receiver: &Value, args: &[Value]) -> Result<Vec<IndexSet<Py
 /// Same as `collect_iterable` but takes a snapshot of the receiver
 /// via `set_with` when the arg aliases it, avoiding the
 /// `as_set`/`borrow` reentry on the same storage.
-fn snapshot_iterable(receiver: &Value, arg: &Value) -> Result<IndexSet<PyKey>> {
+fn snapshot_iterable(receiver: &Value, arg: &Value) -> Result<PySet> {
     if std::ptr::eq(receiver as *const Value, arg as *const Value)
         || receiver.value_id() == arg.value_id() && receiver.value_id().is_some()
     {
@@ -224,8 +223,8 @@ fn to_key(v: &Value) -> Result<PyKey> {
 }
 
 /// Collect an iterable `Value` into a set of `PyKey`s.
-fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
-    let mut out = IndexSet::new();
+fn collect_iterable(v: &Value) -> Result<PySet> {
+    let mut out = PySet::default();
     match v.kind() {
         ValueKind::Set(s) => {
             for k in s.iter() {
@@ -288,7 +287,7 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
 
 // ── mutating methods ──────────────────────────────────────────────────────────
 
-fn add(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
+fn add(items: &mut PySet, args: &[Value]) -> Result<Value> {
     let elem = args
         .first()
         .ok_or_else(|| PyError::Runtime("set.add() requires 1 argument".to_string()))?;
@@ -296,7 +295,7 @@ fn add(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
     Ok(Value::none())
 }
 
-fn remove(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
+fn remove(items: &mut PySet, args: &[Value]) -> Result<Value> {
     let elem = args
         .first()
         .ok_or_else(|| PyError::Runtime("set.remove() requires 1 argument".to_string()))?;
@@ -308,7 +307,7 @@ fn remove(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
     }
 }
 
-fn discard(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
+fn discard(items: &mut PySet, args: &[Value]) -> Result<Value> {
     let elem = args
         .first()
         .ok_or_else(|| PyError::Runtime("set.discard() requires 1 argument".to_string()))?;
@@ -317,7 +316,7 @@ fn discard(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
     Ok(Value::none())
 }
 
-fn pop(items: &mut IndexSet<PyKey>) -> Result<Value> {
+fn pop(items: &mut PySet) -> Result<Value> {
     match items.pop() {
         Some(k) => Ok(key_to_value(k)),
         None => Err(PyError::named(
@@ -395,7 +394,7 @@ fn symmetric_difference(receiver: &Value, args: &[Value]) -> Result<Value> {
         .and_then(|v| snapshot_iterable(receiver, v))?;
     receiver
         .set_with(|items| {
-            let mut result: IndexSet<PyKey> = IndexSet::new();
+            let mut result: PySet = PySet::default();
             for k in items {
                 if !other.contains(k) {
                     result.insert(k.clone());
@@ -473,7 +472,7 @@ fn key_to_value(k: PyKey) -> Value {
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
         PyKey::FrozenSet(items) => {
-            let mut set = indexmap::IndexSet::new();
+            let mut set = PySet::default();
             for k in items {
                 set.insert(k);
             }

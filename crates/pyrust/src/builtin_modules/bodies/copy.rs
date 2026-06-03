@@ -28,8 +28,8 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{invoke_class_method, key_to_value, lookup_class_attr, ExpandedCallArg};
-use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
-use indexmap::{IndexMap, IndexSet};
+use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PySet, Value, ValueKind};
+use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
 // ── copy.Error class singleton ────────────────────────────────────────────────
@@ -105,7 +105,7 @@ pyrust_module! {
         let memo = if args.len() == 2 {
             args[1].value.clone()
         } else {
-            Value::dict(IndexMap::new())
+            Value::dict(PyDict::default())
         };
         deep_copy(obj, memo, _interp)
     }
@@ -147,14 +147,14 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
 
         // dict — new dict with the same key-value pairs.
         ValueKind::Dict(d) => {
-            let new_dict: IndexMap<PyKey, Value> = d.clone();
+            let new_dict: PyDict = d.clone();
             drop(d);
             Ok(Value::dict(new_dict))
         }
 
         // set — new set with the same keys.
         ValueKind::Set(items) => {
-            let new_items: IndexSet<PyKey> = items.clone();
+            let new_items: PySet = items.clone();
             drop(items);
             Ok(Value::set(new_items))
         }
@@ -225,7 +225,7 @@ fn deep_copy(
         // frozenset — CPython deep-copies the elements even though the
         // container itself is immutable; user-defined hashable objects inside
         // the frozenset may have __deepcopy__ methods.  Extract the inner
-        // IndexSet<PyKey>, convert each key to a Value, deep-copy it, then
+        // PySet, convert each key to a Value, deep-copy it, then
         // convert back via value_to_pykey and rebuild a new frozenset.
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => {
             let items_rc = pyrust_builtins::frozenset::as_items(&obj)
@@ -233,7 +233,7 @@ fn deep_copy(
             // Snapshot before borrowing mutably through interp.
             let keys: Vec<PyKey> = items_rc.iter().cloned().collect();
             drop(items_rc);
-            let mut new_set: IndexSet<PyKey> = IndexSet::with_capacity(keys.len());
+            let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
                 let deep_v = deep_copy(v, memo.clone(), interp)?;
@@ -277,7 +277,7 @@ fn deep_copy(
             let pairs: Vec<(PyKey, Value)> =
                 d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             drop(d);
-            let mut new_dict: IndexMap<PyKey, Value> = IndexMap::with_capacity(pairs.len());
+            let mut new_dict: PyDict = PyDict::with_capacity_and_hasher(pairs.len(), Default::default());
             for (k, v) in pairs {
                 let deep_k = {
                     let kv = key_to_value(k);
@@ -296,7 +296,7 @@ fn deep_copy(
         ValueKind::Set(items) => {
             let keys: Vec<PyKey> = items.iter().cloned().collect();
             drop(items);
-            let mut new_set: IndexSet<PyKey> = IndexSet::with_capacity(keys.len());
+            let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
                 let deep_v = deep_copy(v, memo.clone(), interp)?;

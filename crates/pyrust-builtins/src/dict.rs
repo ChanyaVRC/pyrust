@@ -1,5 +1,4 @@
-use indexmap::IndexMap;
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{PyDict, PyError, PyKey, PySet, Result, Value, ValueKind};
 
 /// Canonical list of method names exposed for `dict`.
 ///
@@ -50,12 +49,7 @@ pub fn needs_rc(method: &str) -> bool {
 /// own scoped borrow when the arg aliases the receiver, so
 /// `d.update(d)` never simultaneously borrows the same `IndexMap`
 /// (#448).
-pub fn call(
-    method: &str,
-    receiver: &Value,
-    args: Vec<Value>,
-    kwargs: &IndexMap<PyKey, Value>,
-) -> Result<Value> {
+pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -> Result<Value> {
     let not_dict = || {
         PyError::named(
             "TypeError",
@@ -238,7 +232,7 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
     Ok(out)
 }
 
-fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
+fn popitem(dict: &mut PyDict) -> Result<Value> {
     match dict.pop() {
         Some((k, v)) => Ok(Value::tuple(vec![key_to_value(k), v])),
         None => Err(PyError::named(
@@ -258,7 +252,7 @@ fn key_to_value(k: PyKey) -> Value {
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
         PyKey::FrozenSet(items) => {
-            let mut set = indexmap::IndexSet::new();
+            let mut set = PySet::default();
             for k in items {
                 set.insert(k);
             }
