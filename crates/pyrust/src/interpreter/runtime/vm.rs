@@ -842,6 +842,13 @@ impl Interpreter {
         let mut iter_next_cache: IterCacheBuf = smallvec::smallvec![None; iters.len()];
         let mut exc_handlers: ExcHandlersBuf = exc_handlers_init;
         let mut pc: usize = start_pc;
+        // Register-resident current-line tracker.  Updated cheaply per
+        // instruction from `lineno_table` (a non-zero entry means "this
+        // instruction starts a new source line"; `0` means "same line as the
+        // previous instruction").  Flushed to the thread-local `CURRENT_VM_LINE`
+        // (via `set_current_vm_line`) only on the error-propagation paths, so
+        // the common hot path pays no TLS / RefCell cost (issue #348).
+        let mut cur_line: u32 = pyrust_core::get_current_vm_line();
         // Counts self-tail-call iterations so that infinite tail recursion
         // eventually raises RecursionError instead of looping forever.
         let mut tco_iters: usize = 0;
@@ -881,7 +888,13 @@ impl Interpreter {
                     Ok(v) => v,
                     Err(e) => match self.handle_vm_error(e, &mut exc_handlers, exc_ctx_frame_base) {
                         Ok(h) => { pc = h; continue 'vm; }
-                        Err(e) => return Err(e),
+                        Err(e) => {
+                            // Error escapes this frame: publish our register-resident
+                            // line tracker so the traceback machinery sees the
+                            // instruction that was executing (issue #348).
+                            pyrust_core::set_current_vm_line(cur_line);
+                            return Err(e);
+                        }
                     },
                 }
             };
@@ -911,18 +924,19 @@ impl Interpreter {
                 if pc == code.insns.len() {
                     return Ok(FrameOutcome::Returned(Value::none()));
                 }
+                pyrust_core::set_current_vm_line(cur_line);
                 return Err(PyError::Runtime(format!(
                     "internal error: PC {} out of bounds (insns len {})",
                     pc,
                     code.insns.len()
                 )));
             };
-            // Update the current-line tracker when the lineno table has a
-            // non-zero entry for this instruction.  `0` means "same line as
-            // the previous instruction" and is deliberately not updated here.
+            // Register-resident line tracker (issue #348): update from the
+            // lineno table without touching the thread-local.  A non-zero entry
+            // marks a new source line; `0` keeps the previous line.
             if let Some(&ln) = code.lineno_table.get(pc) {
                 if ln != 0 {
-                    pyrust_core::set_current_vm_line(ln);
+                    cur_line = ln;
                 }
             }
             pc += 1;
@@ -931,6 +945,7 @@ impl Interpreter {
                 ($offset:expr) => {{
                     let new_pc = pc as i64 + $offset as i64;
                     if new_pc < 0 || new_pc as usize > code.insns.len() {
+                        pyrust_core::set_current_vm_line(cur_line);
                         return Err(PyError::Runtime(format!(
                             "internal error: jump to invalid PC {} (insns len {})",
                             new_pc,
