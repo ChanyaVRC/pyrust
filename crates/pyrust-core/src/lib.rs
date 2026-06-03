@@ -2181,6 +2181,46 @@ impl Value {
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
+    /// Build a string of exactly `total` bytes by filling its backing buffer
+    /// in place, avoiding the intermediate `String` allocation + memcpy that
+    /// `Value::string` would otherwise pay.  `fill` receives the uninitialised
+    /// byte buffer and must write exactly `total` bytes; it returns
+    /// `Some(is_ascii)` to set the cached ASCII flag from that same (cache-hot)
+    /// pass, or `None` to leave it uncomputed for a lazy resolve — used by long
+    /// joins where a separate ASCII scan would double the bytes touched relative
+    /// to the copy alone.
+    /// Used by `str.join` so the result bytes are touched once (the fill copy)
+    /// rather than three times (push into a `String`, `is_ascii` scan, then the
+    /// final memcpy in `Value::string`).
+    ///
+    /// # Safety
+    /// `fill` must initialise all `total` bytes, the resulting buffer must be
+    /// valid UTF-8, and any `Some(_)` it returns must report the true
+    /// ASCII-ness.  Callers join already-validated `&str` parts, so these hold.
+    pub unsafe fn string_from_fill(
+        total: usize,
+        fill: impl FnOnce(&mut [u8]) -> Option<bool>,
+    ) -> Self {
+        let layout = Layout::from_size_align(16 + total, 8).unwrap();
+        unsafe {
+            let ptr = alloc(layout);
+            (ptr.add(8) as *mut *const u8).write(ptr.add(16)); // ref → own bytes
+            let buf = std::slice::from_raw_parts_mut(ptr.add(16), total);
+            let is_ascii = fill(buf);
+            let ascii_flag = match is_ascii {
+                Some(true) => STR_IS_ASCII | STR_ASCII_COMPUTED,
+                Some(false) => STR_ASCII_COMPUTED,
+                // Caller declined to compute it (e.g. a long join, where the
+                // scan would double the bytes touched): leave it uncomputed and
+                // let `str_is_ascii` resolve it lazily on first query.
+                None => 0,
+            };
+            (ptr as *mut u32).write(STR_RC_ONE | ascii_flag); // rc=1, type=A
+            (ptr.add(4) as *mut u32).write(total as u32);
+            Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
+        }
+    }
+
     pub fn string_slice(&self, byte_start: usize, byte_end: usize) -> Self {
         // Guard against inverted indices: wrapping subtraction would produce a
         // colossal sub_len and the resulting slice descriptor would be invalid.

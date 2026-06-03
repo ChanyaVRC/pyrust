@@ -1567,25 +1567,38 @@ pub(crate) fn coerce_bytes_subclass_method_args(
 /// all-exact-str container is returned untouched after a scan.  Any other
 /// iterable kind is returned unchanged for the builtins join fn to handle.
 pub(crate) fn coerce_str_subclass_join_iterable(iterable: Value) -> Value {
-    let snapshot: Option<Vec<Value>> = match iterable.kind() {
-        ValueKind::List(items) => Some(items.iter().cloned().collect()),
-        ValueKind::Tuple(items) => Some(items.to_vec()),
-        _ => None,
-    };
-    let Some(items) = snapshot else {
-        return iterable;
-    };
-    let needs = items.iter().any(|v| {
+    let needs_coerce = |v: &Value| {
         matches!(v.kind(), ValueKind::PyInstance(inst)
             if matches!(
                 inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
                 Some(ValueKind::Str(_))
             ))
-    });
-    if !needs {
-        return iterable;
+    };
+    // Scan the elements *under the borrow* without cloning the container — the
+    // all-exact-str case (overwhelmingly common) then pays only the scan and
+    // returns `iterable` untouched.  Only when an element actually needs
+    // coercing do we snapshot and rebuild a coerced list.
+    let snapshot: Option<Vec<Value>> = match iterable.kind() {
+        ValueKind::List(items) => {
+            if !items.iter().any(needs_coerce) {
+                None
+            } else {
+                Some(items.iter().cloned().collect())
+            }
+        }
+        ValueKind::Tuple(items) => {
+            if !items.iter().any(needs_coerce) {
+                None
+            } else {
+                Some(items.to_vec())
+            }
+        }
+        _ => None,
+    };
+    match snapshot {
+        Some(items) => Value::list(items.into_iter().map(coerce_str_subclass_arg).collect()),
+        None => iterable,
     }
-    Value::list(items.into_iter().map(coerce_str_subclass_arg).collect())
 }
 
 /// Coerce the elements of a `bytes.join` iterable so bytes-subclass / bytearray
