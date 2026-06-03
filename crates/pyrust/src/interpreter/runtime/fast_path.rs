@@ -89,19 +89,29 @@ fn set_algebra_fast(
     b: &indexmap::IndexSet<PyKey>,
     op: SetOp,
 ) -> indexmap::IndexSet<PyKey> {
+    // `Or` clones the LHS backing table wholesale — a raw bucket copy that
+    // preserves every element's already-computed hash, so a's elements are NOT
+    // re-hashed — then adds only the RHS elements (CPython's `set_or`: copy LHS,
+    // update with RHS).  Insertion order (a's elements, then b's extras) is
+    // identical to the previous `a.iter().chain(b.iter())` build, but it skips
+    // re-hashing all of a.
+    if let SetOp::Or = op {
+        let mut out = a.clone();
+        out.reserve(b.len());
+        for k in b.iter() {
+            out.insert(k.clone());
+        }
+        return out;
+    }
     let cap = match op {
         SetOp::And => a.len().min(b.len()),
         SetOp::Sub => a.len(),
-        SetOp::Or => a.len() + b.len(),
+        SetOp::Or => unreachable!(),
         SetOp::Xor => a.len() + b.len(),
     };
     let mut out = indexmap::IndexSet::with_capacity(cap);
     match op {
-        SetOp::Or => {
-            for k in a.iter().chain(b.iter()) {
-                out.insert(k.clone());
-            }
-        }
+        SetOp::Or => {}
         SetOp::And => {
             for k in a.iter() {
                 if b.contains(k) {
