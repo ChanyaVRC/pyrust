@@ -88,10 +88,7 @@ pyrust_module! {
     /// lazily, so a non-iterable element raises `TypeError` only when
     /// reached.
     class _chain_from_iterable {
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
+        iter_self;
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             loop {
@@ -140,6 +137,7 @@ pyrust_module! {
     /// remaining count until stop), `_step`.
     /// <https://docs.python.org/3/library/itertools.html#itertools.islice>
     class islice {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -202,10 +200,6 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let (iter, remaining, step) = read_islice_state(&inst, FN_NAME)?;
@@ -240,6 +234,7 @@ pyrust_module! {
     /// rounding-error workaround; CPython has the same drift).
     /// <https://docs.python.org/3/library/itertools.html#itertools.count>
     class count {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -266,10 +261,6 @@ pyrust_module! {
             a.attrs.insert("_cur".to_string(), start);
             a.attrs.insert("_step".to_string(), step);
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -315,6 +306,7 @@ pyrust_module! {
     /// isn't an integer).
     /// <https://docs.python.org/3/library/itertools.html#itertools.repeat>
     class repeat {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -352,10 +344,6 @@ pyrust_module! {
                 times.map_or_else(Value::none, |t| Value::int(t.max(0))),
             );
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -407,6 +395,7 @@ pyrust_module! {
     /// then repeat forever from a remembered copy.
     /// <https://docs.python.org/3/library/itertools.html#itertools.cycle>
     class cycle {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -426,10 +415,6 @@ pyrust_module! {
             a.attrs.insert("_pos".to_string(), Value::int(0));
             a.attrs.insert("_first_pass".to_string(), Value::bool_(true));
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -507,6 +492,7 @@ pyrust_module! {
     /// `predicate(x)` is truthy; stop at the first falsy result.
     /// <https://docs.python.org/3/library/itertools.html#itertools.takewhile>
     class takewhile {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -525,18 +511,9 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            if matches!(
-                inst.borrow().attrs.get("_done").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            ) {
-                return Err(PyError::named("StopIteration", String::new()));
-            }
+            check_not_exhausted(&inst, "_done")?;
             let (pred, iter) = {
                 let a = inst.borrow();
                 (
@@ -573,6 +550,7 @@ pyrust_module! {
     /// flip).
     /// <https://docs.python.org/3/library/itertools.html#itertools.dropwhile>
     class dropwhile {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -591,10 +569,6 @@ pyrust_module! {
             // element; from then on we just drain `_iter` unconditionally.
             a.attrs.insert("_started".to_string(), Value::bool_(false));
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -643,6 +617,7 @@ pyrust_module! {
     /// unpacks each element as positional args to `function`.
     /// <https://docs.python.org/3/library/itertools.html#itertools.starmap>
     class starmap {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -658,10 +633,6 @@ pyrust_module! {
             a.attrs.insert("_func".to_string(), user[0].value.clone());
             a.attrs.insert("_iter".to_string(), iter);
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -693,6 +664,7 @@ pyrust_module! {
     /// step.  `func=None` defaults to addition.
     /// <https://docs.python.org/3/library/itertools.html#itertools.accumulate>
     class accumulate {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             // Separate `initial` (keyword-only) from positionals.
@@ -744,10 +716,6 @@ pyrust_module! {
             // after walks the source-pull-and-fold loop.
             a.attrs.insert("_started".to_string(), Value::bool_(false));
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -819,6 +787,7 @@ pyrust_module! {
     /// product algorithm walks each pool by index repeatedly.
     /// <https://docs.python.org/3/library/itertools.html#itertools.product>
     class product {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             // `repeat` is keyword-only.
@@ -886,10 +855,6 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             // One immutable borrow does all the reading: pool lengths,
@@ -897,14 +862,9 @@ pyrust_module! {
             // outgoing tuple.  No full-pool clone (the old
             // `read_list_of_lists` path was O(total input size) per
             // yield).
+            check_not_exhausted(&inst, "_exhausted")?;
             let outcome: ProductStep = {
                 let attrs = inst.borrow();
-                if matches!(
-                    attrs.attrs.get("_exhausted").map(|v| v.kind()),
-                    Some(ValueKind::Bool(true))
-                ) {
-                    return Err(PyError::named("StopIteration", String::new()));
-                }
                 let started = matches!(
                     attrs.attrs.get("_started").map(|v| v.kind()),
                     Some(ValueKind::Bool(true))
@@ -989,12 +949,9 @@ pyrust_module! {
     /// in input order, no repeats.
     /// <https://docs.python.org/3/library/itertools.html#itertools.combinations>
     class combinations {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             init_combo_state(_interp, args, "combinations", /* with_replacement = */ false)
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -1006,6 +963,7 @@ pyrust_module! {
     /// r-length tuples in input order, repeats allowed.
     /// <https://docs.python.org/3/library/itertools.html#itertools.combinations_with_replacement>
     class combinations_with_replacement {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             init_combo_state(
                 _interp,
@@ -1013,10 +971,6 @@ pyrust_module! {
                 "combinations_with_replacement",
                 /* with_replacement = */ true,
             )
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -1033,6 +987,7 @@ pyrust_module! {
     /// pool size.
     /// <https://docs.python.org/3/library/itertools.html#itertools.permutations>
     class permutations {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -1095,10 +1050,6 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             // Single immutable borrow to read pool, r, indices, cycles,
@@ -1114,14 +1065,9 @@ pyrust_module! {
                 },
                 Exhausted,
             }
+            check_not_exhausted(&inst, "_exhausted")?;
             let outcome: Step = {
                 let attrs = inst.borrow();
-                if matches!(
-                    attrs.attrs.get("_exhausted").map(|v| v.kind()),
-                    Some(ValueKind::Bool(true))
-                ) {
-                    return Err(PyError::named("StopIteration", String::new()));
-                }
                 let pool_items = match attrs.attrs.get("_pool").map(|v| v.kind()) {
                     Some(ValueKind::List(items)) => items,
                     _ => return Err(internal(FN_NAME)),
@@ -1212,6 +1158,7 @@ pyrust_module! {
     /// below for the staleness mechanism.
     /// <https://docs.python.org/3/library/itertools.html#itertools.groupby>
     class groupby {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             // CPython: `groupby(iterable, key=None)` — `key` accepted both
@@ -1270,10 +1217,6 @@ pyrust_module! {
             a.attrs.insert("_id".to_string(), Value::int(0));
             a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -1348,10 +1291,7 @@ pyrust_module! {
     /// immediately raises `StopIteration` — matching CPython's documented
     /// "previous group is no longer visible" behaviour.
     class _grouper {
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
+        iter_self;
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let (parent_val, my_tgtkey, my_id) = {
@@ -1412,6 +1352,7 @@ pyrust_module! {
     /// comes first.
     /// <https://docs.python.org/3/library/itertools.html#itertools.compress>
     class compress {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -1440,10 +1381,6 @@ pyrust_module! {
             a.attrs.insert("_data".to_string(), data_iter);
             a.attrs.insert("_selectors".to_string(), selectors_iter);
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -1478,6 +1415,7 @@ pyrust_module! {
     /// substituting `fillvalue` for shorter ones.
     /// <https://docs.python.org/3/library/itertools.html#itertools.zip_longest>
     class zip_longest {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let mut positional: Vec<Value> = Vec::new();
@@ -1511,10 +1449,6 @@ pyrust_module! {
                 Value::list(vec![Value::bool_(false); n]),
             );
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -1589,6 +1523,7 @@ pyrust_module! {
     /// `None`, yield elements that are themselves falsy.
     /// <https://docs.python.org/3/library/itertools.html#itertools.filterfalse>
     class filterfalse {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -1604,10 +1539,6 @@ pyrust_module! {
             a.attrs.insert("_pred".to_string(), user[0].value.clone());
             a.attrs.insert("_iter".to_string(), iter);
             Ok(Value::none())
-        }
-
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
         }
 
         fn __next__(args) -> Result<Value> {
@@ -1716,6 +1647,7 @@ pyrust_module! {
     /// Added in Python 3.10.
     /// <https://docs.python.org/3/library/itertools.html#itertools.pairwise>
     class pairwise {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -1752,18 +1684,9 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            if matches!(
-                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            ) {
-                return Err(PyError::named("StopIteration", String::new()));
-            }
+            check_not_exhausted(&inst, "_exhausted")?;
             let (prev, iter) = {
                 let a = inst.borrow();
                 (
@@ -1794,6 +1717,7 @@ pyrust_module! {
     /// >= 1.  Added in Python 3.12.
     /// <https://docs.python.org/3/library/itertools.html#itertools.batched>
     class batched {
+        iter_self;
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
@@ -1836,18 +1760,9 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        fn __iter__(args) -> Result<Value> {
-            Ok(args[0].value.clone())
-        }
-
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            if matches!(
-                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            ) {
-                return Err(PyError::named("StopIteration", String::new()));
-            }
+            check_not_exhausted(&inst, "_exhausted")?;
             let (iter, n) = {
                 let a = inst.borrow();
                 (
@@ -1893,6 +1808,23 @@ fn expect_self(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
+}
+
+/// Single source of truth for the "iterator already exhausted →
+/// `StopIteration`" prologue shared by every itertools `__next__`.  Reads
+/// the boolean sentinel stored under `flag` (`_exhausted` / `_done`) and
+/// raises `StopIteration` (empty message, matching CPython) when it's
+/// `True`.  Takes the instance and borrows internally so call sites that
+/// already hold an `attrs` borrow can call it *before* opening their own
+/// borrow block.
+fn check_not_exhausted(inst: &Rc<std::cell::RefCell<PyInstance>>, flag: &str) -> Result<()> {
+    if matches!(
+        inst.borrow().attrs.get(flag).map(|v| v.kind()),
+        Some(ValueKind::Bool(true))
+    ) {
+        return Err(PyError::named("StopIteration", String::new()));
+    }
+    Ok(())
 }
 
 /// Read the (`_iter`, `_remaining_stop`, `_step`) triple for `islice`.
@@ -2266,16 +2198,11 @@ fn advance_combinations(
         EmptyTuple,
         Exhausted,
     }
+    check_not_exhausted(&inst, "_exhausted")?;
     // Single immutable borrow: read pool slice (no clone), r, started,
     // indices; build the tuple by direct index lookup.
     let outcome: Outcome = {
         let attrs = inst.borrow();
-        if matches!(
-            attrs.attrs.get("_exhausted").map(|v| v.kind()),
-            Some(ValueKind::Bool(true))
-        ) {
-            return Err(PyError::named("StopIteration", String::new()));
-        }
         let pool_items = match attrs.attrs.get("_pool").map(|v| v.kind()) {
             Some(ValueKind::List(items)) => items,
             _ => return Err(internal(fn_name)),
