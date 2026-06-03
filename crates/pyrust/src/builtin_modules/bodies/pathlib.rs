@@ -43,7 +43,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, NativeIterFrame};
-use crate::value::{PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -86,7 +86,7 @@ fn is_path_instance(rc: &Rc<RefCell<PyInstance>>) -> bool {
 /// `__init__`.  Used by `__truediv__`, `parent`, etc.
 fn make_path_instance(path: &str) -> Value {
     POSIX_PATH_CLASS.with(|class| {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("_path".to_string(), Value::string(path));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
@@ -174,7 +174,7 @@ pyrust_module! {
         Ok(POSIX_PATH_CLASS.with(|class| {
             Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class: Rc::clone(class),
-                attrs: IndexMap::new(),
+                attrs: InstanceAttrs::new(),
             })))
         }))
     }

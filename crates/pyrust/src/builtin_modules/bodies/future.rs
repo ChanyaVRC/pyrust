@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::value::{PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 // ── Compiler-flag constants (must match CPython's Include/cpython/compile.h) ──
@@ -60,7 +60,7 @@ fn make_feature(
             Some(m) => version_tuple(m),
             None => Value::none(),
         };
-        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("optional".to_string(), opt_tuple);
         attrs.insert("mandatory".to_string(), mand_val);
         attrs.insert("compiler_flag".to_string(), Value::int(compiler_flag));

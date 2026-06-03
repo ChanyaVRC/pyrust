@@ -1138,10 +1138,150 @@ impl PyClass {
     }
 }
 
+thread_local! {
+    /// Per-thread interner for instance attribute-name keys.
+    ///
+    /// Every `PyInstance` stores its attribute names as `Rc<str>`.  Without
+    /// interning, N instances of the same class would each heap-allocate the
+    /// SAME key strings (`"x"`, `"y"`, …) — the dominant per-instance memory
+    /// cost identified in #2012.  This table maps a name to a single shared
+    /// `Rc<str>`, so the bytes for each distinct attribute name are allocated
+    /// exactly once and refcount-shared across all instances.
+    ///
+    /// Bounded like the string intern table: only short names (identifiers,
+    /// dunders) are interned, and the table is capped so pathological programs
+    /// that synthesise unbounded distinct names don't grow it without limit.
+    /// Names outside those bounds simply get a fresh (non-shared) `Rc<str>`,
+    /// which is still correct — interning is a memory optimisation, not a
+    /// semantic requirement.
+    static ATTR_KEY_INTERN: RefCell<HashMap<Box<str>, Rc<str>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Maximum byte length of an attribute name eligible for key interning.
+const ATTR_KEY_INTERN_MAX_BYTES: usize = 40;
+/// Maximum number of distinct interned attribute names per thread.
+const ATTR_KEY_INTERN_MAX_ENTRIES: usize = 4096;
+
+/// Return a shared `Rc<str>` for attribute name `name`, reusing the cached
+/// allocation when one exists.  Falls back to a fresh `Rc<str>` for names that
+/// are too long or once the table is full (still correct, just not shared).
+pub fn intern_attr_key(name: &str) -> Rc<str> {
+    if name.len() > ATTR_KEY_INTERN_MAX_BYTES {
+        return Rc::from(name);
+    }
+    ATTR_KEY_INTERN.with(|cache| {
+        let mut map = cache.borrow_mut();
+        if let Some(k) = map.get(name) {
+            return Rc::clone(k);
+        }
+        let k: Rc<str> = Rc::from(name);
+        if map.len() < ATTR_KEY_INTERN_MAX_ENTRIES {
+            map.insert(name.into(), Rc::clone(&k));
+        }
+        k
+    })
+}
+
+/// Per-instance attribute storage for `PyInstance`.
+///
+/// CPython shares the attribute-name layout across all instances of a class
+/// (PEP 412 key-sharing dicts) and pyrust previously stored a full
+/// `IndexMap<String, Value>` per instance — duplicating both the key strings
+/// and the hash-table scaffolding in every object (#2012: ~3.15× CPython's
+/// per-instance footprint).
+///
+/// This type replaces that with two contained wins:
+///
+/// 1. **Interned keys** — names are `Rc<str>` pulled from a per-thread interner
+///    ([`intern_attr_key`]), so the bytes for each distinct name are allocated
+///    once and shared across every instance, not duplicated per instance.
+/// 2. **Compact linear storage** — a plain `Vec<(Rc<str>, Value)>` instead of a
+///    hash map.  Instances almost always have a handful of attributes, for
+///    which linear scan beats hashing and avoids the IndexMap `RawTable` +
+///    capacity overhead entirely.  Insertion order is preserved natively, which
+///    CPython requires for `__dict__` iteration.
+#[derive(Debug, Clone, Default)]
+pub struct InstanceAttrs {
+    entries: Vec<(Rc<str>, Value)>,
+}
+
+impl InstanceAttrs {
+    pub fn new() -> Self {
+        InstanceAttrs {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(cap: usize) -> Self {
+        InstanceAttrs {
+            entries: Vec::with_capacity(cap),
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Look up a value by attribute name.  Linear scan — fast for the small
+    /// attribute counts real instances carry.
+    #[inline]
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.entries
+            .iter()
+            .find(|(k, _)| k.as_ref() == name)
+            .map(|(_, v)| v)
+    }
+
+    #[inline]
+    pub fn contains_key(&self, name: &str) -> bool {
+        self.entries.iter().any(|(k, _)| k.as_ref() == name)
+    }
+
+    /// Insert or overwrite `name`'s value, returning the previous value when
+    /// the key already existed.  New keys are appended (insertion order
+    /// preserved) and interned so the name bytes are shared across instances.
+    pub fn insert(&mut self, name: impl AsRef<str>, value: Value) -> Option<Value> {
+        let name = name.as_ref();
+        if let Some(slot) = self.entries.iter_mut().find(|(k, _)| k.as_ref() == name) {
+            return Some(std::mem::replace(&mut slot.1, value));
+        }
+        self.entries.push((intern_attr_key(name), value));
+        None
+    }
+
+    /// Remove `name`, shifting later entries down to preserve insertion order
+    /// (matching `IndexMap::shift_remove`).  Returns the removed value.
+    pub fn shift_remove(&mut self, name: &str) -> Option<Value> {
+        let pos = self.entries.iter().position(|(k, _)| k.as_ref() == name)?;
+        Some(self.entries.remove(pos).1)
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    #[inline]
+    pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    #[inline]
+    pub fn keys(&self) -> impl Iterator<Item = &Rc<str>> {
+        self.entries.iter().map(|(k, _)| k)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PyInstance {
     pub class: Rc<RefCell<PyClass>>,
-    pub attrs: IndexMap<String, Value>,
+    pub attrs: InstanceAttrs,
 }
 
 #[derive(Debug, Clone)]

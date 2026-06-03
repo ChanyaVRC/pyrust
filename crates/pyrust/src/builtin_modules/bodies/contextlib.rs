@@ -30,8 +30,7 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::class_is_subclass_of;
-use crate::value::{PyInstance, Value, ValueKind};
-use indexmap::IndexMap;
+use crate::value::{InstanceAttrs, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -235,7 +234,7 @@ pyrust_module! {
             // Call the generator function to get a generator object.
             let generator = _interp.call_function_expanded(func, user)?;
             // Wrap the generator in a _GeneratorContextManager.
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert("_gen".to_string(), generator);
             Ok(make_instance("_GeneratorContextManager", attrs))
         }
@@ -446,7 +445,7 @@ pyrust_module! {
             let func = args[1].value.clone();
             let bound_args: Vec<ExpandedCallArg> = args[2..].to_vec();
             // Wrap func+bound_args in a no-argument callable (a _StackCallback instance).
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            let mut attrs = InstanceAttrs::new();
             attrs.insert("_func".to_string(), func);
             // Encode bound_args as a list of [name_or_none, value] pairs.
             let encoded: Vec<Value> = bound_args.iter().map(|a| {
@@ -579,7 +578,7 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
 }
 
 /// Construct a `PyInstance` of `name` with the given attrs, bypassing `__init__`.
-fn make_instance(name: &str, attrs: IndexMap<String, Value>) -> Value {
+fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
     match module_class(name) {
         Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs }))),
         None => unreachable!(
@@ -590,7 +589,7 @@ fn make_instance(name: &str, attrs: IndexMap<String, Value>) -> Value {
 
 /// Construct a `_ContextManagerFactory` instance seeding `_func`.
 fn make_cm_factory(func: Value) -> Value {
-    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    let mut attrs = InstanceAttrs::new();
     attrs.insert("_func".to_string(), func);
     make_instance("_ContextManagerFactory", attrs)
 }

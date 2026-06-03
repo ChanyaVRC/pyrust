@@ -35,7 +35,7 @@ use crate::interpreter::{
     unicode_exc_set_attrs,
     value_to_float, value_type_name_str,
 };
-use crate::value::{PyBigInt, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
+use crate::value::{InstanceAttrs, PyBigInt, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -5373,7 +5373,7 @@ pyrust_module! {
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
-                attrs: indexmap::IndexMap::new(),
+                attrs: InstanceAttrs::new(),
             },
         ))))
     }
@@ -5600,7 +5600,7 @@ pyrust_module! {
                 ));
             }
         };
-        let mut attrs = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert(
             crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
             backing,
@@ -5662,7 +5662,7 @@ pyrust_module! {
                 ));
             }
         };
-        let mut attrs = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert(
             crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
             backing,
@@ -5709,7 +5709,7 @@ pyrust_module! {
         } else {
             return Err(PyError::Runtime("internal: int not in registry".to_string()));
         };
-        let mut attrs = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert(
             crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
             backing,
@@ -5756,7 +5756,7 @@ pyrust_module! {
         } else {
             return Err(PyError::Runtime("internal: str not in registry".to_string()));
         };
-        let mut attrs = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert(
             crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
             backing,
@@ -5805,7 +5805,7 @@ pyrust_module! {
                 "internal: float not in registry".to_string(),
             ));
         };
-        let mut attrs = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert(
             crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
             backing,
@@ -5854,7 +5854,7 @@ pyrust_module! {
                 "internal: bytes not in registry".to_string(),
             ));
         };
-        let mut attrs = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert(
             crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
             backing,
@@ -6960,9 +6960,9 @@ pyrust_module! {
         // always call list_push on the value without re-borrowing inst.
         {
             let mut inst = inst_rc.borrow_mut();
-            inst.attrs
-                .entry("__notes__".to_string())
-                .or_insert_with(|| Value::list(vec![]));
+            if !inst.attrs.contains_key("__notes__") {
+                inst.attrs.insert("__notes__", Value::list(vec![]));
+            }
         }
         // Re-borrow immutably to read the list value and push to it.
         // Value::list_push takes &self and uses RefCell internally — no

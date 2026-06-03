@@ -77,7 +77,7 @@ static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::interpreter::{NativeIterFrame, value_type_name_str};
-use crate::value::{PyClass, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -1114,7 +1114,7 @@ thread_local! {
 /// Build an `os.terminal_size(columns, lines)` instance.
 fn make_terminal_size(columns: i64, lines: i64) -> Value {
     TERMINAL_SIZE_CLASS.with(|class| {
-        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("columns".to_string(), Value::int(columns));
         attrs.insert("lines".to_string(), Value::int(lines));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
@@ -1173,7 +1173,7 @@ fn make_stat_result(meta: &std::fs::Metadata) -> Value {
     );
 
     STAT_RESULT_CLASS.with(|class| {
-        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        let mut attrs = InstanceAttrs::new();
         attrs.insert("st_mode".to_string(), Value::int(mode));
         attrs.insert("st_ino".to_string(), Value::int(ino));
         attrs.insert("st_dev".to_string(), Value::int(dev));
@@ -1200,7 +1200,7 @@ fn make_environ_instance() -> Value {
     ENVIRON_CLASS.with(|class| {
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
-            attrs: indexmap::IndexMap::new(),
+            attrs: InstanceAttrs::new(),
         })))
     })
 }

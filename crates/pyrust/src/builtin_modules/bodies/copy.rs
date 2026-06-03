@@ -28,7 +28,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{invoke_class_method, key_to_value, lookup_class_attr, ExpandedCallArg};
-use crate::value::{PyClass, PyInstance, PyKey, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
 use indexmap::{IndexMap, IndexSet};
 use pyrust_derive::pyrust_module;
 
@@ -337,10 +337,9 @@ fn deep_copy(
                     let borrow = rc.borrow();
                     (Rc::clone(&borrow.class), borrow.attrs.clone())
                 };
-                let mut new_attrs: IndexMap<String, Value> =
-                    IndexMap::with_capacity(attrs_snapshot.len());
-                for (k, v) in attrs_snapshot {
-                    new_attrs.insert(k, deep_copy(v, memo.clone(), interp)?);
+                let mut new_attrs = InstanceAttrs::with_capacity(attrs_snapshot.len());
+                for (k, v) in attrs_snapshot.iter() {
+                    new_attrs.insert(k.clone(), deep_copy(v.clone(), memo.clone(), interp)?);
                 }
                 Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                     class,

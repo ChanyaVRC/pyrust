@@ -3497,7 +3497,7 @@ impl Interpreter {
 
         let instance = Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(&class),
-            attrs: IndexMap::new(),
+            attrs: InstanceAttrs::new(),
         }));
 
         // Issue #976: if this class inherits from dict/list/set, pre-initialise
@@ -5545,7 +5545,8 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
     }
     match value.kind() {
         ValueKind::PyInstance(inst) => {
-            let mut names: Vec<String> = inst.borrow().attrs.keys().cloned().collect();
+            let mut names: Vec<String> =
+                inst.borrow().attrs.keys().map(|k| k.to_string()).collect();
             let class = Rc::clone(&inst.borrow().class);
             collect_class_names(&class, &mut names);
             names
