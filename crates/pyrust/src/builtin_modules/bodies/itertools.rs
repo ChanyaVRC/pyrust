@@ -1838,34 +1838,54 @@ fn slice_arg(interp: &mut crate::Interpreter, _fn_name: &str, v: &Value, slot: &
     // shared protocol; only the non-index case takes the ValueError path.
     let resolved = match v.kind() {
         ValueKind::None => return Ok(None),
-        ValueKind::Int(n) => return Ok(Some(n)),
-        ValueKind::Bool(b) => return Ok(Some(b as i64)),
+        ValueKind::Int(_) | ValueKind::Bool(_) => Ok(v.clone()),
         ValueKind::PyInstance(_) => {
             interp.value_to_index(v, |_| PyError::named("__pyrust_NotIndex__", String::new()))
         }
         _ => Err(PyError::named("__pyrust_NotIndex__", String::new())),
     };
-    let slice_value_err = || {
+    // CPython's `itertools_islice` coerces each slot with
+    // `PyNumber_AsSsize_t(v, NULL)`, which *clears* any exception (missing/bad
+    // `__index__`, a raising `__index__`, a non-int return, or out-of-ssize_t
+    // overflow) and yields a sentinel `-1`.  The slot-specific ValueError is
+    // then raised.  The one quirk: a `stop` that *successfully* coerces to a
+    // negative value <= -2 is reported with the generic "Indices" message,
+    // whereas a `stop` that fails to coerce (or coerces to exactly -1, or
+    // overflows ssize_t) gets the "Stop argument" message.  `start`/`step`
+    // always use their own single message.  This mirrors CPython 3.12 exactly.
+    let indices_msg =
+        || "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.".to_string();
+    let slot_err = |coerced_neg_in_range: bool| {
         let msg = match slot {
             "step" => "Step for islice() must be a positive integer or None.".to_string(),
-            "stop" => {
+            // A valid in-range negative `stop` (<= -2) reports as "Indices";
+            // every other `stop` failure reports as "Stop argument".
+            "stop" if !coerced_neg_in_range => {
                 "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
                     .to_string()
             }
-            _ => "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.".to_string(),
+            _ => indices_msg(),
         };
         PyError::named("ValueError", msg)
     };
     match resolved {
         Ok(r) => match r.kind() {
-            ValueKind::Int(n) => Ok(Some(n)),
+            ValueKind::Int(n) if n >= 0 => Ok(Some(n)),
             ValueKind::Bool(b) => Ok(Some(b as i64)),
-            // A bigint slice bound is out of the `0 <= x <= sys.maxsize` range.
-            ValueKind::BigInt(_) => Err(slice_value_err()),
+            // A negative `stop` that still fits in ssize_t takes the "Indices"
+            // message *unless* it is the -1 sentinel; a negative `start` always
+            // takes "Indices".
+            ValueKind::Int(n) => Err(slot_err(n <= -2)),
+            // A bigint bound is out of the `0 <= x <= sys.maxsize` range; it
+            // never coerced to an in-range negative, so `stop` reports as
+            // "Stop argument".
+            ValueKind::BigInt(_) => Err(slot_err(false)),
             _ => unreachable!("value_to_index guarantees an integer"),
         },
-        Err(PyError::Named(name, _)) if name == "__pyrust_NotIndex__" => Err(slice_value_err()),
-        Err(e) => Err(e),
+        // Coercion failed entirely (non-int, raising `__index__`, missing
+        // `__index__`): CPython clears the error and reports the slot message
+        // ("Stop argument" for `stop`).
+        Err(_) => Err(slot_err(false)),
     }
 }
 
