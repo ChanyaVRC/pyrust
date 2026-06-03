@@ -736,14 +736,8 @@ pyrust_module! {
         /// `d.append(x)` — add to the right end.  When maxlen is set and
         /// the deque is full, the leftmost element is dropped.
         fn append(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let x = args[1].value.clone();
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let x = arg.clone();
             let maxlen = deque_maxlen(&inst);
             if let Some(0) = maxlen {
                 return Ok(Value::none()); // maxlen=0: discard all appends
@@ -762,14 +756,8 @@ pyrust_module! {
         /// `d.appendleft(x)` — add to the left end.  When maxlen is set
         /// and the deque is full, the rightmost element is dropped.
         fn appendleft(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let x = args[1].value.clone();
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let x = arg.clone();
             let maxlen = deque_maxlen(&inst);
             if let Some(0) = maxlen {
                 return Ok(Value::none()); // maxlen=0: discard all appends
@@ -789,13 +777,7 @@ pyrust_module! {
         /// `d.pop()` — remove and return from the right.  Raises
         /// `IndexError` if the deque is empty.
         fn pop(args) -> Result<Value> {
-            if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            let inst = expect_self(args, FN_NAME)?;
+            let inst = expect_self_no_args(args, FN_NAME)?;
             let items_val = deque_items_val(&inst)?;
             let n = items_val.list_len().unwrap_or(0);
             if n == 0 {
@@ -810,13 +792,7 @@ pyrust_module! {
         /// `d.popleft()` — remove and return from the left.  Raises
         /// `IndexError` if the deque is empty.
         fn popleft(args) -> Result<Value> {
-            if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            let inst = expect_self(args, FN_NAME)?;
+            let inst = expect_self_no_args(args, FN_NAME)?;
             let items_val = deque_items_val(&inst)?;
             let n = items_val.list_len().unwrap_or(0);
             if n == 0 {
@@ -831,14 +807,8 @@ pyrust_module! {
         /// `d.extend(iterable)` — extend right from an iterable, applying
         /// maxlen trimming along the way (same as repeated `append`).
         fn extend(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let new_items = _interp.collect_iterable(&args[1].value)?;
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let new_items = _interp.collect_iterable(arg)?;
             let maxlen = deque_maxlen(&inst);
             if let Some(0) = maxlen {
                 return Ok(Value::none()); // maxlen=0: nothing to extend
@@ -859,14 +829,8 @@ pyrust_module! {
         /// prepending each element in turn (which reverses the iterable's
         /// order — matching CPython).  Maxlen trimming from the right.
         fn extendleft(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let new_items = _interp.collect_iterable(&args[1].value)?;
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let new_items = _interp.collect_iterable(arg)?;
             let maxlen = deque_maxlen(&inst);
             if let Some(0) = maxlen {
                 return Ok(Value::none()); // maxlen=0: nothing to extend
@@ -930,13 +894,7 @@ pyrust_module! {
 
         /// `d.clear()` — remove all elements.  maxlen is preserved.
         fn clear(args) -> Result<Value> {
-            if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            let inst = expect_self(args, FN_NAME)?;
+            let inst = expect_self_no_args(args, FN_NAME)?;
             let items_val = deque_items_val(&inst)?;
             items_val.list_clear()?;
             Ok(Value::none())
@@ -945,13 +903,7 @@ pyrust_module! {
         /// `d.copy()` — shallow copy.  Returns a new deque with the same
         /// elements and the same maxlen.
         fn copy(args) -> Result<Value> {
-            if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            let inst = expect_self(args, FN_NAME)?;
+            let inst = expect_self_no_args(args, FN_NAME)?;
             let items = deque_items_snapshot(&inst)?;
             let maxlen_val = inst
                 .borrow()
@@ -971,14 +923,8 @@ pyrust_module! {
 
         /// `d.count(x)` — count occurrences of `x` using `==` equality.
         fn count(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let target = args[1].value.clone();
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let target = arg.clone();
             let items = deque_items_snapshot(&inst)?;
             let mut n: i64 = 0;
             for v in &items {
@@ -992,14 +938,8 @@ pyrust_module! {
         /// `d.remove(x)` — remove the first occurrence of `x`.  Raises
         /// `ValueError` if not found.
         fn remove(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let target = args[1].value.clone();
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let target = arg.clone();
             let items = deque_items_snapshot(&inst)?;
             let mut found: Option<usize> = None;
             for (i, v) in items.iter().enumerate() {
@@ -1023,13 +963,7 @@ pyrust_module! {
 
         /// `d.reverse()` — reverse in place.
         fn reverse(args) -> Result<Value> {
-            if args.len() != 1 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes no arguments"),
-                ));
-            }
-            let inst = expect_self(args, FN_NAME)?;
+            let inst = expect_self_no_args(args, FN_NAME)?;
             let items_val = deque_items_val(&inst)?;
             items_val.list_reverse()?;
             Ok(Value::none())
@@ -1147,16 +1081,10 @@ pyrust_module! {
         /// `d[i]` — element at index `i`.  Negative indices count from the
         /// right.  Raises `IndexError` if out of range.
         fn __getitem__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
             let items = deque_items_snapshot(&inst)?;
             let len = items.len();
-            let idx = deque_resolve_index(args[1].value.kind(), len, FN_NAME)?;
+            let idx = deque_resolve_index(arg.kind(), len, FN_NAME)?;
             Ok(items[idx].clone())
         }
 
@@ -1182,30 +1110,18 @@ pyrust_module! {
 
         /// `del d[i]` — delete element at index `i`.
         fn __delitem__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
             let items_val = deque_items_val(&inst)?;
             let len = items_val.list_len().unwrap_or(0);
-            let idx = deque_resolve_index(args[1].value.kind(), len, FN_NAME)?;
+            let idx = deque_resolve_index(arg.kind(), len, FN_NAME)?;
             items_val.list_pop_at(idx)?;
             Ok(Value::none())
         }
 
         /// `x in d` — membership test using `==` equality.
         fn __contains__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            if args.len() != 2 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes exactly 1 argument"),
-                ));
-            }
-            let target = args[1].value.clone();
+            let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
+            let target = arg.clone();
             let items = deque_items_snapshot(&inst)?;
             for v in &items {
                 if _interp.values_user_eq(v, &target)? {
@@ -1393,6 +1309,42 @@ fn expect_self(
             "internal: {fn_name}() self must be a PyInstance",
         ))),
     }
+}
+
+/// Arity guard for a deque method that takes no positional arguments
+/// (`pop`, `popleft`, `clear`, `copy`, `reverse`).  The argument-count
+/// check runs *before* `expect_self`, so a wrong-arity call wins over a
+/// bad-self call — matching the original open-coded order.
+fn expect_self_no_args(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Rc<RefCell<PyInstance>>> {
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes no arguments"),
+        ));
+    }
+    expect_self(args, fn_name)
+}
+
+/// Arity guard for a deque method that takes exactly one positional
+/// argument.  `expect_self` runs *before* the argument-count check, so a
+/// bad-self call wins over a wrong-arity call — matching the original
+/// open-coded order.  Returns both the receiver and a borrow of the lone
+/// argument value.
+fn expect_self_one_arg<'a>(
+    args: &'a [ExpandedCallArg],
+    fn_name: &str,
+) -> Result<(Rc<RefCell<PyInstance>>, &'a Value)> {
+    let inst = expect_self(args, fn_name)?;
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly 1 argument"),
+        ));
+    }
+    Ok((inst, &args[1].value))
 }
 
 /// Read the `_counts` dict off `self`.  Returns an empty IndexMap if the
