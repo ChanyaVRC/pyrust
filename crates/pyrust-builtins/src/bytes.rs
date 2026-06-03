@@ -669,9 +669,11 @@ fn push_surrogate_escape(out: &mut String, b: u8) {
     }
 }
 
-/// Decode UTF-8 with `backslashreplace`: each invalid byte `b` becomes `\xNN`.
-/// Valid UTF-8 bytes pass through unchanged.
-fn bytes_decode_utf8_backslashreplace(bytes: &[u8]) -> String {
+/// Incrementally decode `bytes` as UTF-8, invoking `on_invalid` once per byte of
+/// every invalid sequence. Valid UTF-8 runs pass through unchanged. This is the
+/// single shared scaffold behind the `backslashreplace` / `surrogateescape` /
+/// `ignore` error handlers, which differ only in `on_invalid`.
+fn bytes_decode_utf8_with(bytes: &[u8], mut on_invalid: impl FnMut(&mut String, u8)) -> String {
     let mut out = String::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
@@ -682,13 +684,15 @@ fn bytes_decode_utf8_backslashreplace(bytes: &[u8]) -> String {
             }
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
-                // SAFETY: validated by from_utf8.
+                // SAFETY: `from_utf8` reports `valid_up_to` as the length of the
+                // well-formed UTF-8 prefix of `bytes[i..]`, so `bytes[i..i +
+                // valid_up_to]` is valid UTF-8 and `from_utf8_unchecked` is sound.
                 out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + valid_up_to]) });
-                // Each byte in the invalid sequence gets its own \xNN escape.
+                // Hand each byte of the invalid run to the handler. `error_len()`
+                // is `None` for a truncated trailing sequence, treated as 1 byte.
                 let skip = e.error_len().unwrap_or(1);
                 for j in 0..skip {
-                    use std::fmt::Write as _;
-                    let _ = write!(out, "\\x{:02x}", bytes[i + valid_up_to + j]);
+                    on_invalid(&mut out, bytes[i + valid_up_to + j]);
                 }
                 i += valid_up_to + skip;
             }
@@ -697,31 +701,19 @@ fn bytes_decode_utf8_backslashreplace(bytes: &[u8]) -> String {
     out
 }
 
+/// Decode UTF-8 with `backslashreplace`: each invalid byte `b` becomes `\xNN`.
+/// Valid UTF-8 bytes pass through unchanged.
+fn bytes_decode_utf8_backslashreplace(bytes: &[u8]) -> String {
+    bytes_decode_utf8_with(bytes, |out, b| {
+        use std::fmt::Write as _;
+        let _ = write!(out, "\\x{:02x}", b);
+    })
+}
+
 /// Decode UTF-8 with `surrogateescape`: each invalid byte `b` becomes the lone
 /// surrogate U+DC80 + (b - 0x80) (stored as CESU-8).  Valid UTF-8 passes through.
 fn bytes_decode_utf8_surrogateescape(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match std::str::from_utf8(&bytes[i..]) {
-            Ok(s) => {
-                out.push_str(s);
-                break;
-            }
-            Err(e) => {
-                let valid_up_to = e.valid_up_to();
-                // SAFETY: validated by from_utf8.
-                out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + valid_up_to]) });
-                // Each byte in the invalid sequence individually maps to a surrogate.
-                let skip = e.error_len().unwrap_or(1);
-                for j in 0..skip {
-                    push_surrogate_escape(&mut out, bytes[i + valid_up_to + j]);
-                }
-                i += valid_up_to + skip;
-            }
-        }
-    }
-    out
+    bytes_decode_utf8_with(bytes, push_surrogate_escape)
 }
 
 /// Decode a little-endian UTF-16 byte slice (no BOM) into a Python string,
@@ -1177,25 +1169,7 @@ fn decode_utf32(
 
 /// Decode UTF-8 bytes, skipping any invalid byte sequences (errors='ignore').
 fn bytes_decode_utf8_ignore(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match std::str::from_utf8(&bytes[i..]) {
-            Ok(s) => {
-                out.push_str(s);
-                break;
-            }
-            Err(e) => {
-                let valid_up_to = e.valid_up_to();
-                // SAFETY: validated by from_utf8.
-                out.push_str(unsafe { std::str::from_utf8_unchecked(&bytes[i..i + valid_up_to]) });
-                // Skip the invalid byte(s): error_len() is None for truncated sequence.
-                let skip = e.error_len().unwrap_or(1);
-                i += valid_up_to + skip;
-            }
-        }
-    }
-    out
+    bytes_decode_utf8_with(bytes, |_out, _b| {})
 }
 
 // ---------------------------------------------------------------------------
