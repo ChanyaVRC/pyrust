@@ -985,6 +985,74 @@ fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// Collect the simple names bound by a comprehension `for <target>` clause
+/// (descending into tuple/starred targets).  Attribute/subscript targets bind
+/// no names.
+fn collect_comp_target_names(target: &AssignTarget, out: &mut HashSet<String>) {
+    match target {
+        AssignTarget::Name(name) => {
+            out.insert(name.clone());
+        }
+        AssignTarget::Tuple(targets) => {
+            for t in targets {
+                collect_comp_target_names(t, out);
+            }
+        }
+        AssignTarget::Starred(inner) => collect_comp_target_names(inner, out),
+        AssignTarget::Attr(..) | AssignTarget::Index(..) | AssignTarget::Slice { .. } => {}
+    }
+}
+
+/// Validate a comprehension / generator expression at compile time, raising the
+/// CPython 3.12 `SyntaxError`s that pyrust would otherwise accept:
+///
+/// * a `yield`/`yield from` directly in the element/condition expressions
+///   (`'yield' inside <kind>`); and
+/// * an assignment expression (`:=`) whose target collides with one of the
+///   comprehension's own iteration variables (PEP 572,
+///   `assignment expression cannot rebind comprehension iteration variable '<n>'`).
+///
+/// `result_exprs` are the value-producing expressions (`elt`, or `key`+`val`);
+/// `clauses` are the comprehension clauses.  Iterable expressions (`clause.iter`)
+/// are evaluated in the enclosing scope and are validated elsewhere, so they are
+/// not scanned here.  `kind` is the CPython label (e.g. `"list comprehension"`).
+///
+/// Returns the `SyntaxError` message on violation (`None` when valid).
+fn check_comprehension(
+    result_exprs: &[&Expr],
+    clauses: &[CompClause],
+    kind: &str,
+) -> Option<String> {
+    // yield directly inside the comprehension body.
+    let mut yields = result_exprs.iter().any(|e| expr_contains_yield(e));
+    yields = yields
+        || clauses
+            .iter()
+            .any(|c| c.cond.as_ref().is_some_and(|e| expr_contains_yield(e)));
+    if yields {
+        return Some(format!("'yield' inside {kind}"));
+    }
+
+    // Walrus target colliding with a comprehension iteration variable.
+    let mut targets: HashSet<String> = HashSet::new();
+    for c in clauses {
+        collect_comp_target_names(&c.target, &mut targets);
+    }
+    let mut walrus: HashSet<String> = HashSet::new();
+    for e in result_exprs {
+        collect_walrus_writes_in_expr(e, &mut walrus);
+    }
+    for c in clauses {
+        if let Some(cond) = &c.cond {
+            collect_walrus_writes_in_expr(cond, &mut walrus);
+        }
+    }
+    // Report deterministically (smallest name) when several collide.
+    walrus.intersection(&targets).min().map(|name| {
+        format!("assignment expression cannot rebind comprehension iteration variable '{name}'")
+    })
+}
+
 fn lambda_captures_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
@@ -7807,6 +7875,12 @@ impl Compiler {
         let mod_reg = self.alloc_temp();
         self.emit(Insn::ImportModule(mod_reg, mod_idx));
         if names.len() == 1 && names[0].0 == "*" {
+            // CPython: `from MOD import *` is only allowed at module level.
+            if !self.is_module_scope {
+                self.free_temp(mod_reg);
+                self.set_syntax_error("import * only allowed at module level");
+                return;
+            }
             // Star import: emit ImportStar which iterates the module's __all__
             // (or all non-underscore attrs when __all__ is absent) and stores
             // each name into the current scope.
@@ -7842,6 +7916,22 @@ impl Compiler {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
         let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
+
+        // A parameter may not also be declared `global`/`nonlocal` in the body.
+        // CPython 3.12 raises `SyntaxError: name 'x' is parameter and global`
+        // (resp. `... and nonlocal`).  This conflict wins over the later
+        // ordering / annotation / no-binding diagnostics, so check it first.
+        for p in params {
+            if inner_global.contains(&p.name) {
+                self.set_syntax_error(&format!("name '{}' is parameter and global", p.name));
+                return None;
+            }
+            if inner_nonlocal.contains(&p.name) {
+                self.set_syntax_error(&format!("name '{}' is parameter and nonlocal", p.name));
+                return None;
+            }
+        }
+
         let inner_local =
             crate::interpreter::collect_local_names(params, body, &inner_global, &inner_nonlocal);
 
@@ -10411,6 +10501,10 @@ impl Compiler {
             self.set_syntax_error("async comprehension is not yet supported");
             return 0;
         }
+        if let Some(msg) = check_comprehension(&[elt], clauses, "list comprehension") {
+            self.set_syntax_error(&msg);
+            return 0;
+        }
 
         const ACC_NAME: &str = ".acc";
 
@@ -10453,6 +10547,11 @@ impl Compiler {
         }
         if clauses.iter().any(|c| c.is_async) {
             self.set_syntax_error("async comprehension is not yet supported");
+            return 0;
+        }
+
+        if let Some(msg) = check_comprehension(&[key, val], clauses, "dict comprehension") {
+            self.set_syntax_error(&msg);
             return 0;
         }
 
@@ -10565,6 +10664,11 @@ impl Compiler {
             return 0;
         }
 
+        if let Some(msg) = check_comprehension(&[elt], clauses, "set comprehension") {
+            self.set_syntax_error(&msg);
+            return 0;
+        }
+
         const ACC_NAME: &str = ".acc";
 
         let iter_reg = self.compile_expr(&clauses[0].iter);
@@ -10618,6 +10722,10 @@ impl Compiler {
         }
         if clauses.iter().any(|c| c.is_async) {
             self.set_syntax_error("async comprehension is not yet supported");
+            return 0;
+        }
+        if let Some(msg) = check_comprehension(&[elt], clauses, "generator expression") {
+            self.set_syntax_error(&msg);
             return 0;
         }
 
