@@ -25,7 +25,7 @@ use crate::interpreter::{
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-    float_divmod, float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
+    float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
@@ -4369,57 +4369,18 @@ pyrust_module! {
     ) -> Result<Value> {
         let value = &value.0;
         let spec: &str = format_spec.as_ref().map(|s| s.as_ref()).unwrap_or("");
-        // Dispatch __format__(spec) for user instances.
-        if let ValueKind::PyInstance(instance) = value.kind() {
-            let instance_rc = Rc::clone(instance);
-            let class = Rc::clone(&instance_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__format__") {
-                let result = invoke_class_method(
-                    _interp,
-                    method_val,
-                    Value::py_instance(instance_rc),
-                    &[ExpandedCallArg {
-                        name: None,
-                        value: Value::string(spec),
-                    }],
-                )?;
-                return if is_str_or_str_subclass(&result) {
-                    Ok(result)
-                } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__format__ must return a str, not {}",
-                            value_type_name_str(&result),
-                        ),
-                    ))
-                };
-            }
-            // No user __format__ in MRO.  For primitive subclasses (e.g.
-            // `class MyInt(int): pass`), fall through to the backing value's
-            // format so that `format(MyInt(42), "d")` returns `"42"` the same
-            // way CPython delegates to `int.__format__`.
-            if let Some(backing) = instance_builtin_data(&instance_rc) {
-                return apply_format_spec(&backing, spec);
-            }
-            // Pure user class with no custom __format__: for an empty spec,
-            // CPython's object.__format__ delegates to str(self), which
-            // dispatches __str__.  Mirror that here so that format(exc, "")
-            // and f"{exc}" call the user-defined __str__.
-            if spec.is_empty() {
-                return Ok(Value::string(render_instance_str(_interp, value)?));
-            } else {
-                // CPython raises TypeError (not ValueError) when a non-empty spec
-                // is passed to a type that inherits object.__format__ without
-                // overriding it.
-                let type_name = value_type_name_str(value);
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("unsupported format string passed to {}.__format__", type_name),
-                ));
-            }
-        }
-        apply_format_spec(value, spec)
+        // Delegate to the shared `__format__` dispatcher that f-strings and
+        // `str.format` already use (#1370).  It only invokes a *user-defined*
+        // `__format__` (skipping the inherited builtin/`object.__format__`),
+        // and otherwise extracts the primitive backing and applies the spec.
+        // Issue #1935: the previous inline copy here invoked *any* inherited
+        // `__format__` — including the builtin one a primitive subclass picks
+        // up from its MRO — which rejected a non-empty spec before the
+        // backing-extraction branch could run, so `format(MyInt(42), "d")`
+        // raised TypeError.  Routing through `dispatch_dunder_format` (which has
+        // the `!BuiltinFunction` guard) fixes that and keeps the three format
+        // paths in lock-step.
+        _interp.dispatch_dunder_format(value, spec)
     }
 
     /// CPython: classmethod(function) — class-method descriptor.

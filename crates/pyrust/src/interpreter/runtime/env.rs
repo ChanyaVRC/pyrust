@@ -3671,6 +3671,18 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         {
             return true;
         }
+        // Issue #2191: `(5).__format__(spec)` / `"hi".__format__(spec)` etc. must
+        // route through the real format machinery (same result as
+        // `format(self, spec)`).  Expose `__format__` as a bound method-wrapper
+        // on every built-in data value so the dispatch lands in
+        // `bound_method_dispatch_inner` (which delegates to `apply_format_spec`)
+        // rather than the unbound `object.__format__` class-attr that drops
+        // `self` and returns the spec verbatim.
+        if name == "__format__"
+            && crate::interpreter::primitive_class_for_value(target).is_some()
+        {
+            return true;
+        }
     }
     match target.kind() {
         // bool is a subclass of int; hasattr(True, "bit_length") must return True.
