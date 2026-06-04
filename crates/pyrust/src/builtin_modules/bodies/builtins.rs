@@ -4292,11 +4292,14 @@ pyrust_module! {
             .collect();
         if let ValueKind::Dict(kw_map) = args[2].value.kind() {
             for (k, v) in kw_map.iter() {
-                if let PyKey::Str(name) = k {
-                    expanded.push(ExpandedCallArg {
+                match k {
+                    PyKey::Str(name) => expanded.push(ExpandedCallArg {
                         name: Some(name.as_str().unwrap_or("").to_owned()),
                         value: v.clone(),
-                    });
+                    }),
+                    // CPython: a non-string `**` key is a TypeError, not a
+                    // silently dropped entry.
+                    _ => return Err(pyrust_core::type_err!("keywords must be strings")),
                 }
             }
         }

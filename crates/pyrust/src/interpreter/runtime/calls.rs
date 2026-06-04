@@ -7865,6 +7865,11 @@ impl Interpreter {
             ValueKind::Dict(d) => d.clone(),
             _ => return Err(PyError::Runtime("CallMethodExpanded: kw_dict must be a dict".to_string())),
         };
+        // CPython: a non-string `**` key is a TypeError (`keywords must be
+        // strings`), not a silently dropped keyword argument.
+        if kw_map.keys().any(|k| !matches!(k, PyKey::Str(_))) {
+            return Err(pyrust_core::type_err!("keywords must be strings"));
+        }
 
         let obj_kind_tag = Self::builtin_container_tag(regs[obj as usize].as_some());
 
