@@ -4948,6 +4948,9 @@ impl Compiler {
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
             binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
+            // Empty until the optimizer's `build_exc_table` pass runs; while
+            // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.
+            exc_table: Vec::new(),
         })
     }
 

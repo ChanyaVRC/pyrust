@@ -706,7 +706,18 @@ pub struct FnCode {
     ///   `Specialized(tag)` + same tag → try fast path; mismatch → `Megamorphic`.
     ///   `Megamorphic` → permanently bypass cache, call `eval_binary` directly.
     pub(crate) binop_cache: RefCell<Vec<BinOpCacheEntry>>,
+    /// Zero-cost exception table (CPython 3.11 model).  Parallel to `insns`:
+    /// `exc_table[pc]` is the absolute target PC of the innermost `try` handler
+    /// active when an exception is raised at `pc`, or [`EXC_NO_HANDLER`] for
+    /// none.  Populated by the optimizer's `build_exc_table` pass after the
+    /// `SetupExcept`/`PopExcept` block-setup instructions have been stripped, so
+    /// entering/leaving a `try` is free and only the raise path pays an O(1)
+    /// lookup.  Empty when bytecode was built without the optimizer (the VM then
+    /// falls back to the dynamic `SetupExcept`/`PopExcept` handler stack).
+    pub(crate) exc_table: Vec<u32>,
 }
+
+pub(crate) use crate::optimizer::EXC_NO_HANDLER;
 
 /// Initial version stored in every `global_cache` slot at construction
 /// time.  Chosen so that it never matches a real `global_env_version`

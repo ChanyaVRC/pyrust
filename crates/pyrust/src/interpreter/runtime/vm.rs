@@ -679,9 +679,27 @@ impl Interpreter {
         e: PyError,
         exc_handlers: &mut ExcHandlersBuf,
         exc_ctx_frame_base: usize,
+        // Zero-cost exception table (CPython 3.11 model).  When non-empty it is
+        // the source of truth: `exc_table[raise_pc]` gives the handler PC for an
+        // exception raised at `raise_pc`, and the dynamic `exc_handlers` stack is
+        // unused.  When empty (non-optimized bytecode) the VM falls back to the
+        // dynamic stack.
+        exc_table: &[u32],
+        raise_pc: usize,
     ) -> std::result::Result<usize, PyError> {
-        let Some(h) = exc_handlers.pop() else {
-            return Err(e);
+        let h = if exc_table.is_empty() {
+            // Fallback: dynamic SetupExcept/PopExcept handler stack.
+            match exc_handlers.pop() {
+                Some(h) => h,
+                None => return Err(e),
+            }
+        } else {
+            // Zero-cost table lookup.  `EXC_NO_HANDLER` ⇒ no handler covers this
+            // pc ⇒ the exception propagates to the caller frame.
+            match exc_table.get(raise_pc).copied() {
+                Some(t) if t != crate::bytecode::EXC_NO_HANDLER => t as usize,
+                _ => return Err(e),
+            }
         };
         let exc_val = match e {
             PyError::Raised(v) => v,
@@ -886,7 +904,16 @@ impl Interpreter {
             ($expr:expr) => {
                 match $expr {
                     Ok(v) => v,
-                    Err(e) => match self.handle_vm_error(e, &mut exc_handlers, exc_ctx_frame_base) {
+                    // `pc` was already advanced past the current instruction
+                    // (the `pc += 1` below the fetch), so the raising
+                    // instruction's index — the exception-table key — is `pc - 1`.
+                    Err(e) => match self.handle_vm_error(
+                        e,
+                        &mut exc_handlers,
+                        exc_ctx_frame_base,
+                        &code.exc_table,
+                        pc.wrapping_sub(1),
+                    ) {
                         Ok(h) => { pc = h; continue 'vm; }
                         Err(e) => {
                             // Error escapes this frame: publish our register-resident
@@ -914,11 +941,35 @@ impl Interpreter {
             };
         }
             // Inject a pending exception (set by resume_generator_with_exc for
-            // generator.close()/throw()) before dispatching the next
+            // generator.throw()/close()) before dispatching the next
             // instruction.  Routes through the existing handler stack so that
             // try/except/finally inside the generator can observe the throw.
+            //
+            // The generator was suspended at a `Yield`, and `start_pc` (== this
+            // `pc`) is the instruction *after* it.  The exception is raised *by
+            // the yield expression*, so the exception-table key is the Yield's
+            // pc, `pc - 1` — the resume pc itself may already be outside the try
+            // region that encloses the yield.  For a non-generator entry with an
+            // injected exception at `pc == 0` there is no enclosing handler, so
+            // `wrapping_sub` is harmless (no table entry ⇒ propagate).
             if let Some(e) = pending_inject.take() {
-                vm_try!(Err::<(), _>(e));
+                let inject_pc = pc.wrapping_sub(1);
+                match self.handle_vm_error(
+                    e,
+                    &mut exc_handlers,
+                    exc_ctx_frame_base,
+                    &code.exc_table,
+                    inject_pc,
+                ) {
+                    Ok(h) => {
+                        pc = h;
+                        continue 'vm;
+                    }
+                    Err(e) => {
+                        pyrust_core::set_current_vm_line(cur_line);
+                        return Err(e);
+                    }
+                }
             }
             let Some(insn) = code.insns.get(pc) else {
                 if pc == code.insns.len() {
@@ -1880,7 +1931,7 @@ impl Interpreter {
 
                     // Self-call check: if the callee is the same user function as
                     // the one currently executing, and we are not inside a try
-                    // block (exc_handlers must be empty for safe frame reuse),
+                    // block (reusing the frame would discard the active handler),
                     // reset the register file and loop back to pc=0.
                     let is_self_call = if let Some(fn_id) = current_fn_id {
                         match callee_val.kind() {
@@ -1891,7 +1942,20 @@ impl Interpreter {
                         false
                     };
 
-                    if is_self_call && exc_handlers.is_empty() {
+                    // "Not inside a try" in both models: with the zero-cost
+                    // exception table the dynamic `exc_handlers` stack is always
+                    // empty, so consult `exc_table[pc - 1]` (the TailCall's pc)
+                    // instead; with the fallback stack consult `exc_handlers`.
+                    let no_active_handler = if code.exc_table.is_empty() {
+                        exc_handlers.is_empty()
+                    } else {
+                        code.exc_table
+                            .get(pc - 1)
+                            .copied()
+                            .is_none_or(|t| t == crate::bytecode::EXC_NO_HANDLER)
+                    };
+
+                    if is_self_call && no_active_handler {
                         // Guard against infinite tail recursion: treat each
                         // TCO iteration as one "call depth" unit, matching
                         // the recursion limit so that RecursionError fires at
@@ -3387,6 +3451,9 @@ mod vm_tests {
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); 0]),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
+            // Empty: these hand-built test fixtures run unoptimized, so the VM
+            // uses the dynamic SetupExcept/PopExcept handler stack.
+            exc_table: Vec::new(),
         }
     }
 
