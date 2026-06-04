@@ -1322,15 +1322,20 @@ pyrust_module! {
         // and all BuiltinObject iterator types are not sequences and must
         // raise TypeError, matching CPython 3.12's check for __reversed__ /
         // (__len__ + __getitem__).
-        let is_reversible = matches!(
-            seq.0.kind(),
+        let is_reversible = match seq.0.kind() {
             ValueKind::List(_)
-                | ValueKind::Tuple(_)
-                | ValueKind::Str(_)
-                | ValueKind::Bytes(_)
-                | ValueKind::Range { .. }
-                | ValueKind::BigRange { .. }
-        );
+            | ValueKind::Tuple(_)
+            | ValueKind::Str(_)
+            | ValueKind::Bytes(_)
+            | ValueKind::Range { .. }
+            | ValueKind::BigRange { .. } => true,
+            // `bytearray` is a mutable sequence (len + getitem) and is
+            // reversible in CPython, yielding its bytes as ints (#2005).
+            ValueKind::BuiltinObject { ops, .. } => {
+                ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+            }
+            _ => false,
+        };
         if !is_reversible {
             let type_name = full_type_name_str(&seq.0);
             return Err(PyError::named(
@@ -1445,6 +1450,10 @@ pyrust_module! {
                     Generator,
                     PyInstance(Rc<RefCell<crate::value::PyInstance>>),
                     BigRange,
+                    // A `BuiltinObject` that is itself an iterator (e.g.
+                    // `reversed()`'s `list_reverseiterator`).  An iterator's
+                    // `__iter__` returns `self`, so `iter(x) is x` (#2117).
+                    SelfIterator,
                     Other,
                 }
                 let kind = match val.kind() {
@@ -1452,10 +1461,13 @@ pyrust_module! {
                     ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
                     // Big range: lazy iterator (#2118) — never materialize.
                     ValueKind::BigRange { .. } => IterKind::BigRange,
+                    ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => {
+                        IterKind::SelfIterator
+                    }
                     _ => IterKind::Other,
                 };
                 match kind {
-                    IterKind::Generator => Ok(val),
+                    IterKind::Generator | IterKind::SelfIterator => Ok(val),
                     IterKind::BigRange => make_iterator(_interp, &val),
                     IterKind::PyInstance(inst_rc) => {
                         let class = Rc::clone(&inst_rc.borrow().class);
@@ -7690,6 +7702,11 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         Generator,
         PyInstance(Rc<RefCell<crate::value::PyInstance>>),
         BigRange(crate::value::PyBigInt, crate::value::PyBigInt, crate::value::PyBigInt),
+        // A `BuiltinObject` that is itself an iterator (`reversed`, `enumerate`,
+        // `zip`, `chain`, file objects).  Its `__iter__` returns `self`, so it
+        // is returned unchanged and shares position with the original — never
+        // re-wrapped in a fresh `NativeIterFrame` (#2117).
+        SelfIterator,
         Other,
     }
     let kind = match v.kind() {
@@ -7700,10 +7717,11 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         ValueKind::BigRange { start, stop, step } => {
             IterKind::BigRange(start.clone(), stop.clone(), step.clone())
         }
+        ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => IterKind::SelfIterator,
         _ => IterKind::Other,
     };
     match kind {
-        IterKind::Generator => Ok(v.clone()),
+        IterKind::Generator | IterKind::SelfIterator => Ok(v.clone()),
         IterKind::BigRange(cur, stop, step) => {
             Ok(Value::generator(Box::new(BigRangeIter { cur, stop, step })))
         }

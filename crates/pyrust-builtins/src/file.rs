@@ -88,6 +88,10 @@ impl BuiltinTypeOps for FileOps {
         true
     }
 
+    fn is_iterator(&self) -> bool {
+        true
+    }
+
     fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<FileState>()?;
