@@ -2252,72 +2252,95 @@ fn utf7_is_direct(cp: u32) -> bool {
         || (0x20..=0x7E).contains(&cp) && cp != 0x2B && cp != 0x5C && cp != 0x7E
 }
 
+/// True if `cp` is a modified-base64 alphabet byte (`[A-Za-z0-9+/]`).  Used to
+/// decide whether a shifted section needs an explicit `-` shift-out before the
+/// next direct character (CPython only emits `-` when the following byte could
+/// otherwise be misread as continuing the base64 run).
+fn utf7_is_b64(cp: u32) -> bool {
+    matches!(cp, 0x41..=0x5A | 0x61..=0x7A | 0x30..=0x39) || cp == 0x2B || cp == 0x2F
+}
+
 /// `str.encode('utf-7')`.  Direct characters pass through; runs of other
-/// characters are base64-encoded (of their UTF-16BE code units) inside `+...-`.
-/// A literal `+` becomes `+-`.  Matches CPython byte-for-byte.
+/// characters are base64-encoded (of their UTF-16BE code units) inside `+...`.
+/// A bare `+` becomes `+-`.  The closing `-` shift-out is emitted only when the
+/// following byte is a base64 char or `-` (or at end of string), matching
+/// CPython byte-for-byte.  A `+` encountered while already inside a shifted
+/// section is folded into the running base64 (CPython does not break the run).
 fn encode_utf7(source: &str) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(source.len());
     let cps: Vec<u32> = cesu8_codepoints(source).collect();
+    // Pending base64 bit accumulator for the active shifted section.
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    let mut shifted = false;
+
+    // Flush the active shifted section, deciding the trailing `-` from `next`
+    // (the codepoint that terminates the run, or `None` at end of string).
+    fn close_shift(out: &mut Vec<u8>, acc: &mut u32, nbits: &mut u32, next: Option<u32>) {
+        if *nbits > 0 {
+            out.push(UTF7_B64[((*acc << (6 - *nbits)) & 0x3F) as usize]);
+        }
+        *acc = 0;
+        *nbits = 0;
+        // CPython emits the shift-out `-` at end of string, or when the next
+        // direct char is itself a base64 char or `-`.
+        let emit_dash = match next {
+            None => true,
+            Some(c) => c == 0x2D || utf7_is_b64(c),
+        };
+        if emit_dash {
+            out.push(b'-');
+        }
+    }
+
+    let push_unit = |out: &mut Vec<u8>, acc: &mut u32, nbits: &mut u32, unit: u16| {
+        *acc = (*acc << 16) | unit as u32;
+        *nbits += 16;
+        while *nbits >= 6 {
+            *nbits -= 6;
+            out.push(UTF7_B64[((*acc >> *nbits) & 0x3F) as usize]);
+        }
+    };
+
     let mut idx = 0usize;
     while idx < cps.len() {
         let cp = cps[idx];
+        // A direct char (when not already shifted) is emitted literally; if a
+        // shifted section is open it must be closed first.
         if utf7_is_direct(cp) {
+            if shifted {
+                close_shift(&mut out, &mut acc, &mut nbits, Some(cp));
+                shifted = false;
+            }
             out.push(cp as u8);
             idx += 1;
             continue;
         }
-        if cp == 0x2B {
+        // A `+` outside a shifted section is the literal `+-`; inside a shifted
+        // section it is just another code unit folded into the run.
+        if cp == 0x2B && !shifted {
             out.extend_from_slice(b"+-");
             idx += 1;
             continue;
         }
-        // Begin a shifted (base64) section; gather UTF-16BE code units until the
-        // next direct character or a `+`.
-        let mut units: Vec<u16> = Vec::new();
-        while idx < cps.len() {
-            let c = cps[idx];
-            if utf7_is_direct(c) || c == 0x2B {
-                break;
-            }
-            // Surrogate codepoints encode as their own 16-bit unit; scalars may
-            // produce a surrogate pair.
-            if (0xD800..=0xDFFF).contains(&c) {
-                units.push(c as u16);
-            } else if let Some(ch) = char::from_u32(c) {
-                let mut buf = [0u16; 2];
-                for u in ch.encode_utf16(&mut buf) {
-                    units.push(*u);
-                }
-            }
-            idx += 1;
+        if !shifted {
+            out.push(b'+');
+            shifted = true;
         }
-        out.push(b'+');
-        out.extend_from_slice(&utf7_base64_encode(&units));
-        out.push(b'-');
-    }
-    out
-}
-
-/// Base64-encode the big-endian bytes of `units` using the modified UTF-7
-/// alphabet (no `=` padding).
-fn utf7_base64_encode(units: &[u16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(units.len() * 2);
-    for u in units {
-        bytes.extend_from_slice(&u.to_be_bytes());
-    }
-    let mut out = Vec::new();
-    let mut acc: u32 = 0;
-    let mut nbits = 0u32;
-    for &b in &bytes {
-        acc = (acc << 8) | b as u32;
-        nbits += 8;
-        while nbits >= 6 {
-            nbits -= 6;
-            out.push(UTF7_B64[((acc >> nbits) & 0x3F) as usize]);
+        // Surrogate codepoints encode as their own 16-bit unit; scalars may
+        // produce a surrogate pair.
+        if (0xD800..=0xDFFF).contains(&cp) {
+            push_unit(&mut out, &mut acc, &mut nbits, cp as u16);
+        } else if let Some(ch) = char::from_u32(cp) {
+            let mut buf = [0u16; 2];
+            for u in ch.encode_utf16(&mut buf) {
+                push_unit(&mut out, &mut acc, &mut nbits, *u);
+            }
         }
+        idx += 1;
     }
-    if nbits > 0 {
-        out.push(UTF7_B64[((acc << (6 - nbits)) & 0x3F) as usize]);
+    if shifted {
+        close_shift(&mut out, &mut acc, &mut nbits, None);
     }
     out
 }

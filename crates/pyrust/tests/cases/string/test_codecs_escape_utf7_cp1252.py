@@ -67,6 +67,15 @@ print(repr("\\~".encode("utf-7")))
 print(repr("中文".encode("utf-7")))
 print(repr("\U0001F600".encode("utf-7")))
 print(repr("!@#$%".encode("utf-7")))
+# shift-out '-' is omitted when the next direct char is not a base64 char,
+# and a '+' inside a shifted run folds into the base64 (no premature close)
+print(repr("☺!".encode("utf-7")))
+print(repr("café世界!".encode("utf-7")))
+print(repr("★+".encode("utf-7")))
+print(repr("★+a".encode("utf-7")))
+print(repr("★A".encode("utf-7")))
+print(repr("mix αβ γδ".encode("utf-7")))
+print(repr("★;★".encode("utf-7")))
 
 # --- utf-7 decode ---
 print(repr(b"+-".decode("utf-7")))
