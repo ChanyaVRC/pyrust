@@ -891,13 +891,41 @@ fn pass_fold_const_tuple(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Val
 /// - `BinOpConst(r, lhs, op, c) + JumpIfTrue(r, k)`  → `CmpJumpIfTrueConst(lhs, op, c, k)`
 ///
 /// Only fuses when `r >= num_locals` (temp register — not a named local).
+///
+/// ## Jump-target guard (issue #2088)
+///
+/// The `JumpIfFalse(r, k)` at `i+1` is replaced *in place* by a `CmpJump…` that
+/// **recomputes** `lhs op rhs` instead of merely testing the already-computed
+/// register `r`.  That is only sound when control reaches `i+1` exclusively by
+/// falling through from the `BinOp` at `i`.  If another instruction *jumps to*
+/// `i+1`, that incoming edge expected the original `JumpIfFalse` to test `r`
+/// (e.g. an `and`/`or` short-circuit jump that lands on the trailing
+/// conditional jump to re-use its still-false LHS result).  Recomputing
+/// `lhs op rhs` on that path produces the wrong branch decision.  So we skip
+/// fusion whenever `i+1` is the target of any jump.
 fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     let mut transformed = insns;
     let mut keep = vec![true; n];
 
+    // Indices that are the target of some (forward or backward) jump.  The
+    // trailing conditional jump of a fusion candidate must not be such a target.
+    let mut jump_targets: HashSet<usize> = HashSet::new();
+    for (idx, insn) in transformed.iter().enumerate() {
+        if let Some(k) = insn_jump_off(insn) {
+            let target = idx as i64 + 1 + k as i64;
+            if target >= 0 && (target as usize) < n {
+                jump_targets.insert(target as usize);
+            }
+        }
+    }
+
     let mut i = 0;
     while i + 1 < n {
+        if jump_targets.contains(&(i + 1)) {
+            i += 1;
+            continue;
+        }
         let fused: Option<Insn> = match (&transformed[i], &transformed[i + 1]) {
             (Insn::BinOpConst(r, lhs, op, c, _), Insn::JumpIfFalse(cond, k))
                 if *r == *cond && *r >= num_locals =>
@@ -8368,6 +8396,36 @@ mod tests {
         ];
         let out = pass_cmpjump_fusion(insns, 3);
         assert_eq!(out.len(), 3, "no fusion when cond reg is a local");
+    }
+
+    #[test]
+    fn cmpjump_skips_when_jump_targets_the_cond_jump() {
+        use crate::ast::BinaryOp;
+        // Issue #2088: an `and` short-circuit lands on the trailing conditional
+        // jump of the RHS comparison.  Fusing BinOp+JumpIfFalse at index 1/2
+        // would make index 2 recompute (5 Ne 6) instead of re-testing the LHS
+        // register — wrong on the incoming-jump path.  The JumpIfFalse(4, -1)
+        // (short-circuit) targets index 2 (0 + 1 + 1 = 2), so fusion must skip.
+        let insns = vec![
+            Insn::JumpIfFalse(4, 1), // short-circuit LHS-false jump → targets index 2
+            Insn::BinOp(3, 5, BinaryOp::Ne, 6),
+            Insn::JumpIfFalse(3, 0), // index 2: jump target — must NOT be fused
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 2);
+        assert_eq!(
+            out.len(),
+            4,
+            "BinOp must survive: its JumpIfFalse is a jump target"
+        );
+        assert!(
+            matches!(out[1], Insn::BinOp(3, 5, BinaryOp::Ne, 6)),
+            "BinOp(3, 5, Ne, 6) must be preserved, not fused away"
+        );
+        assert!(
+            matches!(out[2], Insn::JumpIfFalse(3, 0)),
+            "trailing JumpIfFalse must remain a plain register test"
+        );
     }
 
     #[test]

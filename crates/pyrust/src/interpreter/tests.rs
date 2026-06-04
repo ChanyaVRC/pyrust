@@ -930,6 +930,25 @@ result = fact(10)
         assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::int(10)));
     }
 
+    #[test]
+    fn licm_not_applied_when_body_mutates_condition_container() {
+        // Issue #2034: `while x: x.pop()` mutates the container in place without
+        // reassigning the register `x`.  LICM must NOT hoist the truthiness
+        // check — the loop must drain to empty and stop, not over-iterate.
+        let interpreter = run_program("x = [1, 2, 3]\nn = 0\nwhile x:\n    x.pop()\n    n += 1\n");
+        assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::int(3)));
+        let x = interpreter.lookup_name("x").unwrap().unwrap();
+        assert!(x.truthy() == false, "x should be drained to empty");
+    }
+
+    #[test]
+    fn licm_not_applied_when_body_mutates_via_alias() {
+        // Issue #2034 (aliasing): the mutation flows through a different name
+        // that aliases the condition's object.  Still must drain.
+        let interpreter = run_program("a = [1, 2, 3]\nb = a\nn = 0\nwhile a:\n    b.pop()\n    n += 1\n");
+        assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::int(3)));
+    }
+
     // ── Register-VM specific tests ──────────────────────────────────────────
 
     #[test]
