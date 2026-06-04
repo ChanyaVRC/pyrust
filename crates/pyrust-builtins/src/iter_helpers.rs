@@ -43,6 +43,10 @@ impl BuiltinTypeOps for EnumerateOps {
         true
     }
 
+    fn is_iterator(&self) -> bool {
+        true
+    }
+
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
         let borrow = state.borrow();
         let s = borrow
@@ -106,6 +110,10 @@ impl BuiltinTypeOps for ZipOps {
     }
 
     fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn is_iterator(&self) -> bool {
         true
     }
 
@@ -226,6 +234,10 @@ impl BuiltinTypeOps for ReversedOps {
         true
     }
 
+    fn is_iterator(&self) -> bool {
+        true
+    }
+
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
         let borrow = state.borrow();
         let s = borrow
@@ -295,6 +307,10 @@ impl BuiltinTypeOps for ChainOps {
     }
 
     fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn is_iterator(&self) -> bool {
         true
     }
 

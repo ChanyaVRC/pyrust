@@ -1688,6 +1688,15 @@ pub trait BuiltinTypeOps: 'static {
         false
     }
 
+    /// Returns true if this type is *itself an iterator* — i.e. its
+    /// `__iter__` returns `self`, per the iterator protocol.  `iter(x)`
+    /// returns such objects unchanged instead of wrapping them in a fresh
+    /// iterator.  Iterable-but-not-iterator views (e.g. `dict_keys`) must
+    /// leave this `false` so `iter()` builds a new iterator over them.
+    fn is_iterator(&self) -> bool {
+        false
+    }
+
     /// Convert this object to a `PyKey` for use as a dict/set key.  Returns
     /// `None` if this type is not hashable.  Frozensets etc. override this.
     fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
