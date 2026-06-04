@@ -100,6 +100,20 @@ fn open_self(
     Ok(inst)
 }
 
+/// Like `open_self`, but raises the trailing-period variant of the closed-file
+/// error.  CPython's `BytesIO` uses the period on every closed-file message,
+/// and `StringIO.__enter__` does too, so those sites use this prologue.
+fn open_self_dot(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<Rc<RefCell<PyInstance>>> {
+    let inst = expect_self(args, fn_name)?;
+    if is_closed(&inst) {
+        return Err(closed_error_dot());
+    }
+    Ok(inst)
+}
+
 /// Slice off `self` and enforce the "takes at most 1 argument" arity used by
 /// `read` / `readline` / `readlines` / `truncate`.
 fn user_at_most_one<'a>(
@@ -232,8 +246,11 @@ pyrust_module! {
         }
 
         /// `readlines([hint])` — read all remaining lines into a list.
+        /// CPython's StringIO.readlines closed-file error carries the trailing
+        /// period (unlike read/readline/tell, which omit it).
         fn readlines(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = expect_self(args, FN_NAME)?;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
             user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = string_io_buf(&inst, FN_NAME)?;
@@ -436,9 +453,10 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        /// `__enter__` — context manager support; returns `self`.
+        /// `__enter__` — context manager support; returns `self`.  CPython's
+        /// closed-file error here carries the trailing period.
         fn __enter__(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             let _ = _interp;
             Ok(Value::py_instance(inst))
         }
@@ -457,21 +475,22 @@ pyrust_module! {
         /// separators are added (CPython delegates each element to `write`).
         /// Returns `None`.
         fn writelines(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = expect_self(args, FN_NAME)?;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
             if args.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
-            // Materialise the iterable, then validate every element is str
-            // *before* writing any of it, matching CPython which raises on the
-            // first non-str element with nothing written.
+            // CPython's writelines delegates each element to `write` as it
+            // iterates, so a non-str element mid-iterable leaves the already
+            // written prefix in the buffer (it is NOT atomic).  Write each
+            // element as it is validated to match that partial-write behaviour.
             let items = _interp.collect_iterable(&args[1].value)?;
-            let mut pieces: Vec<String> = Vec::with_capacity(items.len());
             for item in &items {
                 match item.kind() {
-                    ValueKind::Str(s) => pieces.push(s.to_string()),
+                    ValueKind::Str(s) => string_io_write_at(&inst, s),
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
@@ -480,9 +499,6 @@ pyrust_module! {
                         ),
                     )),
                 }
-            }
-            for piece in pieces {
-                string_io_write_at(&inst, &piece);
             }
             Ok(Value::none())
         }
@@ -555,11 +571,13 @@ pyrust_module! {
         }
 
         /// `__next__` — yield the next line (terminated by `\n` or EOF),
-        /// raising `StopIteration` once the buffer is exhausted.
+        /// raising `StopIteration` once the buffer is exhausted.  CPython's
+        /// StringIO.__next__ closed-file error omits the trailing period
+        /// (unlike __iter__/isatty, which include it).
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            if is_closed(&inst) { return Err(closed_error_dot()); }
+            if is_closed(&inst) { return Err(closed_error()); }
             let buf = string_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
             let chars: Vec<char> = buf.chars().collect();
@@ -627,7 +645,7 @@ pyrust_module! {
 
         /// `read([size=-1])` — read up to `size` bytes.
         fn read(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             let user = user_at_most_one(args, FN_NAME)?;
             let size = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
@@ -646,7 +664,7 @@ pyrust_module! {
 
         /// `readline([size=-1])` — read up to the next `\n` byte (inclusive).
         fn readline(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             let user = user_at_most_one(args, FN_NAME)?;
             let size_limit = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
@@ -668,7 +686,7 @@ pyrust_module! {
 
         /// `readlines([hint])` — read all remaining lines into a list of bytes.
         fn readlines(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
@@ -693,7 +711,7 @@ pyrust_module! {
 
         /// `write(b)` — write bytes at the current position.
         fn write(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             if args.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -715,7 +733,7 @@ pyrust_module! {
 
         /// `getvalue()` — return the full buffer regardless of position.
         fn getvalue(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             if args.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -730,7 +748,7 @@ pyrust_module! {
         /// `seek(pos[, whence=0])` — BytesIO supports all three whence modes
         /// with arbitrary offsets (unlike StringIO which restricts them).
         fn seek(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             let user = &args[1..];
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
@@ -780,7 +798,7 @@ pyrust_module! {
 
         /// `tell()` — return the current position (byte offset).
         fn tell(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             if args.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -793,7 +811,7 @@ pyrust_module! {
 
         /// `truncate([size=None])` — truncate to at most `size` bytes.
         fn truncate(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             let user = user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
@@ -836,7 +854,7 @@ pyrust_module! {
         }
 
         fn __enter__(args) -> Result<Value> {
-            let inst = open_self(args, FN_NAME)?;
+            let inst = open_self_dot(args, FN_NAME)?;
             let _ = _interp;
             Ok(Value::py_instance(inst))
         }
@@ -860,13 +878,15 @@ pyrust_module! {
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
+            // CPython delegates each element to `write` as it iterates, so a
+            // non-bytes element mid-iterable leaves the written prefix in the
+            // buffer (it is NOT atomic).  Write each as it is validated.
             let items = _interp.collect_iterable(&args[1].value)?;
-            let mut pieces: Vec<Vec<u8>> = Vec::with_capacity(items.len());
             for item in &items {
                 match item.kind() {
-                    ValueKind::Bytes(b) => pieces.push(b.to_vec()),
+                    ValueKind::Bytes(b) => bytes_io_write_at(&inst, b),
                     _ => match pyrust_builtins::bytearray::as_bytearray_snapshot(item) {
-                        Some(b) => pieces.push(b),
+                        Some(b) => bytes_io_write_at(&inst, &b),
                         None => return Err(PyError::named(
                             "TypeError",
                             format!(
@@ -876,9 +896,6 @@ pyrust_module! {
                         )),
                     },
                 }
-            }
-            for piece in pieces {
-                bytes_io_write_at(&inst, &piece);
             }
             Ok(Value::none())
         }

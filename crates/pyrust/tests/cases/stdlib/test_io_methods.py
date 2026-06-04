@@ -88,6 +88,58 @@ try:
 except TypeError:
     pass
 
+# ── writelines is NOT atomic: the valid prefix is written before the bad
+#    element raises (CPython delegates each item to write as it iterates) ──────
+s = io.StringIO()
+try:
+    s.writelines(["a", "b", 1, "c"])
+    print("FAIL: expected TypeError in writelines")
+except TypeError:
+    pass
+assert s.getvalue() == "ab"
+b = io.BytesIO()
+try:
+    b.writelines([b"a", b"b", 1])
+    print("FAIL: expected TypeError in writelines")
+except TypeError:
+    pass
+assert b.getvalue() == b"ab"
+
+# ── closed-file error message: CPython's trailing-period quirk ────────────────
+# StringIO: read/readline/tell/seek/getvalue/truncate/write/seekable/readable/
+# writable/__next__ omit the period; readlines/writelines/isatty/iteration and
+# __enter__ include it.  BytesIO uses the period everywhere.
+def msg(fn):
+    try:
+        fn()
+        return "NO RAISE"
+    except ValueError as e:
+        return str(e)
+
+NO = "I/O operation on closed file"
+DOT = "I/O operation on closed file."
+
+s = io.StringIO("a\nb"); s.close()
+assert msg(lambda: s.read()) == NO
+assert msg(lambda: s.readline()) == NO
+assert msg(lambda: s.readlines()) == DOT
+assert msg(lambda: s.tell()) == NO
+assert msg(lambda: s.seek(0)) == NO
+assert msg(lambda: s.write("x")) == NO
+assert msg(lambda: s.writelines(["x"])) == DOT
+assert msg(lambda: s.__next__()) == NO
+assert msg(lambda: list(s)) == DOT
+assert msg(lambda: s.isatty()) == DOT
+
+b = io.BytesIO(b"a\nb"); b.close()
+for fn in (lambda: b.read(), lambda: b.readline(), lambda: b.readlines(),
+           lambda: b.tell(), lambda: b.seek(0), lambda: b.write(b"x"),
+           lambda: b.writelines([b"x"]), lambda: b.getvalue(),
+           lambda: b.truncate(), lambda: b.readinto(bytearray(1)),
+           lambda: b.read1(), lambda: b.__next__(), lambda: list(b),
+           lambda: b.isatty(), lambda: b.flush()):
+    assert msg(fn) == DOT, fn
+
 # ── closed-stream predicates raise ValueError ────────────────────────────────
 for make in (lambda: io.StringIO("x"), lambda: io.BytesIO(b"x")):
     c = make()
