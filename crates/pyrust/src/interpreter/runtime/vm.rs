@@ -2347,6 +2347,18 @@ impl Interpreter {
                                 )))
                             }
                         }
+                        // Any non-dict mapping following the duck-typed protocol
+                        // (`keys()` + `__getitem__`): `ChainMap`, `UserDict`,
+                        // custom mappings (issue #2190).
+                        ValueKind::PyInstance(_) => {
+                            match vm_try!(mapping_pairs_via_protocol(self, &src_val)) {
+                                Some(pairs) => pairs,
+                                None => vm_try!(Err(pyrust_core::type_err!(
+                                    "'{}' object is not a mapping",
+                                    value_type_name_str(&src_val)
+                                ))),
+                            }
+                        }
                         _ => vm_try!(Err(pyrust_core::type_err!("'{}' object is not a mapping",
                                 value_type_name_str(&src_val)))),
                     };

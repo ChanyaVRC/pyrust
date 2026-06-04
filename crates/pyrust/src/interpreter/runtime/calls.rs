@@ -1109,6 +1109,26 @@ impl Interpreter {
                 }
             }
         }
+        // #2093: dict views are reversible by insertion order; expose
+        // `view.__reversed__()` so the dunder is callable (and `reversed(view)`
+        // works through the builtin).  Routes back through the `reversed`
+        // builtin, which materialises the view in reverse.
+        if !has_kw
+            && method == "__reversed__"
+            && pyrust_builtins::dict_views::view_kind(&receiver).is_some()
+        {
+            if !pos.is_empty() {
+                let view_name = value_type_name_str(&receiver);
+                return Err(pyrust_core::type_err!(
+                    "{view_name}.__reversed__() takes no arguments ({} given)",
+                    pos.len()
+                ));
+            }
+            let arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("reversed")
+                .expect("reversed must be in the registry");
+            return dispatch(self, &[arg]);
+        }
         enum Kind {
             Int,
             Float,
@@ -2158,7 +2178,7 @@ impl Interpreter {
         //     and `sq_ass_item` (`__setitem__`) carry a leading space.
         let want: usize = match method {
             "__len__" | "__neg__" | "__pos__" | "__abs__" | "__invert__" | "__hash__"
-            | "__str__" | "__repr__" | "__bool__" => 0,
+            | "__str__" | "__repr__" | "__bool__" | "__reversed__" => 0,
             "__setitem__" => 2,
             _ => 1,
         };
@@ -2171,6 +2191,14 @@ impl Interpreter {
             if named_wrapper {
                 return Err(pyrust_core::type_err!("{type_name}.{method}() takes exactly one argument ({} given)",
                         args.len()));
+            }
+            // `dict.__reversed__()` is a named no-arg method-wrapper in CPython
+            // 3.12: `dict.__reversed__() takes no arguments (N given)` (#2093).
+            if method == "__reversed__" {
+                return Err(pyrust_core::type_err!(
+                    "{type_name}.__reversed__() takes no arguments ({} given)",
+                    args.len()
+                ));
             }
             // `__mul__` (sq_repeat), `__imul__` (sq_inplace_repeat) and
             // `__setitem__` (sq_ass_item) print a leading space before
@@ -2203,6 +2231,15 @@ impl Interpreter {
             "__bool__" => {
                 let b = self.truthy_value(&receiver)?;
                 return Ok(Value::bool_(b));
+            }
+            // #2093: `dict.__reversed__()` yields keys in reverse insertion
+            // order.  Routes through the `reversed` builtin, which handles the
+            // dict case directly.
+            "__reversed__" => {
+                let arg = ExpandedCallArg { name: None, value: receiver };
+                let dispatch = crate::builtin_registry::lookup("reversed")
+                    .expect("reversed must be in the registry");
+                return dispatch(self, &[arg]);
             }
             // Rich-comparison dunders (issue #2070): exposed on every primitive
             // type.  The forward slot returns `NotImplemented` for operand types
@@ -6235,6 +6272,9 @@ fn is_container_protocol_dunder_name(name: &str) -> bool {
             | "__hash__"
             | "__str__"
             | "__repr__"
+            // `dict.__reversed__()` — reversible by insertion order (#2093);
+            // the per-receiver membership check restricts it to `dict`.
+            | "__reversed__"
     )
 }
 
@@ -6318,7 +6358,7 @@ pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static st
         ],
         "dict" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__or__", "__ror__", "__ior__",
+            "__or__", "__ror__", "__ior__", "__reversed__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__str__", "__repr__",
         ],

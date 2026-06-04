@@ -1928,6 +1928,113 @@ pub(crate) fn invoke_class_method(
     }
 }
 
+/// If `value` is a `PyInstance` whose class exposes a `keys` method, treat it
+/// as a mapping per CPython's mapping protocol (`dict(m)` / `{**m}` /
+/// `dict.update(m)` all key on `keys()` + `__getitem__`) and materialise its
+/// `(PyKey, Value)` pairs.  Returns `Ok(None)` for any value that is not a
+/// `keys()`-bearing instance, so callers fall back to their iterable-of-pairs
+/// path unchanged.
+///
+/// This covers `collections.ChainMap`, `UserDict`/`OrderedDict` subclasses, and
+/// any user class that follows the duck-typed mapping protocol — without
+/// requiring a concrete builtin `dict` backing (issue #2190).
+pub(crate) fn mapping_pairs_via_protocol(
+    interp: &mut Interpreter,
+    value: &Value,
+) -> Result<Option<Vec<(PyKey, Value)>>> {
+    let inst = match value.kind() {
+        ValueKind::PyInstance(inst) => Rc::clone(inst),
+        _ => return Ok(None),
+    };
+    let class = Rc::clone(&inst.borrow().class);
+    // `dict` subclasses (OrderedDict / defaultdict / Counter): their `keys`
+    // is a *builtin* method that is not present in `class.attrs`, so the
+    // user-method `lookup_class_attr("keys")` below returns `None`.  Mirror
+    // the `dict()` constructor's subclass handling so `{**subclass}`
+    // materialises the same pairs as `dict(subclass)` (issue #2190).
+    let getitem = lookup_class_attr(&class, "__getitem__");
+    let is_dict_subclass = primitive_class_by_name("dict")
+        .is_some_and(|dict_class| class_is_subclass_of(&class, &dict_class));
+    if is_dict_subclass {
+        // Concrete builtin backing dict (e.g. OrderedDict) — extract directly.
+        if let Some(backing) = instance_builtin_data(&inst) {
+            if let Some(map) = backing.as_dict() {
+                return Ok(Some(map.clone().into_iter().collect()));
+            }
+        }
+        // No builtin backing (defaultdict / Counter): iterate the instance for
+        // its keys and subscript via `__getitem__`, exactly as `dict()` does.
+        let getitem = match getitem {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let keys = interp.collect_iterable(value)?;
+        let mut pairs: Vec<(PyKey, Value)> = Vec::with_capacity(keys.len());
+        for k in keys {
+            let v = invoke_class_method(
+                interp,
+                getitem.clone(),
+                Value::py_instance(Rc::clone(&inst)),
+                &[ExpandedCallArg { name: None, value: k.clone() }],
+            )?;
+            let key = interp.value_to_pykey(&k)?;
+            pairs.push((key, v));
+        }
+        return Ok(Some(pairs));
+    }
+    let keys_method = match lookup_class_attr(&class, "keys") {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    let getitem = match getitem {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    // Call `m.keys()` and iterate the result (CPython does not require it to be
+    // a list — any iterable of keys is accepted).
+    let keys_iter = invoke_class_method(
+        interp,
+        keys_method,
+        Value::py_instance(Rc::clone(&inst)),
+        &[],
+    )?;
+    let keys = interp.collect_iterable(&keys_iter)?;
+    let mut pairs: Vec<(PyKey, Value)> = Vec::with_capacity(keys.len());
+    for k in keys {
+        let v = invoke_class_method(
+            interp,
+            getitem.clone(),
+            Value::py_instance(Rc::clone(&inst)),
+            &[ExpandedCallArg { name: None, value: k.clone() }],
+        )?;
+        let key = interp.value_to_pykey(&k)?;
+        pairs.push((key, v));
+    }
+    Ok(Some(pairs))
+}
+
+/// `true` if `value` is a mapping for printf-style `%`-formatting (issue #2089).
+///
+/// CPython enters mapping mode for a `%(key)` format when the rhs is not a
+/// `tuple` and not a `str` and passes `PyMapping_Check` (has `mp_subscript`).
+/// A plain `dict` always qualifies; a `PyInstance` qualifies when it exposes
+/// `__getitem__` and is not a `tuple` or `str` subclass (`list`/`bytes`/
+/// `bytearray`/`range` subclasses and custom `__getitem__` classes do qualify,
+/// matching CPython — the subscript itself then raises the type-appropriate
+/// error for a non-mapping key).
+pub(crate) fn is_percent_format_mapping(value: &Value) -> bool {
+    match value.kind() {
+        ValueKind::Dict(_) => true,
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            lookup_class_attr(&class, "__getitem__").is_some()
+                && find_immutable_primitive_base(&class) != Some("tuple")
+                && find_scalar_primitive_base(&class) != Some("str")
+        }
+        _ => false,
+    }
+}
+
 fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
     match value.kind() {
         ValueKind::Str(text) => Ok(Some(text.to_string())),

@@ -27,7 +27,7 @@ use crate::interpreter::{
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
-    is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
+    is_exception_class, iter_values, key_to_value, lookup_class_attr, mapping_pairs_via_protocol, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
     bind_constructor_kwargs, reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
@@ -1316,6 +1316,31 @@ pyrust_module! {
                 "TypeError",
                 format!("'{}' object is not reversible", class.borrow().name),
             ));
+        }
+        // dict / dict views are reversible by insertion order (CPython 3.8+,
+        // issue #2093).  The backing IndexMap preserves insertion order, so we
+        // build a forward-ordered list of keys / values / (key, value) pairs and
+        // hand it to the reversed-iterator helper (which yields it in reverse).
+        if let ValueKind::Dict(map) = seq.0.kind() {
+            let keys: Vec<Value> = map.keys().map(|k| key_to_value(k.clone())).collect();
+            return Ok(pyrust_builtins::iter_helpers::reversed(Value::list(keys)));
+        }
+        if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0) {
+            if let Some(rc) = pyrust_builtins::dict_views::as_dict_rc(&seq.0) {
+                let map = rc.borrow();
+                let forward: Vec<Value> = match kind {
+                    // dict_keys
+                    0 => map.keys().map(|k| key_to_value(k.clone())).collect(),
+                    // dict_values
+                    1 => map.values().cloned().collect(),
+                    // dict_items
+                    _ => map
+                        .iter()
+                        .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
+                        .collect(),
+                };
+                return Ok(pyrust_builtins::iter_helpers::reversed(Value::list(forward)));
+            }
         }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
@@ -4137,6 +4162,15 @@ pyrust_module! {
                                 }
                             };
                             let key = _interp.value_to_pykey(&k)?;
+                            _interp.dict_insert(&mut result, key, v)?;
+                        }
+                    } else if let Some(pairs) =
+                        mapping_pairs_via_protocol(_interp, &arg.value)?
+                    {
+                        // Any non-dict mapping that follows the duck-typed
+                        // protocol (`keys()` + `__getitem__`): `ChainMap`,
+                        // `UserDict`, custom mappings (issue #2190).
+                        for (key, v) in pairs {
                             _interp.dict_insert(&mut result, key, v)?;
                         }
                     } else {

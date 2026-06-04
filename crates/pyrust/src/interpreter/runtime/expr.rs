@@ -5386,7 +5386,13 @@ impl Interpreter {
             }
             found
         };
-        let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
+        // CPython enters mapping mode when the format has a `%(key)` code and the
+        // rhs is a mapping (issue #2089): a `dict`, a `dict` subclass, or any
+        // non-tuple/non-str object exposing `__getitem__`.  A plain `dict` keeps
+        // the fast `d.get` lookup; a subclass / custom mapping routes the lookup
+        // through `__getitem__` so `__missing__` and a custom `KeyError` are
+        // honoured.
+        let is_mapping = has_named_key && is_percent_format_mapping(&args);
         // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
         // Use &[Value] to avoid cloning the tuple's items upfront; borrow from
         // args directly for the single-value case to avoid an extra clone.
@@ -5534,9 +5540,10 @@ impl Interpreter {
                                 }
                             }
                         }
-                        _ => {
-                            return Err(pyrust_core::type_err!("format requires a mapping"));
-                        }
+                        // dict subclass / custom mapping: subscript via
+                        // `__getitem__` so `__missing__` and a custom `KeyError`
+                        // are honoured (issue #2089).
+                        _ => self.eval_index(&args, Value::string(key))?,
                     }
                 } else {
                     return Err(pyrust_core::type_err!("format requires a mapping"));
@@ -5598,7 +5605,10 @@ impl Interpreter {
             }
             found
         };
-        let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
+        // Same mapping rule as the str path (issue #2089); the subclass /
+        // custom-mapping lookup routes through `__getitem__` so `__missing__`
+        // is honoured.
+        let is_mapping = has_named_key && is_percent_format_mapping(&args);
         let positional: Option<&[Value]> = if is_mapping {
             None
         } else {
@@ -5751,9 +5761,10 @@ impl Interpreter {
                                 }
                             }
                         }
-                        _ => {
-                            return Err(pyrust_core::type_err!("format requires a mapping"));
-                        }
+                        // dict subclass / custom mapping: subscript via
+                        // `__getitem__` (bytes key) so `__missing__` and a custom
+                        // `KeyError` are honoured (issue #2089).
+                        _ => self.eval_index(&args, Value::bytes(key.to_vec()))?,
                     }
                 } else {
                     return Err(pyrust_core::type_err!("format requires a mapping"));
