@@ -733,11 +733,7 @@ pyrust_module! {
         // iterating during mutation would also see the snapshot, not
         // the mutated set).
         let keys: Vec<Value> = std::env::vars().map(|(k, _)| Value::string(k)).collect();
-        Ok(Value::generator(Box::new(NativeIterFrame {
-            items: keys,
-            pos: 0,
-            type_name: "generator",
-        })))
+        Ok(Value::generator(Box::new(NativeIterFrame::new(keys, "generator"))))
     }
 
     #[py_name = "_Environ.__len__"]
