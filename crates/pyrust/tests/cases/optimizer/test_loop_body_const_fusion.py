@@ -42,3 +42,38 @@ for _ in range(3):
     total += big + 0
 print(total == big * 3)
 print(total)
+
+# Induction-variable strength reduction must stay sound once the fusion feeds
+# `i*K` into loop bodies that also branch.  The accumulator increment IVSR
+# inserts before the back-edge is only reached on every path when the body is
+# straight-line; a conditional / nested loop can skip it.  These lock in the
+# correct sums for the control-flow shapes (regression for the IVSR-skip bug
+# the looser fusion exposed).
+s = 0  # conditional in body
+for i in range(1000):
+    x = i * 2 - 1
+    if x > 100:
+        s += x * 3
+    else:
+        s += x - 5
+print(s)
+
+s = 0  # break in body
+for i in range(1000):
+    s += i * 2
+    if s > 500:
+        break
+print(s, i)
+
+s = 0  # continue in body
+for i in range(1000):
+    if i % 2 == 0:
+        continue
+    s += i * 3 - 1
+print(s)
+
+s = 0  # nested loop: outer i*K read inside inner loop
+for i in range(100):
+    for j in range(100):
+        s += i * 2 + j * 3 - 1
+print(s)

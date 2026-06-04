@@ -3966,6 +3966,51 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
             continue;
         }
 
+        // The accumulator increment is inserted unconditionally just before the
+        // back-edge at `latch`, so strength reduction is only sound when *every*
+        // path from the header to the back-edge passes through that point.  Two
+        // shapes break that invariant — both newly reachable now that the
+        // const-fusion relaxation feeds `BinOpConst(_, iv, Mul, _)` into loop
+        // bodies that master could not:
+        //
+        //  1. A forward branch in the body that targets `latch` (or beyond)
+        //     skips the increment, leaving the accumulator stale on that path
+        //     (`if` / `else` / `break` / `continue` inside the body).
+        //  2. A *nested* loop in the body: the reduced multiply may sit inside
+        //     it, and the inner loop's exit edge is retargeted past the inserted
+        //     increment, so the increment never runs (the inner loop always
+        //     exits, never falls through to the increment).
+        //
+        // Bail conservatively on either.  (Before this PR these shapes never
+        // reached IVSR, so the unsoundness was latent.)
+        let unsafe_body = (h + 1..latch).any(|i| {
+            // Nested loop header → reduced op may be inside it (case 2).
+            if matches!(
+                insns[i],
+                Insn::ForCountConst(..)
+                    | Insn::ForCountConstInline(..)
+                    | Insn::ForCountReg(..)
+                    | Insn::ForIter(..)
+            ) {
+                return true;
+            }
+            // Forward branch jumping to or past the increment site (case 1).
+            let target = match &insns[i] {
+                Insn::Jump(k)
+                | Insn::JumpIfFalse(_, k)
+                | Insn::JumpIfTrue(_, k)
+                | Insn::CmpJumpIfFalse(_, _, _, k)
+                | Insn::CmpJumpIfTrue(_, _, _, k)
+                | Insn::CmpJumpIfFalseConst(_, _, _, k)
+                | Insn::CmpJumpIfTrueConst(_, _, _, k) => Some((i as i64 + 1 + *k as i64) as usize),
+                _ => None,
+            };
+            target.is_some_and(|t| t >= latch)
+        });
+        if unsafe_body {
+            continue;
+        }
+
         // Skip loops with exception handling
         if (h + 1..latch).any(|i| matches!(insns[i], Insn::SetupExcept(_) | Insn::PopExcept)) {
             continue;
@@ -9695,6 +9740,69 @@ mod tests {
             acc_init_in_consts,
             "const 0 added for accumulator init ((-1+1)*3=0)"
         );
+    }
+
+    #[test]
+    fn ivsr_skips_when_body_branch_can_skip_increment() {
+        use crate::ast::BinaryOp;
+        // A conditional in the body jumps to the back-edge, skipping the
+        // accumulator increment IVSR would insert there → must NOT reduce.
+        //
+        // [0] LoadConst(iv=2, c=-1)
+        // [1] ForCountConst(2, Lt, 1, 2, k)
+        // [2] BinOpConst(3, 2, Mul, 3)        ← i*K
+        // [3] JumpIfFalse(4, 1)               ← if false, jump to [5] (the latch)
+        // [4] BinOpInPlace(0, 0, Add, 3)
+        // [5] Jump(-5)                         ← back-edge (latch)
+        // [6] Return(0)
+        let mut consts = vec![Value::int(-1), Value::int(10), Value::int(1), Value::int(3)];
+        let mut num_regs = 5u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 5),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3, false),
+            Insn::JumpIfFalse(4, 1),
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 3),
+            Insn::Jump(-5),
+            Insn::Return(0),
+        ];
+        let out = pass_ivsr(insns.clone(), &mut consts, &mut num_regs);
+        assert_eq!(out, insns, "branch can skip increment → no reduction");
+        assert_eq!(num_regs, 5, "no new register allocated");
+    }
+
+    #[test]
+    fn ivsr_skips_when_body_contains_nested_loop() {
+        use crate::ast::BinaryOp;
+        // The reduced multiply sits inside a nested loop; the inner loop's exit
+        // edge is retargeted past the inserted increment, so it never runs →
+        // must NOT reduce.
+        //
+        // [0] LoadConst(iv=2, c=-1)
+        // [1] ForCountConst(2, Lt, 1, 2, 6)   ← outer header
+        // [2] LoadConst(jv=4, c=-1)
+        // [3] ForCountConst(4, Lt, 1, 2, 3)   ← inner header, exit → [7] (latch)
+        // [4] BinOpConst(3, 2, Mul, 3)        ← i*K inside inner loop
+        // [5] BinOpInPlace(0, 0, Add, 3)
+        // [6] Jump(-4)                         ← inner back-edge
+        // [7] Jump(-7)                         ← outer back-edge (latch)
+        // [8] Return(0)
+        let mut consts = vec![Value::int(-1), Value::int(10), Value::int(1), Value::int(3)];
+        let mut num_regs = 5u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 6),
+            Insn::LoadConst(4, 0),
+            Insn::ForCountConst(4, BinaryOp::Lt, 1, 2, 3),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3, false),
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 3),
+            Insn::Jump(-4),
+            Insn::Jump(-7),
+            Insn::Return(0),
+        ];
+        let out = pass_ivsr(insns.clone(), &mut consts, &mut num_regs);
+        assert_eq!(out, insns, "nested loop in body → no reduction");
+        assert_eq!(num_regs, 5, "no new register allocated");
     }
 
     #[test]
