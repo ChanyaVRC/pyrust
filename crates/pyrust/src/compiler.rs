@@ -2983,6 +2983,202 @@ fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
     }
 }
 
+/// Return `true` if any statement in `body` (recursively, including nested
+/// blocks and sub-expressions) could mutate a Python object **in place**.
+///
+/// Used to keep `while`-condition LICM sound (issue #2034): in-place mutation
+/// (`x.pop()`, `x[i] = v`, `del x[i]`, slice/attr assignment, …) changes a
+/// container's truthiness without ever reassigning the loop variable's register,
+/// so the hoisted condition check would observe a stale value.  Because the
+/// mutated object may alias the condition variable in ways we cannot disprove
+/// statically, this is intentionally conservative: any in-place mutation in the
+/// body disqualifies the loop from LICM.  Pure-name reassignments (`i += 1`,
+/// `x = ...`) are *not* mutations — they are already tracked by
+/// `collect_body_written`.
+fn stmts_may_mutate_object(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_may_mutate_object)
+}
+
+fn stmt_may_mutate_object(stmt: &Stmt) -> bool {
+    match stmt {
+        // Direct in-place mutation of a subscript / attribute / slice target.
+        Stmt::IndexAssign { .. }
+        | Stmt::AttrAssign { .. }
+        | Stmt::SliceAssign { .. }
+        | Stmt::Delete(_) => true,
+        // Augmented assignment to a subscript/attribute/slice mutates in place
+        // (e.g. `x[0] += 1`); to a bare name it is a plain reassignment.
+        Stmt::AugAssign { target, expr, .. } => {
+            !matches!(target, AssignTarget::Name(_))
+                || expr_may_mutate_object(expr)
+                || assign_target_may_mutate_object(target)
+        }
+        Stmt::Assign(target, value) => {
+            assign_target_may_mutate_object(target) || expr_may_mutate_object(value)
+        }
+        Stmt::AnnAssign { value, .. } => value.as_ref().is_some_and(expr_may_mutate_object),
+        Stmt::Expr(e) | Stmt::Return(Some(e)) => expr_may_mutate_object(e),
+        Stmt::Return(None) | Stmt::Pass | Stmt::Break | Stmt::Continue => false,
+        Stmt::If {
+            branches,
+            else_branch,
+            ..
+        } => {
+            branches
+                .iter()
+                .any(|(c, b)| expr_may_mutate_object(c) || stmts_may_mutate_object(b))
+                || else_branch.as_deref().is_some_and(stmts_may_mutate_object)
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+            ..
+        } => {
+            expr_may_mutate_object(cond)
+                || stmts_may_mutate_object(body)
+                || else_branch.as_deref().is_some_and(stmts_may_mutate_object)
+        }
+        Stmt::For {
+            iter,
+            body,
+            else_branch,
+            ..
+        } => {
+            expr_may_mutate_object(iter)
+                || stmts_may_mutate_object(body)
+                || else_branch.as_deref().is_some_and(stmts_may_mutate_object)
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+            ..
+        } => {
+            stmts_may_mutate_object(body)
+                || handlers.iter().any(|h| stmts_may_mutate_object(&h.body))
+                || else_branch.as_deref().is_some_and(stmts_may_mutate_object)
+                || finally_branch
+                    .as_deref()
+                    .is_some_and(stmts_may_mutate_object)
+        }
+        Stmt::With { items, body, .. } => {
+            items.iter().any(|(e, _)| expr_may_mutate_object(e)) || stmts_may_mutate_object(body)
+        }
+        Stmt::Match { subject, arms } => {
+            expr_may_mutate_object(subject)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(expr_may_mutate_object)
+                        || stmts_may_mutate_object(&a.body)
+                })
+        }
+        Stmt::Raise { expr, cause } => {
+            expr.as_ref().is_some_and(expr_may_mutate_object)
+                || cause.as_ref().is_some_and(expr_may_mutate_object)
+        }
+        Stmt::Assert { test, msg } => {
+            expr_may_mutate_object(test) || msg.as_ref().is_some_and(expr_may_mutate_object)
+        }
+        // A nested def/class body does not execute during the loop; only its
+        // defaults/decorators (evaluated at definition time) could mutate, but
+        // those run once and reassign the name — treat the definition itself as
+        // non-mutating for the purpose of the enclosing loop condition.
+        Stmt::Def { .. } | Stmt::Class { .. } => false,
+        Stmt::TypeAlias { .. } => false,
+        Stmt::Import { .. } | Stmt::ImportFrom { .. } | Stmt::Global(_) | Stmt::Nonlocal(_) => {
+            false
+        }
+    }
+}
+
+fn assign_target_may_mutate_object(target: &AssignTarget) -> bool {
+    match target {
+        // Storing into a subscript / attribute / slice mutates the container.
+        AssignTarget::Attr(..) | AssignTarget::Index(..) | AssignTarget::Slice { .. } => true,
+        AssignTarget::Name(_) => false,
+        AssignTarget::Tuple(ts) => ts.iter().any(assign_target_may_mutate_object),
+        AssignTarget::Starred(inner) => assign_target_may_mutate_object(inner),
+    }
+}
+
+/// Return `true` if evaluating `expr` could mutate a Python object in place.
+///
+/// The dominant vector is a method call (`x.append(…)`, `x.pop()`): any call
+/// whose callee is an attribute access is treated as a potential mutator, as is
+/// any call at all (a plain function could mutate an argument), plus walrus
+/// assignments to non-name targets are impossible here, so we focus on calls
+/// and recurse structurally.  Pure reads (`Var`, literals, arithmetic on
+/// immutables) are not mutations.
+fn expr_may_mutate_object(expr: &Expr) -> bool {
+    match expr {
+        // Any call may mutate its receiver/arguments in place.
+        Expr::Call { .. } => true,
+        Expr::Named { value, .. } => expr_may_mutate_object(value),
+        Expr::Int(_)
+        | Expr::BigInt(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None
+        | Expr::Ellipsis
+        | Expr::Var(_) => false,
+        Expr::Unary { expr, .. } => expr_may_mutate_object(expr),
+        Expr::Binary { left, right, .. } => {
+            expr_may_mutate_object(left) || expr_may_mutate_object(right)
+        }
+        Expr::Compare { left, ops } => {
+            expr_may_mutate_object(left) || ops.iter().any(|(_, e)| expr_may_mutate_object(e))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            expr_may_mutate_object(cond)
+                || expr_may_mutate_object(then)
+                || expr_may_mutate_object(else_)
+        }
+        Expr::Attr { target, .. } => expr_may_mutate_object(target),
+        Expr::Index { target, index } => {
+            expr_may_mutate_object(target) || expr_may_mutate_object(index)
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_may_mutate_object(target)
+                || [lower, upper, step]
+                    .iter()
+                    .flat_map(|o| o.as_deref())
+                    .any(expr_may_mutate_object)
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            items.iter().any(expr_may_mutate_object)
+        }
+        Expr::Starred(inner) => expr_may_mutate_object(inner),
+        Expr::Dict(items) => items.iter().any(|item| match item {
+            DictItem::Pair(k, v) => expr_may_mutate_object(k) || expr_may_mutate_object(v),
+            DictItem::DoubleSplat(e) => expr_may_mutate_object(e),
+        }),
+        Expr::FString(parts) => any_fstring_expr(parts, &mut expr_may_mutate_object),
+        // Comprehensions/generators run in a nested scope; only the outermost
+        // iterable is evaluated here.  A comprehension allocates a fresh object
+        // and does not mutate an existing one, but its element/condition exprs
+        // may contain calls — conservatively treat any comprehension as a
+        // potential mutator (it is rare in a loop condition's sibling body and
+        // the cost is only a missed LICM).
+        Expr::ListComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::GenExp { .. } => true,
+        // Lambda body is not evaluated here.
+        Expr::Lambda { .. } => false,
+        // Yield/await suspend; treat conservatively as potential mutators.
+        Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) => true,
+    }
+}
+
 /// Try to rewrite `while i < len(c): ...; c[i]; ...; i += 1` into `for i in c: ...`
 /// for the matched-pattern `while` at `stmts[idx]`.  Returns `Some(rewritten_for)`
 /// when the rewrite is safe; `None` otherwise.
@@ -7048,9 +7244,20 @@ impl Compiler {
             return;
         }
 
+        // LICM (hoisting the condition check before the loop so the back-edge
+        // skips re-evaluation) is only sound when `bool(cond)` is provably
+        // constant across iterations.  `expr_is_invariant` checks that no name
+        // in `cond` is *reassigned* in the body — but a bare container variable's
+        // truthiness also changes when the body mutates the object *in place*
+        // (`x.pop()`, `x[i] = v`, `del x[i]`, …) without ever touching the
+        // register (issue #2034).  In-place mutation can reach the condition's
+        // object through aliasing we cannot disprove statically, so we
+        // conservatively disable LICM whenever the body performs any in-place
+        // object mutation.  The genuine win-case (a `while not done:` flag loop
+        // that exits via `break`, with no mutation in its body) is unaffected.
         let is_licm = !is_infinite && {
             let written = collect_body_written(body);
-            expr_is_invariant(cond, &written)
+            expr_is_invariant(cond, &written) && !stmts_may_mutate_object(body)
         };
 
         let (loop_start, exit_jmp) = if is_licm {
