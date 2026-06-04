@@ -46,8 +46,11 @@ impl BuiltinTypeOps for GenericAliasOps {
             _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
         };
 
-        // args is always a tuple of one or more elements.
+        // args is a tuple; for `tuple[()]` it is empty, which CPython's
+        // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
+        // rather than the empty string that joining an empty list yields.
         let args_repr = match s.args.kind() {
+            ValueKind::Tuple(items) if items.is_empty() => "()".to_string(),
             ValueKind::Tuple(items) => items
                 .iter()
                 .map(repr_type_arg)
@@ -70,6 +73,10 @@ impl BuiltinTypeOps for GenericAliasOps {
         match name {
             "__origin__" => Some(s.origin.clone()),
             "__args__" => Some(s.args.clone()),
+            // `__parameters__` is the de-duplicated tuple of type variables
+            // collected from `__args__` (CPython's `_Py_make_parameters`).
+            // It is GenericAlias's own attribute and must not proxy to origin.
+            "__parameters__" => Some(collect_parameters(&s.args)),
             _ => None,
         }
     }
@@ -146,6 +153,10 @@ impl BuiltinTypeOps for GenericAliasOps {
 /// For anything else we fall back to the general `Value::repr()`.
 fn repr_type_arg(v: &Value) -> String {
     match v.kind() {
+        // CPython's `ga_repr_item` special-cases `Ellipsis` to render `...`
+        // rather than its bare repr (`Ellipsis`), so `tuple[int, ...]` prints
+        // as `tuple[int, ...]` instead of `tuple[int, Ellipsis]`.
+        ValueKind::Ellipsis => "...".to_string(),
         ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
         ValueKind::PyInstance(inst_rc) => {
@@ -157,6 +168,54 @@ fn repr_type_arg(v: &Value) -> String {
             v.repr()
         }
         _ => v.repr(),
+    }
+}
+
+/// Collect the type-variable parameters from a `GenericAlias`'s `__args__`,
+/// de-duplicated and in first-seen order, matching CPython's
+/// `_Py_make_parameters`.  A parameter is any argument that is "type-variable
+/// like" — in pyrust a `TypeVar` is a `PyInstance` carrying a `__name__`
+/// attribute (see `typing.rs`).  Nested `GenericAlias` arguments (e.g.
+/// `dict[str, list[T]]`) contribute their own parameters recursively.  Plain
+/// classes (`int`, `str`) and `Ellipsis` are not parameters.  Always returns a
+/// tuple (empty for fully-concrete aliases like `list[int]`).
+fn collect_parameters(args: &Value) -> Value {
+    let mut out: Vec<Value> = Vec::new();
+    let items: Vec<Value> = match args.kind() {
+        ValueKind::Tuple(items) => items.iter().cloned().collect(),
+        _ => vec![args.clone()],
+    };
+    for item in items {
+        match item.kind() {
+            // Nested GenericAlias: pull its parameters in.
+            ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
+                let borrow = state.borrow();
+                if let Some(s) = borrow.downcast_ref::<GenericAliasState>() {
+                    if let ValueKind::Tuple(nested) = collect_parameters(&s.args).kind() {
+                        for p in nested.iter() {
+                            push_unique(&mut out, p.clone());
+                        }
+                    }
+                }
+            }
+            // A TypeVar is a PyInstance with a `__name__` attribute.
+            ValueKind::PyInstance(inst_rc) => {
+                if inst_rc.borrow().attrs.get("__name__").is_some() {
+                    push_unique(&mut out, item.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    Value::tuple(out)
+}
+
+/// Append `v` to `out` only if no element already equal to it is present
+/// (preserving first-seen order), matching CPython's tuple-dedup in
+/// `_Py_make_parameters`.
+fn push_unique(out: &mut Vec<Value>, v: Value) {
+    if !out.iter().any(|existing| *existing == v) {
+        out.push(v);
     }
 }
 
@@ -194,6 +253,23 @@ fn value_hash_u64(v: &Value) -> Option<u64> {
             value_hash_u64(item)?.hash(&mut h);
         }
         return Some(h.finish());
+    }
+    None
+}
+
+/// If `v` is a `GenericAlias`, return a clone of its `__origin__`.
+///
+/// Used by the interpreter's call path (issue #2133): calling a `GenericAlias`
+/// (`list[int](x)`) delegates to the origin (`list(x)`), which requires
+/// interpreter access to run the origin's constructor — so the interpreter
+/// asks for the origin here and re-dispatches the call itself.
+pub fn as_generic_alias_origin(v: &Value) -> Option<Value> {
+    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
+        if ops.type_name() == TYPE_NAME {
+            let borrow = state.borrow();
+            let s = borrow.downcast_ref::<GenericAliasState>()?;
+            return Some(s.origin.clone());
+        }
     }
     None
 }

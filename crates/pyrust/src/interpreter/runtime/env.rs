@@ -693,6 +693,31 @@ impl Interpreter {
                     if let Some(val) = ops.getattr(state, name) {
                         return Ok(val);
                     }
+                    // Issue #2133: a `GenericAlias` (`list[int]`) proxies
+                    // attribute access to its `__origin__`, so `list[int].
+                    // __name__ == 'list'`, `.__mro__`, instance methods, etc.
+                    // resolve to the origin's.  CPython's `ga_getattro` keeps a
+                    // small reserved set on the alias itself (`__origin__`,
+                    // `__args__`, `__parameters__` are served by `ops.getattr`
+                    // above; `__class__` resolves to the GenericAlias type, not
+                    // the origin; `__mro_entries__`/`__reduce__`/`__reduce_ex__`/
+                    // `__copy__`/`__deepcopy__` are the alias's own protocol
+                    // methods) and forwards everything else to the origin.
+                    if ops.type_name() == pyrust_builtins::generic_alias::TYPE_NAME
+                        && !matches!(
+                            name,
+                            "__class__"
+                                | "__mro_entries__"
+                                | "__reduce__"
+                                | "__reduce_ex__"
+                                | "__copy__"
+                                | "__deepcopy__"
+                        )
+                    {
+                        if let Some(origin) = ops.getattr(state, "__origin__") {
+                            return self.get_attr(&origin, name);
+                        }
+                    }
                 }
                 if builtin_has_method(target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(

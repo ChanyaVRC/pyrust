@@ -912,6 +912,18 @@ impl Interpreter {
                 self.call_function_expanded(method_val, &expanded)
             }
 
+            // Issue #2133: a `GenericAlias` (`list[int]`) is callable and
+            // delegates construction to its `__origin__`, so `list[int]([1,2,3])`
+            // behaves like `list([1,2,3])` (returning a plain `list`).  The
+            // origin's constructor may run user code, so we re-dispatch the call
+            // through the interpreter rather than via the receiver-only ops.
+            _ if pyrust_builtins::generic_alias::as_generic_alias_origin(&function).is_some() => {
+                let origin =
+                    pyrust_builtins::generic_alias::as_generic_alias_origin(&function)
+                        .expect("guard checked above");
+                self.call_function_expanded(origin, args)
+            }
+
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
