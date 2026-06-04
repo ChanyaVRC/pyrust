@@ -5127,6 +5127,11 @@ impl Interpreter {
                             }
                         }
                         PrintfInt::Big(b) => {
+                            // gh-95778: %d/%i/%u render base 10 — subject to
+                            // int_max_str_digits (%x/%o are exempt).
+                            if pyrust_core::bigint_str_digits_exceed_limit(&b) {
+                                return Err(pyrust_core::int_max_str_digits_format_error());
+                            }
                             // to_str_radix(10) includes the '-' sign for negatives.
                             let mut s = b.to_str_radix(10);
                             if !s.starts_with('-') && flag_plus {

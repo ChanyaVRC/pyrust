@@ -188,6 +188,55 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// CPython: sys.get_int_max_str_digits() — return the current integer
+    /// string-conversion length limit (0 = unlimited).
+    /// <https://docs.python.org/3/library/sys.html#sys.get_int_max_str_digits>
+    fn get_int_max_str_digits(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "sys.get_int_max_str_digits() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::int(pyrust_core::get_int_max_str_digits() as i64))
+    }
+
+    /// CPython: sys.set_int_max_str_digits(maxdigits) — set the integer
+    /// string-conversion length limit (gh-95778).  `maxdigits` honors the
+    /// `__index__` protocol and must be 0 (unlimited) or >= 640.
+    /// <https://docs.python.org/3/library/sys.html#sys.set_int_max_str_digits>
+    fn set_int_max_str_digits(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "set_int_max_str_digits() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let n = _interp.value_to_isize(
+            &args[0].value,
+            "Python int too large to convert to C int",
+        )?;
+        if n != 0 && n < pyrust_core::INT_MAX_STR_DIGITS_MIN as i64 {
+            return Err(PyError::named(
+                "ValueError",
+                format!(
+                    "maxdigits must be 0 or larger than {}",
+                    pyrust_core::INT_MAX_STR_DIGITS_MIN
+                ),
+            ));
+        }
+        pyrust_core::set_int_max_str_digits(n as usize);
+        Ok(Value::none())
+    }
+
     /// CPython: sys.exc_info() — returns the (type, value, traceback) tuple
     /// for the exception currently being handled, or (None, None, None) when
     /// called outside any active exception handler.

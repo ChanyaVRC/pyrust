@@ -11,7 +11,27 @@ pub struct Parser {
     /// Optional 1-based line numbers, one per token.  Empty when the parser was
     /// constructed without line tracking (via `Parser::new`).
     line_nos: Vec<u32>,
+    /// Current expression-nesting depth.  Incremented on every `parse_expr`
+    /// entry; since each bracketed construct (`(`, `[`, `{`, call args,
+    /// subscripts) re-enters `parse_expr` for its contents, this tracks the
+    /// true nesting depth.  Bounded by [`MAX_EXPR_DEPTH`] so that pathological
+    /// input (issue #2009: `eval("[" * 5000 + "1" + "]" * 5000)`) raises a
+    /// catchable `SyntaxError` instead of overflowing the native stack
+    /// (SIGABRT).  CPython rejects the same input with a `SyntaxError`.
+    expr_depth: usize,
 }
+
+/// Maximum expression-nesting depth the parser accepts before raising
+/// `SyntaxError: too many nested parentheses`.  CPython's recursive-descent
+/// parser rejects bracket/paren nesting beyond depth 200; we match that so
+/// programs CPython accepts continue to parse while deeper input fails with a
+/// catchable error well below pyrust's native stack-overflow point.
+///
+/// The value is 201 rather than 200 because the outermost expression (an
+/// assignment RHS or a bare `eval` expression) consumes one `parse_expr` level
+/// before any bracket is opened, so a CPython-accepted bracket depth of 200
+/// corresponds to `parse_expr` depth 201.
+const MAX_EXPR_DEPTH: usize = 201;
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
@@ -19,6 +39,7 @@ impl Parser {
             tokens,
             pos: 0,
             line_nos: Vec::new(),
+            expr_depth: 0,
         }
     }
 
@@ -29,6 +50,7 @@ impl Parser {
             tokens,
             pos: 0,
             line_nos,
+            expr_depth: 0,
         }
     }
 
@@ -1875,6 +1897,22 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<Expr> {
+        // Depth guard (#2009): every bracketed construct re-enters `parse_expr`
+        // for its contents, so bounding the entry depth bounds the total
+        // recursive-descent nesting.  Exceeding the limit raises a catchable
+        // `SyntaxError` rather than overflowing the native Rust stack (SIGABRT),
+        // matching CPython's behaviour for deeply nested literals/expressions.
+        self.expr_depth += 1;
+        if self.expr_depth > MAX_EXPR_DEPTH {
+            self.expr_depth -= 1;
+            return Err(PyError::Parse("too many nested parentheses".to_string()));
+        }
+        let result = self.parse_expr_inner();
+        self.expr_depth -= 1;
+        result
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr> {
         // Yield / yield from
         if self.is(&Token::Yield) {
             self.bump(); // consume `yield`

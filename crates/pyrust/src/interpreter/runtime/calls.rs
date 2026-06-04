@@ -4818,6 +4818,13 @@ impl Interpreter {
 /// [docs]: https://docs.python.org/3/library/string.html#format-specification-mini-language
 pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
     if spec.is_empty() {
+        // gh-95778: an empty spec renders an int in base 10 — enforce the
+        // int_max_str_digits limit.  The `value_may_exceed_int_str_limit` tag
+        // test keeps the hot `f"{int}"` / `format(int)` path free of the error
+        // branch entirely; only BigInt/containers enter the checked path.
+        if pyrust_core::value_may_exceed_int_str_limit(value) {
+            pyrust_core::check_int_str_conversion(value)?;
+        }
         return Ok(Value::string(value.to_py_str()));
     }
 
@@ -5309,6 +5316,13 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
 
     // 'n' = same as 'd' for now (no locale-aware grouping).
     let effective_t = if t == 'n' { 'd' } else { t };
+
+    // gh-95778: base-10 ('d'/'n') rendering of a BigInt is subject to the
+    // int_max_str_digits limit; the power-of-two bases ('b'/'o'/'x'/'X') below
+    // are exempt.
+    if effective_t == 'd' && pyrust_core::bigint_str_digits_exceed_limit(b) {
+        return Err(pyrust_core::int_max_str_digits_format_error());
+    }
 
     // Validate grouping vs type.
     if let Some(g) = fs.grouping {
@@ -6455,6 +6469,11 @@ impl Interpreter {
     /// empty-spec path.
     fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
         let ValueKind::PyInstance(inst) = value.kind() else {
+            // gh-95778: enforce int_max_str_digits for base-10 int->str.  This
+            // is the common `str(int)` / `f"{int}"` path; `check_int_str_conversion`
+            // fast-rejects non-BigInt/non-container values from their NaN-box tag
+            // alone, so plain-int rendering pays nothing.
+            pyrust_core::check_int_str_conversion(value)?;
             return Ok(value.to_py_str());
         };
         let inst_rc = Rc::clone(inst);
@@ -6536,7 +6555,11 @@ impl Interpreter {
                 | ValueKind::Bool(_)
                 | ValueKind::Float(_)
                 | ValueKind::Complex(_, _)
-                | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
+                | ValueKind::Bytes(_) => {
+                    // gh-95778: an int subclass renders its backing in base 10.
+                    pyrust_core::check_int_str_conversion(&backing)?;
+                    return Ok(backing.to_py_str());
+                }
                 ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                     return crate::builtin_modules::builtins::render_value_repr(self, &backing);
                 }
@@ -7050,6 +7073,9 @@ pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -
 /// Note: exception instances do not bypass `__repr__` here — CPython dispatches
 /// `__repr__` on exceptions normally (only `__str__` has the special-case).
 fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<String> {
+    // gh-95778: enforce int_max_str_digits for base-10 int->str (no-op unless
+    // `value` is, or transitively contains, an over-limit BigInt).
+    pyrust_core::check_int_str_conversion(value)?;
     let ValueKind::PyInstance(inst) = value.kind() else {
         return Ok(value.repr());
     };
