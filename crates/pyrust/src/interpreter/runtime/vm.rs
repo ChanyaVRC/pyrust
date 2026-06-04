@@ -510,6 +510,10 @@ impl Interpreter {
             nonlocal_names: gen_nonlocal_names,
             env: gen_env_opt,
             is_class_method: frame.code.is_class_method,
+            // Generator frames do not retain the originating `UserFunction`;
+            // traceback `tb_frame` for a generator-raised exception is built
+            // from the lazily-captured `FrameInfo` (which carries `fn_name`).
+            function: None,
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
@@ -537,9 +541,13 @@ impl Interpreter {
                 .script_filename
                 .clone()
                 .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+            let tb_lineno = match pyrust_core::get_current_vm_line() {
+                0 => None,
+                n => Some(n),
+            };
             pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                 filename: tb_filename,
-                lineno: None,
+                lineno: tb_lineno,
                 source_line: None,
                 funcname: frame.fn_name.clone(),
             });
@@ -686,6 +694,10 @@ impl Interpreter {
         // dynamic stack.
         exc_table: &[u32],
         raise_pc: usize,
+        // The register-resident current source line of the catching frame.
+        // Used to populate the outermost traceback node's `tb_lineno` /
+        // `tb_frame.f_lineno` when an exception is caught here (#2170).
+        catch_lineno: u32,
     ) -> std::result::Result<usize, PyError> {
         let h = if exc_table.is_empty() {
             // Fallback: dynamic SetupExcept/PopExcept handler stack.
@@ -792,14 +804,17 @@ impl Interpreter {
             other => return Err(other),
         };
         self.attach_implicit_context(&exc_val);
-        // Issue #1441: set __traceback__ on the exception instance when it is
-        // caught.  Only PyInstance values (all normal exceptions) have an attrs
-        // dict to write to.
+        // Issue #1441 / #2170: set __traceback__ on the exception instance when
+        // it is caught.  Only PyInstance values (all normal exceptions) have an
+        // attrs dict to write to.  The traceback object is a real walkable chain
+        // built from the lazily-captured unwind frames (#2165) plus the catching
+        // frame, so `e.__traceback__.tb_next…` walks every frame in order.
         if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
+            let tb = self.build_traceback_object(catch_lineno as i64);
             inst_rc
                 .borrow_mut()
                 .attrs
-                .insert("__traceback__".to_string(), pyrust_builtins::traceback::make_traceback());
+                .insert("__traceback__".to_string(), tb);
         }
         // Save the current active_exception BEFORE the dedup-pop below.
         // This is the value that was active when the new exception was raised,
@@ -913,6 +928,7 @@ impl Interpreter {
                         exc_ctx_frame_base,
                         &code.exc_table,
                         pc.wrapping_sub(1),
+                        cur_line,
                     ) {
                         Ok(h) => { pc = h; continue 'vm; }
                         Err(e) => {
@@ -960,6 +976,7 @@ impl Interpreter {
                     exc_ctx_frame_base,
                     &code.exc_table,
                     inject_pc,
+                    cur_line,
                 ) {
                     Ok(h) => {
                         pc = h;

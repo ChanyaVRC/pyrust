@@ -84,6 +84,12 @@ pub enum Stmt {
         name: String,
         params: Vec<FunctionParam>,
         body: Vec<Stmt>,
+        /// Parallel 1-based source line numbers for each statement in `body`
+        /// (same length as `body`; `0` = unknown).  Populated by the parser so
+        /// the compiler can emit a `FnCode::lineno_table` for the function body,
+        /// surfacing per-frame line numbers in `tb_lineno` / `f_lineno`
+        /// (issues #2170/#2171).  Empty when no line info is available.
+        body_linenos: Vec<u32>,
         decorators: Vec<Expr>,
         return_annotation: Option<Expr>,
         /// Whether this function was declared with `async def`.

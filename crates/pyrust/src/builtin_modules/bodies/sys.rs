@@ -216,9 +216,61 @@ pyrust_module! {
                     }
                     _ => Value::none(),
                 };
-                Ok(Value::tuple(vec![exc_type, exc_val, Value::none()]))
+                // Issue #2170: the third element is the exception's traceback
+                // object (its `__traceback__`), not `None`.
+                let tb = match exc_val.kind() {
+                    ValueKind::PyInstance(inst) => inst
+                        .borrow()
+                        .attrs
+                        .get("__traceback__")
+                        .cloned()
+                        .unwrap_or_else(Value::none),
+                    _ => Value::none(),
+                };
+                Ok(Value::tuple(vec![exc_type, exc_val, tb]))
             }
         }
+    }
+
+    /// CPython: sys._getframe([depth]) — return a frame object from the call
+    /// stack.  `depth` 0 (the default) is the caller's frame; each increment
+    /// moves one frame further out (toward the module).  Raises
+    /// `ValueError: call stack is not deep enough` when `depth` exceeds the
+    /// stack.  pyrust returns a read-only frame snapshot exposing
+    /// `f_code`/`f_lineno`/`f_back`/`f_globals`/`f_locals` (issue #2171).
+    /// <https://docs.python.org/3/library/sys.html#sys._getframe>
+    fn _getframe(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("_getframe() takes at most 1 argument ({} given)", args.len()),
+            ));
+        }
+        let depth = if args.is_empty() {
+            0usize
+        } else {
+            let n = _interp.value_to_isize(
+                &args[0].value,
+                "Python int too large to convert to C int",
+            )?;
+            if n < 0 {
+                // CPython treats a negative depth as the innermost frame.
+                0usize
+            } else {
+                n as usize
+            }
+        };
+        // The innermost `vm_frame_views` entry is the frame that called
+        // `_getframe` (builtins push no view of their own).
+        let frame = _interp.build_frame_object(depth, pyrust_core::get_current_vm_line() as i64);
+        if frame.is_none() {
+            return Err(PyError::named(
+                "ValueError",
+                "call stack is not deep enough".to_string(),
+            ));
+        }
+        Ok(frame)
     }
 
     /// CPython: sys.exception() — returns the exception instance currently

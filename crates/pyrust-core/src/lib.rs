@@ -4788,6 +4788,18 @@ pub fn take_captured_error_frames() -> Option<Vec<FrameInfo>> {
     CAPTURED_ERROR_FRAMES.with(|c| c.borrow_mut().take())
 }
 
+/// Clone the captured error frame snapshot without consuming it.
+///
+/// Used by the VM to build the Python-visible traceback object chain
+/// (`exc.__traceback__`) when an exception is caught — the snapshot must
+/// remain in place so that, if the same error later escapes the handler, the
+/// stderr traceback formatter still sees the full frame list.  Returns an
+/// empty `Vec` when no frames have been captured.
+#[inline]
+pub fn clone_captured_error_frames() -> Vec<FrameInfo> {
+    CAPTURED_ERROR_FRAMES.with(|c| c.borrow().clone().unwrap_or_default())
+}
+
 /// Clear the captured error frame snapshot (reset between script runs).
 #[inline]
 pub fn reset_captured_error_frames() {

@@ -1027,11 +1027,12 @@ impl Parser {
             None
         };
         self.expect(&Token::Colon)?;
-        let body = self.parse_suite()?;
+        let (body, body_linenos) = self.parse_suite_with_linenos()?;
         Ok(Stmt::Def {
             name,
             params,
             body,
+            body_linenos,
             decorators,
             return_annotation,
             is_async,

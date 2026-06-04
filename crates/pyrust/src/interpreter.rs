@@ -301,6 +301,14 @@ pub(crate) struct VmFrameView {
     /// identify the frame whose register 0 (`self`/`cls`) should be used.
     /// Script and Class frames always have this `false`.
     pub(crate) is_class_method: bool,
+    /// The `UserFunction` this frame is executing, for `Function` frames.
+    /// `None` for `Script` and `Class` frames.  Stored as a strong `Rc`
+    /// (a refcount bump at push time — the function is already alive for the
+    /// duration of its own call) so that frame-introspection objects
+    /// (`sys._getframe`, traceback `tb_frame`; issues #2170/#2171) can recover
+    /// the frame's `co_name` / code object without threading the name through
+    /// the VM dispatch signatures.
+    pub(crate) function: Option<Rc<UserFunction>>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`

@@ -12,3 +12,5 @@ include!("runtime/vm.rs");
 include!("runtime/generators.rs");
 
 include!("runtime/fast_path.rs");
+
+include!("runtime/introspect.rs");
