@@ -6910,7 +6910,7 @@ fn set_binary_op(
     // an operand, so we must not hold a live borrow of the backing `RefCell`
     // across it — the existing clone-then-compute path stays correct there.
     // Dict views and other set-like shapes also fall through.
-    if let (Some((lhs_val, l_frozen)), Some((rhs_val, r_frozen))) =
+    if let (Some((lhs_val, l_frozen)), Some((rhs_val, _r_frozen))) =
         (set_direct_value(left), set_direct_value(right))
     {
         let primitive = !with_set_items(&lhs_val, set_has_object_key)
@@ -6919,7 +6919,9 @@ fn set_binary_op(
             let out = with_set_items(&lhs_val, |a| {
                 with_set_items(&rhs_val, |b| set_algebra_fast(a, b, op))
             });
-            return Some(Ok(if l_frozen || r_frozen {
+            // Result type follows the LEFT operand (CPython 3.12): `set &
+            // frozenset` → `set`, `frozenset & set` → `frozenset` (issue #2042).
+            return Some(Ok(if l_frozen {
                 pyrust_builtins::frozenset::frozenset(out)
             } else {
                 Value::set(out)
@@ -6954,7 +6956,7 @@ fn set_binary_op(
 ///
 /// `force_set` forces a plain `set` result regardless of the operands' frozen
 /// flags — used for dict-view operators, which always return `set` (issue
-/// #1891); otherwise a `frozenset` operand promotes the result to `frozenset`.
+/// #1891); otherwise the result type follows the LEFT operand (issue #2042).
 fn set_binary_op_from_items(
     interp: &mut Interpreter,
     lhs_items: (PySet, bool),
@@ -6963,7 +6965,9 @@ fn set_binary_op_from_items(
     force_set: bool,
 ) -> Option<Result<Value>> {
     let (a, l_frozen) = lhs_items;
-    let (b, r_frozen) = rhs_items;
+    // RHS frozen-ness is irrelevant: the result type follows the LEFT operand
+    // (issue #2042).
+    let (b, _r_frozen) = rhs_items;
     // Fast path: neither operand contains user-instance keys, so raw
     // `IndexSet` identity comparison is exact (issue #1907).  Most sets are
     // primitive, so keep this allocation-cheap path with no `__eq__` dispatch.
@@ -7050,7 +7054,11 @@ fn set_binary_op_from_items(
         Ok(out) => out,
         Err(e) => return Some(Err(e)),
     };
-    Some(Ok(if (l_frozen || r_frozen) && !force_set {
+    // Result type follows the LEFT operand (CPython 3.12, issue #2042): `set &
+    // frozenset` → `set`, `frozenset & set` → `frozenset`. The RHS frozen-ness
+    // never affects the result type. Dict-view operators always yield `set`
+    // (`force_set`).
+    Some(Ok(if l_frozen && !force_set {
         pyrust_builtins::frozenset::frozenset(out)
     } else {
         Value::set(out)

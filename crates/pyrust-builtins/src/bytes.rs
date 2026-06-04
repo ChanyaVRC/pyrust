@@ -1212,11 +1212,18 @@ fn bytes_startswith(bytes: &[u8], args: &[Value]) -> Result<Value> {
                         return Ok(Value::bool_(true));
                     }
                     ValueKind::Bytes(_) => {}
+                    // Non-bytes tuple element: CPython names the offending
+                    // element's type in the canonical message (issue #2044).
+                    // bytearray / bytes-subclass elements are pre-coerced to
+                    // `Bytes` by the interpreter, so only genuinely-wrong types
+                    // reach here.
                     _ => {
                         return Err(PyError::named(
                             "TypeError",
-                            "a bytes-like object is required, not a non-bytes item in the tuple"
-                                .to_string(),
+                            format!(
+                                "a bytes-like object is required, not '{}'",
+                                pyrust_core::builtin_type_name(pv)
+                            ),
                         ));
                     }
                 }
@@ -1254,11 +1261,18 @@ fn bytes_endswith(bytes: &[u8], args: &[Value]) -> Result<Value> {
                         return Ok(Value::bool_(true));
                     }
                     ValueKind::Bytes(_) => {}
+                    // Non-bytes tuple element: CPython names the offending
+                    // element's type in the canonical message (issue #2044).
+                    // bytearray / bytes-subclass elements are pre-coerced to
+                    // `Bytes` by the interpreter, so only genuinely-wrong types
+                    // reach here.
                     _ => {
                         return Err(PyError::named(
                             "TypeError",
-                            "a bytes-like object is required, not a non-bytes item in the tuple"
-                                .to_string(),
+                            format!(
+                                "a bytes-like object is required, not '{}'",
+                                pyrust_core::builtin_type_name(sv)
+                            ),
                         ));
                     }
                 }
@@ -1994,15 +2008,24 @@ fn bytes_rsplit(bytes: &[u8], args: &[Value]) -> Result<Value> {
 
 /// Parse (sep, maxsplit) from bytes split/rsplit args.
 fn bytes_split_args(args: &[Value]) -> Result<(Option<&[u8]>, i64)> {
-    let sep = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Bytes(rc)) => Some(rc.as_slice()),
-        Some(ValueKind::None) | None => None,
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                "bytes.split() argument 1 must be a bytes-like object or None".to_string(),
-            ));
-        }
+    let sep = match args.first() {
+        Some(v) => match v.kind() {
+            ValueKind::Bytes(rc) => Some(rc.as_slice()),
+            ValueKind::None => None,
+            // CPython 3.12 names the offending separator type (issue #2044).
+            // bytearray / bytes-subclass separators are pre-coerced to `Bytes`
+            // by the interpreter, so only genuinely-wrong types reach here.
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "a bytes-like object is required, not '{}'",
+                        pyrust_core::builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
+        None => None,
     };
     let maxsplit: i64 = match args.get(1).map(|v| v.kind()) {
         None => -1,
