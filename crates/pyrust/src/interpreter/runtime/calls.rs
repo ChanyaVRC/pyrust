@@ -2026,9 +2026,11 @@ impl Interpreter {
                 return Err(pyrust_core::type_err!("{type_name}.{method}() takes exactly one argument ({} given)",
                         args.len()));
             }
-            // `__mul__` (sq_repeat) and `__setitem__` (sq_ass_item) print a
-            // leading space before "expected" in CPython 3.12.
-            let lead = if matches!(method, "__mul__" | "__setitem__") { " " } else { "" };
+            // `__mul__` (sq_repeat), `__imul__` (sq_inplace_repeat) and
+            // `__setitem__` (sq_ass_item) print a leading space before
+            // "expected" in CPython 3.12.
+            let lead =
+                if matches!(method, "__mul__" | "__imul__" | "__setitem__") { " " } else { "" };
             let plural = if want == 1 { "argument" } else { "arguments" };
             return Err(pyrust_core::type_err!("{lead}expected {want} {plural}, got {}",
                     args.len()));
@@ -2096,6 +2098,121 @@ impl Interpreter {
                 };
                 self.exec_delete_item(&mut regs, 0, 0, 1)?;
                 Ok(Value::none())
+            }
+            // list/bytearray in-place dunders (#2119): identical semantics to
+            // the `+=`/`*=` operators — mutate the receiver in place and return
+            // it.  `try_inplace_op(..., is_augmented_assign = true)` routes
+            // through the same machinery the operators use, including the
+            // operator-form TypeErrors (`'int' object is not iterable`,
+            // `'float' object cannot be interpreted as an integer`, …).
+            "__iadd__" if matches!(&*type_name, "list" | "bytearray") => {
+                let other = args.pop().unwrap();
+                match self.try_inplace_op(&receiver, crate::ast::BinaryOp::Add, &other, true)? {
+                    Some(v) => Ok(v),
+                    // The fast paths in `try_inplace_op` always handle list /
+                    // bytearray `+=`, so this fallback is defensive only — it
+                    // surfaces the operator's TypeError for a bad operand.
+                    None => self.eval_binary(receiver, crate::ast::BinaryOp::Add, other),
+                }
+            }
+            "__imul__" if matches!(&*type_name, "list" | "bytearray") => {
+                // The `sq_inplace_repeat` slot wrapper resolves the count
+                // through `__index__` (like `__mul__`/`sq_repeat`), so a float
+                // raises `'X' object cannot be interpreted as an integer` —
+                // stricter than the `*=` operator's "can't multiply sequence by
+                // non-int" message.  Resolve first, then mutate in place.
+                let other = args.pop().unwrap();
+                let count = self.value_to_index(&other, |v| {
+                    pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(v))
+                })?;
+                match self.try_inplace_op(&receiver, crate::ast::BinaryOp::Mul, &count, true)? {
+                    Some(v) => Ok(v),
+                    // None only for an out-of-range count (e.g. a BigInt that
+                    // can't fit an index): delegate so the canonical
+                    // OverflowError is raised, matching CPython.
+                    None => self.eval_binary(receiver, crate::ast::BinaryOp::Mul, count),
+                }
+            }
+            // set/frozenset/dict forward algebra & merge dunders (#2122).
+            // CPython returns `NotImplemented` (not TypeError) when the other
+            // operand is not set-/dict-compatible, so guard the operand type
+            // before delegating to the operator machinery.
+            "__or__" | "__and__" | "__sub__" | "__xor__"
+                if matches!(&*type_name, "set" | "frozenset") =>
+            {
+                let other = args.pop().unwrap();
+                if set_items_from_value(&other).is_none() {
+                    return Ok(Value::not_implemented());
+                }
+                let op = match method {
+                    "__or__" => crate::ast::BinaryOp::BitOr,
+                    "__and__" => crate::ast::BinaryOp::BitAnd,
+                    "__sub__" => crate::ast::BinaryOp::Sub,
+                    _ => crate::ast::BinaryOp::BitXor,
+                };
+                self.eval_binary(receiver, op, other)
+            }
+            // Reflected set dunders: `a.__rOP__(b)` computes `b OP a`.  Same
+            // NotImplemented guard as the forward forms.
+            "__ror__" | "__rand__" | "__rsub__" | "__rxor__"
+                if matches!(&*type_name, "set" | "frozenset") =>
+            {
+                let other = args.pop().unwrap();
+                if set_items_from_value(&other).is_none() {
+                    return Ok(Value::not_implemented());
+                }
+                let op = match method {
+                    "__ror__" => crate::ast::BinaryOp::BitOr,
+                    "__rand__" => crate::ast::BinaryOp::BitAnd,
+                    "__rsub__" => crate::ast::BinaryOp::Sub,
+                    _ => crate::ast::BinaryOp::BitXor,
+                };
+                self.eval_binary(other, op, receiver)
+            }
+            // set in-place algebra dunders (#2122).  Unlike the `|=`/`&=`/…
+            // operators (which raise TypeError on a non-set operand), the
+            // dunder returns `NotImplemented`, so guard first and only then
+            // route through the mutating operator machinery.
+            "__ior__" | "__iand__" | "__isub__" | "__ixor__" if &*type_name == "set" => {
+                let other = args.pop().unwrap();
+                if set_items_from_value(&other).is_none() {
+                    return Ok(Value::not_implemented());
+                }
+                let op = match method {
+                    "__ior__" => crate::ast::BinaryOp::BitOr,
+                    "__iand__" => crate::ast::BinaryOp::BitAnd,
+                    "__isub__" => crate::ast::BinaryOp::Sub,
+                    _ => crate::ast::BinaryOp::BitXor,
+                };
+                match self.try_inplace_op(&receiver, op, &other, true)? {
+                    Some(v) => Ok(v),
+                    None => Ok(receiver),
+                }
+            }
+            // dict PEP-584 forward / reflected merge dunders (#2122).  Returns
+            // `NotImplemented` when the other operand is not a mapping (matching
+            // `dict.__or__`/`__ror__`, which only accept dicts — not arbitrary
+            // iterables of pairs, unlike `__ior__`).
+            "__or__" | "__ror__" if &*type_name == "dict" => {
+                let other = args.pop().unwrap();
+                if dict_entries_from_value(&other).is_none() {
+                    return Ok(Value::not_implemented());
+                }
+                if method == "__or__" {
+                    self.eval_binary(receiver, crate::ast::BinaryOp::BitOr, other)
+                } else {
+                    self.eval_binary(other, crate::ast::BinaryOp::BitOr, receiver)
+                }
+            }
+            // dict `__ior__` (#2122): identical to `|=` — accepts dicts *and*
+            // iterables of (key, value) pairs, mutates in place, returns self.
+            "__ior__" if &*type_name == "dict" => {
+                let other = args.pop().unwrap();
+                match self.try_inplace_op(&receiver, crate::ast::BinaryOp::BitOr, &other, true)? {
+                    Some(v) => Ok(v),
+                    None => Ok(receiver),
+                }
             }
             other => Err(PyError::Runtime(format!(
                 "internal: unhandled builtin protocol dunder '{other}'"
@@ -5647,6 +5764,23 @@ fn is_container_protocol_dunder_name(name: &str) -> bool {
             | "__contains__"
             | "__add__"
             | "__mul__"
+            // In-place sequence dunders (#2119): list/bytearray.
+            | "__iadd__"
+            | "__imul__"
+            // set/frozenset/dict algebra & merge dunders (#2122), including
+            // reflected (`__rOP__`) and in-place (`__iOP__`) forms.
+            | "__or__"
+            | "__ror__"
+            | "__ior__"
+            | "__and__"
+            | "__rand__"
+            | "__iand__"
+            | "__sub__"
+            | "__rsub__"
+            | "__isub__"
+            | "__xor__"
+            | "__rxor__"
+            | "__ixor__"
     )
 }
 
@@ -5654,17 +5788,28 @@ pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static st
     match type_name {
         "list" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__add__", "__mul__",
+            "__add__", "__mul__", "__iadd__", "__imul__",
         ],
         "tuple" | "str" | "bytes" => &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
         ],
         "bytearray" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__add__", "__mul__",
+            "__add__", "__mul__", "__iadd__", "__imul__",
         ],
-        "dict" => &["__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__"],
-        "set" | "frozenset" => &["__len__", "__contains__"],
+        "dict" => &[
+            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
+            "__or__", "__ror__", "__ior__",
+        ],
+        "set" => &[
+            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
+            "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
+            "__isub__", "__ixor__",
+        ],
+        "frozenset" => &[
+            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
+            "__sub__", "__rsub__", "__xor__", "__rxor__",
+        ],
         _ => &[],
     }
 }
