@@ -191,7 +191,7 @@ mod tests {
             "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
             "ascii",  // len dispatches user __len__ on PyInstance values (#1526).
             "len",    // chr dispatches user __index__ on PyInstance values (#1908).
-            "chr", // type(name, bases, ns) runs class-creation hooks (#2129/#2130).
+            "chr",    // type(name, bases, ns) runs class-creation hooks (#2129/#2130).
             "type",
         ] {
             assert!(
