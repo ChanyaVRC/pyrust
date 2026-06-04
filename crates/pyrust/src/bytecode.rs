@@ -393,6 +393,16 @@ pub enum Insn {
     /// PEP 487: kwarg_n keyword arg values are in R[kwarg_base..kwarg_base+kwarg_n];
     /// names come from fn_protos[proto_idx].class_kwarg_names.
     MakeClass(Reg, u8, Reg, u8, u16, Reg, u8),
+    /// R[dst] = metaclass-driven class creation, where the metaclass value is in
+    /// R[meta_reg].  Same layout as `MakeClass` plus a trailing `meta_reg`.
+    /// Unlike `MakeClass`, this calls `metaclass.__prepare__(name, bases, **kw)`
+    /// to obtain the body namespace, runs the class body into it, then calls
+    /// `metaclass(name, bases_tuple, namespace, **kw)` — so all class-creation
+    /// hooks (`__set_name__`, `__init_subclass__`) run once inside the metaclass
+    /// (`type.__new__`) rather than in `MakeClass` (issues #2128/#2130).
+    /// Tuple: (dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base,
+    /// kwarg_n, meta_reg).
+    MakeClassMeta(Reg, u8, Reg, u8, u16, Reg, u8, Reg),
     /// R[dst] = TypeVar(name=consts[name_idx])
     /// PEP 695: construct a `TypeVar` object for a generic type parameter.
     MakeTypeVar(Reg, u16),

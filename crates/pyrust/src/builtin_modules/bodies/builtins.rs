@@ -1601,30 +1601,43 @@ pyrust_module! {
 
     /// CPython: type(object) → type / type(name, bases, namespace) → new class.
     /// <https://docs.python.org/3/library/functions.html#type>
-    #[pure]
+    ///
+    /// Not `#[pure]`: the 3-arg form runs class-creation hooks (`__set_name__`,
+    /// `__init_subclass__`) which may execute arbitrary user code (#2129/#2130).
     fn r#type(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() == 3 {
-            let name = match args[0].value.kind() {
+        // The 3-arg form `type(name, bases, ns, **kwds)` forwards keyword args
+        // to `__init_subclass__` (so a bad kwarg surfaces as
+        // `X.__init_subclass__() takes no keyword arguments`, matching CPython);
+        // the 1-arg form `type(obj)` takes none.  Split positional / keyword
+        // accordingly instead of rejecting all kwargs up front.
+        let positional: Vec<&ExpandedCallArg> =
+            args.iter().filter(|a| a.name.is_none()).collect();
+        let init_subclass_kwargs: Vec<ExpandedCallArg> = args
+            .iter()
+            .filter(|a| a.name.is_some())
+            .cloned()
+            .collect();
+        if positional.len() == 3 {
+            let name = match positional[0].value.kind() {
                 ValueKind::Str(s) => s.to_string(),
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!(
                         "type.__new__() argument 1 must be str, not {}",
-                        value_type_name_str(&args[0].value),
+                        value_type_name_str(&positional[0].value),
                     ),
                 )),
             };
             // Extract all bases from the bases sequence.  Collect into a Vec
             // first (inside a scoped block so the kind() Ref guard drops before
             // we work with the Values — see #450).
-            let base_values: Vec<Value> = match args[1].value.kind() {
+            let base_values: Vec<Value> = match positional[1].value.kind() {
                 ValueKind::Tuple(items) => items.to_vec(),
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!(
                         "type.__new__() argument 2 must be tuple, not {}",
-                        value_type_name_str(&args[1].value),
+                        value_type_name_str(&positional[1].value),
                     ),
                 )),
             };
@@ -1675,7 +1688,7 @@ pyrust_module! {
                 }
             }
             let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
-            match args[2].value.kind() {
+            match positional[2].value.kind() {
                 ValueKind::Dict(map) => {
                     for (k, v) in map.iter() {
                         if let PyKey::Str(key) = k {
@@ -1687,7 +1700,7 @@ pyrust_module! {
                     if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
                 {
                     if let Some(class_rc) =
-                        pyrust_builtins::mapping_proxy::as_class_rc(&args[2].value)
+                        pyrust_builtins::mapping_proxy::as_class_rc(&positional[2].value)
                     {
                         let class = class_rc.borrow();
                         for (k, v) in class.attrs.iter() {
@@ -1699,29 +1712,29 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "type.__new__() argument 3 must be dict, not {}",
-                        value_type_name_str(&args[2].value),
+                        value_type_name_str(&positional[2].value),
                     ),
                 )),
             }
-            let new_class = Rc::new(RefCell::new(PyClass {
-                extra_bases: extra_bases.clone(),
-                ..PyClass::new(name.clone(), name, base.clone(), attrs)
-            }));
-            if let Some(ref b) = base {
-                b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
-            }
-            for eb in &extra_bases {
-                eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
-            }
-            return Ok(Value::py_class(new_class));
+            // Issues #2129 / #2130: route the 3-arg constructor through the
+            // same finalization the `class` statement runs (set __module__,
+            // process __slots__, call __set_name__ on descriptors and
+            // __init_subclass__ on the base) so a `type()`-built class is not
+            // missing hooks a `class`-built one has.  Keyword args are forwarded
+            // to __init_subclass__ (CPython routes type()'s kwds there).
+            return _interp.build_class_via_type(
+                name, base, extra_bases, attrs, None, &init_subclass_kwargs,
+            );
         }
-        if args.len() != 1 {
+        // The 1-arg form `type(obj)` accepts no keyword arguments.
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if positional.len() != 1 {
             return Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() takes 1 or 3 arguments"),
             ));
         }
-        let obj = &args[0].value;
+        let obj = &positional[0].value;
         // For user-defined class instances return the actual Rc so that
         // `type(x) is type(x)` works via Rc::ptr_eq.
         //
@@ -5390,15 +5403,24 @@ pyrust_module! {
     #[py_name = "type.__new__"]
     fn type_new_dunder(args) -> Result<Value> {
         // type.__new__ has two call signatures:
-        //   type.__new__(mcs, name, bases, namespace)  — metaclass allocator
-        //   type(obj)                                  — returns type(obj)
+        //   type.__new__(mcs, name, bases, namespace, **kwds)  — metaclass alloc
+        //   type(obj)                                          — returns type(obj)
         // The one-arg form is handled by the "type" registry entry, not here.
-        // Here we always expect exactly 4 args (mcs + name + bases + namespace).
-        if args.len() != 4 {
+        // The 4 positional args are mcs + name + bases + namespace; any extra
+        // keyword args are the PEP 487 class kwargs that get forwarded to
+        // `__init_subclass__` (CPython's type.__new__ accepts **kwds).
+        let positional: Vec<&ExpandedCallArg> =
+            args.iter().filter(|a| a.name.is_none()).collect();
+        let init_subclass_kwargs: Vec<ExpandedCallArg> = args
+            .iter()
+            .filter(|a| a.name.is_some())
+            .cloned()
+            .collect();
+        if positional.len() != 4 {
             // CPython counts positional args excluding the implicit cls arg, so
             // the error says "3 arguments" (name, bases, dict) not "4".
             // With 0 args (no cls at all), CPython uses a different message.
-            if args.is_empty() {
+            if positional.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
                     "type.__new__(): not enough arguments".to_string(),
@@ -5408,14 +5430,14 @@ pyrust_module! {
                 "TypeError",
                 format!(
                     "type.__new__() takes exactly 3 arguments ({} given)",
-                    args.len() - 1,
+                    positional.len() - 1,
                 ),
             ));
         }
-        let mcs_val = args[0].value.clone();
-        let name_val = args[1].value.clone();
-        let bases_val = args[2].value.clone();
-        let namespace_val = args[3].value.clone();
+        let mcs_val = positional[0].value.clone();
+        let name_val = positional[1].value.clone();
+        let bases_val = positional[2].value.clone();
+        let namespace_val = positional[3].value.clone();
 
         let mcs_rc = match mcs_val.kind() {
             ValueKind::PyClass(c) => Rc::clone(c),
@@ -5483,13 +5505,6 @@ pyrust_module! {
                 }
             }
         }
-        let qualname = attrs
-            .get("__qualname__")
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_else(|| name.clone());
-        // __qualname__ must not live in the class attrs dict (it is a type
-        // descriptor in CPython); remove it so get_attr intercepts it cleanly.
-        attrs.shift_remove("__qualname__");
         // Issue #1626: record the actual metatype on the class so that
         // `type(Foo)` returns the metaclass and `isinstance(Foo, Meta)` works.
         // `type` itself is the default metatype and is represented as `None`
@@ -5502,20 +5517,12 @@ pyrust_module! {
                 Some(mcs_rc)
             }
         };
-        let class = Rc::new(RefCell::new(PyClass {
-            extra_bases: extra_bases.clone(),
-            metatype,
-            ..PyClass::new(name, qualname, base.clone(), attrs)
-        }));
-        // Register the new class as a direct subclass of each base so that
-        // base.__subclasses__() includes it.
-        if let Some(ref b) = base {
-            b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
-        }
-        for eb in &extra_bases {
-            eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
-        }
-        Ok(Value::py_class(class))
+        // Issues #2129 / #2130: run the full class-creation finalization
+        // (__module__, __slots__, __set_name__, __init_subclass__) so a class
+        // built via a metaclass / `type.__new__` matches the `class` statement.
+        // The `class`-statement metaclass path now also routes here exactly
+        // once (via `exec_make_class_meta`), so hooks fire once, not twice.
+        _interp.build_class_via_type(name, base, extra_bases, attrs, metatype, &init_subclass_kwargs)
     }
 
     /// Issue #1385: `type.__init__(cls, name, bases, namespace)` — the
@@ -5529,6 +5536,17 @@ pyrust_module! {
     #[py_name = "type.__init__"]
     fn type_init_dunder(_args) -> Result<Value> {
         Ok(Value::none())
+    }
+
+    /// Issue #2128: `type.__prepare__(mcs, name, bases, /, **kwds)` — the
+    /// default metaclass namespace factory.  CPython exposes this as a
+    /// classmethod returning a fresh plain `dict`; a `class` statement (and the
+    /// `exec_make_class_meta` path) calls `metaclass.__prepare__(...)` before
+    /// running the class body.  Registering it makes `hasattr(type, '__prepare__')`
+    /// true and lets `super().__prepare__(...)` resolve in a custom metaclass.
+    #[py_name = "type.__prepare__"]
+    fn type_prepare_dunder(_args) -> Result<Value> {
+        Ok(Value::dict(PyDict::default()))
     }
 
     /// Issue #1956: `type.__call__(cls, *args, **kwargs)` — the default
