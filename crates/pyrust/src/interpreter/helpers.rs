@@ -1833,6 +1833,27 @@ pub(crate) fn invoke_class_method(
                     return interp.dispatch_builtin_protocol_dunder(&method, receiver, rest);
                 }
             }
+            // PEP 654: BaseExceptionGroup.derive / subgroup / split are not
+            // registry builtins (they need interpreter access for predicates and
+            // a subclass's overridden `derive`).  Dispatch them here with the
+            // receiver prepended.
+            if matches!(
+                name,
+                "BaseExceptionGroup.derive"
+                    | "BaseExceptionGroup.subgroup"
+                    | "BaseExceptionGroup.split"
+            ) {
+                let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                combined.push(ExpandedCallArg { name: None, value: instance.clone() });
+                combined.extend(args.iter().cloned());
+                return match name {
+                    "BaseExceptionGroup.derive" => interp.exception_group_derive(&combined),
+                    "BaseExceptionGroup.subgroup" => {
+                        interp.exception_group_subgroup_or_split(&combined, false)
+                    }
+                    _ => interp.exception_group_subgroup_or_split(&combined, true),
+                };
+            }
             let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
                 PyError::Runtime(format!(
                     "internal: builtin method '{name}' not in registry"
@@ -3013,6 +3034,25 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     // ExceptionGroup(message, exceptions)    — only accepts Exception subclasses;
     //   inherits from both BaseExceptionGroup (primary) and Exception (extra base).
     let base_exception_group = mk("BaseExceptionGroup", Some(Rc::clone(&base_exception)));
+    // PEP 654: install `derive`, `subgroup`, and `split` on BaseExceptionGroup
+    // so every group subclass inherits them.  These are intercepted in
+    // `call_function_expanded` (they need interpreter access to call user
+    // predicates / a subclass's overridden `derive`).
+    {
+        let mut beg = base_exception_group.borrow_mut();
+        beg.attrs.insert(
+            "derive".to_string(),
+            Value::builtin_function("BaseExceptionGroup.derive"),
+        );
+        beg.attrs.insert(
+            "subgroup".to_string(),
+            Value::builtin_function("BaseExceptionGroup.subgroup"),
+        );
+        beg.attrs.insert(
+            "split".to_string(),
+            Value::builtin_function("BaseExceptionGroup.split"),
+        );
+    }
     // ExceptionGroup uses multiple inheritance: primary base = BaseExceptionGroup,
     // extra base = Exception.  Build it manually so we can set extra_bases.
     let exception_group = Rc::new(RefCell::new(PyClass {
