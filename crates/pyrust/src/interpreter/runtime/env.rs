@@ -1064,6 +1064,24 @@ impl Interpreter {
                 return Ok(d);
             }
         }
+        // Issue #2081: a *data* descriptor on the metaclass shadows a same-named
+        // attribute in the class's own dict.  CPython's `type.__getattribute__`
+        // resolves `meta_data_descriptor` BEFORE the class MRO; only non-data
+        // metaclass attributes (handled further below, #1956/#2078) are shadowed
+        // by class-own entries.  Check the metaclass MRO first and, when the
+        // attribute found there is a data descriptor (e.g. a `property`), invoke
+        // its `__get__(cls, type(cls))`.
+        if let Some(meta_val) = metaclass_dunder(&class, name) {
+            if is_data_descriptor(&meta_val) {
+                return call_descriptor_get(
+                    self,
+                    &meta_val,
+                    Value::py_class(Rc::clone(&class)),
+                    Value::py_class(metaclass_of(&class)),
+                    name,
+                );
+            }
+        }
         if let Some(value) = lookup_class_attr(&class, name) {
             // Descriptor protocol for class-level access: if the class
             // attribute is a user-defined descriptor (PyInstance with

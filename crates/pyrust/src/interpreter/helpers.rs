@@ -218,13 +218,29 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
         return Some(v.clone());
     }
     let has_explicit_base = borrowed.base.is_some();
+    // Issue #2075: when a class participates in *multiple* inheritance, plain
+    // depth-first recursion ("primary base's full ancestry, then the extra
+    // bases") is NOT C3: in a diamond `D(B, C)` it descends `D → B → A` and
+    // returns `A`'s attribute before ever considering the sibling `C` that
+    // overrides it.  CPython resolves attributes by scanning the C3 `__mro__`
+    // left-to-right and returning the first class whose *own* dict defines the
+    // name.  Switch to that order here whenever this class has extra bases.
+    //
+    // The fast single-inheritance path below (no `extra_bases`) is left exactly
+    // as before: for a linear chain depth-first recursion already equals C3, so
+    // ordinary classes and the hot exception-construction path pay nothing.
+    if !borrowed.extra_bases.is_empty() {
+        // Drop the borrow before computing the MRO (which borrows each class).
+        drop(borrowed);
+        for cls in c3_linearize_classes(class) {
+            if let Some(v) = cls.borrow().attrs.get(name) {
+                return Some(v.clone());
+            }
+        }
+        return None;
+    }
     if let Some(base) = &borrowed.base {
         if let Some(v) = lookup_class_attr(base, name) {
-            return Some(v);
-        }
-    }
-    for extra in &borrowed.extra_bases {
-        if let Some(v) = lookup_class_attr(extra, name) {
             return Some(v);
         }
     }
@@ -251,6 +267,81 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
         }
     }
     None
+}
+
+/// C3 linearization of `class`, returning the MRO as a `Vec` of class pointers
+/// (the same order as `__mro__` / `class_mro_items`), with the `object`
+/// singleton appended last.  Unlike `class_mro_items`, this returns class
+/// pointers (no `Value` wrapping) and is infallible: it is only ever called on
+/// classes that were successfully created (so a consistent linearization was
+/// already verified at class-creation time).  Used by `lookup_class_attr` to
+/// scan multiple-inheritance bases in C3 order (issue #2075).
+///
+/// Runs the identical C3 algorithm as `class_mro_items` (which `__mro__` and
+/// `mro()` use), so the two always agree on order.  They are kept separate
+/// because `class_mro_items` is fallible — it reports a `TypeError` for an
+/// inconsistent linearization at class-creation time — whereas this variant is
+/// only reached after a class already exists and so never needs to fail.
+pub(crate) fn c3_linearize_classes(
+    class: &Rc<RefCell<PyClass>>,
+) -> Vec<Rc<RefCell<PyClass>>> {
+    fn linearize(c: &Rc<RefCell<PyClass>>) -> Vec<Rc<RefCell<PyClass>>> {
+        let (base, extra_bases) = {
+            let b = c.borrow();
+            (b.base.clone(), b.extra_bases.clone())
+        };
+        let mut all_bases: Vec<Rc<RefCell<PyClass>>> = Vec::new();
+        if let Some(b) = base {
+            all_bases.push(b);
+        }
+        all_bases.extend(extra_bases);
+        if all_bases.is_empty() {
+            return vec![Rc::clone(c)];
+        }
+        let mut lists: Vec<Vec<Rc<RefCell<PyClass>>>> =
+            all_bases.iter().map(linearize).collect();
+        lists.push(all_bases);
+
+        let mut result = vec![Rc::clone(c)];
+        loop {
+            lists.retain(|l| !l.is_empty());
+            if lists.is_empty() {
+                break;
+            }
+            let mut chosen: Option<Rc<RefCell<PyClass>>> = None;
+            'outer: for list in &lists {
+                let head_ptr = Rc::as_ptr(&list[0]);
+                for other in &lists {
+                    for tail in other.iter().skip(1) {
+                        if Rc::as_ptr(tail) == head_ptr {
+                            continue 'outer;
+                        }
+                    }
+                }
+                chosen = Some(Rc::clone(&list[0]));
+                break;
+            }
+            // No consistent head: fall back to the first remaining head so the
+            // scan still terminates.  This cannot happen for a validly-created
+            // class (the MRO was checked at creation), but we never panic.
+            let chosen = chosen.unwrap_or_else(|| Rc::clone(&lists[0][0]));
+            let chosen_ptr = Rc::as_ptr(&chosen);
+            result.push(chosen);
+            for list in &mut lists {
+                if !list.is_empty() && Rc::as_ptr(&list[0]) == chosen_ptr {
+                    list.remove(0);
+                }
+            }
+        }
+        result
+    }
+
+    let mut mro = linearize(class);
+    let obj = object_class_singleton();
+    if !mro.iter().any(|c| Rc::ptr_eq(c, &obj)) {
+        mro.push(obj);
+    }
+    mro
 }
 
 thread_local! {
