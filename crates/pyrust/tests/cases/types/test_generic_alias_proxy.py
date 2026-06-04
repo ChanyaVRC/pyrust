@@ -9,6 +9,12 @@ print(repr(list[int]))
 print(repr(dict[str, int]))
 print(repr(list[dict[str, int]]))
 
+# An empty args tuple (`tuple[()]`, __args__ == ()) reprs as `tuple[()]`,
+# not `tuple[]` — CPython's `ga_repr` writes `()` for the zero-arg case.
+print(repr(tuple[()]))
+print(repr(list[tuple[()]]))
+print(repr(tuple[tuple[()], str]))
+
 # Bare / in-container Ellipsis is unaffected (still reprs as `Ellipsis`).
 print(repr(...))
 print(repr([1, ..., 2]))

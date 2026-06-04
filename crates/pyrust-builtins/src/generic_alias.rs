@@ -46,8 +46,11 @@ impl BuiltinTypeOps for GenericAliasOps {
             _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
         };
 
-        // args is always a tuple of one or more elements.
+        // args is a tuple; for `tuple[()]` it is empty, which CPython's
+        // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
+        // rather than the empty string that joining an empty list yields.
         let args_repr = match s.args.kind() {
+            ValueKind::Tuple(items) if items.is_empty() => "()".to_string(),
             ValueKind::Tuple(items) => items
                 .iter()
                 .map(repr_type_arg)
