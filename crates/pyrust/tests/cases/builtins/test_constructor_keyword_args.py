@@ -26,6 +26,12 @@ show("round(number=3.14)", lambda: round(number=3.14))
 show("round(number=2.6, ndigits=0)", lambda: round(number=2.6, ndigits=0))
 show("round(3.14, foo=1)", lambda: round(3.14, foo=1))
 show("round(3.14, 1, ndigits=1)", lambda: round(3.14, 1, ndigits=1))
+# number unbound: CPython's clinic reports the missing required positional
+# *before* rejecting the unknown keyword (not "'x'/'foo' is an invalid kw").
+show("round(x=3.14)", lambda: round(x=3.14))
+show("round(foo=1)", lambda: round(foo=1))
+show("round(number=3.14, foo=1)", lambda: round(number=3.14, foo=1))
+show("round(3.14, number=1)", lambda: round(3.14, number=1))
 
 # --- complex: real and imag both keyword ---
 show("complex(real=1, imag=2)", lambda: complex(real=1, imag=2))

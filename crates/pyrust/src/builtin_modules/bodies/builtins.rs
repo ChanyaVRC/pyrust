@@ -2497,18 +2497,38 @@ pyrust_module! {
         // `ndigits` are keyword-or-positional.  Bind kwargs (with the
         // C-clinic "invalid keyword argument" wording) before the existing
         // positional dispatch below.
+        //
+        // Unlike the int/complex/str constructors, `round` is an argument-clinic
+        // function whose *missing required positional* check precedes the
+        // unknown-keyword check: `round(x=3.5)` / `round(foo=1)` report
+        // "missing required argument 'number'", not "'x'/'foo' is an invalid
+        // keyword argument".  The arity-overflow check still comes first, so
+        // mirror CPython's exact order: arity, then missing-number, then the
+        // generic keyword binding (which surfaces the remaining errors).
+        if args.len() > 2 {
+            let noun = if args.iter().all(|a| a.name.is_some()) {
+                "keyword arguments"
+            } else {
+                "arguments"
+            };
+            return Err(PyError::named(
+                "TypeError",
+                format!("round() takes at most 2 {noun} ({} given)", args.len()),
+            ));
+        }
+        let number_bound = args
+            .iter()
+            .any(|a| a.name.is_none() || a.name.as_deref() == Some("number"));
+        if !number_bound {
+            return Err(PyError::named(
+                "TypeError",
+                "round() missing required argument 'number' (pos 1)".to_string(),
+            ));
+        }
         let bound =
             bind_constructor_kwargs(FN_NAME, args, &["number", "ndigits"], &[true, true], 2)?;
-        // `round()` (no number) → missing required argument, matching CPython.
-        let x: PyValue = match bound[0].clone() {
-            Some(v) => PyValue(v),
-            None => {
-                return Err(PyError::named(
-                    "TypeError",
-                    "round() missing required argument 'number' (pos 1)".to_string(),
-                ));
-            }
-        };
+        // `number` was confirmed bound above; the slot is always populated here.
+        let x: PyValue = PyValue(bound[0].clone().expect("number slot bound"));
         let ndigits: Option<PyValue> = bound[1].clone().map(PyValue);
         // Classify x first so we can decide whether to validate ndigits.
         // CPython forwards any ndigits type to user-defined __round__ without
