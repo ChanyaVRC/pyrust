@@ -533,10 +533,564 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
         }
         "utf32le" => decode_utf32_le(bytes, bytes, 0, errors),
         "utf32be" => decode_utf32_be(bytes, bytes, 0, errors),
+        "cp1252" | "windows1252" => decode_cp1252(bytes, errors),
+        "unicodeescape" => decode_unicode_escape(bytes, errors),
+        "rawunicodeescape" => decode_raw_unicode_escape(bytes, errors),
+        "utf7" => decode_utf7(bytes, errors),
         _ => Err(PyError::named(
             "LookupError",
             format!("unknown encoding: {encoding}"),
         )),
+    }
+}
+
+/// Build a Python `str` from codepoints that may include lone surrogates,
+/// using the CESU-8-aware encoder so `char::from_u32` is never called on a
+/// surrogate (which would abort in debug builds).
+fn string_from_codepoints(cps: &[u32]) -> Value {
+    let mut s = String::new();
+    for &cp in cps {
+        s.push_str(&pyrust_core::cesu8_encode_codepoint(cp));
+    }
+    Value::string(s)
+}
+
+/// Decode CP1252 (Windows-1252) bytes, honouring the `errors` handler.
+/// Undefined bytes (0x81/0x8D/0x8F/0x90/0x9D) raise with CPython's `charmap`
+/// reason "character maps to <undefined>".
+fn decode_cp1252(bytes: &[u8], errors: &str) -> Result<Value> {
+    let mut out = String::with_capacity(bytes.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if let Some(cp) = crate::string::cp1252_decode_codepoint(b) {
+            // cp1252 maps only to scalar values, never surrogates.
+            out.push(char::from_u32(cp).expect("cp1252 maps to a scalar value"));
+            idx += 1;
+            continue;
+        }
+        match errors {
+            "ignore" => idx += 1,
+            "replace" => {
+                out.push('\u{FFFD}');
+                idx += 1;
+            }
+            "strict" => {
+                return Err(PyError::UnicodeDecodeError {
+                    encoding: "charmap".to_string(),
+                    object: bytes.to_vec(),
+                    start: idx,
+                    end: idx + 1,
+                    reason: "character maps to <undefined>".to_string(),
+                });
+            }
+            other => {
+                return Err(PyError::named(
+                    "LookupError",
+                    format!("unknown error handler name '{other}'"),
+                ));
+            }
+        }
+    }
+    Ok(Value::string(out))
+}
+
+/// Parse exactly `n` hex digits starting at `start`.
+///
+/// Returns `Ok(value)` when `n` valid hex digits are present, otherwise
+/// `Err(consumed)` where `consumed` is the count of leading valid hex digits
+/// (so callers can report CPython's truncated-escape end position).
+fn parse_hex_escape(bytes: &[u8], start: usize, n: usize) -> std::result::Result<u32, usize> {
+    let mut v: u32 = 0;
+    for k in 0..n {
+        match bytes.get(start + k).and_then(|b| (*b as char).to_digit(16)) {
+            Some(d) => v = v * 16 + d,
+            None => return Err(k),
+        }
+    }
+    Ok(v)
+}
+
+/// Decode `raw_unicode_escape` bytes: bytes < 0x100 pass through as Latin-1,
+/// `\uHHHH` / `\UHHHHHHHH` are interpreted; backslash is otherwise literal.
+fn decode_raw_unicode_escape(bytes: &[u8], errors: &str) -> Result<Value> {
+    let mut cps: Vec<u32> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            cps.push(bytes[i] as u32);
+            i += 1;
+            continue;
+        }
+        // Count the run of consecutive backslashes; only an odd run followed by
+        // 'u'/'U' starts an escape (CPython treats '\\u0041' as literal).
+        let bs_start = i;
+        let mut j = i;
+        while j < bytes.len() && bytes[j] == b'\\' {
+            j += 1;
+        }
+        let bs_count = j - bs_start;
+        let next = bytes.get(j).copied();
+        let is_escape = bs_count % 2 == 1 && matches!(next, Some(b'u') | Some(b'U'));
+        if !is_escape {
+            for _ in 0..bs_count {
+                cps.push(b'\\' as u32);
+            }
+            i = j;
+            continue;
+        }
+        // Emit the leading (even) backslashes literally; the last one escapes.
+        for _ in 0..(bs_count - 1) {
+            cps.push(b'\\' as u32);
+        }
+        let kind = next.unwrap();
+        let digits = if kind == b'u' { 4 } else { 8 };
+        let esc_start = j - 1; // position of the escaping backslash
+        match parse_hex_escape(bytes, j + 1, digits) {
+            Ok(cp) => {
+                if cp > 0x10FFFF {
+                    return raw_unicode_escape_error(
+                        bytes,
+                        errors,
+                        esc_start,
+                        j + 1 + digits,
+                        "\\Uxxxxxxxx out of range",
+                        &mut cps,
+                    );
+                }
+                cps.push(cp);
+                i = j + 1 + digits;
+            }
+            Err(consumed) => {
+                let reason = if kind == b'u' {
+                    "truncated \\uXXXX escape"
+                } else {
+                    "truncated \\UXXXXXXXX escape"
+                };
+                return raw_unicode_escape_error(
+                    bytes,
+                    errors,
+                    esc_start,
+                    j + 1 + consumed,
+                    reason,
+                    &mut cps,
+                );
+            }
+        }
+    }
+    Ok(string_from_codepoints(&cps))
+}
+
+fn raw_unicode_escape_error(
+    bytes: &[u8],
+    errors: &str,
+    start: usize,
+    end: usize,
+    reason: &str,
+    cps: &mut Vec<u32>,
+) -> Result<Value> {
+    match errors {
+        "strict" => Err(PyError::UnicodeDecodeError {
+            encoding: "rawunicodeescape".to_string(),
+            object: bytes.to_vec(),
+            start,
+            end,
+            reason: reason.to_string(),
+        }),
+        "ignore" => {
+            let rest = decode_raw_unicode_escape(&bytes[end..], errors)?;
+            if let ValueKind::Str(s) = rest.kind() {
+                for cp in pyrust_core::cesu8_codepoints(s) {
+                    cps.push(cp);
+                }
+            }
+            Ok(string_from_codepoints(cps))
+        }
+        "replace" => {
+            cps.push(0xFFFD);
+            let rest = decode_raw_unicode_escape(&bytes[end..], errors)?;
+            if let ValueKind::Str(s) = rest.kind() {
+                for cp in pyrust_core::cesu8_codepoints(s) {
+                    cps.push(cp);
+                }
+            }
+            Ok(string_from_codepoints(cps))
+        }
+        other => Err(PyError::named(
+            "LookupError",
+            format!("unknown error handler name '{other}'"),
+        )),
+    }
+}
+
+/// Decode `unicode_escape` bytes: interpret Python string escapes
+/// (`\n \t \r \a \b \f \v \0`, octal, `\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\\`,
+/// `\'`, `\"`); unknown escapes keep the backslash.
+fn decode_unicode_escape(bytes: &[u8], errors: &str) -> Result<Value> {
+    let mut cps: Vec<u32> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            cps.push(bytes[i] as u32);
+            i += 1;
+            continue;
+        }
+        let esc_start = i;
+        match bytes.get(i + 1).copied() {
+            None => {
+                return unicode_escape_error(
+                    bytes,
+                    errors,
+                    esc_start,
+                    esc_start + 1,
+                    "\\ at end of string",
+                    &mut cps,
+                );
+            }
+            Some(c) => match c {
+                b'\n' => i += 2, // line continuation: nothing emitted
+                b'\\' => {
+                    cps.push(b'\\' as u32);
+                    i += 2;
+                }
+                b'\'' => {
+                    cps.push(b'\'' as u32);
+                    i += 2;
+                }
+                b'"' => {
+                    cps.push(b'"' as u32);
+                    i += 2;
+                }
+                b'a' => {
+                    cps.push(0x07);
+                    i += 2;
+                }
+                b'b' => {
+                    cps.push(0x08);
+                    i += 2;
+                }
+                b'f' => {
+                    cps.push(0x0C);
+                    i += 2;
+                }
+                b'n' => {
+                    cps.push(0x0A);
+                    i += 2;
+                }
+                b'r' => {
+                    cps.push(0x0D);
+                    i += 2;
+                }
+                b't' => {
+                    cps.push(0x09);
+                    i += 2;
+                }
+                b'v' => {
+                    cps.push(0x0B);
+                    i += 2;
+                }
+                b'0'..=b'7' => {
+                    // Octal escape: up to 3 digits.
+                    let mut val: u32 = 0;
+                    let mut k = i + 1;
+                    let mut count = 0;
+                    while k < bytes.len() && count < 3 && (b'0'..=b'7').contains(&bytes[k]) {
+                        val = val * 8 + (bytes[k] - b'0') as u32;
+                        k += 1;
+                        count += 1;
+                    }
+                    cps.push(val);
+                    i = k;
+                }
+                b'x' => match parse_hex_escape(bytes, i + 2, 2) {
+                    Ok(cp) => {
+                        cps.push(cp);
+                        i += 4;
+                    }
+                    Err(consumed) => {
+                        return unicode_escape_error(
+                            bytes,
+                            errors,
+                            esc_start,
+                            i + 2 + consumed,
+                            "truncated \\xXX escape",
+                            &mut cps,
+                        );
+                    }
+                },
+                b'u' => match parse_hex_escape(bytes, i + 2, 4) {
+                    Ok(cp) => {
+                        cps.push(cp);
+                        i += 6;
+                    }
+                    Err(consumed) => {
+                        return unicode_escape_error(
+                            bytes,
+                            errors,
+                            esc_start,
+                            i + 2 + consumed,
+                            "truncated \\uXXXX escape",
+                            &mut cps,
+                        );
+                    }
+                },
+                b'U' => match parse_hex_escape(bytes, i + 2, 8) {
+                    Ok(cp) => {
+                        if cp > 0x10FFFF {
+                            return unicode_escape_error(
+                                bytes,
+                                errors,
+                                esc_start,
+                                esc_start + 10,
+                                "illegal Unicode character",
+                                &mut cps,
+                            );
+                        }
+                        cps.push(cp);
+                        i += 10;
+                    }
+                    Err(consumed) => {
+                        return unicode_escape_error(
+                            bytes,
+                            errors,
+                            esc_start,
+                            i + 2 + consumed,
+                            "truncated \\UXXXXXXXX escape",
+                            &mut cps,
+                        );
+                    }
+                },
+                b'N' => {
+                    // \N{NAME} — named character escape.
+                    if bytes.get(i + 2) != Some(&b'{') {
+                        return unicode_escape_error(
+                            bytes,
+                            errors,
+                            esc_start,
+                            esc_start + 2,
+                            "malformed \\N character escape",
+                            &mut cps,
+                        );
+                    }
+                    match bytes[i + 3..].iter().position(|&b| b == b'}') {
+                        None => {
+                            return unicode_escape_error(
+                                bytes,
+                                errors,
+                                esc_start,
+                                bytes.len(),
+                                "malformed \\N character escape",
+                                &mut cps,
+                            );
+                        }
+                        Some(rel) => {
+                            let name_end = i + 3 + rel;
+                            let name = std::str::from_utf8(&bytes[i + 3..name_end]).ok();
+                            match name.and_then(unicode_names2::character) {
+                                Some(ch) => {
+                                    cps.push(ch as u32);
+                                    i = name_end + 1;
+                                }
+                                None => {
+                                    return unicode_escape_error(
+                                        bytes,
+                                        errors,
+                                        esc_start,
+                                        name_end + 1,
+                                        "unknown Unicode character name",
+                                        &mut cps,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // Unknown escape: keep the backslash and the char literally.
+                    cps.push(b'\\' as u32);
+                    cps.push(c as u32);
+                    i += 2;
+                }
+            },
+        }
+    }
+    Ok(string_from_codepoints(&cps))
+}
+
+fn unicode_escape_error(
+    bytes: &[u8],
+    errors: &str,
+    start: usize,
+    end: usize,
+    reason: &str,
+    cps: &mut Vec<u32>,
+) -> Result<Value> {
+    match errors {
+        "strict" => Err(PyError::UnicodeDecodeError {
+            encoding: "unicodeescape".to_string(),
+            object: bytes.to_vec(),
+            start,
+            end,
+            reason: reason.to_string(),
+        }),
+        "ignore" => {
+            let rest = decode_unicode_escape(&bytes[end..], errors)?;
+            if let ValueKind::Str(s) = rest.kind() {
+                for cp in pyrust_core::cesu8_codepoints(s) {
+                    cps.push(cp);
+                }
+            }
+            Ok(string_from_codepoints(cps))
+        }
+        "replace" => {
+            cps.push(0xFFFD);
+            let rest = decode_unicode_escape(&bytes[end..], errors)?;
+            if let ValueKind::Str(s) = rest.kind() {
+                for cp in pyrust_core::cesu8_codepoints(s) {
+                    cps.push(cp);
+                }
+            }
+            Ok(string_from_codepoints(cps))
+        }
+        other => Err(PyError::named(
+            "LookupError",
+            format!("unknown error handler name '{other}'"),
+        )),
+    }
+}
+
+/// Modified-UTF-7 base64 alphabet value for a byte, or `None` if not a base64
+/// character.
+fn utf7_base64_value(b: u8) -> Option<u32> {
+    match b {
+        b'A'..=b'Z' => Some((b - b'A') as u32),
+        b'a'..=b'z' => Some((b - b'a' + 26) as u32),
+        b'0'..=b'9' => Some((b - b'0' + 52) as u32),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+/// Decode a run of modified-UTF-7 base64 characters into UTF-16 code units.
+///
+/// Bits are accumulated 6-per-char and a 16-bit unit is emitted every 16 bits.
+/// On a malformed shift sequence returns the CPython error reason:
+/// - "partial character in shift sequence" when >= 6 unused bits remain (a whole
+///   base64 char's worth that can't complete a unit);
+/// - "non-zero padding bits in shift sequence" when the leftover (< 6) padding
+///   bits are not all zero.
+///
+/// Always returns the complete (16-bit) units decoded; `Err(reason)` indicates a
+/// malformed tail, but the already-decoded `units` are still returned so the
+/// non-strict error handlers can keep them (matching CPython, e.g.
+/// `b'+ABC-'.decode('utf-7','replace') == '\x10�'`).
+fn utf7_base64_decode(b64: &[u8]) -> (Vec<u16>, Option<&'static str>) {
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    let mut units: Vec<u16> = Vec::new();
+    for &c in b64 {
+        // Caller only passes valid base64 chars.
+        let v = match utf7_base64_value(c) {
+            Some(v) => v,
+            None => return (units, Some("partial character in shift sequence")),
+        };
+        acc = (acc << 6) | v;
+        nbits += 6;
+        if nbits >= 16 {
+            nbits -= 16;
+            units.push(((acc >> nbits) & 0xFFFF) as u16);
+        }
+    }
+    if nbits >= 6 {
+        return (units, Some("partial character in shift sequence"));
+    }
+    if nbits > 0 && (acc & ((1 << nbits) - 1)) != 0 {
+        return (units, Some("non-zero padding bits in shift sequence"));
+    }
+    (units, None)
+}
+
+/// Decode modified UTF-7.  Direct bytes pass through; `+...-` sections are
+/// base64-decoded to UTF-16BE code units (`+-` is a literal `+`).
+fn decode_utf7(bytes: &[u8], errors: &str) -> Result<Value> {
+    let mut cps: Vec<u32> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b != b'+' {
+            cps.push(b as u32);
+            i += 1;
+            continue;
+        }
+        // `+` begins a shifted section.  `+-` is a literal `+`.
+        if bytes.get(i + 1) == Some(&b'-') {
+            cps.push('+' as u32);
+            i += 2;
+            continue;
+        }
+        let section_start = i;
+        i += 1;
+        let mut b64: Vec<u8> = Vec::new();
+        while i < bytes.len() && utf7_base64_value(bytes[i]).is_some() {
+            b64.push(bytes[i]);
+            i += 1;
+        }
+        let (units, err) = utf7_base64_decode(&b64);
+        // Combine UTF-16 units (surrogate pairs → scalar; lone surrogate kept).
+        utf7_units_to_codepoints(&units, &mut cps);
+        if let Some(reason) = err {
+            // CPython's error span includes a terminating '-' if present.
+            let end = if bytes.get(i) == Some(&b'-') {
+                i + 1
+            } else {
+                i
+            };
+            match errors {
+                "strict" => {
+                    return Err(PyError::UnicodeDecodeError {
+                        encoding: "utf7".to_string(),
+                        object: bytes.to_vec(),
+                        start: section_start,
+                        end,
+                        reason: reason.to_string(),
+                    });
+                }
+                "ignore" => {}
+                "replace" => cps.push(0xFFFD),
+                other => {
+                    return Err(PyError::named(
+                        "LookupError",
+                        format!("unknown error handler name '{other}'"),
+                    ));
+                }
+            }
+        }
+        // Consume a terminating `-` if present (explicit shift-out).
+        if bytes.get(i) == Some(&b'-') {
+            i += 1;
+        }
+    }
+    Ok(string_from_codepoints(&cps))
+}
+
+/// Combine decoded UTF-16 units into codepoints, joining valid surrogate pairs
+/// and keeping lone surrogates as-is.
+fn utf7_units_to_codepoints(units: &[u16], cps: &mut Vec<u32>) {
+    let mut k = 0usize;
+    while k < units.len() {
+        let u = units[k];
+        if (0xD800..=0xDBFF).contains(&u) && k + 1 < units.len() {
+            let low = units[k + 1];
+            if (0xDC00..=0xDFFF).contains(&low) {
+                let cp = 0x10000 + ((u as u32 - 0xD800) << 10) + (low as u32 - 0xDC00);
+                cps.push(cp);
+                k += 2;
+                continue;
+            }
+        }
+        cps.push(u as u32);
+        k += 1;
     }
 }
 

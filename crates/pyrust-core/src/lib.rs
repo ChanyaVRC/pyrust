@@ -4672,9 +4672,12 @@ pub fn format_unicode_encode_str(
     end: usize,
     reason: &str,
 ) -> String {
-    let chars: Vec<char> = object.chars().collect();
+    // Iterate via cesu8_codepoints: the object may hold lone surrogates (the
+    // very case that raised this error), and str::chars() would abort on them
+    // in debug builds.
+    let cps: Vec<u32> = cesu8_codepoints(object).collect();
     if end == start + 1 {
-        let cp = chars.get(start).map(|&c| c as u32).unwrap_or(0);
+        let cp = cps.get(start).copied().unwrap_or(0);
         let esc = format_codepoint_escape(cp);
         format!("'{encoding}' codec can't encode character '{esc}' in position {start}: {reason}")
     } else {
@@ -4693,9 +4696,9 @@ pub fn format_unicode_translate_str(
     end: usize,
     reason: &str,
 ) -> String {
-    let chars: Vec<char> = object.chars().collect();
+    let cps: Vec<u32> = cesu8_codepoints(object).collect();
     if end == start + 1 {
-        let cp = chars.get(start).map(|&c| c as u32).unwrap_or(0);
+        let cp = cps.get(start).copied().unwrap_or(0);
         let esc = format_codepoint_escape(cp);
         format!("can't translate character '{esc}' in position {start}: {reason}")
     } else {
