@@ -88,13 +88,20 @@ def namedtuple(typename, field_names, *, rename=False, defaults=None, module=Non
         arg_list += ','
     repr_fmt = '(' + ', '.join(f'{name}=%r' for name in field_names) + ')'
 
-    # Build __new__ via eval, baking any defaults straight into the lambda
-    # signature so the rightmost fields become optional (matching CPython's
-    # `__new__.__defaults__` behaviour without mutating the function object).
+    # Build __new__ via eval, making the rightmost defaulted fields optional
+    # (matching CPython's `__new__.__defaults__` behaviour without mutating the
+    # function object).  Default *values* are passed through the eval namespace
+    # and referenced by name in the signature rather than baked in via `!r`:
+    # `repr(value)` is not a reliable round-trip (`float('inf')`, `nan`, a set,
+    # or any object with a non-eval-able `__repr__` would raise / mis-evaluate),
+    # and this also preserves object identity for a shared mutable default.
+    eval_ns = {'_tuple_new': tuple.__new__}
     sig_parts = []
-    for name in field_names:
+    for index, name in enumerate(field_names):
         if name in field_defaults:
-            sig_parts.append(f'{name}={field_defaults[name]!r}')
+            default_key = f'_def_{index}'
+            eval_ns[default_key] = field_defaults[name]
+            sig_parts.append(f'{name}={default_key}')
         else:
             sig_parts.append(name)
     sig = ', '.join(sig_parts)
@@ -105,7 +112,7 @@ def namedtuple(typename, field_names, *, rename=False, defaults=None, module=Non
         code = f'lambda _cls, {sig}: _tuple_new(_cls, ({body}))'
     else:
         code = 'lambda _cls: _tuple_new(_cls, ())'
-    __new__ = eval(code, {'_tuple_new': tuple.__new__})
+    __new__ = eval(code, eval_ns)
     __new__.__name__ = '__new__'
     __new__.__doc__ = f'Create new instance of {typename}({arg_list})'
 
