@@ -4616,6 +4616,26 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
         }
     }
 
+    // CPython's `BaseExceptionGroup.__str__` formats as
+    // "%s (%zd sub-exception%s)" % (message, n, "s" if n != 1 else "") —
+    // i.e. the `.message` string followed by the count of direct
+    // sub-exceptions (NOT recursive leaf count), with plural "s" when n != 1.
+    if class_chain_has_name(&instance.borrow().class, "BaseExceptionGroup") {
+        let borrowed = instance.borrow();
+        let message = borrowed
+            .attrs
+            .get("message")
+            .map(|v| v.to_py_str())
+            .unwrap_or_default();
+        let n = borrowed
+            .attrs
+            .get("exceptions")
+            .and_then(|v| v.as_tuple().map(|t| t.len()))
+            .unwrap_or(0);
+        let plural = if n == 1 { "" } else { "s" };
+        return format!("{message} ({n} sub-exception{plural})");
+    }
+
     format_exception_args(&args, is_key_error)
 }
 

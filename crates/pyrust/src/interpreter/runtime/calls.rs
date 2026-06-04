@@ -259,6 +259,19 @@ impl Interpreter {
                     pyrust_builtins::bound_method::as_bound_method(&function).unwrap();
                 self.call_bound_method_dispatch(name_rc, receiver_owned, args)
             }
+            // PEP 654: BaseExceptionGroup.derive / subgroup / split.  These need
+            // interpreter access (to call a user predicate or a subclass's
+            // overridden `derive`), so they are intercepted here rather than
+            // declared as registry builtins.
+            ValueKind::BuiltinFunction("BaseExceptionGroup.derive") => {
+                self.exception_group_derive(args)
+            }
+            ValueKind::BuiltinFunction("BaseExceptionGroup.subgroup") => {
+                self.exception_group_subgroup_or_split(args, false)
+            }
+            ValueKind::BuiltinFunction("BaseExceptionGroup.split") => {
+                self.exception_group_subgroup_or_split(args, true)
+            }
             ValueKind::BuiltinFunction("str.format") => {
                 let self_val = args
                     .first()
