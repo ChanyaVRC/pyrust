@@ -209,6 +209,17 @@ impl Interpreter {
             }
         }
 
+        // Issue #2096: calling the `type.__call__` method-wrapper returned by
+        // `C.__call__` (for a class that defines no `__call__` of its own) is
+        // equivalent to calling the class itself — `C.__call__(args)` ==
+        // `C(args)`.  Re-dispatch onto the bound class so both the primitive
+        // (`int.__call__("5")`) and user-class construction paths are reused.
+        if let Some(class_val) =
+            pyrust_builtins::type_call_wrapper::as_type_call_wrapper(&function)
+        {
+            return self.call_function_expanded(class_val, args);
+        }
+
         // Issue #1909: type-level unbound container protocol dunders
         // (`list.__getitem__([1,2], 0)`, `list.__setitem__(l, 0, 9)`,
         // `list.__add__([1], [2])`, …).  Route through the shared dispatcher so

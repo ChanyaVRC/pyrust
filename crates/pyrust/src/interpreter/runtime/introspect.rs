@@ -88,6 +88,15 @@ impl Interpreter {
             }
         }
 
+        // co_freevars: the names this function reads from an enclosing function
+        // scope, in CPython's sorted order (issue #2106).  Reuses the same
+        // free-variable analysis that powers `__closure__`.
+        let freevars: Vec<Value> = self
+            .closure_free_vars(function)
+            .into_iter()
+            .map(|(name, _)| Value::string(name))
+            .collect();
+
         code_obj::code_full(
             co_name,
             argcount,
@@ -97,7 +106,77 @@ impl Interpreter {
             firstlineno,
             consts,
             names,
+            freevars,
         )
+    }
+
+    /// Compute the function's free variables (the names it reads from an
+    /// enclosing *function* scope, i.e. its `__closure__` cells), paired with
+    /// their captured values, in CPython's `co_freevars` order (sorted by name).
+    ///
+    /// pyrust has no per-function free-var list: free variables are resolved at
+    /// runtime through the captured `env` chain.  We recover the set by scanning
+    /// the compiled body for `LoadGlobal` name references (free reads compile to
+    /// `LoadGlobal`, which walks the env chain) and keeping those that actually
+    /// resolve to a binding in a *non-module* enclosing env — exactly CPython's
+    /// definition of a free variable (bound in an enclosing function scope, not
+    /// a module global).  Names the function declares `global`/`local` are
+    /// excluded so an explicit `global x` is never mistaken for a closure cell.
+    pub(crate) fn closure_free_vars(&self, function: &UserFunction) -> Vec<(String, Value)> {
+        let Some(rc) = function.precompiled_code.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(fncode) = Rc::clone(rc).downcast::<crate::bytecode::FnCode>() else {
+            return Vec::new();
+        };
+
+        // Collect the distinct names loaded via `LoadGlobal` (free reads and
+        // true globals both go through this insn; the env-resolution filter
+        // below keeps only the free ones).
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut candidates: Vec<&str> = Vec::new();
+        for insn in &fncode.insns {
+            if let crate::bytecode::Insn::LoadGlobal(_, name_idx) = insn {
+                if let Some(name) = fncode.names.get(*name_idx as usize) {
+                    if seen.insert(name.as_str()) {
+                        candidates.push(name.as_str());
+                    }
+                }
+            }
+        }
+
+        let mut found: Vec<(String, Value)> = Vec::new();
+        for name in candidates {
+            // An explicit `global`/`nonlocal` mismatch or own local is not a
+            // closure free var.  `global` names target the module env;
+            // own-local names never reach `LoadGlobal` for a free read.
+            if function.global_names.contains(name) || function.local_names.contains(name) {
+                continue;
+            }
+            if let Some(value) = lookup_enclosing_function_value(&function.env, name) {
+                found.push((name.to_string(), value));
+            }
+        }
+        // CPython reports `co_freevars` (and orders `__closure__` cells) sorted
+        // by name.
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
+    }
+
+    /// Build `function.__closure__`: a tuple of `cell` objects, one per free
+    /// variable (in `co_freevars` order), or `None` for a function with no free
+    /// variables (issue #2106).
+    pub(crate) fn build_closure(&self, function: &UserFunction) -> Value {
+        let cells: Vec<Value> = self
+            .closure_free_vars(function)
+            .into_iter()
+            .map(|(_, value)| pyrust_builtins::cell::cell(value))
+            .collect();
+        if cells.is_empty() {
+            Value::none()
+        } else {
+            Value::tuple(cells)
+        }
     }
 
     /// Build a `frame` object for the VM frame view at stack index `idx`
