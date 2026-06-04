@@ -5082,21 +5082,30 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
 
     // Special values: inf / nan ignore precision / alt / grouping.
     if f.is_nan() {
-        let body = if matches!(t, 'F' | 'G' | 'E') {
+        let mut body = if matches!(t, 'F' | 'G' | 'E') {
             "NAN".to_string()
         } else {
             "nan".to_string()
         };
+        // The '%' presentation type still appends the percent sign for non-finite
+        // values: format(nan, '%') -> 'nan%' (#2027).
+        if t == '%' {
+            body.push('%');
+        }
         // nan has no sign, but the explicit sign flag ('+' / ' ') still applies
         // (CPython: format(nan, '+') -> '+nan').
         return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
     }
     if f.is_infinite() {
-        let body = if matches!(t, 'F' | 'G' | 'E') {
+        let mut body = if matches!(t, 'F' | 'G' | 'E') {
             "INF".to_string()
         } else {
             "inf".to_string()
         };
+        // '%' still appends the percent sign: format(inf, '%') -> 'inf%' (#2027).
+        if t == '%' {
+            body.push('%');
+        }
         return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
     }
 
