@@ -16,7 +16,7 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyBigInt, PyToPrimitive, Value, ValueKind};
 
 // ── scalar / range read-only attribute values ───────────────────────────────
 //
@@ -81,13 +81,28 @@ pub fn complex_attr(value: &Value, name: &str) -> Option<Value> {
 /// `range` `.start` / `.stop` / `.step` read-only properties (issue #1807).
 /// Returns `None` when `value` is not a `range` or `name` is not one of them.
 pub fn range_attr(value: &Value, name: &str) -> Option<Value> {
-    let ValueKind::Range { start, stop, step } = value.kind() else {
-        return None;
-    };
-    match name {
-        "start" => Some(Value::int(start)),
-        "stop" => Some(Value::int(stop)),
-        "step" => Some(Value::int(step)),
+    match value.kind() {
+        ValueKind::Range { start, stop, step } => match name {
+            "start" => Some(Value::int(start)),
+            "stop" => Some(Value::int(stop)),
+            "step" => Some(Value::int(step)),
+            _ => None,
+        },
+        // Arbitrary-precision range (#2118): start/stop/step are full ints.
+        // Normalize each to the inline `int` form when it happens to fit i64
+        // (e.g. `range(0, 10**20).step` is the plain int `1`).
+        ValueKind::BigRange { start, stop, step } => {
+            let normalize = |n: &PyBigInt| match n.to_i64() {
+                Some(i) => Value::int(i),
+                None => Value::bigint(n.clone()),
+            };
+            match name {
+                "start" => Some(normalize(start)),
+                "stop" => Some(normalize(stop)),
+                "step" => Some(normalize(step)),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }

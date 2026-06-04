@@ -1790,7 +1790,7 @@ impl Interpreter {
                 module.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
-            ValueKind::Range { .. } => {
+            ValueKind::Range { .. } | ValueKind::BigRange { .. } => {
                 // Range objects are immutable.  start/stop/step are read-only
                 // C-level slots in CPython; the error message is "readonly attribute".
                 // Any other attribute gives "has no attribute" (issue #1807).
@@ -3486,7 +3486,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
         ValueKind::Dict(_) => pyrust_builtins::dict::has_method(name),
         ValueKind::Set(_) => pyrust_builtins::set::has_method(name),
-        ValueKind::Range { .. } => {
+        ValueKind::Range { .. } | ValueKind::BigRange { .. } => {
             matches!(name, "__iter__" | "__len__" | "count" | "index")
         }
         ValueKind::BuiltinObject { ops, .. } => ops.has_method(name),

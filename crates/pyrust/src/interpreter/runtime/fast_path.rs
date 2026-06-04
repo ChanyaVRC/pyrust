@@ -362,7 +362,7 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        let (iter_val, counter): (Value, i64) = {
+        let (iter_val, counter): (Value, Value) = {
             let borrow = state_rc.borrow();
             let s = borrow.downcast_ref::<EnumerateIter>().ok_or_else(|| {
                 PyError::Runtime("step_enumerate_iter on non-EnumerateIter state".to_string())
@@ -370,14 +370,26 @@ impl Interpreter {
             if s.done {
                 return Ok(None);
             }
-            (s.source.clone(), s.counter)
+            (s.source.clone(), s.counter.clone())
         };
         match self.call_next(&iter_val, None) {
             Ok(item) => {
+                // Increment the counter, promoting to BigInt on i64 overflow
+                // instead of wrapping to a negative index (#2125).  The common
+                // inline-int case stays a single `checked_add`.
+                let next = match counter.as_int() {
+                    Some(n) => match n.checked_add(1) {
+                        Some(m) => Value::int(m),
+                        None => value_from_bigint(PyBigInt::from(n) + 1),
+                    },
+                    None => value_from_bigint(
+                        value_to_bigint(&counter).expect("enumerate counter is always an int") + 1,
+                    ),
+                };
                 let mut borrow = state_rc.borrow_mut();
                 let s = borrow.downcast_mut::<EnumerateIter>().unwrap();
-                s.counter += 1;
-                Ok(Some(Value::tuple(vec![Value::int(counter), item])))
+                s.counter = next;
+                Ok(Some(Value::tuple(vec![counter, item])))
             }
             Err(e) if e.class_name_is("StopIteration") => {
                 state_rc
@@ -389,6 +401,29 @@ impl Interpreter {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// One step of the lazy arbitrary-precision range iterator (#2118).
+    /// Yields `cur` then advances by `step`; `Ok(None)` once `stop` is reached.
+    pub(crate) fn step_bigrange_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        let mut borrow = state_rc.borrow_mut();
+        let s = borrow.downcast_mut::<BigRangeIter>().ok_or_else(|| {
+            PyError::Runtime("step_bigrange_iter on non-BigRangeIter state".to_string())
+        })?;
+        let exhausted = if s.step.sign() == PyBigIntSign::Plus {
+            s.cur >= s.stop
+        } else {
+            s.cur <= s.stop
+        };
+        if exhausted {
+            return Ok(None);
+        }
+        let v = value_from_bigint(s.cur.clone());
+        s.cur += &s.step;
+        Ok(Some(v))
     }
 
     /// One step of the lazy `zip(it1, it2, ..., strict=False)` iterator.

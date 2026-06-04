@@ -116,10 +116,23 @@ pub(crate) struct FilterIter {
 pub(crate) struct EnumerateIter {
     /// Already-converted iterator object.
     pub(crate) source: Value,
-    /// Current counter value; incremented after each yielded pair.
-    pub(crate) counter: i64,
+    /// Current counter value; incremented after each yielded pair.  Held as a
+    /// `Value` (inline `int` in the common case, promoting to `BigInt` past
+    /// `i64::MAX`) so the counter is arbitrary-precision — matching CPython and
+    /// accepting a `BigInt` `start` (#2125).
+    pub(crate) counter: Value,
     /// Set to `true` once the source raises `StopIteration`.
     pub(crate) done: bool,
+}
+
+/// Lazy iterator over an arbitrary-precision `range` (#2118).  Produced by
+/// `iter()` / `enumerate()` / `zip()` on a big-bound range so those callers do
+/// not materialize the (potentially enormous) sequence.  `cur` advances by
+/// `step` each `next()`; iteration stops when it reaches `stop`.
+pub(crate) struct BigRangeIter {
+    pub(crate) cur: PyBigInt,
+    pub(crate) stop: PyBigInt,
+    pub(crate) step: PyBigInt,
 }
 
 /// Lazy iterator for `zip(it1, it2, ..., strict=False)`.
@@ -240,6 +253,10 @@ pub(crate) enum FrameOutcome {
 pub(crate) enum IterState {
     Materialized(Vec<Value>, usize),
     Range { cur: i64, stop: i64, step: i64 },
+    /// Lazy arbitrary-precision range iteration (#2118): advances a `BigInt`
+    /// cursor by `step` each tick, never materializing the (potentially huge)
+    /// sequence.  Only produced for ranges with out-of-i64 bounds.
+    BigRange { cur: PyBigInt, stop: PyBigInt, step: PyBigInt },
     /// Lazy: reads directly from the source register on each ForIter call.
     /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
     /// Behaves like CPython's list_iterator: checks pos < len each tick; no
@@ -284,6 +301,27 @@ macro_rules! for_count_step {
             None => false,
         };
         if !cont {
+            $pc = jump_pc!($offset);
+        }
+    }};
+}
+
+/// Arbitrary-precision counterpart of [`for_count_step`] (#2118).  Reached only
+/// when the loop counter or stop has promoted past `i64` (e.g. `for i in
+/// range(10**19, 10**19+4)`), which the compiler's for-range / while-range
+/// rewrite cannot statically rule out because the bounds are runtime values.
+/// `cur`/`stop` are read as `BigInt`; `step` is the (always-i64) const.
+macro_rules! for_count_step_big {
+    ($regs:ident, $var:expr, $cur:expr, $stop:expr, $step:expr, $cmp_op:expr, $pc:ident, $offset:expr) => {{
+        let next: PyBigInt = $cur + PyBigInt::from($step);
+        let cont = match $cmp_op {
+            BinaryOp::Lt => next < $stop,
+            BinaryOp::Gt => next > $stop,
+            _ => unreachable!("ForCount* uses Lt or Gt only"),
+        };
+        if cont {
+            $regs[$var as usize] = value_from_bigint(next);
+        } else {
             $pc = jump_pc!($offset);
         }
     }};
@@ -2394,6 +2432,7 @@ impl Interpreter {
                         // (#450).
                         enum IterTag {
                             Range(i64, i64, i64),
+                            BigRange(PyBigInt, PyBigInt, PyBigInt),
                             Generator,
                             PyInstance(Rc<RefCell<crate::value::PyInstance>>),
                             BuiltinIterable,
@@ -2402,6 +2441,9 @@ impl Interpreter {
                         }
                         let tag = match src_val.kind() {
                             ValueKind::Range { start, stop, step } => IterTag::Range(start, stop, step),
+                            ValueKind::BigRange { start, stop, step } => {
+                                IterTag::BigRange(start.clone(), stop.clone(), step.clone())
+                            }
                             ValueKind::Generator(_) => IterTag::Generator,
                             ValueKind::PyInstance(inst) => IterTag::PyInstance(Rc::clone(inst)),
                             ValueKind::BuiltinObject { ops, .. } if ops.is_iterable() => {
@@ -2416,6 +2458,10 @@ impl Interpreter {
                                     vm_try!(Err(pyrust_core::value_err!("range() arg 3 must not be zero")));
                                 }
                                 IterState::Range { cur: start, stop, step }
+                            }
+                            IterTag::BigRange(start, stop, step) => {
+                                // step is guaranteed non-zero by `Value::range_big`.
+                                IterState::BigRange { cur: start, stop, step }
                             }
                             IterTag::Generator => IterState::UserDefined(src_val),
                             IterTag::ListOrTuple => {
@@ -2542,6 +2588,20 @@ impl Interpreter {
                                 regs[*dst as usize] = v;
                             }
                         }
+                        Some(IterState::BigRange { cur, stop, step }) => {
+                            let exhausted = if step.sign() == pyrust_core::PyBigIntSign::Plus {
+                                *cur >= *stop
+                            } else {
+                                *cur <= *stop
+                            };
+                            if exhausted {
+                                pc = jump_pc!(*offset);
+                            } else {
+                                let v = value_from_bigint(cur.clone());
+                                *cur += &*step;
+                                regs[*dst as usize] = v;
+                            }
+                        }
                         Some(IterState::UserDefined(iter_obj)) => {
                             // Call __next__() on the iterator object; stop on StopIteration.
                             let iter_val: &Value = iter_obj;
@@ -2618,6 +2678,17 @@ impl Interpreter {
                                                 Err(e) => Err(e),
                                             })
                                         } else {
+                                        let is_bigrange_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<BigRangeIter>()
+                                            .is_some();
+                                        if is_bigrange_iter {
+                                            Some(match self.step_bigrange_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
@@ -2641,6 +2712,7 @@ impl Interpreter {
                                             )))
                                         }
                                         }   // closes else { let mut borrow = ...
+                                        }   // closes is_bigrange_iter else
                                         }   // closes is_zip_iter else
                                         }   // closes is_enumerate_iter else
                                         }   // closes is_filter_iter else
@@ -2706,6 +2778,12 @@ impl Interpreter {
                         .zip(regs[*stop_reg as usize].as_int());
                     if let Some((cur, stop)) = pair {
                         for_count_step!(regs, *var, cur, stop, step, cmp_op, pc, *offset);
+                    } else if let (Some(cur), Some(stop)) = (
+                        value_to_bigint(&regs[*var as usize]),
+                        value_to_bigint(&regs[*stop_reg as usize]),
+                    ) {
+                        // BigInt counter/stop (#2118): promote the loop arithmetic.
+                        for_count_step_big!(regs, *var, cur, stop, step, cmp_op, pc, *offset);
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter or stop".into(),
@@ -2721,6 +2799,9 @@ impl Interpreter {
                         .expect("ForCountConst stop must be Int");
                     if let Some(cur) = regs[*var as usize].as_int() {
                         for_count_step!(regs, *var, cur, stop, step, cmp_op, pc, *offset);
+                    } else if let Some(cur) = value_to_bigint(&regs[*var as usize]) {
+                        // BigInt counter (#2118): promote the loop arithmetic.
+                        for_count_step_big!(regs, *var, cur, PyBigInt::from(stop), step, cmp_op, pc, *offset);
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),
@@ -2733,6 +2814,9 @@ impl Interpreter {
                     // lookup / `.kind()` decode for them.
                     if let Some(cur) = regs[*var as usize].as_int() {
                         for_count_step!(regs, *var, cur, *stop, *step, cmp_op, pc, *offset);
+                    } else if let Some(cur) = value_to_bigint(&regs[*var as usize]) {
+                        // BigInt counter (#2118): promote the loop arithmetic.
+                        for_count_step_big!(regs, *var, cur, PyBigInt::from(*stop), *step, cmp_op, pc, *offset);
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),

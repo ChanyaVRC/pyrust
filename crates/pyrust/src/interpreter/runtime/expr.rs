@@ -328,6 +328,17 @@ pub(crate) fn bigint_divmod_floor(a: &PyBigInt, b: &PyBigInt) -> (PyBigInt, PyBi
 ///
 /// Shared with `builtin_modules/bodies/builtins.rs` (the `divmod()`
 /// builtin) to avoid divergence in coercion logic (issue #493).
+/// Normalize a `BigInt` to a `Value`: a plain `Value::int` when it fits in
+/// `i64` (which itself collapses small values to the inline TAG_INT form),
+/// otherwise a heap `Value::bigint`.  Mirrors the int-overflow promotion used
+/// throughout numeric arithmetic (#2118).
+pub(crate) fn value_from_bigint(n: PyBigInt) -> Value {
+    match n.to_i64() {
+        Some(i) => Value::int(i),
+        None => Value::bigint(n),
+    }
+}
+
 pub(crate) fn value_to_bigint(v: &Value) -> Option<PyBigInt> {
     match v.kind() {
         ValueKind::Int(n) => Some(PyBigInt::from(n)),
@@ -1086,6 +1097,21 @@ impl Interpreter {
                 }
                 Ok(Value::int(start + i * step))
             }
+            ValueKind::BigRange { start, stop, step } => {
+                // Arbitrary-precision range indexing (#2118).  `call_index_protocol`
+                // already resolved any `__index__`, so the subscript is an int-like
+                // value; widen it to BigInt for the negative-wrap + bounds check.
+                let len = pyrust_core::bigrange_len(start, stop, step);
+                let mut i = value_to_bigint(&index)
+                    .expect("call_index_protocol guarantees an integer");
+                if i.sign() == pyrust_core::PyBigIntSign::Minus {
+                    i += &len;
+                }
+                if i.sign() == pyrust_core::PyBigIntSign::Minus || i >= len {
+                    return Err(pyrust_core::index_err!("range object index out of range"));
+                }
+                Ok(value_from_bigint(start + i * step))
+            }
             ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 // Built-in object types opt in to subscripting via
@@ -1613,7 +1639,7 @@ impl Interpreter {
         // here: compute the hash via `hash_value_with_interp` (which calls the
         // `ValueKind::Range` arm in `hash_value`) and store it in `PyKey::Object`
         // so that `range == range` lookup uses `Value`'s `PartialEq`.
-        if matches!(value.kind(), ValueKind::Range { .. }) {
+        if matches!(value.kind(), ValueKind::Range { .. } | ValueKind::BigRange { .. }) {
             let hash =
                 crate::builtin_modules::builtins::hash_value_with_interp(self, value)? as u64;
             return Ok(PyKey::Object {
@@ -4493,6 +4519,25 @@ impl Interpreter {
             let new_step  = r_step  * sl_step;
             return Ok(Value::range(new_start, new_stop, new_step));
         }
+        // Arbitrary-precision range slicing (#2118).  CPython resolves the slice
+        // indices against the range length as a Python int (not Py_ssize_t), so
+        // `range(10**20)[:5]` slices fine even though the length overflows i64.
+        // All of len / slice-index resolution / the new start·stop·step run in
+        // BigInt arithmetic.
+        if let ValueKind::BigRange { start: r_start, stop: r_stop, step: r_step } = target.kind() {
+            let r_start = r_start.clone();
+            let r_step = r_step.clone();
+            let r_len = pyrust_core::bigrange_len(&r_start, r_stop, &r_step);
+            let lo = self.resolve_slice_bound_val(lo)?;
+            let hi = self.resolve_slice_bound_val(hi)?;
+            let st = self.resolve_slice_bound_val(st)?;
+            let (sl_start, sl_stop, sl_step) =
+                Self::resolve_slice_bounds_big(&r_len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
+            let new_start = &r_start + &sl_start * &r_step;
+            let new_stop = &r_start + &sl_stop * &r_step;
+            let new_step = &r_step * &sl_step;
+            return Ok(Value::range_big(new_start, new_stop, new_step));
+        }
 
         // Built-in sequences: resolve bounds through __index__ before applying
         // the integer arithmetic in resolve_slice_bounds (issue #849).
@@ -4771,6 +4816,42 @@ impl Interpreter {
                     }
                     _ => Ok(Value::bool_(false)),
                 }
+            }
+            ValueKind::BigRange { start, stop, step } => {
+                // Arbitrary-precision range membership (#2118).  Mirrors the i64
+                // O(1) check but in BigInt arithmetic: `v` is a member iff it lies
+                // within [start, stop) (for positive step, or (stop, start] for
+                // negative) and `(v - start)` is divisible by `step`.
+                let bigrange_contains = |v: &PyBigInt| -> bool {
+                    use pyrust_core::PyBigIntSign;
+                    let sgn = step.sign();
+                    let in_bounds = if sgn == PyBigIntSign::Plus {
+                        v >= start && v < stop
+                    } else {
+                        v <= start && v > stop
+                    };
+                    in_bounds && ((v - start) % step).sign() == PyBigIntSign::NoSign
+                };
+                // Resolve `item` to an integer value when possible (int/bool/bigint,
+                // or an integer-valued finite float/complex).  Anything else is a
+                // non-member.
+                use num_traits::FromPrimitive;
+                let int_valued_float = |f: f64| -> Option<PyBigInt> {
+                    if f.is_finite() && f.fract() == 0.0 {
+                        PyBigInt::from_f64(f)
+                    } else {
+                        None
+                    }
+                };
+                let as_int: Option<PyBigInt> = match item.kind() {
+                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {
+                        value_to_bigint(&item)
+                    }
+                    ValueKind::Float(f) => int_valued_float(f),
+                    ValueKind::Complex(re, im) if im == 0.0 => int_valued_float(re),
+                    _ => None,
+                };
+                Ok(Value::bool_(as_int.is_some_and(|v| bigrange_contains(&v))))
             }
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
@@ -6440,6 +6521,26 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                 let mut cur = start;
                 while cur > stop {
                     out.push(Value::int(cur));
+                    cur += step;
+                }
+            }
+            Ok(out)
+        }
+        ValueKind::BigRange { start, stop, step } => {
+            // Materialize an arbitrary-precision range (#2118).  Only reached for
+            // out-of-i64 bounds; the element *count* still fits in memory (a range
+            // whose length itself overflows would OOM here, exactly as CPython's
+            // `list(range(...))` does).
+            let mut out = Vec::new();
+            let mut cur = start.clone();
+            if step.sign() == pyrust_core::PyBigIntSign::Plus {
+                while cur < *stop {
+                    out.push(value_from_bigint(cur.clone()));
+                    cur += step;
+                }
+            } else {
+                while cur > *stop {
+                    out.push(value_from_bigint(cur.clone()));
                     cur += step;
                 }
             }

@@ -79,6 +79,74 @@ impl Interpreter {
         Ok((start, end, step))
     }
 
+    /// Arbitrary-precision `slice.indices(len)` for big-bound range slicing
+    /// (#2118).  Mirrors [`Self::resolve_slice_bounds`] but in `BigInt` so a
+    /// range whose *length* exceeds i64 (`range(10**20)[:5]`) still slices
+    /// correctly instead of overflowing.  `lo`/`hi`/`st` come straight from the
+    /// slice object (already `__index__`-resolved to int-like values).
+    fn resolve_slice_bounds_big(
+        len: &PyBigInt,
+        lo: Option<&Value>,
+        hi: Option<&Value>,
+        st: Option<&Value>,
+    ) -> Result<(PyBigInt, PyBigInt, PyBigInt)> {
+        let zero = PyBigInt::from(0);
+        let one = PyBigInt::from(1);
+        let to_big = |v: &Value| -> Result<PyBigInt> {
+            value_to_bigint(v).ok_or_else(|| {
+                pyrust_core::type_err!(
+                    "slice indices must be integers or None or have an __index__ method"
+                )
+            })
+        };
+        let step = match st {
+            None => one.clone(),
+            Some(v) if v.is_none() => one.clone(),
+            Some(v) => {
+                let s = to_big(v)?;
+                if s == zero {
+                    return Err(pyrust_core::value_err!("slice step cannot be zero"));
+                }
+                s
+            }
+        };
+        let step_pos = step.sign() == PyBigIntSign::Plus;
+        // clamp(idx, lo, hi)
+        let clamp = |idx: PyBigInt, low: &PyBigInt, high: &PyBigInt| -> PyBigInt {
+            if idx < *low {
+                low.clone()
+            } else if idx > *high {
+                high.clone()
+            } else {
+                idx
+            }
+        };
+        let len_minus_1 = len - &one;
+        let resolve = |v: &Value| -> Result<PyBigInt> {
+            let i = to_big(v)?;
+            let i = if i.sign() == PyBigIntSign::Minus { i + len } else { i };
+            Ok(if step_pos {
+                clamp(i, &zero, len)
+            } else {
+                // negative step lower bound is -1
+                clamp(i, &(-&one), &len_minus_1)
+            })
+        };
+        let start_default = if step_pos { zero.clone() } else { len_minus_1.clone() };
+        let end_default = if step_pos { len.clone() } else { -&one };
+        let start = match lo {
+            None => start_default,
+            Some(v) if v.is_none() => start_default,
+            Some(v) => resolve(v)?,
+        };
+        let end = match hi {
+            None => end_default,
+            Some(v) if v.is_none() => end_default,
+            Some(v) => resolve(v)?,
+        };
+        Ok((start, end, step))
+    }
+
     fn slice_target_indices(len: i64, start: i64, end: i64, step: i64) -> Vec<usize> {
         let mut targets = Vec::new();
         let mut i = start;
