@@ -2051,6 +2051,18 @@ impl Interpreter {
                             value: vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals)),
                         });
                     }
+                    // Publish the register-resident current line so that
+                    // `sys._getframe()` reads the line its call is on, giving an
+                    // exact `frame.f_lineno` for the innermost frame (issue
+                    // #2185).  Gated on the `_getframe` builtin specifically (its
+                    // registered name is namespaced, `"sys._getframe"`) — a cheap
+                    // name compare that short-circuits for every other callee —
+                    // so neither the hot user-function call path nor the common
+                    // builtin-call path pays a thread-local write.
+                    if matches!(func_val.kind(), ValueKind::BuiltinFunction(n) if n.ends_with("_getframe"))
+                    {
+                        pyrust_core::set_current_vm_line(cur_line);
+                    }
                     let call_result = self.call_function_expanded(func_val, &buf);
                     self.call_arg_buf = buf;
                     regs[*func_reg as usize] = vm_try!(call_result);
@@ -2080,7 +2092,7 @@ impl Interpreter {
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
                     // pc was incremented before dispatch; the instruction position is pc - 1.
-                    let r = self.exec_call_method(&mut regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code, pc - 1);
+                    let r = self.exec_call_method(&mut regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code, pc - 1, cur_line);
                     regs[*dst as usize] = vm_try!(r);
                 }
 
@@ -3732,6 +3744,7 @@ mod vm_tests {
         FnCode {
             insns,
             lineno_table: vec![0u32; n],
+            first_lineno: 0,
             consts: vec![],
             names: vec![],
             num_regs: 0,

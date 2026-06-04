@@ -73,6 +73,13 @@ impl BuiltinTypeOps for FrameOps {
             // through the env chain rather than a dedicated dict, so surface the
             // globals dict (a non-error, mapping-typed best effort).
             "f_builtins" => Some(s.globals.clone()),
+            // `f_lasti` is the last executed bytecode offset; pyrust exposes no
+            // stable bytecode offset, so report `-1` (the value CPython uses for
+            // a frame that has not yet executed an instruction).
+            "f_lasti" => Some(Value::int(-1)),
+            // `f_trace` is the per-frame trace function; pyrust has no tracing
+            // hook, so it is always `None` (matching an untraced CPython frame).
+            "f_trace" => Some(Value::none()),
             _ => None,
         }
     }

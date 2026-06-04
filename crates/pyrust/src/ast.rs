@@ -90,6 +90,12 @@ pub enum Stmt {
         /// surfacing per-frame line numbers in `tb_lineno` / `f_lineno`
         /// (issues #2170/#2171).  Empty when no line info is available.
         body_linenos: Vec<u32>,
+        /// 1-based source line of the `def` keyword — the function's
+        /// `co_firstlineno`.  Populated by the parser; `0` when no line info is
+        /// available.  Distinct from `body_linenos[0]` (the first body
+        /// statement), which is one or more lines below for multi-line
+        /// signatures (issue #2185).
+        def_lineno: u32,
         decorators: Vec<Expr>,
         return_annotation: Option<Expr>,
         /// Whether this function was declared with `async def`.

@@ -16,31 +16,57 @@ impl Interpreter {
     /// `co_varnames`.
     pub(crate) fn build_code_object(&self, function: &UserFunction) -> Value {
         let co_name = function.name.clone();
+        // co_argcount: positional-only + positional-or-keyword params (excludes
+        // *args/**kwargs and keyword-only), matching CPython.
         let argcount = function
             .params
             .iter()
             .filter(|p| !p.is_args && !p.is_kwargs && !p.is_keyword_only)
             .count() as i64;
+        // co_posonlyargcount / co_kwonlyargcount (CPython 3.8+/3.0+).
+        let posonlyargcount = function
+            .params
+            .iter()
+            .filter(|p| p.is_positional_only)
+            .count() as i64;
+        let kwonlyargcount = function
+            .params
+            .iter()
+            .filter(|p| p.is_keyword_only)
+            .count() as i64;
 
-        // co_varnames: positional, then keyword-only, then *args, then **kwargs
-        // (CPython ordering).
+        // co_varnames: CPython orders parameters as positional (positional-only
+        // then positional-or-keyword), then keyword-only, then *args, then
+        // **kwargs — followed by the function-body locals in source order.
+        // Cell variables (locals captured by a nested scope) are reported in
+        // co_cellvars, NOT co_varnames, so they are excluded here.
+        let mut param_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut varnames: Vec<Value> = Vec::with_capacity(function.params.len());
         for p in function
             .params
             .iter()
             .filter(|p| !p.is_args && !p.is_kwargs && !p.is_keyword_only)
         {
+            param_names.insert(p.name.as_str());
             varnames.push(Value::string(p.name.clone()));
         }
         for p in function.params.iter().filter(|p| p.is_keyword_only) {
+            param_names.insert(p.name.as_str());
             varnames.push(Value::string(p.name.clone()));
         }
         for p in function.params.iter().filter(|p| p.is_args) {
+            param_names.insert(p.name.as_str());
             varnames.push(Value::string(p.name.clone()));
         }
         for p in function.params.iter().filter(|p| p.is_kwargs) {
+            param_names.insert(p.name.as_str());
             varnames.push(Value::string(p.name.clone()));
         }
+
+        // co_qualname (CPython 3.11+): the compile-time qualified name.  Unlike
+        // `__qualname__`, this is fixed at compile time and ignores any later
+        // `f.__qualname__ = ...` user override.
+        let qualname = function.qualname.clone();
 
         // co_flags: CPython sets CO_OPTIMIZED | CO_NEWLOCALS for every normal
         // function, plus CO_VARARGS / CO_VARKEYWORDS / CO_GENERATOR as the
@@ -60,32 +86,74 @@ impl Interpreter {
             .map(|s| s.to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
 
-        // co_consts / co_names / co_firstlineno / CO_GENERATOR from the
-        // compiled FnCode when available.
+        // The remaining attributes come from the compiled `FnCode` when
+        // available: co_firstlineno, co_consts, co_names, co_cellvars,
+        // co_stacksize, the function-body locals appended to co_varnames, and
+        // the CO_GENERATOR flag.  Downcast once and derive them all together.
+        let fncode = function
+            .precompiled_code
+            .as_ref()
+            .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok());
+
+        // co_cellvars: cell variables this function defines (locals captured by
+        // a nested scope), in CPython's sorted order.  Also used to exclude
+        // those names from co_varnames.
+        let cellvar_set: std::collections::HashSet<String> = fncode
+            .as_ref()
+            .map(|c| c.cell_vars.iter().cloned().collect())
+            .unwrap_or_default();
+        let cellvars: Vec<Value> = {
+            let mut v: Vec<String> = cellvar_set.iter().cloned().collect();
+            v.sort();
+            v.into_iter().map(Value::string).collect()
+        };
+
+        // Body locals appended to co_varnames: every name in the function's
+        // `local_index` that is not a parameter and not a cell variable, in
+        // register-slot order (the compiler assigns slots in source-encounter
+        // order, matching CPython's co_varnames body-local ordering; #2185).
+        let mut body_locals: Vec<(u32, &str)> = function
+            .local_index
+            .iter()
+            .filter(|(name, _)| {
+                !param_names.contains(name.as_str()) && !cellvar_set.contains(name.as_str())
+            })
+            .map(|(name, &slot)| (slot, name.as_str()))
+            .collect();
+        body_locals.sort_by_key(|(slot, _)| *slot);
+        for (_, name) in &body_locals {
+            varnames.push(Value::string(name.to_string()));
+        }
+        // co_nlocals == len(co_varnames).
+        let nlocals = varnames.len() as i64;
+
         let mut firstlineno = 0i64;
         let mut consts: Vec<Value> = Vec::new();
         let mut names: Vec<Value> = Vec::new();
-        if let Some(rc) = function.precompiled_code.as_ref() {
-            if let Ok(fncode) = Rc::clone(rc).downcast::<crate::bytecode::FnCode>() {
-                if fncode.is_generator {
-                    flags |= code_obj::CO_GENERATOR;
-                }
-                // co_firstlineno: the first source line the body maps to (the
-                // earliest non-zero entry in the line table; 0 when no line
-                // information was recorded).
-                firstlineno = fncode
-                    .lineno_table
-                    .iter()
-                    .copied()
-                    .find(|&n| n != 0)
-                    .unwrap_or(0) as i64;
-                consts = fncode.consts.clone();
-                names = fncode
-                    .names
-                    .iter()
-                    .map(|n| Value::string(n.clone()))
-                    .collect();
+        let mut stacksize = 0i64;
+        if let Some(fncode) = fncode.as_ref() {
+            if fncode.is_generator {
+                flags |= code_obj::CO_GENERATOR;
             }
+            // co_firstlineno: the `def`/`lambda` line recorded by the compiler
+            // (NOT the first body statement, which may be one or more lines
+            // below for a multi-line signature; issue #2185).
+            firstlineno = fncode.first_lineno as i64;
+            // co_consts: CPython always reserves slot 0 for `None` (the implicit
+            // `return None` value), followed by the body literals in order, with
+            // `None` deduplicated to that single slot.  pyrust's pool holds only
+            // the literals actually referenced (no implicit `None`), so prepend
+            // a single `None` and drop any other `None` occurrence to match
+            // (issue #2185).  (Docstring-carrying functions, where CPython uses
+            // slot 0 for the docstring, are not reproduced — pyrust does not yet
+            // extract docstrings into the const pool.)
+            consts.push(Value::none());
+            consts.extend(fncode.consts.iter().filter(|c| !c.is_none()).cloned());
+            names = fncode.names.iter().map(|n| Value::string(n.clone())).collect();
+            // co_stacksize: CPython's max operand-stack depth.  pyrust is a
+            // register VM with no operand stack, so report the register count —
+            // a positive int of the right type.
+            stacksize = fncode.num_regs as i64;
         }
 
         // co_freevars: the names this function reads from an enclosing function
@@ -97,9 +165,14 @@ impl Interpreter {
             .map(|(name, _)| Value::string(name))
             .collect();
 
-        code_obj::code_full(
-            co_name,
+        code_obj::CodeBuild {
+            name: co_name,
+            qualname,
             argcount,
+            posonlyargcount,
+            kwonlyargcount,
+            nlocals,
+            stacksize,
             varnames,
             flags,
             filename,
@@ -107,7 +180,9 @@ impl Interpreter {
             consts,
             names,
             freevars,
-        )
+            cellvars,
+        }
+        .build()
     }
 
     /// Compute the function's free variables (the names it reads from an
@@ -216,6 +291,126 @@ impl Interpreter {
         };
 
         frame_obj::frame(code, lineno, back, globals, locals)
+    }
+
+    /// Build the `gi_frame` object for a suspended generator, or `Value::none()`
+    /// when the generator is exhausted (matching CPython, where `gi_frame`
+    /// becomes `None` only after the generator finishes).  The frame's
+    /// `f_lineno` is the source line the generator is suspended on (the line of
+    /// the `yield` it last paused at); `f_code` is a code object carrying the
+    /// generator function's `co_name` / `co_firstlineno` / `co_consts` etc.
+    /// (issue #2185).
+    pub(crate) fn build_generator_frame_object(&self, frame: &GeneratorFrame) -> Value {
+        if frame.done {
+            return Value::none();
+        }
+        // Current line: a suspended generator stores `pc` as the *resume* point
+        // (the instruction after the `Yield`), whose line may already be the
+        // next statement.  The line CPython reports is the `yield` it paused at,
+        // which is at `pc - 1`.  Scan `[..pc]` (i.e. up to and including the
+        // Yield) backward for the last entry that starts a new source line (a
+        // `0` entry means "same line as the previous instruction").  When the
+        // generator has not started yet (`pc == 0`), CPython reports the `def`
+        // line (`first_lineno`).
+        let lineno = if frame.pc == 0 {
+            frame.code.first_lineno as i64
+        } else {
+            frame
+                .code
+                .lineno_table
+                .iter()
+                .take(frame.pc)
+                .rev()
+                .copied()
+                .find(|&n| n != 0)
+                .unwrap_or(frame.code.first_lineno) as i64
+        };
+
+        let code = self.build_code_from_fncode(
+            &frame.code,
+            frame.fn_name.as_ref(),
+            frame.qualname.as_ref(),
+            &frame.local_index,
+        );
+        frame_obj::frame(
+            code,
+            lineno,
+            Value::none(),
+            self.module_globals_dict.clone(),
+            Value::dict(Default::default()),
+        )
+    }
+
+    /// Build a `code` object directly from a compiled `FnCode` (plus the name /
+    /// qualname / local-name map), for callers that hold a `FnCode` but no
+    /// `UserFunction` — currently generator `gi_frame` (issue #2185).  Populates
+    /// the FnCode-derived attributes (`co_firstlineno`, `co_consts`, `co_names`,
+    /// `co_cellvars`, `co_varnames` body locals, `co_stacksize`); the
+    /// signature-derived counts (`co_argcount` etc.) are reported as 0 since the
+    /// parameter list is not recoverable from the `FnCode` alone.
+    fn build_code_from_fncode(
+        &self,
+        fncode: &crate::bytecode::FnCode,
+        name: &str,
+        qualname: &str,
+        local_index: &std::collections::HashMap<String, crate::bytecode::Reg>,
+    ) -> Value {
+        let cellvar_set: std::collections::HashSet<&str> =
+            fncode.cell_vars.iter().map(|s| s.as_str()).collect();
+        // co_varnames: the body locals in register-slot order, excluding cell
+        // variables.  (Parameters are also in `local_index`; without the
+        // signature we cannot reorder them into CPython's posonly/kwonly groups,
+        // so we report all locals in slot order — a best-effort that still lists
+        // every name with the right membership.)
+        let mut locals: Vec<(u32, &str)> = local_index
+            .iter()
+            .filter(|(n, _)| !cellvar_set.contains(n.as_str()))
+            .map(|(n, &slot)| (slot, n.as_str()))
+            .collect();
+        locals.sort_by_key(|(slot, _)| *slot);
+        let varnames: Vec<Value> = locals
+            .iter()
+            .map(|(_, n)| Value::string(n.to_string()))
+            .collect();
+        let nlocals = varnames.len() as i64;
+
+        let mut cellvars: Vec<String> = fncode.cell_vars.iter().cloned().collect();
+        cellvars.sort();
+        let cellvars: Vec<Value> = cellvars.into_iter().map(Value::string).collect();
+
+        let mut consts: Vec<Value> = Vec::new();
+        consts.push(Value::none());
+        consts.extend(fncode.consts.iter().filter(|c| !c.is_none()).cloned());
+        let names: Vec<Value> = fncode.names.iter().map(|n| Value::string(n.clone())).collect();
+
+        let mut flags = code_obj::CO_OPTIMIZED | code_obj::CO_NEWLOCALS;
+        if fncode.is_generator {
+            flags |= code_obj::CO_GENERATOR;
+        }
+        let filename = self
+            .script_filename
+            .as_ref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        code_obj::CodeBuild {
+            name: name.to_string(),
+            qualname: qualname.to_string(),
+            argcount: 0,
+            posonlyargcount: 0,
+            kwonlyargcount: 0,
+            nlocals,
+            stacksize: fncode.num_regs as i64,
+            varnames,
+            flags,
+            filename,
+            firstlineno: fncode.first_lineno as i64,
+            consts,
+            names,
+            freevars: Vec::new(),
+            cellvars,
+        }
+        .build()
     }
 
     /// Build the Python-visible traceback object chain for an exception that
