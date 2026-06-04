@@ -1023,7 +1023,9 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
         ValueKind::None => "NoneType",
         ValueKind::NotImplemented => "NotImplementedType",
         ValueKind::Ellipsis => "ellipsis",
-        ValueKind::Range { .. } => return Some(RANGE_CLASS.with(Rc::clone)),
+        ValueKind::Range { .. } | ValueKind::BigRange { .. } => {
+            return Some(RANGE_CLASS.with(Rc::clone));
+        }
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "bytearray" => "bytearray",
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
         ValueKind::BuiltinObject { ops, .. }

@@ -175,7 +175,8 @@ pub fn call(method: &str, receiver: &Value, args: &[Value], kw: &PyDict) -> Resu
             }
             // Return (self, 1) as a tuple.
             let self_val = match receiver.kind() {
-                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => receiver.clone(),
+                ValueKind::Bool(b) => Value::int(b as i64),
+                ValueKind::Int(_) | ValueKind::BigInt(_) => receiver.clone(),
                 _ => {
                     return Err(PyError::named(
                         "TypeError",

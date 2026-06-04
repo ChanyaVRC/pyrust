@@ -220,7 +220,7 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
         ValueKind::NotImplemented | ValueKind::Ellipsis => dunder == "__hash__",
 
         // range: iterable, sized, contains, hashable, reversed
-        ValueKind::Range { .. } => matches!(
+        ValueKind::Range { .. } | ValueKind::BigRange { .. } => matches!(
             dunder,
             "__iter__" | "__len__" | "__contains__" | "__hash__" | "__reversed__"
         ),

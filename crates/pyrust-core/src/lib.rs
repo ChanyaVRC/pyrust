@@ -1813,6 +1813,10 @@ pub enum Opaque {
         stop: i64,
         step: i64,
     },
+    /// Arbitrary-precision `range` whose start/stop/step do not all fit in `i64`
+    /// (#2118).  The common i64 case stays on [`Opaque::Range`]; this variant is
+    /// only produced when `Value::range_big` sees a bound outside i64.
+    BigRange(Rc<BigRangeData>),
     UserFunction(Rc<UserFunction>),
     PyClass(Rc<RefCell<PyClass>>),
     PyInstance(Rc<RefCell<PyInstance>>),
@@ -1888,6 +1892,39 @@ pub enum Opaque {
     },
 }
 
+/// Backing data for an arbitrary-precision `range` (#2118).  `start`/`stop`/`step`
+/// are full Python ints; at least one of them is outside the `i64` range (otherwise
+/// the value would be stored as the cheaper i64-backed [`Opaque::Range`]).
+#[derive(Debug, PartialEq)]
+pub struct BigRangeData {
+    pub start: BigInt,
+    pub stop: BigInt,
+    pub step: BigInt,
+}
+
+/// Element count of a big range, as CPython computes `len(range(...))`: the count
+/// of `start, start+step, …` strictly before `stop`.  Mirrors [`range_len`] but in
+/// `BigInt` arithmetic; returns a non-negative `BigInt` (0 when empty).
+pub fn bigrange_len(start: &BigInt, stop: &BigInt, step: &BigInt) -> BigInt {
+    let zero = BigInt::from(0);
+    let one = BigInt::from(1);
+    if *step > zero {
+        if stop > start {
+            (stop - start - &one) / step + &one
+        } else {
+            zero
+        }
+    } else if *step < zero {
+        if start > stop {
+            (start - stop - &one) / (-step) + &one
+        } else {
+            zero
+        }
+    } else {
+        zero
+    }
+}
+
 impl Clone for Opaque {
     fn clone(&self) -> Self {
         match self {
@@ -1900,6 +1937,7 @@ impl Clone for Opaque {
                 stop: *stop,
                 step: *step,
             },
+            Opaque::BigRange(rc) => Opaque::BigRange(Rc::clone(rc)),
             Opaque::UserFunction(f) => Opaque::UserFunction(Rc::clone(f)),
             Opaque::PyClass(c) => Opaque::PyClass(Rc::clone(c)),
             Opaque::PyInstance(i) => Opaque::PyInstance(Rc::clone(i)),
@@ -1993,6 +2031,12 @@ pub enum ValueKind<'a> {
         start: i64,
         stop: i64,
         step: i64,
+    },
+    /// Arbitrary-precision `range` view (#2118).
+    BigRange {
+        start: &'a BigInt,
+        stop: &'a BigInt,
+        step: &'a BigInt,
     },
     UserFunction(&'a Rc<UserFunction>),
     BuiltinFunction(&'static str),
@@ -2493,6 +2537,22 @@ impl Value {
 
     pub fn range(start: i64, stop: i64, step: i64) -> Self {
         Value::opaque(Opaque::Range { start, stop, step })
+    }
+
+    /// Construct a `range` from arbitrary-precision bounds (#2118).  When all
+    /// three bounds fit in `i64` this collapses to the cheap i64-backed
+    /// [`Self::range`]; otherwise it produces a [`Opaque::BigRange`].  This keeps
+    /// the common small-range path unchanged (no `BigRange` allocation, no extra
+    /// match arms exercised) and only pays for `BigInt` storage when needed.
+    pub fn range_big(start: BigInt, stop: BigInt, step: BigInt) -> Self {
+        match (start.to_i64(), stop.to_i64(), step.to_i64()) {
+            (Some(s), Some(e), Some(st)) => Value::range(s, e, st),
+            _ => Value::opaque(Opaque::BigRange(Rc::new(BigRangeData {
+                start,
+                stop,
+                step,
+            }))),
+        }
     }
 
     pub fn user_function(f: Rc<UserFunction>) -> Self {
@@ -3425,6 +3485,11 @@ impl Value {
                     stop: *stop,
                     step: *step,
                 },
+                Opaque::BigRange(rc) => ValueKind::BigRange {
+                    start: &rc.start,
+                    stop: &rc.stop,
+                    step: &rc.step,
+                },
                 Opaque::UserFunction(f) => match f.kind {
                     UserFunctionKind::Builtin(name) => ValueKind::BuiltinFunction(name),
                     _ => ValueKind::UserFunction(f),
@@ -3474,6 +3539,7 @@ impl Value {
             ValueKind::Dict(v) => !v.is_empty(),
             ValueKind::Set(v) => !v.is_empty(),
             ValueKind::Range { start, stop, step } => range_len(start, stop, step) > 0,
+            ValueKind::BigRange { start, stop, step } => !bigrange_len(start, stop, step).is_zero(),
             ValueKind::UserFunction(_) => true,
             ValueKind::BuiltinFunction(_) => true,
             ValueKind::PyClass(_) => true,
@@ -3588,6 +3654,13 @@ impl Value {
             }
             ValueKind::Range { start, stop, step } => {
                 if step == 1 {
+                    format!("range({start}, {stop})")
+                } else {
+                    format!("range({start}, {stop}, {step})")
+                }
+            }
+            ValueKind::BigRange { start, stop, step } => {
+                if *step == BigInt::from(1) {
                     format!("range({start}, {stop})")
                 } else {
                     format!("range({start}, {stop}, {step})")
@@ -3956,6 +4029,18 @@ impl PartialEq for Value {
                     step: bt,
                 },
             ) => as_ == bs && ao == bo && at == bt,
+            (
+                ValueKind::BigRange {
+                    start: as_,
+                    stop: ao,
+                    step: at,
+                },
+                ValueKind::BigRange {
+                    start: bs,
+                    stop: bo,
+                    step: bt,
+                },
+            ) => as_ == bs && ao == bo && at == bt,
             (ValueKind::BuiltinFunction(a), ValueKind::BuiltinFunction(b)) => a == b,
             (ValueKind::UserFunction(a), ValueKind::UserFunction(b)) => Rc::ptr_eq(a, b),
             (ValueKind::PyClass(a), ValueKind::PyClass(b)) => Rc::ptr_eq(a, b),
@@ -4043,7 +4128,7 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::Tuple(_) => Cow::Borrowed("tuple"),
         ValueKind::Dict(_) => Cow::Borrowed("dict"),
         ValueKind::Set(_) => Cow::Borrowed("set"),
-        ValueKind::Range { .. } => Cow::Borrowed("range"),
+        ValueKind::Range { .. } | ValueKind::BigRange { .. } => Cow::Borrowed("range"),
         ValueKind::Bytes(_) => Cow::Borrowed("bytes"),
         ValueKind::Complex(_, _) => Cow::Borrowed("complex"),
         ValueKind::BuiltinFunction(_) => Cow::Borrowed("builtin_function_or_method"),

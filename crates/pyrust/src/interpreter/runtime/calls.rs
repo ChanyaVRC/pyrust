@@ -1802,6 +1802,65 @@ impl Interpreter {
                     _ => Err(pyrust_core::py_err!("AttributeError", "'range' object has no attribute '{method}'")),
                 }
             }
+            // Arbitrary-precision range methods (#2118): __len__ / count / index
+            // in BigInt arithmetic.  start/stop/step are cloned out of the borrow
+            // first so the helpers can take &mut self if needed.
+            ValueKind::BigRange { start, stop, step } => {
+                let (start, stop, step) = (start.clone(), stop.clone(), step.clone());
+                let args_vec: Vec<Value> = std::mem::take(pos);
+                match method {
+                    "__len__" => {
+                        let extra = args_vec.len() + kw.len();
+                        if extra != 0 {
+                            Err(pyrust_core::type_err!("expected 0 arguments, got {extra}"))
+                        } else {
+                            match pyrust_core::bigrange_len(&start, &stop, &step).to_i64() {
+                                Some(n) => Ok(Value::int(n)),
+                                None => Err(pyrust_core::py_err!(
+                                    "OverflowError",
+                                    "Python int too large to convert to C ssize_t".to_string()
+                                )),
+                            }
+                        }
+                    }
+                    "count" => {
+                        if args_vec.len() != 1 || !kw.is_empty() {
+                            Err(pyrust_core::type_err!("range.count() takes exactly one argument ({} given)",
+                                    args_vec.len() + kw.len()))
+                        } else {
+                            let contained =
+                                Self::bigrange_member(&start, &stop, &step, &args_vec[0]).is_some();
+                            Ok(Value::int(if contained { 1 } else { 0 }))
+                        }
+                    }
+                    "index" => {
+                        if args_vec.len() != 1 || !kw.is_empty() {
+                            Err(pyrust_core::type_err!("range.index() takes exactly one argument ({} given)",
+                                    args_vec.len() + kw.len()))
+                        } else {
+                            let v = &args_vec[0];
+                            // CPython distinguishes a non-integer subscript (which
+                            // never has an index → "x not in sequence") from an
+                            // integer that simply isn't a member of this range
+                            // ("{} is not in range").
+                            let is_int_valued = matches!(
+                                v.kind(),
+                                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                            ) || matches!(v.kind(), ValueKind::Float(f) if f.is_finite() && f.fract() == 0.0);
+                            match Self::bigrange_member(&start, &stop, &step, v) {
+                                Some(x) => Ok(value_from_bigint((x - &start) / &step)),
+                                None if is_int_valued => {
+                                    Err(pyrust_core::value_err!("{} is not in range", v.repr()))
+                                }
+                                None => Err(pyrust_core::value_err!(
+                                    "sequence.index(x): x not in sequence"
+                                )),
+                            }
+                        }
+                    }
+                    _ => Err(pyrust_core::py_err!("AttributeError", "'range' object has no attribute '{method}'")),
+                }
+            }
             // Issue #1413: generator bound-methods (__iter__, __next__,
             // send, close, throw) captured via get_attr route here.
             // Delegate to call_generator_method which holds all the VM
@@ -1919,6 +1978,18 @@ impl Interpreter {
                 if is_zip_iter {
                     let mut items = Vec::new();
                     while let Some(v) = self.step_zip_iter(&state_rc)? {
+                        items.push(v);
+                    }
+                    return Ok(items);
+                }
+            }
+
+            // BigRangeIter path: drive a lazy big range to exhaustion (#2118).
+            {
+                let is_bigrange_iter = state_rc.borrow().downcast_ref::<BigRangeIter>().is_some();
+                if is_bigrange_iter {
+                    let mut items = Vec::new();
+                    while let Some(v) = self.step_bigrange_iter(&state_rc)? {
                         items.push(v);
                     }
                     return Ok(items);
@@ -2334,6 +2405,14 @@ impl Interpreter {
                 let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
                 if is_filter_iter {
                     return Self::step_or_stop(self.step_filter_iter(&state_rc)?, default);
+                }
+            }
+
+            // BigRangeIter path: lazy arbitrary-precision range iteration (#2118).
+            {
+                let is_bigrange_iter = state_rc.borrow().downcast_ref::<BigRangeIter>().is_some();
+                if is_bigrange_iter {
+                    return Self::step_or_stop(self.step_bigrange_iter(&state_rc)?, default);
                 }
             }
 
@@ -3790,24 +3869,27 @@ impl Interpreter {
                     args.len()));
         }
 
-        let mut ints = Vec::with_capacity(args.len());
+        // Resolve each argument to an arbitrary-precision int through the
+        // `__index__` protocol (#2118).  Bounds beyond i64 are kept as BigInt;
+        // `Value::range_big` collapses the all-i64 case back to the cheap
+        // i64-backed range so the common path is unchanged.
+        let mut ints: Vec<PyBigInt> = Vec::with_capacity(args.len());
         for arg in args {
-            let v = self.coerce_range_arg(arg.value.clone())?;
-            ints.push(v);
+            ints.push(self.coerce_range_arg_big(arg.value.clone())?);
         }
 
         let (start, stop, step) = match ints.as_slice() {
-            [stop] => (0, *stop, 1),
-            [start, stop] => (*start, *stop, 1),
-            [start, stop, step] => (*start, *stop, *step),
+            [stop] => (PyBigInt::from(0), stop.clone(), PyBigInt::from(1)),
+            [start, stop] => (start.clone(), stop.clone(), PyBigInt::from(1)),
+            [start, stop, step] => (start.clone(), stop.clone(), step.clone()),
             _ => unreachable!("validated by length"),
         };
 
-        if step == 0 {
+        if step == PyBigInt::from(0) {
             return Err(pyrust_core::value_err!("range() arg 3 must not be zero"));
         }
 
-        Ok(Value::range(start, stop, step))
+        Ok(Value::range_big(start, stop, step))
     }
 
     /// Return the compiled `FnCode` for `function`.
@@ -3974,13 +4056,17 @@ impl Interpreter {
         Ok(Value::string(out))
     }
 
-    /// Coerce a single `range()` argument to `i64` through the shared index
-    /// protocol, matching CPython 3.12.  Thin wrapper over
-    /// [`Interpreter::value_to_isize`]: accepts int/bool/bigint/int-subclass/
-    /// `__index__`; a non-integer raises `'X' object cannot be interpreted as an
-    /// integer`; an out-of-`i64` bigint raises `OverflowError`.
-    fn coerce_range_arg(&mut self, val: Value) -> Result<i64> {
-        self.value_to_isize(&val, "Python int too large to convert to C ssize_t")
+    /// Resolve a single `range()` argument to an arbitrary-precision `BigInt`
+    /// through the `__index__` protocol (#2118).  Unlike [`Self::coerce_range_arg`]
+    /// this does not clamp to `i64`, so `range(10**20)` no longer raises
+    /// `OverflowError`.  A non-integer (no `__index__`) raises
+    /// `'X' object cannot be interpreted as an integer`, matching CPython 3.12.
+    fn coerce_range_arg_big(&mut self, val: Value) -> Result<PyBigInt> {
+        let resolved = self.value_to_index(&val, |v| {
+            pyrust_core::type_err!("'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(v))
+        })?;
+        Ok(value_to_bigint(&resolved).expect("value_to_index returns an int-like value"))
     }
 
     /// Resolve a single start/stop argument for `list.index` / `tuple.index`
@@ -4067,6 +4153,35 @@ impl Interpreter {
             }
             _ => false,
         })
+    }
+
+    /// Arbitrary-precision analogue of [`Self::range_contains_value`] (#2118):
+    /// resolves `v` to an integer value (int/bool/bigint or an integer-valued
+    /// finite float) and applies the BigInt membership formula.  Returns the
+    /// resolved `BigInt` when `v` is a member, else `None`.
+    fn bigrange_member(
+        start: &PyBigInt,
+        stop: &PyBigInt,
+        step: &PyBigInt,
+        v: &Value,
+    ) -> Option<PyBigInt> {
+        use num_traits::FromPrimitive;
+        let x: PyBigInt = match v.kind() {
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => value_to_bigint(v)?,
+            ValueKind::Float(f) if f.is_finite() && f.fract() == 0.0 => PyBigInt::from_f64(f)?,
+            _ => return None,
+        };
+        let sgn = step.sign();
+        let in_bounds = if sgn == pyrust_core::PyBigIntSign::Plus {
+            x >= *start && x < *stop
+        } else {
+            x <= *start && x > *stop
+        };
+        if in_bounds && ((&x - start) % step).sign() == pyrust_core::PyBigIntSign::NoSign {
+            Some(x)
+        } else {
+            None
+        }
     }
 
     /// `list.index(target[, start[, stop]])` / `tuple.index(...)` with correct
@@ -4298,7 +4413,7 @@ impl Interpreter {
     ///   be integers or slices, not X"`, etc.).
     ///
     /// Replaced ~40 open-coded coercions (issue #2022); the thin wrappers below
-    /// (`call_index_protocol`, `coerce_range_arg`, `resolve_index_arg`,
+    /// (`call_index_protocol`, `coerce_range_arg_big`, `resolve_index_arg`,
     /// `try_resolve_index_value`, `try_index_for_seq_repeat`) all route here.
     pub(crate) fn value_to_index(
         &mut self,

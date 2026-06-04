@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
@@ -1156,11 +1156,14 @@ pyrust_module! {
         #[default(None)]
         start: Option<PyValue>,
     ) -> Result<Value> {
-        let start_val: i64 = match start {
-            None => 0,
+        // `start` accepts any int (incl. BigInt and bool); a non-int raises the
+        // CPython TypeError.  The counter is kept as a `Value` so it promotes to
+        // BigInt on overflow instead of wrapping (#2125).
+        let start_val: Value = match start {
+            None => Value::int(0),
             Some(v) => match v.0.kind() {
-                ValueKind::Int(n) => n,
-                ValueKind::Bool(b) => b as i64,
+                ValueKind::Int(_) | ValueKind::BigInt(_) => v.0.clone(),
+                ValueKind::Bool(b) => Value::int(b as i64),
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!(
@@ -1326,6 +1329,7 @@ pyrust_module! {
                 | ValueKind::Str(_)
                 | ValueKind::Bytes(_)
                 | ValueKind::Range { .. }
+                | ValueKind::BigRange { .. }
         );
         if !is_reversible {
             let type_name = full_type_name_str(&seq.0);
@@ -1440,15 +1444,19 @@ pyrust_module! {
                 enum IterKind {
                     Generator,
                     PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+                    BigRange,
                     Other,
                 }
                 let kind = match val.kind() {
                     ValueKind::Generator(_) => IterKind::Generator,
                     ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
+                    // Big range: lazy iterator (#2118) — never materialize.
+                    ValueKind::BigRange { .. } => IterKind::BigRange,
                     _ => IterKind::Other,
                 };
                 match kind {
                     IterKind::Generator => Ok(val),
+                    IterKind::BigRange => make_iterator(_interp, &val),
                     IterKind::PyInstance(inst_rc) => {
                         let class = Rc::clone(&inst_rc.borrow().class);
                         if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
@@ -2216,6 +2224,21 @@ pyrust_module! {
             ValueKind::Bytes(rc) => rc.len() as i64,
             ValueKind::Dict(items) => items.len() as i64,
             ValueKind::Range { start, stop, step } => range_len(start, stop, step),
+            // Arbitrary-precision range (#2118): the *length* must still fit in a
+            // Py_ssize_t (i64), matching CPython's `range.__len__` which raises
+            // `OverflowError: cannot fit 'int' into an index-sized integer` when
+            // it does not — even though the bounds themselves may be big.
+            ValueKind::BigRange { start, stop, step } => {
+                match pyrust_core::bigrange_len(start, stop, step).to_i64() {
+                    Some(n) => n,
+                    None => {
+                        return Err(PyError::named(
+                            "OverflowError",
+                            "Python int too large to convert to C ssize_t".to_string(),
+                        ));
+                    }
+                }
+            }
             ValueKind::BuiltinObject { ops, state } => match ops.len(state) {
                 Some(n) => n as i64,
                 None => {
@@ -7214,6 +7237,8 @@ pub(crate) fn value_class(obj: &Value) -> Value {
                 Value::builtin_function("callable_iterator")
             } else if borrow.downcast_ref::<GetItemIter>().is_some() {
                 Value::builtin_function("iterator")
+            } else if borrow.downcast_ref::<BigRangeIter>().is_some() {
+                Value::builtin_function("longrange_iterator")
             } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
                 Value::builtin_function(native.type_name)
             } else {
@@ -7248,6 +7273,7 @@ pub(crate) fn value_class(obj: &Value) -> Value {
         | ValueKind::NotImplemented
         | ValueKind::Ellipsis
         | ValueKind::Range { .. }
+        | ValueKind::BigRange { .. }
         | ValueKind::PyInstance(_) => {
             unreachable!("primitive_class_for_value should have handled this variant")
         }
@@ -7650,15 +7676,24 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
     enum IterKind {
         Generator,
         PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+        BigRange(crate::value::PyBigInt, crate::value::PyBigInt, crate::value::PyBigInt),
         Other,
     }
     let kind = match v.kind() {
         ValueKind::Generator(_) => IterKind::Generator,
         ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
+        // Arbitrary-precision range (#2118): return a lazy iterator so callers
+        // (iter / enumerate / zip) never materialize a huge sequence.
+        ValueKind::BigRange { start, stop, step } => {
+            IterKind::BigRange(start.clone(), stop.clone(), step.clone())
+        }
         _ => IterKind::Other,
     };
     match kind {
         IterKind::Generator => Ok(v.clone()),
+        IterKind::BigRange(cur, stop, step) => {
+            Ok(Value::generator(Box::new(BigRangeIter { cur, stop, step })))
+        }
         IterKind::PyInstance(inst_rc) => {
             let class = Rc::clone(&inst_rc.borrow().class);
             if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
@@ -7846,6 +7881,25 @@ fn hash_value(value: &Value) -> Result<i64> {
                     Ok(h_len),
                     Ok(if len >= 1 { py_hash_int(start) } else { h_none }),
                     Ok(if len >= 2 { py_hash_int(step) } else { h_none }),
+                ]
+                .into_iter(),
+            )
+        }
+        // Arbitrary-precision range (#2118): same tuple(len, start, step) hash as
+        // the i64 case, computed via the BigInt-aware integer hash helper so the
+        // big start/step components reduce correctly.  `len` itself is reduced as
+        // a BigInt because it may exceed i64.
+        ValueKind::BigRange { start, stop, step } => {
+            let len = pyrust_core::bigrange_len(start, stop, step);
+            let one = pyrust_core::PyBigInt::from(1);
+            let two = pyrust_core::PyBigInt::from(2);
+            let h_len = py_hash_bigint(&len);
+            let h_none = pyrust_core::py_hash_none();
+            tuple_hash_cpython(
+                [
+                    Ok(h_len),
+                    Ok(if len >= one { py_hash_bigint(start) } else { h_none }),
+                    Ok(if len >= two { py_hash_bigint(step) } else { h_none }),
                 ]
                 .into_iter(),
             )
@@ -9523,6 +9577,9 @@ fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
         }
         if borrow.downcast_ref::<GetItemIter>().is_some() {
             return std::borrow::Cow::Borrowed("iterator");
+        }
+        if borrow.downcast_ref::<BigRangeIter>().is_some() {
+            return std::borrow::Cow::Borrowed("longrange_iterator");
         }
         if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
             return std::borrow::Cow::Borrowed(native.type_name);
