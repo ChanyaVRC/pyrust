@@ -322,11 +322,23 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 .get(&lc_reg)
                 .copied()
                 .is_some_and(|last| last >= i + 2);
+            // The coarse `last_read[lc_reg]` / `back_edge_after` guards block the
+            // very common "reused scratch register" shape that dominates loop
+            // bodies: a temp re-`LoadConst`-ed for each operand, e.g.
+            //   LoadConst(t,2); BinOp(_, i, Mul, t)   ← value of t dead here
+            //   LoadConst(t,1); BinOp(_, _, Sub, t)   ← (t overwritten before read)
+            // `last_read[t]` points at the *second* BinOp and the loop ends in a
+            // back-edge, so neither pair ever fuses.  `scratch_dead_after` proves
+            // the precise fact — the value loaded at `i` is overwritten before any
+            // read OR branch in a short straight-line window — which makes fusion
+            // sound regardless of the forward `last_read` estimate or a later
+            // back-edge (no reachable path can observe the dead value).
+            let dead_after = scratch_dead_after(&transformed, i + 2, lc_reg);
             if rhs == lc_reg
                 && lhs != lc_reg
                 && lc_reg >= num_locals
-                && !back_edge_after[i + 2]
-                && (dst == lc_reg || !read_after)
+                && (dead_after || !back_edge_after[i + 2])
+                && (dst == lc_reg || !read_after || dead_after)
             {
                 keep[i] = false;
                 // Fusing a plain BinOp (never augmented) → is_aug = false.
@@ -1315,11 +1327,19 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
         .filter(|(r, _)| write_count.get(r).copied() == Some(1))
         .collect();
 
+    // Only *machine* ints (not BigInt) seed `int_regs`.  `int_regs` gates the
+    // algebraic identity rewrites (`x + 0 → x`, `x * 1 → x`, …), which replace
+    // the op with a `Move` and therefore make the result share `x`'s object
+    // identity.  For a machine int that divergence from CPython (`1000 + 0 is
+    // 1000` is `False` in CPython) is an accepted long-standing tradeoff, but
+    // for a BigInt it breaks the `is` semantics the runtime otherwise preserves
+    // (`2**64 + 0 is 2**64` must be `False` — issue #523, test_bigint_identity).
+    // Excluding BigInt consts keeps them out of `int_regs` so their `+ 0` / `* 1`
+    // is never folded to a `Move`.  (Previously the const-fusion pass could not
+    // reach these sites inside loops; loosening that fusion exposed the latent
+    // BigInt-identity bug, which this gate closes.)
     let is_int_const = |idx: u16, consts: &[Value]| -> bool {
-        matches!(
-            consts[idx as usize].kind(),
-            ValueKind::Int(_) | ValueKind::BigInt(_)
-        )
+        matches!(consts[idx as usize].kind(), ValueKind::Int(_))
     };
     // Ops that preserve Int when both operands are Int.  `Div` returns
     // Float; `Pow` may return Float for negative RHS; skipped.
@@ -1816,6 +1836,58 @@ fn slice_has_back_edge(insns: &[Insn]) -> bool {
 /// Used as a forward liveness guard before removing a `LoadConst` that produced `r`.
 fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
     insns.iter().any(|insn| insn_reads_reg(insn, r))
+}
+
+/// Returns `true` when the value held in register `r` is provably dead starting
+/// at `insns[start]` — the first instruction at or after `start` that touches
+/// `r` *writes* it without first reading it.  Lets `pass_binop_const_fusion`
+/// fuse the "reused scratch register" shape inside loop bodies, which the coarse
+/// global `last_read[r]` and `back_edge_after` guards otherwise veto.
+///
+/// Conservatively returns `false` (treat as live) at the first control-flow
+/// instruction: a jump-over could reach a later read of the stale value, so we
+/// only reason within a straight-line run.  Scans a tiny fixed window — a
+/// scratch temp is always overwritten within a couple of instructions, and an
+/// unbounded scan would reintroduce the O(n²) blowup this pass avoids (#2002).
+fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
+    const WINDOW: usize = 6;
+    let end = (start + WINDOW).min(insns.len());
+    let mut written = HashSet::new();
+    for insn in &insns[start..end] {
+        // Any branch / suspend / return ends the straight-line region.
+        if matches!(
+            insn,
+            Insn::Jump(_)
+                | Insn::JumpIfFalse(..)
+                | Insn::JumpIfTrue(..)
+                | Insn::CmpJumpIfFalse(..)
+                | Insn::CmpJumpIfTrue(..)
+                | Insn::CmpJumpIfFalseConst(..)
+                | Insn::CmpJumpIfTrueConst(..)
+                | Insn::ForIter(..)
+                | Insn::ForCountReg(..)
+                | Insn::ForCountConst(..)
+                | Insn::ForCountConstInline(..)
+                | Insn::SetupExcept(..)
+                | Insn::Yield { .. }
+                | Insn::YieldFrom { .. }
+                | Insn::Return(..)
+                | Insn::ReturnNone
+        ) {
+            return false;
+        }
+        if insn_reads_reg(insn, r) {
+            return false; // read before any overwrite → value is live
+        }
+        written.clear();
+        collect_writes(insn, &mut written);
+        if written.contains(&r) {
+            return true; // overwritten before any read → old value is dead
+        }
+    }
+    // Hit the true end of the stream without a read → dead; otherwise (window
+    // edge reached mid-stream) be conservative.
+    end == insns.len()
 }
 
 /// Returns `true` if `insn` reads the value of register `r`.
@@ -3901,6 +3973,51 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
             target == Some(h)
         });
         if has_continue {
+            continue;
+        }
+
+        // The accumulator increment is inserted unconditionally just before the
+        // back-edge at `latch`, so strength reduction is only sound when *every*
+        // path from the header to the back-edge passes through that point.  Two
+        // shapes break that invariant — both newly reachable now that the
+        // const-fusion relaxation feeds `BinOpConst(_, iv, Mul, _)` into loop
+        // bodies that master could not:
+        //
+        //  1. A forward branch in the body that targets `latch` (or beyond)
+        //     skips the increment, leaving the accumulator stale on that path
+        //     (`if` / `else` / `break` / `continue` inside the body).
+        //  2. A *nested* loop in the body: the reduced multiply may sit inside
+        //     it, and the inner loop's exit edge is retargeted past the inserted
+        //     increment, so the increment never runs (the inner loop always
+        //     exits, never falls through to the increment).
+        //
+        // Bail conservatively on either.  (Before this PR these shapes never
+        // reached IVSR, so the unsoundness was latent.)
+        let unsafe_body = (h + 1..latch).any(|i| {
+            // Nested loop header → reduced op may be inside it (case 2).
+            if matches!(
+                insns[i],
+                Insn::ForCountConst(..)
+                    | Insn::ForCountConstInline(..)
+                    | Insn::ForCountReg(..)
+                    | Insn::ForIter(..)
+            ) {
+                return true;
+            }
+            // Forward branch jumping to or past the increment site (case 1).
+            let target = match &insns[i] {
+                Insn::Jump(k)
+                | Insn::JumpIfFalse(_, k)
+                | Insn::JumpIfTrue(_, k)
+                | Insn::CmpJumpIfFalse(_, _, _, k)
+                | Insn::CmpJumpIfTrue(_, _, _, k)
+                | Insn::CmpJumpIfFalseConst(_, _, _, k)
+                | Insn::CmpJumpIfTrueConst(_, _, _, k) => Some((i as i64 + 1 + *k as i64) as usize),
+                _ => None,
+            };
+            target.is_some_and(|t| t >= latch)
+        });
+        if unsafe_body {
             continue;
         }
 
@@ -7046,6 +7163,57 @@ mod tests {
     }
 
     #[test]
+    fn binop_const_fusion_fires_for_reused_scratch_in_loop_body() {
+        use crate::ast::BinaryOp;
+        // The "reused scratch register" shape that dominates loop bodies: temp
+        // reg 3 is LoadConst-ed afresh for each operand, and the loop ends in a
+        // back-edge.  The first LoadConst(3)+BinOp(_, _, Mul, 3) pair must fuse
+        // because reg 3 is overwritten by the next LoadConst before being read
+        // (its value is dead), even though `last_read[3]` is the second BinOp and
+        // a back-edge follows.  num_locals = 2.
+        let insns = vec![
+            Insn::LoadConst(3, 0),                      // t = 2     (scratch)
+            Insn::BinOp(2, 1, BinaryOp::Mul, 3),        // r2 = i * t   ← fuse
+            Insn::LoadConst(3, 1),                      // t = 1     (overwrites reg 3)
+            Insn::BinOp(2, 2, BinaryOp::Sub, 3),        // r2 = r2 - t
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 2), // s += r2
+            Insn::Jump(-6),                             // loop back-edge
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert!(
+            matches!(out[0], Insn::BinOpConst(2, 1, BinaryOp::Mul, 0, false)),
+            "first pair fused despite the back-edge (scratch overwritten before \
+             read): {:?}",
+            out[0]
+        );
+        // The whole LoadConst is removed, so the stream shrinks by at least one.
+        assert!(
+            out.len() < 6,
+            "at least one LoadConst removed: len {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_reused_scratch_when_value_is_live() {
+        use crate::ast::BinaryOp;
+        // Same shape but reg 3 is READ again (by the second BinOp) before being
+        // overwritten, so its value is live and the first pair must NOT fuse.
+        let insns = vec![
+            Insn::LoadConst(3, 0),
+            Insn::BinOp(2, 1, BinaryOp::Mul, 3), // reads reg 3
+            Insn::BinOp(4, 2, BinaryOp::Sub, 3), // reads reg 3 again → still live
+            Insn::Jump(-4),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert!(
+            matches!(out[0], Insn::LoadConst(3, 0)),
+            "no fusion while reg 3 is still live: {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
     fn binop_const_fusion_skips_when_reg_is_local() {
         use crate::ast::BinaryOp;
         // r=1 < num_locals=3  → must NOT fuse (register could be a local variable)
@@ -9755,6 +9923,69 @@ mod tests {
             acc_init_in_consts,
             "const 0 added for accumulator init ((-1+1)*3=0)"
         );
+    }
+
+    #[test]
+    fn ivsr_skips_when_body_branch_can_skip_increment() {
+        use crate::ast::BinaryOp;
+        // A conditional in the body jumps to the back-edge, skipping the
+        // accumulator increment IVSR would insert there → must NOT reduce.
+        //
+        // [0] LoadConst(iv=2, c=-1)
+        // [1] ForCountConst(2, Lt, 1, 2, k)
+        // [2] BinOpConst(3, 2, Mul, 3)        ← i*K
+        // [3] JumpIfFalse(4, 1)               ← if false, jump to [5] (the latch)
+        // [4] BinOpInPlace(0, 0, Add, 3)
+        // [5] Jump(-5)                         ← back-edge (latch)
+        // [6] Return(0)
+        let mut consts = vec![Value::int(-1), Value::int(10), Value::int(1), Value::int(3)];
+        let mut num_regs = 5u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 5),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3, false),
+            Insn::JumpIfFalse(4, 1),
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 3),
+            Insn::Jump(-5),
+            Insn::Return(0),
+        ];
+        let out = pass_ivsr(insns.clone(), &mut consts, &mut num_regs);
+        assert_eq!(out, insns, "branch can skip increment → no reduction");
+        assert_eq!(num_regs, 5, "no new register allocated");
+    }
+
+    #[test]
+    fn ivsr_skips_when_body_contains_nested_loop() {
+        use crate::ast::BinaryOp;
+        // The reduced multiply sits inside a nested loop; the inner loop's exit
+        // edge is retargeted past the inserted increment, so it never runs →
+        // must NOT reduce.
+        //
+        // [0] LoadConst(iv=2, c=-1)
+        // [1] ForCountConst(2, Lt, 1, 2, 6)   ← outer header
+        // [2] LoadConst(jv=4, c=-1)
+        // [3] ForCountConst(4, Lt, 1, 2, 3)   ← inner header, exit → [7] (latch)
+        // [4] BinOpConst(3, 2, Mul, 3)        ← i*K inside inner loop
+        // [5] BinOpInPlace(0, 0, Add, 3)
+        // [6] Jump(-4)                         ← inner back-edge
+        // [7] Jump(-7)                         ← outer back-edge (latch)
+        // [8] Return(0)
+        let mut consts = vec![Value::int(-1), Value::int(10), Value::int(1), Value::int(3)];
+        let mut num_regs = 5u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 6),
+            Insn::LoadConst(4, 0),
+            Insn::ForCountConst(4, BinaryOp::Lt, 1, 2, 3),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3, false),
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 3),
+            Insn::Jump(-4),
+            Insn::Jump(-7),
+            Insn::Return(0),
+        ];
+        let out = pass_ivsr(insns.clone(), &mut consts, &mut num_regs);
+        assert_eq!(out, insns, "nested loop in body → no reduction");
+        assert_eq!(num_regs, 5, "no new register allocated");
     }
 
     #[test]
