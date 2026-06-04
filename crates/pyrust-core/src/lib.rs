@@ -1218,21 +1218,46 @@ pub fn intern_attr_key(name: &str) -> Rc<str> {
 ///    which linear scan beats hashing and avoids the IndexMap `RawTable` +
 ///    capacity overhead entirely.  Insertion order is preserved natively, which
 ///    CPython requires for `__dict__` iteration.
+///
+/// **Hybrid index** (#2162): the linear scan in (2) becomes a cold-access cliff
+/// for *wide* instances — once an instance carries more than [`INDEX_THRESHOLD`]
+/// attributes, a `find()` over the `Vec` costs more than the IndexMap hash
+/// lookup it replaced (measured crossover ~16 attrs; 50 attrs ~2.26× slower).
+/// To keep the small-instance win while restoring O(1) cold access for wide
+/// instances, a side `HashMap<Rc<str>, usize>` (FxHash, name → slot in
+/// `entries`) is lazily built once `entries` grows past the threshold.  The
+/// `Vec` remains the source of truth for storage and insertion order; the index
+/// is a pure lookup accelerator that `get`/`contains_key`/`insert` consult when
+/// present, kept in sync on insert and rebuilt on the (rare) shift-remove.
 #[derive(Debug, Clone, Default)]
 pub struct InstanceAttrs {
     entries: Vec<(Rc<str>, Value)>,
+    /// Lazily-built name → slot index, present only once `entries` exceeds
+    /// [`INDEX_THRESHOLD`].  `None` for the common small-instance case.  Boxed so
+    /// the small-instance footprint grows by only one pointer (8 bytes) rather
+    /// than a full inline `HashMap` (~48 bytes) — preserving the #2161 memory
+    /// win; the map allocation is paid only by wide instances that build it.
+    index: Option<Box<HashMap<Rc<str>, usize, FxBuildHasher>>>,
 }
+
+/// Attribute count above which [`InstanceAttrs`] builds a hash index for
+/// O(1) cold lookups.  At or below this, linear scan over the compact `Vec`
+/// wins (the #2161 small-instance memory + speed gain); the measured crossover
+/// versus the old IndexMap hash lookup is ~16 attributes.
+const INDEX_THRESHOLD: usize = 16;
 
 impl InstanceAttrs {
     pub fn new() -> Self {
         InstanceAttrs {
             entries: Vec::new(),
+            index: None,
         }
     }
 
     pub fn with_capacity(cap: usize) -> Self {
         InstanceAttrs {
             entries: Vec::with_capacity(cap),
+            index: None,
         }
     }
 
@@ -1246,10 +1271,36 @@ impl InstanceAttrs {
         self.entries.is_empty()
     }
 
-    /// Look up a value by attribute name.  Linear scan — fast for the small
-    /// attribute counts real instances carry.
+    /// Find the slot of `name`, consulting the hash index when one has been
+    /// built (wide instance) and falling back to linear scan otherwise.
+    #[inline]
+    fn position(&self, name: &str) -> Option<usize> {
+        if let Some(index) = &self.index {
+            index.get(name).copied()
+        } else {
+            self.entries.iter().position(|(k, _)| k.as_ref() == name)
+        }
+    }
+
+    /// Build the side hash index from the current `entries`.  Called once an
+    /// instance crosses [`INDEX_THRESHOLD`], and to refresh it after a
+    /// shift-remove renumbers slots.
+    fn build_index(&mut self) {
+        let mut index =
+            HashMap::with_capacity_and_hasher(self.entries.len(), FxBuildHasher::default());
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            index.insert(Rc::clone(k), i);
+        }
+        self.index = Some(Box::new(index));
+    }
+
+    /// Look up a value by attribute name.  Linear scan for small instances;
+    /// O(1) hash lookup once the side index has been built (#2162).
     #[inline]
     pub fn get(&self, name: &str) -> Option<&Value> {
+        if let Some(index) = &self.index {
+            return index.get(name).map(|&i| &self.entries[i].1);
+        }
         self.entries
             .iter()
             .find(|(k, _)| k.as_ref() == name)
@@ -1258,6 +1309,9 @@ impl InstanceAttrs {
 
     #[inline]
     pub fn contains_key(&self, name: &str) -> bool {
+        if let Some(index) = &self.index {
+            return index.contains_key(name);
+        }
         self.entries.iter().any(|(k, _)| k.as_ref() == name)
     }
 
@@ -1266,22 +1320,44 @@ impl InstanceAttrs {
     /// preserved) and interned so the name bytes are shared across instances.
     pub fn insert(&mut self, name: impl AsRef<str>, value: Value) -> Option<Value> {
         let name = name.as_ref();
-        if let Some(slot) = self.entries.iter_mut().find(|(k, _)| k.as_ref() == name) {
-            return Some(std::mem::replace(&mut slot.1, value));
+        if let Some(pos) = self.position(name) {
+            return Some(std::mem::replace(&mut self.entries[pos].1, value));
         }
-        self.entries.push((intern_attr_key(name), value));
+        let key = intern_attr_key(name);
+        let slot = self.entries.len();
+        if let Some(index) = &mut self.index {
+            index.insert(Rc::clone(&key), slot);
+        }
+        self.entries.push((key, value));
+        // Crossing the threshold turns linear scan from the win into the cliff;
+        // build the index now so subsequent cold lookups are O(1).
+        if self.index.is_none() && self.entries.len() > INDEX_THRESHOLD {
+            self.build_index();
+        }
         None
     }
 
     /// Remove `name`, shifting later entries down to preserve insertion order
     /// (matching `IndexMap::shift_remove`).  Returns the removed value.
     pub fn shift_remove(&mut self, name: &str) -> Option<Value> {
-        let pos = self.entries.iter().position(|(k, _)| k.as_ref() == name)?;
-        Some(self.entries.remove(pos).1)
+        let pos = self.position(name)?;
+        let removed = self.entries.remove(pos).1;
+        // The shift renumbers every entry after `pos`, invalidating the index.
+        // Removes are rare; rebuild while the instance is still wide, else drop
+        // the index and fall back to linear scan once back at/under threshold.
+        if self.index.is_some() {
+            if self.entries.len() > INDEX_THRESHOLD {
+                self.build_index();
+            } else {
+                self.index = None;
+            }
+        }
+        Some(removed)
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.index = None;
     }
 
     #[inline]
