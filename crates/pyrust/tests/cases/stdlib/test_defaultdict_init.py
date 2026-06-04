@@ -44,6 +44,32 @@ class DuckMap:
 
 print(dict(defaultdict(str, DuckMap())))
 
+# ── any callable is a valid factory (not just functions/types) ───────────
+import functools
+
+
+class CallableFactory:
+    def __call__(self):
+        return "Z"
+
+
+cf = defaultdict(CallableFactory())
+print(cf["miss"], dict(cf))
+# functools.partial is a callable instance.
+pf = defaultdict(functools.partial(int, 7))
+print(pf["a"], dict(pf))
+
+
+# bound method as factory.
+class Maker:
+    def make(self):
+        return []
+
+
+bm = defaultdict(Maker().make)
+bm["k"].append(1)
+print(dict(bm))
+
 # ── factory=None acts like dict ──────────────────────────────────────────
 print(defaultdict(None))
 print(defaultdict(None, {"k": 9}))

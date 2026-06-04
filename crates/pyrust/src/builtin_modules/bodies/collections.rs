@@ -466,15 +466,7 @@ pyrust_module! {
                 .map(|a| a.value.clone())
                 .unwrap_or_else(Value::none);
             if !factory.is_none() {
-                let callable = matches!(
-                    factory.kind(),
-                    ValueKind::UserFunction(_)
-                        | ValueKind::BuiltinFunction(_)
-                        | ValueKind::BoundMethod { .. }
-                        | ValueKind::ClassBoundMethod { .. }
-                        | ValueKind::PyClass(_)
-                );
-                if !callable {
+                if !value_is_callable(&factory) {
                     return Err(PyError::named(
                         "TypeError",
                         "first argument must be callable or None".to_string(),
@@ -1571,6 +1563,34 @@ fn map_insert_eq(
     value: Value,
 ) -> Result<()> {
     interp.dict_insert(map, key, value)
+}
+
+/// Mirror of the `callable()` builtin (builtins.rs): decide whether `v` may be
+/// used as `defaultdict`'s `default_factory`.  CPython accepts *any* callable,
+/// not just functions/types — a class with `__call__`, a bound method, or a
+/// `functools.partial` are all valid factories.  Keep this in sync with the
+/// `callable()` body; the earlier hand-rolled `matches!` here wrongly rejected
+/// `__call__` instances and `partial` (#2099 review).
+fn value_is_callable(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::UserFunction(_)
+        | ValueKind::BuiltinFunction(_)
+        | ValueKind::BoundMethod { .. }
+        | ValueKind::ClassBoundMethod { .. }
+        | ValueKind::PyClass(_) => true,
+        ValueKind::BuiltinObject { .. } => {
+            pyrust_builtins::bound_method::is_bound_method(v)
+                || pyrust_builtins::super_bound_builtin::as_super_bound_builtin(v).is_some()
+                || pyrust_builtins::property::property_partial_slot(v)
+                    .is_some_and(|slot| slot.is_some())
+                || pyrust_builtins::type_call_wrapper::as_type_call_wrapper(v).is_some()
+        }
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            lookup_class_attr(&class, "__call__").is_some()
+        }
+        _ => false,
+    }
 }
 
 /// Apply `dict.__init__`/`dict.update` semantics into `items`: an optional
