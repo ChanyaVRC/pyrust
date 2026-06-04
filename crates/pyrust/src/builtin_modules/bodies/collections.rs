@@ -453,12 +453,15 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            if user.len() > 1 {
-                return Err(PyError::Runtime(format!(
-                    "{FN_NAME}() takes at most one argument",
-                )));
-            }
-            let factory = user
+            // CPython: `defaultdict(default_factory=None, /, *args, **kwargs)`.
+            // The first *positional* arg is the factory; remaining positionals
+            // and all keyword args initialise the dict exactly like `dict(...)`
+            // (#2099).
+            let positional: Vec<&ExpandedCallArg> =
+                user.iter().filter(|a| a.name.is_none()).collect();
+            let kwargs: Vec<&ExpandedCallArg> =
+                user.iter().filter(|a| a.name.is_some()).collect();
+            let factory = positional
                 .first()
                 .map(|a| a.value.clone())
                 .unwrap_or_else(Value::none);
@@ -474,15 +477,34 @@ pyrust_module! {
                 if !callable {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() first argument must be callable or None"),
+                        "first argument must be callable or None".to_string(),
                     ));
                 }
             }
+            // Everything after the factory is forwarded to dict init. CPython
+            // allows at most one such positional (the dict initialiser).
+            let dict_positionals = &positional[positional.len().min(1)..];
+            if dict_positionals.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "dict expected at most 1 argument, got {}",
+                        dict_positionals.len()
+                    ),
+                ));
+            }
+            let mut items = PyDict::default();
+            dict_init_into(
+                _interp,
+                &mut items,
+                dict_positionals.first().map(|a| &a.value),
+                &kwargs,
+            )?;
             let mut attrs = inst.borrow_mut();
             attrs.attrs.insert("default_factory".to_string(), factory);
             attrs
                 .attrs
-                .insert(COUNTER_BACKING.to_string(), Value::dict(PyDict::default()));
+                .insert(COUNTER_BACKING.to_string(), Value::dict(items));
             Ok(Value::none())
         }
 
@@ -1549,6 +1571,89 @@ fn map_insert_eq(
     value: Value,
 ) -> Result<()> {
     interp.dict_insert(map, key, value)
+}
+
+/// Apply `dict.__init__`/`dict.update` semantics into `items`: an optional
+/// positional mapping-or-iterable-of-pairs followed by string-keyed keyword
+/// arguments (#2099 — `defaultdict(factory, mapping)` / `(factory, pairs)` /
+/// `(factory, **kw)`).  Mirrors CPython: a mapping (anything with `keys()`) is
+/// copied key/value; any other positional is iterated as length-2
+/// `(key, value)` pairs.  Insertion is `__eq__`-aware via [`map_insert_eq`] so
+/// equal user-keys dedup (#1919).
+fn dict_init_into(
+    interp: &mut crate::Interpreter,
+    items: &mut PyDict,
+    positional: Option<&Value>,
+    kwargs: &[&ExpandedCallArg],
+) -> Result<()> {
+    if let Some(arg) = positional {
+        // Mapping form: a plain dict is copied verbatim, matching CPython's
+        // `dict(mapping)`.
+        if let ValueKind::Dict(map) = arg.kind() {
+            for (k, v) in map.iter() {
+                map_insert_eq(interp, items, k.clone(), v.clone())?;
+            }
+        } else if let Some(pairs) = crate::interpreter::mapping_pairs_via_protocol(interp, arg)? {
+            // Any `keys()`-bearing mapping (dict subclasses like Counter /
+            // defaultdict / OrderedDict, ChainMap, UserDict, duck-typed user
+            // mappings) — keyed via `keys()` + `__getitem__`, exactly like
+            // `dict(mapping)`.
+            for (k, v) in pairs {
+                map_insert_eq(interp, items, k, v)?;
+            }
+        } else {
+            // Iterable-of-pairs form: each element must be a length-2
+            // sequence, unpacked into `(key, value)`.
+            for (idx, elem) in interp.collect_iterable(arg)?.into_iter().enumerate() {
+                let (k_val, v_val) = match elem.kind() {
+                    ValueKind::List(els) => {
+                        let len = els.len();
+                        if len != 2 {
+                            return Err(pyrust_core::value_err!(
+                                "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                            ));
+                        }
+                        (els[0].clone(), els[1].clone())
+                    }
+                    ValueKind::Tuple(els) => {
+                        let len = els.len();
+                        if len != 2 {
+                            return Err(pyrust_core::value_err!(
+                                "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                            ));
+                        }
+                        (els[0].clone(), els[1].clone())
+                    }
+                    ValueKind::Str(s) => {
+                        let chars: Vec<char> = s.chars().collect();
+                        let len = chars.len();
+                        if len != 2 {
+                            return Err(pyrust_core::value_err!(
+                                "dictionary update sequence element #{idx} has length {len}; 2 is required"
+                            ));
+                        }
+                        (
+                            Value::string(chars[0].to_string()),
+                            Value::string(chars[1].to_string()),
+                        )
+                    }
+                    _ => {
+                        return Err(pyrust_core::type_err!(
+                            "cannot convert dictionary update sequence element #{idx} to a sequence"
+                        ));
+                    }
+                };
+                let pk = interp.value_to_pykey(&k_val)?;
+                map_insert_eq(interp, items, pk, v_val)?;
+            }
+        }
+    }
+    // Keyword arguments overlay the positional data, matching CPython order.
+    for kw in kwargs {
+        let name = kw.name.as_deref().unwrap_or("");
+        map_insert_eq(interp, items, PyKey::str_from(name), kw.value.clone())?;
+    }
+    Ok(())
 }
 
 /// Method-body convention: `keys()`, `values()`, `items()` etc. take no
