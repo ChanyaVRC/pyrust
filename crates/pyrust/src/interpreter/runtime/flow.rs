@@ -615,7 +615,7 @@ impl Interpreter {
         let user_argc = args.len().saturating_sub(1);
         if user_argc != 1 {
             return Err(pyrust_core::type_err!(&format!(
-                "derive() takes exactly one argument ({user_argc} given)"
+                "function takes exactly 1 argument ({user_argc} given)"
             )));
         }
         let self_val = &args[0].value;
@@ -638,7 +638,9 @@ impl Interpreter {
         } else if let Some(l) = args[1].value.as_list() {
             l.to_vec()
         } else {
-            return Err(pyrust_core::type_err!("derive() argument must be a sequence"));
+            return Err(pyrust_core::type_err!(
+                "second argument (exceptions) must be a sequence"
+            ));
         };
         Ok(self.make_derived_group(message, excs))
     }
