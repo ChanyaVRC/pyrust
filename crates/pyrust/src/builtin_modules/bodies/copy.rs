@@ -133,6 +133,19 @@ fn value_identity(obj: &Value) -> Option<i64> {
     }
 }
 
+/// Did `deep_copy(orig)` leave the element unchanged (CPython's `k is j`)?
+/// Objects with a stable identity compare equal by that identity; atomic
+/// immutables (no `value_identity`) are returned as-is by `deep_copy`, so they
+/// always count as unchanged.  Used by the tuple arm to decide whether to
+/// return the original tuple (immutable-of-immutables) instead of a fresh one.
+fn deepcopy_kept_identity(orig: &Value, copied: &Value) -> bool {
+    match (value_identity(orig), value_identity(copied)) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 /// Look up an already-copied object in the memo by identity.
 fn memo_get(memo: &Value, id: i64) -> Option<Value> {
     memo.dict_with(|d| d.get(&PyKey::Int(id)).cloned())
@@ -386,19 +399,39 @@ fn deep_copy(
             Ok(result)
         }
 
-        // tuple — CPython deepcopies each element into a new tuple even though
-        // tuples are immutable, for consistency with user-defined types that may
-        // be tuple subclasses.  A tuple can't refer to itself directly, but it
-        // may hold a mutable container that cycles back to it, so we memoise the
-        // finished tuple under its identity.
+        // tuple — CPython's `_deepcopy_tuple` deep-copies each element, then:
+        //   1. re-checks the memo: if a child's recursion cycled back into this
+        //      tuple and already produced a copy, return *that* copy (so cyclic
+        //      structures rooted at a tuple stay consistent);
+        //   2. if every element deep-copied to an identity-unchanged object,
+        //      returns the *original* tuple (immutable-of-immutables → same
+        //      object, matching `deepcopy((1,2,3)) is (1,2,3)`);
+        //   3. otherwise builds a fresh tuple and memoises it.
         ValueKind::Tuple(items) => {
             // Collect to owned Vec first so the borrow (&[Value]) is released
             // before we recursively call deep_copy (which may re-enter match).
             let items_vec: Vec<Value> = items.to_vec();
             // items is &[Value] — a raw reference, no Ref guard to drop.
             let mut new_items = Vec::with_capacity(items_vec.len());
-            for item in items_vec {
-                new_items.push(deep_copy(item, memo, interp)?);
+            let mut all_same = true;
+            for item in &items_vec {
+                let copied = deep_copy(item.clone(), memo, interp)?;
+                if !deepcopy_kept_identity(item, &copied) {
+                    all_same = false;
+                }
+                new_items.push(copied);
+            }
+            // A child may have cycled back and inserted a copy of this tuple
+            // under our identity while we recursed — honour it.
+            if let Some(id) = value_identity(&obj) {
+                if let Some(existing) = memo_get(memo, id) {
+                    return Ok(existing);
+                }
+            }
+            if all_same {
+                // Every element is the same object as in the source → CPython
+                // returns the original tuple unchanged.
+                return Ok(obj.clone());
             }
             let result = Value::tuple(new_items);
             if let Some(id) = value_identity(&obj) {

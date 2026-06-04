@@ -50,6 +50,20 @@ assert sd["a"] is sd["b"]
 st = copy.deepcopy((inner, inner))
 assert st[0] is st[1]
 
+# ── tuple-rooted cycle: a mutable child refers back to the enclosing tuple ─────
+
+cyc_list = []
+cyc_tup = (cyc_list,)
+cyc_list.append(cyc_tup)
+ctup = copy.deepcopy(cyc_tup)
+assert ctup[0][0] is ctup        # cycle re-pointed at the copied tuple
+assert ctup is not cyc_tup
+
+# ── deepcopy of an all-immutable tuple returns the same object ────────────────
+
+imm = (1, 2, (3, "x"))
+assert copy.deepcopy(imm) is imm        # nothing changed → original returned
+
 # ── self-referential instance graph ──────────────────────────────────────────
 
 class Node:
