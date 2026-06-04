@@ -59,3 +59,7 @@ print(callable(object), hasattr(object, "__call__"))  # True True
 # Each access yields a fresh wrapper (identity is not preserved), matching
 # CPython.
 print(C.__call__ is C.__call__)  # False
+
+# The surfaced type.__call__ wrapper is itself callable, so callable() agrees.
+print(callable(C.__call__))  # True
+print(callable(int.__call__))  # True
