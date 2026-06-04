@@ -122,3 +122,49 @@ def with_method():
 
 K = with_method()
 print(K.m.__closure__[0].cell_contents, K.m.__code__.co_freevars)  # C ('cfg',)
+
+
+# A free variable referenced *only* inside a nested code object — a
+# comprehension, genexpr, lambda, or nested def — is still a free variable of
+# the enclosing function (its LoadGlobal lives in the nested body).
+def comp():
+    base = 10
+    other = 5
+
+    def inner():
+        return other, [base + i for i in range(2)]
+
+    return inner
+
+
+print(comp().__code__.co_freevars)  # ('base', 'other')
+print(tuple(c.cell_contents for c in comp().__closure__))  # (10, 5)
+
+
+def genexpr():
+    v = 7
+
+    def inner():
+        return list(v + i for i in range(2))
+
+    return inner
+
+
+print(genexpr().__code__.co_freevars)  # ('v',)
+print(genexpr().__closure__[0].cell_contents)  # 7
+
+
+# A nested body's own local read via LoadGlobal must NOT be promoted to a free
+# variable of the enclosing function.
+def shadowed():
+    base = 1
+
+    def inner():
+        k = 2
+        return [k + base + i for i in range(1)]
+
+    return inner
+
+
+print(shadowed().__code__.co_freevars)  # ('base',)
+print(tuple(c.cell_contents for c in shadowed().__closure__))  # (1,)

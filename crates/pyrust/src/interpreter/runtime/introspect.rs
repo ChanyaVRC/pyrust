@@ -132,21 +132,20 @@ impl Interpreter {
 
         // Collect the distinct names loaded via `LoadGlobal` (free reads and
         // true globals both go through this insn; the env-resolution filter
-        // below keeps only the free ones).
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        let mut candidates: Vec<&str> = Vec::new();
-        for insn in &fncode.insns {
-            if let crate::bytecode::Insn::LoadGlobal(_, name_idx) = insn {
-                if let Some(name) = fncode.names.get(*name_idx as usize) {
-                    if seen.insert(name.as_str()) {
-                        candidates.push(name.as_str());
-                    }
-                }
-            }
-        }
+        // below keeps only the free ones).  A free variable referenced *only*
+        // inside a nested code object — a comprehension/genexpr, `lambda`, or
+        // nested `def` — compiles its `LoadGlobal` into that nested
+        // `FnCode`, not into `fncode.insns`, yet CPython still reports it as a
+        // free variable of this function.  So recurse through `fn_protos` and
+        // gather candidates from every nested body too.  The env-resolution
+        // filter below is the authoritative gate: a nested proto's own local
+        // never resolves in `function.env`, so it cannot be falsely promoted.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut candidates: Vec<String> = Vec::new();
+        collect_loadglobal_names(&fncode, &mut seen, &mut candidates);
 
         let mut found: Vec<(String, Value)> = Vec::new();
-        for name in candidates {
+        for name in &candidates {
             // An explicit `global`/`nonlocal` mismatch or own local is not a
             // closure free var.  `global` names target the module env;
             // own-local names never reach `LoadGlobal` for a free read.
@@ -154,7 +153,7 @@ impl Interpreter {
                 continue;
             }
             if let Some(value) = lookup_enclosing_function_value(&function.env, name) {
-                found.push((name.to_string(), value));
+                found.push((name.clone(), value));
             }
         }
         // CPython reports `co_freevars` (and orders `__closure__` cells) sorted
@@ -272,5 +271,32 @@ impl Interpreter {
             Value::dict(Default::default()),
         );
         tb_obj::traceback_node(catch_frame, node, catch_lineno, -1)
+    }
+}
+
+/// Collect the distinct names referenced via `LoadGlobal` in `fncode` and,
+/// recursively, in every nested code object (`fn_protos`).  A free variable
+/// read only inside a comprehension/genexpr, `lambda`, or nested `def`
+/// compiles its `LoadGlobal` into the nested body, so the enclosing
+/// function's free-variable set must include those names too (issue #2106).
+/// Names are de-duplicated via `seen`; the caller applies the env-resolution
+/// filter that distinguishes a true free variable from a module global or a
+/// nested body's own local.
+fn collect_loadglobal_names(
+    fncode: &crate::bytecode::FnCode,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for insn in &fncode.insns {
+        if let crate::bytecode::Insn::LoadGlobal(_, name_idx) = insn {
+            if let Some(name) = fncode.names.get(*name_idx as usize) {
+                if seen.insert(name.clone()) {
+                    out.push(name.clone());
+                }
+            }
+        }
+    }
+    for proto in &fncode.fn_protos {
+        collect_loadglobal_names(&proto.code, seen, out);
     }
 }
