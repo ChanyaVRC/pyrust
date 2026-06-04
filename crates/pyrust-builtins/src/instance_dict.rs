@@ -193,13 +193,13 @@ impl BuiltinTypeOps for InstanceDictOps {
         };
         // Hidden exception C-level slots must not be accessible via subscript.
         if s.is_hidden(key_str) {
-            return Err(PyError::named("KeyError", Value::string(key_str).repr()));
+            return Err(PyError::key_error(Value::string(key_str)));
         }
         let inst = s.instance.borrow();
         inst.attrs
             .get(key_str)
             .cloned()
-            .ok_or_else(|| PyError::named("KeyError", Value::string(key_str).repr()))
+            .ok_or_else(|| PyError::key_error(Value::string(key_str)))
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
@@ -228,7 +228,7 @@ impl BuiltinTypeOps for InstanceDictOps {
         };
         let removed = s.instance.borrow_mut().attrs.shift_remove(&key_str);
         if removed.is_none() {
-            return Err(PyError::named("KeyError", Value::string(key_str).repr()));
+            return Err(PyError::key_error(Value::string(key_str)));
         }
         s.iter_keys.borrow_mut().take();
         *s.iter_pos.borrow_mut() = 0;
@@ -291,6 +291,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                 | "values"
                 | "items"
                 | "pop"
+                | "popitem"
                 | "setdefault"
                 | "update"
                 | "copy"
@@ -308,11 +309,95 @@ impl BuiltinTypeOps for InstanceDictOps {
         state: &BuiltinState,
         method: &str,
         args: Vec<Value>,
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let s = borrow_state(state)
             .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
         match method {
+            // Dunder methods delegate to the same write-through paths as the
+            // operator forms so `o.__dict__.__setitem__('x', 1)` /
+            // `__getitem__` / `__delitem__` / `__contains__` / `__len__`
+            // behave identically to `o.__dict__['x'] = 1` etc.  Issue #2163:
+            // these were advertised by `has_method` but had no `call_method`
+            // arm, so the resolved bound method raised AttributeError on call.
+            "__getitem__" => {
+                if args.len() != 1 {
+                    return Err(takes_exactly_one_err("__getitem__", args.len()));
+                }
+                drop(s);
+                self.get_item(state, &args[0])
+            }
+            "__setitem__" => {
+                if args.len() != 2 {
+                    // CPython's mapping `__setitem__` slot wrapper reports
+                    // " expected 2 arguments, got N" with a leading space
+                    // (a quirk distinct from `__delitem__` / `__len__`).
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(" expected 2 arguments, got {}", args.len()),
+                    ));
+                }
+                drop(s);
+                let mut it = args.into_iter();
+                let key = it.next().unwrap();
+                let value = it.next().unwrap();
+                self.set_item(state, &key, value)?;
+                Ok(Value::none())
+            }
+            "__delitem__" => {
+                if args.len() != 1 {
+                    return Err(expected_args_err(1, args.len()));
+                }
+                drop(s);
+                self.delete_item(state, &args[0])?;
+                Ok(Value::none())
+            }
+            "__contains__" => {
+                if args.len() != 1 {
+                    return Err(takes_exactly_one_err("__contains__", args.len()));
+                }
+                drop(s);
+                Ok(Value::bool_(self.contains(state, &args[0])?))
+            }
+            "__len__" => {
+                if !args.is_empty() {
+                    return Err(expected_args_err(0, args.len()));
+                }
+                drop(s);
+                Ok(Value::int(self.len(state).unwrap_or(0) as i64))
+            }
+            "popitem" => {
+                if !args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("dict.popitem() takes no arguments ({} given)", args.len()),
+                    ));
+                }
+                // dict.popitem() removes and returns the last inserted (key,
+                // value) pair (LIFO), raising KeyError on an empty dict.  The
+                // attrs key iterator is not double-ended, so scan forward and
+                // keep the last visible key.  `is_hidden` borrows the instance
+                // (slotted/exception classes), so resolve the key under a
+                // shared borrow first, then take the mutable borrow to remove
+                // it — borrowing mutably across `is_hidden` would panic.
+                let last_key = {
+                    let inst = s.instance.borrow();
+                    inst.attrs
+                        .keys()
+                        .filter(|k| !s.is_hidden(k))
+                        .last()
+                        .map(|k| k.to_string())
+                };
+                let Some(key) = last_key else {
+                    return Err(PyError::key_error(Value::string(
+                        "popitem(): dictionary is empty",
+                    )));
+                };
+                let value = s.instance.borrow_mut().attrs.shift_remove(&key).unwrap();
+                s.iter_keys.borrow_mut().take();
+                *s.iter_pos.borrow_mut() = 0;
+                Ok(Value::tuple(vec![Value::string(key), value]))
+            }
             "get" => {
                 if args.is_empty() || args.len() > 2 {
                     return Err(PyError::named(
@@ -398,7 +483,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                         if let Some(default) = args.get(1) {
                             return Ok(default.clone());
                         }
-                        return Err(PyError::named("KeyError", args[0].repr()));
+                        return Err(PyError::key_error(args[0].clone()));
                     }
                 };
                 let removed = s.instance.borrow_mut().attrs.shift_remove(&key_str);
@@ -408,7 +493,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                     Some(v) => Ok(v),
                     None => match args.get(1) {
                         Some(default) => Ok(default.clone()),
-                        None => Err(PyError::named("KeyError", Value::string(key_str).repr())),
+                        None => Err(PyError::key_error(Value::string(key_str))),
                     },
                 }
             }
@@ -434,12 +519,17 @@ impl BuiltinTypeOps for InstanceDictOps {
                     Ok(existing.clone())
                 } else {
                     inst.attrs.insert(key_str, default_val.clone());
+                    drop(inst);
+                    s.iter_keys.borrow_mut().take();
+                    *s.iter_pos.borrow_mut() = 0;
                     Ok(default_val)
                 }
             }
             "update" => {
-                // update(dict) or update(**kwargs) — we only get positional
-                // args here; kwargs support would require the kwargs map.
+                // update(dict, **kwargs) — CPython applies the positional
+                // mapping first, then the keyword arguments (issue #2163:
+                // `update(**kwargs)` previously dropped the keywords because
+                // the kwargs map was ignored entirely).
                 if args.len() > 1 {
                     return Err(PyError::named(
                         "TypeError",
@@ -449,18 +539,22 @@ impl BuiltinTypeOps for InstanceDictOps {
                         ),
                     ));
                 }
+                let mut pairs: Vec<(String, Value)> = Vec::new();
                 if let Some(other) = args.first() {
-                    let pairs: Vec<(String, Value)> = match other.kind() {
-                        ValueKind::Dict(d) => d
-                            .iter()
-                            .map(|(k, v)| match k {
-                                PyKey::Str(s) => Ok((s.to_string(), v.clone())),
-                                _ => Err(PyError::named(
-                                    "TypeError",
-                                    "instance __dict__ keys must be strings".to_string(),
-                                )),
-                            })
-                            .collect::<Result<_>>()?,
+                    match other.kind() {
+                        ValueKind::Dict(d) => {
+                            for (k, v) in d.iter() {
+                                match k {
+                                    PyKey::Str(ks) => pairs.push((ks.to_string(), v.clone())),
+                                    _ => {
+                                        return Err(PyError::named(
+                                            "TypeError",
+                                            "instance __dict__ keys must be strings".to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                         _ => {
                             return Err(PyError::named(
                                 "TypeError",
@@ -470,11 +564,17 @@ impl BuiltinTypeOps for InstanceDictOps {
                                 ),
                             ));
                         }
-                    };
+                    }
+                }
+                for (k, v) in kwargs.iter() {
+                    pairs.push((k.clone(), v.clone()));
+                }
+                if !pairs.is_empty() {
                     let mut inst = s.instance.borrow_mut();
                     for (k, v) in pairs {
                         inst.attrs.insert(k, v);
                     }
+                    drop(inst);
                     s.iter_keys.borrow_mut().take();
                     *s.iter_pos.borrow_mut() = 0;
                 }
@@ -501,7 +601,31 @@ impl BuiltinTypeOps for InstanceDictOps {
                         format!("clear() takes no arguments ({} given)", args.len()),
                     ));
                 }
-                s.instance.borrow_mut().attrs.clear();
+                // Only remove visible `__dict__` entries: hidden slot members
+                // (`__slots__ = (..., '__dict__')`) and exception C-level slots
+                // are stored in `attrs` but are not part of the `__dict__`
+                // proxy, so `dict.clear()` must leave them intact (CPython keeps
+                // the slot value alive after `o.__dict__.clear()`).  The common
+                // no-slots, non-exception instance has no hidden keys, so wipe
+                // the whole map in one shot.  Otherwise resolve the visible keys
+                // under a shared borrow first (`is_hidden` re-borrows the
+                // instance), then take the mutable borrow to remove only them.
+                if !s.has_slots && !s.is_exception {
+                    s.instance.borrow_mut().attrs.clear();
+                } else {
+                    let visible: Vec<String> = {
+                        let inst = s.instance.borrow();
+                        inst.attrs
+                            .keys()
+                            .filter(|k| !s.is_hidden(k))
+                            .map(|k| k.to_string())
+                            .collect()
+                    };
+                    let mut inst = s.instance.borrow_mut();
+                    for k in &visible {
+                        inst.attrs.shift_remove(k);
+                    }
+                }
                 s.iter_keys.borrow_mut().take();
                 *s.iter_pos.borrow_mut() = 0;
                 Ok(Value::none())
@@ -602,6 +726,30 @@ fn borrow_state(state: &BuiltinState) -> Option<std::cell::Ref<'_, InstanceDictS
     let borrow = state.borrow();
     // `Ref::filter_map` is stable since 1.63.
     std::cell::Ref::filter_map(borrow, |any| any.downcast_ref::<InstanceDictState>()).ok()
+}
+
+/// CPython's `dict.__getitem__` / `__contains__` C wrappers report
+/// "dict.<method>() takes exactly one argument (N given)".
+fn takes_exactly_one_err(method: &str, given: usize) -> PyError {
+    PyError::named(
+        "TypeError",
+        format!("dict.{method}() takes exactly one argument ({given} given)"),
+    )
+}
+
+/// CPython's `__delitem__` / `__len__` slot wrappers report
+/// "expected N argument(s), got M" (no method name, no leading space —
+/// `__setitem__` has its own leading-space quirk handled inline).
+fn expected_args_err(expected: usize, given: usize) -> PyError {
+    let noun = if expected == 1 {
+        "argument"
+    } else {
+        "arguments"
+    };
+    PyError::named(
+        "TypeError",
+        format!("expected {expected} {noun}, got {given}"),
+    )
 }
 
 fn key_as_str(key: &Value) -> Result<&str> {
