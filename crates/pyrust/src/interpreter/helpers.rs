@@ -1804,6 +1804,88 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
     Ok(())
 }
 
+/// Bind a builtin constructor's call args (positional + keyword) into a
+/// per-parameter slot vector in declared parameter order, matching CPython
+/// 3.12's argument-binding error semantics.
+///
+/// `params` lists every parameter in positional order; `keyword_ok` is the
+/// matching mask of whether each parameter is keyword-acceptable (a `false`
+/// entry is positional-only — supplying it by name yields the CPython
+/// `'<name>' is an invalid keyword argument for <fn>()` error).  `max_args`
+/// is the constructor's maximum total arity used for the "takes at most N
+/// arguments" overflow check, which CPython performs *before* validating
+/// keyword names.
+///
+/// Returns one slot per declared parameter (`None` for an unfilled slot), so
+/// each constructor can apply its own per-parameter defaults / arity logic.
+pub(crate) fn bind_constructor_kwargs(
+    function_name: &str,
+    args: &[ExpandedCallArg],
+    params: &[&str],
+    keyword_ok: &[bool],
+    max_args: usize,
+) -> Result<Vec<Option<Value>>> {
+    debug_assert_eq!(params.len(), keyword_ok.len());
+
+    // CPython checks total arity before validating individual keyword names:
+    // `complex(1, 2, foo=3)` reports "takes at most 2 arguments (3 given)",
+    // not the invalid-keyword error.  When *every* arg is a keyword, CPython
+    // words it "takes at most N keyword arguments" instead.
+    if args.len() > max_args {
+        let noun = if args.iter().all(|a| a.name.is_some()) {
+            "keyword arguments"
+        } else {
+            "arguments"
+        };
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{function_name}() takes at most {max_args} {noun} ({} given)",
+                args.len()
+            ),
+        ));
+    }
+
+    let mut slots: Vec<Option<Value>> = vec![None; params.len()];
+
+    // Assign positional args to leading slots in order.
+    let mut next_pos = 0usize;
+    for a in args.iter().filter(|a| a.name.is_none()) {
+        // `args.len() <= max_args` already guarantees we don't overrun.
+        slots[next_pos] = Some(a.value.clone());
+        next_pos += 1;
+    }
+
+    // Bind keyword args by name.
+    for a in args.iter().filter(|a| a.name.is_some()) {
+        let name = a.name.as_ref().unwrap();
+        match params.iter().position(|p| p == name) {
+            Some(idx) if keyword_ok[idx] => {
+                if slots[idx].is_some() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "argument for {function_name}() given by name ('{name}') and position ({})",
+                            idx + 1
+                        ),
+                    ));
+                }
+                slots[idx] = Some(a.value.clone());
+            }
+            // Either an unknown name, or a positional-only parameter supplied
+            // by keyword — both surface as the invalid-keyword error.
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{name}' is an invalid keyword argument for {function_name}()"),
+                ));
+            }
+        }
+    }
+
+    Ok(slots)
+}
+
 /// Returns true if the named builtin function is a classmethod on `object`.
 ///
 /// CPython's `object.__init_subclass__` is a `classmethod_descriptor`; all
