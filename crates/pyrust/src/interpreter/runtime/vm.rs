@@ -32,6 +32,94 @@ pub(crate) struct NativeIterFrame {
     pub(crate) items: Vec<Value>,
     pub(crate) pos: usize,
     pub(crate) type_name: &'static str,
+    /// Optional mutation guard (#1988/#1994).  Set only for `deque` iterators
+    /// and the manual `iter()` form of dict / set / dict-views.  Boxed so the
+    /// common unguarded `NativeIterFrame` grows by just one (null) pointer,
+    /// keeping its footprint — and the per-step `downcast`/field access on the
+    /// hot iteration path — identical to the pre-guard layout.  The box is
+    /// allocated once at iterator creation (cold), never per step.
+    pub(crate) guard: Option<Box<NativeIterGuard>>,
+}
+
+/// Mutation guard for [`NativeIterFrame`].  Holds the live `container` `Value`
+/// and a `version` recorded at iterator creation; [`NativeIterFrame::advance`]
+/// re-reads the live version each step and raises `msg` as a `RuntimeError` on
+/// a mismatch.  Two flavours:
+///   - [`GuardVersion::Size`] for the manual `iter()` form of dict / set /
+///     dict-views (#1988; `container` is the collection, version = live size).
+///   - [`GuardVersion::DequeState { counter }`] for `deque` iterators (#1994;
+///     `container` keeps the `_state` cell alive, version = its mutation
+///     counter, so even net-zero-size mutations like `rotate()` are detected).
+pub(crate) struct NativeIterGuard {
+    pub(crate) container: Value,
+    pub(crate) version: i64,
+    pub(crate) kind: GuardVersion,
+    pub(crate) msg: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum GuardVersion {
+    /// Version is the container's live element count (dict / set / dict-view).
+    Size,
+    /// Version is a deque `_state` mutation counter read directly through a
+    /// cached pointer to element 0 of the (never-reallocated) one-element
+    /// `_state` cell list.  `container` holds the `Rc` that keeps the cell's
+    /// backing buffer alive for the iterator's lifetime, so the pointer stays
+    /// valid; the read is a single tagged-int load with no decode/borrow,
+    /// keeping deque iteration perf-neutral.
+    DequeState { counter: *const Value },
+}
+
+impl NativeIterFrame {
+    /// Construct an unguarded native iterator (the common case).
+    pub(crate) fn new(items: Vec<Value>, type_name: &'static str) -> Self {
+        NativeIterFrame { items, pos: 0, type_name, guard: None }
+    }
+
+    /// Mutation-guard check, run once per `__next__` *only when a guard is
+    /// present* (#1988/#1994).  Returns `Err(RuntimeError)` if the guarded
+    /// container's version diverged from the value recorded at iterator
+    /// creation, else `Ok(())`.  `#[inline]` so the common unguarded iterator
+    /// collapses to a single predictable `Option::is_some` branch and the
+    /// version-read body is only reached by guarded (deque / dict-iter)
+    /// iterators — the per-step fast path is unchanged.
+    #[inline]
+    fn guard_check(&self) -> Result<()> {
+        let Some(guard) = &self.guard else {
+            return Ok(());
+        };
+        let live = match guard.kind {
+            GuardVersion::Size => live_collection_len(&guard.container).map(|n| n as i64),
+            // SAFETY: `counter` points at element 0 of the deque's `_state`
+            // cell list, whose backing buffer is kept alive by `guard.container`
+            // (an `Rc` clone) and never reallocates (it is a fixed one-element
+            // list; mutations overwrite the element in place).  The pointer
+            // therefore stays valid and exclusive-free for the iterator's
+            // lifetime.
+            GuardVersion::DequeState { counter } => unsafe { (*counter).as_int() },
+        };
+        if live != Some(guard.version) {
+            return Err(PyError::Runtime(guard.msg.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Advance one step, applying the mutation guard if present.
+    ///
+    /// Returns `Ok(Some(v))` for the next element, `Ok(None)` once exhausted,
+    /// or `Err(RuntimeError)` if a guarded container mutated since the iterator
+    /// was created.  Used by call sites that already pay a function-call
+    /// boundary (`call_next`, `yield_from_advance`); the VM's `ForIter` hot loop
+    /// inlines the equivalent steps directly to keep iteration fast.
+    pub(crate) fn advance(&mut self) -> Result<Option<Value>> {
+        self.guard_check()?;
+        if self.pos >= self.items.len() {
+            return Ok(None);
+        }
+        let item = self.items[self.pos].clone();
+        self.pos += 1;
+        Ok(Some(item))
+    }
 }
 
 /// Lazy iterator over `obj.__getitem__(0)`, `obj.__getitem__(1)`, …
@@ -269,6 +357,37 @@ pub(crate) enum IterState {
     /// User-defined iterator: holds the iterator object (result of __iter__).
     /// Each ForIter call invokes __next__() on it and stops on StopIteration.
     UserDefined(Value),
+    /// Materialized snapshot guarded against size mutation (#1988): dict / set
+    /// and their keys/values/items views.  Holds the live `container` Value and
+    /// the length recorded at iterator creation; on each `ForIter` the live
+    /// length is re-read and compared, raising `RuntimeError` (CPython's
+    /// "dictionary/Set changed size during iteration") on a mismatch.  Only the
+    /// *size* is guarded — value-only mutations that preserve the key count are
+    /// allowed, matching CPython.  The single `usize` compare per step keeps the
+    /// iteration hot path unchanged.
+    MaterializedGuarded {
+        items: Vec<Value>,
+        pos: usize,
+        container: Value,
+        recorded_len: usize,
+        msg: &'static str,
+    },
+}
+
+/// Read the live element count of a `dict` / `set` / dict-view `container`,
+/// used by the size-mutation guard (#1988).  Returns `None` if `container` is
+/// not one of those types (in which case the guard treats the snapshot as
+/// non-mutating, since no other guarded source reaches this path).
+pub(crate) fn live_collection_len(container: &Value) -> Option<usize> {
+    // Unguarded `as_dict` / `as_set` read via `as_ptr` (no RefCell borrow-flag
+    // traffic), keeping the per-step iteration guard cheap.
+    if let Some(d) = container.as_dict() {
+        return Some(d.len());
+    }
+    if let Some(s) = container.as_set() {
+        return Some(s.len());
+    }
+    pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| rc.borrow().len())
 }
 
 /// One iteration step for `ForCount*` opcodes — dedupes the three
@@ -2521,7 +2640,28 @@ impl Interpreter {
                                 }
                             }
                             IterTag::Other => {
-                                IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
+                                // dict / set / dict-views: snapshot but guard
+                                // against size mutation during iteration (#1988).
+                                // Frozensets, str, bytes, etc. are immutable or
+                                // never reach this with a live size, so they stay
+                                // on the plain Materialized path.
+                                let items = vm_try!(iter_values(&src_val));
+                                if let Some(recorded_len) = live_collection_len(&src_val) {
+                                    let msg = if src_val.set_len().is_some() {
+                                        "Set changed size during iteration"
+                                    } else {
+                                        "dictionary changed size during iteration"
+                                    };
+                                    IterState::MaterializedGuarded {
+                                        items,
+                                        pos: 0,
+                                        container: src_val,
+                                        recorded_len,
+                                        msg,
+                                    }
+                                } else {
+                                    IterState::Materialized(items, 0)
+                                }
                             }
                         }
                     };
@@ -2567,6 +2707,32 @@ impl Interpreter {
                             }
                         }
                         Some(IterState::Materialized(items, pos)) => {
+                            let cur_pos = *pos;
+                            if cur_pos < items.len() {
+                                // SAFETY: cur_pos < items.len() checked just above.
+                                let v = unsafe { items.get_unchecked(cur_pos).clone() };
+                                *pos = cur_pos + 1;
+                                regs[*dst as usize] = v;
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::MaterializedGuarded {
+                            items,
+                            pos,
+                            container,
+                            recorded_len,
+                            msg,
+                        }) => {
+                            // Size-mutation guard (#1988): one usize compare per
+                            // step.  CPython raises whenever the container's size
+                            // differs from the value recorded at iterator
+                            // creation — including the step that would otherwise
+                            // exhaust the snapshot — so check before the bounds
+                            // test, not only while items remain.
+                            if live_collection_len(container) != Some(*recorded_len) {
+                                vm_try!(Err(PyError::Runtime((*msg).to_string())));
+                            }
                             let cur_pos = *pos;
                             if cur_pos < items.len() {
                                 // SAFETY: cur_pos < items.len() checked just above.
@@ -2692,13 +2858,22 @@ impl Interpreter {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
-                                            if native.pos >= native.items.len() {
-                                                Some(Err(pyrust_core::py_err!("StopIteration", String::new())))
-                                            } else {
-                                                let item = native.items[native.pos].clone();
-                                                native.pos += 1;
-                                                Some(Ok(item))
-                                            }
+                                            // Inlined fast path: the common
+                                            // unguarded iterator pays only the
+                                            // `guard_check` no-op branch, keeping
+                                            // the per-step cost identical to the
+                                            // pre-guard code.
+                                            Some(match native.guard_check() {
+                                                Err(e) => Err(e),
+                                                Ok(()) if native.pos >= native.items.len() => {
+                                                    Err(pyrust_core::py_err!("StopIteration", String::new()))
+                                                }
+                                                Ok(()) => {
+                                                    let item = native.items[native.pos].clone();
+                                                    native.pos += 1;
+                                                    Ok(item)
+                                                }
+                                            })
                                         } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                                             // Resume the generator.
                                             if frame.done {
@@ -2972,12 +3147,10 @@ impl Interpreter {
 
                 if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                     // Built-in iterator: no send support, just advance.
-                    if native.pos >= native.items.len() {
-                        return Err(pyrust_core::py_err!("StopIteration", String::new()));
-                    }
-                    let item = native.items[native.pos].clone();
-                    native.pos += 1;
-                    return Ok(item);
+                    return match native.advance()? {
+                        Some(v) => Ok(v),
+                        None => Err(pyrust_core::py_err!("StopIteration", String::new())),
+                    };
                 }
 
                 if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {

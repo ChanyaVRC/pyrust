@@ -36,7 +36,8 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    Interpreter, NativeIterFrame, invoke_class_method, lookup_class_attr,
+    GuardVersion, Interpreter, NativeIterFrame, NativeIterGuard, invoke_class_method,
+    lookup_class_attr,
 };
 use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, Value, ValueKind, key_repr};
 use pyrust_derive::pyrust_module;
@@ -191,7 +192,7 @@ pyrust_module! {
         fn __iter__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
             let items: Vec<Value> = counts.keys().cloned().map(key_to_value).collect();
-            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0, type_name: "generator" })))
+            Ok(Value::generator(Box::new(NativeIterFrame::new(items, "generator"))))
         }
 
         /// `repr(c)` — most-common-first when all values are integers
@@ -571,11 +572,7 @@ pyrust_module! {
         fn __iter__(args) -> Result<Value> {
             let items = read_items(args, FN_NAME)?;
             let keys: Vec<Value> = items.keys().cloned().map(key_to_value).collect();
-            Ok(Value::generator(Box::new(NativeIterFrame {
-                items: keys,
-                pos: 0,
-                type_name: "generator",
-            })))
+            Ok(Value::generator(Box::new(NativeIterFrame::new(keys, "generator"))))
         }
 
         fn __repr__(args) -> Result<Value> {
@@ -794,6 +791,7 @@ pyrust_module! {
                 }
             }
             items_val.list_push(x)?;
+            deque_bump_state(&inst);
             Ok(Value::none())
         }
 
@@ -815,6 +813,7 @@ pyrust_module! {
                 }
             }
             items_val.list_insert(0, x)?;
+            deque_bump_state(&inst);
             Ok(Value::none())
         }
 
@@ -830,7 +829,9 @@ pyrust_module! {
                     "pop from an empty deque".to_string(),
                 ));
             }
-            Ok(items_val.list_pop_at(n - 1)?)
+            let popped = items_val.list_pop_at(n - 1)?;
+            deque_bump_state(&inst);
+            Ok(popped)
         }
 
         /// `d.popleft()` — remove and return from the left.  Raises
@@ -845,7 +846,9 @@ pyrust_module! {
                     "pop from an empty deque".to_string(),
                 ));
             }
-            Ok(items_val.list_pop_at(0)?)
+            let popped = items_val.list_pop_at(0)?;
+            deque_bump_state(&inst);
+            Ok(popped)
         }
 
         /// `d.extend(iterable)` — extend right from an iterable, applying
@@ -865,6 +868,7 @@ pyrust_module! {
                     }
                 }
                 items_val.list_push(x)?;
+                deque_bump_state(&inst);
             }
             Ok(Value::none())
         }
@@ -889,6 +893,7 @@ pyrust_module! {
                     }
                 }
                 items_val.list_insert(0, x)?;
+                deque_bump_state(&inst);
             }
             Ok(Value::none())
         }
@@ -921,7 +926,14 @@ pyrust_module! {
             // in place while tracking offsets.
             let mut items = deque_items_snapshot(&inst)?;
             let len = items.len();
-            if len == 0 || n == 0 {
+            if len == 0 {
+                return Ok(Value::none());
+            }
+            // CPython bumps `deque->state` on every rotate of a non-empty deque,
+            // even when the net order is unchanged (n == 0 or a full cycle), so
+            // a `rotate()` mid-iteration always raises (#1994).
+            deque_bump_state(&inst);
+            if n == 0 {
                 return Ok(Value::none());
             }
             // Normalise to right-rotation steps in [0, len).
@@ -941,6 +953,7 @@ pyrust_module! {
             let inst = expect_self_no_args(args, FN_NAME)?;
             let items_val = deque_items_val(&inst)?;
             items_val.list_clear()?;
+            deque_bump_state(&inst);
             Ok(Value::none())
         }
 
@@ -996,6 +1009,7 @@ pyrust_module! {
                 Some(i) => {
                     let items_val = deque_items_val(&inst)?;
                     items_val.list_pop_at(i)?;
+                    deque_bump_state(&inst);
                     Ok(Value::none())
                 }
                 None => Err(PyError::named(
@@ -1112,6 +1126,7 @@ pyrust_module! {
                 (i as usize).min(cur_len)
             };
             items_val.list_insert(idx, x)?;
+            deque_bump_state(&inst);
             Ok(Value::none())
         }
 
@@ -1159,6 +1174,7 @@ pyrust_module! {
             let len = items_val.list_len().unwrap_or(0);
             let idx = deque_resolve_index(arg.kind(), len, FN_NAME)?;
             items_val.list_pop_at(idx)?;
+            deque_bump_state(&inst);
             Ok(Value::none())
         }
 
@@ -1176,10 +1192,35 @@ pyrust_module! {
         }
 
         /// `for x in d` — yield elements in left-to-right order.
+        ///
+        /// The iterator snapshots the elements but holds the live backing
+        /// `_items` list and its length, so each `__next__` re-checks the
+        /// length and raises `RuntimeError: deque mutated during iteration`
+        /// when the deque's size changes mid-iteration (#1994), matching
+        /// CPython.
         fn __iter__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let items = deque_items_snapshot(&inst)?;
-            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0, type_name: "generator" })))
+            // Cache a raw pointer to element 0 of the `_state` cell (a fixed
+            // one-element list) so the per-step guard reads the counter with a
+            // single tagged-int load — no attribute lookup, decode, or RefCell
+            // borrow — keeping deque iteration perf-neutral.  The `cell` Value
+            // stored in the guard keeps the backing buffer alive.
+            let cell = deque_state_cell(&inst);
+            let version = deque_state(&inst);
+            let counter: *const Value = cell
+                .as_list()
+                .and_then(|s| s.first())
+                .map(|v| v as *const Value)
+                .ok_or_else(|| PyError::named("RuntimeError", "deque _state cell missing".to_string()))?;
+            let mut frame = NativeIterFrame::new(items, "generator");
+            frame.guard = Some(Box::new(NativeIterGuard {
+                container: cell,
+                version,
+                kind: GuardVersion::DequeState { counter },
+                msg: "deque mutated during iteration",
+            }));
+            Ok(Value::generator(Box::new(frame)))
         }
 
         /// `repr(d)` — `deque([1, 2, 3])` or `deque([1, 2, 3], maxlen=5)`.
@@ -1850,6 +1891,65 @@ fn counter_inplace_op(
 }
 
 // ── deque helpers ────────────────────────────────────────────────────────────
+
+/// Return the deque's mutation-state cell (#1994): a one-element list `[counter]`
+/// stored under `_state`, lazily created on first access.  Mirrors CPython's
+/// `deque->state` — a version bumped on every structural mutation.  It is held
+/// in a list (an `Rc`-shared cell) rather than a plain int attr so the iterator
+/// can cache the `Rc` once and re-read the counter each `__next__` with a single
+/// `Rc` deref + index, paying *no* per-step attribute lookup (keeps deque
+/// iteration perf-neutral).
+fn deque_state_cell(inst: &Rc<RefCell<PyInstance>>) -> Value {
+    {
+        let borrow = inst.borrow();
+        if let Some(v) = borrow.attrs.get("_state") {
+            if v.is_list() {
+                return v.clone();
+            }
+        }
+    }
+    let cell = Value::list(vec![Value::int(0)]);
+    inst.borrow_mut()
+        .attrs
+        .insert("_state".to_string(), cell.clone());
+    cell
+}
+
+/// Read the current deque mutation-state counter.
+fn deque_state(inst: &Rc<RefCell<PyInstance>>) -> i64 {
+    deque_state_cell(inst)
+        .as_list()
+        .and_then(|s| s.first())
+        .map(|v| match v.kind() {
+            ValueKind::Int(n) => n,
+            _ => 0,
+        })
+        .unwrap_or(0)
+}
+
+/// Bump the deque's mutation-state counter (#1994).  Called by every structural
+/// mutation so the iterator's snapshotted state diverges and `__next__` raises
+/// `RuntimeError: deque mutated during iteration`.  Wraps on `i64` overflow
+/// (benign — would require 2^63 mutations in a single iteration).
+fn deque_bump_state(inst: &Rc<RefCell<PyInstance>>) {
+    let cell = deque_state_cell(inst);
+    let next = cell
+        .as_list()
+        .and_then(|s| s.first())
+        .map(|v| match v.kind() {
+            ValueKind::Int(n) => n,
+            _ => 0,
+        })
+        .unwrap_or(0)
+        .wrapping_add(1);
+    // Replace element 0 in place (keeps the same backing Rc so iterators that
+    // cached the cell observe the bump).
+    cell.list_with_mut(|v| {
+        if let Some(slot) = v.first_mut() {
+            *slot = Value::int(next);
+        }
+    });
+}
 
 /// Return the `_items` list `Value` from a deque instance.  The Value holds
 /// an `Rc<RefCell<Vec<Value>>>` so mutations are shared — callers can mutate

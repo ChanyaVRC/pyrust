@@ -2355,16 +2355,16 @@ impl Interpreter {
             {
                 let mut borrow = state_rc.borrow_mut();
                 if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
-                    if native.pos >= native.items.len() {
-                        return if let Some(d) = default {
-                            Ok(d)
-                        } else {
-                            Err(pyrust_core::py_err!("StopIteration", String::new()))
-                        };
-                    }
-                    let item = native.items[native.pos].clone();
-                    native.pos += 1;
-                    return Ok(item);
+                    return match native.advance()? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(pyrust_core::py_err!("StopIteration", String::new()))
+                            }
+                        }
+                    };
                 }
             }
 

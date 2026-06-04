@@ -966,11 +966,7 @@ pyrust_module! {
             let child_path = entry.path().to_string_lossy().into_owned();
             items.push(make_path_instance(&child_path));
         }
-        Ok(Value::generator(Box::new(NativeIterFrame {
-            items,
-            pos: 0,
-            type_name: "generator",
-        })))
+        Ok(Value::generator(Box::new(NativeIterFrame::new(items, "generator"))))
     }
 
     /// `path.glob(pattern)` — yield all paths matching `pattern` relative to
@@ -999,11 +995,7 @@ pyrust_module! {
         let _ = _interp;
         let base = get_path(&inst, FN_NAME)?;
         let items = glob_collect(&base, &pattern)?;
-        Ok(Value::generator(Box::new(NativeIterFrame {
-            items,
-            pos: 0,
-            type_name: "generator",
-        })))
+        Ok(Value::generator(Box::new(NativeIterFrame::new(items, "generator"))))
     }
 
     // ── path mutation (with_*) ────────────────────────────────────────────────

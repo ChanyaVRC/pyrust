@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
@@ -1503,11 +1503,24 @@ pyrust_module! {
                                 format!("'{}' object is not iterable", value_type_name_str(&val)),
                             )
                         })?;
-                        Ok(Value::generator(Box::new(NativeIterFrame {
-                            items,
-                            pos: 0,
-                            type_name: iter_type_name,
-                        })))
+                        let mut frame = NativeIterFrame::new(items, iter_type_name);
+                        // dict / set / dict-views: guard the manual `iter()`
+                        // iterator against size mutation (#1988), mirroring the
+                        // `for`-loop guard.
+                        if let Some(recorded_len) = crate::interpreter::live_collection_len(&val) {
+                            let msg = if val.set_len().is_some() {
+                                "Set changed size during iteration"
+                            } else {
+                                "dictionary changed size during iteration"
+                            };
+                            frame.guard = Some(Box::new(NativeIterGuard {
+                                container: val.clone(),
+                                version: recorded_len as i64,
+                                kind: GuardVersion::Size,
+                                msg,
+                            }));
+                        }
+                        Ok(Value::generator(Box::new(frame)))
                     }
                 }
             }
@@ -7735,11 +7748,23 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     format!("'{}' object is not iterable", value_type_name_str(v)),
                 )
             })?;
-            Ok(Value::generator(Box::new(NativeIterFrame {
-                items,
-                pos: 0,
-                type_name: iter_type_name,
-            })))
+            let mut frame = NativeIterFrame::new(items, iter_type_name);
+            // dict / set / dict-views: guard the manual `iter()` iterator
+            // against size mutation, mirroring the `for`-loop guard (#1988).
+            if let Some(recorded_len) = crate::interpreter::live_collection_len(v) {
+                let msg = if v.set_len().is_some() {
+                    "Set changed size during iteration"
+                } else {
+                    "dictionary changed size during iteration"
+                };
+                frame.guard = Some(Box::new(NativeIterGuard {
+                    container: v.clone(),
+                    version: recorded_len as i64,
+                    kind: GuardVersion::Size,
+                    msg,
+                }));
+            }
+            Ok(Value::generator(Box::new(frame)))
         }
     }
 }
