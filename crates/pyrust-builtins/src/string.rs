@@ -1766,6 +1766,7 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
         BackslashReplace,
         XmlCharRefReplace,
         NameReplace,
+        SurrogatePass,
     }
 
     fn resolve_handler(errors: &str) -> Result<Handler> {
@@ -1776,11 +1777,17 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
             "backslashreplace" => Ok(Handler::BackslashReplace),
             "xmlcharrefreplace" => Ok(Handler::XmlCharRefReplace),
             "namereplace" => Ok(Handler::NameReplace),
+            "surrogatepass" => Ok(Handler::SurrogatePass),
             other => Err(PyError::named(
                 "LookupError",
                 format!("unknown error handler name '{other}'"),
             )),
         }
+    }
+
+    /// True for a lone surrogate codepoint (U+D800..=U+DFFF).
+    fn is_surrogate(cp: u32) -> bool {
+        (0xD800..=0xDFFF).contains(&cp)
     }
 
     /// Produce the backslash-escape bytes for a single unencodable codepoint.
@@ -1802,11 +1809,13 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
         range_label: &str,
         errors: &str,
     ) -> Result<Value> {
-        let chars: Vec<char> = source.chars().collect();
+        // Iterate codepoints via cesu8_codepoints so surrogate bytes never reach
+        // char::chars() (a debug-abort hazard on the CESU-8 strings pyrust stores).
+        let cps: Vec<u32> = cesu8_codepoints(source).collect();
         let mut out = Vec::with_capacity(source.len());
         let mut idx = 0usize;
-        while idx < chars.len() {
-            let cp = chars[idx] as u32;
+        while idx < cps.len() {
+            let cp = cps[idx];
             if fits(cp) {
                 out.push(cp as u8);
                 idx += 1;
@@ -1828,18 +1837,21 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                         idx += 1;
                     }
                     Handler::NameReplace => {
-                        let c = chars[idx];
-                        let replacement = match unicode_names2::name(c) {
+                        // Surrogates (from_u32 == None) have no name; fall back to
+                        // the backslash escape form.
+                        let replacement = match char::from_u32(cp).and_then(unicode_names2::name) {
                             Some(name) => format!("\\N{{{}}}", name).into_bytes(),
                             None => backslash_escape_bytes(cp),
                         };
                         out.extend_from_slice(&replacement);
                         idx += 1;
                     }
-                    Handler::Strict => {
+                    // For single-byte codecs CPython treats surrogatepass like
+                    // strict (the surrogate still doesn't fit the byte range).
+                    Handler::Strict | Handler::SurrogatePass => {
                         let run_start = idx;
                         let mut run_end = idx + 1;
-                        while run_end < chars.len() && !fits(chars[run_end] as u32) {
+                        while run_end < cps.len() && !fits(cps[run_end]) {
                             run_end += 1;
                         }
                         return Err(PyError::UnicodeEncodeError {
@@ -1856,14 +1868,140 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
         Ok(Value::bytes(out))
     }
 
+    /// Surrogate-aware UTF-N encoder.
+    ///
+    /// Iterates codepoints via `cesu8_codepoints` (never `str::chars`, which would
+    /// abort on the CESU-8 surrogate bytes pyrust stores), encoding non-surrogate
+    /// codepoints with `encode_cp` and applying the resolved `errors` handler to
+    /// lone surrogates.  `surrogate_bytes` produces the raw UTF-N bytes emitted by
+    /// the `surrogatepass` handler.  Error positions are codepoint indices,
+    /// matching CPython; consecutive surrogates are coalesced into one error run.
+    fn encode_utf_surrogate_aware(
+        source: &str,
+        codec_name: &str,
+        bom: &[u8],
+        mut encode_cp: impl FnMut(u32, &mut Vec<u8>),
+        surrogate_bytes: impl Fn(u32) -> Vec<u8>,
+        errors: &str,
+    ) -> Result<Value> {
+        let cps: Vec<u32> = cesu8_codepoints(source).collect();
+        let mut out = Vec::with_capacity(bom.len() + source.len());
+        out.extend_from_slice(bom);
+        let mut idx = 0usize;
+        while idx < cps.len() {
+            let cp = cps[idx];
+            if !is_surrogate(cp) {
+                encode_cp(cp, &mut out);
+                idx += 1;
+                continue;
+            }
+            match resolve_handler(errors)? {
+                Handler::SurrogatePass => {
+                    out.extend_from_slice(&surrogate_bytes(cp));
+                    idx += 1;
+                }
+                Handler::Ignore => {
+                    idx += 1;
+                }
+                Handler::Replace => {
+                    out.push(b'?');
+                    idx += 1;
+                }
+                Handler::BackslashReplace => {
+                    out.extend_from_slice(&backslash_escape_bytes(cp));
+                    idx += 1;
+                }
+                Handler::XmlCharRefReplace => {
+                    out.extend_from_slice(format!("&#{};", cp).as_bytes());
+                    idx += 1;
+                }
+                Handler::NameReplace => {
+                    // Surrogates have no Unicode name; fall back to the backslash form.
+                    out.extend_from_slice(&backslash_escape_bytes(cp));
+                    idx += 1;
+                }
+                Handler::Strict => {
+                    let run_start = idx;
+                    let mut run_end = idx + 1;
+                    while run_end < cps.len() && is_surrogate(cps[run_end]) {
+                        run_end += 1;
+                    }
+                    return Err(PyError::UnicodeEncodeError {
+                        encoding: codec_name.to_string(),
+                        object: source.to_string(),
+                        start: run_start,
+                        end: run_end,
+                        reason: "surrogates not allowed".to_string(),
+                    });
+                }
+            }
+        }
+        Ok(Value::bytes(out))
+    }
+
+    // UTF-16 surrogatepass: emit the surrogate as a single 16-bit code unit.
+    fn utf16_surrogate_bytes(cp: u32, big_endian: bool) -> Vec<u8> {
+        let unit = cp as u16;
+        if big_endian {
+            unit.to_be_bytes().to_vec()
+        } else {
+            unit.to_le_bytes().to_vec()
+        }
+    }
+
+    // Encode a non-surrogate scalar codepoint into UTF-16 code units (LE or BE).
+    fn encode_cp_utf16(cp: u32, big_endian: bool, out: &mut Vec<u8>) {
+        let c = char::from_u32(cp).expect("non-surrogate codepoint is a valid char");
+        let mut buf = [0u16; 2];
+        for unit in c.encode_utf16(&mut buf) {
+            if big_endian {
+                out.extend_from_slice(&unit.to_be_bytes());
+            } else {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+        }
+    }
+
     match canonical.as_str() {
-        "utf-8" | "utf8" | "u8" | "utf" => Ok(Value::bytes(source.as_bytes().to_vec())),
+        "utf-8" | "utf8" | "u8" | "utf" => {
+            // Fast path: a string with no 0xED byte cannot contain a CESU-8 lone
+            // surrogate, so its bytes are already valid UTF-8 — copy them directly.
+            if !source.as_bytes().contains(&0xED) {
+                return Ok(Value::bytes(source.as_bytes().to_vec()));
+            }
+            encode_utf_surrogate_aware(
+                source,
+                "utf-8",
+                b"",
+                |cp, out| {
+                    let c = char::from_u32(cp).expect("non-surrogate codepoint is a valid char");
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                },
+                |cp| pyrust_core::cesu8_encode_codepoint(cp).into_bytes(),
+                errors,
+            )
+        }
         // UTF-8-SIG: prepend U+FEFF BOM (EF BB BF) then UTF-8 encoded content.
         "utf-8-sig" => {
-            let mut out = Vec::with_capacity(3 + source.len());
-            out.extend_from_slice(b"\xef\xbb\xbf");
-            out.extend_from_slice(source.as_bytes());
-            Ok(Value::bytes(out))
+            if !source.as_bytes().contains(&0xED) {
+                let mut out = Vec::with_capacity(3 + source.len());
+                out.extend_from_slice(b"\xef\xbb\xbf");
+                out.extend_from_slice(source.as_bytes());
+                return Ok(Value::bytes(out));
+            }
+            encode_utf_surrogate_aware(
+                source,
+                "utf-8-sig",
+                b"\xef\xbb\xbf",
+                |cp, out| {
+                    let c = char::from_u32(cp).expect("non-surrogate codepoint is a valid char");
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                },
+                |cp| pyrust_core::cesu8_encode_codepoint(cp).into_bytes(),
+                errors,
+            )
         }
         "ascii" | "us-ascii" | "646" => {
             encode_single_byte_codec(source, "ascii", |cp| cp < 0x80, "128", errors)
@@ -1871,60 +2009,340 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
         "latin-1" | "iso-8859-1" | "8859" | "cp819" | "latin1" | "l1" => {
             encode_single_byte_codec(source, "latin-1", |cp| cp < 0x100, "256", errors)
         }
+        "cp1252" | "windows-1252" => encode_cp1252(source, errors),
+        "unicode-escape" => Ok(Value::bytes(encode_unicode_escape(source))),
+        "raw-unicode-escape" => Ok(Value::bytes(encode_raw_unicode_escape(source))),
+        "utf-7" => Ok(Value::bytes(encode_utf7(source))),
         // UTF-16 with LE BOM: \xff\xfe followed by LE-encoded code units.
         // "utf16" is the no-separator alias (normalize replaces _ with - but not
         // nothing, so "utf16" stays as-is and must be listed separately).
-        "utf-16" | "utf16" => {
-            let mut out = Vec::with_capacity(2 + source.encode_utf16().count() * 2);
-            out.extend_from_slice(b"\xff\xfe");
-            for unit in source.encode_utf16() {
-                out.extend_from_slice(&unit.to_le_bytes());
-            }
-            Ok(Value::bytes(out))
-        }
-        "utf-16-le" => {
-            let mut out = Vec::with_capacity(source.encode_utf16().count() * 2);
-            for unit in source.encode_utf16() {
-                out.extend_from_slice(&unit.to_le_bytes());
-            }
-            Ok(Value::bytes(out))
-        }
-        "utf-16-be" => {
-            let mut out = Vec::with_capacity(source.encode_utf16().count() * 2);
-            for unit in source.encode_utf16() {
-                out.extend_from_slice(&unit.to_be_bytes());
-            }
-            Ok(Value::bytes(out))
-        }
+        "utf-16" | "utf16" => encode_utf_surrogate_aware(
+            source,
+            "utf-16",
+            b"\xff\xfe",
+            |cp, out| encode_cp_utf16(cp, false, out),
+            |cp| utf16_surrogate_bytes(cp, false),
+            errors,
+        ),
+        "utf-16-le" => encode_utf_surrogate_aware(
+            source,
+            "utf-16-le",
+            b"",
+            |cp, out| encode_cp_utf16(cp, false, out),
+            |cp| utf16_surrogate_bytes(cp, false),
+            errors,
+        ),
+        "utf-16-be" => encode_utf_surrogate_aware(
+            source,
+            "utf-16-be",
+            b"",
+            |cp, out| encode_cp_utf16(cp, true, out),
+            |cp| utf16_surrogate_bytes(cp, true),
+            errors,
+        ),
         // UTF-32 with LE BOM: \xff\xfe\x00\x00 followed by LE-encoded code points.
-        "utf-32" | "utf32" => {
-            let chars: Vec<char> = source.chars().collect();
-            let mut out = Vec::with_capacity(4 + chars.len() * 4);
-            out.extend_from_slice(b"\xff\xfe\x00\x00");
-            for c in &chars {
-                out.extend_from_slice(&(*c as u32).to_le_bytes());
-            }
-            Ok(Value::bytes(out))
-        }
-        "utf-32-le" => {
-            let mut out = Vec::with_capacity(source.chars().count() * 4);
-            for c in source.chars() {
-                out.extend_from_slice(&(c as u32).to_le_bytes());
-            }
-            Ok(Value::bytes(out))
-        }
-        "utf-32-be" => {
-            let mut out = Vec::with_capacity(source.chars().count() * 4);
-            for c in source.chars() {
-                out.extend_from_slice(&(c as u32).to_be_bytes());
-            }
-            Ok(Value::bytes(out))
-        }
+        "utf-32" | "utf32" => encode_utf_surrogate_aware(
+            source,
+            "utf-32",
+            b"\xff\xfe\x00\x00",
+            |cp, out| out.extend_from_slice(&cp.to_le_bytes()),
+            |cp| cp.to_le_bytes().to_vec(),
+            errors,
+        ),
+        "utf-32-le" => encode_utf_surrogate_aware(
+            source,
+            "utf-32-le",
+            b"",
+            |cp, out| out.extend_from_slice(&cp.to_le_bytes()),
+            |cp| cp.to_le_bytes().to_vec(),
+            errors,
+        ),
+        "utf-32-be" => encode_utf_surrogate_aware(
+            source,
+            "utf-32-be",
+            b"",
+            |cp, out| out.extend_from_slice(&cp.to_be_bytes()),
+            |cp| cp.to_be_bytes().to_vec(),
+            errors,
+        ),
         _ => Err(PyError::named(
             "LookupError",
             format!("unknown encoding: {encoding}"),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Additional codecs: cp1252, unicode_escape, raw_unicode_escape, utf-7
+// ---------------------------------------------------------------------------
+
+/// CP1252 (Windows-1252) is identical to Latin-1 except in 0x80..=0x9F, where it
+/// maps to printable characters (the five undefined slots are `None`).  This
+/// table holds the 0x80..=0x9F → Unicode codepoint mapping; `None` means the
+/// byte is undefined (encoding/decoding raises).
+const CP1252_HIGH: [Option<u32>; 32] = [
+    Some(0x20AC), // 0x80 €
+    None,         // 0x81
+    Some(0x201A), // 0x82 ‚
+    Some(0x0192), // 0x83 ƒ
+    Some(0x201E), // 0x84 „
+    Some(0x2026), // 0x85 …
+    Some(0x2020), // 0x86 †
+    Some(0x2021), // 0x87 ‡
+    Some(0x02C6), // 0x88 ˆ
+    Some(0x2030), // 0x89 ‰
+    Some(0x0160), // 0x8A Š
+    Some(0x2039), // 0x8B ‹
+    Some(0x0152), // 0x8C Œ
+    None,         // 0x8D
+    Some(0x017D), // 0x8E Ž
+    None,         // 0x8F
+    None,         // 0x90
+    Some(0x2018), // 0x91 ‘
+    Some(0x2019), // 0x92 ’
+    Some(0x201C), // 0x93 “
+    Some(0x201D), // 0x94 ”
+    Some(0x2022), // 0x95 •
+    Some(0x2013), // 0x96 –
+    Some(0x2014), // 0x97 —
+    Some(0x02DC), // 0x98 ˜
+    Some(0x2122), // 0x99 ™
+    Some(0x0161), // 0x9A š
+    Some(0x203A), // 0x9B ›
+    Some(0x0153), // 0x9C œ
+    None,         // 0x9D
+    Some(0x017E), // 0x9E ž
+    Some(0x0178), // 0x9F Ÿ
+];
+
+/// Map a Unicode codepoint to its CP1252 byte, or `None` if it is not
+/// representable in CP1252.
+fn cp1252_encode_byte(cp: u32) -> Option<u8> {
+    // 0x00..=0x7F and 0xA0..=0xFF map straight through (== Latin-1).
+    if cp < 0x80 || (0xA0..=0xFF).contains(&cp) {
+        return Some(cp as u8);
+    }
+    // Search the high table for a matching codepoint.
+    for (i, slot) in CP1252_HIGH.iter().enumerate() {
+        if *slot == Some(cp) {
+            return Some(0x80 + i as u8);
+        }
+    }
+    None
+}
+
+/// Map a CP1252 byte to its Unicode codepoint, or `None` if the byte is
+/// undefined.
+pub fn cp1252_decode_codepoint(byte: u8) -> Option<u32> {
+    if byte < 0x80 || byte >= 0xA0 {
+        Some(byte as u32)
+    } else {
+        CP1252_HIGH[(byte - 0x80) as usize]
+    }
+}
+
+/// Encode a string to CP1252, honouring the `errors` handler (mirrors CPython's
+/// `charmap` codec: undefined characters raise with reason
+/// "character maps to <undefined>").
+fn encode_cp1252(source: &str, errors: &str) -> Result<Value> {
+    let cps: Vec<u32> = cesu8_codepoints(source).collect();
+    let mut out = Vec::with_capacity(source.len());
+    let mut idx = 0usize;
+    while idx < cps.len() {
+        let cp = cps[idx];
+        if let Some(b) = cp1252_encode_byte(cp) {
+            out.push(b);
+            idx += 1;
+            continue;
+        }
+        match errors {
+            "ignore" => idx += 1,
+            "replace" => {
+                out.push(b'?');
+                idx += 1;
+            }
+            "backslashreplace" => {
+                out.extend_from_slice(&escape_codepoint_backslash(cp));
+                idx += 1;
+            }
+            "xmlcharrefreplace" => {
+                out.extend_from_slice(format!("&#{};", cp).as_bytes());
+                idx += 1;
+            }
+            "strict" => {
+                let run_start = idx;
+                let mut run_end = idx + 1;
+                while run_end < cps.len() && cp1252_encode_byte(cps[run_end]).is_none() {
+                    run_end += 1;
+                }
+                return Err(PyError::UnicodeEncodeError {
+                    encoding: "charmap".to_string(),
+                    object: source.to_string(),
+                    start: run_start,
+                    end: run_end,
+                    reason: "character maps to <undefined>".to_string(),
+                });
+            }
+            other => {
+                return Err(PyError::named(
+                    "LookupError",
+                    format!("unknown error handler name '{other}'"),
+                ));
+            }
+        }
+    }
+    Ok(Value::bytes(out))
+}
+
+/// `\xHH` / `\uHHHH` / `\UHHHHHHHH` escape bytes for one codepoint.
+fn escape_codepoint_backslash(cp: u32) -> Vec<u8> {
+    if cp < 0x100 {
+        format!("\\x{:02x}", cp).into_bytes()
+    } else if cp < 0x10000 {
+        format!("\\u{:04x}", cp).into_bytes()
+    } else {
+        format!("\\U{:08x}", cp).into_bytes()
+    }
+}
+
+/// `str.encode('unicode_escape')` — Python string-escape representation.
+///
+/// Printable ASCII (0x20..=0x7E) emits literally except backslash (`\\`).
+/// `\n`/`\t`/`\r` get their short escapes; all other codepoints become
+/// `\xHH` / `\uHHHH` / `\UHHHHHHHH`.  Always succeeds (no error handler needed),
+/// matching CPython.
+fn encode_unicode_escape(source: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(source.len());
+    for cp in cesu8_codepoints(source) {
+        match cp {
+            0x5C => out.extend_from_slice(b"\\\\"),
+            0x0A => out.extend_from_slice(b"\\n"),
+            0x09 => out.extend_from_slice(b"\\t"),
+            0x0D => out.extend_from_slice(b"\\r"),
+            0x20..=0x7E => out.push(cp as u8),
+            _ => out.extend_from_slice(&escape_codepoint_backslash(cp)),
+        }
+    }
+    out
+}
+
+/// `str.encode('raw_unicode_escape')` — like Latin-1, but codepoints >= 0x100
+/// become `\uHHHH` / `\UHHHHHHHH` (bytes 0x00..=0xFF pass through raw).
+fn encode_raw_unicode_escape(source: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(source.len());
+    for cp in cesu8_codepoints(source) {
+        if cp < 0x100 {
+            out.push(cp as u8);
+        } else if cp < 0x10000 {
+            out.extend_from_slice(format!("\\u{:04x}", cp).as_bytes());
+        } else {
+            out.extend_from_slice(format!("\\U{:08x}", cp).as_bytes());
+        }
+    }
+    out
+}
+
+const UTF7_B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// True for the UTF-7 "direct" character set (encoded as a single byte): the
+/// whitespace controls `\t \n \r`, and printable ASCII 0x20..=0x7E except
+/// `+` (0x2B), `\` (0x5C), and `~` (0x7E).  Matches CPython's encoder output.
+fn utf7_is_direct(cp: u32) -> bool {
+    matches!(cp, 0x09 | 0x0A | 0x0D)
+        || (0x20..=0x7E).contains(&cp) && cp != 0x2B && cp != 0x5C && cp != 0x7E
+}
+
+/// True if `cp` is a modified-base64 alphabet byte (`[A-Za-z0-9+/]`).  Used to
+/// decide whether a shifted section needs an explicit `-` shift-out before the
+/// next direct character (CPython only emits `-` when the following byte could
+/// otherwise be misread as continuing the base64 run).
+fn utf7_is_b64(cp: u32) -> bool {
+    matches!(cp, 0x41..=0x5A | 0x61..=0x7A | 0x30..=0x39) || cp == 0x2B || cp == 0x2F
+}
+
+/// `str.encode('utf-7')`.  Direct characters pass through; runs of other
+/// characters are base64-encoded (of their UTF-16BE code units) inside `+...`.
+/// A bare `+` becomes `+-`.  The closing `-` shift-out is emitted only when the
+/// following byte is a base64 char or `-` (or at end of string), matching
+/// CPython byte-for-byte.  A `+` encountered while already inside a shifted
+/// section is folded into the running base64 (CPython does not break the run).
+fn encode_utf7(source: &str) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(source.len());
+    let cps: Vec<u32> = cesu8_codepoints(source).collect();
+    // Pending base64 bit accumulator for the active shifted section.
+    let mut acc: u32 = 0;
+    let mut nbits: u32 = 0;
+    let mut shifted = false;
+
+    // Flush the active shifted section, deciding the trailing `-` from `next`
+    // (the codepoint that terminates the run, or `None` at end of string).
+    fn close_shift(out: &mut Vec<u8>, acc: &mut u32, nbits: &mut u32, next: Option<u32>) {
+        if *nbits > 0 {
+            out.push(UTF7_B64[((*acc << (6 - *nbits)) & 0x3F) as usize]);
+        }
+        *acc = 0;
+        *nbits = 0;
+        // CPython emits the shift-out `-` at end of string, or when the next
+        // direct char is itself a base64 char or `-`.
+        let emit_dash = match next {
+            None => true,
+            Some(c) => c == 0x2D || utf7_is_b64(c),
+        };
+        if emit_dash {
+            out.push(b'-');
+        }
+    }
+
+    let push_unit = |out: &mut Vec<u8>, acc: &mut u32, nbits: &mut u32, unit: u16| {
+        *acc = (*acc << 16) | unit as u32;
+        *nbits += 16;
+        while *nbits >= 6 {
+            *nbits -= 6;
+            out.push(UTF7_B64[((*acc >> *nbits) & 0x3F) as usize]);
+        }
+    };
+
+    let mut idx = 0usize;
+    while idx < cps.len() {
+        let cp = cps[idx];
+        // A direct char (when not already shifted) is emitted literally; if a
+        // shifted section is open it must be closed first.
+        if utf7_is_direct(cp) {
+            if shifted {
+                close_shift(&mut out, &mut acc, &mut nbits, Some(cp));
+                shifted = false;
+            }
+            out.push(cp as u8);
+            idx += 1;
+            continue;
+        }
+        // A `+` outside a shifted section is the literal `+-`; inside a shifted
+        // section it is just another code unit folded into the run.
+        if cp == 0x2B && !shifted {
+            out.extend_from_slice(b"+-");
+            idx += 1;
+            continue;
+        }
+        if !shifted {
+            out.push(b'+');
+            shifted = true;
+        }
+        // Surrogate codepoints encode as their own 16-bit unit; scalars may
+        // produce a surrogate pair.
+        if (0xD800..=0xDFFF).contains(&cp) {
+            push_unit(&mut out, &mut acc, &mut nbits, cp as u16);
+        } else if let Some(ch) = char::from_u32(cp) {
+            let mut buf = [0u16; 2];
+            for u in ch.encode_utf16(&mut buf) {
+                push_unit(&mut out, &mut acc, &mut nbits, *u);
+            }
+        }
+        idx += 1;
+    }
+    if shifted {
+        close_shift(&mut out, &mut acc, &mut nbits, None);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
