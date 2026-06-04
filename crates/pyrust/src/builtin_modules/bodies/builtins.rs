@@ -7689,6 +7689,11 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         Generator,
         PyInstance(Rc<RefCell<crate::value::PyInstance>>),
         BigRange(crate::value::PyBigInt, crate::value::PyBigInt, crate::value::PyBigInt),
+        // A `BuiltinObject` that is itself an iterator (`reversed`, `enumerate`,
+        // `zip`, `chain`, file objects).  Its `__iter__` returns `self`, so it
+        // is returned unchanged and shares position with the original — never
+        // re-wrapped in a fresh `NativeIterFrame` (#2117).
+        SelfIterator,
         Other,
     }
     let kind = match v.kind() {
@@ -7699,10 +7704,11 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         ValueKind::BigRange { start, stop, step } => {
             IterKind::BigRange(start.clone(), stop.clone(), step.clone())
         }
+        ValueKind::BuiltinObject { ops, .. } if ops.is_iterator() => IterKind::SelfIterator,
         _ => IterKind::Other,
     };
     match kind {
-        IterKind::Generator => Ok(v.clone()),
+        IterKind::Generator | IterKind::SelfIterator => Ok(v.clone()),
         IterKind::BigRange(cur, stop, step) => {
             Ok(Value::generator(Box::new(BigRangeIter { cur, stop, step })))
         }

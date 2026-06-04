@@ -39,3 +39,24 @@ print(next(r))  # 30
 r2 = iter(r)
 print(next(r2))  # 20  (continues from same position)
 print(list(r))  # [10]
+
+# map / filter / zip / enumerate consume the *same* underlying iterator,
+# because they call iter() on it and an iterator's __iter__ returns self.
+# They must not eagerly drain or re-wrap a builtin iterator at construction.
+src = reversed([10, 20, 30, 40])
+next(src)  # drop 40
+mp = map(lambda x: x, src)
+print(next(mp))  # 30  (shares position with src)
+print(next(src))  # 20  (map advanced src)
+print(list(mp))  # [10]
+
+e = enumerate([1, 2, 3, 4])
+next(e)
+fl = filter(lambda t: True, e)
+print(next(fl))  # (1, 2)
+print(next(e))  # (2, 3)  (filter advanced e)
+
+# Constructing map over an iterator is lazy: it pulls nothing up front.
+lazy = reversed([1, 2, 3])
+_m = map(lambda x: x, lazy)
+print(list(lazy))  # [3, 2, 1]  (map hasn't pulled yet, same object)
