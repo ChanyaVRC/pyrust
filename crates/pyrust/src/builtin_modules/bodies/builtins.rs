@@ -1423,6 +1423,8 @@ pyrust_module! {
                             .is_some()
                             || pyrust_builtins::property::property_partial_slot(&callable)
                                 .is_some_and(|slot| slot.is_some())
+                            || pyrust_builtins::type_call_wrapper::as_type_call_wrapper(&callable)
+                                .is_some()
                     }
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
@@ -4575,6 +4577,11 @@ pyrust_module! {
                         .is_some()
                     || pyrust_builtins::property::property_partial_slot(value)
                         .is_some_and(|slot| slot.is_some())
+                    // Issue #2096: the `type.__call__` method-wrapper surfaced
+                    // by `C.__call__` is callable (calling it constructs an
+                    // instance), so `callable(C.__call__)` must agree with
+                    // CPython's `True`.
+                    || pyrust_builtins::type_call_wrapper::as_type_call_wrapper(value).is_some()
             }
             ValueKind::PyInstance(inst) => {
                 let class = Rc::clone(&inst.borrow().class);

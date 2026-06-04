@@ -2,6 +2,7 @@ pub mod bound_method;
 pub mod bytearray;
 pub mod bytes;
 pub mod cached_property;
+pub mod cell;
 pub mod classmethod;
 pub mod code;
 pub mod complex;
@@ -28,6 +29,7 @@ pub mod string;
 pub mod super_bound_builtin;
 pub mod traceback;
 pub mod tuple;
+pub mod type_call_wrapper;
 pub mod unicode_data;
 pub mod union_type;
 
@@ -49,6 +51,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),
         property::TYPE_NAME => Some(property::PROPERTY_OPS),
         cached_property::TYPE_NAME => Some(cached_property::CACHED_PROPERTY_OPS),
+        cell::TYPE_NAME => Some(cell::CELL_OPS),
         bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
         instance_dict::TYPE_NAME => Some(instance_dict::INSTANCE_DICT_OPS),
         mapping_proxy::TYPE_NAME => Some(mapping_proxy::MAPPING_PROXY_OPS),
@@ -59,6 +62,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
         code::TYPE_NAME => Some(code::CODE_OPS),
         traceback::TYPE_NAME => Some(traceback::TRACEBACK_OPS),
+        type_call_wrapper::TYPE_NAME => Some(type_call_wrapper::TYPE_CALL_WRAPPER_OPS),
         union_type::TYPE_NAME => Some(union_type::UNION_TYPE_OPS),
         numeric_attrs_descriptor::GETSET_TYPE_NAME => {
             Some(numeric_attrs_descriptor::GETSET_DESCRIPTOR_OPS)

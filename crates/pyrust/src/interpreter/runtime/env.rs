@@ -478,12 +478,13 @@ impl Interpreter {
                         return Ok(self.module_globals_dict.clone());
                     }
                     "__closure__" => {
-                        // pyrust does not model cell objects; free variables are
-                        // resolved through the captured `env` chain.  CPython
-                        // returns `None` for functions with no free variables;
-                        // we return `None` for all functions (cell modelling is
-                        // tracked separately).
-                        return Ok(Value::none());
+                        // A tuple of `cell` objects (one per free variable, in
+                        // `co_freevars` order), or `None` when the function has
+                        // no free variables (issue #2106).  pyrust resolves free
+                        // variables through the captured `env` chain rather than
+                        // CPython-style cells; `build_closure` recovers the cell
+                        // set from that chain.
+                        return Ok(self.build_closure(func));
                     }
                     "__code__" => {
                         // A lightweight code object carrying the introspection
@@ -1280,6 +1281,23 @@ impl Interpreter {
                     &[Value::py_class(Rc::clone(&class))],
                 );
             }
+        }
+        // Issue #2096: every class is callable (to construct instances) via the
+        // built-in `type` metaclass slot `type.__call__`.  When a class defines
+        // no `__call__` of its own (so the MRO lookup above missed) and its
+        // metaclass is the built-in `type` (so the user-metaclass fallback also
+        // missed), surface `type.__call__` as a `method-wrapper` bound to the
+        // class — exactly as CPython does (`C.__call__ ==
+        // <method-wrapper '__call__' of type object at 0x...>`).  This keeps
+        // `hasattr(C, '__call__')` consistent with `callable(C)`, and
+        // `C.__call__(...)` constructs an instance just like `C(...)`.
+        // Restricted to `__call__` so that other `type`-only dunders that pyrust
+        // does not model are unaffected, and only when no user metaclass
+        // overrides `__call__` (handled by the `metaclass_dunder` path above).
+        if name == "__call__" {
+            return Ok(pyrust_builtins::type_call_wrapper::type_call_wrapper(
+                Value::py_class(Rc::clone(&class)),
+            ));
         }
         let class_name = class.borrow().name.clone();
         Err(PyError::attribute_error(

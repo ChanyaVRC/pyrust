@@ -3755,6 +3755,36 @@ fn has_local_binding_in_current_or_ancestor(env: &EnvRef, name: &str) -> bool {
     find_function_scope_with_local(env, name, true).is_some()
 }
 
+/// Resolve `name` to its captured value in the **non-module** portion of the
+/// `env` chain (issue #2106).  Walks from `env` (the function's captured
+/// enclosing scope) outward, returning the first `values` entry for `name`
+/// found in a function scope (`parent.is_some()`); the module/root env is never
+/// consulted, so a true module global returns `None` and is not reported as a
+/// closure free variable.  Used by `closure_free_vars` to build `__closure__`
+/// cells and `co_freevars`.
+pub(crate) fn lookup_enclosing_function_value(env: &EnvRef, name: &str) -> Option<Value> {
+    let mut current = Some(Rc::clone(env));
+    while let Some(candidate) = current {
+        let (is_function_scope, value, next) = {
+            let borrowed = candidate.borrow();
+            (
+                borrowed.parent.is_some(),
+                borrowed.values.get(name).cloned(),
+                borrowed.parent.clone(),
+            )
+        };
+        if is_function_scope {
+            if let Some(v) = value {
+                if !v.is_unset() {
+                    return Some(v);
+                }
+            }
+        }
+        current = next;
+    }
+    None
+}
+
 fn find_enclosing_local_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
     find_function_scope_with_local(env, name, false)
 }

@@ -43,6 +43,10 @@ pub struct CodeState {
     pub consts: Value,
     /// `co_names` — a tuple of the global/attribute name strings.
     pub names: Value,
+    /// `co_freevars` — a tuple of the free-variable name strings (names bound
+    /// in an enclosing function scope), in CPython's sorted order.  Empty tuple
+    /// when the function is not a closure (issue #2106).
+    pub freevars: Value,
 }
 
 pub struct CodeOps;
@@ -81,6 +85,7 @@ impl BuiltinTypeOps for CodeOps {
             "co_firstlineno" => Some(Value::int(s.firstlineno)),
             "co_consts" => Some(s.consts.clone()),
             "co_names" => Some(s.names.clone()),
+            "co_freevars" => Some(s.freevars.clone()),
             _ => None,
         }
     }
@@ -98,6 +103,7 @@ pub fn code_full(
     firstlineno: i64,
     consts: Vec<Value>,
     names: Vec<Value>,
+    freevars: Vec<Value>,
 ) -> Value {
     let state: Box<dyn Any> = Box::new(CodeState {
         name,
@@ -108,6 +114,7 @@ pub fn code_full(
         firstlineno,
         consts: Value::tuple(consts),
         names: Value::tuple(names),
+        freevars: Value::tuple(freevars),
     });
     Value::builtin_object(CODE_OPS, state)
 }
@@ -124,6 +131,7 @@ pub fn code(name: String, argcount: i64, varnames: Vec<Value>) -> Value {
         0,
         "<unknown>".to_string(),
         0,
+        Vec::new(),
         Vec::new(),
         Vec::new(),
     )
