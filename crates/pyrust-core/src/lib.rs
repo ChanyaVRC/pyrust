@@ -4160,21 +4160,27 @@ pub fn is_exception_instance(instance: &Rc<RefCell<PyInstance>>) -> bool {
 /// [`crate::interpreter::helpers::install_exception_builtins`] in the
 /// `pyrust` crate for where the classes are constructed.
 pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
-    let (name, base, extra_bases) = {
-        let borrowed = class.borrow();
-        (
-            borrowed.name.clone(),
-            borrowed.base.clone(),
-            borrowed.extra_bases.clone(),
-        )
-    };
-    if name == "BaseException" || name == "Exception" || name == "GeneratorExit" {
+    // Walk the base chain by reference — each node is a distinct `RefCell`, so
+    // recursing while the current borrow is held never conflicts.  This is on
+    // the per-raise hot path (`is_exception_class` runs once per construction);
+    // the previous version cloned `name`/`base`/`extra_bases` at every node,
+    // mirroring the same churn #1967 removed from `class_chain_contains_name`.
+    let borrowed = class.borrow();
+    if borrowed.name == "BaseException"
+        || borrowed.name == "Exception"
+        || borrowed.name == "GeneratorExit"
+    {
         return true;
     }
-    if base.is_some_and(|base| class_chain_contains_exception(&base)) {
-        return true;
+    if let Some(base) = &borrowed.base {
+        if class_chain_contains_exception(base) {
+            return true;
+        }
     }
-    extra_bases.iter().any(class_chain_contains_exception)
+    borrowed
+        .extra_bases
+        .iter()
+        .any(class_chain_contains_exception)
 }
 
 /// Walk the class base chain and return `true` if any class in the chain has

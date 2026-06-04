@@ -2238,7 +2238,10 @@ pub(crate) fn instantiate_exception_with_kinds(
     args: Vec<Value>,
     kinds: &ExcClassKinds,
 ) -> Value {
-    let mut attrs = InstanceAttrs::new();
+    // The common case (a plain built-in exception) sets exactly two attributes
+    // — `args` and `__traceback__` — so reserve for them up front to avoid the
+    // Vec growth realloc that would otherwise happen on the second insert.
+    let mut attrs = InstanceAttrs::with_capacity(2);
     // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
     let is_stop_iteration = kinds.stop_iteration;
     let is_syntax_error = kinds.syntax_error;
@@ -2268,11 +2271,14 @@ pub(crate) fn instantiate_exception_with_kinds(
     // PEP 654 (Python 3.11+): BaseExceptionGroup / ExceptionGroup.
     // Both have `.message` (str) and `.exceptions` (tuple of exceptions).
     let is_base_exception_group = kinds.base_exception_group;
-    attrs.insert("args".to_string(), Value::tuple(args.clone()));
+    // Pass `&str` keys (not `String`): `insert` interns the key into a shared
+    // `Rc<str>`, so a temporary `String` per key per raise would be allocated
+    // only to be dropped immediately.
+    attrs.insert("args", Value::tuple(args.clone()));
     // CPython 3.12: every BaseException instance has __traceback__ initialised
     // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
     // real traceback object once the exception propagates through a frame.
-    attrs.insert("__traceback__".to_string(), Value::none());
+    attrs.insert("__traceback__", Value::none());
     if is_stop_iteration {
         let val = args.first().cloned().unwrap_or_else(Value::none);
         attrs.insert("value".to_string(), val);
