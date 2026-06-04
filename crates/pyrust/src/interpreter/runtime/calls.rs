@@ -1020,10 +1020,23 @@ impl Interpreter {
         // built-in data value.  Intercept here — the receiver is already bound,
         // so dispatch directly rather than threading these through every
         // per-type arm below.
-        if method.starts_with("__")
-            && crate::interpreter::is_object_protocol_method(&receiver, method)
-        {
-            return Ok(self.object_protocol_method_result(method, &receiver));
+        if method.starts_with("__") {
+            if crate::interpreter::is_object_protocol_method(&receiver, method) {
+                return Ok(self.object_protocol_method_result(method, &receiver));
+            }
+            // #2191: `__format__` bound on a built-in data value
+            // (`(5).__format__('x')`, `"hi".__format__('>5')`,
+            // `None.__format__('')`, …).  Route through the same
+            // `apply_format_spec` machinery the `format()` builtin uses, so that
+            // `x.__format__(spec)` and `format(x, spec)` agree byte-for-byte.
+            // Only primitives reach here as a bound `__format__` (see
+            // `builtin_has_method`); user `__format__` overrides resolve to a
+            // PyFunction, not this wrapper.  Gated under the `__` prefix so the
+            // common method-name path is untouched.
+            if method == "__format__" {
+                let spec = format_dunder_spec_arg(&receiver, pos)?;
+                return apply_format_spec(&receiver, spec);
+            }
         }
         // `__slots__` member_descriptor's descriptor-protocol methods, invoked
         // directly (`S.x.__get__(inst)`, `S.x.__set__(inst, v)`,
@@ -4626,6 +4639,38 @@ fn value_has_real_format(value: &Value) -> bool {
     )
 }
 
+/// Validate the positional args of a builtin `obj.__format__(spec)` call and
+/// return the borrowed spec string.  Mirrors CPython 3.12's error wording:
+/// a non-`str` spec → `__format__() argument must be str, not <type>`; more
+/// than one argument → `<owner>.__format__() takes exactly one argument (N
+/// given)`, where `<owner>` is the receiver's own type when it defines a real
+/// `__format__` (int/float/str/bool/complex) and `object` otherwise (the
+/// inherited `object.__format__`).  Shared by the two `__format__` method-call
+/// dispatch sites (bound-method wrapper + tagged-container opcode), #2191.
+fn format_dunder_spec_arg<'a>(receiver: &Value, pos: &'a [Value]) -> Result<&'a str> {
+    if pos.len() > 1 {
+        let owner = if value_has_real_format(receiver) {
+            pyrust_core::builtin_type_name(receiver)
+        } else {
+            std::borrow::Cow::Borrowed("object")
+        };
+        return Err(pyrust_core::type_err!(
+            "{}.__format__() takes exactly one argument ({} given)",
+            owner,
+            pos.len()
+        ));
+    }
+    match pos.first() {
+        None => Ok(""),
+        Some(v) => v.as_str().ok_or_else(|| {
+            pyrust_core::type_err!(
+                "__format__() argument must be str, not {}",
+                pyrust_core::builtin_type_name(v)
+            )
+        }),
+    }
+}
+
 #[derive(Debug, Clone)]
 struct FormatSpec {
     fill: char,
@@ -6242,7 +6287,7 @@ impl Interpreter {
     ///      CPython's `object.__format__` behaviour).
     ///
     /// For all other value kinds: delegate straight to `apply_format_spec`.
-    fn dispatch_dunder_format(&mut self, value: &Value, spec: &str) -> Result<Value> {
+    pub(crate) fn dispatch_dunder_format(&mut self, value: &Value, spec: &str) -> Result<Value> {
         let ValueKind::PyInstance(inst) = value.kind() else {
             return apply_format_spec(value, spec);
         };
@@ -7851,13 +7896,29 @@ impl Interpreter {
         // `__reduce__`/`__reduce_ex__`) called directly via the method-call
         // opcode on a container.  Handled here (the per-type `call` below would
         // leak a RuntimeError) so `[1].__dir__()` returns a list.
-        if method.starts_with("__")
-            && crate::interpreter::is_object_protocol_method(&receiver, method)
-        {
-            if !kw.is_empty() {
-                return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
+        if method.starts_with("__") {
+            if crate::interpreter::is_object_protocol_method(&receiver, method) {
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
+                }
+                return Ok(self.object_protocol_method_result(method, &receiver));
             }
-            return Ok(self.object_protocol_method_result(method, &receiver));
+            // Issue #2191: `__format__` called directly via the method-call
+            // opcode on a tagged container (`"hi".__format__('>5')`,
+            // `[1,2].__format__('')`).  Route through `apply_format_spec` so the
+            // result matches `format(receiver, spec)` — otherwise the per-type
+            // `call` below leaks a RuntimeError (`'str' object has no attribute
+            // '__format__'`).  Gated under the `__` prefix so the common
+            // method-name path (`.append`, `.upper`, …) is untouched.
+            if method == "__format__" {
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "__format__() takes no keyword arguments"
+                    ));
+                }
+                let spec = format_dunder_spec_arg(&receiver, &pos)?;
+                return apply_format_spec(&receiver, spec);
+            }
         }
         // Issue #1909: container/sequence protocol dunders called directly via
         // the `obj.__getitem__(i)` method-call opcode (not through the
