@@ -784,9 +784,12 @@ fn str_istitle(s: &str) -> bool {
                 continue;
             }
         };
-        if c.is_uppercase() {
+        // CPython's unicode_istitle treats titlecase (Lt) characters like
+        // uppercase: they must start a word (follow a non-cased character).
+        // Rust's char::is_uppercase covers only Lu, so test Lt explicitly.
+        if c.is_uppercase() || c.general_category() == GeneralCategory::TitlecaseLetter {
             if prev_cased {
-                return false; // uppercase after cased (must follow non-cased)
+                return false; // uppercase/titlecase after cased (must follow non-cased)
             }
             prev_cased = true;
             has_cased = true;
