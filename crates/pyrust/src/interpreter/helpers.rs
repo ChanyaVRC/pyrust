@@ -1947,11 +1947,46 @@ pub(crate) fn mapping_pairs_via_protocol(
         _ => return Ok(None),
     };
     let class = Rc::clone(&inst.borrow().class);
+    // `dict` subclasses (OrderedDict / defaultdict / Counter): their `keys`
+    // is a *builtin* method that is not present in `class.attrs`, so the
+    // user-method `lookup_class_attr("keys")` below returns `None`.  Mirror
+    // the `dict()` constructor's subclass handling so `{**subclass}`
+    // materialises the same pairs as `dict(subclass)` (issue #2190).
+    let getitem = lookup_class_attr(&class, "__getitem__");
+    let is_dict_subclass = primitive_class_by_name("dict")
+        .is_some_and(|dict_class| class_is_subclass_of(&class, &dict_class));
+    if is_dict_subclass {
+        // Concrete builtin backing dict (e.g. OrderedDict) — extract directly.
+        if let Some(backing) = instance_builtin_data(&inst) {
+            if let Some(map) = backing.as_dict() {
+                return Ok(Some(map.clone().into_iter().collect()));
+            }
+        }
+        // No builtin backing (defaultdict / Counter): iterate the instance for
+        // its keys and subscript via `__getitem__`, exactly as `dict()` does.
+        let getitem = match getitem {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let keys = interp.collect_iterable(value)?;
+        let mut pairs: Vec<(PyKey, Value)> = Vec::with_capacity(keys.len());
+        for k in keys {
+            let v = invoke_class_method(
+                interp,
+                getitem.clone(),
+                Value::py_instance(Rc::clone(&inst)),
+                &[ExpandedCallArg { name: None, value: k.clone() }],
+            )?;
+            let key = interp.value_to_pykey(&k)?;
+            pairs.push((key, v));
+        }
+        return Ok(Some(pairs));
+    }
     let keys_method = match lookup_class_attr(&class, "keys") {
         Some(m) => m,
         None => return Ok(None),
     };
-    let getitem = match lookup_class_attr(&class, "__getitem__") {
+    let getitem = match getitem {
         Some(m) => m,
         None => return Ok(None),
     };
