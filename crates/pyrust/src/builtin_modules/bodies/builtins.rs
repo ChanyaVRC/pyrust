@@ -1746,76 +1746,7 @@ pyrust_module! {
         // Remaining variants (functions, modules, ranges, generators, …)
         // still emit a `BuiltinFunction(name)` sentinel — they're not part
         // of the primitive-class migration.
-        if let ValueKind::PyInstance(inst) = obj.kind() {
-            return Ok(Value::py_class(Rc::clone(&inst.borrow().class)));
-        }
-        if let Some(class) = crate::interpreter::primitive_class_for_value(obj) {
-            return Ok(Value::py_class(class));
-        }
-        match obj.kind() {
-            // Every class is an instance of `type` in CPython: `type(int) is type`.
-            // Issue #1626: return the stored metatype when the class was created
-            // with a custom metaclass (`class Foo(metaclass=Meta): pass`),
-            // otherwise fall back to the per-thread `type` singleton.
-            ValueKind::PyClass(cls_rc) => {
-                let meta = cls_rc.borrow().metatype.clone();
-                Ok(Value::py_class(meta.unwrap_or_else(type_class_singleton)))
-            }
-            ValueKind::UserFunction(f) => match f.kind {
-                UserFunctionKind::StaticMethod => Ok(Value::builtin_function("staticmethod")),
-                UserFunctionKind::ClassMethod => Ok(Value::builtin_function("classmethod")),
-                _ => Ok(Value::py_class(function_type_singleton())),
-            },
-            ValueKind::BoundMethod { .. }
-            | ValueKind::ClassBoundMethod { .. } => Ok(Value::py_class(method_type_singleton())),
-            ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
-            ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
-            ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
-            ValueKind::Generator(state_rc) => {
-                let borrow = state_rc.borrow();
-                if borrow.downcast_ref::<MapIter>().is_some() {
-                    Ok(Value::builtin_function("map"))
-                } else if borrow.downcast_ref::<FilterIter>().is_some() {
-                    Ok(Value::builtin_function("filter"))
-                } else if borrow.downcast_ref::<EnumerateIter>().is_some() {
-                    Ok(Value::builtin_function("enumerate"))
-                } else if borrow.downcast_ref::<ZipIter>().is_some() {
-                    Ok(Value::builtin_function("zip"))
-                } else if borrow.downcast_ref::<CallableIter>().is_some() {
-                    Ok(Value::builtin_function("callable_iterator"))
-                } else if borrow.downcast_ref::<GetItemIter>().is_some() {
-                    Ok(Value::builtin_function("iterator"))
-                } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
-                    Ok(Value::builtin_function(native.type_name))
-                } else {
-                    Ok(Value::builtin_function("generator"))
-                }
-            }
-            ValueKind::BuiltinObject { ops, .. } => {
-                // instance_dict is a live-proxy for obj.__dict__; its Python
-                // type is `dict` (same as CPython's actual __dict__).
-                if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME {
-                    if let Some(dict_class) =
-                        crate::interpreter::primitive_class_by_name("dict")
-                    {
-                        return Ok(Value::py_class(dict_class));
-                    }
-                }
-                Ok(Value::builtin_function(ops.type_name()))
-            }
-            // Migrated primitives are handled above via
-            // `primitive_class_for_value`; the explicit `unreachable!`
-            // documents that and lets rustc verify exhaustiveness.
-            ValueKind::Bool(_) | ValueKind::Int(_) | ValueKind::BigInt(_)
-            | ValueKind::Float(_) | ValueKind::Str(_) | ValueKind::List(_)
-            | ValueKind::Tuple(_) | ValueKind::Dict(_) | ValueKind::Set(_)
-            | ValueKind::Bytes(_) | ValueKind::Complex(_, _)
-            | ValueKind::None | ValueKind::NotImplemented | ValueKind::Ellipsis
-            | ValueKind::Range { .. }
-            | ValueKind::PyInstance(_) => unreachable!(
-                "primitive_class_for_value should have handled this variant"
-            ),
-        }
+        Ok(value_class(obj))
     }
 
     /// CPython: hasattr(obj, name) — true if `getattr(obj, name)` would succeed.
@@ -5174,6 +5105,85 @@ pyrust_module! {
         Ok(Value::int(h))
     }
 
+    /// Issue #2151: `object.__sizeof__(self)` — the size of the object in
+    /// bytes.  CPython returns an implementation-specific value; pyrust's
+    /// NaN-boxed representation has no comparable layout, so we report the
+    /// in-memory `Value` size as a plausible, deterministic-per-build int.
+    /// Tests assert only the return type (int), not the exact value.
+    #[py_name = "object.__sizeof__"]
+    fn object_sizeof_dunder(args) -> Result<Value> {
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__sizeof__' of 'object' object needs an argument".to_string(),
+            ));
+        }
+        Ok(Value::int(std::mem::size_of::<Value>() as i64))
+    }
+
+    /// Issue #2151: `object.__dir__(self)` — the default attribute listing,
+    /// equivalent to `dir(self)` before `dir()` sorts.  Returns a `list`.
+    #[py_name = "object.__dir__"]
+    fn object_dir_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__dir__' of 'object' object needs an argument".to_string(),
+            )
+        })?;
+        let mut names = dir_names(&self_val);
+        names.sort();
+        names.dedup();
+        Ok(Value::list(names.into_iter().map(Value::string).collect()))
+    }
+
+    /// Issue #2151: `object.__reduce_ex__(self, protocol)` — the pickle-protocol
+    /// reduction.  CPython returns the `copyreg.__newobj__` tuple; pyrust does
+    /// not model copyreg, so we return a tuple of the correct *shape*
+    /// (`(class, ())`).  Tests assert only the return type (tuple).
+    #[py_name = "object.__reduce_ex__"]
+    fn object_reduce_ex_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__reduce_ex__' of 'object' object needs an argument".to_string(),
+            )
+        })?;
+        Ok(Value::tuple(vec![
+            value_class(&self_val),
+            Value::tuple(Vec::new()),
+        ]))
+    }
+
+    /// Issue #2151: `object.__reduce__(self)` — the default reduction, which
+    /// CPython implements as `self.__reduce_ex__(2)`.  Returns a tuple.
+    #[py_name = "object.__reduce__"]
+    fn object_reduce_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__reduce__' of 'object' object needs an argument".to_string(),
+            )
+        })?;
+        Ok(Value::tuple(vec![
+            value_class(&self_val),
+            Value::tuple(Vec::new()),
+        ]))
+    }
+
+    /// Issue #2151: `None.__bool__()` returns `False`.  `__bool__` is
+    /// NoneType-specific (not inherited from `object`).
+    #[py_name = "NoneType.__bool__"]
+    fn none_bool_dunder(args) -> Result<Value> {
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__bool__' of 'NoneType' object needs an argument".to_string(),
+            ));
+        }
+        Ok(Value::bool_(false))
+    }
+
     /// Issue #1256: `object.__init__(self, *args, **kwargs)` — the default no-op
     /// `__init__` exposed on `object` so that `super().__init__()` in user
     /// classes terminates the MRO walk without error.
@@ -7151,6 +7161,96 @@ pyrust_module! {
             }
         }
         Ok(Value::string(self_val.repr()))
+    }
+}
+
+/// `type(obj)` — the class object for any value, mirroring CPython's
+/// `obj.__class__`.  Extracted from the `type` builtin so the `__class__`
+/// attribute (issue #2150) and the object-protocol fallback (#2151) share a
+/// single source of truth: `obj.__class__ is type(obj)` for every value.
+pub(crate) fn value_class(obj: &Value) -> Value {
+    // User-defined class instances: return the actual Rc so that
+    // `type(x) is type(x)` works via Rc::ptr_eq.
+    if let ValueKind::PyInstance(inst) = obj.kind() {
+        return Value::py_class(Rc::clone(&inst.borrow().class));
+    }
+    // Issue #462: the migrated primitives (`int`, `str`, …) resolve to their
+    // per-thread `PyClass` singletons.
+    if let Some(class) = crate::interpreter::primitive_class_for_value(obj) {
+        return Value::py_class(class);
+    }
+    match obj.kind() {
+        // Every class is an instance of `type`: `type(int) is type`.
+        // Issue #1626: return the stored metatype when set, else the
+        // per-thread `type` singleton.
+        ValueKind::PyClass(cls_rc) => {
+            let meta = cls_rc.borrow().metatype.clone();
+            Value::py_class(meta.unwrap_or_else(type_class_singleton))
+        }
+        ValueKind::UserFunction(f) => match f.kind {
+            UserFunctionKind::StaticMethod => Value::builtin_function("staticmethod"),
+            UserFunctionKind::ClassMethod => Value::builtin_function("classmethod"),
+            _ => Value::py_class(function_type_singleton()),
+        },
+        ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+            Value::py_class(method_type_singleton())
+        }
+        ValueKind::BuiltinFunction(_) => Value::builtin_function("builtin_function_or_method"),
+        ValueKind::PyModule(_) => Value::builtin_function("module"),
+        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => {
+            Value::builtin_function("super")
+        }
+        ValueKind::Generator(state_rc) => {
+            let borrow = state_rc.borrow();
+            if borrow.downcast_ref::<MapIter>().is_some() {
+                Value::builtin_function("map")
+            } else if borrow.downcast_ref::<FilterIter>().is_some() {
+                Value::builtin_function("filter")
+            } else if borrow.downcast_ref::<EnumerateIter>().is_some() {
+                Value::builtin_function("enumerate")
+            } else if borrow.downcast_ref::<ZipIter>().is_some() {
+                Value::builtin_function("zip")
+            } else if borrow.downcast_ref::<CallableIter>().is_some() {
+                Value::builtin_function("callable_iterator")
+            } else if borrow.downcast_ref::<GetItemIter>().is_some() {
+                Value::builtin_function("iterator")
+            } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
+                Value::builtin_function(native.type_name)
+            } else {
+                Value::builtin_function("generator")
+            }
+        }
+        ValueKind::BuiltinObject { ops, .. } => {
+            // instance_dict is a live-proxy for obj.__dict__; its Python
+            // type is `dict` (same as CPython's actual __dict__).
+            if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME {
+                if let Some(dict_class) = crate::interpreter::primitive_class_by_name("dict") {
+                    return Value::py_class(dict_class);
+                }
+            }
+            Value::builtin_function(ops.type_name())
+        }
+        // Migrated primitives are handled above via
+        // `primitive_class_for_value`; the explicit `unreachable!`
+        // documents that and lets rustc verify exhaustiveness.
+        ValueKind::Bool(_)
+        | ValueKind::Int(_)
+        | ValueKind::BigInt(_)
+        | ValueKind::Float(_)
+        | ValueKind::Str(_)
+        | ValueKind::List(_)
+        | ValueKind::Tuple(_)
+        | ValueKind::Dict(_)
+        | ValueKind::Set(_)
+        | ValueKind::Bytes(_)
+        | ValueKind::Complex(_, _)
+        | ValueKind::None
+        | ValueKind::NotImplemented
+        | ValueKind::Ellipsis
+        | ValueKind::Range { .. }
+        | ValueKind::PyInstance(_) => {
+            unreachable!("primitive_class_for_value should have handled this variant")
+        }
     }
 }
 

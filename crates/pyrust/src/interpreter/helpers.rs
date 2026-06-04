@@ -282,6 +282,14 @@ thread_local! {
             "__gt__",
             "__ge__",
             "__format__",
+            // Issue #2151: object-protocol methods every object inherits.
+            // `obj.__sizeof__()` / `obj.__dir__()` / `obj.__reduce__()` /
+            // `obj.__reduce_ex__(p)` resolve here for all values whose class
+            // chains to `object`.
+            "__sizeof__",
+            "__dir__",
+            "__reduce__",
+            "__reduce_ex__",
         ] {
             let qualified: &'static str =
                 Box::leak(format!("object.{dunder}").into_boxed_str());
@@ -745,13 +753,27 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         bytes_class,
         complex_class,
         dict_class,
-        ellipsis_class: make("ellipsis", None),
+        // Issue #2151: NoneType/NotImplementedType/ellipsis/mappingproxy must
+        // inherit from `object` like every other primitive, so that the object
+        // dunders (`__eq__`, `__str__`, `__repr__`, `__hash__`, `__doc__`,
+        // `__sizeof__`, …) resolve for `None`/`NotImplemented`/`...`.  Without
+        // an explicit base these classes ended their MRO at themselves and
+        // exposed *no* dunders at all (`hasattr(None, '__eq__')` was False).
+        ellipsis_class: make("ellipsis", Some(Rc::clone(&obj))),
         float_class,
         frozenset_class,
         list_class,
-        mappingproxy_class: make("mappingproxy", None),
-        none_class: make("NoneType", None),
-        notimplemented_class: make("NotImplementedType", None),
+        mappingproxy_class: make("mappingproxy", Some(Rc::clone(&obj))),
+        none_class: {
+            let c = make("NoneType", Some(Rc::clone(&obj)));
+            // `None.__bool__()` returns False; `__bool__` is NoneType-specific
+            // (not inherited from `object`), so register it on the class.
+            c.borrow_mut()
+                .attrs
+                .insert("__bool__".to_string(), Value::builtin_function("NoneType.__bool__"));
+            c
+        },
+        notimplemented_class: make("NotImplementedType", Some(Rc::clone(&obj))),
         set_class,
         str_class,
         tuple_class,
