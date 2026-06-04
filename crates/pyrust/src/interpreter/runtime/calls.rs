@@ -8865,6 +8865,7 @@ impl Interpreter {
         nargs: u8,
         code: &crate::bytecode::FnCode,
         call_site_pc: usize,
+        cur_line: u32,
     ) -> Result<Value> {
         let method: &str = code.names.get(name_idx as usize)
             .ok_or_else(|| PyError::Runtime(format!("bytecode error: name index {name_idx} out of range")))?
@@ -8933,6 +8934,18 @@ impl Interpreter {
 
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(&obj_val, method)?;
+                // Publish the register-resident current line before invoking
+                // `sys._getframe()` — which compiles to a CallMethod on the
+                // `sys` module (registered name `"sys._getframe"`) — so
+                // `f_lineno` reads the call's line (issue #2185).  Gated on the
+                // `_getframe` name (a cheap compare that short-circuits
+                // otherwise); this is already the cold generic path (tagged
+                // containers and cached methods returned above), so the common
+                // `x.append()` / `s.upper()` calls pay nothing.
+                if matches!(method_val.kind(), ValueKind::BuiltinFunction(n) if n.ends_with("_getframe"))
+                {
+                    pyrust_core::set_current_vm_line(cur_line);
+                }
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                 buf.clear();
                 for arg in args {

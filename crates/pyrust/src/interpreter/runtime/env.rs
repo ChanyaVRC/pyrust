@@ -801,9 +801,13 @@ impl Interpreter {
                             }
                             return Ok(Value::none());
                         }
-                        // gi_frame and gi_code: pyrust does not expose frame/code
-                        // objects; return None to avoid AttributeError (issue #1270).
-                        "gi_frame" => return Ok(Value::none()),
+                        // gi_frame: the suspended generator's frame object (or
+                        // None once exhausted), built from the retained FnCode
+                        // (issue #2185).
+                        "gi_frame" => return Ok(self.build_generator_frame_object(frame)),
+                        // gi_code: pyrust does not expose a standalone code
+                        // object for the generator here; return None to avoid
+                        // AttributeError (issue #1270).
                         "gi_code" => return Ok(Value::none()),
                         _ => {}
                     }

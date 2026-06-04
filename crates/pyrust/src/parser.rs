@@ -1034,6 +1034,10 @@ impl Parser {
     }
 
     fn parse_def(&mut self, decorators: Vec<Expr>, is_async: bool) -> Result<Stmt> {
+        // The `def` keyword's source line is the function's `co_firstlineno`
+        // (CPython 3.12 reports the `def` line even for decorated functions),
+        // captured before consuming the keyword (issue #2185).
+        let def_lineno = self.current_lineno();
         self.expect(&Token::Def)?;
         let name = self.expect_ident("function name")?;
         // PEP 695: optional `[T, U, ...]` type parameter list before `(`.
@@ -1055,6 +1059,7 @@ impl Parser {
             params,
             body,
             body_linenos,
+            def_lineno,
             decorators,
             return_annotation,
             is_async,

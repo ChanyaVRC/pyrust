@@ -655,6 +655,12 @@ pub struct FnCode {
     /// the script was compiled with line tracking enabled).  Used by the VM to
     /// update the current-line counter when building tracebacks.
     pub(crate) lineno_table: Vec<u32>,
+    /// 1-based source line of the `def`/`lambda` that produced this code object
+    /// — the function's `co_firstlineno`.  `0` for the module-level `<module>`
+    /// code or when no line information is available.  Set by the compiler from
+    /// the `def` keyword's line (NOT the first body statement, which may be one
+    /// or more lines below for a multi-line signature; issue #2185).
+    pub(crate) first_lineno: u32,
     /// Constant pool (literals used in the function body)
     pub(crate) consts: Vec<Value>,
     /// Name pool (global variable names and attribute names)

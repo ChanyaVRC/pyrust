@@ -4177,6 +4177,10 @@ struct Compiler {
     /// Set by `set_lineno()` before each `compile_stmt` call when line
     /// information is available.  0 when no line info is known.
     current_lineno: u32,
+    /// 1-based source line of the `def`/`lambda` this compiler is the body of
+    /// — emitted into `FnCode::first_lineno` (the function's `co_firstlineno`).
+    /// 0 for the module-level compiler (issue #2185).
+    first_lineno: u32,
     consts: Vec<Value>,
     const_index: HashMap<crate::value::PyKey, u16>,
     names: Vec<String>,
@@ -4669,6 +4673,7 @@ impl Compiler {
             insns: Vec::new(),
             lineno_table: Vec::new(),
             current_lineno: 0,
+            first_lineno: 0,
             consts: Vec::new(),
             const_index: HashMap::new(),
             names: Vec::new(),
@@ -5200,6 +5205,7 @@ impl Compiler {
         Ok(FnCode {
             insns,
             lineno_table: self.lineno_table,
+            first_lineno: self.first_lineno,
             consts: self.consts,
             names: self.names,
             num_regs,
@@ -5517,6 +5523,7 @@ impl Compiler {
                 params,
                 body,
                 body_linenos,
+                def_lineno,
                 decorators,
                 return_annotation,
                 is_async,
@@ -5527,6 +5534,7 @@ impl Compiler {
                     params,
                     body,
                     body_linenos,
+                    *def_lineno,
                     decorators,
                     return_annotation.as_ref(),
                     *is_async,
@@ -8114,12 +8122,14 @@ impl Compiler {
     /// resulting `FnProto`.  Returns `(proto_idx, is_pure, has_kwonly_params)`,
     /// or `None` when a (syntax/limit) error was recorded and the caller must
     /// bail out.
+    #[allow(clippy::too_many_arguments)]
     fn build_def_proto(
         &mut self,
         name: &str,
         params: &[FunctionParam],
         body: &[Stmt],
         body_linenos: &[u32],
+        def_lineno: u32,
         return_annotation: Option<&Expr>,
         is_async: bool,
     ) -> Option<(u8, bool, bool)> {
@@ -8283,6 +8293,9 @@ impl Compiler {
             // registers and would bypass keyword-only enforcement on self-calls.
             sub.pure_locals.insert(name.to_string());
         }
+        // `co_firstlineno`: the `def`/`lambda` line, recorded on the body's
+        // FnCode (issue #2185).
+        sub.first_lineno = def_lineno;
         sub.compile_block_with_linenos(body, body_linenos);
         let inner_code = match sub.finish() {
             Ok(c) => c,
@@ -8510,12 +8523,14 @@ impl Compiler {
         Some(val_reg)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_def(
         &mut self,
         name: &str,
         params: &[FunctionParam],
         body: &[Stmt],
         body_linenos: &[u32],
+        def_lineno: u32,
         decorators: &[Expr],
         return_annotation: Option<&Expr>,
         is_async: bool,
@@ -8526,6 +8541,7 @@ impl Compiler {
             params,
             body,
             body_linenos,
+            def_lineno,
             return_annotation,
             is_async,
         ) {
@@ -11445,7 +11461,20 @@ impl Compiler {
         // Convert lambda body into an implicit return statement.
         let body_stmts = vec![Stmt::Return(Some(body.clone()))];
         let temp_name = "<lambda>";
-        self.compile_def(temp_name, params, &body_stmts, &[], &[], None, false, &[]);
+        // A lambda's `co_firstlineno` is the source line it appears on; use the
+        // statement line currently being compiled (issue #2185).
+        let lambda_lineno = self.current_lineno;
+        self.compile_def(
+            temp_name,
+            params,
+            &body_stmts,
+            &[],
+            lambda_lineno,
+            &[],
+            None,
+            false,
+            &[],
+        );
         // compile_def stored the result in local or global named "<lambda>".
         // We need to return the register it's in.
         // Actually compile_def uses compile_store_name which may put it in a

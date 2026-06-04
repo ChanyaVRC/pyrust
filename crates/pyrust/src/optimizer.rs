@@ -192,6 +192,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     FnCode {
         insns,
         lineno_table,
+        first_lineno: code.first_lineno,
         consts,
         names,
         num_regs,
