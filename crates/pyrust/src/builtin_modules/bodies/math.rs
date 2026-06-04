@@ -942,6 +942,137 @@ pyrust_module! {
         };
         Ok(Value::bool_(result))
     }
+
+    /// CPython: math.fsum(iterable) → float.  Full-precision (exactly rounded)
+    /// sum of an iterable of floats, using Shewchuk's algorithm.
+    /// <https://docs.python.org/3/library/math.html#math.fsum>
+    fn fsum(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            // CPython: "math.fsum() takes exactly one argument (N given)".
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let items = _interp.collect_iterable(&args[0].value)?;
+        let mut values = Vec::with_capacity(items.len());
+        for item in &items {
+            values.push(math_arg_to_float(_interp, item)?);
+        }
+        Ok(Value::float(fsum_impl(&values)?))
+    }
+
+    /// CPython: math.sumprod(p, q) → number.  Sum of products of two iterables
+    /// (Python 3.12+).  Returns an exact int when every element of both
+    /// iterables is integral, a compensated-summation float for float/int
+    /// elements, and otherwise falls back to the generic `*`/`+` operators.
+    /// Raises ValueError if the iterables differ in length.
+    /// <https://docs.python.org/3/library/math.html#math.sumprod>
+    fn sumprod(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            // CPython (Argument Clinic, bare name): "sumprod expected 2
+            // arguments, got N" — distinct from the single_float wording.
+            return Err(PyError::named(
+                "TypeError",
+                format!("sumprod expected 2 arguments, got {}", args.len()),
+            ));
+        }
+        let p_items = _interp.collect_iterable(&args[0].value)?;
+        let q_items = _interp.collect_iterable(&args[1].value)?;
+        if p_items.len() != q_items.len() {
+            return Err(PyError::named(
+                "ValueError",
+                "Inputs are not the same length".to_string(),
+            ));
+        }
+        // CPython's math_sumprod_impl picks a path per pair (Modules/mathmodule.c):
+        //  (1) both exact ints  -> exact integer accumulation (BigInt here),
+        //  (2) an exact float / exact-int pair -> triple-double float sum,
+        //  (3) anything else (e.g. an object with __mul__) -> the generic
+        //      `*` / `+` operators.
+        // We classify whole iterables up front: all-int -> (1); all
+        // float-path-eligible (exact float or exact int) -> (2); otherwise the
+        // generic operator path (3), which — like CPython — raises TypeError for
+        // objects that define neither `__mul__` nor coercion.
+        let is_int =
+            |v: &Value| matches!(v.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_));
+        let is_flt_eligible = |v: &Value| {
+            matches!(
+                v.kind(),
+                ValueKind::Float(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            )
+        };
+        if p_items.iter().chain(q_items.iter()).all(is_int) {
+            // (1) Exact integer path -> exact `int` (sumprod([1,2,3],[4,5,6]) == 32).
+            let mut acc = PyBigInt::from(0i64);
+            for (pv, qv) in p_items.iter().zip(q_items.iter()) {
+                let a = value_to_bigint_int(_interp, FN_NAME, pv)?;
+                let b = value_to_bigint_int(_interp, FN_NAME, qv)?;
+                acc += a * b;
+            }
+            return bigint_to_int_value(acc);
+        }
+        if p_items.iter().chain(q_items.iter()).all(is_flt_eligible) {
+            // (2) Float path: triple-double compensated sum of products.
+            let mut p = Vec::with_capacity(p_items.len());
+            let mut q = Vec::with_capacity(q_items.len());
+            for v in &p_items {
+                p.push(value_to_float(v, "__SENTINEL__")?);
+            }
+            for v in &q_items {
+                q.push(value_to_float(v, "__SENTINEL__")?);
+            }
+            return Ok(Value::float(sumprod_floats(&p, &q)));
+        }
+        // (3) Generic path: accumulate via the `*` and `+` operators, exactly as
+        // CPython falls back to PyNumber_Multiply / PyNumber_Add.  Objects that
+        // define neither raise TypeError here, matching CPython.
+        let mut acc = Value::int(0);
+        for (pv, qv) in p_items.iter().zip(q_items.iter()) {
+            let prod = _interp.eval_binary(pv.clone(), BinaryOp::Mul, qv.clone())?;
+            acc = _interp.eval_binary(acc, BinaryOp::Add, prod)?;
+        }
+        Ok(acc)
+    }
+
+    /// CPython: math.gamma(x) → float.  The Gamma function.  Poles at
+    /// non-positive integers raise ValueError ("math domain error").
+    /// <https://docs.python.org/3/library/math.html#math.gamma>
+    #[pure]
+    fn gamma(args) -> Result<Value> {
+        let x = single_float(_interp, FN_NAME, args)?;
+        Ok(Value::float(m_tgamma(x)?))
+    }
+
+    /// CPython: math.lgamma(x) → float.  Natural log of |Gamma(x)|.  Poles at
+    /// non-positive integers raise ValueError ("math domain error").
+    /// <https://docs.python.org/3/library/math.html#math.lgamma>
+    #[pure]
+    fn lgamma(args) -> Result<Value> {
+        let x = single_float(_interp, FN_NAME, args)?;
+        Ok(Value::float(m_lgamma(x)?))
+    }
+
+    /// CPython: math.erf(x) → float.  The error function.
+    /// <https://docs.python.org/3/library/math.html#math.erf>
+    #[pure]
+    fn erf(args) -> Result<Value> {
+        let x = single_float(_interp, FN_NAME, args)?;
+        Ok(Value::float(m_erf(x)))
+    }
+
+    /// CPython: math.erfc(x) → float.  The complementary error function.
+    /// <https://docs.python.org/3/library/math.html#math.erfc>
+    #[pure]
+    fn erfc(args) -> Result<Value> {
+        let x = single_float(_interp, FN_NAME, args)?;
+        Ok(Value::float(m_erfc(x)))
+    }
 }
 
 // ── Helpers used by the macro-generated bodies ───────────────────────────────
@@ -1132,9 +1263,13 @@ fn single_float(
 ) -> Result<f64> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 1 {
+        // CPython: "math.<fn>() takes exactly one argument (N given)".
         return Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() takes exactly one argument"),
+            format!(
+                "{fn_name}() takes exactly one argument ({} given)",
+                args.len()
+            ),
         ));
     }
     math_arg_to_float(interp, &args[0].value)
@@ -1514,4 +1649,504 @@ fn bigint_to_int_value(n: PyBigInt) -> Result<Value> {
     } else {
         Ok(Value::bigint(n))
     }
+}
+
+// ── Shewchuk full-precision summation (math.fsum) ────────────────────────────
+
+/// `math.fsum(iterable)` — exactly-rounded sum of an iterable of floats.
+///
+/// Faithful port of CPython 3.12's `math_fsum_impl` (`Modules/mathmodule.c`),
+/// which implements Shewchuk's algorithm: maintain a growing set of
+/// non-overlapping partial sums whose exact (infinite-precision) total equals
+/// the running sum, then round that total to the nearest double once at the end.
+/// This yields the correctly-rounded result even under catastrophic
+/// cancellation (`fsum([1e16, 1, -1e16]) == 1.0`).
+fn fsum_impl(values: &[f64]) -> Result<f64> {
+    // `partials` holds the non-overlapping partial sums, smallest-magnitude
+    // first.  `special_sum` accumulates any non-finite term; `inf_sum` tracks
+    // the running infinity so that `inf + -inf` is detected as NaN.
+    let mut partials: Vec<f64> = Vec::new();
+    let mut special_sum = 0.0f64;
+    let mut inf_sum = 0.0f64;
+
+    for &xsave in values {
+        let mut x = xsave;
+        let mut i = 0usize;
+        // Knuth's two-sum: fold `x` into the running partials, capturing the
+        // exact low-order rounding error of each step as a new partial.
+        for j in 0..partials.len() {
+            let mut y = partials[j];
+            if x.abs() < y.abs() {
+                std::mem::swap(&mut x, &mut y);
+            }
+            let hi = x + y;
+            let yr = hi - x;
+            let lo = y - yr;
+            if lo != 0.0 {
+                partials[i] = lo;
+                i += 1;
+            }
+            x = hi;
+        }
+        partials.truncate(i);
+        if x != 0.0 {
+            if !x.is_finite() {
+                // A non-finite `x` arises either from intermediate overflow or
+                // from a nan/inf in the summands.  If the original element was
+                // finite, this is intermediate overflow — an OverflowError.
+                if xsave.is_finite() {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "intermediate overflow in fsum".to_string(),
+                    ));
+                }
+                if xsave.is_infinite() {
+                    inf_sum += xsave;
+                }
+                special_sum += xsave;
+                partials.clear();
+            } else {
+                partials.push(x);
+            }
+        }
+    }
+
+    if special_sum != 0.0 {
+        if inf_sum.is_nan() {
+            return Err(PyError::named(
+                "ValueError",
+                "-inf + inf in fsum".to_string(),
+            ));
+        }
+        return Ok(special_sum);
+    }
+
+    // Sum the partials from the top (largest magnitude first), stopping as soon
+    // as the running sum becomes inexact, then apply CPython's half-even
+    // rounding fix-up across the remaining partials.
+    let mut n = partials.len();
+    let mut hi = 0.0f64;
+    let mut lo = 0.0f64;
+    if n > 0 {
+        n -= 1;
+        hi = partials[n];
+        while n > 0 {
+            let x = hi;
+            n -= 1;
+            let y = partials[n];
+            hi = x + y;
+            let yr = hi - x;
+            lo = y - yr;
+            if lo != 0.0 {
+                break;
+            }
+        }
+        // Half-even rounding across multiple partials so that, e.g.,
+        // fsum([1e-16, 1, 1e16]) rounds the last digit up to two, guaranteeing
+        // commutativity.
+        if n > 0
+            && ((lo < 0.0 && partials[n - 1] < 0.0) || (lo > 0.0 && partials[n - 1] > 0.0))
+        {
+            let y = lo * 2.0;
+            let x = hi + y;
+            let yr = x - hi;
+            if y == yr {
+                hi = x;
+            }
+        }
+    }
+    Ok(hi)
+}
+
+// ── sumprod (math.sumprod) ───────────────────────────────────────────────────
+
+/// A double-double `(hi, lo)` pair, matching CPython's `DoubleLength`.
+#[derive(Clone, Copy)]
+struct DoubleLength {
+    hi: f64,
+    lo: f64,
+}
+
+/// Error-free transformation of a sum (CPython `dl_sum`, Algorithm 3.1).
+#[inline]
+fn dl_sum(a: f64, b: f64) -> DoubleLength {
+    let x = a + b;
+    let z = x - a;
+    let y = (a - (x - z)) + (b - z);
+    DoubleLength { hi: x, lo: y }
+}
+
+/// Error-free transformation of a product via FMA (CPython `dl_mul`,
+/// Algorithm 3.5 — the `UNRELIABLE_FMA`-off path used on modern hardware).
+#[inline]
+fn dl_mul(x: f64, y: f64) -> DoubleLength {
+    let z = x * y;
+    let zz = x.mul_add(y, -z);
+    DoubleLength { hi: z, lo: zz }
+}
+
+/// A triple-double accumulator, matching CPython's `TripleLength`.
+#[derive(Clone, Copy)]
+struct TripleLength {
+    hi: f64,
+    lo: f64,
+    tiny: f64,
+}
+
+const TL_ZERO: TripleLength = TripleLength {
+    hi: 0.0,
+    lo: 0.0,
+    tiny: 0.0,
+};
+
+/// Fused multiply-add into the triple-double total (CPython `tl_fma`,
+/// Algorithm 5.10 with SumKVert for K=3).
+#[inline]
+fn tl_fma(x: f64, y: f64, total: TripleLength) -> TripleLength {
+    let pr = dl_mul(x, y);
+    let sm = dl_sum(total.hi, pr.hi);
+    let r1 = dl_sum(total.lo, pr.lo);
+    let r2 = dl_sum(r1.hi, sm.lo);
+    TripleLength {
+        hi: sm.hi,
+        lo: r2.hi,
+        tiny: total.tiny + r1.lo + r2.lo,
+    }
+}
+
+/// Collapse the triple-double total to a rounded double (CPython `tl_to_d`).
+#[inline]
+fn tl_to_d(total: TripleLength) -> f64 {
+    let last = dl_sum(total.lo, total.hi);
+    total.tiny + last.lo + last.hi
+}
+
+/// Float path of `math.sumprod`: triple-double compensated accumulation of the
+/// products, matching CPython 3.12's `math_sumprod_impl` float path.  When a
+/// running step overflows to a non-finite value, CPython finalises the
+/// triple-double total and continues with a plain `total + p*q` accumulation;
+/// we mirror that fallback so `sumprod([1e308], [2.0]) == inf`.
+fn sumprod_floats(p: &[f64], q: &[f64]) -> f64 {
+    let mut flt_total = TL_ZERO;
+    let mut fell_back = false;
+    let mut plain_total = 0.0f64;
+    for (&a, &b) in p.iter().zip(q.iter()) {
+        if fell_back {
+            plain_total += a * b;
+            continue;
+        }
+        let new_total = tl_fma(a, b, flt_total);
+        if new_total.hi.is_finite() {
+            flt_total = new_total;
+        } else {
+            // Overflow: finalise the compensated total and switch to the plain
+            // running-sum fallback for this and the remaining terms.
+            plain_total = tl_to_d(flt_total) + a * b;
+            fell_back = true;
+        }
+    }
+    if fell_back {
+        plain_total
+    } else {
+        tl_to_d(flt_total)
+    }
+}
+
+// CPython 3.12 implements gamma/lgamma itself (to dodge poor-quality libm
+// tgamma) but evaluates the transcendental sub-terms (`exp`, `pow`, `log`,
+// `sin`, `cos`) and the whole of `erf`/`erfc` through the platform libm.  To
+// reproduce CPython's results to the last ULP we route the same sub-calls
+// through libm rather than Rust's `std` math (which can round the final bit
+// differently from glibc).
+unsafe extern "C" {
+    fn erf(x: f64) -> f64;
+    fn erfc(x: f64) -> f64;
+    fn log(x: f64) -> f64;
+    fn exp(x: f64) -> f64;
+    fn pow(x: f64, y: f64) -> f64;
+    fn sin(x: f64) -> f64;
+    fn cos(x: f64) -> f64;
+}
+
+#[inline]
+fn libm_log(x: f64) -> f64 {
+    // SAFETY: libm `log` has no preconditions.
+    unsafe { log(x) }
+}
+#[inline]
+fn libm_exp(x: f64) -> f64 {
+    // SAFETY: libm `exp` has no preconditions.
+    unsafe { exp(x) }
+}
+#[inline]
+fn libm_pow(x: f64, y: f64) -> f64 {
+    // SAFETY: libm `pow` has no preconditions.
+    unsafe { pow(x, y) }
+}
+
+// ── Lanczos gamma / lgamma (math.gamma, math.lgamma) ─────────────────────────
+//
+// Constants and algorithm ported verbatim from CPython 3.12 Modules/mathmodule.c.
+
+const PI_M: f64 = 3.141592653589793238462643383279502884197;
+const LANCZOS_G: f64 = 6.024680040776729583740234375;
+const LANCZOS_G_MINUS_HALF: f64 = 5.524680040776729583740234375;
+const LANCZOS_NUM_COEFFS: [f64; 13] = [
+    23531376880.410759688572007674451636754734846804940,
+    42919803642.649098768957899047001988850926355848959,
+    35711959237.355668049440185451547166705960488635843,
+    17921034426.037209699919755754458931112671403265390,
+    6039542586.3520280050642916443072979210699388420708,
+    1439720407.3117216736632230727949123939715485786772,
+    248874557.86205415651146038641322942321632125127801,
+    31426415.585400194380614231628318205362874684987640,
+    2876370.6289353724412254090516208496135991145378768,
+    186056.26539522349504029498971604569928220784236328,
+    8071.6720023658162106380029022722506138218516325024,
+    210.82427775157934587250973392071336271166969580291,
+    2.5066282746310002701649081771338373386264310793408,
+];
+const LANCZOS_DEN_COEFFS: [f64; 13] = [
+    0.0,
+    39916800.0,
+    120543840.0,
+    150917976.0,
+    105258076.0,
+    45995730.0,
+    13339535.0,
+    2637558.0,
+    357423.0,
+    32670.0,
+    1925.0,
+    66.0,
+    1.0,
+];
+
+const NGAMMA_INTEGRAL: usize = 23;
+const GAMMA_INTEGRAL: [f64; NGAMMA_INTEGRAL] = [
+    1.0,
+    1.0,
+    2.0,
+    6.0,
+    24.0,
+    120.0,
+    720.0,
+    5040.0,
+    40320.0,
+    362880.0,
+    3628800.0,
+    39916800.0,
+    479001600.0,
+    6227020800.0,
+    87178291200.0,
+    1307674368000.0,
+    20922789888000.0,
+    355687428096000.0,
+    6402373705728000.0,
+    121645100408832000.0,
+    2432902008176640000.0,
+    51090942171709440000.0,
+    1124000727777607680000.0,
+];
+
+/// Lanczos sum used by both gamma and lgamma.  Port of CPython `lanczos_sum`:
+/// evaluate the rational approximation, choosing the Horner order that
+/// minimises rounding error based on the magnitude of `x`.
+fn lanczos_sum(x: f64) -> f64 {
+    let mut num = 0.0f64;
+    let mut den = 0.0f64;
+    if x < 5.0 {
+        for i in (0..13).rev() {
+            num = num * x + LANCZOS_NUM_COEFFS[i];
+            den = den * x + LANCZOS_DEN_COEFFS[i];
+        }
+    } else {
+        for i in 0..13 {
+            num = num / x + LANCZOS_NUM_COEFFS[i];
+            den = den / x + LANCZOS_DEN_COEFFS[i];
+        }
+    }
+    num / den
+}
+
+/// `sin(pi*x)` computed accurately via argument reduction.  Port of CPython
+/// `sinpi`.
+fn sinpi(x: f64) -> f64 {
+    let y = x.abs() % 2.0;
+    let n = (2.0 * y).round() as i64;
+    // SAFETY: libm `sin`/`cos` have no preconditions.
+    let r = unsafe {
+        match n {
+            0 => sin(PI_M * y),
+            1 => cos(PI_M * (y - 0.5)),
+            2 => sin(PI_M * (1.0 - y)),
+            3 => -cos(PI_M * (y - 1.5)),
+            4 => sin(PI_M * (y - 2.0)),
+            _ => unreachable!("sinpi: reduced argument out of range"),
+        }
+    };
+    1.0_f64.copysign(x) * r
+}
+
+/// `math.gamma(x)` — Gamma function.  Faithful port of CPython 3.12 `m_tgamma`.
+fn m_tgamma(x: f64) -> Result<f64> {
+    // NaN and +inf pass through unchanged.
+    if x.is_nan() || (x.is_infinite() && x > 0.0) {
+        return Ok(x);
+    }
+    // -inf: tgamma(-inf) is NaN — a domain error in CPython.
+    if x.is_infinite() {
+        return Err(PyError::named(
+            "ValueError",
+            "math domain error".to_string(),
+        ));
+    }
+    // ±0.0: pole (tgamma → ±inf, divide-by-zero) → domain error.
+    if x == 0.0 {
+        return Err(PyError::named(
+            "ValueError",
+            "math domain error".to_string(),
+        ));
+    }
+    // Integer arguments: small non-negative ints are exact; negative ints poles.
+    if x == x.floor() {
+        if x < 0.0 {
+            return Err(PyError::named(
+                "ValueError",
+                "math domain error".to_string(),
+            ));
+        }
+        if (x as usize) <= NGAMMA_INTEGRAL {
+            return Ok(GAMMA_INTEGRAL[x as usize - 1]);
+        }
+    }
+    let absx = x.abs();
+    // Tiny arguments: tgamma(x) ~ 1/x near 0.
+    if absx < 1e-20 {
+        let r = 1.0 / x;
+        if r.is_infinite() {
+            return Err(PyError::named(
+                "OverflowError",
+                "math range error".to_string(),
+            ));
+        }
+        return Ok(r);
+    }
+    // Large arguments: any |x| >= 200 overflows (or underflows for x < 0).
+    if absx > 200.0 {
+        if x < 0.0 {
+            return Ok(0.0 / sinpi(x));
+        }
+        return Err(PyError::named(
+            "OverflowError",
+            "math range error".to_string(),
+        ));
+    }
+
+    let y = absx + LANCZOS_G_MINUS_HALF;
+    // Compute z = (absx - 0.5) / y accurately (CPython's careful subtraction).
+    let z = if absx > LANCZOS_G_MINUS_HALF {
+        let q = y - absx;
+        q - LANCZOS_G_MINUS_HALF
+    } else {
+        let q = y - LANCZOS_G_MINUS_HALF;
+        q - absx
+    };
+    let z = z * LANCZOS_G / y;
+
+    let mut r;
+    if x < 0.0 {
+        r = -PI_M / sinpi(absx) / absx * libm_exp(y) / lanczos_sum(absx);
+        r -= z * r;
+        if absx < 140.0 {
+            r /= libm_pow(y, absx - 0.5);
+        } else {
+            let sqrtpow = libm_pow(y, absx / 2.0 - 0.25);
+            r /= sqrtpow;
+            r /= sqrtpow;
+        }
+    } else {
+        r = lanczos_sum(absx) / libm_exp(y);
+        r += z * r;
+        if absx < 140.0 {
+            r *= libm_pow(y, absx - 0.5);
+        } else {
+            let sqrtpow = libm_pow(y, absx / 2.0 - 0.25);
+            r *= sqrtpow;
+            r *= sqrtpow;
+        }
+    }
+    if r.is_infinite() {
+        return Err(PyError::named(
+            "OverflowError",
+            "math range error".to_string(),
+        ));
+    }
+    Ok(r)
+}
+
+/// `math.lgamma(x)` — natural log of |Gamma(x)|.  Faithful port of CPython 3.12
+/// `m_lgamma`.  The statement order matches CPython exactly (compute `r` for the
+/// positive branch, then apply the reflection formula on that same `r` when
+/// `x < 0`) so the last-ULP rounding agrees; the `log` calls go through libm for
+/// the same reason.
+fn m_lgamma(x: f64) -> Result<f64> {
+    // log(pi) — CPython's `logpi` constant from mathmodule.c.
+    const LOGPI: f64 = 1.144729885849400174143427351353058711647;
+    if x.is_nan() {
+        return Ok(x);
+    }
+    if x.is_infinite() {
+        return Ok(f64::INFINITY);
+    }
+    // Integer arguments <= 2: lgamma(1) == lgamma(2) == 0; non-positive poles.
+    if x == x.floor() && x <= 2.0 {
+        if x <= 0.0 {
+            return Err(PyError::named(
+                "ValueError",
+                "math domain error".to_string(),
+            ));
+        }
+        return Ok(0.0);
+    }
+    let absx = x.abs();
+    if absx < 1e-20 {
+        return Ok(-libm_log(absx));
+    }
+    // Lanczos' formula, computed in CPython's statement order.
+    let mut r = libm_log(lanczos_sum(absx)) - LANCZOS_G;
+    r += (absx - 0.5) * (libm_log(absx + LANCZOS_G - 0.5) - 1.0);
+    if x < 0.0 {
+        // Reflection formula for negative x.
+        r = LOGPI - libm_log(sinpi(absx).abs()) - libm_log(absx) - r;
+    }
+    if r.is_infinite() {
+        return Err(PyError::named(
+            "OverflowError",
+            "math range error".to_string(),
+        ));
+    }
+    Ok(r)
+}
+
+// ── erf / erfc (math.erf, math.erfc) ─────────────────────────────────────────
+//
+// CPython 3.12 registers erf/erfc via `FUNC1A(erf, erf, ...)`, i.e. it forwards
+// directly to the C standard library's `erf` / `erfc` (unlike gamma/lgamma,
+// which CPython implements itself to dodge poor-quality libm tgamma).  To match
+// CPython to the last ULP we likewise call the platform libm functions (declared
+// in the libm extern block above) rather than re-deriving a series /
+// continued-fraction approximation (which diverged from libm by hundreds of ULP
+// for large |x|).
+
+/// `math.erf(x)` — forwards to libm `erf`, matching CPython 3.12.
+fn m_erf(x: f64) -> f64 {
+    // SAFETY: `erf` is a pure libm function with no preconditions.
+    unsafe { erf(x) }
+}
+
+/// `math.erfc(x)` — forwards to libm `erfc`, matching CPython 3.12.
+fn m_erfc(x: f64) -> f64 {
+    // SAFETY: `erfc` is a pure libm function with no preconditions.
+    unsafe { erfc(x) }
 }
