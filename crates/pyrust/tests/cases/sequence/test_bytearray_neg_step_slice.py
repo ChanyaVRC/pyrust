@@ -48,3 +48,26 @@ print(bytes(ba3))  # b'abcj'
 ba4 = bytearray(b"abcdefghij")
 del ba4[::-2]
 print(bytes(ba4))  # b'acegi'
+
+# Out-of-range positive start with a negative step != -1 must clamp start to
+# len-1, not len (otherwise the strided walk starts one position too high).
+print(bytes(ba[10::-2]))  # b'jhfdb'
+print(bytes(ba[100::-3]))  # b'jgda'
+print(bytes(ba[10:0:-2]))  # b'jhfd'
+
+# Start more negative than -len with a negative step is empty, not index 0.
+print(bytes(ba[-11::-1]))  # b''
+print(bytes(ba[-100::-2]))  # b''
+
+# step==1 with start > stop is an empty/reversed range: get is empty, deletion
+# is a no-op, and assignment inserts at start (must not panic on drain/splice).
+print(bytes(ba[5:2]))  # b''
+ba5 = bytearray(b"abcdefghij")
+del ba5[1:0]
+print(bytes(ba5))  # b'abcdefghij'
+ba6 = bytearray(b"abcdefghij")
+ba6[5:2] = b"XY"
+print(bytes(ba6))  # b'abcdeXYfghij'
+ba7 = bytearray(b"abcdefghij")
+ba7[5:2] = b""
+print(bytes(ba7))  # b'abcdefghij'
