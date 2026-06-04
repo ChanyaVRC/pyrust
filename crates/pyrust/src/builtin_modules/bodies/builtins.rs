@@ -29,7 +29,7 @@ use crate::interpreter::{
     invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
-    reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
+    bind_constructor_kwargs, reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
     sync_module_env_to_globals_dict, type_class_singleton,
     unicode_exc_set_attrs,
@@ -2506,22 +2506,55 @@ pyrust_module! {
         min_max_impl(_interp, args, true, FN_NAME)
     }
 
-    /// CPython: round(number[, ndigits]) — banker's rounding.
+    /// CPython: round(number, ndigits=None) — banker's rounding.
     /// <https://docs.python.org/3/library/functions.html#round>
     ///
-    /// Migrated to the typed-signature dialect (#400).  A single
-    /// `#[positional_only]` signature is used (not an overload set) so
-    /// that `#[default(None)]` on `ndigits` is legal — the macro forbids
-    /// defaults in overload sets.  `PyValue` is used for both `x` and
-    /// `ndigits` so the body can dispatch on `ValueKind` for full CPython
-    /// parity: `bool ⊆ int` (both round unchanged), `float` uses
-    /// half-even rounding, and everything else raises `TypeError`.
-    fn round(
-        #[positional_only] x: PyValue,
-        #[positional_only]
-        #[default(None)]
-        ndigits: Option<PyValue>,
-    ) -> Result<Value> {
+    /// Both `number` and `ndigits` are keyword-or-positional in CPython 3.12
+    /// (#2180), so this uses the raw-`args` form + `bind_constructor_kwargs`
+    /// rather than the typed-signature dialect (whose unknown-keyword wording
+    /// differs from the C-clinic "invalid keyword argument" message round
+    /// emits).  `x`/`ndigits` are resolved to `PyValue` so the body can
+    /// dispatch on `ValueKind` for full CPython parity: `bool ⊆ int` (both
+    /// round unchanged), `float` uses half-even rounding, and everything else
+    /// raises `TypeError`.
+    fn round(args) -> Result<Value> {
+        // CPython 3.12: round(number, ndigits=None) — both `number` and
+        // `ndigits` are keyword-or-positional.  Bind kwargs (with the
+        // C-clinic "invalid keyword argument" wording) before the existing
+        // positional dispatch below.
+        //
+        // Unlike the int/complex/str constructors, `round` is an argument-clinic
+        // function whose *missing required positional* check precedes the
+        // unknown-keyword check: `round(x=3.5)` / `round(foo=1)` report
+        // "missing required argument 'number'", not "'x'/'foo' is an invalid
+        // keyword argument".  The arity-overflow check still comes first, so
+        // mirror CPython's exact order: arity, then missing-number, then the
+        // generic keyword binding (which surfaces the remaining errors).
+        if args.len() > 2 {
+            let noun = if args.iter().all(|a| a.name.is_some()) {
+                "keyword arguments"
+            } else {
+                "arguments"
+            };
+            return Err(PyError::named(
+                "TypeError",
+                format!("round() takes at most 2 {noun} ({} given)", args.len()),
+            ));
+        }
+        let number_bound = args
+            .iter()
+            .any(|a| a.name.is_none() || a.name.as_deref() == Some("number"));
+        if !number_bound {
+            return Err(PyError::named(
+                "TypeError",
+                "round() missing required argument 'number' (pos 1)".to_string(),
+            ));
+        }
+        let bound =
+            bind_constructor_kwargs(FN_NAME, args, &["number", "ndigits"], &[true, true], 2)?;
+        // `number` was confirmed bound above; the slot is always populated here.
+        let x: PyValue = PyValue(bound[0].clone().expect("number slot bound"));
+        let ndigits: Option<PyValue> = bound[1].clone().map(PyValue);
         // Classify x first so we can decide whether to validate ndigits.
         // CPython forwards any ndigits type to user-defined __round__ without
         // pre-validating it (round(obj, 3.5) passes 3.5 to __round__), but
@@ -2844,7 +2877,10 @@ pyrust_module! {
     /// `__iter__` and `__next__` when consuming a general iterable (e.g. range,
     /// generator expressions, user-defined iterables).
     fn bytes(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
+        // CPython 3.12: bytes(source, encoding, errors) — source/encoding/
+        // errors are keyword-or-positional.
+        let bound = bind_bytes_like_args(FN_NAME, args)?;
+        let args = &bound[..];
         match args.len() {
             0 => Ok(Value::bytes(Vec::new())),
             1 => match args[0].value.kind() {
@@ -3041,7 +3077,10 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#func-bytearray>
     /// Mirrors `bytes()` but returns a mutable `bytearray` value.
     fn bytearray(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
+        // CPython 3.12: bytearray(source, encoding, errors) — all three are
+        // keyword-or-positional.
+        let bound = bind_bytes_like_args(FN_NAME, args)?;
+        let args = &bound[..];
         match args.len() {
             0 => Ok(pyrust_builtins::bytearray::bytearray(Vec::new())),
             1 => match args[0].value.kind() {
@@ -3153,7 +3192,24 @@ pyrust_module! {
     /// Not marked `#[pure]` because it dispatches user `__complex__`,
     /// `__float__`, and `__index__` on user-defined objects.
     fn complex(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
+        // CPython 3.12: complex(real=0, imag=0) — both keyword-or-positional.
+        let bound = bind_constructor_kwargs(FN_NAME, args, &["real", "imag"], &[true, true], 2)?;
+        // Flatten to positional args.  If `imag` is supplied but `real` is
+        // omitted (`complex(imag=5)`), CPython treats `real` as its default
+        // `0` — fill the interior gap so the two-arg path runs.
+        let mut bound_pos: Vec<ExpandedCallArg> = Vec::with_capacity(2);
+        if bound[1].is_some() && bound[0].is_none() {
+            bound_pos.push(ExpandedCallArg { name: None, value: Value::int(0) });
+            bound_pos.push(ExpandedCallArg { name: None, value: bound[1].clone().unwrap() });
+        } else {
+            for slot in bound.into_iter() {
+                match slot {
+                    Some(v) => bound_pos.push(ExpandedCallArg { name: None, value: v }),
+                    None => break,
+                }
+            }
+        }
+        let args = &bound_pos[..];
 
         // Convert a primitive (non-PyInstance) Value to f64.
         // `type_err_msg` is the full TypeError message to emit for unrecognised kinds.
@@ -3470,59 +3526,75 @@ pyrust_module! {
     /// Not marked `#[pure]` because it dispatches user `__str__` and
     /// (as fallback) `__repr__` on user-defined objects.
     fn str(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            0 => Ok(Value::string(String::new())),
-            1 => Ok(Value::string(render_instance_str(_interp, &args[0].value)?)),
-            2 | 3 => {
-                // str(object, encoding[, errors]) — bytes-to-string decoding form.
-                let bytes = match args[0].value.kind() {
-                    ValueKind::Bytes(rc) => rc.as_slice().to_vec(),
-                    ValueKind::Str(_) => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "decoding str is not supported".to_string(),
-                        ));
-                    }
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "decoding to str: need a bytes-like object, {} found",
-                                pyrust_core::builtin_type_name(&args[0].value)
-                            ),
-                        ));
-                    }
-                };
-                let encoding = match args[1].value.kind() {
-                    ValueKind::Str(s) => s.to_owned(),
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("{FN_NAME}() argument 2 (encoding) must be a str"),
-                        ));
-                    }
-                };
-                let errors = if args.len() == 3 {
-                    match args[2].value.kind() {
-                        ValueKind::Str(s) => s.to_owned(),
-                        _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("{FN_NAME}() argument 3 (errors) must be a str"),
-                            ));
-                        }
-                    }
-                } else {
-                    "strict".to_owned()
-                };
-                pyrust_builtins::bytes::decode_bytes(&bytes, &encoding, &errors)
-            }
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes at most 3 arguments ({} given)", args.len()),
-            )),
+        // CPython 3.12: str(object='', encoding='utf-8', errors='strict') —
+        // all three parameters are keyword-or-positional.
+        let bound = bind_constructor_kwargs(
+            FN_NAME,
+            args,
+            &["object", "encoding", "errors"],
+            &[true, true, true],
+            3,
+        )?;
+        let object = &bound[0];
+        let encoding = &bound[1];
+        let errors = &bound[2];
+
+        // No object → empty string, regardless of encoding/errors (CPython:
+        // `str(encoding='utf-8') == ''`).
+        let Some(object) = object else {
+            return Ok(Value::string(String::new()));
+        };
+
+        // The decoding form is selected when *either* encoding or errors is
+        // supplied; otherwise this is the plain `str(object)` form.
+        if encoding.is_none() && errors.is_none() {
+            return Ok(Value::string(render_instance_str(_interp, object)?));
         }
+
+        // str(object, encoding[, errors]) — bytes-to-string decoding form.
+        let bytes = match object.kind() {
+            ValueKind::Bytes(rc) => rc.as_slice().to_vec(),
+            ValueKind::Str(_) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "decoding str is not supported".to_string(),
+                ));
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "decoding to str: need a bytes-like object, {} found",
+                        pyrust_core::builtin_type_name(object)
+                    ),
+                ));
+            }
+        };
+        let encoding = match encoding {
+            Some(e) => match e.kind() {
+                ValueKind::Str(s) => s.to_owned(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() argument 2 (encoding) must be a str"),
+                    ));
+                }
+            },
+            None => "utf-8".to_owned(),
+        };
+        let errors = match errors {
+            Some(e) => match e.kind() {
+                ValueKind::Str(s) => s.to_owned(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() argument 3 (errors) must be a str"),
+                    ));
+                }
+            },
+            None => "strict".to_owned(),
+        };
+        pyrust_builtins::bytes::decode_bytes(&bytes, &encoding, &errors)
     }
 
     /// CPython: int(x=0, base=10) — integer constructor.
@@ -3530,7 +3602,29 @@ pyrust_module! {
     /// Not marked `#[pure]` because it dispatches user `__int__`, `__index__`,
     /// and `__trunc__` on user-defined objects.
     fn int(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
+        // CPython 3.12: int(x, /, base=10) — `x` positional-only, `base`
+        // keyword-or-positional.  `int(x='5')` → invalid-keyword error;
+        // `int('10', base=2)` is accepted.
+        let bound = bind_constructor_kwargs(FN_NAME, args, &["x", "base"], &[false, true], 2)?;
+        // `int(base=2)` (base supplied, value omitted): CPython raises
+        // `int() missing string argument`, not the default-0 path.
+        if bound[0].is_none() && bound[1].is_some() {
+            return Err(PyError::named(
+                "TypeError",
+                "int() missing string argument".to_string(),
+            ));
+        }
+        // Flatten to positional args (stop at the first unfilled slot — `int`
+        // has no interior optional gaps once the missing-value case above is
+        // handled).
+        let mut bound_pos: Vec<ExpandedCallArg> = Vec::with_capacity(2);
+        for slot in bound.into_iter() {
+            match slot {
+                Some(v) => bound_pos.push(ExpandedCallArg { name: None, value: v }),
+                None => break,
+            }
+        }
+        let args = &bound_pos[..];
         match args.len() {
             0 => Ok(Value::int(0)),
             1 => match args[0].value.kind() {
@@ -3580,33 +3674,7 @@ pyrust_module! {
                     }
                 }
                 ValueKind::Bytes(rc) => {
-                    let repr = args[0].value.repr();
-                    let s = std::str::from_utf8(rc).map_err(|_| {
-                        PyError::named(
-                            "ValueError",
-                            format!("invalid literal for int() with base 10: {repr}"),
-                        )
-                    })?;
-                    let trimmed = s.trim();
-                    let cleaned = int_strip_explicit_base(trimmed, 10).ok_or_else(|| {
-                        PyError::named(
-                            "ValueError",
-                            format!("invalid literal for int() with base 10: {repr}"),
-                        )
-                    })?;
-                    match cleaned.parse::<i64>() {
-                        Ok(v) => Ok(Value::int(v)),
-                        Err(_) => {
-                            // Overflow: try BigInt before giving up.
-                            use num_traits::Num as _;
-                            crate::value::PyBigInt::from_str_radix(&cleaned, 10)
-                                .map(Value::bigint)
-                                .map_err(|_| PyError::named(
-                                    "ValueError",
-                                    format!("invalid literal for int() with base 10: {repr}"),
-                                ))
-                        }
-                    }
+                    int_parse_bytes_like(rc.as_slice(), &args[0].value.repr(), 10)
                 }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
@@ -3707,6 +3775,16 @@ pyrust_module! {
                         ),
                     ))
                 }
+                // bytearray (a BuiltinObject) is bytes-like: decode + parse as
+                // base-10 ASCII, same as the `bytes` arm above (#2077).  Note
+                // CPython's `int()` error uses the *bytes* repr (`b'…'`) even
+                // for a bytearray operand, so render from the byte data.
+                _ if pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).is_some() => {
+                    let data =
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).unwrap();
+                    let repr = Value::bytes(data.clone()).repr();
+                    int_parse_bytes_like(&data, &repr, 10)
+                }
                 _ => Err(PyError::named(
                     "TypeError",
                     format!(
@@ -3774,64 +3852,20 @@ pyrust_module! {
                         }
                     }
                     ValueKind::Bytes(rc) => {
-                        let repr = args[0].value.repr();
-                        let s = std::str::from_utf8(rc).map_err(|_| {
-                            PyError::named(
-                                "ValueError",
-                                format!("invalid literal for int() with base {base_arg}: {repr}"),
-                            )
-                        })?;
-                        let trimmed = s.trim();
-                        if base_arg == 0 {
-                            let (base, digits) =
-                                int_parse_base_zero(trimmed).ok_or_else(|| {
-                                    PyError::named(
-                                        "ValueError",
-                                        format!(
-                                            "invalid literal for int() with base 0: {repr}"
-                                        ),
-                                    )
-                                })?;
-                            match i64::from_str_radix(&digits, base) {
-                                Ok(v) => Ok(Value::int(v)),
-                                Err(_) => {
-                                    // Overflow: try BigInt before giving up.
-                                    use num_traits::Num as _;
-                                    crate::value::PyBigInt::from_str_radix(&digits, base)
-                                        .map(Value::bigint)
-                                        .map_err(|_| PyError::named(
-                                            "ValueError",
-                                            format!("invalid literal for int() with base 0: {repr}"),
-                                        ))
-                                }
-                            }
-                        } else {
-                            let base = base_arg as u32;
-                            let stripped =
-                                int_strip_explicit_base(trimmed, base).ok_or_else(|| {
-                                    PyError::named(
-                                        "ValueError",
-                                        format!(
-                                            "invalid literal for int() with base {base_arg}: {repr}"
-                                        ),
-                                    )
-                                })?;
-                            match i64::from_str_radix(&stripped, base) {
-                                Ok(v) => Ok(Value::int(v)),
-                                Err(_) => {
-                                    // Overflow: try BigInt before giving up.
-                                    use num_traits::Num as _;
-                                    crate::value::PyBigInt::from_str_radix(&stripped, base)
-                                        .map(Value::bigint)
-                                        .map_err(|_| PyError::named(
-                                            "ValueError",
-                                            format!(
-                                                "invalid literal for int() with base {base_arg}: {repr}"
-                                            ),
-                                        ))
-                                }
-                            }
-                        }
+                        int_parse_bytes_like(rc.as_slice(), &args[0].value.repr(), base_arg)
+                    }
+                    // bytearray with explicit base — bytes-like, parse as ASCII
+                    // (#2077).  As above, CPython's `int()` error uses the
+                    // bytes repr for a bytearray operand.
+                    _ if pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value)
+                        .is_some() =>
+                    {
+                        let data = pyrust_builtins::bytearray::as_bytearray_snapshot(
+                            &args[0].value,
+                        )
+                        .unwrap();
+                        let repr = Value::bytes(data.clone()).repr();
+                        int_parse_bytes_like(&data, &repr, base_arg)
                     }
                     _ => Err(PyError::named(
                         "TypeError",
@@ -3878,6 +3912,12 @@ pyrust_module! {
                     // PEP 515: strip valid underscores, reject invalid placement.
                     let cleaned = pep515_strip_float(s.trim()).ok_or_else(err)?;
                     cleaned.parse::<f64>().map(Value::float).map_err(|_| err())
+                }
+                // bytes-like: decode as ASCII and parse identically to `str`
+                // (#2077).  `bytearray` is a BuiltinObject handled by the
+                // `_` guard below.
+                ValueKind::Bytes(rc) => {
+                    float_parse_bytes_like(rc.as_slice(), &args[0].value.repr())
                 }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
@@ -3950,6 +3990,12 @@ pyrust_module! {
                             class.borrow().name
                         ),
                     ))
+                }
+                // bytearray (a BuiltinObject) is bytes-like: decode + parse as
+                // ASCII, same as the `bytes` arm above (#2077).
+                _ if pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).is_some() => {
+                    let (data, repr) = float_bytes_like(&args[0].value).unwrap();
+                    float_parse_bytes_like(&data, &repr)
                 }
                 _ => Err(PyError::named(
                     "TypeError",
@@ -8622,6 +8668,125 @@ fn chr_from_code_point(code_point: i64) -> Result<Value> {
 /// Delegates to `pyrust_builtins::string::encode_str_to_bytes`.
 fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
     pyrust_builtins::string::encode_str_to_bytes(source, encoding, errors)
+}
+
+/// If `v` is a bytes-like object (`bytes` or `bytearray`), return its byte
+/// contents plus its Python `repr()`, for the `float()` bytes-like parse path
+/// (#2077).  `float()`'s `could not convert string to float` message uses the
+/// operand's own repr — `b'…'` for bytes, `bytearray(b'…')` for bytearray.
+/// (Unlike `int()`, which always renders the bytes repr; see that path.)
+fn float_bytes_like(v: &Value) -> Option<(Vec<u8>, String)> {
+    match v.kind() {
+        ValueKind::Bytes(rc) => Some((rc.as_slice().to_vec(), v.repr())),
+        _ => pyrust_builtins::bytearray::as_bytearray_snapshot(v).map(|data| (data, v.repr())),
+    }
+}
+
+/// Parse a bytes-like buffer as an `int` for `int(bytes_like[, base])`,
+/// decoding the buffer as ASCII and reusing the exact same numeric parse as
+/// the `str` operand (whitespace trim, PEP 515 underscores, base handling).
+/// `repr` is the operand's `repr()` for the `invalid literal` error message.
+fn int_parse_bytes_like(bytes: &[u8], repr: &str, base_arg: i64) -> Result<Value> {
+    use num_traits::Num as _;
+    let err = || {
+        PyError::named(
+            "ValueError",
+            format!("invalid literal for int() with base {base_arg}: {repr}"),
+        )
+    };
+    let s = std::str::from_utf8(bytes).map_err(|_| err())?;
+    let trimmed = s.trim();
+    if base_arg == 0 {
+        let (base, digits) = int_parse_base_zero(trimmed).ok_or_else(err)?;
+        match i64::from_str_radix(&digits, base) {
+            Ok(v) => Ok(Value::int(v)),
+            Err(_) => crate::value::PyBigInt::from_str_radix(&digits, base)
+                .map(Value::bigint)
+                .map_err(|_| err()),
+        }
+    } else {
+        let base = base_arg as u32;
+        let stripped = int_strip_explicit_base(trimmed, base).ok_or_else(err)?;
+        match i64::from_str_radix(&stripped, base) {
+            Ok(v) => Ok(Value::int(v)),
+            Err(_) => crate::value::PyBigInt::from_str_radix(&stripped, base)
+                .map(Value::bigint)
+                .map_err(|_| err()),
+        }
+    }
+}
+
+/// Parse a bytes-like buffer as a `float` for `float(bytes_like)`, decoding as
+/// ASCII and reusing the same parse as the `str` operand (PEP 515 underscores,
+/// surrounding whitespace, `inf`/`nan`).  `repr` is used in the error message.
+fn float_parse_bytes_like(bytes: &[u8], repr: &str) -> Result<Value> {
+    let err = || {
+        PyError::named(
+            "ValueError",
+            format!("could not convert string to float: {repr}"),
+        )
+    };
+    let s = std::str::from_utf8(bytes).map_err(|_| err())?;
+    let cleaned = pep515_strip_float(s.trim()).ok_or_else(err)?;
+    cleaned.parse::<f64>().map(Value::float).map_err(|_| err())
+}
+
+/// Bind `bytes()` / `bytearray()` call args into the equivalent positional
+/// slice the bodies' `match args.len()` logic expects, accepting the CPython
+/// 3.12 keyword names `source` / `encoding` / `errors`.
+///
+/// The encode form is selected by the presence of `encoding`; when only
+/// `errors` is supplied, CPython raises a dedicated message rather than
+/// treating it as an encode — replicated here for parity.
+fn bind_bytes_like_args(
+    function_name: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Vec<ExpandedCallArg>> {
+    let slots = bind_constructor_kwargs(
+        function_name,
+        args,
+        &["source", "encoding", "errors"],
+        &[true, true, true],
+        3,
+    )?;
+    let source = &slots[0];
+    let encoding = &slots[1];
+    let errors = &slots[2];
+
+    let make = |v: Value| ExpandedCallArg { name: None, value: v };
+
+    if encoding.is_some() {
+        // Encode form: source defaults to a non-str placeholder so the
+        // encode path reports "encoding without a string argument" when the
+        // source is omitted, matching CPython.
+        let mut out = Vec::with_capacity(3);
+        out.push(make(source.clone().unwrap_or_else(Value::none)));
+        out.push(make(encoding.clone().unwrap()));
+        if let Some(e) = errors.clone() {
+            out.push(make(e));
+        }
+        Ok(out)
+    } else if errors.is_some() {
+        // `errors` given without `encoding`: CPython reports a string-specific
+        // message when source is a str, else the generic errors message.
+        if matches!(source.as_ref().map(|v| v.kind()), Some(ValueKind::Str(_))) {
+            Err(PyError::named(
+                "TypeError",
+                "string argument without an encoding".to_string(),
+            ))
+        } else {
+            Err(PyError::named(
+                "TypeError",
+                "errors without a string argument".to_string(),
+            ))
+        }
+    } else {
+        // Buffer-protocol form: 0-arg (no source) or 1-arg.
+        match source.clone() {
+            Some(v) => Ok(vec![make(v)]),
+            None => Ok(Vec::new()),
+        }
+    }
 }
 
 /// Warm-path element conversion for `bytes()` / `bytearray()` from a `List` /
