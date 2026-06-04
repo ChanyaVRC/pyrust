@@ -1827,7 +1827,7 @@ pub(crate) fn invoke_class_method(
     match method_val.kind() {
         ValueKind::UserFunction(f) => {
             let func = Rc::clone(f);
-            interp.call_user_function_expanded(func, args, &[instance])
+            return interp.call_user_function_expanded(func, args, &[instance]);
         }
         ValueKind::BuiltinFunction(name) => {
             // Issue #1909: container protocol-dunder sentinels
@@ -1899,21 +1899,32 @@ pub(crate) fn invoke_class_method(
             combined.extend(args.iter().cloned());
             let result = dispatch(interp, &combined);
             interp.invoke_arg_buf = combined;
-            result
+            return result;
         }
-        _ => {
-            // Resolved class attr is something other than a function —
-            // usually because the user did `Foo.__len__ = 5` or similar.
-            // CPython surfaces the standard "object is not callable" keyed on
-            // the *resolved value's* type, not the owning class:
-            //   `len(D())` with `__len__ = 5` -> "'int' object is not callable".
-            // Match that exactly so every implicit-dunder dispatch path agrees
-            // with CPython 3.12.
-            Err(PyError::named(
-                "TypeError",
-                format!("'{}' object is not callable", value_type_name_str(&method_val)),
-            ))
-        }
+        // The non-function arm is handled after the match so `method_val` can be
+        // moved out of the borrow taken by `method_val.kind()` above.
+        _ => {}
+    }
+    // Issue #2054: the resolved slot is not a plain function but may still be
+    // callable — a bound method, a class object, or a callable *instance* (an
+    // object whose class defines `__call__`).  CPython invokes whatever the slot
+    // resolves to.  Such a slot is *not* a descriptor, so (unlike a function
+    // slot) it does NOT receive the receiver as `self`: `__len__ = Caller()`
+    // calls `Caller()()` with no implicit self, `__add__ = Caller()` calls
+    // `Caller()(other)`.  Route through the normal call machinery with `args`.
+    //
+    // Genuinely non-callable slots (`Foo.__len__ = 5`) raise the standard
+    // "object is not callable" keyed on the *resolved value's* type, not the
+    // owning class: `len(D())` with `__len__ = 5` -> "'int' object is not
+    // callable".  Match that exactly so every implicit-dunder dispatch path
+    // agrees with CPython 3.12 (issue #1963 / #2055).
+    if slot_is_callable(&method_val) {
+        interp.call_function_expanded(method_val, args)
+    } else {
+        Err(PyError::named(
+            "TypeError",
+            format!("'{}' object is not callable", value_type_name_str(&method_val)),
+        ))
     }
 }
 

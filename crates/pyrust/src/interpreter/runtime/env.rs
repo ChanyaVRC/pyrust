@@ -875,6 +875,20 @@ impl Interpreter {
                         target.clone(),
                     ));
                 }
+                // Issue #2070: CPython sets `__hash__ = None` on the unhashable
+                // built-in types (list/dict/set/bytearray), so `[1].__hash__`
+                // resolves to `None` (and `[1].__hash__()` raises
+                // `'NoneType' object is not callable`).  Intercept before the
+                // object-MRO `lookup_class_attr` fallback, which would otherwise
+                // surface the inherited `object.__hash__`.
+                if name == "__hash__"
+                    && matches!(
+                        pyrust_core::builtin_type_name(target).as_ref(),
+                        "list" | "dict" | "set" | "bytearray"
+                    )
+                {
+                    return Ok(Value::none());
+                }
                 // Fallback: check the primitive class attrs for classmethods
                 // accessible on instances (e.g. `(1.0).fromhex`).
                 if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {

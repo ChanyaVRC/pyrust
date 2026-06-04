@@ -1298,25 +1298,11 @@ impl Interpreter {
         if right_has_subtype_priority {
             if let ValueKind::PyInstance(inst) = right.kind() {
                 let class = Rc::clone(&inst.borrow().class);
-                if let Some(m) = lookup_class_attr(&class, rmethod)
-                    && is_callable_method(&m)
-                {
-                    // BuiltinFunction dunders (e.g. `int.__radd__`) operate on
-                    // the backing primitive value.  Pass the coerced value so
-                    // `eval_binary` inside the dunder doesn't re-dispatch to the
-                    // same method on the still-wrapped PyInstance (infinite loop).
-                    let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right)
-                    } else {
-                        Value::py_instance(Rc::clone(inst))
-                    };
-                    let arg = ExpandedCallArg {
-                        name: None,
-                        value: left.clone(),
-                    };
-                    match invoke_class_method(self, m, self_val, &[arg]) {
-                        Ok(v) if is_not_implemented(&v) => {}
-                        result => return Some(result),
+                if let Some(m) = lookup_class_attr(&class, rmethod) {
+                    match self.dispatch_binary_slot(m, right, inst, left) {
+                        Some(Ok(v)) if is_not_implemented(&v) => {}
+                        Some(result) => return Some(result),
+                        None => {}
                     }
                 }
             }
@@ -1324,21 +1310,11 @@ impl Interpreter {
 
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, method)
-                && is_callable_method(&m)
-            {
-                let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(left)
-                } else {
-                    Value::py_instance(Rc::clone(inst))
-                };
-                let arg = ExpandedCallArg {
-                    name: None,
-                    value: right.clone(),
-                };
-                match invoke_class_method(self, m, self_val, &[arg]) {
-                    Ok(v) if is_not_implemented(&v) => {}
-                    result => return Some(result),
+            if let Some(m) = lookup_class_attr(&class, method) {
+                match self.dispatch_binary_slot(m, left, inst, right) {
+                    Some(Ok(v)) if is_not_implemented(&v) => {}
+                    Some(result) => return Some(result),
+                    None => {}
                 }
             }
         }
@@ -1361,26 +1337,57 @@ impl Interpreter {
         if !right_has_subtype_priority && !same_type_reflected_arith {
             if let ValueKind::PyInstance(inst) = right.kind() {
                 let class = Rc::clone(&inst.borrow().class);
-                if let Some(m) = lookup_class_attr(&class, rmethod)
-                    && is_callable_method(&m)
-                {
-                    let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right)
-                    } else {
-                        Value::py_instance(Rc::clone(inst))
-                    };
-                    let arg = ExpandedCallArg {
-                        name: None,
-                        value: left.clone(),
-                    };
-                    match invoke_class_method(self, m, self_val, &[arg]) {
-                        Ok(v) if is_not_implemented(&v) => {}
-                        result => return Some(result),
+                if let Some(m) = lookup_class_attr(&class, rmethod) {
+                    match self.dispatch_binary_slot(m, right, inst, left) {
+                        Some(Ok(v)) if is_not_implemented(&v) => {}
+                        Some(result) => return Some(result),
+                        None => {}
                     }
                 }
             }
         }
         None
+    }
+
+    /// Dispatch a resolved binary-operator slot `m` (the value of e.g.
+    /// `type(owner).__add__`) found on `owner` (a `PyInstance` backed by `inst`)
+    /// with `other` as the single operand argument.
+    ///
+    /// Returns:
+    /// - `Some(Ok(v))` when the slot was invoked (the result may be
+    ///   `NotImplemented`, which the caller treats as "try the next slot");
+    /// - `Some(Err(..))` when the slot raised, OR when the slot exists but is
+    ///   *non-callable* (issue #2055: `__add__ = 5` → `TypeError: 'int' object
+    ///   is not callable`);
+    /// - `None` is never returned (the slot was already found by the caller);
+    ///   it is kept in the signature only so callers read uniformly.
+    fn dispatch_binary_slot(
+        &mut self,
+        m: Value,
+        owner: &Value,
+        inst: &Rc<RefCell<PyInstance>>,
+        other: &Value,
+    ) -> Option<Result<Value>> {
+        if !slot_is_callable(&m) {
+            return Some(Err(PyError::named(
+                "TypeError",
+                format!("'{}' object is not callable", value_type_name_str(&m)),
+            )));
+        }
+        // BuiltinFunction dunders (e.g. `int.__radd__`) operate on the backing
+        // primitive value.  Pass the coerced value so `eval_binary` inside the
+        // dunder doesn't re-dispatch to the same method on the still-wrapped
+        // PyInstance (infinite loop).
+        let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
+            coerce_numeric(owner)
+        } else {
+            Value::py_instance(Rc::clone(inst))
+        };
+        let arg = ExpandedCallArg {
+            name: None,
+            value: other.clone(),
+        };
+        Some(invoke_class_method(self, m, self_val, &[arg]))
     }
 
     /// Try to call a unary dunder method on a PyInstance.  Routes both
@@ -1389,9 +1396,16 @@ impl Interpreter {
     pub(crate) fn try_dunder_unary(&mut self, val: &Value, method: &str) -> Option<Result<Value>> {
         if let ValueKind::PyInstance(inst) = val.kind() {
             let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, method)
-                && is_callable_method(&m)
-            {
+            if let Some(m) = lookup_class_attr(&class, method) {
+                // Issue #2055: a slot that exists but is non-callable
+                // (`__neg__ = 5`) raises `TypeError: 'int' object is not
+                // callable`, matching CPython, rather than silently skipping.
+                if !slot_is_callable(&m) {
+                    return Some(Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' object is not callable", value_type_name_str(&m)),
+                    )));
+                }
                 // BuiltinFunction dunders operate on the backing primitive value;
                 // pass the coerced value so they don't reject the PyInstance wrapper.
                 let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
@@ -1699,7 +1713,21 @@ impl Interpreter {
                     let class_name = class.borrow().name.clone();
                     return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
                 }
-                if is_callable_method(&hash_method) {
+                // Issue #2055: a non-callable `__hash__` slot (`__hash__ = 5`)
+                // raises `TypeError: 'int' object is not callable` when hashed,
+                // matching CPython, instead of silently falling back to the
+                // identity hash.  A callable instance / bound method is invoked
+                // (issue #2054) via `invoke_class_method`.
+                if !slot_is_callable(&hash_method) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object is not callable",
+                            value_type_name_str(&hash_method)
+                        ),
+                    ));
+                }
+                {
                     let result = invoke_class_method(
                         self,
                         hash_method,
@@ -6300,6 +6328,33 @@ fn is_callable_method(v: &Value) -> bool {
         v.kind(),
         ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
     )
+}
+
+/// Whether a resolved class-attribute slot value is callable, in the same
+/// sense as the `callable()` builtin.  A plain function / builtin function is
+/// callable (the common case); issue #2054 additionally accepts a callable
+/// *instance* (an object whose class defines `__call__`), a bound method, or a
+/// class object as a dunder slot, matching CPython's "invoke whatever the slot
+/// resolves to" behaviour.  `invoke_class_method` knows how to dispatch each of
+/// these.  A slot that is *not* callable (`__add__ = 5`) is rejected by the
+/// callers with `TypeError: 'int' object is not callable` (issue #2055).
+pub(crate) fn slot_is_callable(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::UserFunction(_)
+        | ValueKind::BuiltinFunction(_)
+        | ValueKind::BoundMethod { .. }
+        | ValueKind::ClassBoundMethod { .. }
+        | ValueKind::PyClass(_) => true,
+        ValueKind::BuiltinObject { .. } => {
+            pyrust_builtins::bound_method::is_bound_method(v)
+                || pyrust_builtins::super_bound_builtin::as_super_bound_builtin(v).is_some()
+        }
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            lookup_class_attr(&class, "__call__").is_some()
+        }
+        _ => false,
+    }
 }
 
 /// Container-only backing extraction for the `==` path (`values_user_eq`):

@@ -2127,7 +2127,8 @@ impl Interpreter {
         //     /…) use `expected N argument(s), got M`; `sq_repeat` (`__mul__`)
         //     and `sq_ass_item` (`__setitem__`) carry a leading space.
         let want: usize = match method {
-            "__len__" => 0,
+            "__len__" | "__neg__" | "__pos__" | "__abs__" | "__invert__" | "__hash__"
+            | "__str__" | "__repr__" | "__bool__" => 0,
             "__setitem__" => 2,
             _ => 1,
         };
@@ -2149,6 +2150,52 @@ impl Interpreter {
             let plural = if want == 1 { "argument" } else { "arguments" };
             return Err(pyrust_core::type_err!("{lead}expected {want} {plural}, got {}",
                     args.len()));
+        }
+        // Issue #2070: scalar/object dunders that route to a registry builtin or
+        // an interpreter helper, exposed on every primitive type.  These never
+        // collide with the container `__add__`/`__mul__`/… arms below.
+        match method {
+            "__hash__" => {
+                let h =
+                    crate::builtin_modules::builtins::hash_value_with_interp(self, &receiver)?;
+                return Ok(Value::int(h));
+            }
+            "__str__" | "__repr__" => {
+                let name = if method == "__str__" { "str" } else { "repr" };
+                let arg = ExpandedCallArg {
+                    name: None,
+                    value: receiver,
+                };
+                let dispatch = crate::builtin_registry::lookup(name)
+                    .unwrap_or_else(|| panic!("{name} must be in the registry"));
+                return dispatch(self, &[arg]);
+            }
+            "__bool__" => {
+                let b = self.truthy_value(&receiver)?;
+                return Ok(Value::bool_(b));
+            }
+            // Rich-comparison dunders (issue #2070): exposed on every primitive
+            // type.  The forward slot returns `NotImplemented` for operand types
+            // it does not accept (`(5).__eq__('x')`, `(1,).__lt__([1])`), exactly
+            // as CPython does — the `==`/`<` *operators* never reach here (they go
+            // through `eval_binary`), so this is access-only and leaves the
+            // operator hot paths untouched.
+            "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__" => {
+                let other = args.pop().unwrap();
+                return self.primitive_richcmp_dunder(method, &receiver, &other);
+            }
+            _ => {}
+        }
+        // Issue #2070: scalar-numeric forward dunders (int/float/complex/bool).
+        // Gated on the scalar types so the container `__add__`/`__mul__`/`__or__`
+        // arms below keep their sequence/set semantics.  Returns `NotImplemented`
+        // when the operand type is outside the receiver's accepted set.
+        if matches!(&*type_name, "int" | "float" | "complex" | "bool") {
+            if let Some(result) =
+                self.primitive_numeric_dunder(method, &receiver, &mut args)?
+            {
+                return Ok(result);
+            }
         }
         match method {
             "__len__" => {
@@ -2333,6 +2380,119 @@ impl Interpreter {
                 "internal: unhandled builtin protocol dunder '{other}'"
             ))),
         }
+    }
+
+    /// Dispatch a rich-comparison dunder (`__eq__`/`__ne__`/`__lt__`/…) accessed
+    /// directly on a primitive instance (issue #2070).  Returns the boolean
+    /// result of the comparison, or `NotImplemented` when the forward slot does
+    /// not accept the operand type — matching CPython's per-type slot semantics
+    /// exactly (`(5).__eq__('x')` → `NotImplemented`, `(5).__eq__(5.0)` →
+    /// `NotImplemented`, `(5.0).__eq__(5)` → `True`, `(1,).__lt__([1])` →
+    /// `NotImplemented`).  The `==`/`<` *operators* never call this — they go
+    /// through `eval_binary` — so the operator fast paths are untouched.
+    fn primitive_richcmp_dunder(
+        &mut self,
+        method: &str,
+        recv: &Value,
+        other: &Value,
+    ) -> Result<Value> {
+        let is_equality = matches!(method, "__eq__" | "__ne__");
+        if !richcmp_operand_accepted(recv, other, is_equality) {
+            return Ok(Value::not_implemented());
+        }
+        let op = match method {
+            "__eq__" => crate::ast::BinaryOp::Eq,
+            "__ne__" => crate::ast::BinaryOp::Ne,
+            "__lt__" => crate::ast::BinaryOp::Lt,
+            "__le__" => crate::ast::BinaryOp::Le,
+            "__gt__" => crate::ast::BinaryOp::Gt,
+            _ => crate::ast::BinaryOp::Ge,
+        };
+        self.eval_binary(recv.clone(), op, other.clone())
+    }
+
+    /// Dispatch a scalar-numeric forward dunder (int/float/complex/bool) accessed
+    /// directly on a primitive instance (issue #2070): the binary arithmetic /
+    /// bitwise slots and the unary `__neg__`/`__pos__`/`__abs__`/`__invert__`.
+    ///
+    /// Returns:
+    /// - `Some(Ok(NotImplemented))` when a *binary* slot's operand is outside the
+    ///   receiver's accepted numeric set (`(5).__add__(5.0)` → `NotImplemented`);
+    /// - `Some(Ok(result))` / `Some(Err(..))` when the slot computed / raised;
+    /// - `None` when `method` is not a scalar-numeric dunder (the caller then
+    ///   falls through to the container/other arms).
+    fn primitive_numeric_dunder(
+        &mut self,
+        method: &str,
+        recv: &Value,
+        args: &mut Vec<Value>,
+    ) -> Result<Option<Value>> {
+        use crate::ast::BinaryOp;
+        // Unary slots first — no operand-acceptance check needed.  `__neg__` /
+        // `__pos__` / `__invert__` route through the canonical `vm_eval_unary`;
+        // `__abs__` through the `abs` registry builtin (complex `abs` returns a
+        // float, which `vm_eval_unary` does not cover).
+        match method {
+            "__neg__" => {
+                return Ok(Some(crate::interpreter::vm_eval_unary(
+                    crate::ast::UnaryOp::Neg,
+                    recv.clone(),
+                )?));
+            }
+            "__pos__" => {
+                return Ok(Some(crate::interpreter::vm_eval_unary(
+                    crate::ast::UnaryOp::Pos,
+                    recv.clone(),
+                )?));
+            }
+            "__invert__" => {
+                return Ok(Some(crate::interpreter::vm_eval_unary(
+                    crate::ast::UnaryOp::BitNot,
+                    recv.clone(),
+                )?));
+            }
+            "__abs__" => {
+                let arg = ExpandedCallArg {
+                    name: None,
+                    value: recv.clone(),
+                };
+                let dispatch = crate::builtin_registry::lookup("abs")
+                    .expect("abs must be in the registry");
+                return Ok(Some(dispatch(self, &[arg])?));
+            }
+            _ => {}
+        }
+        let op = match method {
+            "__add__" => BinaryOp::Add,
+            "__sub__" => BinaryOp::Sub,
+            "__mul__" => BinaryOp::Mul,
+            "__truediv__" => BinaryOp::Div,
+            "__floordiv__" => BinaryOp::FloorDiv,
+            "__mod__" => BinaryOp::Mod,
+            "__pow__" => BinaryOp::Pow,
+            "__and__" => BinaryOp::BitAnd,
+            "__or__" => BinaryOp::BitOr,
+            "__xor__" => BinaryOp::BitXor,
+            "__lshift__" => BinaryOp::LShift,
+            "__rshift__" => BinaryOp::RShift,
+            "__divmod__" => {
+                let other = args.pop().unwrap();
+                if !numeric_operand_accepted(recv, &other) {
+                    return Ok(Some(Value::not_implemented()));
+                }
+                let dispatch = crate::builtin_registry::lookup("divmod")
+                    .expect("divmod must be in the registry");
+                let a = ExpandedCallArg { name: None, value: recv.clone() };
+                let b = ExpandedCallArg { name: None, value: other };
+                return Ok(Some(dispatch(self, &[a, b])?));
+            }
+            _ => return Ok(None),
+        };
+        let other = args.pop().unwrap();
+        if !numeric_operand_accepted(recv, &other) {
+            return Ok(Some(Value::not_implemented()));
+        }
+        Ok(Some(self.eval_binary(recv.clone(), op, other)?))
     }
 
     /// Build a lazy iterator wrapping the legacy `__getitem__`
@@ -5984,34 +6144,145 @@ fn is_container_protocol_dunder_name(name: &str) -> bool {
             | "__xor__"
             | "__rxor__"
             | "__ixor__"
+            // Rich-comparison / `__hash__` / `__str__` / `__repr__` exposed on
+            // every primitive type (issue #2070).  Routed through the protocol
+            // dispatcher so `[1].__lt__([2])`, `'a'.__eq__('a')`,
+            // `{1}.__hash__()` … work via the method-call opcode.  The
+            // per-receiver `builtin_protocol_dunders` membership check at the
+            // call site still raises `AttributeError` for a name a given type
+            // does not expose.
+            | "__eq__"
+            | "__ne__"
+            | "__lt__"
+            | "__le__"
+            | "__gt__"
+            | "__ge__"
+            | "__hash__"
+            | "__str__"
+            | "__repr__"
     )
 }
 
+/// Numeric-tower rank used by the scalar forward dunders (#2070):
+/// `int`/`bool` = 0, `float` = 1, `complex` = 2.  Returns `None` for
+/// non-numeric values.  A forward slot on a receiver of rank R accepts an
+/// operand of rank ≤ R (`float.__add__(int)` works, `int.__add__(float)` →
+/// `NotImplemented`), mirroring CPython's `nb_*` slot coercion direction.
+fn numeric_tower_rank(v: &Value) -> Option<u8> {
+    match v.kind() {
+        ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => Some(0),
+        ValueKind::Float(_) => Some(1),
+        ValueKind::Complex(..) => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether a scalar numeric/bitwise forward dunder on `recv` accepts `operand`
+/// (else the slot returns `NotImplemented`).  See [`numeric_tower_rank`].
+fn numeric_operand_accepted(recv: &Value, operand: &Value) -> bool {
+    match (numeric_tower_rank(recv), numeric_tower_rank(operand)) {
+        (Some(r), Some(o)) => o <= r,
+        _ => false,
+    }
+}
+
+/// Whether a rich-comparison forward dunder on `recv` accepts `operand` (else
+/// it returns `NotImplemented`).  `is_equality` distinguishes `__eq__`/`__ne__`
+/// (defined for `complex` and `dict`) from the ordering slots (which `complex`
+/// and `dict` do not define).  Numeric receivers follow the same tower-rank
+/// acceptance as arithmetic; non-numeric receivers accept only operands of a
+/// compatible type group (str/str, bytes/bytes, list/list, tuple/tuple,
+/// dict/dict, and set↔frozenset interchangeably).
+fn richcmp_operand_accepted(recv: &Value, operand: &Value, is_equality: bool) -> bool {
+    // Numeric receivers: ordering is undefined for `complex`, so a complex
+    // receiver does not accept an ordering comparison from any operand.
+    if let Some(r) = numeric_tower_rank(recv) {
+        if !is_equality && r == 2 {
+            return false;
+        }
+        return numeric_operand_accepted(recv, operand);
+    }
+    let rt = pyrust_core::builtin_type_name(recv);
+    let ot = pyrust_core::builtin_type_name(operand);
+    match &*rt {
+        // dict has equality but no ordering.
+        "dict" => is_equality && ot == "dict",
+        // set and frozenset are interchangeable for both equality and the
+        // subset/superset ordering comparisons.
+        "set" | "frozenset" => matches!(&*ot, "set" | "frozenset"),
+        // Every other primitive sequence/string compares only with its own
+        // exact type (`'a'.__eq__(b'a')` → NotImplemented).
+        _ => rt == ot,
+    }
+}
+
 pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
+    // Rich-comparison / `__hash__` / `__str__` / `__repr__` are exposed as
+    // bound method-wrappers on every primitive type (issue #2070); the
+    // per-type slices below interleave them with the container/numeric slots.
     match type_name {
+        // list / dict / set / bytearray are unhashable, so `__hash__` is *not*
+        // exposed (CPython sets `list.__hash__ = None`; `[1].__hash__()` raises
+        // `'NoneType' object is not callable`, handled by the None-attr path).
         "list" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
             "__add__", "__mul__", "__iadd__", "__imul__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__str__", "__repr__",
         ],
         "tuple" | "str" | "bytes" => &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__hash__", "__str__", "__repr__",
         ],
         "bytearray" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
             "__add__", "__mul__", "__iadd__", "__imul__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__str__", "__repr__",
         ],
         "dict" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
             "__or__", "__ror__", "__ior__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__str__", "__repr__",
         ],
         "set" => &[
             "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
             "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
             "__isub__", "__ixor__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__str__", "__repr__",
         ],
         "frozenset" => &[
             "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
             "__sub__", "__rsub__", "__xor__", "__rxor__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__hash__", "__str__", "__repr__",
+        ],
+        // Issue #2070: scalar numeric types expose rich-comparison, numeric,
+        // and (for int/bool) bitwise dunders as bound method-wrappers, plus
+        // `__hash__`/`__str__`/`__repr__`/`__bool__`.  The arithmetic dunders
+        // return `NotImplemented` for operand types the forward slot does not
+        // accept (e.g. `(5).__add__(5.0)`), matching CPython exactly.
+        "int" | "bool" => &[
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__hash__", "__str__", "__repr__", "__bool__",
+            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
+            "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
+            "__and__", "__or__", "__xor__", "__lshift__", "__rshift__", "__invert__",
+        ],
+        "float" => &[
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__hash__", "__str__", "__repr__", "__bool__",
+            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
+            "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
+        ],
+        "complex" => &[
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__hash__", "__str__", "__repr__", "__bool__",
+            "__add__", "__sub__", "__mul__", "__truediv__", "__pow__",
+            "__neg__", "__pos__", "__abs__",
         ],
         _ => &[],
     }
@@ -7871,6 +8142,14 @@ impl Interpreter {
                     return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
                 }
                 return self.dispatch_builtin_protocol_dunder(method, receiver, pos);
+            }
+            // Issue #2070: `__hash__` on an unhashable built-in (list/dict/set/
+            // bytearray) resolves to `None` in CPython, so `[1].__hash__()`
+            // raises `'NoneType' object is not callable` — not `AttributeError`.
+            if method == "__hash__"
+                && matches!(&*type_name, "list" | "dict" | "set" | "bytearray")
+            {
+                return Err(pyrust_core::type_err!("'NoneType' object is not callable"));
             }
             // A protocol-dunder name that is valid for *other* types but not
             // this one (e.g. `set().__getitem__`, `"".__setitem__`) is
