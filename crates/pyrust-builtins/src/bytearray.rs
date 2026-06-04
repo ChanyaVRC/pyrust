@@ -265,8 +265,11 @@ impl BuiltinTypeOps for ByteArrayOps {
                 let replacement = bytes_from_value(&value, "bytearray slice assignment")?;
                 if step == 1 {
                     // Simple slice: replace range [start, stop) with replacement.
-                    let s2 = start.min(data.len());
-                    let e2 = stop.min(data.len());
+                    // For step == 1 both bounds are forward, clamped to [0, len].
+                    // An empty/reversed range (start > stop) inserts at `start`,
+                    // matching CPython (e.g. `ba[5:2] = b"XY"` inserts at 5).
+                    let s2 = (start.max(0) as usize).min(data.len());
+                    let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
                     data.splice(s2..e2, replacement);
                 } else {
                     // Extended slice: replacement must have the exact same length.
@@ -318,8 +321,10 @@ impl BuiltinTypeOps for ByteArrayOps {
                 let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
                 drop(sb);
                 if step == 1 {
-                    let s2 = start.min(data.len());
-                    let e2 = stop.min(data.len());
+                    // For step == 1 both bounds are forward, clamped to [0, len].
+                    // An empty/reversed range (start > stop) deletes nothing.
+                    let s2 = (start.max(0) as usize).min(data.len());
+                    let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
                     data.drain(s2..e2);
                 } else {
                     // Extended slice deletion: collect indices in reverse and remove.
@@ -668,13 +673,12 @@ pub fn iter_elements(v: &Value) -> Option<Vec<Value>> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Resolve a slice object's start/stop/step against a sequence of length
-/// `len`, returning concrete `usize` values (clamped into `[0, len]`).
-fn resolve_slice_indices(
-    len: i64,
-    start: &Value,
-    stop: &Value,
-    step: &Value,
-) -> (usize, usize, i64) {
+/// `len`. Returns `(start, stop, step)` as signed `i64` values matching CPython
+/// slice semantics: `stop` is the *exclusive* boundary, and for a backward
+/// slice both `start` and `stop` may be `-1` (an empty slice / a walk down to
+/// and including index 0). For forward (`step >= 0`) slices both land in
+/// `[0, len]`, so step==1 callers can cast them back to `usize`.
+fn resolve_slice_indices(len: i64, start: &Value, stop: &Value, step: &Value) -> (i64, i64, i64) {
     let step_val: i64 = match step.kind() {
         ValueKind::Int(n) => n,
         ValueKind::Bool(b) => b as i64,
@@ -693,10 +697,18 @@ fn resolve_slice_indices(
     let start_val: i64 = match start.kind() {
         ValueKind::None => default_start,
         ValueKind::Int(n) => {
-            if n < 0 {
-                clamp(n + len, 0, len)
+            if step_val > 0 {
+                if n < 0 {
+                    clamp(n + len, 0, len)
+                } else {
+                    clamp(n, 0, len)
+                }
+            } else if n < 0 {
+                // Backward slice: a `start` below `-len` clamps to -1 (empty);
+                // otherwise to at most `len - 1` (the last valid index).
+                clamp(n + len, -1, len - 1)
             } else {
-                clamp(n, 0, len)
+                clamp(n, -1, len - 1)
             }
         }
         ValueKind::Bool(b) => b as i64,
@@ -721,16 +733,16 @@ fn resolve_slice_indices(
         _ => default_stop,
     };
 
-    // Convert start to usize (safe because we clamped to [0, len]).
-    let ustart = start_val.max(0) as usize;
-    // For stop in a forward slice, clamp to [0, len]; for backward, use as-is.
-    let ustop = stop_val;
-
-    (ustart, ustop as usize, step_val)
+    // Both `start` and `stop` are kept signed. For a backward slice `start`
+    // may be -1 (the slice is empty) and `stop` may be -1 (iterate down to and
+    // including index 0); round-tripping either through `usize` would corrupt
+    // these boundary cases. For forward slices both land in [0, len], so the
+    // step==1 callers can cast back to `usize` safely.
+    (start_val, stop_val, step_val)
 }
 
 /// Generate index sequence for a slice (start, stop, step) over a sequence.
-fn slice_indices(start: usize, stop: usize, step: i64) -> impl Iterator<Item = usize> {
+fn slice_indices(start: i64, stop: i64, step: i64) -> impl Iterator<Item = usize> {
     struct SliceIter {
         current: i64,
         stop: i64,
@@ -752,14 +764,11 @@ fn slice_indices(start: usize, stop: usize, step: i64) -> impl Iterator<Item = u
             }
         }
     }
-    let stop_i64 = if step > 0 {
-        stop as i64
-    } else {
-        stop as i64 - 1
-    };
+    // `stop` is already the exclusive boundary (CPython slice semantics):
+    // forward slices stop before `stop`, backward slices stop after `stop`.
     SliceIter {
-        current: start as i64,
-        stop: stop_i64,
+        current: start,
+        stop,
         step,
     }
 }
