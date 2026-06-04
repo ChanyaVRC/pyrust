@@ -8064,7 +8064,16 @@ impl Interpreter {
         // An explicit `key=None` means "no key function" (default comparison),
         // mirroring `sorted`/`min`/`max` (#1937).
         let key_fn = kw.get(&StrKey("key")).cloned().filter(|v| !v.is_none());
-        let reverse = kw.get(&StrKey("reverse")).map(|v| v.truthy()).unwrap_or(false);
+        // CPython applies `bool(reverse)` to *any* object — a non-empty
+        // list/str or an arbitrary object is truthy and reverses (issue #2126).
+        // Compute it interpreter-side so a user `__bool__`/`__len__` is honoured,
+        // matching `sorted()`.  This single computed flag is threaded into every
+        // sort path below; the primitive fast path no longer re-parses `reverse`
+        // (its receiver-only `extract_reverse` recognised only Bool/Int/Float).
+        let reverse = match kw.get(&StrKey("reverse")) {
+            Some(v) => self.truthy_value(&v.clone())?,
+            None => false,
+        };
         if let Some(key_fn_val) = key_fn {
             // Compute keys via the interpreter, then delegate sorting to builtins.
             let items_snapshot: Vec<Value> = receiver
@@ -8095,8 +8104,12 @@ impl Interpreter {
             .list_with(|items| items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_))))
             .unwrap_or(false);
         if !has_instance {
-            // Primitive fast path: delegate to builtins (handles reverse kwarg).
-            return pyrust_builtins::list::call("sort", receiver, pos, kw);
+            // Primitive fast path: delegate to builtins with the already-resolved
+            // `reverse` bool (issue #2126).  Going through `call("sort", …)` would
+            // re-parse `reverse` via the receiver-only `extract_reverse`, which
+            // recognises only Bool/Int/Float and silently drops a truthy
+            // list/str/object — diverging from `sorted()` and CPython.
+            return pyrust_builtins::list::sort_no_key(receiver, reverse);
         }
         // Snapshot the items so the comparator (which may re-enter the same
         // list via user `__lt__`) does not straddle the receiver's borrow.

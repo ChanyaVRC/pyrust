@@ -4928,7 +4928,14 @@ impl Interpreter {
                 }
                 Err(pyrust_core::type_err!("argument of type '{}' is not iterable", class.borrow().name))
             }
-            _ => Err(PyError::Runtime("argument of type is not iterable".to_string())),
+            // Scalar non-iterables (int/float/bool/bigint/complex/None …) reach
+            // here.  CPython raises `TypeError: argument of type '<type>' is not
+            // iterable` with the operand's type name — matching the PyInstance
+            // arm above (issue #2030); a bare `RuntimeError` escaped before.
+            _ => Err(pyrust_core::type_err!(
+                "argument of type '{}' is not iterable",
+                value_type_name_str(&container)
+            )),
         }
     }
 

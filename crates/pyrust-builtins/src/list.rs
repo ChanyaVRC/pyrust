@@ -87,6 +87,16 @@ fn extract_reverse(args: &[Value], kwargs: &PyDict) -> Result<bool> {
     )
 }
 
+/// Sort a key-less list with the `reverse` flag already resolved to a `bool`
+/// by the interpreter (issue #2126).  The receiver-only `call("sort", …)` path
+/// re-parses `reverse` via `extract_reverse`, which recognises only
+/// Bool/Int/Float; CPython applies `bool(reverse)` to any object.  The
+/// interpreter computes that truthiness (honouring user `__bool__`) and calls
+/// here directly, matching `sorted()`.
+pub fn sort_no_key(receiver: &Value, reverse: bool) -> Result<Value> {
+    sort_by_cmp(receiver, reverse)
+}
+
 fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
     // Snapshot the items into an owned Vec.  The comparator may call
     // user `__lt__` which can re-enter the same list — by working on
