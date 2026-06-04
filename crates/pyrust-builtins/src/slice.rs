@@ -165,6 +165,21 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
     Value::builtin_object(SLICE_OPS, state)
 }
 
+/// Return the `(start, stop, step)` triple of a slice `Value`, or `None` if the
+/// value is not a slice object.  Used by the interpreter's ordering comparison
+/// to compare two slices as `(start, stop, step)` tuples, matching CPython's
+/// `slice_richcompare` (issue #2127).
+pub fn slice_fields(value: &Value) -> Option<(Value, Value, Value)> {
+    if let ValueKind::BuiltinObject { ops, state } = value.kind() {
+        if ops.type_name() == TYPE_NAME {
+            let borrow = state.borrow();
+            let s = borrow.downcast_ref::<SliceState>()?;
+            return Some((s.start.clone(), s.stop.clone(), s.step.clone()));
+        }
+    }
+    None
+}
+
 /// Convert the `length` argument of `slice.indices()` to an `i64`.
 ///
 /// Accepts `int`, `bool` (as 0/1), and `BigInt` (clamped to `i64` range).

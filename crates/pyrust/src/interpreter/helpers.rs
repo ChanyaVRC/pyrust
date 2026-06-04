@@ -194,6 +194,31 @@ pub(crate) fn compare_values_with_op(
             }
             Ok(x.len().cmp(&y.len()))
         }
+        // Two slice objects compare as their `(start, stop, step)` tuples
+        // (issue #2127), matching CPython's `slice_richcompare`.  Mixed
+        // None/int bounds raise exactly the TypeError the equivalent tuple
+        // comparison would (e.g. `slice(None,2) < slice(1,2)` → `None < 1`).
+        (
+            ValueKind::BuiltinObject { ops: aops, .. },
+            ValueKind::BuiltinObject { ops: bops, .. },
+        ) if aops.type_name() == pyrust_builtins::slice::TYPE_NAME
+            && bops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
+        {
+            let (a_start, a_stop, a_step) =
+                pyrust_builtins::slice::slice_fields(a).expect("slice fields");
+            let (b_start, b_stop, b_step) =
+                pyrust_builtins::slice::slice_fields(b).expect("slice fields");
+            for (x, y) in [(&a_start, &b_start), (&a_stop, &b_stop), (&a_step, &b_step)] {
+                // Tuple ordering scans the equal prefix with `==` (so equal
+                // unorderable fields like two `None`s don't error) and only
+                // applies the ordering op to the first *differing* field.
+                if x == y {
+                    continue;
+                }
+                return compare_values_with_op(x, y, op_name);
+            }
+            Ok(std::cmp::Ordering::Equal)
+        }
         _ => Err(PyError::named(
             "TypeError",
             format!(
