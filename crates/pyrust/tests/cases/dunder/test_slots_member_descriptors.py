@@ -45,6 +45,20 @@ try:
 except TypeError as e:
     print(e)  # descriptor 'a' for 'S' objects doesn't apply to a 'int' object
 
+
+# An instance of an *unrelated* class is also the wrong type: get / set / delete
+# must all raise TypeError (in particular __set__ must not write into it).
+class W:
+    pass
+
+
+w = W()
+for m, extra in (("__get__", ()), ("__set__", (1,)), ("__delete__", ())):
+    try:
+        getattr(S.a, m)(w, *extra)
+    except TypeError as e:
+        print(e)  # descriptor 'a' for 'S' objects doesn't apply to a 'W' object
+
 # Inheritance: a subclass adding slots gets its own member_descriptors and the
 # union of all slots is enforced.
 class A:

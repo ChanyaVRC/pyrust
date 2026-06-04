@@ -3165,13 +3165,21 @@ impl Interpreter {
         let (slot, owner_name) =
             pyrust_builtins::member_descriptor::as_member_descriptor_full(&descriptor)
                 .expect("member_descriptor receiver");
-        // CPython rejects an instance that is not of the owning type with a
-        // `descriptor '<slot>' for '<owner>' objects doesn't apply to a '<T>'
-        // object` TypeError.  A `None` instance (class-level `__get__`) is
-        // allowed and handled below.
+        // CPython rejects an instance that is not of the owning type (or a
+        // subclass) with a `descriptor '<slot>' for '<owner>' objects doesn't
+        // apply to a '<T>' object` TypeError.  A `None` instance (class-level
+        // `__get__`) is allowed and handled below.  Checking only "is a
+        // PyInstance" is insufficient: an instance of an *unrelated* class is
+        // not of the owning type, so it must raise the same TypeError (and in
+        // particular `__set__` must not silently write into an unrelated
+        // instance's storage).  The owning class is identified by name, matching
+        // the rest of this file's name-based MRO checks.
         let check_instance = |obj: &Value| -> Result<()> {
-            if matches!(obj.kind(), ValueKind::PyInstance(_)) {
-                return Ok(());
+            if let ValueKind::PyInstance(inst) = obj.kind() {
+                let class = Rc::clone(&inst.borrow().class);
+                if class_chain_contains_name(&class, &owner_name) {
+                    return Ok(());
+                }
             }
             let tname = pyrust_core::builtin_type_name(obj);
             Err(pyrust_core::type_err!(
@@ -3180,9 +3188,16 @@ impl Interpreter {
         };
         match method {
             "__get__" => {
-                if args.is_empty() || args.len() > 2 {
+                // CPython's wrapper messages carry a leading space (the empty
+                // method-name prefix) and split too-few / too-many wording.
+                if args.is_empty() {
                     return Err(pyrust_core::type_err!(
-                        "expected 1 or 2 arguments, got {}",
+                        " expected at least 1 argument, got 0"
+                    ));
+                }
+                if args.len() > 2 {
+                    return Err(pyrust_core::type_err!(
+                        " expected at most 2 arguments, got {}",
                         args.len()
                     ));
                 }
@@ -3196,7 +3211,7 @@ impl Interpreter {
             "__set__" => {
                 if args.len() != 2 {
                     return Err(pyrust_core::type_err!(
-                        "expected 2 arguments, got {}",
+                        " expected 2 arguments, got {}",
                         args.len()
                     ));
                 }
