@@ -8661,110 +8661,6 @@ impl Compiler {
         Some((bases_base, bases_n, kwarg_base, kwarg_n))
     }
 
-    /// Emit the explicit-metaclass call that replaces `dst` with
-    /// `metaclass(name, bases_tuple, namespace_dict)`.  Returns `Some(())` on
-    /// success, or `None` on register overflow (error already recorded).
-    fn emit_metaclass_call(
-        &mut self,
-        meta_expr: &Expr,
-        bases: &[Expr],
-        bases_n: u8,
-        dst: Reg,
-        name: &str,
-    ) -> Option<()> {
-        // 1. Build the bases tuple from already-evaluated bases.
-        //    Since the bases registers may have been freed above, we recompile
-        //    them into a fresh contiguous region.
-        let tup_base = self.next_temp;
-        if self
-            .next_temp
-            .checked_add(Reg::from(bases_n.max(1)))
-            .is_none()
-        {
-            self.failed = true;
-            if self.error_msg.is_none() {
-                self.error_msg = Some("too many registers for metaclass call".to_string());
-            }
-            return None;
-        }
-        self.next_temp += Reg::from(bases_n);
-        if bases_n > 0 && self.next_temp - 1 > self.max_reg {
-            self.max_reg = self.next_temp - 1;
-        }
-        for (i, base_expr) in (0u32..).zip(bases.iter()) {
-            let saved = self.next_temp;
-            let r = self.compile_expr(base_expr);
-            if r != tup_base + i {
-                self.emit(Insn::Move(tup_base + i, r));
-            }
-            self.next_temp = saved;
-        }
-        let bases_tuple_reg = self.alloc_temp();
-        self.emit(Insn::BuildTuple(
-            bases_tuple_reg,
-            tup_base,
-            Reg::from(bases_n),
-        ));
-        // Note: we keep the [tup_base..bases_tuple_reg] region allocated so
-        // bases_tuple_reg isn't clobbered by subsequent temp allocations.
-
-        // 2. Call vars(dst) to get the class namespace proxy, then
-        //    dict(proxy) to convert to a mutable plain dict for the metaclass.
-        //    Register layout (3 slots):
-        //      vars_frame+0  -- function (vars / dict)
-        //      vars_frame+1  -- arg
-        //      vars_frame+2  -- stash proxy while loading dict fn
-        let vars_name_idx = self.intern_name("vars");
-        let dict_name_idx_meta = self.intern_name("dict");
-        let vars_frame = self.next_temp;
-        if vars_frame.checked_add(3).is_none() {
-            self.failed = true;
-            if self.error_msg.is_none() {
-                self.error_msg = Some("too many registers for metaclass call".to_string());
-            }
-            return None;
-        }
-        self.next_temp = vars_frame + 3;
-        if vars_frame + 2 > self.max_reg {
-            self.max_reg = vars_frame + 2;
-        }
-        // vars(dst) -> proxy in vars_frame
-        self.emit(Insn::LoadGlobal(vars_frame, vars_name_idx));
-        self.emit(Insn::Move(vars_frame + 1, dst));
-        self.emit(Insn::Call(vars_frame, 1));
-        // dict(proxy) -> plain dict in vars_frame
-        self.emit(Insn::Move(vars_frame + 2, vars_frame));
-        self.emit(Insn::LoadGlobal(vars_frame, dict_name_idx_meta));
-        self.emit(Insn::Move(vars_frame + 1, vars_frame + 2));
-        self.emit(Insn::Call(vars_frame, 1));
-        let ns_reg = vars_frame; // result of dict(vars(dst))
-
-        // 3. Set up call frame for metaclass(name_str, bases_tuple, namespace).
-        let frame = self.next_temp;
-        if frame.checked_add(4).is_none() {
-            self.failed = true;
-            if self.error_msg.is_none() {
-                self.error_msg = Some("too many registers for metaclass call".to_string());
-            }
-            return None;
-        }
-        self.next_temp = frame + 4;
-        if frame + 3 > self.max_reg {
-            self.max_reg = frame + 3;
-        }
-        let saved = self.next_temp;
-        self.compile_expr_into(meta_expr, frame);
-        self.next_temp = saved;
-        let name_const = self.intern_const(Value::string(name));
-        self.emit(Insn::LoadConst(frame + 1, name_const));
-        self.emit(Insn::Move(frame + 2, bases_tuple_reg));
-        self.emit(Insn::Move(frame + 3, ns_reg));
-        self.emit(Insn::Call(frame, 3));
-        self.emit(Insn::Move(dst, frame));
-        self.next_temp = dst + 1;
-        Some(())
-    }
-
     fn compile_class(
         &mut self,
         name: &str,
@@ -8787,17 +8683,39 @@ impl Compiler {
             };
 
         let name_idx = self.intern_name(name);
+
+        // With an explicit `metaclass=`, route the whole creation through
+        // `MakeClassMeta`: it calls `metaclass.__prepare__`, runs the body into
+        // that namespace, and calls `metaclass(name, bases, ns, **kw)` so the
+        // class-creation hooks fire once inside the metaclass (issues
+        // #2128/#2130).  The metaclass value must live in a register kept alive
+        // across the instruction; allocate it after the bases/kwargs region.
+        if let Some(meta_expr) = metaclass {
+            let meta_reg = self.alloc_temp();
+            let saved = self.next_temp;
+            self.compile_expr_into(meta_expr, meta_reg);
+            self.next_temp = saved;
+            let dst = self.alloc_temp();
+            self.emit(Insn::MakeClassMeta(
+                dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n, meta_reg,
+            ));
+            // bases/kwargs/meta_reg are dead after the instruction; keep only
+            // `dst` (the class object) live for decorators / type-params / store.
+            self.next_temp = dst + 1;
+            return self.finish_class_definition(name, dst, decorators, type_params);
+        }
+
         let dst = self.alloc_temp();
         self.emit(Insn::MakeClass(
             dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n,
         ));
-        if bases_n > 0 && metaclass.is_none() {
-            // Without metaclass, the base registers are dead after MakeClass,
-            // but `dst` (the freshly built class object) must stay live for the
-            // decorator / type-params / store steps below.  `dst` was allocated
-            // immediately after the bases, so `dst == bases_base + bases_n`; the
-            // correct watermark is therefore `dst + 1`, which preserves the
-            // class object and releases every slot above it.
+        if bases_n > 0 {
+            // The base registers are dead after MakeClass, but `dst` (the freshly
+            // built class object) must stay live for the decorator / type-params
+            // / store steps below.  `dst` was allocated immediately after the
+            // bases, so `dst == bases_base + bases_n`; the correct watermark is
+            // therefore `dst + 1`, which preserves the class object and releases
+            // every slot above it.
             //
             // The previous formula (`bases_base + 1`) overwrote `dst` whenever a
             // base was present: with one base, `bases_base + 1 == dst`, so the
@@ -8807,21 +8725,24 @@ impl Compiler {
             self.next_temp = dst + 1;
         }
 
-        // If a metaclass is provided, replace `dst` with the result of
-        // `metaclass(name_str, bases_tuple, namespace_dict)`.
-        if let Some(meta_expr) = metaclass {
-            if self
-                .emit_metaclass_call(meta_expr, bases, bases_n, dst, name)
-                .is_none()
-            {
-                return;
-            }
-        }
+        self.finish_class_definition(name, dst, decorators, type_params);
+    }
 
+    /// Shared tail of class compilation for both the plain `MakeClass` and the
+    /// metaclass `MakeClassMeta` paths: apply PEP 695 `__type_params__`, run the
+    /// class decorators, store the result, and free the class register.  On
+    /// entry `dst` holds the class object and `next_temp == dst + 1`.
+    fn finish_class_definition(
+        &mut self,
+        name: &str,
+        dst: Reg,
+        decorators: &[Expr],
+        type_params: &[String],
+    ) {
         // PEP 695: if this is a generic class, build the __type_params__ tuple
         // and store it on the class object before decorators are applied.
-        // The watermark reset above already leaves `next_temp == dst + 1`, so
-        // `emit_type_params_attr` allocates TypeVar registers above `dst` and
+        // The watermark reset by the caller already leaves `next_temp == dst + 1`,
+        // so `emit_type_params_attr` allocates TypeVar registers above `dst` and
         // never overwrites the class object. The guard below is kept as
         // defense-in-depth in case any future path leaves `next_temp <= dst`.
         if !type_params.is_empty() {

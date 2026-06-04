@@ -2778,6 +2778,13 @@ impl Interpreter {
                     let r = self.exec_make_class(code, &regs, num_locals, *proto_idx, *bases_base, *bases_n, *name_idx, *kwarg_base);
                     regs[*dst as usize] = vm_try!(r);
                 }
+                Insn::MakeClassMeta(dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n, meta_reg) => {
+                    let r = self.exec_make_class_meta(
+                        code, &regs, num_locals, *proto_idx, *bases_base, *bases_n, *name_idx,
+                        *kwarg_base, *kwarg_n, *meta_reg,
+                    );
+                    regs[*dst as usize] = vm_try!(r);
+                }
 
                 // ── PEP 695 type alias ───────────────────────────────────
                 Insn::MakeTypeVar(dst, name_idx) => {

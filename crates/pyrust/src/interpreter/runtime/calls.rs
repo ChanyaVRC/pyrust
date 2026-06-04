@@ -7017,6 +7017,190 @@ impl Interpreter {
         Ok(Value::py_class(class))
     }
 
+    /// Construct a class through an explicit `metaclass=` (issue #2128/#2130).
+    ///
+    /// Mirrors CPython's `class` statement protocol for the metaclass path:
+    ///   1. `ns = metaclass.__prepare__(name, bases, **kwds)`,
+    ///   2. run the class body, collecting its assignments,
+    ///   3. populate `ns` (`__module__`, `__qualname__`, then the body's
+    ///      assignments in order) — going through `__setitem__` so a custom
+    ///      recording mapping observes them,
+    ///   4. `metaclass(name, bases_tuple, ns, **kwds)`.
+    ///
+    /// All class-creation hooks (`__set_name__`, `__init_subclass__`) then run
+    /// once inside the metaclass call (`type.__new__` → `build_class_via_type`),
+    /// not in this method.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_make_class_meta(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        proto_idx: u8,
+        bases_base: crate::bytecode::Reg,
+        bases_n: u8,
+        name_idx: u16,
+        kwarg_base: crate::bytecode::Reg,
+        kwarg_n: u8,
+        meta_reg: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let class_name = code
+            .names
+            .get(name_idx as usize)
+            .ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "bytecode error: name index {} out of range (pool size {})",
+                    name_idx,
+                    code.names.len()
+                ))
+            })?
+            .clone();
+        let proto = code.fn_protos.get(proto_idx as usize).ok_or_else(|| {
+            PyError::Runtime(format!(
+                "bytecode error: fn_proto index {} out of range (pool size {})",
+                proto_idx,
+                code.fn_protos.len()
+            ))
+        })?;
+        let class_code = Rc::clone(&proto.code);
+        let local_index = Rc::clone(&proto.local_index);
+        let proto_qualname = proto.qualname.clone();
+        let proto_global_names = Rc::clone(&proto.global_names);
+        let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
+        let class_kwarg_names = proto.class_kwarg_names.clone();
+
+        let metaclass = vm_read(regs, meta_reg, num_locals)?;
+
+        // Build the bases tuple (used for __prepare__ and the metaclass call).
+        let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
+        for i in 0..bases_n as usize {
+            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+            bases_vec.push(vm_read(regs, reg, num_locals)?);
+        }
+        let bases_tuple = Value::tuple(bases_vec);
+
+        // Assemble the class keyword arguments (everything except `metaclass`,
+        // which is not part of `keywords`).  Forwarded to both __prepare__ and
+        // the metaclass call.
+        let kwargs: ExpandedArgBuf = class_kwarg_names
+            .iter()
+            .take(kwarg_n as usize)
+            .enumerate()
+            .map(|(i, key)| {
+                let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
+                ExpandedCallArg {
+                    name: Some(key.clone()),
+                    value: regs[reg as usize].clone(),
+                }
+            })
+            .collect();
+
+        // 1. ns = metaclass.__prepare__(name, bases, **kwds).  __prepare__ is a
+        //    classmethod resolved via the metaclass; `type.__prepare__` returns
+        //    a fresh dict, so a metaclass without an override still gets a dict.
+        //    A non-class callable metaclass (e.g. a plain function) has no
+        //    `__prepare__` attribute at all — CPython falls back to a plain dict
+        //    in that case (PEP 3115), so swallow the AttributeError here.
+        let namespace = match self.get_attr(&metaclass, "__prepare__") {
+            Ok(prepare_fn) => {
+                let mut prepare_args: ExpandedArgBuf = smallvec![
+                    ExpandedCallArg { name: None, value: Value::string(class_name.clone()) },
+                    ExpandedCallArg { name: None, value: bases_tuple.clone() },
+                ];
+                prepare_args.extend(kwargs.iter().cloned());
+                self.call_function_expanded(prepare_fn, &prepare_args)?
+            }
+            Err(ref e) if e.class_name_is("AttributeError") => {
+                Value::dict(PyDict::default())
+            }
+            Err(e) => return Err(e),
+        };
+
+        // 2. Run the class body and collect its ordered assignments.
+        let (attrs, class_env_rc) = self.run_class_body(
+            &class_code,
+            &local_index,
+            &proto_qualname,
+            proto_global_names,
+            proto_nonlocal_names,
+        )?;
+
+        // 3. Populate the namespace in CPython's order: `__module__` first,
+        //    `__qualname__` second (the latter is intercepted out of the body
+        //    attrs by run_class_body), then the body's assignments in the order
+        //    they ran (skipping the `__module__` already emitted).  Set via a
+        //    generic setitem so a custom mapping's __setitem__ records them.
+        if let Some(module_val) = attrs.get("__module__") {
+            self.namespace_set_item(&namespace, "__module__", module_val.clone())?;
+        }
+        self.namespace_set_item(&namespace, "__qualname__", Value::string(proto_qualname))?;
+        for (k, v) in &attrs {
+            if k == "__module__" {
+                continue;
+            }
+            self.namespace_set_item(&namespace, k, v.clone())?;
+        }
+
+        // 4. metaclass(name, bases_tuple, namespace, **kwds).
+        let mut call_args: ExpandedArgBuf = smallvec![
+            ExpandedCallArg { name: None, value: Value::string(class_name) },
+            ExpandedCallArg { name: None, value: bases_tuple },
+            ExpandedCallArg { name: None, value: namespace },
+        ];
+        call_args.extend(kwargs);
+        let result = self.call_function_expanded(metaclass, &call_args)?;
+
+        // Seed the `__class__` cell the body's methods closed over so that
+        // zero-arg `super()` inside them resolves to the *final* class the
+        // metaclass produced (mirrors the `MakeClass` path).  `class_env_rc` is
+        // the env captured by every method defined in the body.
+        class_env_rc
+            .borrow_mut()
+            .values
+            .insert("__class__".to_string(), result.clone());
+        Ok(result)
+    }
+
+    /// Set `ns[key] = value` on a class-body namespace mapping returned by
+    /// `__prepare__`.  Fast-paths a plain `dict`; otherwise dispatches to the
+    /// mapping's `__setitem__` so a custom recording namespace observes the
+    /// assignment (issue #2128).
+    fn namespace_set_item(&mut self, ns: &Value, key: &str, value: Value) -> Result<()> {
+        if ns.as_dict().is_some() {
+            ns.dict_insert(PyKey::str_from(key), value)?;
+            return Ok(());
+        }
+        let ValueKind::PyInstance(inst) = ns.kind() else {
+            // BuiltinObject mappings without a user __setitem__ fall back to a
+            // direct dict_insert when they expose one; otherwise this is a
+            // namespace type we do not support — report it like CPython.
+            if ns.dict_insert(PyKey::str_from(key), value.clone()).is_ok() {
+                return Ok(());
+            }
+            let tname = pyrust_core::builtin_type_name(ns);
+            return Err(pyrust_core::type_err!(
+                "'{tname}' object does not support item assignment"
+            ));
+        };
+        let class = Rc::clone(&inst.borrow().class);
+        let Some(method_val) = lookup_class_attr(&class, "__setitem__") else {
+            let class_name = class.borrow().name.clone();
+            return Err(pyrust_core::type_err!(
+                "'{class_name}' object does not support item assignment"
+            ));
+        };
+        invoke_class_method(
+            self,
+            method_val,
+            ns.clone(),
+            &[
+                ExpandedCallArg { name: None, value: Value::string(key) },
+                ExpandedCallArg { name: None, value },
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Run a class body and return its assembled attrs dict plus the class env
     /// (so the caller can seed `__class__` after the class object exists).
     fn run_class_body(
@@ -7178,15 +7362,6 @@ impl Interpreter {
         kwarg_base: crate::bytecode::Reg,
         class_kwarg_names: &[String],
     ) -> Result<()> {
-        let lookup_base = class
-            .borrow()
-            .base
-            .clone()
-            .unwrap_or_else(object_class_singleton);
-        let Some(method_val) = lookup_class_attr(&lookup_base, "__init_subclass__") else {
-            return Ok(());
-        };
-        let new_cls = Value::py_class(Rc::clone(class));
         let kwarg_args: ExpandedArgBuf = class_kwarg_names
             .iter()
             .enumerate()
@@ -7198,8 +7373,71 @@ impl Interpreter {
                 }
             })
             .collect();
-        invoke_class_method(self, method_val, new_cls, &kwarg_args)?;
+        self.make_class_call_init_subclass_with_kwargs(class, &kwarg_args)
+    }
+
+    /// Core of PEP 487 `__init_subclass__` dispatch shared by the `class`
+    /// statement (`make_class_call_init_subclass`) and the `type()` /
+    /// `type.__new__` constructor path: looks up `base.__init_subclass__` and
+    /// invokes it with the already-assembled keyword arguments.
+    fn make_class_call_init_subclass_with_kwargs(
+        &mut self,
+        class: &Rc<RefCell<PyClass>>,
+        kwarg_args: &[ExpandedCallArg],
+    ) -> Result<()> {
+        let lookup_base = class
+            .borrow()
+            .base
+            .clone()
+            .unwrap_or_else(object_class_singleton);
+        let Some(method_val) = lookup_class_attr(&lookup_base, "__init_subclass__") else {
+            return Ok(());
+        };
+        let new_cls = Value::py_class(Rc::clone(class));
+        invoke_class_method(self, method_val, new_cls, kwarg_args)?;
         Ok(())
+    }
+
+    /// Shared class-construction finalization used by both the `type()` and
+    /// `type.__new__` constructor builtins.  Mirrors the `class` statement's
+    /// post-body path (`exec_make_class`): adjust the namespace per CPython's
+    /// `type_new` rules (__module__/__doc__/__hash__/__qualname__), process
+    /// `__slots__`, build the `PyClass`, register it as a subclass of every
+    /// base, run `__set_name__` on namespace descriptors, then call the base's
+    /// `__init_subclass__`.  This gives `type(...)`-created classes the same
+    /// hooks as a `class` statement (issues #2129 / #2130).
+    pub(crate) fn build_class_via_type(
+        &mut self,
+        name: String,
+        base: Option<Rc<RefCell<PyClass>>>,
+        extra_bases: Vec<Rc<RefCell<PyClass>>>,
+        mut attrs: IndexMap<String, Value>,
+        metatype: Option<Rc<RefCell<PyClass>>>,
+        init_subclass_kwargs: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        let class_docstring = attrs.get("__doc__").and_then(|v| match v.kind() {
+            ValueKind::Str(s) => Some(s.to_string()),
+            _ => None,
+        });
+        let qualname =
+            make_class_finalize_attrs(&mut attrs, name.clone(), class_docstring.as_deref())?;
+        let slots = make_class_extract_slots(&mut attrs)?;
+        let class = Rc::new(RefCell::new(PyClass {
+            extra_bases: extra_bases.clone(),
+            slots,
+            metatype,
+            ..PyClass::new(name, qualname, base.clone(), attrs)
+        }));
+        class_mro_items(&class).map(|_| ())?;
+        if let Some(ref b) = base {
+            b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        for eb in &extra_bases {
+            eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        self.make_class_call_set_name(&class)?;
+        self.make_class_call_init_subclass_with_kwargs(&class, init_subclass_kwargs)?;
+        Ok(Value::py_class(class))
     }
 }
 

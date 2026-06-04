@@ -339,6 +339,14 @@ thread_local! {
             "__call__".to_string(),
             Value::builtin_function("type.__call__"),
         );
+        // Issue #2128: register the default `type.__prepare__` so
+        // `hasattr(type, '__prepare__')` is true, `type.__prepare__(name, bases)`
+        // returns a fresh dict, and `super().__prepare__(...)` resolves inside a
+        // custom metaclass.  It is a classmethod (receives the metaclass).
+        attrs.insert(
+            "__prepare__".to_string(),
+            Value::builtin_function("type.__prepare__"),
+        );
         let cls = Rc::new(RefCell::new(PyClass::new(
             "type",
             "type",
@@ -1785,6 +1793,7 @@ pub(crate) fn is_builtin_classmethod(fn_name: &str) -> bool {
         fn_name,
         "object.__init_subclass__"
             | "object.__subclasshook__"
+            | "type.__prepare__"
             | "collections.abc.__instancecheck__"
             | "collections.abc.__subclasshook__"
             | "collections.abc.__subclasscheck__"

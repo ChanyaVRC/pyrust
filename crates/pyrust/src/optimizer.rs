@@ -1407,7 +1407,8 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::CallMemo(..)
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
-            | Insn::MakeClass(..)) => {
+            | Insn::MakeClass(..)
+            | Insn::MakeClassMeta(..)) => {
                 known.retain(|&r, _| r >= num_locals);
                 if let Some(dst) = writable_dst(&insn) {
                     known.remove(&dst);
@@ -1480,6 +1481,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | ImportModule(r, _)
         | LoadExc(r)
         | MakeClass(r, _, _, _, _, _, _)
+        | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
         | MakeTypeVar(r, _) => Some(*r),
         CallMethod { dst, .. }
@@ -2452,6 +2454,11 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             (r >= *bases_base && r < *bases_base + *bases_n as u32)
                 || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n as u32)
         }
+        MakeClassMeta(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
+            *meta_reg == r
+                || (r >= *bases_base && r < *bases_base + *bases_n as u32)
+                || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n as u32)
+        }
         MakeTypeAlias(_, _, value_reg, params_reg) => *value_reg == r || *params_reg == r,
         MakeTypeVar(_, _) => false,
 
@@ -2637,6 +2644,15 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             }
         }
         MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
+            for r in *bases_base..*bases_base + *bases_n as u32 {
+                reads.insert(r);
+            }
+            for r in *kwarg_base..*kwarg_base + *kwarg_n as u32 {
+                reads.insert(r);
+            }
+        }
+        MakeClassMeta(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
+            reads.insert(*meta_reg);
             for r in *bases_base..*bases_base + *bases_n as u32 {
                 reads.insert(r);
             }
@@ -3084,7 +3100,8 @@ fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
             | Insn::CallMemo(..)
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
-            | Insn::MakeClass(..) => {
+            | Insn::MakeClass(..)
+            | Insn::MakeClassMeta(..) => {
                 numeric.clear();
             }
             other => {
@@ -3414,6 +3431,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | ImportModule(r, _)
         | MakeFunction(r, _, _, _, _, _)
         | MakeClass(r, _, _, _, _, _, _)
+        | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
         | MakeTypeVar(r, _)
         | BuildList(r, _, _)
@@ -4248,6 +4266,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
+                | Insn::MakeClassMeta(..)
         ) {
             table.evict_local_srcs(num_locals);
         }
@@ -5220,6 +5239,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
+                | Insn::MakeClassMeta(..)
         ) {
             copies.retain(|k, v| *k >= num_locals && *v >= num_locals);
         }
@@ -7214,6 +7234,15 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             }
         }
         MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
+            for r in *bases_base..*bases_base + *bases_n as u32 {
+                f(r);
+            }
+            for r in *kwarg_base..*kwarg_base + *kwarg_n as u32 {
+                f(r);
+            }
+        }
+        MakeClassMeta(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n, meta_reg) => {
+            f(*meta_reg);
             for r in *bases_base..*bases_base + *bases_n as u32 {
                 f(r);
             }
@@ -10221,6 +10250,7 @@ mod tests {
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::MakeClass(..)
+                    | Insn::MakeClassMeta(..)
             ) {
                 table.retain(|k, _| match k {
                     K::LoadConst(_) => true,

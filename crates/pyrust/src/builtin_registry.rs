@@ -144,14 +144,17 @@ mod tests {
         // Spot-checks across the three buckets that the optimizer's DCE
         // pass depends on (issue #433):
         //
-        // 1. Definitionally pure flat builtins — `abs`, `chr`, `ord`, `type` …
+        // 1. Definitionally pure flat builtins — `abs`, `ord` …
         //    These have `#[pure]` in `bodies/builtins.rs` and must come back
         //    pure here, otherwise the optimizer's call-DCE pass would
         //    drift backwards relative to the legacy `PURE_BUILTINS` list.
         //    `len` is intentionally absent: it dispatches user `__len__` and
         //    is therefore impure (issue #1526).  `chr` is likewise absent: it
-        //    dispatches user `__index__` and is impure (issue #1908).
-        for name in ["abs", "ord", "type"] {
+        //    dispatches user `__index__` and is impure (issue #1908).  `type`
+        //    is impure too: the 3-arg `type(name, bases, ns)` constructor runs
+        //    class-creation hooks (`__set_name__`/`__init_subclass__`) that may
+        //    execute arbitrary user code (issues #2129/#2130).
+        for name in ["abs", "ord"] {
             assert!(is_pure(name), "{name:?} must be registered as pure");
         }
 
@@ -188,7 +191,8 @@ mod tests {
             "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
             "ascii",  // len dispatches user __len__ on PyInstance values (#1526).
             "len",    // chr dispatches user __index__ on PyInstance values (#1908).
-            "chr",
+            "chr",    // type(name, bases, ns) runs class-creation hooks (#2129/#2130).
+            "type",
         ] {
             assert!(
                 !is_pure(name),
