@@ -1012,6 +1012,15 @@ impl Interpreter {
         {
             return Ok(self.object_protocol_method_result(method, &receiver));
         }
+        // `__slots__` member_descriptor's descriptor-protocol methods, invoked
+        // directly (`S.x.__get__(inst)`, `S.x.__set__(inst, v)`,
+        // `S.x.__delete__(inst)`).  Issue #2084.
+        if matches!(method, "__get__" | "__set__" | "__delete__")
+            && pyrust_builtins::member_descriptor::as_member_descriptor(&receiver).is_some()
+        {
+            let args_vec: Vec<Value> = std::mem::take(pos);
+            return self.member_descriptor_protocol_call(receiver, method, args_vec);
+        }
         // Bound-method dispatch: each builtin takes `&Value`
         // and scopes its own `RefCell::borrow_mut()` for the
         // duration of the operation (#448).  No `&mut Vec /
@@ -7148,7 +7157,7 @@ impl Interpreter {
         let (base, extra_bases_vec) =
             self.make_class_resolve_bases(regs, num_locals, bases_base, bases_n)?;
 
-        let slots = make_class_extract_slots(&mut attrs)?;
+        let slots = make_class_extract_slots(&mut attrs, &class_name)?;
         let class = Rc::new(RefCell::new(PyClass {
             extra_bases: extra_bases_vec.clone(),
             slots,
@@ -7579,7 +7588,7 @@ impl Interpreter {
         });
         let qualname =
             make_class_finalize_attrs(&mut attrs, name.clone(), class_docstring.as_deref())?;
-        let slots = make_class_extract_slots(&mut attrs)?;
+        let slots = make_class_extract_slots(&mut attrs, &name)?;
         let class = Rc::new(RefCell::new(PyClass {
             extra_bases: extra_bases.clone(),
             slots,
@@ -7696,10 +7705,19 @@ fn make_class_finalize_attrs(
 /// Extract the declared `__slots__` names (string / tuple / list of strings)
 /// from the attrs dict.  Returns `None` when no `__slots__` is declared (the
 /// instance gets a full __dict__); `Some(set)` restricts instance attributes.
-/// When __slots__ is present without __dict__, the __dict__ sentinel is removed
-/// so slotted instances have no per-instance dict (CPython parity).
+/// When __slots__ is present without a `'__dict__'` slot, the `__dict__` /
+/// `__weakref__` class entries are removed so slotted instances have no
+/// per-instance dict (CPython parity).
+///
+/// For each declared slot name (other than `__dict__` / `__weakref__`) this
+/// also installs a `member_descriptor` data descriptor in the class namespace
+/// (issue #2084), so `S.x` is a `member_descriptor`, `'x' in S.__dict__` and
+/// `'x' in dir(S)`.  The descriptor stores into / reads from the instance's
+/// slot storage and is the mechanism that lets a slotted instance hold
+/// attributes without a per-instance `__dict__` (issue #2076).
 fn make_class_extract_slots(
     attrs: &mut IndexMap<String, Value>,
+    class_name: &str,
 ) -> Result<Option<indexmap::IndexSet<String>>> {
     let Some(slots_val) = attrs.get("__slots__") else {
         return Ok(None);
@@ -7735,8 +7753,29 @@ fn make_class_extract_slots(
             ));
         }
     }
+    // Install a member_descriptor per slot (issue #2084).  CPython turns each
+    // slot name into a data descriptor on the class; `__dict__` / `__weakref__`
+    // are special-cased by CPython (they enable per-instance dict / weakref
+    // rather than allocating a member slot), so they don't get descriptors.
+    for slot in &set {
+        if slot == "__dict__" || slot == "__weakref__" {
+            continue;
+        }
+        attrs.insert(
+            slot.clone(),
+            pyrust_builtins::member_descriptor::member_descriptor(slot, class_name),
+        );
+    }
+    // An all-slots class (no `'__dict__'` slot) has neither a `__dict__` nor a
+    // `__weakref__` entry in its class namespace (issue #2076): CPython only
+    // adds those getset_descriptors when the layout actually carries a per-
+    // instance dict / weakref.  `make_class_finalize_attrs` inserts them
+    // unconditionally for the common case, so strip them back out here.  When
+    // `'__dict__'` IS a declared slot, keep the `__dict__` entry so
+    // `'__dict__' in S.__dict__` stays True.
     if !set.contains("__dict__") {
-        attrs.insert("__dict__".to_string(), Value::none());
+        attrs.shift_remove("__dict__");
+        attrs.shift_remove("__weakref__");
     }
     Ok(Some(set))
 }

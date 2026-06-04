@@ -21,7 +21,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
-    class_chain_contains_name, class_is_subclass_of,
+    class_chain_contains_name, class_is_subclass_of, class_suppresses_instance_dict,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
@@ -1881,6 +1881,14 @@ pyrust_module! {
         }
         match args[0].value.kind() {
             ValueKind::PyInstance(instance) => {
+                // Issue #2076: a `__slots__` instance with no `__dict__` has no
+                // mapping, so `vars()` raises TypeError (CPython parity).
+                if class_suppresses_instance_dict(&instance.borrow().class) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() argument must have __dict__ attribute"),
+                    ));
+                }
                 let is_exc = class_chain_contains_name(
                     &instance.borrow().class,
                     "BaseException",

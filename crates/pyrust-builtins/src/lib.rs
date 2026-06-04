@@ -17,6 +17,7 @@ pub mod int;
 pub mod iter_helpers;
 pub mod list;
 pub mod mapping_proxy;
+pub mod member_descriptor;
 pub mod mutable_sequence;
 pub mod numeric_attrs_descriptor;
 pub mod property;
