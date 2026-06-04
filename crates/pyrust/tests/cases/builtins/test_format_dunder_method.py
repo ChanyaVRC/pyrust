@@ -68,6 +68,17 @@ try:
     [1].__format__('a', 'b')
 except TypeError as e:
     print('TypeError:', e)
+try:
+    True.__format__('a', 'b')  # bool inherits int.__format__
+except TypeError as e:
+    print('TypeError:', e)
+
+# --- error: keyword arguments rejected (owner is the formatting type) ---
+for value in [255, 3.0, True, 1 + 2j, 'hi', b'x', None, [1, 2]]:
+    try:
+        value.__format__(format_spec='x')
+    except TypeError as e:
+        print('TypeError:', e)
 
 # --- super().__format__('') on a pure user class delegates to str(self) ---
 class C:

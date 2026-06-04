@@ -1034,6 +1034,12 @@ impl Interpreter {
             // PyFunction, not this wrapper.  Gated under the `__` prefix so the
             // common method-name path is untouched.
             if method == "__format__" {
+                if has_kw {
+                    return Err(pyrust_core::type_err!(
+                        "{}.__format__() takes no keyword arguments",
+                        format_dunder_owner(&receiver)
+                    ));
+                }
                 let spec = format_dunder_spec_arg(&receiver, pos)?;
                 return apply_format_spec(&receiver, spec);
             }
@@ -4649,14 +4655,9 @@ fn value_has_real_format(value: &Value) -> bool {
 /// dispatch sites (bound-method wrapper + tagged-container opcode), #2191.
 fn format_dunder_spec_arg<'a>(receiver: &Value, pos: &'a [Value]) -> Result<&'a str> {
     if pos.len() > 1 {
-        let owner = if value_has_real_format(receiver) {
-            pyrust_core::builtin_type_name(receiver)
-        } else {
-            std::borrow::Cow::Borrowed("object")
-        };
         return Err(pyrust_core::type_err!(
             "{}.__format__() takes exactly one argument ({} given)",
-            owner,
+            format_dunder_owner(receiver),
             pos.len()
         ));
     }
@@ -4668,6 +4669,24 @@ fn format_dunder_spec_arg<'a>(receiver: &Value, pos: &'a [Value]) -> Result<&'a 
                 pyrust_core::builtin_type_name(v)
             )
         }),
+    }
+}
+
+/// The owner type name CPython 3.12 names in a builtin `__format__` arg error:
+/// the receiver's own type when it defines a real `__format__`
+/// (int/float/str/bool/complex), `object` otherwise (the inherited
+/// `object.__format__`).  Shared by the spec-arg and keyword-arg validators so
+/// both `__format__` method-call dispatch sites use the same wording.
+fn format_dunder_owner(receiver: &Value) -> std::borrow::Cow<'static, str> {
+    // `bool` inherits `int.__format__`; CPython names the type that *defines*
+    // `__format__` in the MRO, so `True.__format__(...)` errors name `int`.
+    if matches!(receiver.kind(), ValueKind::Bool(_)) {
+        return std::borrow::Cow::Borrowed("int");
+    }
+    if value_has_real_format(receiver) {
+        pyrust_core::builtin_type_name(receiver)
+    } else {
+        std::borrow::Cow::Borrowed("object")
     }
 }
 
@@ -7913,7 +7932,8 @@ impl Interpreter {
             if method == "__format__" {
                 if !kw.is_empty() {
                     return Err(pyrust_core::type_err!(
-                        "__format__() takes no keyword arguments"
+                        "{}.__format__() takes no keyword arguments",
+                        format_dunder_owner(&receiver)
                     ));
                 }
                 let spec = format_dunder_spec_arg(&receiver, &pos)?;
