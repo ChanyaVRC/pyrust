@@ -619,6 +619,7 @@ pyrust_module! {
     /// `PyInstance` values (and transitively for instances inside containers),
     /// which may invoke arbitrary user code.
     fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
+        pyrust_core::check_int_str_conversion(&obj.0)?;
         let s = render_value_repr(_interp, &obj.0)?;
         Ok(Value::string(s))
     }
@@ -3669,6 +3670,7 @@ pyrust_module! {
                             format!("invalid literal for int() with base 10: '{s}'"),
                         )
                     })?;
+                    pyrust_core::check_int_parse_digits(&cleaned, 10)?;
                     match cleaned.parse::<i64>() {
                         Ok(v) => Ok(Value::int(v)),
                         Err(_) => {
@@ -3825,6 +3827,7 @@ pyrust_module! {
                                     format!("invalid literal for int() with base 0: '{s}'"),
                                 )
                             })?;
+                            pyrust_core::check_int_parse_digits(&digits, base)?;
                             match i64::from_str_radix(&digits, base) {
                                 Ok(v) => Ok(Value::int(v)),
                                 Err(_) => {
@@ -3846,6 +3849,7 @@ pyrust_module! {
                                     format!("invalid literal for int() with base {base_arg}: '{s}'"),
                                 )
                             })?;
+                            pyrust_core::check_int_parse_digits(&stripped, base)?;
                             match i64::from_str_radix(&stripped, base) {
                                 Ok(v) => Ok(Value::int(v)),
                                 Err(_) => {
@@ -8674,6 +8678,7 @@ fn int_parse_bytes_like(bytes: &[u8], repr: &str, base_arg: i64) -> Result<Value
     let trimmed = s.trim();
     if base_arg == 0 {
         let (base, digits) = int_parse_base_zero(trimmed).ok_or_else(err)?;
+        pyrust_core::check_int_parse_digits(&digits, base)?;
         match i64::from_str_radix(&digits, base) {
             Ok(v) => Ok(Value::int(v)),
             Err(_) => crate::value::PyBigInt::from_str_radix(&digits, base)
@@ -8683,6 +8688,7 @@ fn int_parse_bytes_like(bytes: &[u8], repr: &str, base_arg: i64) -> Result<Value
     } else {
         let base = base_arg as u32;
         let stripped = int_strip_explicit_base(trimmed, base).ok_or_else(err)?;
+        pyrust_core::check_int_parse_digits(&stripped, base)?;
         match i64::from_str_radix(&stripped, base) {
             Ok(v) => Ok(Value::int(v)),
             Err(_) => crate::value::PyBigInt::from_str_radix(&stripped, base)
@@ -9500,6 +9506,11 @@ pub(crate) fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> R
 /// CPython's `BaseException.__str__`); those with a user-defined `__str__`
 /// call it via the normal dunder dispatch loop.
 fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
+    // gh-95778: reject a base-10 int->str conversion (directly or nested inside
+    // a container) that exceeds `sys.get_int_max_str_digits()`.
+    // `check_int_str_conversion` fast-rejects non-BigInt/non-container values
+    // from their NaN-box tag alone, so the common `str(int)` path pays nothing.
+    pyrust_core::check_int_str_conversion(value)?;
     let ValueKind::PyInstance(inst) = value.kind() else {
         // For containers, str() is defined as repr() in CPython.  Route
         // through render_value_repr so that PyInstance elements inside a
