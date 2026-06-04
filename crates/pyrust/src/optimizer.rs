@@ -171,6 +171,15 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // `pass_compact_consts` is a 1:1 instruction-count- and order-preserving
     // transformation, so the line numbers computed against the pre-compaction
     // stream apply unchanged to the post-compaction stream.
+    // Zero-cost exception handling (CPython 3.11): build the per-pc handler
+    // table from the balanced SetupExcept/PopExcept structure and strip those
+    // two block-setup instructions from the stream.  Runs before the lineno
+    // remap so the (post-strip) instruction stream is the one line numbers are
+    // computed against.  On the (never-observed) bail path the stream is handed
+    // back unchanged with an empty table, and the VM falls back to the dynamic
+    // SetupExcept/PopExcept handler stack — always correct, never wrong.
+    let (insns, exc_table) = build_exc_table(insns);
+
     let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
@@ -191,6 +200,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
         binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
+        exc_table,
     }
 }
 
@@ -5979,6 +5989,179 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
     (new_insns, new_consts)
 }
 
+// ─── Zero-cost exception table ─────────────────────────────────────────────────
+
+/// Sentinel in an exception table meaning "no handler covers this pc".
+pub(crate) const EXC_NO_HANDLER: u32 = u32::MAX;
+
+/// Build a per-pc exception-handler table from the (PC-balanced)
+/// `SetupExcept`/`PopExcept` structure, then strip those two instructions from
+/// the stream (CPython 3.11 "zero-cost" model).
+///
+/// Returns `(new_insns, exc_table)` where `exc_table[pc]` is the absolute target
+/// PC (in the *new*, post-strip instruction space) of the innermost exception
+/// handler active when an exception is raised at `pc`, or [`EXC_NO_HANDLER`] if
+/// none.  `SetupExcept`/`PopExcept` are removed entirely, so entering/leaving a
+/// `try` costs nothing at runtime — the cost moves to the rare raise/unwind,
+/// which does a single O(1) table lookup instead of a per-frame block push/pop.
+///
+/// On the bail path (handler stack not statically consistent at every PC) the
+/// stream is returned unchanged with an **empty** table; the VM then keeps the
+/// dynamic `SetupExcept`/`PopExcept` handler stack.  The compiler emits balanced,
+/// properly-nested `SetupExcept`/`PopExcept`, so in practice this never bails;
+/// the check is a safety net that guarantees we never produce an incorrect table.
+fn build_exc_table(insns: Vec<Insn>) -> (Vec<Insn>, Vec<u32>) {
+    let n = insns.len();
+
+    // Fast out: no exception handlers at all → empty table, nothing to strip.
+    if !insns.iter().any(|i| matches!(i, Insn::SetupExcept(_))) {
+        return (insns, vec![EXC_NO_HANDLER; n]);
+    }
+
+    // Forward dataflow: `stack_in[pc]` = the exc-handler stack (absolute target
+    // PCs, innermost last) at entry to instruction `pc`.  `None` = not yet
+    // visited.  Computed by walking normal control-flow edges (fallthrough +
+    // explicit jumps); exception edges are exactly what this table encodes and
+    // are not followed here.
+    let mut stack_in: Vec<Option<Vec<usize>>> = vec![None; n];
+    let mut work: Vec<usize> = Vec::new();
+    if n > 0 {
+        stack_in[0] = Some(Vec::new());
+        work.push(0);
+    }
+
+    // Propagate `stack` to successor `t`, queueing it if newly set.  Returns
+    // false on a stack-state conflict (statically inconsistent → bail).
+    fn propagate(
+        stack_in: &mut [Option<Vec<usize>>],
+        work: &mut Vec<usize>,
+        t: usize,
+        stack: &[usize],
+    ) -> bool {
+        if t >= stack_in.len() {
+            // Edge past the end of the stream (fallthrough off the last insn or
+            // a jump to insns.len()): no instruction to annotate.
+            return true;
+        }
+        match &stack_in[t] {
+            None => {
+                stack_in[t] = Some(stack.to_vec());
+                work.push(t);
+                true
+            }
+            Some(existing) => existing.as_slice() == stack,
+        }
+    }
+
+    let mut consistent = true;
+    while let Some(i) = work.pop() {
+        let cur = stack_in[i].clone().expect("queued => visited");
+        let jt = |k: i32| -> usize { (i as i64 + 1 + k as i64) as usize };
+        match &insns[i] {
+            // `SetupExcept(k)`: the fallthrough edge enters the try body with
+            // the handler at `k` pushed; the jump edge *to* `k` is the handler
+            // itself, which lives outside its own protected region, so it sees
+            // the pre-push stack.
+            Insn::SetupExcept(k) => {
+                let handler = jt(*k);
+                let mut pushed = cur.clone();
+                pushed.push(handler);
+                consistent &= propagate(&mut stack_in, &mut work, i + 1, &pushed);
+                consistent &= propagate(&mut stack_in, &mut work, handler, &cur);
+            }
+            // `PopExcept`: leaves the innermost try region (fallthrough only).
+            Insn::PopExcept => {
+                let mut popped = cur.clone();
+                popped.pop();
+                consistent &= propagate(&mut stack_in, &mut work, i + 1, &popped);
+            }
+            Insn::Jump(k) => {
+                consistent &= propagate(&mut stack_in, &mut work, jt(*k), &cur);
+            }
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::MatchExcept(_, k)
+            | Insn::MatchExceptStar(_, _, _, k) => {
+                consistent &= propagate(&mut stack_in, &mut work, jt(*k), &cur);
+                consistent &= propagate(&mut stack_in, &mut work, i + 1, &cur);
+            }
+            insn if is_terminator(insn) => {
+                // No normal-flow successor.
+            }
+            _ => {
+                consistent &= propagate(&mut stack_in, &mut work, i + 1, &cur);
+            }
+        }
+    }
+
+    // Safety net: a statically inconsistent handler stack means the per-pc table
+    // would be ambiguous.  Hand the (unstripped) stream back with an empty table
+    // and let the VM keep the dynamic SetupExcept/PopExcept handler stack.
+    if !consistent {
+        return (insns, Vec::new());
+    }
+
+    // `handler_at[pc]` (original PC space) = innermost active handler at `pc`,
+    // or `usize::MAX` for none / unreachable.
+    let mut handler_at: Vec<usize> = vec![usize::MAX; n];
+    for pc in 0..n {
+        if let Some(stack) = &stack_in[pc]
+            && let Some(&h) = stack.last()
+        {
+            handler_at[pc] = h;
+        }
+    }
+
+    // Strip SetupExcept/PopExcept and retarget all jumps via the shared compact
+    // machinery, then remap `handler_at` into the new PC space.
+    let keep: Vec<bool> = insns
+        .iter()
+        .map(|i| !matches!(i, Insn::SetupExcept(_) | Insn::PopExcept))
+        .collect();
+
+    // Replicate compact's old→new index map so we can remap handler targets.
+    let mut to_new = vec![0usize; n + 1];
+    let mut cnt = 0usize;
+    for i in 0..n {
+        to_new[i] = cnt;
+        if keep[i] {
+            cnt += 1;
+        }
+    }
+    to_new[n] = cnt;
+
+    let new_insns = compact(insns, &keep);
+    let new_len = new_insns.len();
+    debug_assert_eq!(new_len, cnt);
+
+    let mut exc_table = vec![EXC_NO_HANDLER; new_len];
+    for old_pc in 0..n {
+        if !keep[old_pc] {
+            continue;
+        }
+        let new_pc = to_new[old_pc];
+        let h = handler_at[old_pc];
+        exc_table[new_pc] = if h == usize::MAX {
+            EXC_NO_HANDLER
+        } else {
+            // A handler target is always a SetupExcept jump target, i.e. the
+            // first kept instruction at-or-after the removed SetupExcept's
+            // destination — exactly compact's redirect rule.
+            to_new[h] as u32
+        };
+    }
+
+    (new_insns, exc_table)
+}
+
 // ─── Compaction helper ─────────────────────────────────────────────────────────
 
 /// Remove instructions where `keep[i]` is `false` and rewrite all jump offsets.
@@ -11433,5 +11616,90 @@ elif x == 2:
             assert_eq!(indexed, linear, "indexed vs linear intern diverged");
         }
         assert_eq!(a.len(), b.len());
+    }
+
+    #[test]
+    fn build_exc_table_no_handlers_is_identity() {
+        let insns = vec![Insn::LoadConst(0, 0), Insn::Return(0)];
+        let (out, table) = build_exc_table(insns.clone());
+        assert_eq!(out, insns, "stream unchanged when no SetupExcept present");
+        assert_eq!(table, vec![EXC_NO_HANDLER, EXC_NO_HANDLER]);
+    }
+
+    #[test]
+    fn build_exc_table_strips_and_maps_single_try() {
+        // Layout (offsets are relative, +1 of the source counting in jump_pc):
+        //   0 SetupExcept(+1)   -> handler at pc 3 (the LoadConst below)
+        //   1 RaiseValue(0)     try body, raises
+        //   2 PopExcept         normal exit (jumped over on raise)
+        //   3 LoadConst(0,0)    handler entry
+        //   4 Return(0)
+        // SetupExcept's absolute target = 0 + 1 + 1 = 2; but pc 2 is PopExcept,
+        // which is stripped, so compact redirects the handler to pc 3 → new pc 1.
+        let insns = vec![
+            Insn::SetupExcept(1),
+            Insn::RaiseValue(0),
+            Insn::PopExcept,
+            Insn::LoadConst(0, 0),
+            Insn::Return(0),
+        ];
+        let (out, table) = build_exc_table(insns);
+        // Two instructions (SetupExcept + PopExcept) removed.
+        assert_eq!(out.len(), 3);
+        assert!(
+            !out.iter()
+                .any(|i| matches!(i, Insn::SetupExcept(_) | Insn::PopExcept)),
+            "block-setup instructions must be stripped"
+        );
+        // New stream: [RaiseValue(0), LoadConst(0,0), Return(0)].
+        // RaiseValue is now at new pc 0 and must dispatch to the handler at new
+        // pc 1 (the LoadConst).
+        assert!(matches!(out[0], Insn::RaiseValue(0)));
+        assert_eq!(table[0], 1, "raise inside try → handler pc 1");
+        // The handler body and code after it are not protected.
+        assert_eq!(table[1], EXC_NO_HANDLER);
+        assert_eq!(table[2], EXC_NO_HANDLER);
+    }
+
+    #[test]
+    fn build_exc_table_real_compiled_try_is_stripped_and_consistent() {
+        // A real compiled try/except: after the optimizer runs (which includes
+        // build_exc_table), the FnCode must have no SetupExcept/PopExcept left
+        // and a non-empty exc_table whose every protected entry points at a
+        // valid in-range handler pc.
+        let code = optimize(compile_fn(
+            "def f(x):\n    try:\n        return x.attr\n    except AttributeError:\n        return -1\n",
+        ));
+        // The optimized top-level code holds f as a nested proto; check the proto.
+        let proto = &code.fn_protos[0].code;
+        assert!(
+            !proto
+                .insns
+                .iter()
+                .any(|i| matches!(i, Insn::SetupExcept(_) | Insn::PopExcept)),
+            "block-setup instructions must be stripped from optimized try/except"
+        );
+        assert_eq!(
+            proto.exc_table.len(),
+            proto.insns.len(),
+            "exc_table is parallel to insns"
+        );
+        // At least one instruction is protected, and every handler target is a
+        // valid pc within the (post-strip) stream.
+        let protected = proto
+            .exc_table
+            .iter()
+            .filter(|&&t| t != EXC_NO_HANDLER)
+            .count();
+        assert!(protected > 0, "the try body must be covered by a handler");
+        for &t in &proto.exc_table {
+            if t != EXC_NO_HANDLER {
+                assert!(
+                    (t as usize) < proto.insns.len(),
+                    "handler target {t} out of range (len {})",
+                    proto.insns.len()
+                );
+            }
+        }
     }
 }
