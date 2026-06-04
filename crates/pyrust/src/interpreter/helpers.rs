@@ -2350,6 +2350,17 @@ pub(crate) fn mro_slot_allows(class: &Rc<RefCell<PyClass>>, name: &str) -> bool 
         .any(|b| mro_slot_allows(b, name))
 }
 
+/// Return `true` if instances of `class` must NOT expose a `__dict__`
+/// (issue #2076).  CPython suppresses the instance `__dict__` when the class
+/// declares `__slots__`, none of the slots is `'__dict__'`, and no ancestor in
+/// the MRO is unslotted (an unslotted ancestor reintroduces `tp_dictoffset`).
+/// Mirrors the condition guarding `__slots__` setattr enforcement.
+pub(crate) fn class_suppresses_instance_dict(class: &Rc<RefCell<PyClass>>) -> bool {
+    class.borrow().slots.is_some()
+        && !mro_slot_allows(class, "__dict__")
+        && !mro_has_unslotted_ancestor(class)
+}
+
 /// Handle `instance.__dict__ = value` (issue #1942).
 ///
 /// CPython's `tp_setattro` routes assignment to the `__dict__` slot through a

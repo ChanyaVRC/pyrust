@@ -40,6 +40,10 @@ pub struct InstanceDictState {
     /// When `true`, attrs that are exception C-level slots are hidden from
     /// public iteration/repr (matching CPython's `__dict__` on BaseException).
     pub is_exception: bool,
+    /// When `true`, the class (or an ancestor) declares `__slots__`, so the
+    /// `__dict__` proxy must hide slot-member keys (issue #2076).  Cached once
+    /// so the common no-slots instance pays no per-key MRO walk.
+    has_slots: bool,
     /// Cached key snapshot for iteration (lazily materialised on first
     /// `iter_next` call, reset by mutating methods).  Uses interior
     /// mutability so `iter_next` can advance the cursor through `&self`.
@@ -51,6 +55,17 @@ impl InstanceDictState {
     /// Returns `true` when `name` is a C-level exception slot that must be
     /// hidden from `__dict__` for this instance.
     fn is_hidden(&self, name: &str) -> bool {
+        // Issue #2076: a `__slots__` member is stored in the instance's attrs
+        // map but is slot storage, not a `__dict__` entry, so it is hidden from
+        // the `__dict__` proxy (relevant only for `__slots__ = (..., '__dict__')`,
+        // where both a dict and member slots coexist).  Gated on `has_slots` so
+        // the common no-slots instance skips the MRO walk.
+        if self.has_slots {
+            let class = Rc::clone(&self.instance.borrow().class);
+            if is_slot_member(name, &class) {
+                return true;
+            }
+        }
         if !self.is_exception {
             return false;
         }
@@ -539,13 +554,31 @@ pub fn as_instance_dict_items(value: &Value) -> Option<Vec<(PyKey, Value)>> {
 /// separately in `values_are_identical` by comparing the `instance` `Rc`
 /// pointers of two `instance_dict` proxies.
 pub fn instance_dict(instance: Rc<RefCell<PyInstance>>, is_exception: bool) -> Value {
+    let has_slots = class_chain_has_slots(&instance.borrow().class);
     let state: Box<dyn Any> = Box::new(InstanceDictState {
         instance,
         is_exception,
+        has_slots,
         iter_keys: RefCell::new(None),
         iter_pos: RefCell::new(0),
     });
     Value::builtin_object(INSTANCE_DICT_OPS, state)
+}
+
+/// Walk the class base chain and return `true` if any class declares
+/// `__slots__` (issue #2076).  Cached on the proxy so per-key `is_hidden`
+/// checks only run the slot-member walk for slotted classes.
+fn class_chain_has_slots(class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool {
+    let (has, base, extra_bases) = {
+        let borrowed = class.borrow();
+        (
+            borrowed.slots.is_some(),
+            borrowed.base.clone(),
+            borrowed.extra_bases.clone(),
+        )
+    };
+    has || base.is_some_and(|b| class_chain_has_slots(&b))
+        || extra_bases.iter().any(class_chain_has_slots)
 }
 
 /// Return `true` if both `BuiltinState` values are `instance_dict` proxies for
@@ -635,6 +668,31 @@ fn is_exc_class_slot(name: &str, class: &Rc<RefCell<pyrust_core::PyClass>>) -> b
         return true;
     }
     false
+}
+
+/// Walk the class base chain and return `true` if `name` resolves to a
+/// `__slots__` member_descriptor (issue #2076).  Such names are stored in the
+/// instance's `attrs` map but represent slot storage, not the per-instance
+/// `__dict__`, so they must be hidden from the `__dict__` proxy when the class
+/// also has a `__dict__` slot (`__slots__ = ('q', '__dict__')`).
+fn is_slot_member(name: &str, class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool {
+    let (attr, base, extra_bases) = {
+        let borrowed = class.borrow();
+        (
+            borrowed.attrs.get(name).cloned(),
+            borrowed.base.clone(),
+            borrowed.extra_bases.clone(),
+        )
+    };
+    if let Some(v) = attr {
+        return crate::member_descriptor::as_member_descriptor(&v).is_some();
+    }
+    if let Some(b) = base {
+        if is_slot_member(name, &b) {
+            return true;
+        }
+    }
+    extra_bases.iter().any(|b| is_slot_member(name, b))
 }
 
 /// Walk the class base chain and return `true` if any class has `target_name`.
