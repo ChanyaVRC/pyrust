@@ -150,6 +150,18 @@ impl Interpreter {
         // than on a registered name, so they can't live in the registry.
         // See `crates/pyrust/src/builtin_modules/` for the per-module bodies.
 
+        // Fast path (#frame-setup-trim): a plain user function — the most
+        // common callee — can never be a `super_bound_builtin`, a registered
+        // `BuiltinFunction`, a bound method, or any of the pattern-guarded
+        // arms below.  Dispatch straight to `call_user_function_expanded`,
+        // skipping the `as_super_bound_builtin` probe, the registry lookup,
+        // and entry into the large `match function.kind()` cascade.  Exactly
+        // equivalent to the `ValueKind::UserFunction` arm of that match.
+        if let ValueKind::UserFunction(f) = function.kind() {
+            let f = Rc::clone(f);
+            return self.call_user_function_expanded(f, args, &[]);
+        }
+
         // Issue #988: `super().__init__(args)` on a dict/list/set subclass.
         // The SuperProxy wraps the resolved BuiltinFunction sentinel together
         // with the instance in a `super_bound_builtin` object so that `self`
