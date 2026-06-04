@@ -107,7 +107,16 @@ impl Parser {
     // ── Statements ─────────────────────────────────────────────────────────
 
     fn parse_stmt(&mut self) -> Result<Vec<Stmt>> {
-        // Collect decorators before def/class
+        // Collect decorators before def/class.  CPython 3.12 reports the line
+        // of the *first decorator* (not the `def`) as `co_firstlineno` for a
+        // decorated function, so capture the `@` line before consuming it
+        // (issue #2185).  `0` when undecorated → `parse_def` falls back to the
+        // `def` line.
+        let deco_lineno = if self.is(&Token::At) {
+            self.current_lineno()
+        } else {
+            0
+        };
         let mut decorators: Vec<Expr> = Vec::new();
         while self.is(&Token::At) {
             decorators.push(self.parse_decorator()?);
@@ -115,11 +124,11 @@ impl Parser {
         }
 
         match self.current() {
-            Some(Token::Def) => Ok(vec![self.parse_def(decorators, false)?]),
+            Some(Token::Def) => Ok(vec![self.parse_def(decorators, false, deco_lineno)?]),
             Some(Token::Class) => Ok(vec![self.parse_class(decorators)?]),
             // `async def` — soft keyword `async` followed by `def`
             Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::Def)) => {
-                Ok(vec![self.parse_async_def(decorators)?])
+                Ok(vec![self.parse_async_def(decorators, deco_lineno)?])
             }
             _ if !decorators.is_empty() => Err(PyError::Parse(
                 "decorator must be followed by def or class".to_string(),
@@ -1033,11 +1042,20 @@ impl Parser {
         }
     }
 
-    fn parse_def(&mut self, decorators: Vec<Expr>, is_async: bool) -> Result<Stmt> {
-        // The `def` keyword's source line is the function's `co_firstlineno`
-        // (CPython 3.12 reports the `def` line even for decorated functions),
-        // captured before consuming the keyword (issue #2185).
-        let def_lineno = self.current_lineno();
+    fn parse_def(
+        &mut self,
+        decorators: Vec<Expr>,
+        is_async: bool,
+        deco_lineno: u32,
+    ) -> Result<Stmt> {
+        // `co_firstlineno` is the line of the first decorator when the function
+        // is decorated, otherwise the `def` keyword's line (CPython 3.12;
+        // issue #2185).  `deco_lineno` is `0` when undecorated.
+        let def_lineno = if deco_lineno != 0 {
+            deco_lineno
+        } else {
+            self.current_lineno()
+        };
         self.expect(&Token::Def)?;
         let name = self.expect_ident("function name")?;
         // PEP 695: optional `[T, U, ...]` type parameter list before `(`.
@@ -1069,9 +1087,9 @@ impl Parser {
 
     /// Parse `async def name(...) -> ...: ...`  (the `async` keyword has already
     /// been identified by the caller via lookahead but not consumed yet).
-    fn parse_async_def(&mut self, decorators: Vec<Expr>) -> Result<Stmt> {
+    fn parse_async_def(&mut self, decorators: Vec<Expr>, deco_lineno: u32) -> Result<Stmt> {
         self.bump(); // consume `async`
-        self.parse_def(decorators, true)
+        self.parse_def(decorators, true, deco_lineno)
     }
 
     fn parse_params(&mut self) -> Result<Vec<FunctionParam>> {

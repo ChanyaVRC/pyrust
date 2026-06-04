@@ -24,6 +24,21 @@ def firstline(a, b):
 print("co_firstlineno:", firstline.__code__.co_firstlineno)
 
 
+# A decorated function's co_firstlineno is the FIRST decorator line, not the
+# `def` line (CPython 3.12).
+def _identity(fn):
+    return fn
+
+
+@_identity
+@_identity
+def decorated():
+    return 0
+
+
+print("decorated co_firstlineno:", decorated.__code__.co_firstlineno)
+
+
 # --- co_consts: implicit None reserved at slot 0 --------------------------
 def no_literals(a, b):
     return a + b
