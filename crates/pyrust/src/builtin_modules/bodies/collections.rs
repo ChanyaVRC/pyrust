@@ -36,10 +36,55 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    NativeIterFrame, invoke_class_method, lookup_class_attr,
+    Interpreter, NativeIterFrame, invoke_class_method, lookup_class_attr,
 };
 use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, Value, ValueKind, key_repr};
 use pyrust_derive::pyrust_module;
+
+/// Python-source definitions for `namedtuple`, `OrderedDict`, `ChainMap`,
+/// `UserDict`, `UserList`, and `UserString` (issue #1884).  These members
+/// are most naturally expressed in Python; they are exec'd once into a
+/// throwaway namespace at first import of `collections` and the resulting
+/// names copied onto the module.  See `inject_python_members`.
+const COLLECTIONS_PY_SOURCE: &str = include_str!("collections_py.py");
+
+/// Names defined by `COLLECTIONS_PY_SOURCE` that should be exported onto the
+/// `collections` module.  Private helpers (`_keywords`, `_make_field_getter`,
+/// `_sys_maxsize`) are intentionally omitted.
+const COLLECTIONS_PY_EXPORTS: [&str; 6] = [
+    "namedtuple",
+    "OrderedDict",
+    "ChainMap",
+    "UserDict",
+    "UserList",
+    "UserString",
+];
+
+/// Execute `COLLECTIONS_PY_SOURCE` once and copy its public names onto the
+/// `collections` module's attribute map.  Called from the `collections`
+/// post-load hook in `env.rs::load_module` after the native classes
+/// (`Counter`, `defaultdict`, `deque`) and `Counter`/`defaultdict`'s `dict`
+/// re-parenting are in place, so the Python source can rely on the rest of
+/// the module being present.
+pub(crate) fn inject_python_members(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<crate::value::PyModule>>,
+) -> Result<()> {
+    let ns = Value::dict(PyDict::default());
+    interp.exec_source(COLLECTIONS_PY_SOURCE, Some(ns.clone()), None)?;
+    let dict = ns
+        .as_dict()
+        .ok_or_else(|| PyError::Runtime("collections: exec namespace not a dict".into()))?;
+    for name in COLLECTIONS_PY_EXPORTS {
+        if let Some(val) = dict.get(&PyKey::str_from(name)) {
+            module
+                .borrow_mut()
+                .attrs
+                .insert(name.to_string(), val.clone());
+        }
+    }
+    Ok(())
+}
 
 /// Attribute name under which `Counter` and `defaultdict` keep their backing
 /// dict (issue #2010).  Both are real `dict` subclasses (their `PyClass.base`

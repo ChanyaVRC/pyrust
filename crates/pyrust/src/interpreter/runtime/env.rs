@@ -2507,6 +2507,19 @@ impl Interpreter {
                 }
             }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
+            // `collections` Python-source members (issue #1884): inject
+            // `namedtuple`, `OrderedDict`, `ChainMap`, `UserDict`,
+            // `UserList`, and `UserString` by exec'ing their Python source.
+            // Done *after* the module is in `module_cache` so the exec (which
+            // resolves builtins like `dict`/`tuple`/`property`) sees a
+            // consistent import state.
+            if name == "collections"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::collections::inject_python_members(
+                    self, &m,
+                )?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*
