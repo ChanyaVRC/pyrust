@@ -312,11 +312,23 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 .get(&lc_reg)
                 .copied()
                 .is_some_and(|last| last >= i + 2);
+            // The coarse `last_read[lc_reg]` / `back_edge_after` guards block the
+            // very common "reused scratch register" shape that dominates loop
+            // bodies: a temp re-`LoadConst`-ed for each operand, e.g.
+            //   LoadConst(t,2); BinOp(_, i, Mul, t)   ← value of t dead here
+            //   LoadConst(t,1); BinOp(_, _, Sub, t)   ← (t overwritten before read)
+            // `last_read[t]` points at the *second* BinOp and the loop ends in a
+            // back-edge, so neither pair ever fuses.  `scratch_dead_after` proves
+            // the precise fact — the value loaded at `i` is overwritten before any
+            // read OR branch in a short straight-line window — which makes fusion
+            // sound regardless of the forward `last_read` estimate or a later
+            // back-edge (no reachable path can observe the dead value).
+            let dead_after = scratch_dead_after(&transformed, i + 2, lc_reg);
             if rhs == lc_reg
                 && lhs != lc_reg
                 && lc_reg >= num_locals
-                && !back_edge_after[i + 2]
-                && (dst == lc_reg || !read_after)
+                && (dead_after || !back_edge_after[i + 2])
+                && (dst == lc_reg || !read_after || dead_after)
             {
                 keep[i] = false;
                 // Fusing a plain BinOp (never augmented) → is_aug = false.
@@ -1305,11 +1317,19 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
         .filter(|(r, _)| write_count.get(r).copied() == Some(1))
         .collect();
 
+    // Only *machine* ints (not BigInt) seed `int_regs`.  `int_regs` gates the
+    // algebraic identity rewrites (`x + 0 → x`, `x * 1 → x`, …), which replace
+    // the op with a `Move` and therefore make the result share `x`'s object
+    // identity.  For a machine int that divergence from CPython (`1000 + 0 is
+    // 1000` is `False` in CPython) is an accepted long-standing tradeoff, but
+    // for a BigInt it breaks the `is` semantics the runtime otherwise preserves
+    // (`2**64 + 0 is 2**64` must be `False` — issue #523, test_bigint_identity).
+    // Excluding BigInt consts keeps them out of `int_regs` so their `+ 0` / `* 1`
+    // is never folded to a `Move`.  (Previously the const-fusion pass could not
+    // reach these sites inside loops; loosening that fusion exposed the latent
+    // BigInt-identity bug, which this gate closes.)
     let is_int_const = |idx: u16, consts: &[Value]| -> bool {
-        matches!(
-            consts[idx as usize].kind(),
-            ValueKind::Int(_) | ValueKind::BigInt(_)
-        )
+        matches!(consts[idx as usize].kind(), ValueKind::Int(_))
     };
     // Ops that preserve Int when both operands are Int.  `Div` returns
     // Float; `Pow` may return Float for negative RHS; skipped.
@@ -1806,6 +1826,58 @@ fn slice_has_back_edge(insns: &[Insn]) -> bool {
 /// Used as a forward liveness guard before removing a `LoadConst` that produced `r`.
 fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
     insns.iter().any(|insn| insn_reads_reg(insn, r))
+}
+
+/// Returns `true` when the value held in register `r` is provably dead starting
+/// at `insns[start]` — the first instruction at or after `start` that touches
+/// `r` *writes* it without first reading it.  Lets `pass_binop_const_fusion`
+/// fuse the "reused scratch register" shape inside loop bodies, which the coarse
+/// global `last_read[r]` and `back_edge_after` guards otherwise veto.
+///
+/// Conservatively returns `false` (treat as live) at the first control-flow
+/// instruction: a jump-over could reach a later read of the stale value, so we
+/// only reason within a straight-line run.  Scans a tiny fixed window — a
+/// scratch temp is always overwritten within a couple of instructions, and an
+/// unbounded scan would reintroduce the O(n²) blowup this pass avoids (#2002).
+fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
+    const WINDOW: usize = 6;
+    let end = (start + WINDOW).min(insns.len());
+    let mut written = HashSet::new();
+    for insn in &insns[start..end] {
+        // Any branch / suspend / return ends the straight-line region.
+        if matches!(
+            insn,
+            Insn::Jump(_)
+                | Insn::JumpIfFalse(..)
+                | Insn::JumpIfTrue(..)
+                | Insn::CmpJumpIfFalse(..)
+                | Insn::CmpJumpIfTrue(..)
+                | Insn::CmpJumpIfFalseConst(..)
+                | Insn::CmpJumpIfTrueConst(..)
+                | Insn::ForIter(..)
+                | Insn::ForCountReg(..)
+                | Insn::ForCountConst(..)
+                | Insn::ForCountConstInline(..)
+                | Insn::SetupExcept(..)
+                | Insn::Yield { .. }
+                | Insn::YieldFrom { .. }
+                | Insn::Return(..)
+                | Insn::ReturnNone
+        ) {
+            return false;
+        }
+        if insn_reads_reg(insn, r) {
+            return false; // read before any overwrite → value is live
+        }
+        written.clear();
+        collect_writes(insn, &mut written);
+        if written.contains(&r) {
+            return true; // overwritten before any read → old value is dead
+        }
+    }
+    // Hit the true end of the stream without a read → dead; otherwise (window
+    // edge reached mid-stream) be conservative.
+    end == insns.len()
 }
 
 /// Returns `true` if `insn` reads the value of register `r`.
@@ -6859,6 +6931,57 @@ mod tests {
         assert!(
             matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0, ..)),
             "BinOp should become BinOpConst"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_fires_for_reused_scratch_in_loop_body() {
+        use crate::ast::BinaryOp;
+        // The "reused scratch register" shape that dominates loop bodies: temp
+        // reg 3 is LoadConst-ed afresh for each operand, and the loop ends in a
+        // back-edge.  The first LoadConst(3)+BinOp(_, _, Mul, 3) pair must fuse
+        // because reg 3 is overwritten by the next LoadConst before being read
+        // (its value is dead), even though `last_read[3]` is the second BinOp and
+        // a back-edge follows.  num_locals = 2.
+        let insns = vec![
+            Insn::LoadConst(3, 0),                      // t = 2     (scratch)
+            Insn::BinOp(2, 1, BinaryOp::Mul, 3),        // r2 = i * t   ← fuse
+            Insn::LoadConst(3, 1),                      // t = 1     (overwrites reg 3)
+            Insn::BinOp(2, 2, BinaryOp::Sub, 3),        // r2 = r2 - t
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 2), // s += r2
+            Insn::Jump(-6),                             // loop back-edge
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert!(
+            matches!(out[0], Insn::BinOpConst(2, 1, BinaryOp::Mul, 0, false)),
+            "first pair fused despite the back-edge (scratch overwritten before \
+             read): {:?}",
+            out[0]
+        );
+        // The whole LoadConst is removed, so the stream shrinks by at least one.
+        assert!(
+            out.len() < 6,
+            "at least one LoadConst removed: len {}",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_reused_scratch_when_value_is_live() {
+        use crate::ast::BinaryOp;
+        // Same shape but reg 3 is READ again (by the second BinOp) before being
+        // overwritten, so its value is live and the first pair must NOT fuse.
+        let insns = vec![
+            Insn::LoadConst(3, 0),
+            Insn::BinOp(2, 1, BinaryOp::Mul, 3), // reads reg 3
+            Insn::BinOp(4, 2, BinaryOp::Sub, 3), // reads reg 3 again → still live
+            Insn::Jump(-4),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert!(
+            matches!(out[0], Insn::LoadConst(3, 0)),
+            "no fusion while reg 3 is still live: {:?}",
+            out[0]
         );
     }
 
