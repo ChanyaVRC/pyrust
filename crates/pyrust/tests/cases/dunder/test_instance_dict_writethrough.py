@@ -91,3 +91,35 @@ try:
     o8.__dict__["missing"]
 except KeyError as e:
     print("missing key:", e)
+
+
+# A `__slots__ = (..., '__dict__')` class stores slot members in the same attrs
+# map but they are NOT part of the `__dict__` proxy: they must stay hidden from
+# iteration/len and must survive a `dict.clear()` / `popitem()` of the proxy.
+class S:
+    __slots__ = ("q", "__dict__")
+
+    def __init__(self):
+        self.q = 10  # slot member, hidden from __dict__
+        self.a = 1
+        self.b = 2
+
+
+s = S()
+print(sorted(s.__dict__), len(s.__dict__), "q" in s.__dict__)
+print(s.__dict__.popitem())  # last visible entry, not the slot
+s.__dict__.update(c=3)
+s.__dict__.clear()  # wipes visible entries only
+print(s.__dict__, s.q)  # slot value survives
+
+# Exception C-level slots (`args`) likewise survive proxy clear/popitem.
+exc = ValueError("boom")
+exc.custom = 1
+exc.__dict__.clear()
+print(exc.__dict__, exc.args)
+
+# popitem arity error carries the `dict.` prefix.
+try:
+    s.__dict__.popitem("x")
+except TypeError as e:
+    print("popitem arity:", str(e))

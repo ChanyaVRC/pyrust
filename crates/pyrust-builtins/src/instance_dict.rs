@@ -370,7 +370,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("popitem() takes no arguments ({} given)", args.len()),
+                        format!("dict.popitem() takes no arguments ({} given)", args.len()),
                     ));
                 }
                 // dict.popitem() removes and returns the last inserted (key,
@@ -601,7 +601,31 @@ impl BuiltinTypeOps for InstanceDictOps {
                         format!("clear() takes no arguments ({} given)", args.len()),
                     ));
                 }
-                s.instance.borrow_mut().attrs.clear();
+                // Only remove visible `__dict__` entries: hidden slot members
+                // (`__slots__ = (..., '__dict__')`) and exception C-level slots
+                // are stored in `attrs` but are not part of the `__dict__`
+                // proxy, so `dict.clear()` must leave them intact (CPython keeps
+                // the slot value alive after `o.__dict__.clear()`).  The common
+                // no-slots, non-exception instance has no hidden keys, so wipe
+                // the whole map in one shot.  Otherwise resolve the visible keys
+                // under a shared borrow first (`is_hidden` re-borrows the
+                // instance), then take the mutable borrow to remove only them.
+                if !s.has_slots && !s.is_exception {
+                    s.instance.borrow_mut().attrs.clear();
+                } else {
+                    let visible: Vec<String> = {
+                        let inst = s.instance.borrow();
+                        inst.attrs
+                            .keys()
+                            .filter(|k| !s.is_hidden(k))
+                            .map(|k| k.to_string())
+                            .collect()
+                    };
+                    let mut inst = s.instance.borrow_mut();
+                    for k in &visible {
+                        inst.attrs.shift_remove(k);
+                    }
+                }
                 s.iter_keys.borrow_mut().take();
                 *s.iter_pos.borrow_mut() = 0;
                 Ok(Value::none())
