@@ -697,22 +697,30 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         ][..]),
         (&list_class, "list", &[
             "__len__", "__getitem__", "__setitem__", "__delitem__",
-            "__contains__", "__add__", "__mul__",
+            "__contains__", "__add__", "__mul__", "__iadd__", "__imul__",
         ][..]),
         (&tuple_class, "tuple", &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
         ][..]),
         (&dict_class, "dict", &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
+            "__or__", "__ror__", "__ior__",
         ][..]),
-        (&set_class, "set", &["__len__", "__contains__"][..]),
-        (&frozenset_class, "frozenset", &["__len__", "__contains__"][..]),
+        (&set_class, "set", &[
+            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
+            "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
+            "__isub__", "__ixor__",
+        ][..]),
+        (&frozenset_class, "frozenset", &[
+            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
+            "__sub__", "__rsub__", "__xor__", "__rxor__",
+        ][..]),
         (&bytes_class, "bytes", &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
         ][..]),
         (&bytearray_class, "bytearray", &[
             "__len__", "__getitem__", "__setitem__", "__delitem__",
-            "__contains__", "__add__", "__mul__",
+            "__contains__", "__add__", "__mul__", "__iadd__", "__imul__",
         ][..]),
         (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
     ] {

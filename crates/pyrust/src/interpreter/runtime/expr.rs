@@ -1317,7 +1317,22 @@ impl Interpreter {
             }
         }
 
-        if !right_has_subtype_priority {
+        // Same-type skip (mirrors CPython `binary_op1`): when the forward slot
+        // already ran and returned NotImplemented, and both operands are the
+        // *same* type, CPython sets the reflected slot `slotw` to NULL because
+        // it would be identical to the forward slot already tried — so the
+        // reflected method is not called and the op falls through to TypeError.
+        // Scoped to reflected arithmetic slots (`__r*`): comparison reflected
+        // ops (`__gt__`, `__ge__`, …) do not start with `__r`, and CPython
+        // *does* try both sides for same-type comparisons, so they must stay
+        // unaffected.  See issue #2092.
+        let same_type_reflected_arith = rmethod.starts_with("__r")
+            && matches!(
+                (left.kind(), right.kind()),
+                (ValueKind::PyInstance(li), ValueKind::PyInstance(ri))
+                    if Rc::ptr_eq(&li.borrow().class, &ri.borrow().class)
+            );
+        if !right_has_subtype_priority && !same_type_reflected_arith {
             if let ValueKind::PyInstance(inst) = right.kind() {
                 let class = Rc::clone(&inst.borrow().class);
                 if let Some(m) = lookup_class_attr(&class, rmethod)
@@ -3900,6 +3915,31 @@ impl Interpreter {
         if !is_callable_method(&method_value) {
             return Ok(None);
         }
+        // Issue #2122: the in-place set / dict / sequence dunder sentinels
+        // (`set.__ior__`, `dict.__ior__`, `list.__iadd__`, …) registered on the
+        // primitive base classes (#1909-style exposure) are *not* overrides —
+        // a subclass that merely inherits them must reach the identity- and
+        // type-preserving in-place fallbacks below (issue #1006), not dispatch
+        // the base sentinel (which operates on the unwrapped backing value and
+        // would drop the subclass type).  A user-defined `__i*__` (a
+        // `UserFunction`, e.g. `MySet2.__ior__`) is a genuine override and is
+        // dispatched normally.
+        if let ValueKind::BuiltinFunction(name) = method_value.kind() {
+            if matches!(
+                name,
+                "set.__ior__"
+                    | "set.__iand__"
+                    | "set.__isub__"
+                    | "set.__ixor__"
+                    | "dict.__ior__"
+                    | "list.__iadd__"
+                    | "list.__imul__"
+                    | "bytearray.__iadd__"
+                    | "bytearray.__imul__"
+            ) {
+                return Ok(None);
+            }
+        }
         let self_val = Value::py_instance(Rc::clone(&inst));
         let arg = ExpandedCallArg {
             name: None,
@@ -4232,17 +4272,14 @@ impl Interpreter {
     }
 
     fn matmul(&mut self, left: Value, right: Value) -> Result<Value> {
-        // Capture the operand type names before `left` is moved into the
-        // reflected-dispatch call below, so the fall-through TypeError can
-        // still report them (`@` has no built-in implementation).
-        let err = unsupported_operand("@", &left, &right);
-        if let Some(value) = self.try_call_binary_method(&left, "__matmul__", right.clone())? {
-            return Ok(value);
-        }
-        if let Some(value) = self.try_call_binary_method(&right, "__rmatmul__", left)? {
-            return Ok(value);
-        }
-        Err(err)
+        // `@` has no built-in numeric implementation, and the full dunder
+        // dispatch — forward `__matmul__`, reflected `__rmatmul__`, the
+        // same-type skip and subtype-priority rule — already ran in
+        // `eval_binary` via `try_dunder_binary` before this fallback is
+        // reached.  Re-dispatching the reflected slot here bypassed that rule
+        // and wrongly called `__rmatmul__` on a same-type operand after the
+        // forward returned `NotImplemented` (#2092).  Just raise the TypeError.
+        Err(unsupported_operand("@", &left, &right))
     }
 
 
