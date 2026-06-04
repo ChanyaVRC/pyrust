@@ -40,6 +40,8 @@ show("format-d", lambda: format(big, "d"))
 show("format-x", lambda: format(big, "x"))         # exempt
 show("brace-format", lambda: "{}".format(big))
 show("nested-list-repr", lambda: repr([big]))
+show("frozenset-repr", lambda: repr(frozenset({big})))   # frozenset element
+show("nested-frozenset", lambda: repr([frozenset({big})]))
 show("hex-builtin", lambda: hex(big))              # exempt
 show("arith", lambda: big + 1 > 0)                  # arithmetic: exempt
 

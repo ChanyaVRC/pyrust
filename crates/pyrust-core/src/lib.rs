@@ -118,7 +118,10 @@ pub fn value_may_exceed_int_str_limit(value: &Value) -> bool {
         // Container tags: always inspect (may hold a BigInt).
         TAG_LIST | TAG_TUPLE => true,
         // BigInt, small tuples, dicts and sets all live behind TAG_OPAQUE; a
-        // single pointer deref classifies them.
+        // single pointer deref classifies them. `BuiltinObject` covers
+        // `frozenset`, which can hold a BigInt; the recursive check's
+        // `to_key` returns `None` for the other builtin-object kinds so the
+        // over-approximation costs nothing beyond a cold `to_key` call.
         TAG_OPAQUE => matches!(
             unsafe { &*value.opaque_ptr() },
             Opaque::PyBigInt(_)
@@ -126,6 +129,7 @@ pub fn value_may_exceed_int_str_limit(value: &Value) -> bool {
                 | Opaque::SmallTuple3 { .. }
                 | Opaque::Dict(_)
                 | Opaque::Set(_)
+                | Opaque::BuiltinObject { .. }
         ),
         // Every scalar tag (Int / Float / Str / Bool / None / …) is exempt.
         _ => false,
@@ -176,6 +180,17 @@ fn check_value_digits(value: &Value, limit: usize) -> std::result::Result<(), Py
             for (k, v) in entries.iter() {
                 check_key_digits(k, limit)?;
                 check_value_digits(v, limit)?;
+            }
+        }
+        // `frozenset` is a `BuiltinObject`, not an `Opaque::Set`, so a top-level
+        // `repr(frozenset({10 ** 5000}))` would otherwise escape the check.
+        // `to_key` yields the canonical `PyKey::FrozenSet` for hashable builtin
+        // objects (and `None` for the rest), routing its elements through the
+        // existing key-side walk. Non-frozenset builtin objects return `None`
+        // here and are skipped cheaply.
+        ValueKind::BuiltinObject { ops, state } => {
+            if let Some(key) = ops.to_key(state) {
+                check_key_digits(&key, limit)?;
             }
         }
         _ => {}
