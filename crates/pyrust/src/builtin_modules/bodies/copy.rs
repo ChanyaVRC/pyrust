@@ -12,14 +12,20 @@
 // returns the original object).
 //
 // For `PyInstance`:
-//   - If the class defines `__copy__`, call it with no extra args.
-//   - Otherwise clone the attrs map one level (each attr Value is shared by
-//     its Rc — no element-level copies).
+//   - If the class defines `__copy__` / `__deepcopy__`, call it.
+//   - Otherwise apply the default copy protocol: capture state via
+//     `__getstate__()` (defaulting to the instance `__dict__`), build a bare
+//     instance of the same class, and restore via `__setstate__(state)`
+//     (defaulting to `__dict__.update(state)`).  This mirrors CPython's
+//     `object.__reduce_ex__` reduction so `__getstate__` / `__setstate__`
+//     are honoured (#2131).
 //
-// `deepcopy` recurses into the elements of mutable containers.  The `memo`
-// dict is forwarded to any `__deepcopy__(self, memo)` dunder calls so user
-// code receives a proper dict argument.  Circular-reference tracking via the
-// memo dict is out of scope for v1.
+// `deepcopy` recurses into the elements of mutable containers.  A `memo` dict
+// keyed by object identity (`id(x)`) tracks already-copied objects so that
+// cyclic structures terminate (no native stack overflow) and shared
+// references stay shared — the copy of `x` is inserted into the memo *before*
+// recursing into its children (#1997).  The same `memo` is forwarded to any
+// `__deepcopy__(self, memo)` dunder calls so user code receives a proper dict.
 //
 // Reference: <https://docs.python.org/3/library/copy.html>
 
@@ -67,7 +73,8 @@ pyrust_module! {
     /// Immutable types (int, float, str, bool, None, bytes, tuple, frozenset)
     /// are returned as-is.  Mutable containers (list, dict, set) get a new
     /// top-level container with the same elements.  For `PyInstance`, calls
-    /// `__copy__` if defined, otherwise clones the attr map shallowly.
+    /// `__copy__` if defined, otherwise applies the default copy protocol
+    /// (`__getstate__` / `__setstate__`).
     /// <https://docs.python.org/3/library/copy.html#copy.copy>
     fn copy(args) -> Result<Value> {
         if args.len() != 1 {
@@ -83,10 +90,8 @@ pyrust_module! {
     /// CPython: copy.deepcopy(x, memo=None) — deep copy.
     ///
     /// Immutable types are returned as-is.  Mutable containers are recursively
-    /// copied.  `memo` is forwarded to `__deepcopy__` calls (as a dict) so
-    /// user-defined `__deepcopy__(self, memo)` methods receive a proper dict
-    /// argument.  Circular-reference tracking via the memo dict is out of scope
-    /// for v1.
+    /// copied.  The `memo` dict (keyed by `id`) terminates cycles and preserves
+    /// shared references, and is forwarded to `__deepcopy__` calls.
     /// <https://docs.python.org/3/library/copy.html#copy.deepcopy>
     fn deepcopy(args) -> Result<Value> {
         if args.is_empty() || args.len() > 2 {
@@ -107,7 +112,117 @@ pyrust_module! {
         } else {
             Value::dict(PyDict::default())
         };
-        deep_copy(obj, memo, _interp)
+        deep_copy(obj, &memo, _interp)
+    }
+}
+
+// ── identity / memo helpers ───────────────────────────────────────────────────
+
+/// Object identity used as the `memo` key (`id(x)`).  Mirrors the `id()`
+/// builtin: instances/classes/modules/functions use their `Rc` address;
+/// containers (list/dict/set/tuple) and other Rc-backed values use
+/// `Value::value_id`.  Returns `None` for atomic values that have no stable
+/// per-object identity worth memoising (those are returned as-is anyway).
+fn value_identity(obj: &Value) -> Option<i64> {
+    match obj.kind() {
+        ValueKind::PyInstance(rc) => Some(Rc::as_ptr(&rc) as i64),
+        ValueKind::PyClass(rc) => Some(Rc::as_ptr(&rc) as i64),
+        ValueKind::PyModule(rc) => Some(Rc::as_ptr(&rc) as i64),
+        ValueKind::UserFunction(rc) => Some(Rc::as_ptr(&rc) as i64),
+        _ => obj.value_id(),
+    }
+}
+
+/// Look up an already-copied object in the memo by identity.
+fn memo_get(memo: &Value, id: i64) -> Option<Value> {
+    memo.dict_with(|d| d.get(&PyKey::Int(id)).cloned())
+        .flatten()
+}
+
+/// Record `copy` as the deep copy of the object with identity `id`.
+fn memo_insert(memo: &Value, id: i64, copy: Value) {
+    let _ = memo.dict_insert(PyKey::Int(id), copy);
+}
+
+// ── copy protocol (__getstate__ / __setstate__) ───────────────────────────────
+
+/// Capture the copyable state of the instance behind `rc`.  If the class
+/// defines `__getstate__`, call it; otherwise the default state is the
+/// instance `__dict__` as a Python `dict` (or `None` when empty, matching
+/// CPython 3.12's `object.__getstate__`).
+fn capture_state(
+    rc: &Rc<RefCell<PyInstance>>,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    let class = Rc::clone(&rc.borrow().class);
+    if let Some(method) = lookup_class_attr(&class, "__getstate__") {
+        return invoke_class_method(interp, method, Value::py_instance(Rc::clone(rc)), &[]);
+    }
+    // Default: a dict snapshot of __dict__, or None when empty.
+    let borrow = rc.borrow();
+    if borrow.attrs.is_empty() {
+        return Ok(Value::none());
+    }
+    let mut dict: PyDict = PyDict::with_capacity_and_hasher(borrow.attrs.len(), Default::default());
+    for (k, v) in borrow.attrs.iter() {
+        dict.insert(PyKey::str_from(k.as_ref()), v.clone());
+    }
+    Ok(Value::dict(dict))
+}
+
+/// Restore captured `state` onto the bare instance `rc`.  If the class defines
+/// `__setstate__`, call it; otherwise default to `__dict__.update(state)`.
+fn restore_state(
+    rc: &Rc<RefCell<PyInstance>>,
+    state: Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<()> {
+    let class = Rc::clone(&rc.borrow().class);
+    if let Some(method) = lookup_class_attr(&class, "__setstate__") {
+        invoke_class_method(
+            interp,
+            method,
+            Value::py_instance(Rc::clone(rc)),
+            &[ExpandedCallArg {
+                name: None,
+                value: state,
+            }],
+        )?;
+        return Ok(());
+    }
+    // Default object.__setstate__ semantics:
+    //   - state is None            → no-op
+    //   - state is a dict          → __dict__.update(state)
+    //   - state is (dict, slotdict)→ apply both as attributes (pyrust has no
+    //     __slots__ storage, so slot state becomes ordinary attributes too)
+    match state.kind() {
+        ValueKind::None => {}
+        ValueKind::Tuple(items) if items.len() == 2 => {
+            let dict_state = items[0].clone();
+            let slot_state = items[1].clone();
+            apply_state_dict(rc, &dict_state);
+            apply_state_dict(rc, &slot_state);
+        }
+        _ => apply_state_dict(rc, &state),
+    }
+    Ok(())
+}
+
+/// Apply the str-keyed entries of `state` (when it is a dict) as attributes of
+/// the instance behind `rc`.  Mirrors `__dict__.update(state)` — only string
+/// keys become attribute names; non-dict / None state is a no-op.
+fn apply_state_dict(rc: &Rc<RefCell<PyInstance>>, state: &Value) {
+    let pairs: Option<Vec<(PyKey, Value)>> =
+        state.dict_with(|d| d.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
+    if let Some(pairs) = pairs {
+        let mut borrow = rc.borrow_mut();
+        for (k, v) in pairs {
+            if let PyKey::Str(s) = &k {
+                if let Some(name) = s.as_str() {
+                    borrow.attrs.insert(name.to_string(), v);
+                }
+            }
+        }
     }
 }
 
@@ -181,15 +296,11 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
                     &[],
                 )
             } else {
-                // Default: clone the instance with a shallowly-cloned attr map.
-                let (class, attrs) = {
-                    let borrow = rc.borrow();
-                    (Rc::clone(&borrow.class), borrow.attrs.clone())
-                };
-                Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
-                    class,
-                    attrs,
-                }))))
+                // Default: copy protocol — capture state via __getstate__,
+                // build a bare instance, restore via __setstate__.  When the
+                // class customises neither hook this is a verbatim __dict__
+                // copy (capture returns the dict, restore re-applies it).
+                shallow_copy_via_protocol(&rc, interp)
             }
         }
 
@@ -200,16 +311,44 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
     }
 }
 
+/// Default shallow-copy path for an instance: capture state, build a bare
+/// instance of the same class, restore state.  Shallow — the state values are
+/// shared by reference, not recursively copied.
+fn shallow_copy_via_protocol(
+    rc: &Rc<RefCell<PyInstance>>,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    let class = Rc::clone(&rc.borrow().class);
+    let state = capture_state(rc, interp)?;
+    let new_rc = Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs: InstanceAttrs::new(),
+    }));
+    restore_state(&new_rc, state, interp)?;
+    Ok(Value::py_instance(new_rc))
+}
+
 // ── deep_copy ─────────────────────────────────────────────────────────────────
 
 /// Produce a deep copy of `obj`.  Immutable types are returned as-is.
-/// Mutable containers are recursively copied.  `memo` is forwarded to any
-/// `__deepcopy__(self, memo)` dunder calls so user code receives a proper dict.
+/// Mutable containers are recursively copied.  The `memo` dict (keyed by
+/// `id`) terminates cycles and preserves shared references; the copy of a
+/// container/instance is inserted into the memo *before* its children are
+/// recursed into.  `memo` is forwarded to any `__deepcopy__(self, memo)`
+/// dunder calls so user code receives a proper dict.
 fn deep_copy(
     obj: Value,
-    memo: Value,
+    memo: &Value,
     interp: &mut crate::interpreter::Interpreter,
 ) -> Result<Value> {
+    // Cycle / sharing short-circuit: if we've already copied this object,
+    // return the same copy.  Atomic values (value_identity == None) skip this.
+    if let Some(id) = value_identity(&obj) {
+        if let Some(existing) = memo_get(memo, id) {
+            return Ok(existing);
+        }
+    }
+
     match obj.kind() {
         // Immutable scalars.
         ValueKind::None
@@ -236,16 +375,22 @@ fn deep_copy(
             let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
-                let deep_v = deep_copy(v, memo.clone(), interp)?;
+                let deep_v = deep_copy(v, memo, interp)?;
                 let new_k = interp.value_to_pykey(&deep_v)?;
                 new_set.insert(new_k);
             }
-            Ok(pyrust_builtins::frozenset::frozenset(new_set))
+            let result = pyrust_builtins::frozenset::frozenset(new_set);
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, result.clone());
+            }
+            Ok(result)
         }
 
         // tuple — CPython deepcopies each element into a new tuple even though
         // tuples are immutable, for consistency with user-defined types that may
-        // be tuple subclasses.
+        // be tuple subclasses.  A tuple can't refer to itself directly, but it
+        // may hold a mutable container that cycles back to it, so we memoise the
+        // finished tuple under its identity.
         ValueKind::Tuple(items) => {
             // Collect to owned Vec first so the borrow (&[Value]) is released
             // before we recursively call deep_copy (which may re-enter match).
@@ -253,40 +398,54 @@ fn deep_copy(
             // items is &[Value] — a raw reference, no Ref guard to drop.
             let mut new_items = Vec::with_capacity(items_vec.len());
             for item in items_vec {
-                new_items.push(deep_copy(item, memo.clone(), interp)?);
+                new_items.push(deep_copy(item, memo, interp)?);
             }
-            Ok(Value::tuple(new_items))
+            let result = Value::tuple(new_items);
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, result.clone());
+            }
+            Ok(result)
         }
 
-        // list — new list with deeply-copied elements.
+        // list — new list with deeply-copied elements.  Insert the empty list
+        // into the memo *before* recursing so self-referential lists terminate
+        // and shared sublists stay shared.
         ValueKind::List(items) => {
             // Collect before dropping the Ref borrow.
             let items_vec: Vec<Value> = items.iter().cloned().collect();
             drop(items);
-            let mut new_items = Vec::with_capacity(items_vec.len());
-            for item in items_vec {
-                new_items.push(deep_copy(item, memo.clone(), interp)?);
+            let new_list = Value::list(Vec::with_capacity(items_vec.len()));
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, new_list.clone());
             }
-            Ok(Value::list(new_items))
+            for item in items_vec {
+                let copied = deep_copy(item, memo, interp)?;
+                new_list.list_push(copied)?;
+            }
+            Ok(new_list)
         }
 
-        // dict — new dict with deeply-copied keys and values.  Keys are PyKey
-        // but PyKey::Object can hold user instances with __deepcopy__; CPython
-        // deep-copies both keys and values (matching `copy.deepcopy({obj: v})`).
+        // dict — new dict with deeply-copied keys and values.  Insert the empty
+        // dict into the memo before recursing so cyclic dicts terminate.
         ValueKind::Dict(d) => {
             let pairs: Vec<(PyKey, Value)> =
                 d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             drop(d);
-            let mut new_dict: PyDict = PyDict::with_capacity_and_hasher(pairs.len(), Default::default());
+            let new_dict =
+                Value::dict(PyDict::with_capacity_and_hasher(pairs.len(), Default::default()));
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, new_dict.clone());
+            }
             for (k, v) in pairs {
                 let deep_k = {
                     let kv = key_to_value(k);
-                    let deep_kv = deep_copy(kv, memo.clone(), interp)?;
+                    let deep_kv = deep_copy(kv, memo, interp)?;
                     interp.value_to_pykey(&deep_kv)?
                 };
-                new_dict.insert(deep_k, deep_copy(v, memo.clone(), interp)?);
+                let deep_v = deep_copy(v, memo, interp)?;
+                let _ = new_dict.dict_insert(deep_k, deep_v);
             }
-            Ok(Value::dict(new_dict))
+            Ok(new_dict)
         }
 
         // set — elements are PyKey but PyKey::Object holds user instances that
@@ -296,14 +455,21 @@ fn deep_copy(
         ValueKind::Set(items) => {
             let keys: Vec<PyKey> = items.iter().cloned().collect();
             drop(items);
+            let new_set_val = Value::set(PySet::default());
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, new_set_val.clone());
+            }
             let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
-                let deep_v = deep_copy(v, memo.clone(), interp)?;
+                let deep_v = deep_copy(v, memo, interp)?;
                 let new_k = interp.value_to_pykey(&deep_v)?;
                 new_set.insert(new_k);
             }
-            Ok(Value::set(new_set))
+            new_set_val.set_with_mut(|s| *s = new_set).ok_or_else(|| {
+                PyError::named("TypeError", "deepcopy: set rebuild failed".to_string())
+            })?;
+            Ok(new_set_val)
         }
 
         // PyInstance — check for __deepcopy__ dunder first (MRO-aware).
@@ -322,33 +488,50 @@ fn deep_copy(
                 // user code receives a proper dict argument (CPython never
                 // passes None here).  invoke_class_method binds `self` via
                 // bound_prefix and appends the remaining args after.
-                invoke_class_method(
+                let result = invoke_class_method(
                     interp,
                     method,
                     Value::py_instance(Rc::clone(&rc)),
                     &[ExpandedCallArg {
                         name: None,
-                        value: memo,
+                        value: memo.clone(),
                     }],
-                )
-            } else {
-                // Default: deep-copy each attribute value.
-                let (class, attrs_snapshot) = {
-                    let borrow = rc.borrow();
-                    (Rc::clone(&borrow.class), borrow.attrs.clone())
-                };
-                let mut new_attrs = InstanceAttrs::with_capacity(attrs_snapshot.len());
-                for (k, v) in attrs_snapshot.iter() {
-                    new_attrs.insert(k.clone(), deep_copy(v.clone(), memo.clone(), interp)?);
+                )?;
+                if let Some(id) = value_identity(&obj) {
+                    memo_insert(memo, id, result.clone());
                 }
-                Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
-                    class,
-                    attrs: new_attrs,
-                }))))
+                Ok(result)
+            } else {
+                deep_copy_via_protocol(&rc, &obj, memo, interp)
             }
         }
 
         // Anything else — return as-is.
         _ => Ok(obj.clone()),
     }
+}
+
+/// Default deep-copy path for an instance: build a bare instance, memoise it
+/// *before* deep-copying its state, then capture/restore the state.  Inserting
+/// into the memo first lets self-referential instance graphs terminate.
+fn deep_copy_via_protocol(
+    rc: &Rc<RefCell<PyInstance>>,
+    obj: &Value,
+    memo: &Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
+    let class = Rc::clone(&rc.borrow().class);
+    let new_rc = Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs: InstanceAttrs::new(),
+    }));
+    let new_val = Value::py_instance(Rc::clone(&new_rc));
+    if let Some(id) = value_identity(obj) {
+        memo_insert(memo, id, new_val.clone());
+    }
+    // Capture state from the original, deep-copy it, then restore.
+    let state = capture_state(rc, interp)?;
+    let deep_state = deep_copy(state, memo, interp)?;
+    restore_state(&new_rc, deep_state, interp)?;
+    Ok(new_val)
 }
