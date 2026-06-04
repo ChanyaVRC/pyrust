@@ -5073,6 +5073,10 @@ impl Interpreter {
         Ok(match conv {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
+                // %a — ascii repr (like the ascii() builtin); mirrors %r but escapes
+                // non-ASCII. The bytes path already implements this; the str path was
+                // missing the arm (#2073).
+                'a' => apply_str_precision(ascii_repr_interp(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
                     let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv, bytes_mode)? {
@@ -5204,6 +5208,14 @@ impl Interpreter {
                     let f = str_printf_to_float(&coerced_float, conv, bytes_mode)?;
                     let prec = precision.unwrap_or(6);
                     let mut s = format_scientific(f, prec, conv == 'E');
+                    // Alt-form (#) with precision 0 keeps the decimal point even
+                    // though no fractional digits are emitted: "3.e+00" (#2029).
+                    // Non-finite values (inf/nan) never get a point.
+                    if flag_hash && prec == 0 && f.is_finite() {
+                        if let Some(e_pos) = s.find(['e', 'E']) {
+                            s.insert(e_pos, '.');
+                        }
+                    }
                     if f.is_sign_positive() && flag_plus {
                         s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
@@ -5230,7 +5242,13 @@ impl Interpreter {
                         }
                     } else {
                         let prec = precision.unwrap_or(6);
-                        format!("{:.prec$}", f, prec = prec)
+                        let mut body = format!("{:.prec$}", f, prec = prec);
+                        // Alt-form (#) with precision 0 keeps a trailing decimal
+                        // point: "3." rather than "3" (#2029).
+                        if flag_hash && prec == 0 {
+                            body.push('.');
+                        }
+                        body
                     };
                     if f.is_sign_positive() && flag_plus {
                         s.insert(0, '+');
