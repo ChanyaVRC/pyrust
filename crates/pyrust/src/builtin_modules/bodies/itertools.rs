@@ -2044,12 +2044,41 @@ fn groupby_clear_curr(inst: &Rc<RefCell<PyInstance>>) {
     a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
 }
 
+/// Set `__module__ = "itertools"` on every class exposed by this module so
+/// that `type(x).__module__` and the generic instance repr
+/// (`<itertools.X object at 0x..>`) match CPython, instead of defaulting to
+/// `__main__` (issue #2098).  The macro-generated `module()` builds bare
+/// `PyClass`es with no `__module__` entry; patch them here, the single point
+/// every consumer of `module()` funnels through.
+pub(crate) fn patch_class_modules(module_val: &Value) {
+    let ValueKind::PyModule(m) = module_val.kind() else {
+        return;
+    };
+    for v in m.borrow().attrs.values() {
+        if let ValueKind::PyClass(class) = v.kind() {
+            class
+                .borrow_mut()
+                .attrs
+                .insert("__module__".to_string(), Value::string("itertools"));
+        }
+    }
+}
+
+/// `itertools::module()` with `__module__` patched onto every class.  This is
+/// the entry point `load_builtin_module` and the internal class-minting helper
+/// both use, so the module qualifier is correct everywhere.
+pub(crate) fn module_with_qualifiers() -> Value {
+    let module_val = module();
+    patch_class_modules(&module_val);
+    module_val
+}
+
 /// Pull the `itertools` class named `name` out of this module's `module()`
 /// and build a `PyInstance` of it carrying `attrs`, bypassing `__init__`.
 /// Used by `groupby.__next__` to mint a `_grouper` seeded with private
 /// state (parent back-reference, target key, group id).
 fn make_itertools_instance(name: &str, attrs: InstanceAttrs) -> Result<Value> {
-    let module_val = module();
+    let module_val = module_with_qualifiers();
     let ValueKind::PyModule(m) = module_val.kind() else {
         return Err(PyError::Runtime(
             "internal: itertools module() did not return a PyModule".to_string(),

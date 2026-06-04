@@ -36,6 +36,21 @@ fn closed_error() -> PyError {
     PyError::named("ValueError", "I/O operation on closed file".to_string())
 }
 
+/// Closed-file error with the trailing period.  CPython's `_io` module is
+/// internally inconsistent about this: `BytesIO` raises every closed-file
+/// error with a trailing `.`, and `StringIO.isatty()` / line iteration do
+/// too, while `StringIO.read`/`seek`/`tell`/`seekable`/… omit it.  We match
+/// each site exactly.
+fn closed_error_dot() -> PyError {
+    PyError::named("ValueError", "I/O operation on closed file.".to_string())
+}
+
+/// `io.UnsupportedOperation` — raised by `fileno()` whether the stream is
+/// open or closed (CPython raises it before the closed-state check).
+fn unsupported_fileno() -> PyError {
+    PyError::named("io.UnsupportedOperation", "fileno".to_string())
+}
+
 // ── common self helpers ───────────────────────────────────────────────────────
 
 fn expect_self(
@@ -266,31 +281,8 @@ pyrust_module! {
                 )),
             };
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let chars: Vec<char> = buf.chars().collect();
-            let written: Vec<char> = s.chars().collect();
-            let n_written = written.len();
-            let total = chars.len();
-            // Splice: [0..pos] + written + [pos+n_written..total]
-            let mut new_chars: Vec<char> = Vec::with_capacity(total.max(pos + n_written));
-            // Fill gap between pos and current end with NUL if pos > total
-            if pos > total {
-                new_chars.extend_from_slice(&chars[..]);
-                new_chars.extend(std::iter::repeat_n('\0', pos - total));
-            } else {
-                new_chars.extend_from_slice(&chars[..pos]);
-            }
-            new_chars.extend_from_slice(&written);
-            let end = (pos + n_written).min(total);
-            if end < total {
-                new_chars.extend_from_slice(&chars[end..]);
-            }
-            let new_buf: String = new_chars.into_iter().collect();
-            inst.borrow_mut()
-                .attrs
-                .insert("_buf".to_string(), Value::string(&new_buf));
-            set_pos(&inst, (pos + n_written) as i64);
+            let n_written = s.chars().count();
+            string_io_write_at(&inst, &s);
             Ok(Value::int(n_written as i64))
         }
 
@@ -461,6 +453,131 @@ pyrust_module! {
             Ok(Value::bool_(false))
         }
 
+        /// `writelines(lines)` — write each item of `lines` in order.  No
+        /// separators are added (CPython delegates each element to `write`).
+        /// Returns `None`.
+        fn writelines(args) -> Result<Value> {
+            let inst = open_self(args, FN_NAME)?;
+            if args.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            // Materialise the iterable, then validate every element is str
+            // *before* writing any of it, matching CPython which raises on the
+            // first non-str element with nothing written.
+            let items = _interp.collect_iterable(&args[1].value)?;
+            let mut pieces: Vec<String> = Vec::with_capacity(items.len());
+            for item in &items {
+                match item.kind() {
+                    ValueKind::Str(s) => pieces.push(s.to_string()),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "string argument expected, got '{}'",
+                            pyrust_core::builtin_type_name(item)
+                        ),
+                    )),
+                }
+            }
+            for piece in pieces {
+                string_io_write_at(&inst, &piece);
+            }
+            Ok(Value::none())
+        }
+
+        /// `seekable()` — StringIO is always seekable.  Raises on a closed
+        /// stream (CPython message omits the trailing period here).
+        fn seekable(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error()); }
+            Ok(Value::bool_(true))
+        }
+
+        /// `readable()` — StringIO is always readable.
+        fn readable(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error()); }
+            Ok(Value::bool_(true))
+        }
+
+        /// `writable()` — StringIO is always writable.
+        fn writable(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error()); }
+            Ok(Value::bool_(true))
+        }
+
+        /// `flush()` — no-op for in-memory streams; returns `None`.  CPython's
+        /// StringIO.flush() does NOT raise on a closed stream.
+        fn flush(args) -> Result<Value> {
+            let _ = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            Ok(Value::none())
+        }
+
+        /// `isatty()` — always `False`.  Raises (with trailing period) when
+        /// the stream is closed.
+        fn isatty(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::bool_(false))
+        }
+
+        /// `fileno()` — in-memory streams have no file descriptor; CPython
+        /// raises `io.UnsupportedOperation` regardless of open/closed state.
+        fn fileno(args) -> Result<Value> {
+            let _ = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            Err(unsupported_fileno())
+        }
+
+        /// `closed` — getter backing the `closed` property (wired up in
+        /// `env.rs` after the module is built).  Returns the bool state and
+        /// never raises.
+        fn closed(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            Ok(Value::bool_(is_closed(&inst)))
+        }
+
+        /// `__iter__` — line iteration support; returns `self`.
+        fn __iter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::py_instance(inst))
+        }
+
+        /// `__next__` — yield the next line (terminated by `\n` or EOF),
+        /// raising `StopIteration` once the buffer is exhausted.
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            let buf = string_io_buf(&inst, FN_NAME)?;
+            let pos = get_pos(&inst) as usize;
+            let chars: Vec<char> = buf.chars().collect();
+            let total = chars.len();
+            let start = pos.min(total);
+            if start >= total {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            let mut count = 0;
+            for ch in &chars[start..] {
+                count += 1;
+                if *ch == '\n' { break; }
+            }
+            let line: String = chars[start..start + count].iter().collect();
+            set_pos(&inst, (start + count) as i64);
+            Ok(Value::string(line))
+        }
+
         fn __repr__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let closed = is_closed(&inst);
@@ -591,26 +708,8 @@ pyrust_module! {
                 )),
             };
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
             let n_written = data.len();
-            let total = buf.len();
-            let mut new_buf: Vec<u8> = Vec::with_capacity(total.max(pos + n_written));
-            if pos > total {
-                new_buf.extend_from_slice(&buf[..]);
-                new_buf.extend(std::iter::repeat_n(0u8, pos - total));
-            } else {
-                new_buf.extend_from_slice(&buf[..pos]);
-            }
-            new_buf.extend_from_slice(&data);
-            let end = (pos + n_written).min(total);
-            if end < total {
-                new_buf.extend_from_slice(&buf[end..]);
-            }
-            inst.borrow_mut()
-                .attrs
-                .insert("_buf".to_string(), Value::bytes(new_buf));
-            set_pos(&inst, (pos + n_written) as i64);
+            bytes_io_write_at(&inst, &data);
             Ok(Value::int(n_written as i64))
         }
 
@@ -751,6 +850,179 @@ pyrust_module! {
             Ok(Value::bool_(false))
         }
 
+        /// `writelines(lines)` — write each bytes item in order, no separators.
+        fn writelines(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            if args.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            let items = _interp.collect_iterable(&args[1].value)?;
+            let mut pieces: Vec<Vec<u8>> = Vec::with_capacity(items.len());
+            for item in &items {
+                match item.kind() {
+                    ValueKind::Bytes(b) => pieces.push(b.to_vec()),
+                    _ => match pyrust_builtins::bytearray::as_bytearray_snapshot(item) {
+                        Some(b) => pieces.push(b),
+                        None => return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "a bytes-like object is required, not '{}'",
+                                pyrust_core::builtin_type_name(item)
+                            ),
+                        )),
+                    },
+                }
+            }
+            for piece in pieces {
+                bytes_io_write_at(&inst, &piece);
+            }
+            Ok(Value::none())
+        }
+
+        /// `readinto(b)` — read up to `len(b)` bytes into the writable
+        /// bytes-like object `b`, returning the number of bytes read.
+        fn readinto(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            if args.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            let target = match pyrust_builtins::bytearray::as_bytearray_rc(&args[1].value) {
+                Some(rc) => rc,
+                None => return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "readinto() argument must be read-write bytes-like object, not {}",
+                        pyrust_core::builtin_type_name(&args[1].value)
+                    ),
+                )),
+            };
+            let _ = _interp;
+            let buf = bytes_io_buf(&inst, FN_NAME)?;
+            let pos = get_pos(&inst) as usize;
+            let total = buf.len();
+            let start = pos.min(total);
+            let mut dst = target.borrow_mut();
+            let n = (total - start).min(dst.len());
+            dst[..n].copy_from_slice(&buf[start..start + n]);
+            set_pos(&inst, (start + n) as i64);
+            Ok(Value::int(n as i64))
+        }
+
+        /// `read1([size=-1])` — for an in-memory stream this is identical to
+        /// `read`; there is no underlying raw layer to do a single syscall on.
+        fn read1(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            let user = user_at_most_one(args, FN_NAME)?;
+            let size = parse_optional_size(user, FN_NAME)?;
+            let _ = _interp;
+            let buf = bytes_io_buf(&inst, FN_NAME)?;
+            let pos = get_pos(&inst) as usize;
+            let total = buf.len();
+            let start = pos.min(total);
+            let end = match size {
+                None => total,
+                Some(n) => (start + n).min(total),
+            };
+            let result = buf[start..end].to_vec();
+            set_pos(&inst, end as i64);
+            Ok(Value::bytes(result))
+        }
+
+        /// `seekable()` — BytesIO is always seekable.
+        fn seekable(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::bool_(true))
+        }
+
+        /// `readable()` — BytesIO is always readable.
+        fn readable(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::bool_(true))
+        }
+
+        /// `writable()` — BytesIO is always writable.
+        fn writable(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::bool_(true))
+        }
+
+        /// `flush()` — no-op; returns `None`.  Unlike StringIO, CPython's
+        /// BytesIO.flush() DOES raise on a closed stream.
+        fn flush(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::none())
+        }
+
+        /// `isatty()` — always `False`.
+        fn isatty(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::bool_(false))
+        }
+
+        /// `fileno()` — no file descriptor; raises `io.UnsupportedOperation`.
+        fn fileno(args) -> Result<Value> {
+            let _ = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            Err(unsupported_fileno())
+        }
+
+        /// `closed` — getter backing the `closed` property.
+        fn closed(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            Ok(Value::bool_(is_closed(&inst)))
+        }
+
+        /// `__iter__` — line iteration support; returns `self`.
+        fn __iter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            Ok(Value::py_instance(inst))
+        }
+
+        /// `__next__` — yield the next line (terminated by `\n` or EOF),
+        /// raising `StopIteration` once the buffer is exhausted.
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let _ = _interp;
+            if is_closed(&inst) { return Err(closed_error_dot()); }
+            let buf = bytes_io_buf(&inst, FN_NAME)?;
+            let pos = get_pos(&inst) as usize;
+            let total = buf.len();
+            let start = pos.min(total);
+            if start >= total {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            let mut count = 0;
+            for &b in &buf[start..] {
+                count += 1;
+                if b == b'\n' { break; }
+            }
+            let line = buf[start..start + count].to_vec();
+            set_pos(&inst, (start + count) as i64);
+            Ok(Value::bytes(line))
+        }
+
         fn __repr__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let closed = is_closed(&inst);
@@ -775,6 +1047,38 @@ fn string_io_buf(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<String
     }
 }
 
+/// Splice `s` into the StringIO buffer at the current cursor (overwriting
+/// existing characters, NUL-padding any gap past EOF) and advance the cursor.
+/// Shared by `write` and `writelines` so both paths stay identical.
+fn string_io_write_at(inst: &Rc<RefCell<PyInstance>>, s: &str) {
+    let buf = match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
+        Some(ValueKind::Str(b)) => b.to_string(),
+        _ => String::new(),
+    };
+    let pos = get_pos(inst) as usize;
+    let chars: Vec<char> = buf.chars().collect();
+    let written: Vec<char> = s.chars().collect();
+    let n_written = written.len();
+    let total = chars.len();
+    let mut new_chars: Vec<char> = Vec::with_capacity(total.max(pos + n_written));
+    if pos > total {
+        new_chars.extend_from_slice(&chars[..]);
+        new_chars.extend(std::iter::repeat_n('\0', pos - total));
+    } else {
+        new_chars.extend_from_slice(&chars[..pos]);
+    }
+    new_chars.extend_from_slice(&written);
+    let end = (pos + n_written).min(total);
+    if end < total {
+        new_chars.extend_from_slice(&chars[end..]);
+    }
+    let new_buf: String = new_chars.into_iter().collect();
+    inst.borrow_mut()
+        .attrs
+        .insert("_buf".to_string(), Value::string(&new_buf));
+    set_pos(inst, (pos + n_written) as i64);
+}
+
 fn bytes_io_buf(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<u8>> {
     match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
         Some(ValueKind::Bytes(b)) => Ok(b.to_vec()),
@@ -782,4 +1086,33 @@ fn bytes_io_buf(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<u8>
             "internal: {fn_name}() BytesIO._buf corrupted",
         ))),
     }
+}
+
+/// Splice `data` into the BytesIO buffer at the current cursor (overwriting
+/// existing bytes, NUL-padding any gap past EOF) and advance the cursor.
+/// Shared by `write` and `writelines`.
+fn bytes_io_write_at(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) {
+    let buf = match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
+        Some(ValueKind::Bytes(b)) => b.to_vec(),
+        _ => Vec::new(),
+    };
+    let pos = get_pos(inst) as usize;
+    let n_written = data.len();
+    let total = buf.len();
+    let mut new_buf: Vec<u8> = Vec::with_capacity(total.max(pos + n_written));
+    if pos > total {
+        new_buf.extend_from_slice(&buf[..]);
+        new_buf.extend(std::iter::repeat_n(0u8, pos - total));
+    } else {
+        new_buf.extend_from_slice(&buf[..pos]);
+    }
+    new_buf.extend_from_slice(data);
+    let end = (pos + n_written).min(total);
+    if end < total {
+        new_buf.extend_from_slice(&buf[end..]);
+    }
+    inst.borrow_mut()
+        .attrs
+        .insert("_buf".to_string(), Value::bytes(new_buf));
+    set_pos(inst, (pos + n_written) as i64);
 }

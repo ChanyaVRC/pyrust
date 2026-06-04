@@ -2631,6 +2631,56 @@ impl Interpreter {
                     }
                 }
             }
+            // `itertools` post-process (issue #2098): tag every iterator class
+            // with `__module__ = "itertools"` so `type(islice(...)).__module__`
+            // and the generic instance repr render `<itertools.X object at
+            // 0x..>` instead of the `__main__` default.  The macro builds the
+            // classes with no `__module__` entry.
+            if name == "itertools" {
+                crate::builtin_modules::itertools::patch_class_modules(&val);
+            }
+            // `io` post-process (issue #2008): `closed` is a read-only property
+            // in CPython (accessed without parens).  The `pyrust_module!` macro
+            // can only register `closed` as a plain method, so wrap each class's
+            // `closed` getter in a `property` descriptor here, where `property`
+            // is reachable.
+            if name == "io"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                // Expose `io.UnsupportedOperation` (issue #2008): the exception
+                // class is registered in the global exception map but, unlike
+                // CPython, was not surfaced as an `io` module attribute — so
+                // `except io.UnsupportedOperation` (raised by `fileno()`) could
+                // not be caught by name.
+                if let Some(exc) = crate::interpreter::build_exc_class_map()
+                    .get("io.UnsupportedOperation")
+                    .map(Rc::clone)
+                {
+                    m.borrow_mut().attrs.insert(
+                        "UnsupportedOperation".to_string(),
+                        Value::py_class(exc),
+                    );
+                }
+                for cls_name in ["StringIO", "BytesIO"] {
+                    let cls = m.borrow().attrs.get(cls_name).cloned();
+                    if let Some(cls_val) = cls
+                        && let ValueKind::PyClass(cls_rc) = cls_val.kind()
+                    {
+                        let getter = cls_rc.borrow().attrs.get("closed").cloned();
+                        if let Some(getter) = getter {
+                            let prop = pyrust_builtins::property::property(
+                                getter,
+                                Value::none(),
+                                Value::none(),
+                            );
+                            cls_rc
+                                .borrow_mut()
+                                .attrs
+                                .insert("closed".to_string(), prop);
+                        }
+                    }
+                }
+            }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
             // `collections` Python-source members (issue #1884): inject
             // `namedtuple`, `OrderedDict`, `ChainMap`, `UserDict`,
