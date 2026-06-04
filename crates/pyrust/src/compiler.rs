@@ -5252,6 +5252,7 @@ impl Compiler {
                 name,
                 params,
                 body,
+                body_linenos,
                 decorators,
                 return_annotation,
                 is_async,
@@ -5261,6 +5262,7 @@ impl Compiler {
                     name,
                     params,
                     body,
+                    body_linenos,
                     decorators,
                     return_annotation.as_ref(),
                     *is_async,
@@ -7836,6 +7838,7 @@ impl Compiler {
         name: &str,
         params: &[FunctionParam],
         body: &[Stmt],
+        body_linenos: &[u32],
         return_annotation: Option<&Expr>,
         is_async: bool,
     ) -> Option<(u8, bool, bool)> {
@@ -7983,7 +7986,7 @@ impl Compiler {
             // registers and would bypass keyword-only enforcement on self-calls.
             sub.pure_locals.insert(name.to_string());
         }
-        sub.compile_block(body);
+        sub.compile_block_with_linenos(body, body_linenos);
         let inner_code = match sub.finish() {
             Ok(c) => c,
             Err(e) => {
@@ -8215,16 +8218,23 @@ impl Compiler {
         name: &str,
         params: &[FunctionParam],
         body: &[Stmt],
+        body_linenos: &[u32],
         decorators: &[Expr],
         return_annotation: Option<&Expr>,
         is_async: bool,
         type_params: &[String],
     ) {
-        let (proto_idx, is_pure, has_kwonly_params) =
-            match self.build_def_proto(name, params, body, return_annotation, is_async) {
-                Some(v) => v,
-                None => return,
-            };
+        let (proto_idx, is_pure, has_kwonly_params) = match self.build_def_proto(
+            name,
+            params,
+            body,
+            body_linenos,
+            return_annotation,
+            is_async,
+        ) {
+            Some(v) => v,
+            None => return,
+        };
 
         let (defs_base, defs_n) = match self.emit_def_default_values(params) {
             Some(v) => v,
@@ -11199,7 +11209,7 @@ impl Compiler {
         // Convert lambda body into an implicit return statement.
         let body_stmts = vec![Stmt::Return(Some(body.clone()))];
         let temp_name = "<lambda>";
-        self.compile_def(temp_name, params, &body_stmts, &[], None, false, &[]);
+        self.compile_def(temp_name, params, &body_stmts, &[], &[], None, false, &[]);
         // compile_def stored the result in local or global named "<lambda>".
         // We need to return the register it's in.
         // Actually compile_def uses compile_store_name which may put it in a

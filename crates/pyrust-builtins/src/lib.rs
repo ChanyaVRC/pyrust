@@ -9,6 +9,7 @@ pub mod dict;
 pub mod dict_views;
 pub mod file;
 pub mod float;
+pub mod frame;
 pub mod frozenset;
 pub mod generic_alias;
 pub mod instance_dict;

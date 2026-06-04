@@ -2608,6 +2608,7 @@ impl Interpreter {
                     nonlocal_names: nonlocal_names_opt,
                     env: env_opt,
                     is_class_method: code.is_class_method,
+                    function: Some(Rc::clone(&function)),
                 });
                 // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
                 // of `regs` (a local RegsBuf that outlives this call).  No
@@ -2624,9 +2625,17 @@ impl Interpreter {
                         .script_filename
                         .clone()
                         .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                    // Capture the source line in this callee where execution
+                    // stopped (the callee published it via `set_current_vm_line`
+                    // on the way out).  Surfaced to Python as `tb_lineno` /
+                    // `f_lineno`; 0 means "no line table" (kept as `None`).
+                    let tb_lineno = match pyrust_core::get_current_vm_line() {
+                        0 => None,
+                        n => Some(n),
+                    };
                     pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                         filename: tb_filename,
-                        lineno: None,
+                        lineno: tb_lineno,
                         source_line: None,
                         funcname: std::sync::Arc::from(function.name.as_str()),
                     });
@@ -2912,6 +2921,7 @@ impl Interpreter {
                 nonlocal_names: nonlocal_names_opt,
                 env: env_opt,
                 is_class_method: code.is_class_method,
+                function: Some(Rc::clone(&function)),
             });
             // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
             // of `regs` (a local RegsBuf that outlives this call).  No
@@ -2927,9 +2937,13 @@ impl Interpreter {
                     .script_filename
                     .clone()
                     .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                let tb_lineno = match pyrust_core::get_current_vm_line() {
+                    0 => None,
+                    n => Some(n),
+                };
                 pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                     filename: tb_filename,
-                    lineno: None,
+                    lineno: tb_lineno,
                     source_line: None,
                     funcname: std::sync::Arc::from(function.name.as_str()),
                 });
@@ -6916,6 +6930,7 @@ impl Interpreter {
             nonlocal_names: None,
             env: None,
             is_class_method: false,
+            function: None,
         });
         // SAFETY: class_regs_ptr is valid for class_regs_len Values for the
         // lifetime of class_regs.  No &mut [Value] referencing class_regs is

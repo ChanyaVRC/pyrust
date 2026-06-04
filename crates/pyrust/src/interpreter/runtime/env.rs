@@ -470,36 +470,14 @@ impl Interpreter {
                     "__code__" => {
                         // A lightweight code object carrying the introspection
                         // attributes most consumers read: co_name / co_argcount /
-                        // co_varnames.  CPython orders co_varnames as positional
-                        // params, then keyword-only, then *args, then **kwargs.
-                        // co_name is the original declared name baked into the
-                        // (immutable) code object; reassigning `f.__name__` does
-                        // not change `f.__code__.co_name`, so use `func.name`
-                        // rather than the mutable `user_name`.
-                        let co_name = func.name.clone();
-                        let argcount = func
-                            .params
-                            .iter()
-                            .filter(|p| {
-                                !p.is_args && !p.is_kwargs && !p.is_keyword_only
-                            })
-                            .count() as i64;
-                        let mut varnames: Vec<Value> = Vec::with_capacity(func.params.len());
-                        for p in func.params.iter().filter(|p| {
-                            !p.is_args && !p.is_kwargs && !p.is_keyword_only
-                        }) {
-                            varnames.push(Value::string(p.name.clone()));
-                        }
-                        for p in func.params.iter().filter(|p| p.is_keyword_only) {
-                            varnames.push(Value::string(p.name.clone()));
-                        }
-                        for p in func.params.iter().filter(|p| p.is_args) {
-                            varnames.push(Value::string(p.name.clone()));
-                        }
-                        for p in func.params.iter().filter(|p| p.is_kwargs) {
-                            varnames.push(Value::string(p.name.clone()));
-                        }
-                        return Ok(pyrust_builtins::code::code(co_name, argcount, varnames));
+                        // co_varnames (CPython parameter order), plus the
+                        // best-effort co_flags / co_filename / co_firstlineno /
+                        // co_consts / co_names (issues #1959, #2171).  co_name is
+                        // the original declared name baked into the (immutable)
+                        // code object; reassigning `f.__name__` does not change
+                        // `f.__code__.co_name`, so `build_code_object` uses
+                        // `func.name` rather than the mutable `user_name`.
+                        return Ok(self.build_code_object(func));
                     }
                     "__func__" if matches!(
                         func.kind,

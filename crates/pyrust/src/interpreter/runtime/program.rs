@@ -229,6 +229,7 @@ impl Interpreter {
             nonlocal_names: None,
             env: None,
             is_class_method: false,
+            function: None,
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // `regs` (a local RegsBuf that outlives this call).  No &mut [Value]
@@ -476,6 +477,7 @@ impl Interpreter {
                     nonlocal_names: None,
                     env: None,
                     is_class_method: false,
+                    function: None,
                 });
                 let regs_slice =
                     unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
@@ -551,6 +553,7 @@ impl Interpreter {
             nonlocal_names: None,
             env: None,
             is_class_method: false,
+            function: None,
         });
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(code, regs_slice);
@@ -611,6 +614,7 @@ impl Interpreter {
             nonlocal_names: None,
             env: None,
             is_class_method: false,
+            function: None,
         });
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(&code, regs_slice);
@@ -700,6 +704,7 @@ impl Interpreter {
             nonlocal_names: None,
             env: None,
             is_class_method: false,
+            function: None,
         });
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(code, regs_slice);
@@ -736,6 +741,7 @@ impl Interpreter {
                     nonlocal_names: None,
                     env: None,
                     is_class_method: false,
+                    function: None,
                 });
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
@@ -772,6 +778,7 @@ impl Interpreter {
                     nonlocal_names: None,
                     env: None,
                     is_class_method: false,
+                    function: None,
                 });
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
