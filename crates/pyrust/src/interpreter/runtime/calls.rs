@@ -990,6 +990,16 @@ impl Interpreter {
                 pos.push(a.value.clone());
             }
         }
+        // #2151: object-protocol method-wrappers (`__sizeof__`, `__dir__`,
+        // `__reduce__`, `__reduce_ex__`, and `None.__bool__`) bound on a
+        // built-in data value.  Intercept here — the receiver is already bound,
+        // so dispatch directly rather than threading these through every
+        // per-type arm below.
+        if method.starts_with("__")
+            && crate::interpreter::is_object_protocol_method(&receiver, method)
+        {
+            return Ok(self.object_protocol_method_result(method, &receiver));
+        }
         // Bound-method dispatch: each builtin takes `&Value`
         // and scopes its own `RefCell::borrow_mut()` for the
         // duration of the operation (#448).  No `&mut Vec /
@@ -5660,6 +5670,15 @@ static OBJECT_DUNDER_NAMES_OWNED: std::sync::LazyLock<Vec<String>> =
             .collect()
     });
 
+/// Append the universal `object` dunder names (#2151) to a built-in value's
+/// method list, so `dir(x)` advertises exactly the names `hasattr(x, …)` /
+/// `getattr(x, …)` resolve through the value's `object`-rooted class MRO.
+/// The caller's dedup pass removes any duplicates from type-specific overrides.
+fn with_object_dunders(mut names: Vec<String>) -> Vec<String> {
+    names.extend_from_slice(&OBJECT_DUNDER_NAMES_OWNED);
+    names
+}
+
 /// Returns the list of attribute/method names that `dir(obj)` should report.
 pub(crate) fn dir_names(value: &Value) -> Vec<String> {
     /// Recursively collect all attribute names from a class and its entire
@@ -5724,16 +5743,28 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             }
             names
         }
+        // Built-in data values (int/str/list/.../None) now chain to `object`
+        // in their class MRO (#2151), so `dir(x)` includes the universal object
+        // dunders (`__class__`, `__doc__`, `__eq__`, `__sizeof__`, `__dir__`,
+        // `__reduce__`, …) alongside the type-specific methods, matching
+        // `dir(x)` under CPython.  `with_object_dunders` appends them; the
+        // caller's dedup pass removes overlaps.
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
-            builtin_method_names("int")
+            with_object_dunders(builtin_method_names("int"))
         }
-        ValueKind::Bytes(_) => builtin_method_names("bytes"),
-        ValueKind::Str(_) => builtin_method_names("str"),
-        ValueKind::List(_) => builtin_method_names("list"),
-        ValueKind::Tuple(_) => builtin_method_names("tuple"),
-        ValueKind::Dict(_) => builtin_method_names("dict"),
-        ValueKind::Set(_) => builtin_method_names("set"),
-        ValueKind::BuiltinObject { ops, .. } => builtin_method_names(ops.type_name()),
+        ValueKind::Bytes(_) => with_object_dunders(builtin_method_names("bytes")),
+        ValueKind::Str(_) => with_object_dunders(builtin_method_names("str")),
+        ValueKind::List(_) => with_object_dunders(builtin_method_names("list")),
+        ValueKind::Tuple(_) => with_object_dunders(builtin_method_names("tuple")),
+        ValueKind::Dict(_) => with_object_dunders(builtin_method_names("dict")),
+        ValueKind::Set(_) => with_object_dunders(builtin_method_names("set")),
+        ValueKind::Float(_) | ValueKind::Complex(_, _) | ValueKind::None
+        | ValueKind::NotImplemented | ValueKind::Ellipsis | ValueKind::Range { .. } => {
+            with_object_dunders(Vec::new())
+        }
+        ValueKind::BuiltinObject { ops, .. } => {
+            with_object_dunders(builtin_method_names(ops.type_name()))
+        }
         ValueKind::Generator(_) => vec![
             "__class__".to_string(),
             "__iter__".to_string(),
@@ -7390,6 +7421,18 @@ impl Interpreter {
         mut pos: Vec<Value>,
         kw: &PyDict,
     ) -> Result<Value> {
+        // Issue #2151: object-protocol methods (`__sizeof__`/`__dir__`/
+        // `__reduce__`/`__reduce_ex__`) called directly via the method-call
+        // opcode on a container.  Handled here (the per-type `call` below would
+        // leak a RuntimeError) so `[1].__dir__()` returns a list.
+        if method.starts_with("__")
+            && crate::interpreter::is_object_protocol_method(&receiver, method)
+        {
+            if !kw.is_empty() {
+                return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
+            }
+            return Ok(self.object_protocol_method_result(method, &receiver));
+        }
         // Issue #1909: container/sequence protocol dunders called directly via
         // the `obj.__getitem__(i)` method-call opcode (not through the
         // bound-method value).  Route through the shared dispatcher so the
@@ -7534,6 +7577,35 @@ impl Interpreter {
             _ => Err(PyError::Runtime(
                 "dispatch_builtin_container_method called with non-container tag".to_string(),
             )),
+        }
+    }
+
+    /// Compute the result of an object-protocol method call (#2151) on a
+    /// built-in data value whose receiver is already bound.  Single source of
+    /// truth shared by the bound-method dispatch and the container method-call
+    /// fast path; mirrors the `object.__sizeof__`/`__dir__`/`__reduce*` and
+    /// `NoneType.__bool__` registry handlers.  `method` must satisfy
+    /// `is_object_protocol_method(receiver, method)`.
+    fn object_protocol_method_result(&self, method: &str, receiver: &Value) -> Value {
+        match method {
+            // Implementation-specific size; tests assert the int type only.
+            "__sizeof__" => Value::int(std::mem::size_of::<Value>() as i64),
+            "__dir__" => {
+                let mut names = dir_names(receiver);
+                names.sort();
+                names.dedup();
+                Value::list(names.into_iter().map(Value::string).collect())
+            }
+            // A tuple of the correct shape (`(class, ())`); pyrust does not
+            // model copyreg, so the exact pickle reduction is not reproduced.
+            "__reduce__" | "__reduce_ex__" => Value::tuple(vec![
+                crate::builtin_modules::builtins::value_class(receiver),
+                Value::tuple(Vec::new()),
+            ]),
+            "__bool__" => Value::bool_(false),
+            // `__getstate__()` returns None for objects with no instance state.
+            "__getstate__" => Value::none(),
+            _ => unreachable!("is_object_protocol_method guard"),
         }
     }
 

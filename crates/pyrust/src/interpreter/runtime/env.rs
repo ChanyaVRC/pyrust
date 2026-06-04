@@ -1,5 +1,23 @@
 impl Interpreter {
     pub(crate) fn get_attr(&mut self, target: &Value, name: &str) -> Result<Value> {
+        // `obj.__class__ is type(obj)` for every value (#2150).  PyInstance has
+        // its own `__class__` handling (and `__class__`-reassignment semantics)
+        // in `get_attr_instance_raw`, so it is excluded here; every other kind
+        // — primitives, containers, None, functions, classes (→ metatype),
+        // modules, generators, bound methods — resolves through `value_class`,
+        // the same source of truth `type(obj)` uses.
+        if name == "__class__" && !matches!(target.kind(), ValueKind::PyInstance(_)) {
+            return Ok(crate::builtin_modules::builtins::value_class(target));
+        }
+        // `obj.__doc__` for a built-in data value (int/str/list/None/…) is the
+        // value's *type* docstring (#2151): `(5).__doc__ is int.__doc__`.  Only
+        // primitive/builtin data values are routed here; functions, modules,
+        // classes, properties keep their own `__doc__` handling below.
+        if name == "__doc__" {
+            if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
+                return self.get_attr_class(cls, "__doc__");
+            }
+        }
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
@@ -681,6 +699,17 @@ impl Interpreter {
                         name,
                         target.clone(),
                     ));
+                }
+                // Issue #2151: BuiltinObject primitives (frozenset, bytearray,
+                // mappingproxy) inherit `object`'s dunders (`__eq__`, `__str__`,
+                // `__hash__`, …) via their primitive class, the same as the
+                // scalar/container `_` arm below.  Without this fall-through
+                // `hasattr(frozenset(), '__eq__')` was False while
+                // `dir(frozenset())` listed it.
+                if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
+                    if let Some(val) = lookup_class_attr(&cls, name) {
+                        return Ok(val);
+                    }
                 }
                 let type_name = pyrust_core::builtin_type_name(target);
                 Err(PyError::attribute_error(
@@ -3383,6 +3412,17 @@ fn class_direct_subclasses(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {
     result
 }
 
+/// `true` if `name` is an object-protocol method that every built-in data
+/// value exposes (#2151).  `__bool__` is only on `None` (other primitives use
+/// truthiness via `__len__`/value, not an inherited `object.__bool__`).
+pub(crate) fn is_object_protocol_method(target: &Value, name: &str) -> bool {
+    match name {
+        "__sizeof__" | "__dir__" | "__reduce__" | "__reduce_ex__" | "__getstate__" => true,
+        "__bool__" => matches!(target.kind(), ValueKind::None),
+        _ => false,
+    }
+}
+
 /// Returns `true` if `name` is a built-in method on `target`'s type.
 /// Used by `get_attr` to produce `BuiltinBoundMethod` values.
 fn builtin_has_method(target: &Value, name: &str) -> bool {
@@ -3394,6 +3434,18 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
     if name.starts_with("__") {
         let type_name = pyrust_core::builtin_type_name(target);
         if builtin_protocol_dunders(&type_name).contains(&name) {
+            return true;
+        }
+        // Issue #2151: object-protocol methods every built-in data value
+        // inherits from `object` (`__sizeof__`/`__dir__`/`__reduce__`/
+        // `__reduce_ex__`), plus `None.__bool__`.  Resolved as bound
+        // method-wrappers so `(5).__sizeof__()` / `None.__bool__()` work;
+        // dispatched in `bound_method_dispatch_inner`.  Gated to built-in
+        // data values so function/class/bound-method attribute access is
+        // untouched.
+        if crate::interpreter::primitive_class_for_value(target).is_some()
+            && is_object_protocol_method(target, name)
+        {
             return true;
         }
     }
