@@ -58,8 +58,9 @@ impl BuiltinTypeOps for DictKeysOps {
     // `dict_keys` is set-like: `isdisjoint` is dispatched on the interpreter
     // side (it iterates the argument and probes this view's membership), but
     // `hasattr`/attribute access must surface it as a method (issue #1891).
+    // `__reversed__` is exposed since dict views are reversible (issue #2093).
     fn has_method(&self, name: &str) -> bool {
-        name == "isdisjoint"
+        name == "isdisjoint" || name == "__reversed__"
     }
 }
 
@@ -101,6 +102,12 @@ impl BuiltinTypeOps for DictValuesOps {
             pyrust_core::PyError::Runtime("internal: bad dict_values state".to_string())
         })?;
         Ok(rc.borrow().values().any(|v| v == item))
+    }
+
+    // `dict_values` is reversible by insertion order (issue #2093); expose
+    // `__reversed__` for `hasattr`/attribute access.
+    fn has_method(&self, name: &str) -> bool {
+        name == "__reversed__"
     }
 }
 
@@ -158,8 +165,9 @@ impl BuiltinTypeOps for DictItemsOps {
 
     // `dict_items` is set-like: `isdisjoint` is dispatched on the interpreter
     // side; expose it for `hasattr`/attribute access (issue #1891).
+    // `__reversed__` is exposed since dict views are reversible (issue #2093).
     fn has_method(&self, name: &str) -> bool {
-        name == "isdisjoint"
+        name == "isdisjoint" || name == "__reversed__"
     }
 }
 
