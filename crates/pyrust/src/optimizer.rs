@@ -109,7 +109,11 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let names = code.names;
     let original_insns = code.insns.clone();
     let original_linenos = code.lineno_table.clone();
-    let insns = pass_thread_jumps(code.insns);
+    // Inter-procedural inlining of small pure leaf functions (issue #349).
+    // Runs first so that const-fold / LICM / forcount machinery can subsequently
+    // optimise the spliced body in the caller's scope.
+    let insns = pass_inline(code.insns, &mut consts, &mut num_regs, &fn_protos, &names);
+    let insns = pass_thread_jumps(insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
     let insns = pass_reassoc(insns, &mut consts, num_locals);
@@ -202,6 +206,447 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
         exc_table,
     }
+}
+
+// ─── Inter-procedural inlining (issue #349) ─────────────────────────────────────
+
+/// Maximum number of instructions in a callee body eligible for inlining.
+/// Counts the callee's pre-optimisation insns including the trailing `Return`.
+const INLINE_MAX_INSNS: usize = 12;
+
+/// Returns `true` if `insn` is a body instruction that the inliner can splice
+/// into the caller's scope.  The whitelist is intentionally narrow: it admits
+/// only register/const arithmetic and object construction, and explicitly
+/// excludes anything that
+///   * references the callee's name pool (globals / attrs / methods) — those
+///     would need name-pool merging and could observe caller-vs-callee scope
+///     differences,
+///   * introduces control flow (jumps, loops, exception setup, returns other
+///     than the single trailing one) — splicing those needs offset remapping,
+///   * builds a frame or closure (`Call*`, `MakeFunction`, `MakeClass`, yield),
+///   * mutates a value that might alias a caller object (`SetItem`, `SetAttr`,
+///     `ListAppend`, `SetAdd`, `DictUpdate`, …).
+///
+/// Instructions that may *raise* (e.g. `BinOp` on mismatched types) are allowed:
+/// the identical instruction runs at the same logical point, so the exception
+/// type and message are byte-identical.  Only the traceback *frame list* would
+/// differ, and pyrust's tracebacks already omit per-frame line numbers / carets
+/// and the parity harness strips all `Traceback`/`File "…"` lines, so the
+/// observable behaviour (final exception line) is unchanged.
+fn inline_body_insn_ok(insn: &Insn) -> bool {
+    use Insn::*;
+    match insn {
+        LoadConst(..)
+        | LoadNone(..)
+        | LoadNoneRange { .. }
+        | Move(..)
+        | CopyReg(..)
+        | BinOp(..)
+        | UnaryOp(..)
+        | GetItem(..)
+        | GetSlice(..)
+        | BuildList(..)
+        | BuildTuple(..)
+        | BuildString(..)
+        | BuildSlice(..)
+        | BuildDict(..)
+        | Concat { .. }
+        | FormatValue(..) => true,
+        // Folded constant binops are admissible only in their *non-augmented*
+        // form: an augmented (`is_aug == true`) fused op applies in-place
+        // `__i<op>__` semantics, which could mutate an argument that aliases a
+        // caller object.  Plain (non-aug) folds are pure non-mutating `__<op>__`.
+        BinOpConst(_, _, _, _, is_aug) | BinOpImm(_, _, _, _, is_aug) => !*is_aug,
+        _ => false,
+    }
+}
+
+/// Per-proto inlining plan computed once: the body to splice (sans the trailing
+/// return), the parameter count, and how the trailing return is realised.
+struct InlinePlan {
+    /// Number of registers the callee uses (its `num_regs`); the splice
+    /// allocates a fresh window of this size in the caller.
+    callee_num_regs: u32,
+    /// Number of positional parameters (== required argc).
+    argc: u8,
+    /// Body instructions (everything before the trailing return), each still in
+    /// the callee's own register numbering.  Const indices have already been
+    /// rewritten to point into the caller's merged const pool.
+    body: Vec<Insn>,
+    /// The trailing return: `Some(reg)` for `Return(reg)` (in callee numbering),
+    /// `None` for `ReturnNone`.
+    ret: Option<u32>,
+}
+
+/// Decide whether `proto` is an inlinable small pure leaf function and, if so,
+/// build its [`InlinePlan`], merging the callee's constant pool into the
+/// caller's `consts`.  Returns `None` (no inlining) on any disqualifier.
+fn build_inline_plan(proto: &FnProto, caller_consts: &mut Vec<Value>) -> Option<InlinePlan> {
+    if !proto.is_pure {
+        return None;
+    }
+    let code = &proto.code;
+    if code.is_generator {
+        return None;
+    }
+    // No closure capture of own locals, and no global/nonlocal interaction.
+    if !code.cell_vars.is_empty() {
+        return None;
+    }
+    // Body must reference no names at all (no globals / attrs / methods).  This
+    // keeps the splice to a const-pool merge only and rules out scope-sensitive
+    // lookups.
+    if !code.names.is_empty() {
+        return None;
+    }
+    let params = &proto.param_spec;
+    // Fixed positional parameters only: no *args / **kwargs / defaults /
+    // keyword-only / positional-only markers.
+    let argc = params.names.len();
+    if argc > u8::MAX as usize {
+        return None;
+    }
+    if params.has_default.iter().any(|&b| b)
+        || params.is_args.iter().any(|&b| b)
+        || params.is_kwargs.iter().any(|&b| b)
+        || params.is_keyword_only.iter().any(|&b| b)
+    {
+        return None;
+    }
+    // Every parameter must bind to register `i` (contiguous 0..argc).  An unused
+    // parameter gets no slot (`ParamBind::None`) which would break the
+    // arg→register mapping, so bail in that case.
+    if proto.param_binds.len() != argc {
+        return None;
+    }
+    for (i, bind) in proto.param_binds.iter().enumerate() {
+        match bind {
+            pyrust_core::ParamBind::Reg(r) if *r as usize == i => {}
+            _ => return None,
+        }
+    }
+    let insns = &code.insns;
+    if insns.is_empty() || insns.len() > INLINE_MAX_INSNS {
+        return None;
+    }
+    // The body must be a single straight-line block ending in exactly one
+    // return.  Every non-final instruction must be in the inlinable whitelist;
+    // the final instruction must be `Return(r)` or `ReturnNone`.
+    let (last, body_insns) = insns.split_last().unwrap();
+    let ret = match last {
+        Insn::Return(r) => Some(*r),
+        Insn::ReturnNone => None,
+        _ => return None,
+    };
+    for ins in body_insns {
+        if !inline_body_insn_ok(ins) {
+            return None;
+        }
+    }
+    // Merge the callee's constant pool into the caller's, building an index map.
+    // Then rewrite every const-referencing instruction in the body.
+    let mut const_map: Vec<u16> = Vec::with_capacity(code.consts.len());
+    for c in &code.consts {
+        match intern_const_in_pool(caller_consts, c.clone()) {
+            Some(idx) => const_map.push(idx),
+            // Const pool full — abandon this inline (no partial state leaks
+            // because we only mutate `caller_consts` via interning, which is
+            // idempotent for already-present values).
+            None => return None,
+        }
+    }
+    let mut body: Vec<Insn> = Vec::with_capacity(body_insns.len());
+    for ins in body_insns {
+        let mut ins = ins.clone();
+        match &mut ins {
+            Insn::LoadConst(_, idx) | Insn::BinOpConst(_, _, _, idx, _) => {
+                *idx = *const_map.get(*idx as usize)?;
+            }
+            _ => {}
+        }
+        body.push(ins);
+    }
+    Some(InlinePlan {
+        callee_num_regs: code.num_regs,
+        argc: argc as u8,
+        body,
+        ret,
+    })
+}
+
+/// Shift every register referenced by `insn` by `base` (used to relocate a
+/// callee body into a fresh register window in the caller).
+fn shift_insn_regs(insn: &mut Insn, base: u32) {
+    use Insn::*;
+    let shift = |r: &mut u32| *r += base;
+    match insn {
+        LoadConst(d, _) | LoadNone(d) => shift(d),
+        LoadNoneRange { start, .. } => shift(start),
+        Move(d, s) | CopyReg(d, s) | UnaryOp(d, _, s) | FormatValue(d, s) => {
+            shift(d);
+            shift(s);
+        }
+        BinOp(d, a, _, b) => {
+            shift(d);
+            shift(a);
+            shift(b);
+        }
+        BinOpConst(d, a, _, _, _) | BinOpImm(d, a, _, _, _) => {
+            shift(d);
+            shift(a);
+        }
+        GetItem(d, a, b) => {
+            shift(d);
+            shift(a);
+            shift(b);
+        }
+        GetSlice(d, obj, base_r) => {
+            shift(d);
+            shift(obj);
+            shift(base_r);
+        }
+        BuildList(d, b, _) | BuildTuple(d, b, _) | BuildDict(d, b, _) => {
+            shift(d);
+            shift(b);
+        }
+        BuildString(d, b, _) => {
+            shift(d);
+            shift(b);
+        }
+        BuildSlice(d, b) => {
+            shift(d);
+            shift(b);
+        }
+        Concat { dst, base: b, .. } => {
+            shift(dst);
+            shift(b);
+        }
+        // No other variants can appear in an inlinable body (gated by
+        // `inline_body_insn_ok`); leave them untouched.
+        _ => {}
+    }
+}
+
+/// Inter-procedural inlining of small pure leaf functions at their call sites.
+///
+/// ## What is inlined
+///
+/// A `Call`/`CallMemo` site whose function-value register provably and stably
+/// holds a known [`FnProto`] that passes [`build_inline_plan`] (small, pure,
+/// straight-line, name-free, fixed positional params).  The call frame is
+/// eliminated: arguments are copied into a fresh register window, the callee
+/// body is spliced register-shifted into the caller, and the callee's return
+/// becomes a move of the result into the call's destination register.
+///
+/// ## Binding stability (no runtime guard)
+///
+/// Inlining is sound only if the call target cannot be rebound between the
+/// `def` and the call.  Rather than emit a runtime deopt guard, this pass
+/// inlines *only* when the binding is provably immutable:
+///
+///   * The function-value register at the call site resolves (through at most
+///     one `Move` hop) to a register written exactly once, by a
+///     `MakeFunction(_, proto_idx, …)` with no defaults / annotations.
+///   * The enclosing function never materialises its namespace via
+///     `globals()` / `locals()` / `vars()` / `exec` / `eval`, and contains no
+///     `import *` — so the global binding cannot be swapped at runtime.
+///
+/// When either fails, the call is left untouched (partial coverage is fine).
+fn pass_inline(
+    insns: Vec<Insn>,
+    consts: &mut Vec<Value>,
+    num_regs: &mut u32,
+    fn_protos: &[FnProto],
+    names: &[String],
+) -> Vec<Insn> {
+    if fn_protos.is_empty() {
+        return insns;
+    }
+
+    // ── Binding-stability precondition: the namespace must not be reifiable. ──
+    // If the scope can observe / mutate its globals dict, a function binding
+    // could be swapped at runtime (e.g. `globals()['f'] = g`) and inlining would
+    // be unsound.  Disable the pass entirely for the scope if it references any
+    // namespace-reifying builtin (`globals` / `locals` / `vars` / `exec` /
+    // `eval`) or performs a star import — all of which can rebind a name behind
+    // the inliner's back.
+    let reifies_namespace = names
+        .iter()
+        .any(|nm| matches!(nm.as_str(), "globals" | "locals" | "vars" | "exec" | "eval"))
+        || insns.iter().any(|i| matches!(i, Insn::ImportStar(_)));
+    if reifies_namespace {
+        return insns;
+    }
+
+    let n = insns.len();
+    let mut write_count: HashMap<u32, u32> = HashMap::new();
+    let mut single_write: HashMap<u32, usize> = HashMap::new();
+    let mut buf: HashSet<u32> = HashSet::new();
+    for (pc, insn) in insns.iter().enumerate() {
+        buf.clear();
+        collect_writes(insn, &mut buf);
+        for &d in &buf {
+            *write_count.entry(d).or_insert(0) += 1;
+            single_write.insert(d, pc);
+        }
+    }
+    // `make_fn_idx(r, before_pc)` returns the proto built by the most-recent
+    // `MakeFunction(r, idx, 0, _, 0)` write to `r` strictly before `before_pc`,
+    // provided `r` is not rewritten between that point and `before_pc`.  Used to
+    // identify the proto a temporary held at the moment it was copied into a
+    // stable holder.
+    let make_fn_idx = |reg: u32, before_pc: usize| -> Option<u8> {
+        let mut latest: Option<usize> = None;
+        for (pc, insn) in insns.iter().enumerate().take(before_pc) {
+            let mut w: HashSet<u32> = HashSet::new();
+            collect_writes(insn, &mut w);
+            if w.contains(&reg) {
+                latest = Some(pc);
+            }
+        }
+        let wpc = latest?;
+        match &insns[wpc] {
+            Insn::MakeFunction(d, proto_idx, _, defs_n, _, annots_n)
+                if *d == reg && *defs_n == 0 && *annots_n == 0 =>
+            {
+                Some(*proto_idx)
+            }
+            _ => None,
+        }
+    };
+    // Resolve the stable function-value holder `reg` (the register named in the
+    // call-site `Move(fn_reg, reg)`) to its proto.  The holder must be written
+    // exactly once across the whole scope (so its value is immutable for every
+    // call), and that single write must either *be* a `MakeFunction` or copy in
+    // a register that held one at that point.
+    let resolve_fn_reg = |reg: u32| -> Option<u8> {
+        if write_count.get(&reg).copied() != Some(1) {
+            return None;
+        }
+        let &wpc = single_write.get(&reg)?;
+        match &insns[wpc] {
+            Insn::MakeFunction(d, proto_idx, _, defs_n, _, annots_n)
+                if *d == reg && *defs_n == 0 && *annots_n == 0 =>
+            {
+                Some(*proto_idx)
+            }
+            Insn::Move(d, s) if *d == reg => make_fn_idx(*s, wpc),
+            _ => None,
+        }
+    };
+
+    // Pre-build an inlining plan for every proto that resolves to a call target.
+    // (Computed lazily / cached as we encounter call sites.)
+    let mut plans: HashMap<u8, Option<InlinePlan>> = HashMap::new();
+    let mut next_window = *num_regs;
+
+    // First splice pass.  `out` accumulates `(old_i, insn)` pairs where `old_i`
+    // is `Some(pc)` for an instruction copied verbatim from the original stream
+    // (its offsets are rewritten in the second pass) and `None` for an inliner-
+    // generated instruction (a plain register/const op with no offsets).
+    //
+    // `old_to_new[pc]` records the new index at which original instruction `pc`
+    // lands (for an inlined call, the position where its splice begins).  Built
+    // alongside `out` so that jumps crossing inlined regions can be re-targeted.
+    let mut out: Vec<(Option<usize>, Insn)> = Vec::with_capacity(n);
+    let mut old_to_new: Vec<usize> = vec![0; n + 1];
+    let mut changed = false;
+    for pc in 0..n {
+        old_to_new[pc] = out.len();
+        let insn = &insns[pc];
+        if let Insn::Call(fn_reg, argc) | Insn::CallMemo(fn_reg, argc) = insn {
+            let fn_reg = *fn_reg;
+            let argc = *argc;
+            // The function-value register is loaded by a `Move(fn_reg, src)`
+            // earlier in this same straight-line block (the standard call-site
+            // shape).  Locate it and resolve the proto behind `src`.
+            if let Some(proto_idx) = resolve_call_target(&insns, pc, fn_reg, &resolve_fn_reg) {
+                let plan_slot = plans
+                    .entry(proto_idx)
+                    .or_insert_with(|| build_inline_plan(&fn_protos[proto_idx as usize], consts));
+                if let Some(plan) = plan_slot
+                    && plan.argc == argc
+                {
+                    // Splice: bind args into a fresh register window, copy the
+                    // body (register-shifted), then realise the return into
+                    // `fn_reg` (the call's destination register).
+                    let base = next_window;
+                    next_window += plan.callee_num_regs;
+                    for i in 0..argc as u32 {
+                        out.push((None, Insn::Move(base + i, fn_reg + 1 + i)));
+                    }
+                    for body_ins in &plan.body {
+                        let mut body_ins = body_ins.clone();
+                        shift_insn_regs(&mut body_ins, base);
+                        out.push((None, body_ins));
+                    }
+                    match plan.ret {
+                        Some(r) => out.push((None, Insn::Move(fn_reg, base + r))),
+                        None => out.push((None, Insn::LoadNone(fn_reg))),
+                    }
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        out.push((Some(pc), insn.clone()));
+    }
+    old_to_new[n] = out.len();
+
+    if next_window > *num_regs {
+        *num_regs = next_window;
+    }
+
+    if !changed {
+        // Nothing inlined — return the original stream untouched (no offset
+        // rewrite needed, and `out` may have re-cloned everything already, so
+        // hand back the cheaper original).
+        return insns;
+    }
+
+    // Second pass: rewrite position-relative offsets of every copied
+    // instruction to account for the inserted splices.  Inliner-generated
+    // instructions carry no offsets and pass through unchanged.
+    out.into_iter()
+        .map(|(old_i, insn)| match old_i {
+            Some(i) => rewrite_offsets(insn, i, &old_to_new),
+            None => insn,
+        })
+        .collect()
+}
+
+/// Resolve the proto that a `Call`/`CallMemo` at `call_pc` targets, by locating
+/// the most recent write to `fn_reg` before the call within the same basic
+/// block and resolving it via `resolve_fn_reg`.
+fn resolve_call_target(
+    insns: &[Insn],
+    call_pc: usize,
+    fn_reg: u32,
+    resolve_fn_reg: &impl Fn(u32) -> Option<u8>,
+) -> Option<u8> {
+    // Walk backwards from the call; stop at a basic-block boundary (any control
+    // flow) — the call-site `Move(fn_reg, src)` is always in the same block.
+    let mut i = call_pc;
+    while i > 0 {
+        i -= 1;
+        let insn = &insns[i];
+        if is_control_flow(insn) {
+            return None;
+        }
+        // The first write we find to fn_reg must be a `Move(fn_reg, src)` that
+        // loads the function value; resolve src to a proto.
+        let mut writes: HashSet<u32> = HashSet::new();
+        collect_writes(insn, &mut writes);
+        if writes.contains(&fn_reg) {
+            if let Insn::Move(d, s) = insn
+                && *d == fn_reg
+            {
+                return resolve_fn_reg(*s);
+            }
+            return None;
+        }
+    }
+    None
 }
 
 // ─── Jump threading ────────────────────────────────────────────────────────────
@@ -11932,5 +12377,87 @@ elif x == 2:
                 );
             }
         }
+    }
+
+    // ── pass_inline (issue #349) ──────────────────────────────────────────────
+
+    fn has_user_call(insns: &[Insn]) -> bool {
+        insns
+            .iter()
+            .any(|i| matches!(i, Insn::Call(..) | Insn::CallMemo(..)))
+    }
+
+    #[test]
+    fn inline_small_pure_leaf_removes_call() {
+        // The canonical target: a tiny pure helper called in a loop is spliced
+        // inline, so no Call/CallMemo survives at the call site.
+        let code = optimize(compile_fn(
+            "def sq(x):\n    return x * x\ns = 0\nfor i in range(5):\n    s += sq(i)\n",
+        ));
+        assert!(
+            !has_user_call(&code.insns),
+            "sq(i) should be inlined away; insns: {:?}",
+            code.insns
+        );
+        // A Mul BinOp from the inlined body must remain in the top-level stream.
+        assert!(
+            code.insns
+                .iter()
+                .any(|i| matches!(i, Insn::BinOp(_, _, crate::ast::BinaryOp::Mul, _))),
+            "inlined body's multiply must appear in caller; insns: {:?}",
+            code.insns
+        );
+    }
+
+    #[test]
+    fn inline_multi_arg_helper() {
+        let code = optimize(compile_fn(
+            "def add3(a, b, c):\n    return a + b + c\nr = add3(1, 2, 3)\n",
+        ));
+        assert!(
+            !has_user_call(&code.insns),
+            "add3(1,2,3) should be inlined; insns: {:?}",
+            code.insns
+        );
+    }
+
+    #[test]
+    fn no_inline_when_globals_reified() {
+        // globals() lets the binding be swapped at runtime, so the helper must
+        // NOT be inlined — the real call is preserved.
+        let code = optimize(compile_fn(
+            "def h(x):\n    return x + 1\ng = globals()\nr = h(2)\n",
+        ));
+        assert!(
+            has_user_call(&code.insns),
+            "globals() reification must disable inlining; insns: {:?}",
+            code.insns
+        );
+    }
+
+    #[test]
+    fn no_inline_recursive_helper() {
+        // A recursive function is not pure (and its body contains a Call), so it
+        // is never inlined — preventing infinite expansion.
+        let code = optimize(compile_fn(
+            "def fac(n):\n    if n <= 1:\n        return 1\n    return n * fac(n - 1)\nr = fac(5)\n",
+        ));
+        assert!(
+            has_user_call(&code.insns),
+            "recursive helper must not be inlined; insns: {:?}",
+            code.insns
+        );
+    }
+
+    #[test]
+    fn no_inline_default_arg_helper() {
+        // Default parameters disqualify inlining (MakeFunction carries defaults
+        // and argc may differ from the call site).
+        let code = optimize(compile_fn("def d(x, y=10):\n    return x + y\nr = d(1)\n"));
+        assert!(
+            has_user_call(&code.insns),
+            "default-arg helper must not be inlined; insns: {:?}",
+            code.insns
+        );
     }
 }
