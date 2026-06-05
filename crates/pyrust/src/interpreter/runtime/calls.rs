@@ -2532,6 +2532,61 @@ impl Interpreter {
             }
             _ => {}
         }
+        // `__divmod__` / `__rdivmod__` route through the `divmod` builtin
+        // (which returns a 2-tuple) rather than a single `BinaryOp`.  The
+        // reflected form swaps the operand order (`b.__rdivmod__(a)` →
+        // `divmod(a, b)`), issue #2215.
+        match method {
+            "__divmod__" => {
+                let other = args.pop().unwrap();
+                if !numeric_operand_accepted(recv, &other) {
+                    return Ok(Some(Value::not_implemented()));
+                }
+                let dispatch = crate::builtin_registry::lookup("divmod")
+                    .expect("divmod must be in the registry");
+                let a = ExpandedCallArg { name: None, value: recv.clone() };
+                let b = ExpandedCallArg { name: None, value: other };
+                return Ok(Some(dispatch(self, &[a, b])?));
+            }
+            "__rdivmod__" => {
+                let other = args.pop().unwrap();
+                if !numeric_operand_accepted(recv, &other) {
+                    return Ok(Some(Value::not_implemented()));
+                }
+                let dispatch = crate::builtin_registry::lookup("divmod")
+                    .expect("divmod must be in the registry");
+                let a = ExpandedCallArg { name: None, value: other };
+                let b = ExpandedCallArg { name: None, value: recv.clone() };
+                return Ok(Some(dispatch(self, &[a, b])?));
+            }
+            _ => {}
+        }
+        // Reflected binary slots (issue #2215): same op table as forward, but
+        // with operands swapped (`eval_binary(other, op, recv)` computes
+        // `other OP recv`).  Acceptance is identical to the forward direction
+        // (see `numeric_operand_accepted`): `(5).__radd__(2.5)` →
+        // `NotImplemented` because float outranks int.
+        if let Some(rop) = match method {
+            "__radd__" => Some(BinaryOp::Add),
+            "__rsub__" => Some(BinaryOp::Sub),
+            "__rmul__" => Some(BinaryOp::Mul),
+            "__rtruediv__" => Some(BinaryOp::Div),
+            "__rfloordiv__" => Some(BinaryOp::FloorDiv),
+            "__rmod__" => Some(BinaryOp::Mod),
+            "__rpow__" => Some(BinaryOp::Pow),
+            "__rand__" => Some(BinaryOp::BitAnd),
+            "__ror__" => Some(BinaryOp::BitOr),
+            "__rxor__" => Some(BinaryOp::BitXor),
+            "__rlshift__" => Some(BinaryOp::LShift),
+            "__rrshift__" => Some(BinaryOp::RShift),
+            _ => None,
+        } {
+            let other = args.pop().unwrap();
+            if !numeric_operand_accepted(recv, &other) {
+                return Ok(Some(Value::not_implemented()));
+            }
+            return Ok(Some(self.eval_binary(other, rop, recv.clone())?));
+        }
         let op = match method {
             "__add__" => BinaryOp::Add,
             "__sub__" => BinaryOp::Sub,
@@ -2545,17 +2600,6 @@ impl Interpreter {
             "__xor__" => BinaryOp::BitXor,
             "__lshift__" => BinaryOp::LShift,
             "__rshift__" => BinaryOp::RShift,
-            "__divmod__" => {
-                let other = args.pop().unwrap();
-                if !numeric_operand_accepted(recv, &other) {
-                    return Ok(Some(Value::not_implemented()));
-                }
-                let dispatch = crate::builtin_registry::lookup("divmod")
-                    .expect("divmod must be in the registry");
-                let a = ExpandedCallArg { name: None, value: recv.clone() };
-                let b = ExpandedCallArg { name: None, value: other };
-                return Ok(Some(dispatch(self, &[a, b])?));
-            }
             _ => return Ok(None),
         };
         let other = args.pop().unwrap();
@@ -6404,24 +6448,34 @@ pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static st
         // `__hash__`/`__str__`/`__repr__`/`__bool__`.  The arithmetic dunders
         // return `NotImplemented` for operand types the forward slot does not
         // accept (e.g. `(5).__add__(5.0)`), matching CPython exactly.
+        // Issue #2215: the *reflected* numeric/bitwise dunders mirror each
+        // type's forward set exactly (swapped-operand semantics, same
+        // tower-rank `NotImplemented` gating), exposed as bound
+        // method-wrappers alongside the forward slots.
         "int" | "bool" => &[
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__hash__", "__str__", "__repr__", "__bool__",
             "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
             "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
             "__and__", "__or__", "__xor__", "__lshift__", "__rshift__", "__invert__",
+            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
+            "__rmod__", "__rpow__", "__rdivmod__",
+            "__rand__", "__ror__", "__rxor__", "__rlshift__", "__rrshift__",
         ],
         "float" => &[
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__hash__", "__str__", "__repr__", "__bool__",
             "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
             "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
+            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
+            "__rmod__", "__rpow__", "__rdivmod__",
         ],
         "complex" => &[
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__hash__", "__str__", "__repr__", "__bool__",
             "__add__", "__sub__", "__mul__", "__truediv__", "__pow__",
             "__neg__", "__pos__", "__abs__",
+            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rpow__",
         ],
         _ => &[],
     }
