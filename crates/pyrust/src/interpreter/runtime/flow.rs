@@ -463,6 +463,13 @@ impl Interpreter {
         group_in: &Value,
         kind: &Value,
     ) -> Result<Option<(Value, Option<Value>)>> {
+        // PEP 654: `except*` forbids catching a `BaseExceptionGroup` subclass and
+        // any non-exception catch type.  CPython validates the whole catch type
+        // (a single class or a tuple) up-front: the "does not inherit from
+        // BaseException" check wins over the ExceptionGroup check across the
+        // tuple, and both fire before any filtering happens.
+        validate_except_star_type(kind)?;
+
         // PEP 654: if the active exception is a plain (non-group) exception,
         // wrap it in an ExceptionGroup before filtering — matching CPython's
         // implicit wrapping behaviour for `except*`.
@@ -824,4 +831,54 @@ impl Interpreter {
 enum EgMatcher {
     Type(Value),
     Predicate(Value),
+}
+
+/// Validate an `except*` catch type (a single exception class or a tuple of
+/// them), matching CPython's `check_except_star_type_valid`.
+///
+/// Two passes over the whole catch type, in CPython's precedence order:
+///   1. every element must inherit from `BaseException`, else
+///      "catching classes that do not inherit from BaseException is not allowed"
+///      (this wins over the ExceptionGroup check, even when a later element is
+///      itself an exception-group subclass);
+///   2. no element may be a `BaseExceptionGroup` subclass, else
+///      "catching ExceptionGroup with except* is not allowed. Use except instead."
+fn validate_except_star_type(kind: &Value) -> Result<()> {
+    let classes: Vec<&Rc<RefCell<PyClass>>> = match kind.kind() {
+        ValueKind::PyClass(cls) => vec![cls],
+        ValueKind::Tuple(items) => {
+            let mut v = Vec::with_capacity(items.len());
+            for item in items {
+                match item.kind() {
+                    ValueKind::PyClass(cls) => v.push(cls),
+                    _ => {
+                        return Err(pyrust_core::type_err!(
+                            "catching classes that do not inherit from BaseException is not allowed"
+                        ));
+                    }
+                }
+            }
+            v
+        }
+        _ => {
+            return Err(pyrust_core::type_err!(
+                "catching classes that do not inherit from BaseException is not allowed"
+            ));
+        }
+    };
+    for cls in &classes {
+        if !is_exception_class(cls) {
+            return Err(pyrust_core::type_err!(
+                "catching classes that do not inherit from BaseException is not allowed"
+            ));
+        }
+    }
+    for cls in &classes {
+        if class_chain_contains_name(cls, "BaseExceptionGroup") {
+            return Err(pyrust_core::type_err!(
+                "catching ExceptionGroup with except* is not allowed. Use except instead."
+            ));
+        }
+    }
+    Ok(())
 }

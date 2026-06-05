@@ -67,3 +67,75 @@ try:
 except* KeyError as eg:
     runs.append(len(eg.exceptions))
 print("clause runs:", len(runs))
+
+
+# --- PEP 654: `except*` rejects ExceptionGroup-subclass / non-exception catch
+#     types with a TypeError (the "does not inherit" check wins over the EG
+#     check across a tuple).  The filter runs only when an exception is present;
+#     each helper raises one, and we compare just the resulting message (the
+#     rich EG traceback rendering is out of scope). ---
+class MyEG(ExceptionGroup):
+    pass
+
+
+def reject(fn):
+    try:
+        fn()
+    except TypeError as e:
+        print("TypeError:", e)
+    else:
+        print("no error")
+
+
+def c_eg():
+    try:
+        raise ValueError("x")
+    except* ExceptionGroup:
+        pass
+
+
+def c_baseeg():
+    try:
+        raise ValueError("x")
+    except* BaseExceptionGroup:
+        pass
+
+
+def c_user_eg():
+    try:
+        raise ValueError("x")
+    except* MyEG:
+        pass
+
+
+def c_tuple_eg():
+    try:
+        raise ValueError("x")
+    except* (ValueError, ExceptionGroup):
+        pass
+
+
+def c_tuple_eg_then_int():
+    try:
+        raise ValueError("x")
+    except* (ExceptionGroup, int):
+        pass
+
+
+def c_int():
+    try:
+        raise ValueError("x")
+    except* int:
+        pass
+
+
+def c_group_raised_eg():
+    try:
+        raise ExceptionGroup("g", [ValueError("v")])
+    except* ExceptionGroup:
+        pass
+
+
+for fn in (c_eg, c_baseeg, c_user_eg, c_tuple_eg, c_tuple_eg_then_int, c_int, c_group_raised_eg):
+    reject(fn)
+
