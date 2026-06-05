@@ -2339,14 +2339,76 @@ impl Interpreter {
                 }
 
                 Insn::CallMemo(func_reg, argc) => {
-                    // `CallMemo` marks a call to a statically-pure callee — the
-                    // optimizer relies on that purity for DCE / TCO.  The former
-                    // result-memoization (fn_cache probe + store) was removed
-                    // (#1987): it was a net loss for the common varying-argument
-                    // case (it paid a key-build + hash every call for a cache
-                    // that essentially never hit) and grew the cache without
-                    // bound.  Execution is now identical to a plain `Call`.
+                    // `CallMemo` marks a call to a statically-pure callee.  An
+                    // adaptive, bounded result cache memoizes pure functions with
+                    // integer args and a value-identity scalar (int/bool/None)
+                    // result — collapsing exponential recursion like `fib` to
+                    // O(n) (#2234).  Parity-safe: pyrust scalars already compare
+                    // by value-identity, so a shared cached result is observably
+                    // transparent.  The adaptive gate (`memo_stats`) disables a
+                    // function whose hit-rate stays low after a warmup, so the
+                    // common varying-argument case pays nothing (the regression
+                    // that removed the previous always-on cache, #1987).
                     let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
+                    'memo: {
+                        let fid = match func_val.kind() {
+                            ValueKind::UserFunction(f) if f.is_pure => f.id,
+                            _ => break 'memo,
+                        };
+                        if matches!(self.memo_stats.get(&fid), Some((_, _, false))) {
+                            break 'memo;
+                        }
+                        let mut key_args: smallvec::SmallVec<[i64; 3]> =
+                            smallvec::SmallVec::new();
+                        for i in 0..crate::bytecode::Reg::from(*argc) {
+                            match vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals))
+                                .as_int()
+                            {
+                                Some(n) => key_args.push(n),
+                                None => break 'memo,
+                            }
+                        }
+                        let key = (fid, key_args);
+                        if let Some(cached) = self.memo_cache.get(&key) {
+                            let v = cached.clone();
+                            let st = self.memo_stats.entry(fid).or_insert((0, 0, true));
+                            st.0 = st.0.saturating_add(1);
+                            st.1 = st.1.saturating_add(1);
+                            regs[*func_reg as usize] = v;
+                            continue 'vm;
+                        }
+                        // Miss: compute it (native call), then store a scalar
+                        // result.  The cache prunes the recursion tree, so misses
+                        // are few (e.g. ~n for `fib(n)`).
+                        let mut buf = std::mem::take(&mut self.call_arg_buf);
+                        buf.clear();
+                        for i in 0..crate::bytecode::Reg::from(*argc) {
+                            buf.push(ExpandedCallArg {
+                                name: None,
+                                value: vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals)),
+                            });
+                        }
+                        let call_result = self.call_function_expanded(func_val.clone(), &buf);
+                        self.call_arg_buf = buf;
+                        let result = vm_try!(call_result);
+                        let st = self.memo_stats.entry(fid).or_insert((0, 0, true));
+                        st.0 = st.0.saturating_add(1);
+                        // Adaptive: after a warmup, disable functions whose
+                        // hit-rate stays below ~25%.
+                        if st.0 >= 128 && st.1.saturating_mul(4) < st.0 {
+                            st.2 = false;
+                        }
+                        let store = st.2;
+                        if store
+                            && self.memo_cache.len() < (1usize << 16)
+                            && (matches!(result.kind(), ValueKind::Int(_) | ValueKind::Bool(_))
+                                || result.is_none())
+                        {
+                            self.memo_cache.insert(key, result.clone());
+                        }
+                        regs[*func_reg as usize] = result;
+                        continue 'vm;
+                    }
                     tramp_try!(*func_reg, *argc, func_val);
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
