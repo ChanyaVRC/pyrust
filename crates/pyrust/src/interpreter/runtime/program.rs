@@ -402,15 +402,22 @@ impl Interpreter {
         Some(vm_result.map(|_| ()))
     }
 
-    /// Parse a Python source string into a statement list.
-    /// Converts lexer/parse errors into `SyntaxError` (or its `IndentationError`
-    /// subclass for indentation failures) exceptions.
-    pub(crate) fn parse_source_to_stmts(source: &str) -> Result<Vec<crate::ast::Stmt>> {
-        let tokens = crate::lexer::Lexer::new(source)
+    /// Parse a Python source string into a statement list plus the per-statement
+    /// 1-based line-number table, so the compiler can thread accurate line
+    /// numbers into the bytecode for `exec`/`eval`/`compile`'d source.  Without
+    /// this, errors raised *inside* exec'd code report wrong internal line
+    /// numbers (issue #2245): the original path discarded the lexer's physical
+    /// line table via `into_tokens()`.  Converts lexer/parse errors into
+    /// `SyntaxError` (or its `IndentationError` subclass for indentation
+    /// failures) exceptions.
+    pub(crate) fn parse_source_to_stmts_with_linenos(
+        source: &str,
+    ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
+        let (tokens, line_nos) = crate::lexer::Lexer::new(source)
             .map_err(lex_parse_to_exc)?
-            .into_tokens();
-        let mut parser = crate::parser::Parser::new(tokens);
-        parser.parse_program().map_err(lex_parse_to_exc)
+            .into_tokens_with_linenos();
+        let mut parser = crate::parser::Parser::new_with_lines(tokens, line_nos);
+        parser.parse_program_with_linenos().map_err(lex_parse_to_exc)
     }
 
     /// Execute a source string as statements, optionally in an explicit
@@ -429,7 +436,7 @@ impl Interpreter {
         globals_dict: Option<Value>,
         locals_dict: Option<Value>,
     ) -> Result<()> {
-        let program = Self::parse_source_to_stmts(source)?;
+        let (program, linenos) = Self::parse_source_to_stmts_with_linenos(source)?;
         match globals_dict {
             None => {
                 // No explicit namespace: compile and run in the current module
@@ -454,10 +461,14 @@ impl Interpreter {
                     } else {
                         Rc::new(HashMap::new())
                     };
-                let code = match crate::compiler::compile_script(
+                // Thread the lexer line table into the bytecode (issue #2245)
+                // so errors inside the exec'd source report correct internal
+                // line numbers.
+                let code = match crate::compiler::compile_script_with_linenos(
                     &program,
                     Rc::clone(&local_index),
                     false,
+                    &linenos,
                 ) {
                     Ok(c) => Rc::new(crate::optimizer::optimize(c)),
                     Err(e) => return Err(e),
@@ -481,6 +492,7 @@ impl Interpreter {
                     unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 self.vm_frame_views.pop();
+                record_exec_string_frame(&vm_result);
                 // Write fastlocals back to module env so names are visible
                 // after exec() returns, matching top-level assignment semantics.
                 for (name, &idx) in local_index.iter() {
@@ -495,7 +507,7 @@ impl Interpreter {
             Some(gdict) => {
                 // Explicit globals dict: seed a fresh env from the dict, run,
                 // then write all new/changed names back to the dict.
-                self.exec_in_dict_env(&program, gdict, locals_dict)
+                self.exec_in_dict_env(&program, &linenos, gdict, locals_dict)
             }
         }
     }
@@ -513,10 +525,14 @@ impl Interpreter {
         // Strip leading and trailing whitespace: CPython's `eval()` strips both.
         // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work in CPython.
         let trimmed = source.trim();
-        let program = Self::parse_source_to_stmts(trimmed)?;
+        let (program, linenos) = Self::parse_source_to_stmts_with_linenos(trimmed)?;
         let local_index: Rc<HashMap<String, crate::bytecode::Reg>> =
             Rc::new(HashMap::new());
-        let code = match crate::compiler::compile_eval_expr(&program, Rc::clone(&local_index)) {
+        let code = match crate::compiler::compile_eval_expr_with_linenos(
+            &program,
+            Rc::clone(&local_index),
+            &linenos,
+        ) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Err(e),
         };
@@ -556,6 +572,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(code, regs_slice);
         self.vm_frame_views.pop();
+        record_exec_string_frame(&vm_result);
         vm_result
     }
 
@@ -564,6 +581,7 @@ impl Interpreter {
     fn exec_in_dict_env(
         &mut self,
         program: &[crate::ast::Stmt],
+        linenos: &[u32],
         globals_dict: Value,
         locals_dict: Option<Value>,
     ) -> Result<()> {
@@ -583,7 +601,14 @@ impl Interpreter {
             } else {
                 Rc::new(HashMap::new())
             };
-        let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), false) {
+        // Thread the lexer line table into the bytecode (issue #2245) so errors
+        // inside the exec'd source report correct internal line numbers.
+        let code = match crate::compiler::compile_script_with_linenos(
+            program,
+            Rc::clone(&local_index),
+            false,
+            linenos,
+        ) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Err(e),
         };
@@ -617,6 +642,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(&code, regs_slice);
         self.vm_frame_views.pop();
+        record_exec_string_frame(&vm_result);
 
         // Write fastlocal registers back to the dict env so we can flush them.
         for (name, &idx) in local_index.iter() {
@@ -707,6 +733,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(code, regs_slice);
         self.vm_frame_views.pop();
+        record_exec_string_frame(&vm_result);
 
         self.env = previous_env;
         self.module_globals_dict = prev_mgd;
@@ -744,6 +771,7 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 self.vm_frame_views.pop();
+                record_exec_string_frame(&vm_result);
                 // Write fastlocals back to module env.
                 for (name, &idx) in local_index.iter() {
                     if !regs[idx as usize].is_unset() {
@@ -781,6 +809,7 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 self.vm_frame_views.pop();
+                record_exec_string_frame(&vm_result);
 
                 for (name, &idx) in local_index.iter() {
                     if !regs[idx as usize].is_unset() {
@@ -896,4 +925,29 @@ fn lex_parse_to_exc(e: PyError) -> PyError {
 /// CPython reports as `IndentationError` rather than a bare `SyntaxError`.
 fn is_indentation_message(msg: &str) -> bool {
     msg == "too many levels of indentation"
+}
+
+/// Synthesize the `<string>` traceback frame for an exception raised inside
+/// `exec`/`eval`'d code (issue #2245).  CPython reports such errors with a
+/// `File "<string>", line N, in <module>` frame, where N is the 1-based line
+/// inside the exec'd source.  The inner VM dispatch loop has already recorded
+/// the current line into `CURRENT_VM_LINE` (now that the exec'd bytecode
+/// carries a `lineno_table`), so read it back and push a module-scope frame at
+/// the front of the captured chain.  The frame carries no `source_line`: the
+/// exec'd string is not a file, so CPython prints no source text for it.
+///
+/// Only records on error; the no-error path skips it entirely.
+fn record_exec_string_frame(vm_result: &Result<Value>) {
+    if vm_result.is_err() {
+        let lineno = match pyrust_core::get_current_vm_line() {
+            0 => None,
+            n => Some(n),
+        };
+        pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+            filename: std::sync::Arc::from("<string>"),
+            lineno,
+            source_line: None,
+            funcname: std::sync::Arc::from("<module>"),
+        });
+    }
 }

@@ -2126,7 +2126,10 @@ pyrust_module! {
         })?;
         match mode {
             "exec" => {
-                let program = crate::interpreter::Interpreter::parse_source_to_stmts(source)?;
+                // Thread the lexer line table through so errors inside the
+                // compiled code report correct internal line numbers (#2245).
+                let (program, linenos) =
+                    crate::interpreter::Interpreter::parse_source_to_stmts_with_linenos(source)?;
                 let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
                 let local_names =
                     crate::interpreter::collect_local_names(&[], &program, &empty, &empty);
@@ -2142,8 +2145,8 @@ pyrust_module! {
                     } else {
                         Rc::new(std::collections::HashMap::new())
                     };
-                let code = crate::compiler::compile_script(
-                    &program, Rc::clone(&local_index), false,
+                let code = crate::compiler::compile_script_with_linenos(
+                    &program, Rc::clone(&local_index), false, &linenos,
                 )
                 .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
                 Ok(crate::interpreter::value_code_object(
@@ -2154,12 +2157,14 @@ pyrust_module! {
             }
             "eval" => {
                 let trimmed = source.trim();
-                let program = crate::interpreter::Interpreter::parse_source_to_stmts(trimmed)?;
+                let (program, linenos) =
+                    crate::interpreter::Interpreter::parse_source_to_stmts_with_linenos(trimmed)?;
                 let local_index: Rc<std::collections::HashMap<String, crate::bytecode::Reg>> =
                     Rc::new(std::collections::HashMap::new());
-                let code =
-                    crate::compiler::compile_eval_expr(&program, Rc::clone(&local_index))
-                        .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
+                let code = crate::compiler::compile_eval_expr_with_linenos(
+                    &program, Rc::clone(&local_index), &linenos,
+                )
+                .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
                 Ok(crate::interpreter::value_code_object(
                     code,
                     crate::interpreter::CodeMode::Eval,

@@ -16,23 +16,17 @@ use crate::error::PyError;
 use crate::interpreter::dispatch_numeric_binop;
 use crate::value::{PyBigInt, Value, ValueKind};
 
-/// Compile a top-level script body.  All script-level names are locals.
+/// Compile a top-level script / module body.  All script-level names are
+/// locals.
 ///
 /// When `repl_mode` is true, top-level `Stmt::Expr` statements emit
 /// `Insn::PrintExpr` instead of discarding the result.
 ///
 /// `linenos` is an optional parallel slice of 1-based source line numbers for
-/// each statement in `stmts`.  Pass an empty slice when no line information is
-/// available (the resulting `FnCode::lineno_table` will be all zeros).
-pub fn compile_script(
-    stmts: &[Stmt],
-    local_index: Rc<HashMap<String, Reg>>,
-    repl_mode: bool,
-) -> Result<FnCode, PyError> {
-    compile_script_with_linenos(stmts, local_index, repl_mode, &[])
-}
-
-/// Like `compile_script` but with per-statement line numbers.
+/// each top-level statement in `stmts`.  Pass an empty slice when no line
+/// information is available (the resulting `FnCode::lineno_table` will be all
+/// zeros).  They are threaded into the bytecode `lineno_table` so tracebacks
+/// report accurate lines.
 pub fn compile_script_with_linenos(
     stmts: &[Stmt],
     local_index: Rc<HashMap<String, Reg>>,
@@ -102,9 +96,13 @@ pub fn compile_script_with_linenos(
 ///
 /// Raises `SyntaxError` if the body is empty or contains statements that are
 /// not a bare expression.
-pub fn compile_eval_expr(
+/// Seeds the expression's source line number into the bytecode line table, so
+/// an error raised while evaluating an `eval()`'d expression reports the
+/// correct internal line (issue #2245).
+pub fn compile_eval_expr_with_linenos(
     stmts: &[Stmt],
     local_index: Rc<HashMap<String, Reg>>,
+    linenos: &[u32],
 ) -> Result<FnCode, PyError> {
     let expr = match stmts {
         [Stmt::Expr(e)] => e,
@@ -123,6 +121,11 @@ pub fn compile_eval_expr(
     };
     let cell_vars = collect_cell_vars(stmts, &local_index);
     let mut c = Compiler::new(local_index, 0, cell_vars);
+    if let Some(&ln) = linenos.first()
+        && ln != 0
+    {
+        c.set_lineno(ln);
+    }
     let r = c.compile_expr(expr);
     let r = c.ensure_temp(r);
     c.emit(Insn::Return(r));
