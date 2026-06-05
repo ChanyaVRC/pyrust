@@ -2292,6 +2292,14 @@ impl Interpreter {
                     // `PyKey::Object{hash == py_hash_none()}`.
                     let needs_dedup = match &key {
                         PyKey::Object { .. } => true,
+                        // Issue #2059: a set comprehension / literal building a
+                        // tuple/frozenset key that nests a user object must dedup
+                        // against an `__eq__`-equal-but-distinct element.
+                        PyKey::Tuple(_) | PyKey::FrozenSet(_)
+                            if nested_object_tuple_key(&key) =>
+                        {
+                            true
+                        }
                         PyKey::None => {
                             let none_hash = pyrust_core::py_hash_none() as u64;
                             regs[*set_reg as usize]

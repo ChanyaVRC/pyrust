@@ -1447,6 +1447,67 @@ pub(crate) fn is_solid_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
     })
 }
 
+/// Returns `true` if `class` introduces extra instance variables beyond its
+/// base — i.e. it has a non-empty `__slots__` (counting only real member
+/// slots, not the `__dict__` / `__weakref__` sentinels, which only toggle the
+/// dict/weakref layout and are not counted by CPython's `extra_ivars`), or it
+/// is a built-in primitive with its own C-level layout.  Mirrors the part of
+/// CPython's `extra_ivars` that distinguishes a fresh "solid base".
+fn class_adds_ivars(class: &Rc<RefCell<PyClass>>) -> bool {
+    if is_solid_primitive_class(class) {
+        return true;
+    }
+    let borrowed = class.borrow();
+    borrowed.slots.as_ref().is_some_and(|s| {
+        s.iter()
+            .any(|name| name != "__dict__" && name != "__weakref__")
+    })
+}
+
+/// CPython's `solid_base(type)`: the most-derived ancestor of `class` whose
+/// instance layout differs from `object`'s.  A class shares its base's solid
+/// base unless it adds real instance variables (non-empty `__slots__` or a
+/// primitive C layout); otherwise the solid base is inherited.  Returns `None`
+/// to mean the `object` layout (no solid base).
+pub(crate) fn solid_base(class: &Rc<RefCell<PyClass>>) -> Option<Rc<RefCell<PyClass>>> {
+    if class_adds_ivars(class) {
+        return Some(Rc::clone(class));
+    }
+    let base = class.borrow().base.clone();
+    base.and_then(|b| solid_base(&b))
+}
+
+/// CPython's `best_base` layout-conflict guard: given the resolved list of
+/// direct bases, returns `true` when two of them have incompatible instance
+/// layouts (neither base's solid base is a subtype of the other's).  Raising
+/// `TypeError: multiple bases have instance lay-out conflict` in that case
+/// matches CPython for both the C-level case (`int` + `str`, issue #1677) and
+/// the user-`__slots__` case (issue #2109).
+pub(crate) fn bases_have_layout_conflict(bases: &[Rc<RefCell<PyClass>>]) -> bool {
+    // Track the current "winner" solid base; each subsequent base must be in a
+    // subtype relationship with it (one a subtype of the other), else conflict.
+    let mut winner: Option<Rc<RefCell<PyClass>>> = None;
+    for base in bases {
+        let Some(candidate) = solid_base(base) else {
+            continue;
+        };
+        match &winner {
+            None => winner = Some(candidate),
+            Some(current) => {
+                if class_is_subclass_of(&candidate, current) {
+                    // candidate is more derived — it becomes the winner.
+                    winner = Some(candidate);
+                } else if !class_is_subclass_of(current, &candidate) {
+                    // Neither is a subtype of the other: incompatible layouts.
+                    return true;
+                }
+                // else: current already subsumes candidate; keep winner.
+            }
+        }
+    }
+    false
+}
+
 /// Walk the base chain of `class` and return the name of the first
 /// primitive builtin base found (`"dict"`, `"list"`, `"set"`, …), or
 /// `None` if the class does not inherit from any primitive.
