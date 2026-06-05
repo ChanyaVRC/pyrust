@@ -2674,6 +2674,36 @@ impl Interpreter {
                 crate::builtin_modules::collections::inject_python_members(
                     self, m,
                 )?;
+                // `collections` class repr (issue #2228): tag each public
+                // collections class with `__module__ = "collections"` so the
+                // type repr renders `<class 'collections.Counter'>` and
+                // `Counter.__module__ == "collections"`, matching CPython.
+                // The native classes (macro-built) carry no `__module__`; the
+                // Python-source classes are exec'd in a private namespace and
+                // pick up that namespace's `__name__` instead.  Done after
+                // `inject_python_members` so every class exists.  `namedtuple`
+                // is deliberately excluded — CPython gives namedtuple-created
+                // classes the *caller's* `__module__`, not `collections`.
+                for cls_name in [
+                    "Counter",
+                    "defaultdict",
+                    "deque",
+                    "OrderedDict",
+                    "ChainMap",
+                    "UserDict",
+                    "UserList",
+                    "UserString",
+                ] {
+                    let cls = m.borrow().attrs.get(cls_name).cloned();
+                    if let Some(cls_val) = cls
+                        && let ValueKind::PyClass(cls_rc) = cls_val.kind()
+                    {
+                        cls_rc.borrow_mut().attrs.insert(
+                            "__module__".to_string(),
+                            Value::string("collections"),
+                        );
+                    }
+                }
             }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via

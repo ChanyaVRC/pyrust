@@ -2697,6 +2697,26 @@ impl Interpreter {
                 // Intercept: the arg is a non-primitive iterable (Range,
                 // Generator, BuiltinObject, PyInstance, …).
                 let arg = args.into_iter().next().unwrap();
+                // #2222: CPython's `dict.update` first checks for a `keys()`
+                // method and, when present, treats the arg as a *mapping*
+                // (iterate `keys()` and subscript via `__getitem__`) rather
+                // than an iterable of pairs.  Route any keys()-bearing mapping
+                // (ChainMap / OrderedDict / Counter / UserDict / custom)
+                // through the same protocol helper used by `dict()` and
+                // `**`-unpack (#2190), so the two paths stay consistent.
+                if let Some(pairs) = crate::interpreter::mapping_pairs_via_protocol(self, &arg)? {
+                    self.dict_extend_value_dedup(&receiver, pairs)?;
+                    for (k, v) in kwargs {
+                        receiver
+                            .dict_with_mut(|dict| {
+                                dict.insert(k.clone(), v.clone());
+                            })
+                            .ok_or_else(|| {
+                                PyError::Runtime("internal: expected dict".to_string())
+                            })?;
+                    }
+                    return Ok(Value::none());
+                }
                 // Drive the iterable one element at a time and insert each
                 // pair into the dict eagerly.  This matches CPython: items
                 // yielded before a mid-iteration exception are already in the
