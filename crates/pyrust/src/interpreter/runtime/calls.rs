@@ -2845,39 +2845,21 @@ impl Interpreter {
         args: &[ExpandedCallArg],
         bound_prefix: &[Value],
     ) -> Result<Value> {
-        // Check if function has *args or **kwargs
-        let has_args_param = function.params.iter().any(|p| p.is_args);
-        let has_kwargs_param = function.params.iter().any(|p| p.is_kwargs);
-
-        let positional_count = args.iter().filter(|arg| arg.name.is_none()).count();
+        // Single pass over the parameter list (replaces three separate
+        // `.iter().any()` scans on the hot call path): `*args` / `**kwargs`
+        // divert to the variadic path, and whether any parameter is
+        // keyword-only gates the exact-positional fast bind below.
+        let mut has_args_param = false;
+        let mut has_kwargs_param = false;
+        let mut has_kwonly_param = false;
+        for p in &function.params {
+            has_args_param |= p.is_args;
+            has_kwargs_param |= p.is_kwargs;
+            has_kwonly_param |= p.is_keyword_only;
+        }
 
         if !has_args_param && !has_kwargs_param {
-            // Fast path: no variadic params - original logic
-            // Number of params that can accept positional arguments (excludes keyword-only).
-            let positional_param_count =
-                function.params.iter().filter(|p| !p.is_keyword_only).count();
-            let required_positional_count = function
-                .params
-                .iter()
-                .filter(|p| !p.is_keyword_only && p.default.is_none())
-                .count();
-            let total_positional_given = positional_count + bound_prefix.len();
-            if total_positional_given > positional_param_count {
-                let given_word = if total_positional_given == 1 { "was" } else { "were" };
-                let (takes_str, arg_word) = if required_positional_count == positional_param_count {
-                    let arg_word =
-                        if positional_param_count == 1 { "argument" } else { "arguments" };
-                    (format!("{positional_param_count}"), arg_word)
-                } else {
-                    (
-                        format!("from {required_positional_count} to {positional_param_count}"),
-                        "arguments",
-                    )
-                };
-                return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                        function.name,
-                        total_positional_given,));
-            }
+            // Fast path: no variadic params.
             // Tier-0: register-VM path — fetch compiled bytecode up front so we
             // can bind arguments *directly* into the callee's new frame register
             // file (like CPython's fastlocals), skipping the per-call
@@ -2910,121 +2892,176 @@ impl Interpreter {
             };
 
             let nparams = function.params.len();
-            // Per-param "already bound" flags (stack-allocated for typical
-            // arity — replaces the heap `Vec<Option<Value>>` whose `Some`
-            // discriminant previously doubled as this flag).
-            let mut bound: smallvec::SmallVec<[bool; 16]> = smallvec![false; nparams];
-            // Routes one bound value to its compile-time destination: a frame
-            // register (the common case) or — for cell-var params under a local
-            // env — an env entry by name.  Marks the param bound.  The body lives
-            // in `fast_path.rs::bind_param` (the frame-binding fast path, #2123),
-            // taking the frame-local state by reference so the file boundary stays
-            // zero-cost (the helper is `#[inline]`).
-            for (index, value) in bound_prefix.iter().enumerate() {
-                bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, index, value.clone())?;
-            }
-            let mut positional_index = bound_prefix.len();
-            let mut posonly_violations: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
-            // Deferred unknown-keyword: CPython raises posonly error before
-            // unexpected-keyword error when both are present in the same call.
-            let mut first_unknown_keyword: Option<&str> = None;
-            for arg in args {
-                let value = arg.value.clone();
-                if let Some(name) = &arg.name {
-                    let Some(param_index) =
-                        function.params.iter().position(|param| param.name == *name)
-                    else {
-                        // Don't return immediately — a posonly violation earlier
-                        // in the arg list must still take priority (CPython 3.12).
-                        if first_unknown_keyword.is_none() {
-                            first_unknown_keyword = Some(name.as_str());
-                        }
-                        continue;
+            // Exact-arity positional fast bind: the dominant call shape — every
+            // argument supplied positionally, exactly filling the parameters,
+            // with no keyword-only parameters and no bound prefix (e.g. a plain
+            // `fib(n - 1)`).  Binds each argument straight into its precomputed
+            // destination register/cell, skipping the per-param bound-flag
+            // tracking, keyword matching, defaults resolution, and the
+            // posonly/missing-argument diagnostics the general path needs.
+            if bound_prefix.is_empty()
+                && !has_kwonly_param
+                && args.len() == nparams
+                && args.iter().all(|a| a.name.is_none())
+            {
+                for (pi, arg) in args.iter().enumerate() {
+                    bind_param_direct(
+                        &function,
+                        num_regs,
+                        &mut regs,
+                        &local_env,
+                        pi,
+                        arg.value.clone(),
+                    )?;
+                }
+            } else {
+                // General argument binding (CPython 3.12 parity): keyword
+                // matching, positional-only / unexpected-keyword diagnostics,
+                // defaults, and missing-argument collection.
+                let positional_count =
+                    args.iter().filter(|arg| arg.name.is_none()).count();
+                // Number of params that can accept positional arguments
+                // (excludes keyword-only).
+                let positional_param_count =
+                    function.params.iter().filter(|p| !p.is_keyword_only).count();
+                let required_positional_count = function
+                    .params
+                    .iter()
+                    .filter(|p| !p.is_keyword_only && p.default.is_none())
+                    .count();
+                let total_positional_given = positional_count + bound_prefix.len();
+                if total_positional_given > positional_param_count {
+                    let given_word = if total_positional_given == 1 { "was" } else { "were" };
+                    let (takes_str, arg_word) = if required_positional_count == positional_param_count {
+                        let arg_word =
+                            if positional_param_count == 1 { "argument" } else { "arguments" };
+                        (format!("{positional_param_count}"), arg_word)
+                    } else {
+                        (
+                            format!("from {required_positional_count} to {positional_param_count}"),
+                            "arguments",
+                        )
                     };
-                    if function.params[param_index].is_positional_only {
-                        // The fast path only runs when the function has neither
-                        // *args nor **kwargs (see the `if !has_args_param &&
-                        // !has_kwargs_param` guard above), so there is no
-                        // **kwargs to absorb this name — TypeError is correct.
-                        // The variadic path (`compute_kw_pos` below) handles
-                        // the "absorb into **kwargs" case separately.
-                        // Collect all violations so the error lists all names,
-                        // matching CPython 3.12: foo() got some positional-only
-                        // arguments passed as keyword arguments: 'a, b'
-                        posonly_violations.push(name.as_str());
-                        continue;
-                    }
-                    if bound[param_index] {
-                        return Err(pyrust_core::type_err!("{}() got multiple values for argument '{}'",
-                                function.name, name));
-                    }
-                    bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, param_index, value)?;
-                } else {
-                    // Skip already-bound slots and keyword-only params.
-                    while positional_index < nparams
-                        && (bound[positional_index]
-                            || function.params[positional_index].is_keyword_only)
-                    {
+                    return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+                            function.name,
+                            total_positional_given,));
+                }
+                // Per-param "already bound" flags (stack-allocated for typical
+                // arity — replaces the heap `Vec<Option<Value>>` whose `Some`
+                // discriminant previously doubled as this flag).
+                let mut bound: smallvec::SmallVec<[bool; 16]> = smallvec![false; nparams];
+                // Routes one bound value to its compile-time destination: a frame
+                // register (the common case) or — for cell-var params under a local
+                // env — an env entry by name.  Marks the param bound.  The body lives
+                // in `fast_path.rs::bind_param` (the frame-binding fast path, #2123),
+                // taking the frame-local state by reference so the file boundary stays
+                // zero-cost (the helper is `#[inline]`).
+                for (index, value) in bound_prefix.iter().enumerate() {
+                    bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, index, value.clone())?;
+                }
+                let mut positional_index = bound_prefix.len();
+                let mut posonly_violations: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
+                // Deferred unknown-keyword: CPython raises posonly error before
+                // unexpected-keyword error when both are present in the same call.
+                let mut first_unknown_keyword: Option<&str> = None;
+                for arg in args {
+                    let value = arg.value.clone();
+                    if let Some(name) = &arg.name {
+                        let Some(param_index) =
+                            function.params.iter().position(|param| param.name == *name)
+                        else {
+                            // Don't return immediately — a posonly violation earlier
+                            // in the arg list must still take priority (CPython 3.12).
+                            if first_unknown_keyword.is_none() {
+                                first_unknown_keyword = Some(name.as_str());
+                            }
+                            continue;
+                        };
+                        if function.params[param_index].is_positional_only {
+                            // The fast path only runs when the function has neither
+                            // *args nor **kwargs (see the `if !has_args_param &&
+                            // !has_kwargs_param` guard above), so there is no
+                            // **kwargs to absorb this name — TypeError is correct.
+                            // The variadic path (`compute_kw_pos` below) handles
+                            // the "absorb into **kwargs" case separately.
+                            // Collect all violations so the error lists all names,
+                            // matching CPython 3.12: foo() got some positional-only
+                            // arguments passed as keyword arguments: 'a, b'
+                            posonly_violations.push(name.as_str());
+                            continue;
+                        }
+                        if bound[param_index] {
+                            return Err(pyrust_core::type_err!("{}() got multiple values for argument '{}'",
+                                    function.name, name));
+                        }
+                        bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, param_index, value)?;
+                    } else {
+                        // Skip already-bound slots and keyword-only params.
+                        while positional_index < nparams
+                            && (bound[positional_index]
+                                || function.params[positional_index].is_keyword_only)
+                        {
+                            positional_index += 1;
+                        }
+                        if positional_index >= nparams
+                            || function.params[positional_index].is_keyword_only
+                        {
+                            let given_word =
+                                if total_positional_given == 1 { "was" } else { "were" };
+                            let (takes_str, arg_word) =
+                                if required_positional_count == positional_param_count {
+                                    let arg_word = if positional_param_count == 1 {
+                                        "argument"
+                                    } else {
+                                        "arguments"
+                                    };
+                                    (format!("{positional_param_count}"), arg_word)
+                                } else {
+                                    (
+                                        format!(
+                                            "from {required_positional_count} to {positional_param_count}"
+                                        ),
+                                        "arguments",
+                                    )
+                                };
+                            return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+                                    function.name,
+                                    total_positional_given,));
+                        }
+                        bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, positional_index, value)?;
                         positional_index += 1;
                     }
-                    if positional_index >= nparams
-                        || function.params[positional_index].is_keyword_only
-                    {
-                        let given_word =
-                            if total_positional_given == 1 { "was" } else { "were" };
-                        let (takes_str, arg_word) =
-                            if required_positional_count == positional_param_count {
-                                let arg_word = if positional_param_count == 1 {
-                                    "argument"
-                                } else {
-                                    "arguments"
-                                };
-                                (format!("{positional_param_count}"), arg_word)
-                            } else {
-                                (
-                                    format!(
-                                        "from {required_positional_count} to {positional_param_count}"
-                                    ),
-                                    "arguments",
-                                )
-                            };
-                        return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                                function.name,
-                                total_positional_given,));
-                    }
-                    bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, positional_index, value)?;
-                    positional_index += 1;
                 }
-            }
-            if !posonly_violations.is_empty() {
-                return Err(pyrust_core::type_err!("{}() got some positional-only arguments passed as keyword arguments: '{}'",
-                        function.name,
-                        posonly_violations.join(", ")));
-            }
-            if let Some(name) = first_unknown_keyword {
-                return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'", function.name, name));
-            }
-            // Resolve defaults: bind any still-unbound params straight into their
-            // destination register/cell.
-            // Collect all missing required positional and keyword-only args before
-            // raising, so the error groups them all (CPython 3.12 parity).
-            let mut missing_positional: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
-            let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
-            for index in 0..nparams {
-                if !bound[index] {
-                    if let Some(default) = function.params[index].default.clone() {
-                        bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, index, default)?;
-                    } else if function.params[index].is_keyword_only {
-                        missing_kwonly.push(&function.params[index].name);
-                    } else {
-                        missing_positional.push(&function.params[index].name);
+                if !posonly_violations.is_empty() {
+                    return Err(pyrust_core::type_err!("{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                            function.name,
+                            posonly_violations.join(", ")));
+                }
+                if let Some(name) = first_unknown_keyword {
+                    return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'", function.name, name));
+                }
+                // Resolve defaults: bind any still-unbound params straight into their
+                // destination register/cell.
+                // Collect all missing required positional and keyword-only args before
+                // raising, so the error groups them all (CPython 3.12 parity).
+                let mut missing_positional: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
+                let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
+                for index in 0..nparams {
+                    if !bound[index] {
+                        if let Some(default) = function.params[index].default.clone() {
+                            bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, index, default)?;
+                        } else if function.params[index].is_keyword_only {
+                            missing_kwonly.push(&function.params[index].name);
+                        } else {
+                            missing_positional.push(&function.params[index].name);
+                        }
                     }
                 }
+                // Use the qualified name (e.g. "Foo.__new__") so the error message
+                // matches CPython 3.12: "Foo.__new__() missing 1 required positional
+                // argument: 'x'" rather than the bare "__new__()".
+                check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
             }
-            // Use the qualified name (e.g. "Foo.__new__") so the error message
-            // matches CPython 3.12: "Foo.__new__() missing 1 required positional
-            // argument: 'x'" rather than the bare "__new__()".
-            check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
 
             // Arguments are already bound directly into `regs` / `local_env`
             // above (#2123).  Run the register-VM path.
