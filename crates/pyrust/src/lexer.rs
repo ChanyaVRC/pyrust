@@ -1379,22 +1379,23 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
     }
 }
 
+/// Parsed contents of an f-string replacement field:
+/// `(expr_src, conversion, format_spec, debug_text, next_pos)`.
+type FStringExpr = (
+    String,
+    Option<char>,
+    Option<Vec<FStringPart>>,
+    Option<String>,
+    usize,
+);
+
 /// Parse the expression inside `{...}` of an f-string.
 /// `pos` points to the first character after the opening `{`.
 /// Returns `(expr_src, conversion, format_spec, debug_text, next_pos)` where
 /// `next_pos` is just after the closing `}`.  `debug_text` is `Some(...)` for
 /// the Python 3.8 debug form `f"{x=}"` and contains the verbatim source text
 /// of the expression with the trailing `=` (whitespace preserved).
-fn lex_fstring_expr(
-    chars: &[char],
-    start: usize,
-) -> Result<(
-    String,
-    Option<char>,
-    Option<Vec<FStringPart>>,
-    Option<String>,
-    usize,
-)> {
+fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
     let mut pos = start;
     let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
     let mut src = String::new();

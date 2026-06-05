@@ -102,12 +102,15 @@ fn accessor_partial(slot: u8, fget: Value, fset: Value, fdel: Value) -> Value {
     Value::builtin_object(PROPERTY_OPS, state)
 }
 
+/// Property slots returned by [`as_property`]: `(fget, fset, fdel, partial_slot)`.
+pub type PropertyFields = (Rc<Value>, Rc<Value>, Rc<Value>, Option<u8>);
+
 /// Extract the property fields (fget, fset, fdel, partial_slot) from a value.
 /// Returns None if the value isn't a property.
 ///
 /// Note: clones all three `Rc<Value>` slots. Prefer [`with_property`] when
 /// only a subset of slots is needed — see #304.
-pub fn as_property(value: &Value) -> Option<(Rc<Value>, Rc<Value>, Rc<Value>, Option<u8>)> {
+pub fn as_property(value: &Value) -> Option<PropertyFields> {
     with_property(value, |s| {
         (
             Rc::clone(&s.fget),

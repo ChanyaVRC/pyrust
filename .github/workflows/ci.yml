@@ -22,6 +22,23 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   unit_and_integration:
     runs-on: ${{ matrix.os }}
     strategy:
