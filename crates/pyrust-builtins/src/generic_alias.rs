@@ -41,8 +41,26 @@ impl BuiltinTypeOps for GenericAliasOps {
 
         // Derive the origin name: prefer `qualname` for PyClass, fall back to
         // the builtin_type_name helper for any other kind of origin.
+        //
+        // CPython's `ga_repr` qualifies a class origin with its module
+        // (`{__module__}.{__qualname__}`) unless the module is `builtins` (or
+        // absent), so `class D[T]` renders as `__main__.D[int]` while
+        // `list[int]` stays bare.  We mirror that by reading `__module__` from
+        // the origin class's own dict.
         let origin_name = match s.origin.kind() {
-            ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
+            ValueKind::PyClass(rc) => {
+                let c = rc.borrow();
+                let module = c
+                    .attrs
+                    .get("__module__")
+                    .and_then(|m| m.as_str().map(|s| s.to_string()));
+                match module {
+                    Some(m) if m != "builtins" && !m.is_empty() => {
+                        format!("{m}.{}", c.qualname)
+                    }
+                    _ => c.qualname.clone(),
+                }
+            }
             _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
         };
 

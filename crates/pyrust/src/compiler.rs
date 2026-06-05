@@ -5716,42 +5716,71 @@ impl Compiler {
 
     // ── PEP 695 generic type parameters helper ────────────────────────────────
 
-    /// Emit code to build a `__type_params__` tuple from `type_params` names
-    /// and store it as an attribute on `obj_reg` via `SetAttr`.
+    /// PEP 695: bind each generic type parameter to a fresh `TypeVar` object in
+    /// the current scope (via `StoreGlobal`) so that annotations, base-class
+    /// expressions, and method/function bodies that reference the parameter name
+    /// (e.g. `def f[T](x: T)`) resolve it instead of raising `NameError`.
     ///
-    /// This is shared by `compile_def` (generic functions) and `compile_class`
-    /// (generic classes).  `obj_reg` must be live and writable after this call.
-    /// All temporary registers allocated inside are fully freed before returning.
-    fn emit_type_params_attr(&mut self, obj_reg: Reg, type_params: &[String]) {
+    /// Returns the contiguous register block `(base, n)` holding the live
+    /// TypeVar objects so the caller can reuse them when building the
+    /// `__type_params__` tuple — CPython keeps the *same* TypeVar object in both
+    /// `__type_params__` and the annotations (`f.__type_params__[0] is
+    /// f.__annotations__['x']`).  The caller must keep `next_temp > base + n`
+    /// until it has emitted the `__type_params__` tuple, then is free to reclaim
+    /// the slots.
+    ///
+    /// Returns `(0, 0)` when there are no type parameters (caller must skip the
+    /// reuse path in that case).
+    ///
+    /// Note: the bound names are intentionally *not* deleted afterwards. Unlike
+    /// the type-alias path (whose RHS is fully evaluated inline), a generic
+    /// function/class body references its type parameters lazily at call time via
+    /// `LoadGlobal`, so the binding must outlive the definition statement. This
+    /// leaks the parameter name into the enclosing namespace, which CPython hides
+    /// behind a dedicated annotation scope; see the deferred note in the PR.
+    fn emit_bind_type_params(&mut self, type_params: &[String]) -> (Reg, Reg) {
         let n = type_params.len() as Reg;
-        let saved_next = self.next_temp;
-        // Allocate a contiguous block of n registers for the TypeVar objects,
-        // then one more for the tuple destination.
-        let base = self.next_temp;
-        let needed = n as u32 + 1; // n TypeVar slots + 1 tuple slot
-        if self.next_temp.checked_add(needed).is_none() {
+        if n == 0 {
+            return (0, 0);
+        }
+        if self.next_temp.checked_add(n as u32).is_none() {
             self.failed = true;
             if self.error_msg.is_none() {
                 self.error_msg = Some("too many registers for type params".to_string());
             }
-            return;
+            return (0, 0);
         }
-        self.next_temp += needed;
+        let base = self.next_temp;
+        self.next_temp += n as u32;
         if self.next_temp - 1 > self.max_reg {
             self.max_reg = self.next_temp - 1;
         }
-        let tuple_reg = base + n as Reg;
-        // Emit MakeTypeVar for each parameter name into consecutive registers.
         for (i, param) in type_params.iter().enumerate() {
             let name_const = self.intern_const(crate::value::Value::string(param.clone()));
-            self.emit(Insn::MakeTypeVar(base + i as Reg, name_const));
+            let tv_reg = base + i as Reg;
+            self.emit(Insn::MakeTypeVar(tv_reg, name_const));
+            // Bind via StoreGlobal so the name lands in `env.values`, which is
+            // exactly where a body's `LoadGlobal` for a free variable looks.
+            let name_idx = self.intern_name(param);
+            self.emit(Insn::StoreGlobal(name_idx, tv_reg));
         }
-        // Build the __type_params__ tuple from the TypeVar registers.
+        (base, n)
+    }
+
+    /// Build the `__type_params__` tuple from an already-bound contiguous block
+    /// of TypeVar registers (produced by `emit_bind_type_params`) and store it on
+    /// `obj_reg`.  Reusing the bound registers preserves TypeVar object identity
+    /// between `__type_params__` and the annotations that reference the names.
+    fn emit_type_params_attr_from_regs(&mut self, obj_reg: Reg, base: Reg, n: Reg) {
+        let saved_next = self.next_temp;
+        if self.next_temp <= base + n {
+            self.next_temp = base + n;
+        }
+        let tuple_reg = self.alloc_temp();
         self.emit(Insn::BuildTuple(tuple_reg, base, n));
-        // Store as obj.__type_params__ = tuple.
         let attr_name_idx = self.intern_name("__type_params__");
         self.emit(Insn::SetAttr(obj_reg, attr_name_idx, tuple_reg));
-        // All TypeVar + tuple registers are dead after SetAttr.
+        // The TypeVar block and the tuple slot are dead after SetAttr.
         self.next_temp = saved_next;
     }
 
@@ -8535,6 +8564,15 @@ impl Compiler {
             None => return,
         };
 
+        // PEP 695: bind the type parameters (as TypeVar objects) in the current
+        // scope *before* the defaults/annotations are evaluated, so a parameter
+        // or return annotation that references `T` (e.g. `def f[T](x: T) -> T`)
+        // resolves.  The returned register block holds the same TypeVar objects
+        // reused for `__type_params__` below to preserve object identity.  The
+        // block sits below `dst`, so the `next_temp = dst + 1` watermark reset
+        // after `MakeFunction` keeps it live until the tuple is built.
+        let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
+
         let (defs_base, defs_n) = match self.emit_def_default_values(params) {
             Some(v) => v,
             None => return,
@@ -8573,9 +8611,10 @@ impl Compiler {
         // and store it on the function object before decorators are applied.
         // CPython sets __type_params__ on the raw function, before wrapping it
         // with decorators (verified: the decorator receives a function that already
-        // has __type_params__).
-        if !type_params.is_empty() {
-            self.emit_type_params_attr(dst, type_params);
+        // has __type_params__).  Reuse the TypeVar registers bound above so the
+        // objects in __type_params__ are identical to those seen in annotations.
+        if tp_n > 0 {
+            self.emit_type_params_attr_from_regs(dst, tp_base, tp_n);
         }
 
         let val_reg = match self.emit_decorator_application(decorators, dst) {
@@ -8888,6 +8927,13 @@ impl Compiler {
             None => return,
         };
 
+        // PEP 695: bind the type parameters before the base-class expressions are
+        // evaluated (so `class C[T](Base[T])` resolves `T`) and before the class
+        // body runs (so a method annotation `def m(self, x: T)` resolves `T` at
+        // class-creation time).  The block sits below `dst`; the watermark resets
+        // below keep it live until `finish_class_definition` builds the tuple.
+        let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
+
         let (bases_base, bases_n, kwarg_base, kwarg_n) =
             match self.emit_class_bases_and_keywords(bases, keywords) {
                 Some(v) => v,
@@ -8914,7 +8960,7 @@ impl Compiler {
             // bases/kwargs/meta_reg are dead after the instruction; keep only
             // `dst` (the class object) live for decorators / type-params / store.
             self.next_temp = dst + 1;
-            return self.finish_class_definition(name, dst, decorators, type_params);
+            return self.finish_class_definition(name, dst, decorators, tp_base, tp_n);
         }
 
         let dst = self.alloc_temp();
@@ -8937,31 +8983,32 @@ impl Compiler {
             self.next_temp = dst + 1;
         }
 
-        self.finish_class_definition(name, dst, decorators, type_params);
+        self.finish_class_definition(name, dst, decorators, tp_base, tp_n);
     }
 
     /// Shared tail of class compilation for both the plain `MakeClass` and the
     /// metaclass `MakeClassMeta` paths: apply PEP 695 `__type_params__`, run the
     /// class decorators, store the result, and free the class register.  On
     /// entry `dst` holds the class object and `next_temp == dst + 1`.
+    /// `tp_base`/`tp_n` describe the contiguous block of bound TypeVar registers
+    /// produced by `emit_bind_type_params` (`tp_n == 0` for a non-generic class).
     fn finish_class_definition(
         &mut self,
         name: &str,
         dst: Reg,
         decorators: &[Expr],
-        type_params: &[String],
+        tp_base: Reg,
+        tp_n: Reg,
     ) {
         // PEP 695: if this is a generic class, build the __type_params__ tuple
-        // and store it on the class object before decorators are applied.
-        // The watermark reset by the caller already leaves `next_temp == dst + 1`,
-        // so `emit_type_params_attr` allocates TypeVar registers above `dst` and
-        // never overwrites the class object. The guard below is kept as
-        // defense-in-depth in case any future path leaves `next_temp <= dst`.
-        if !type_params.is_empty() {
+        // and store it on the class object before decorators are applied.  The
+        // tuple reuses the TypeVar registers bound before the class body ran, so
+        // the objects in __type_params__ are identical to those the body saw.
+        if tp_n > 0 {
             if self.next_temp <= dst {
                 self.next_temp = dst + 1;
             }
-            self.emit_type_params_attr(dst, type_params);
+            self.emit_type_params_attr_from_regs(dst, tp_base, tp_n);
         }
 
         // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
