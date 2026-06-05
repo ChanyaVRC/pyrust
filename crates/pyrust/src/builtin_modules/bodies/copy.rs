@@ -232,7 +232,7 @@ fn apply_state_dict(rc: &Rc<RefCell<PyInstance>>, state: &Value) {
         for (k, v) in pairs {
             if let PyKey::Str(s) = &k
                 && let Some(name) = s.as_str() {
-                    borrow.attrs.insert(name.to_string(), v);
+                    borrow.attrs.insert(name, v);
                 }
         }
     }

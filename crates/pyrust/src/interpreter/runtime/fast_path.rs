@@ -1262,7 +1262,7 @@ impl Interpreter {
                         inst_rc
                             .borrow_mut()
                             .attrs
-                            .insert(name.to_string(), val_val.clone());
+                            .insert(name, val_val.clone());
                         handled = true;
                     }
                 }

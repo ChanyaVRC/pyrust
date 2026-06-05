@@ -324,11 +324,11 @@ pyrust_module! {
             let mut borrow = inst.borrow_mut();
             borrow
                 .attrs
-                .insert("__name__".to_string(), Value::string(name_str));
+                .insert("__name__", Value::string(name_str));
             borrow
                 .attrs
-                .insert("__constraints__".to_string(), Value::tuple(constraints));
-            borrow.attrs.insert("__bound__".to_string(), bound);
+                .insert("__constraints__", Value::tuple(constraints));
+            borrow.attrs.insert("__bound__", bound);
             Ok(Value::none())
         }
 
@@ -364,8 +364,8 @@ fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyI
 fn make_typing_alias(form: &str, subscript: Value) -> Value {
     TYPING_ALIAS_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("_form".to_string(), Value::string(form));
-        attrs.insert("_args".to_string(), subscript);
+        attrs.insert("_form", Value::string(form));
+        attrs.insert("_args", subscript);
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,

@@ -46,7 +46,7 @@ pyrust_module! {
             let types: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
             inst.borrow_mut()
                 .attrs
-                .insert("_types".to_string(), Value::list(types));
+                .insert("_types", Value::list(types));
             let _ = _interp;
             Ok(Value::none())
         }
@@ -234,7 +234,7 @@ pyrust_module! {
             let generator = _interp.call_function_expanded(func, user)?;
             // Wrap the generator in a _GeneratorContextManager.
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("_gen".to_string(), generator);
+            attrs.insert("_gen", generator);
             Ok(make_instance("_GeneratorContextManager", attrs))
         }
     }
@@ -257,7 +257,7 @@ pyrust_module! {
             }
             inst.borrow_mut()
                 .attrs
-                .insert("thing".to_string(), user[0].value.clone());
+                .insert("thing", user[0].value.clone());
             let _ = _interp;
             Ok(Value::none())
         }
@@ -305,7 +305,7 @@ pyrust_module! {
             };
             inst.borrow_mut()
                 .attrs
-                .insert("enter_result".to_string(), enter_result);
+                .insert("enter_result", enter_result);
             let _ = _interp;
             Ok(Value::none())
         }
@@ -333,7 +333,7 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             inst.borrow_mut()
                 .attrs
-                .insert("_callbacks".to_string(), Value::list(vec![]));
+                .insert("_callbacks", Value::list(vec![]));
             let _ = _interp;
             Ok(Value::none())
         }
@@ -445,7 +445,7 @@ pyrust_module! {
             let bound_args: Vec<ExpandedCallArg> = args[2..].to_vec();
             // Wrap func+bound_args in a no-argument callable (a _StackCallback instance).
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("_func".to_string(), func);
+            attrs.insert("_func", func);
             // Encode bound_args as a list of [name_or_none, value] pairs.
             let encoded: Vec<Value> = bound_args.iter().map(|a| {
                 Value::tuple(vec![
@@ -453,7 +453,7 @@ pyrust_module! {
                     a.value.clone(),
                 ])
             }).collect();
-            attrs.insert("_bound_args".to_string(), Value::list(encoded));
+            attrs.insert("_bound_args", Value::list(encoded));
             let wrapper = make_instance("_StackCallback", attrs);
             // Push a closure-like value: a _StackCallback that, when called with
             // (exc_type, exc_val, tb), ignores those and calls func(*bound_args).
@@ -589,7 +589,7 @@ fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
 /// Construct a `_ContextManagerFactory` instance seeding `_func`.
 fn make_cm_factory(func: Value) -> Value {
     let mut attrs = InstanceAttrs::new();
-    attrs.insert("_func".to_string(), func);
+    attrs.insert("_func", func);
     make_instance("_ContextManagerFactory", attrs)
 }
 

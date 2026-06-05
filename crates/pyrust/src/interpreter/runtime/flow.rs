@@ -275,7 +275,7 @@ impl Interpreter {
         if borrow.attrs.contains_key("__context__") {
             return;
         }
-        borrow.attrs.insert("__context__".to_string(), ctx.clone());
+        borrow.attrs.insert("__context__", ctx.clone());
     }
 
     fn coerce_to_exception(&mut self, value: Value) -> Result<Value> {
@@ -863,7 +863,7 @@ impl Interpreter {
                 let mut dst_b = dst.borrow_mut();
                 for key in ["__traceback__", "__cause__", "__context__", "__notes__"] {
                     if let Some(v) = src_b.attrs.get(key) {
-                        dst_b.attrs.insert(key.to_string(), v.clone());
+                        dst_b.attrs.insert(key, v.clone());
                     }
                 }
             }

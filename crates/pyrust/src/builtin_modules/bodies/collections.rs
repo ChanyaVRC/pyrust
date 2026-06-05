@@ -137,7 +137,7 @@ pyrust_module! {
             counter_apply_kwargs(_interp, &mut counts, &kwargs, 1)?;
             inst.borrow_mut()
                 .attrs
-                .insert(COUNTER_BACKING.to_string(), Value::dict(counts));
+                .insert(COUNTER_BACKING, Value::dict(counts));
             Ok(Value::none())
         }
 
@@ -339,7 +339,7 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs = InstanceAttrs::new();
-            attrs.insert(COUNTER_BACKING.to_string(), Value::dict(counts));
+            attrs.insert(COUNTER_BACKING, Value::dict(counts));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -492,10 +492,10 @@ pyrust_module! {
                 &kwargs,
             )?;
             let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("default_factory".to_string(), factory);
+            attrs.attrs.insert("default_factory", factory);
             attrs
                 .attrs
-                .insert(COUNTER_BACKING.to_string(), Value::dict(items));
+                .insert(COUNTER_BACKING, Value::dict(items));
             Ok(Value::none())
         }
 
@@ -661,8 +661,8 @@ pyrust_module! {
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("default_factory".to_string(), factory);
-            attrs.insert(COUNTER_BACKING.to_string(), Value::dict(items));
+            attrs.insert("default_factory", factory);
+            attrs.insert(COUNTER_BACKING, Value::dict(items));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -782,8 +782,8 @@ pyrust_module! {
                 None => Value::none(),
             };
             let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("_items".to_string(), Value::list(deque_items));
-            attrs.attrs.insert("maxlen".to_string(), maxlen_val);
+            attrs.attrs.insert("_items", Value::list(deque_items));
+            attrs.attrs.insert("maxlen", maxlen_val);
             Ok(Value::none())
         }
 
@@ -980,8 +980,8 @@ pyrust_module! {
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("_items".to_string(), Value::list(items));
-            attrs.insert("maxlen".to_string(), maxlen_val);
+            attrs.insert("_items", Value::list(items));
+            attrs.insert("maxlen", maxlen_val);
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
                 attrs,
@@ -1474,7 +1474,7 @@ fn read_counts(
 fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: PyDict) {
     inst.borrow_mut()
         .attrs
-        .insert(COUNTER_BACKING.to_string(), Value::dict(counts));
+        .insert(COUNTER_BACKING, Value::dict(counts));
 }
 
 /// `defaultdict`'s storage accessor.  Same shape as `read_counts` — the
@@ -1505,7 +1505,7 @@ fn read_items(
 fn store_items(inst: &Rc<RefCell<PyInstance>>, items: PyDict) {
     inst.borrow_mut()
         .attrs
-        .insert(COUNTER_BACKING.to_string(), Value::dict(items));
+        .insert(COUNTER_BACKING, Value::dict(items));
 }
 
 /// Hashable-key extraction at index `i` with a uniform TypeError on
@@ -1978,7 +1978,7 @@ fn counter_binop(
     let merged = merge_counts(interp, &lhs, &rhs, op)?;
     let class = Rc::clone(&inst.borrow().class);
     let mut attrs = InstanceAttrs::new();
-    attrs.insert(COUNTER_BACKING.to_string(), Value::dict(merged));
+    attrs.insert(COUNTER_BACKING, Value::dict(merged));
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,
         attrs,
@@ -2030,7 +2030,7 @@ fn deque_state_cell(inst: &Rc<RefCell<PyInstance>>) -> Value {
     let cell = Value::list(vec![Value::int(0)]);
     inst.borrow_mut()
         .attrs
-        .insert("_state".to_string(), cell.clone());
+        .insert("_state", cell.clone());
     cell
 }
 
@@ -2176,8 +2176,8 @@ fn deque_from_items(
     };
     let class = Rc::clone(&proto.borrow().class);
     let mut attrs = InstanceAttrs::new();
-    attrs.insert("_items".to_string(), Value::list(items));
-    attrs.insert("maxlen".to_string(), maxlen_val);
+    attrs.insert("_items", Value::list(items));
+    attrs.insert("maxlen", maxlen_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

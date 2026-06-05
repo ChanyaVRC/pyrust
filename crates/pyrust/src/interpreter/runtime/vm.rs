@@ -970,7 +970,7 @@ impl Interpreter {
             inst_rc
                 .borrow_mut()
                 .attrs
-                .insert("__traceback__".to_string(), tb);
+                .insert("__traceback__", tb);
         }
         // Save the current active_exception BEFORE the dedup-pop below.
         // This is the value that was active when the new exception was raised,
@@ -1922,10 +1922,10 @@ impl Interpreter {
                     // populated so that the chain is observable.
                     self.attach_implicit_context(&exc);
                     if let ValueKind::PyInstance(inst) = exc.kind() {
-                        inst.borrow_mut().attrs.insert("__cause__".to_string(), cause);
+                        inst.borrow_mut().attrs.insert("__cause__", cause);
                         inst.borrow_mut()
                             .attrs
-                            .insert("__suppress_context__".to_string(), Value::bool_(true));
+                            .insert("__suppress_context__", Value::bool_(true));
                     }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
@@ -3638,13 +3638,13 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
                 let context = cause.clone();
                 inst.borrow_mut()
                     .attrs
-                    .insert("__cause__".to_string(), cause);
+                    .insert("__cause__", cause);
                 inst.borrow_mut()
                     .attrs
-                    .insert("__context__".to_string(), context);
+                    .insert("__context__", context);
                 inst.borrow_mut()
                     .attrs
-                    .insert("__suppress_context__".to_string(), Value::bool_(true));
+                    .insert("__suppress_context__", Value::bool_(true));
             }
             return PyError::Raised(rt_err);
         }
@@ -3690,12 +3690,12 @@ thread_local! {
 pub(crate) fn make_typevar_instance(name: String) -> Value {
     TYPEVAR_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("__name__".to_string(), Value::string(name));
+        attrs.insert("__name__", Value::string(name));
         attrs.insert(
-            "__constraints__".to_string(),
+            "__constraints__",
             Value::tuple(vec![]),
         );
-        attrs.insert("__bound__".to_string(), Value::none());
+        attrs.insert("__bound__", Value::none());
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,
@@ -3709,9 +3709,9 @@ pub(crate) fn make_typevar_instance(name: String) -> Value {
 pub(crate) fn make_type_alias_instance(name: String, value: Value, type_params: Value) -> Value {
     TYPE_ALIAS_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("__name__".to_string(), Value::string(name));
-        attrs.insert("__value__".to_string(), value);
-        attrs.insert("__type_params__".to_string(), type_params);
+        attrs.insert("__name__", Value::string(name));
+        attrs.insert("__value__", value);
+        attrs.insert("__type_params__", type_params);
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,

@@ -722,7 +722,7 @@ fn normalise_index(i: i64, len: usize) -> Result<usize> {
 fn make_named_struct(class_name: &str, fields: Vec<(&str, Value)>) -> Value {
     let mut attrs = InstanceAttrs::new();
     for (k, v) in fields {
-        attrs.insert(k.to_string(), v);
+        attrs.insert(k, v);
     }
     let class = Rc::new(RefCell::new(PyClass::new(
         class_name,
@@ -834,24 +834,24 @@ fn make_flags() -> Value {
         // Fields and their defaults match CPython's sys.flags for a normal run
         // with no command-line options (all optimization / debug flags are 0).
         // <https://docs.python.org/3/library/sys.html#sys.flags>
-        attrs.insert("debug".to_string(), Value::int(0));
-        attrs.insert("inspect".to_string(), Value::int(0));
-        attrs.insert("interactive".to_string(), Value::int(0));
-        attrs.insert("optimize".to_string(), Value::int(0));
-        attrs.insert("dont_write_bytecode".to_string(), Value::int(0));
-        attrs.insert("no_user_site".to_string(), Value::int(0));
-        attrs.insert("no_site".to_string(), Value::int(0));
-        attrs.insert("ignore_environment".to_string(), Value::int(0));
-        attrs.insert("verbose".to_string(), Value::int(0));
-        attrs.insert("bytes_warning".to_string(), Value::int(0));
-        attrs.insert("quiet".to_string(), Value::int(0));
-        attrs.insert("hash_randomization".to_string(), Value::int(0));
-        attrs.insert("isolated".to_string(), Value::int(0));
-        attrs.insert("dev_mode".to_string(), Value::bool_(false));
-        attrs.insert("utf8_mode".to_string(), Value::int(0));
-        attrs.insert("warn_default_encoding".to_string(), Value::int(0));
-        attrs.insert("safe_path".to_string(), Value::bool_(false));
-        attrs.insert("int_max_str_digits".to_string(), Value::int(4300));
+        attrs.insert("debug", Value::int(0));
+        attrs.insert("inspect", Value::int(0));
+        attrs.insert("interactive", Value::int(0));
+        attrs.insert("optimize", Value::int(0));
+        attrs.insert("dont_write_bytecode", Value::int(0));
+        attrs.insert("no_user_site", Value::int(0));
+        attrs.insert("no_site", Value::int(0));
+        attrs.insert("ignore_environment", Value::int(0));
+        attrs.insert("verbose", Value::int(0));
+        attrs.insert("bytes_warning", Value::int(0));
+        attrs.insert("quiet", Value::int(0));
+        attrs.insert("hash_randomization", Value::int(0));
+        attrs.insert("isolated", Value::int(0));
+        attrs.insert("dev_mode", Value::bool_(false));
+        attrs.insert("utf8_mode", Value::int(0));
+        attrs.insert("warn_default_encoding", Value::int(0));
+        attrs.insert("safe_path", Value::bool_(false));
+        attrs.insert("int_max_str_digits", Value::int(4300));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
@@ -922,12 +922,12 @@ thread_local! {
 fn make_version_info() -> Value {
     VERSION_INFO_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("major".to_string(), Value::int(3));
+        attrs.insert("major", Value::int(3));
         // pyrust emulates Python 3.12 semantics.
-        attrs.insert("minor".to_string(), Value::int(12));
-        attrs.insert("micro".to_string(), Value::int(0));
-        attrs.insert("releaselevel".to_string(), Value::string("final"));
-        attrs.insert("serial".to_string(), Value::int(0));
+        attrs.insert("minor", Value::int(12));
+        attrs.insert("micro", Value::int(0));
+        attrs.insert("releaselevel", Value::string("final"));
+        attrs.insert("serial", Value::int(0));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,

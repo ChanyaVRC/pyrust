@@ -1672,7 +1672,7 @@ impl Interpreter {
         if name == "__dict__" {
             return replace_instance_dict(&instance, &value);
         }
-        instance.borrow_mut().attrs.insert(name.to_string(), value);
+        instance.borrow_mut().attrs.insert(name, value);
         Ok(())
     }
 
@@ -1737,7 +1737,7 @@ impl Interpreter {
             instance
                 .borrow_mut()
                 .attrs
-                .insert(name.to_string(), Value::none());
+                .insert(name, Value::none());
             return Ok(());
         }
         // CPython 3.12: BaseException.args is a C-level member descriptor
@@ -2014,7 +2014,7 @@ impl Interpreter {
             if name == "__dict__" {
                 return replace_instance_dict(instance, &value);
             }
-            instance.borrow_mut().attrs.insert(name.to_string(), value);
+            instance.borrow_mut().attrs.insert(name, value);
             Ok(())
     }
 
@@ -2452,7 +2452,7 @@ impl Interpreter {
                 instance
                     .borrow_mut()
                     .attrs
-                    .insert(name.to_string(), Value::none());
+                    .insert(name, Value::none());
                 return Ok(());
             }
             // CPython 3.12: BaseException.args is a C-level member descriptor

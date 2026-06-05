@@ -82,7 +82,7 @@ fn get_pos(inst: &Rc<RefCell<PyInstance>>) -> i64 {
 fn set_pos(inst: &Rc<RefCell<PyInstance>>, pos: i64) {
     inst.borrow_mut()
         .attrs
-        .insert("_pos".to_string(), Value::int(pos));
+        .insert("_pos", Value::int(pos));
 }
 
 // ── shared method prologue helpers ─────────────────────────────────────────────
@@ -194,9 +194,9 @@ pyrust_module! {
             }
             let _ = _interp;
             let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("_buf".to_string(), Value::string(&initial));
-            attrs.attrs.insert("_pos".to_string(), Value::int(0));
-            attrs.attrs.insert("_closed".to_string(), Value::bool_(false));
+            attrs.attrs.insert("_buf", Value::string(&initial));
+            attrs.attrs.insert("_pos", Value::int(0));
+            attrs.attrs.insert("_closed", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -432,7 +432,7 @@ pyrust_module! {
             let new_buf: String = chars[..new_len].iter().collect();
             inst.borrow_mut()
                 .attrs
-                .insert("_buf".to_string(), Value::string(&new_buf));
+                .insert("_buf", Value::string(&new_buf));
             Ok(Value::int(new_len as i64))
         }
 
@@ -449,7 +449,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed".to_string(), Value::bool_(true));
+                .insert("_closed", Value::bool_(true));
             Ok(Value::none())
         }
 
@@ -467,7 +467,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed".to_string(), Value::bool_(true));
+                .insert("_closed", Value::bool_(true));
             Ok(Value::bool_(false))
         }
 
@@ -637,9 +637,9 @@ pyrust_module! {
             };
             let _ = _interp;
             let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("_buf".to_string(), Value::bytes(initial));
-            attrs.attrs.insert("_pos".to_string(), Value::int(0));
-            attrs.attrs.insert("_closed".to_string(), Value::bool_(false));
+            attrs.attrs.insert("_buf", Value::bytes(initial));
+            attrs.attrs.insert("_pos", Value::int(0));
+            attrs.attrs.insert("_closed", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -833,7 +833,7 @@ pyrust_module! {
             let new_buf = buf[..new_len].to_vec();
             inst.borrow_mut()
                 .attrs
-                .insert("_buf".to_string(), Value::bytes(new_buf));
+                .insert("_buf", Value::bytes(new_buf));
             Ok(Value::int(new_len as i64))
         }
 
@@ -849,7 +849,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed".to_string(), Value::bool_(true));
+                .insert("_closed", Value::bool_(true));
             Ok(Value::none())
         }
 
@@ -864,7 +864,7 @@ pyrust_module! {
             let _ = _interp;
             inst.borrow_mut()
                 .attrs
-                .insert("_closed".to_string(), Value::bool_(true));
+                .insert("_closed", Value::bool_(true));
             Ok(Value::bool_(false))
         }
 
@@ -1092,7 +1092,7 @@ fn string_io_write_at(inst: &Rc<RefCell<PyInstance>>, s: &str) {
     let new_buf: String = new_chars.into_iter().collect();
     inst.borrow_mut()
         .attrs
-        .insert("_buf".to_string(), Value::string(&new_buf));
+        .insert("_buf", Value::string(&new_buf));
     set_pos(inst, (pos + n_written) as i64);
 }
 
@@ -1130,6 +1130,6 @@ fn bytes_io_write_at(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) {
     }
     inst.borrow_mut()
         .attrs
-        .insert("_buf".to_string(), Value::bytes(new_buf));
+        .insert("_buf", Value::bytes(new_buf));
     set_pos(inst, (pos + n_written) as i64);
 }

@@ -4682,7 +4682,7 @@ pyrust_module! {
             })?;
             // Pass the iterable arg if present, or empty args to get an empty list.
             let new_backing = list_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
-            inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+            inst_rc.borrow_mut().attrs.insert("__builtin_data__", new_backing);
         }
         Ok(Value::none())
     }
@@ -4716,7 +4716,7 @@ pyrust_module! {
             })?;
             // Pass remaining args (positional + kwargs) or nothing for the empty case.
             let new_backing = dict_dispatch(_interp, &args[1..])?;
-            inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+            inst_rc.borrow_mut().attrs.insert("__builtin_data__", new_backing);
         }
         Ok(Value::none())
     }
@@ -4914,7 +4914,7 @@ pyrust_module! {
             })?;
             // Pass the iterable arg if present, or empty args to get an empty set.
             let new_backing = set_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
-            inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+            inst_rc.borrow_mut().attrs.insert("__builtin_data__", new_backing);
         }
         Ok(Value::none())
     }
@@ -5728,7 +5728,7 @@ pyrust_module! {
         };
         let mut attrs = InstanceAttrs::new();
         attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            crate::interpreter::BUILTIN_DATA_ATTR,
             backing,
         );
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
@@ -5790,7 +5790,7 @@ pyrust_module! {
         };
         let mut attrs = InstanceAttrs::new();
         attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            crate::interpreter::BUILTIN_DATA_ATTR,
             backing,
         );
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
@@ -5837,7 +5837,7 @@ pyrust_module! {
         };
         let mut attrs = InstanceAttrs::new();
         attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            crate::interpreter::BUILTIN_DATA_ATTR,
             backing,
         );
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
@@ -5884,7 +5884,7 @@ pyrust_module! {
         };
         let mut attrs = InstanceAttrs::new();
         attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            crate::interpreter::BUILTIN_DATA_ATTR,
             backing,
         );
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
@@ -5933,7 +5933,7 @@ pyrust_module! {
         };
         let mut attrs = InstanceAttrs::new();
         attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            crate::interpreter::BUILTIN_DATA_ATTR,
             backing,
         );
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
@@ -5982,7 +5982,7 @@ pyrust_module! {
         };
         let mut attrs = InstanceAttrs::new();
         attrs.insert(
-            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            crate::interpreter::BUILTIN_DATA_ATTR,
             backing,
         );
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
@@ -6996,7 +6996,7 @@ pyrust_module! {
         inst_rc
             .borrow_mut()
             .attrs
-            .insert("args".to_string(), Value::tuple(exc_args.clone()));
+            .insert("args", Value::tuple(exc_args.clone()));
         // Mirror the StopIteration.value special-case.
         let (is_stop_iteration, is_unicode_decode, is_unicode_encode, is_unicode_translate) = {
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -7013,7 +7013,7 @@ pyrust_module! {
             inst_rc
                 .borrow_mut()
                 .attrs
-                .insert("value".to_string(), val);
+                .insert("value", val);
         } else if is_unicode_decode || is_unicode_encode || is_unicode_translate {
             // Mirror the Unicode-error attribute-setting from instantiate_exception
             // so that `super().__init__(enc, obj, start, end, reason)` in a
@@ -7156,7 +7156,7 @@ pyrust_module! {
         inst_rc
             .borrow_mut()
             .attrs
-            .insert("__traceback__".to_string(), tb_val.clone());
+            .insert("__traceback__", tb_val.clone());
         Ok(self_val.clone())
     }
 

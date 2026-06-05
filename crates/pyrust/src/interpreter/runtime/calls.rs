@@ -1779,7 +1779,7 @@ impl Interpreter {
                         // `call_class_expanded` with the populated dict.
                         if let ValueKind::PyInstance(inst_rc) = instance.kind() {
                             inst_rc.borrow_mut().attrs.insert(
-                                BUILTIN_DATA_ATTR.to_string(),
+                                BUILTIN_DATA_ATTR,
                                 Value::dict(map),
                             );
                         }
@@ -3844,11 +3844,11 @@ impl Interpreter {
         // CPython 3.12: keyword values are NOT included in `.args`.
         if let Some(name_val) = kw_name
             && let ValueKind::PyInstance(inst_rc) = instance.kind() {
-                inst_rc.borrow_mut().attrs.insert("name".to_string(), name_val);
+                inst_rc.borrow_mut().attrs.insert("name", name_val);
             }
         if let Some(path_val) = kw_path
             && let ValueKind::PyInstance(inst_rc) = instance.kind() {
-                inst_rc.borrow_mut().attrs.insert("path".to_string(), path_val);
+                inst_rc.borrow_mut().attrs.insert("path", path_val);
             }
         return Ok(instance);
     }
@@ -4000,7 +4000,7 @@ impl Interpreter {
                 instance
                     .borrow_mut()
                     .attrs
-                    .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+                    .insert(BUILTIN_DATA_ATTR, backing);
             }
 
         // Issue #994: if this class inherits from frozenset/tuple (immutable
@@ -4014,7 +4014,7 @@ impl Interpreter {
                 instance
                     .borrow_mut()
                     .attrs
-                    .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+                    .insert(BUILTIN_DATA_ATTR, backing);
             }
 
         // Issue #1204: if this class inherits from str/int/float/bytes (scalar
@@ -4029,7 +4029,7 @@ impl Interpreter {
                 instance
                     .borrow_mut()
                     .attrs
-                    .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+                    .insert(BUILTIN_DATA_ATTR, backing);
             }
 
         let init = lookup_class_attr(&class, "__init__");
@@ -4072,7 +4072,7 @@ impl Interpreter {
                         instance
                             .borrow_mut()
                             .attrs
-                            .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+                            .insert(BUILTIN_DATA_ATTR, backing);
                     }
                 } else if immutable_prim_base.is_none() && scalar_prim_base.is_none() && !args.is_empty() {
                     let class_name = class.borrow().name.clone();

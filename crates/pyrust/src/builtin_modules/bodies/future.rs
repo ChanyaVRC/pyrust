@@ -61,9 +61,9 @@ fn make_feature(
             None => Value::none(),
         };
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("optional".to_string(), opt_tuple);
-        attrs.insert("mandatory".to_string(), mand_val);
-        attrs.insert("compiler_flag".to_string(), Value::int(compiler_flag));
+        attrs.insert("optional", opt_tuple);
+        attrs.insert("mandatory", mand_val);
+        attrs.insert("compiler_flag", Value::int(compiler_flag));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
