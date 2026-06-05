@@ -2440,7 +2440,7 @@ fn merge_split_kwargs_iter<'a>(
 /// CPython's arg parser checks the total argument count against the
 /// one-positional limit before resolving the name/position clash, so both
 /// `m(x, kw=y)` and `m(x, y)` report `takes at most 1 argument (2 given)`.
-fn merge_single_kwarg(
+pub fn merge_single_kwarg(
     method: &str,
     keyword: &str,
     args: &[Value],
