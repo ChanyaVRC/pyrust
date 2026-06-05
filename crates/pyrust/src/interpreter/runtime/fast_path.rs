@@ -886,6 +886,10 @@ impl Interpreter {
     /// Megamorphic deopt on a type mismatch).  See the original dispatch-arm
     /// comments inlined below for the per-state rationale.
     #[inline(always)]
+    // Hot-path VM instruction handler: the arg list is the decoded `BinOp`
+    // operands (dst/lhs/op/rhs + regs/code/pc/num_locals). Bundling into a struct
+    // would add an indirection on the dispatch loop's hottest path — do not refactor.
+    #[allow(clippy::too_many_arguments)]
     fn exec_binop(
         &mut self,
         regs: &mut RegSlice,
@@ -1027,6 +1031,10 @@ impl Interpreter {
     /// path followed by the slow-path `get_attr` call + cache fill / invalidation.
     /// The cache machinery (#1912, epoch/version guards #2102/#2108) is verbatim.
     #[inline(always)]
+    // Hot-path VM instruction handler: the arg list is the decoded `GetAttr`
+    // operands (dst/obj/name_idx + regs/code/pc/num_locals) feeding the inline
+    // attribute cache; do not bundle into a struct on this dispatch-loop path.
+    #[allow(clippy::too_many_arguments)]
     fn exec_get_attr(
         &mut self,
         regs: &mut RegSlice,
@@ -1215,6 +1223,10 @@ impl Interpreter {
     /// followed by the slow-path `assign_attr` call + cache fill / invalidation
     /// (#1998).  The cache machinery is verbatim.
     #[inline(always)]
+    // Hot-path VM instruction handler: the arg list is the decoded `SetAttr`
+    // operands (obj/name_idx/val + regs/code/pc/num_locals) feeding the inline
+    // attribute cache; do not bundle into a struct on this dispatch-loop path.
+    #[allow(clippy::too_many_arguments)]
     fn exec_set_attr(
         &mut self,
         regs: &mut RegSlice,

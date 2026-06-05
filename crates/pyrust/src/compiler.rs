@@ -1573,6 +1573,10 @@ fn collect_class_method_outer_refs(
 /// body) correctly *skips* promotion into the class cell-var set (issue #699),
 /// but when the class body is nested inside a function the enclosing function
 /// still needs those names promoted so the env chain carries them (issue #701).
+// `class_locals` is threaded for symmetry with the sibling collectors and to
+// document the class-scope context; removing it would churn ~30 recursive call
+// sites + 3 external callers for no behavior change.
+#[allow(clippy::only_used_in_recursion)]
 fn collect_class_lambda_outer_refs_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
@@ -8866,6 +8870,9 @@ impl Compiler {
         Some((bases_base, bases_n, kwarg_base, kwarg_n))
     }
 
+    // AST-node compile entry: each arg is a distinct syntactic child of the
+    // `class` statement; bundling them into a struct only relocates the field list.
+    #[allow(clippy::too_many_arguments)]
     fn compile_class(
         &mut self,
         name: &str,
@@ -8997,6 +9004,9 @@ impl Compiler {
 
     // ── Try / With ────────────────────────────────────────────────────────────
 
+    // AST-node compile entry: body/handlers/else/finally plus their parallel
+    // lineno tables; each is a distinct syntactic child of the `try` statement.
+    #[allow(clippy::too_many_arguments)]
     fn compile_try(
         &mut self,
         body: &[Stmt],
@@ -9262,6 +9272,9 @@ impl Compiler {
     ///
     /// After all handlers, if any exceptions remain un-handled, they are
     /// re-raised as a new group.
+    // AST-node compile entry: same syntactic-child arg shape as `compile_try`
+    // (body/handlers/else/finally + their lineno tables) for the `except*` form.
+    #[allow(clippy::too_many_arguments)]
     fn compile_try_star(
         &mut self,
         body: &[Stmt],

@@ -1463,6 +1463,10 @@ pub struct InstanceAttrs {
     /// the small-instance footprint grows by only one pointer (8 bytes) rather
     /// than a full inline `HashMap` (~48 bytes) — preserving the #2161 memory
     /// win; the map allocation is paid only by wide instances that build it.
+    // #2184: boxed to keep InstanceAttrs small; only allocated for wide instances
+    // (>INDEX_THRESHOLD attrs). Unboxing would bloat every instance + regress the
+    // small-instance attr hot path, defeating the #2161 memory win.
+    #[allow(clippy::box_collection)]
     index: Option<Box<HashMap<Rc<str>, usize, FxBuildHasher>>>,
 }
 
@@ -5092,7 +5096,7 @@ thread_local! {
     ///
     /// Reset to `None` at the top of each `try_exec_vm_script_with_index` run
     /// and cleared on normal exception-handler exit (`vm.rs` `PopExcContext`).
-    static CAPTURED_ERROR_FRAMES: RefCell<Option<Vec<FrameInfo>>> = RefCell::new(None);
+    static CAPTURED_ERROR_FRAMES: RefCell<Option<Vec<FrameInfo>>> = const { RefCell::new(None) };
 
     /// The 1-based source line number of the most recently executed instruction
     /// in the innermost VM dispatch loop.  Updated on every instruction whose
@@ -5100,7 +5104,7 @@ thread_local! {
     /// `run_bytecode` returns an error, to fill in the `<module>` frame's `lineno`.
     ///
     /// Reset to 0 at the start of each top-level script execution.
-    static CURRENT_VM_LINE: RefCell<u32> = RefCell::new(0);
+    static CURRENT_VM_LINE: RefCell<u32> = const { RefCell::new(0) };
 }
 
 /// Record a traceback frame for an error unwinding out of a user-function body.

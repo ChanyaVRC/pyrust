@@ -31,7 +31,10 @@ const ENV_POOL_MAX: usize = 64;
 /// Initialised lazily on the first call to `get` — the exception hierarchy is
 /// built via the thread-local `EXC_CLASS_CACHE` only when actually needed.
 /// Scripts that never raise or catch exceptions pay zero startup cost.
-pub(crate) struct ExcClasses(RefCell<Option<HashMap<&'static str, Rc<RefCell<PyClass>>>>>);
+/// Lazily-built map from exception-class name to its resolved [`PyClass`].
+type ExcClassMap = HashMap<&'static str, Rc<RefCell<PyClass>>>;
+
+pub(crate) struct ExcClasses(RefCell<Option<ExcClassMap>>);
 
 impl ExcClasses {
     fn uninitialized() -> Self {

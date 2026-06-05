@@ -7141,6 +7141,9 @@ fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
     }
 }
 
+/// A pair of complex operands as `((re, im), (re, im))`.
+type ComplexOperands = ((f64, f64), (f64, f64));
+
 /// Returns the two operands as complex `(re, im)` pairs only when AT LEAST
 /// one of them is already a complex number — that way pure int/float
 /// arithmetic continues to use the dedicated fast paths.
@@ -7148,10 +7151,7 @@ fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
 /// Returns `Ok(None)` when neither operand is complex or when one operand is
 /// not a numeric type.  Returns `Err(...)` when a `BigInt` operand overflows
 /// `f64` (propagated as `OverflowError`).
-fn both_as_complex(
-    left: &Value,
-    right: &Value,
-) -> Result<Option<((f64, f64), (f64, f64))>> {
+fn both_as_complex(left: &Value, right: &Value) -> Result<Option<ComplexOperands>> {
     let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
     let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
     if !l_is_c && !r_is_c {

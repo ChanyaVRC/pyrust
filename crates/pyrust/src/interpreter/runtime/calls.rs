@@ -8,6 +8,10 @@ thread_local! {
     static RECURSION_LIMIT: Cell<usize> = const { Cell::new(1000) };
 }
 
+/// Resolved class bases: `(primary_base, extra_bases)` as produced by
+/// `make_class_resolve_bases`.
+type ResolvedBases = (Option<Rc<RefCell<PyClass>>>, Vec<Rc<RefCell<PyClass>>>);
+
 pub(crate) fn get_recursion_limit() -> usize {
     RECURSION_LIMIT.with(|l| l.get())
 }
@@ -7508,6 +7512,10 @@ impl Interpreter {
     /// split into helpers below to keep this top-level flow readable:
     /// seed regs -> run body -> collect attrs -> resolve bases -> build class
     /// -> run PEP 487 hooks.
+    // VM instruction entry: the arg list is the decoded `MakeClass` operands
+    // (proto/bases/name/kwargs registers); packing them into a struct only moves
+    // the operand list without simplifying the call site.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn exec_make_class(
         &mut self,
         code: &crate::bytecode::FnCode,
@@ -7862,7 +7870,7 @@ impl Interpreter {
         num_locals: crate::bytecode::Reg,
         bases_base: crate::bytecode::Reg,
         bases_n: u8,
-    ) -> Result<(Option<Rc<RefCell<PyClass>>>, Vec<Rc<RefCell<PyClass>>>)> {
+    ) -> Result<ResolvedBases> {
         let mut classes: Vec<Rc<RefCell<PyClass>>> = Vec::with_capacity(bases_n as usize);
         for i in 0..bases_n as usize {
             let reg = (bases_base as usize + i) as crate::bytecode::Reg;

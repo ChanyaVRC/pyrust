@@ -332,6 +332,11 @@ pub(crate) struct GenSaveState {
 ///
 /// For callers that don't execute generators (`run_bytecode`, `run_bytecode_for_fn`),
 /// `Yielded` is unreachable and the `Returned` value is extracted directly.
+// Hot-path VM type: this is the return value of the core dispatch loop, matched on
+// every frame return. Boxing the rare `Yielded` variant would add heap indirection
+// on the generator-suspension path; the size delta lives only on the stack and is
+// never duplicated, so a box buys nothing while costing the suspension path.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum FrameOutcome {
     Returned(Value),
     Yielded { value: Value, saved: GenSaveState },
