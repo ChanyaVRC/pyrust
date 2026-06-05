@@ -91,6 +91,15 @@ pub struct Interpreter {
     pub(crate) script_filename: Option<Arc<str>>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
+    /// Automatic memoization of pure scalar functions (#2234): caches the result
+    /// of a `CallMemo` (statically-pure callee) keyed by `(fn_id, integer
+    /// args)`, when the result is a value-identity scalar (int/bool/None) so the
+    /// cache is observably transparent.  `memo_stats` drives an adaptive gate:
+    /// a function whose hit-rate stays low after a warmup is disabled, so the
+    /// common varying-argument case pays nothing (the reason #1987 removed the
+    /// previous always-on cache).
+    memo_cache: std::collections::HashMap<(u64, smallvec::SmallVec<[i64; 3]>), Value>,
+    memo_stats: std::collections::HashMap<u64, (u32, u32, bool)>,
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
@@ -354,6 +363,8 @@ impl Default for Interpreter {
             script_filename: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
+            memo_cache: std::collections::HashMap::new(),
+            memo_stats: std::collections::HashMap::new(),
             call_arg_buf: Vec::new(),
             invoke_arg_buf: ExpandedArgBuf::new(),
             bound_method_pos_buf: Vec::new(),
