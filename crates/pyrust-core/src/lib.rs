@@ -2163,6 +2163,25 @@ pub fn bigrange_len(start: &BigInt, stop: &BigInt, step: &BigInt) -> BigInt {
     }
 }
 
+/// CPython `range_equals` (Objects/rangeobject.c) over arbitrary-precision bounds:
+/// two ranges are equal iff they yield the same sequence — same length, and (when
+/// non-empty) same first element, and (when length ≥ 2) same step.  Mirrors the
+/// content-based range hash so equal ranges hash equal.
+pub fn bigrange_eq(
+    as_: &BigInt,
+    ao: &BigInt,
+    at: &BigInt,
+    bs: &BigInt,
+    bo: &BigInt,
+    bt: &BigInt,
+) -> bool {
+    let la = bigrange_len(as_, ao, at);
+    let lb = bigrange_len(bs, bo, bt);
+    let one = BigInt::from(1);
+    let two = BigInt::from(2);
+    la == lb && (la < one || as_ == bs) && (la < two || at == bt)
+}
+
 impl Clone for Opaque {
     fn clone(&self) -> Self {
         match self {
@@ -4266,7 +4285,15 @@ impl PartialEq for Value {
                     stop: bo,
                     step: bt,
                 },
-            ) => as_ == bs && ao == bo && at == bt,
+            ) => {
+                // CPython `range_equals` (Objects/rangeobject.c): two ranges are
+                // equal iff they yield the same sequence — same length, and (when
+                // non-empty) same first element, and (when length ≥ 2) same step.
+                // Matches the content-based range hash so equal ranges hash equal.
+                let la = range_len(as_, ao, at);
+                let lb = range_len(bs, bo, bt);
+                la == lb && (la < 1 || as_ == bs) && (la < 2 || at == bt)
+            }
             (
                 ValueKind::BigRange {
                     start: as_,
@@ -4278,7 +4305,50 @@ impl PartialEq for Value {
                     stop: bo,
                     step: bt,
                 },
-            ) => as_ == bs && ao == bo && at == bt,
+            ) => bigrange_eq(as_, ao, at, bs, bo, bt),
+            // Cross-width range comparison: a `BigRange` (at least one bound outside
+            // i64) can still yield the same sequence as an i64 `Range` — e.g. both
+            // empty (`range(10**20, 10**20) == range(0)`) or both length-1
+            // (`range(0, 10**20, 10**20) == range(0, 1)`).  Compare via the shared
+            // BigInt content rule.
+            (
+                ValueKind::Range {
+                    start: as_,
+                    stop: ao,
+                    step: at,
+                },
+                ValueKind::BigRange {
+                    start: bs,
+                    stop: bo,
+                    step: bt,
+                },
+            ) => bigrange_eq(
+                &BigInt::from(as_),
+                &BigInt::from(ao),
+                &BigInt::from(at),
+                bs,
+                bo,
+                bt,
+            ),
+            (
+                ValueKind::BigRange {
+                    start: as_,
+                    stop: ao,
+                    step: at,
+                },
+                ValueKind::Range {
+                    start: bs,
+                    stop: bo,
+                    step: bt,
+                },
+            ) => bigrange_eq(
+                as_,
+                ao,
+                at,
+                &BigInt::from(bs),
+                &BigInt::from(bo),
+                &BigInt::from(bt),
+            ),
             (ValueKind::BuiltinFunction(a), ValueKind::BuiltinFunction(b)) => a == b,
             (ValueKind::UserFunction(a), ValueKind::UserFunction(b)) => Rc::ptr_eq(a, b),
             (ValueKind::PyClass(a), ValueKind::PyClass(b)) => Rc::ptr_eq(a, b),
