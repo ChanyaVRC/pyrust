@@ -392,7 +392,45 @@ pub(crate) fn live_collection_len(container: &Value) -> Option<usize> {
     if let Some(s) = container.as_set() {
         return Some(s.len());
     }
+    // dict-subclass instances (Counter / defaultdict / OrderedDict, #2201):
+    // re-resolve the `__builtin_data__` backing dict each step.  Counter and
+    // defaultdict *replace* the backing `Value` (a fresh `Rc`) on every
+    // mutation via `store_items`, so a captured-`Rc` snapshot goes stale and
+    // never trips the guard — re-reading the instance attr each step sees the
+    // current backing and detects the size change.  Only reached on the cold
+    // guarded path (these three subclasses); the common dict/set/deque guard
+    // above is untouched.
+    if let ValueKind::PyInstance(inst) = container.kind()
+        && let Some(backing) = instance_builtin_data(inst)
+    {
+        return backing.as_dict().map(|d| d.len());
+    }
     pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| rc.borrow().len())
+}
+
+/// `true` if `class` is `collections.OrderedDict` or a subclass of it (#2201).
+/// Drives the OrderedDict-specific "OrderedDict mutated during iteration"
+/// message; every other dict subclass uses dict's wording.  Walks the `base`
+/// chain (single-inheritance backbone is sufficient — `collections.OrderedDict`
+/// is itself a plain `dict` subclass) and matches on the class name plus a
+/// `__module__ == "collections"` tag (set in `env.rs` per #2228), so a
+/// user-defined class merely *named* `OrderedDict` in another module is not
+/// mistaken for it.
+pub(crate) fn class_is_named_ordered_dict(class: &Rc<RefCell<PyClass>>) -> bool {
+    let mut cur = Some(Rc::clone(class));
+    while let Some(c) = cur {
+        let b = c.borrow();
+        let is_collections = b
+            .attrs
+            .get("__module__")
+            .and_then(|v| v.as_str())
+            .is_some_and(|m| m == "collections");
+        if is_collections && b.name == "OrderedDict" {
+            return true;
+        }
+        cur = b.base.clone();
+    }
+    false
 }
 
 /// One iteration step for `ForCount*` opcodes — dedupes the three
@@ -2618,6 +2656,30 @@ impl Interpreter {
                                     // CPython's inherited tp_iter slot behaviour.
                                     if matches!(backing.kind(), ValueKind::List(_) | ValueKind::Tuple(_)) {
                                         IterState::ValueIndexed { value: backing, pos: 0 }
+                                    } else if backing.as_dict().is_some() {
+                                        // dict subclass (OrderedDict / plain `class
+                                        // D(dict)`): guard against size mutation
+                                        // during iteration (#2201).  The container
+                                        // is the *instance* so `live_collection_len`
+                                        // re-resolves the live backing dict each
+                                        // step (defensive — even if a future
+                                        // `store_items` replaces the backing `Rc`).
+                                        // OrderedDict uses its own message; every
+                                        // other dict subclass matches plain dict.
+                                        let items = vm_try!(iter_values(&backing));
+                                        let recorded_len = backing.as_dict().map(|d| d.len()).unwrap_or(0);
+                                        let msg = if class_is_named_ordered_dict(&class) {
+                                            "OrderedDict mutated during iteration"
+                                        } else {
+                                            "dictionary changed size during iteration"
+                                        };
+                                        IterState::MaterializedGuarded {
+                                            items,
+                                            pos: 0,
+                                            container: src_val.clone(),
+                                            recorded_len,
+                                            msg,
+                                        }
                                     } else {
                                         IterState::Materialized(vm_try!(iter_values(&backing)), 0)
                                     }

@@ -190,9 +190,10 @@ pyrust_module! {
         /// snapshot is independent) without round-tripping through the
         /// `iter()` builtin's dispatch.
         fn __iter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
             let counts = read_counts(args, FN_NAME)?;
             let items: Vec<Value> = counts.keys().cloned().map(key_to_value).collect();
-            Ok(Value::generator(Box::new(NativeIterFrame::new(items, "generator"))))
+            Ok(make_guarded_dict_subclass_iter(inst, items))
         }
 
         /// `repr(c)` — most-common-first when all values are integers
@@ -583,9 +584,10 @@ pyrust_module! {
         }
 
         fn __iter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
             let items = read_items(args, FN_NAME)?;
             let keys: Vec<Value> = items.keys().cloned().map(key_to_value).collect();
-            Ok(Value::generator(Box::new(NativeIterFrame::new(keys, "generator"))))
+            Ok(make_guarded_dict_subclass_iter(inst, keys))
         }
 
         fn __repr__(args) -> Result<Value> {
@@ -1506,6 +1508,28 @@ fn store_items(inst: &Rc<RefCell<PyInstance>>, items: PyDict) {
     inst.borrow_mut()
         .attrs
         .insert(COUNTER_BACKING, Value::dict(items));
+}
+
+/// Build a key iterator over `keys` for a `Counter` / `defaultdict` instance,
+/// guarded against size mutation during iteration (#2201).  CPython raises
+/// `RuntimeError("dictionary changed size during iteration")` when the dict
+/// changes size mid-loop; value-only mutations (which preserve the key count)
+/// are allowed.  The guard's `container` is the *instance* (not the backing
+/// dict `Value`): `Counter`/`defaultdict` `store_items` replaces the backing
+/// `Value` with a fresh `Rc` on every mutation, so a captured-backing snapshot
+/// would go stale — `live_collection_len` re-resolves `__builtin_data__` from
+/// the instance each step instead.  `keys.len()` is the backing dict's size at
+/// iterator creation (the keys are its live key set).
+fn make_guarded_dict_subclass_iter(inst: Rc<RefCell<PyInstance>>, keys: Vec<Value>) -> Value {
+    let recorded_len = keys.len() as i64;
+    let mut frame = NativeIterFrame::new(keys, "generator");
+    frame.guard = Some(Box::new(NativeIterGuard {
+        container: Value::py_instance(inst),
+        version: recorded_len,
+        kind: GuardVersion::Size,
+        msg: "dictionary changed size during iteration",
+    }));
+    Value::generator(Box::new(frame))
 }
 
 /// Hashable-key extraction at index `i` with a uniform TypeError on
