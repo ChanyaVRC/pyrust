@@ -938,7 +938,7 @@ result = fact(10)
         let interpreter = run_program("x = [1, 2, 3]\nn = 0\nwhile x:\n    x.pop()\n    n += 1\n");
         assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::int(3)));
         let x = interpreter.lookup_name("x").unwrap().unwrap();
-        assert!(x.truthy() == false, "x should be drained to empty");
+        assert!(!x.truthy(), "x should be drained to empty");
     }
 
     #[test]
@@ -1346,11 +1346,11 @@ result = fact(10)
         assert_eq!(std::mem::size_of::<Value>(), 8);
     }
 
-    /// Issue #272: `dir()` on a built-in type instance must surface every
-    /// name in the corresponding `pyrust_builtins::*::METHODS` slice, since
-    /// that slice is the single source of truth.  This locks in that the
-    /// `builtin_method_names` table is derived from `METHODS` rather than
-    /// duplicated.
+    // Issue #272: `dir()` on a built-in type instance must surface every
+    // name in the corresponding `pyrust_builtins::*::METHODS` slice, since
+    // that slice is the single source of truth.  This locks in that the
+    // `builtin_method_names` table is derived from `METHODS` rather than
+    // duplicated.
     // ── Copilot-review regression tests (PR #326) ────────────────────────────
     //
     // The migrated `bodies/builtins.rs` originally carried two latent bugs
@@ -1571,7 +1571,7 @@ result = fact(10)
                     p.push(q);
                 }
             }
-            Value::string(&p.to_string_lossy())
+            Value::string(p.to_string_lossy())
         };
         assert_eq!(interp.lookup_name("a").unwrap(), Some(expect(&["a", "b", "c"])));
         assert_eq!(interp.lookup_name("b").unwrap(), Some(expect(&["/abs", "rel"])));

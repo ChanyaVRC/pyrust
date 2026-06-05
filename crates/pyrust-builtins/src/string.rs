@@ -223,10 +223,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                     ),
                 ));
             }
-            let tabsize = match extract_optional_int(args, 0)? {
-                Some(n) => n,
-                None => 8,
-            };
+            let tabsize = extract_optional_int(args, 0)?.unwrap_or(8);
             Ok(str_expandtabs(s, tabsize))
         }
         // Case
@@ -378,7 +375,7 @@ fn str_center(s: &str, width: i64, fill: char) -> Result<Value> {
     // CPython formula: left = marg//2 + (marg & width & 1)
     let left_pad = marg / 2 + (marg & width & 1);
     let right_pad = marg - left_pad;
-    let fill_bytes = marg.checked_mul(fill.len_utf8()).unwrap_or(usize::MAX);
+    let fill_bytes = marg.saturating_mul(fill.len_utf8());
     let total = s.len().saturating_add(fill_bytes);
     let mut out = String::new();
     try_reserve_str(&mut out, total)?;
@@ -399,7 +396,7 @@ fn str_ljust(s: &str, width: i64, fill: char) -> Result<Value> {
         return Ok(Value::string(s));
     }
     let pad = width - char_len;
-    let fill_bytes = pad.checked_mul(fill.len_utf8()).unwrap_or(usize::MAX);
+    let fill_bytes = pad.saturating_mul(fill.len_utf8());
     let total = s.len().saturating_add(fill_bytes);
     let mut out = String::new();
     try_reserve_str(&mut out, total)?;
@@ -417,7 +414,7 @@ fn str_rjust(s: &str, width: i64, fill: char) -> Result<Value> {
         return Ok(Value::string(s));
     }
     let pad = width - char_len;
-    let fill_bytes = pad.checked_mul(fill.len_utf8()).unwrap_or(usize::MAX);
+    let fill_bytes = pad.saturating_mul(fill.len_utf8());
     let total = s.len().saturating_add(fill_bytes);
     let mut out = String::new();
     try_reserve_str(&mut out, total)?;
@@ -2134,7 +2131,7 @@ fn cp1252_encode_byte(cp: u32) -> Option<u8> {
 /// Map a CP1252 byte to its Unicode codepoint, or `None` if the byte is
 /// undefined.
 pub fn cp1252_decode_codepoint(byte: u8) -> Option<u32> {
-    if byte < 0x80 || byte >= 0xA0 {
+    if !(0x80..0xA0).contains(&byte) {
         Some(byte as u32)
     } else {
         CP1252_HIGH[(byte - 0x80) as usize]

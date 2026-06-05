@@ -1512,8 +1512,7 @@ impl InstanceAttrs {
     /// instance crosses [`INDEX_THRESHOLD`], and to refresh it after a
     /// shift-remove renumbers slots.
     fn build_index(&mut self) {
-        let mut index =
-            HashMap::with_capacity_and_hasher(self.entries.len(), FxBuildHasher::default());
+        let mut index = HashMap::with_capacity_and_hasher(self.entries.len(), FxBuildHasher);
         for (i, (k, _)) in self.entries.iter().enumerate() {
             index.insert(Rc::clone(k), i);
         }
@@ -5194,24 +5193,20 @@ pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
     for frame in frames {
         match frame.lineno {
             Some(n) => {
-                let _ = write!(
+                let _ = writeln!(
                     out,
-                    "  File \"{}\", line {}, in {}\n",
+                    "  File \"{}\", line {}, in {}",
                     frame.filename, n, frame.funcname
                 );
             }
             None => {
-                let _ = write!(
-                    out,
-                    "  File \"{}\", in {}\n",
-                    frame.filename, frame.funcname
-                );
+                let _ = writeln!(out, "  File \"{}\", in {}", frame.filename, frame.funcname);
             }
         }
         // Emit source line + underline when available.
         if let Some(src) = &frame.source_line {
             // CPython indents the source line with four spaces.
-            let _ = write!(out, "    {src}\n");
+            let _ = writeln!(out, "    {src}");
             // Build the underline: leading spaces matching the source line's
             // own indentation, then `^` for each non-whitespace character.
             // Use char counts so the alignment is correct for non-ASCII source.

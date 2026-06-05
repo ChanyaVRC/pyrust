@@ -158,7 +158,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                     return false;
                 }
                 for (k, v) in &lhs_pairs {
-                    match rhs_inst.attrs.get(*k) {
+                    match rhs_inst.attrs.get(k) {
                         Some(other_v) => {
                             if *v != other_v {
                                 return false;

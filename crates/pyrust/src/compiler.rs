@@ -1028,7 +1028,7 @@ fn check_comprehension(
     yields = yields
         || clauses
             .iter()
-            .any(|c| c.cond.as_ref().is_some_and(|e| expr_contains_yield(e)));
+            .any(|c| c.cond.as_ref().is_some_and(expr_contains_yield));
     if yields {
         return Some(format!("'yield' inside {kind}"));
     }
@@ -5002,19 +5002,6 @@ impl Compiler {
         }
     }
 
-    /// Emit cleanup instructions for all `EarlyExitCleanup` entries in
-    /// `self.except_cleanups[from_depth..]`, iterating innermost-first (i.e.
-    /// from the top of the stack downward).
-    ///
-    /// Called before `break`, `continue`, or `return` to unwind any active
-    /// `try`/`except` guards that the early exit crosses.
-    ///
-    /// While the inlined finally/handler-cleanup block for frame `i` is being
-    /// compiled, `except_cleanups` is temporarily truncated to `[..i]` so that
-    /// an early exit (e.g. `return`) inside that inlined block does not re-walk
-    /// the frame we are currently unwinding — which would cause infinite
-    /// recursion (see issue #365: `try: return X finally: return Y`).
-
     /// Emit cleanup instructions for a `raise` statement that exits an `except`
     /// handler body.  Unlike `emit_early_exit_cleanups` (which is for
     /// `break`/`continue`/`return`), `raise` does NOT emit `EndExcept` because
@@ -5110,6 +5097,18 @@ impl Compiler {
         }
     }
 
+    /// Emit cleanup instructions for all `EarlyExitCleanup` entries in
+    /// `self.except_cleanups[from_depth..]`, iterating innermost-first (i.e.
+    /// from the top of the stack downward).
+    ///
+    /// Called before `break`, `continue`, or `return` to unwind any active
+    /// `try`/`except` guards that the early exit crosses.
+    ///
+    /// While the inlined finally/handler-cleanup block for frame `i` is being
+    /// compiled, `except_cleanups` is temporarily truncated to `[..i]` so that
+    /// an early exit (e.g. `return`) inside that inlined block does not re-walk
+    /// the frame we are currently unwinding — which would cause infinite
+    /// recursion (see issue #365: `try: return X finally: return Y`).
     fn emit_early_exit_cleanups(&mut self, from_depth: usize) {
         let total = self.except_cleanups.len();
         if total <= from_depth {
@@ -5609,7 +5608,7 @@ impl Compiler {
         let mut typevar_regs: Vec<Reg> = Vec::with_capacity(type_params.len());
         for param in type_params {
             let param_name_str = crate::value::Value::string(param.clone());
-            let param_const_idx = self.intern_const(param_name_str) as u16;
+            let param_const_idx = self.intern_const(param_name_str);
             let tv_reg = self.alloc_temp();
             self.emit(Insn::MakeTypeVar(tv_reg, param_const_idx));
             // Bind the TypeVar to the param name so the RHS expression can
@@ -5633,7 +5632,7 @@ impl Compiler {
         let params_reg = if type_params.is_empty() {
             // Empty tuple: use a literal empty tuple constant.
             let empty_tuple = crate::value::Value::tuple(vec![]);
-            let const_idx = self.intern_const(empty_tuple) as u16;
+            let const_idx = self.intern_const(empty_tuple);
             let r = self.alloc_temp();
             self.emit(Insn::LoadConst(r, const_idx));
             r
@@ -5688,12 +5687,7 @@ impl Compiler {
         let name_str = crate::value::Value::string(name);
         let name_idx = self.intern_const(name_str);
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeTypeAlias(
-            dst,
-            name_idx as u16,
-            val_reg,
-            params_reg,
-        ));
+        self.emit(Insn::MakeTypeAlias(dst, name_idx, val_reg, params_reg));
         self.free_temp(val_reg);
         self.free_temp(params_reg);
 

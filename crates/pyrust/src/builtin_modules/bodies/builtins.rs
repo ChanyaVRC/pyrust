@@ -4346,7 +4346,7 @@ pyrust_module! {
         pyrust_builtins::file::open(
             &path,
             &mode,
-            encoding.as_deref().map(|s| s),
+            encoding.as_deref(),
             closefd_bool,
         )
     }
@@ -8439,7 +8439,7 @@ fn isinstance_check(
                     &call_args,
                     &[Value::py_class(Rc::clone(cls_rc))],
                 )?;
-                return Ok(interp.truthy_value(&result)?);
+                return interp.truthy_value(&result);
             }
         // Legacy ABC path: ABC classes store `__instancecheck__` directly in
         // their own attrs dict (not on a metaclass).
@@ -8452,7 +8452,7 @@ fn isinstance_check(
                 value: obj.clone(),
             }];
             let result = interp.call_function_expanded(ic_fn, &call_args)?;
-            return Ok(interp.truthy_value(&result)?);
+            return interp.truthy_value(&result);
         }
     }
     Ok(isinstance_single(obj, cls))
@@ -8510,7 +8510,7 @@ fn issubclass_check(
                     &call_args,
                     &[Value::py_class(Rc::clone(classinfo_rc))],
                 )?;
-                return Ok(interp.truthy_value(&result)?);
+                return interp.truthy_value(&result);
             }
         // Legacy ABC path: ABC classes store `__subclasscheck__` directly in
         // their own attrs dict (not on a metaclass).
@@ -8523,7 +8523,7 @@ fn issubclass_check(
                 value: cls.clone(),
             }];
             let result = interp.call_function_expanded(sc_fn, &call_args)?;
-            return Ok(interp.truthy_value(&result)?);
+            return interp.truthy_value(&result);
         }
     }
     match (cls.kind(), classinfo.kind()) {

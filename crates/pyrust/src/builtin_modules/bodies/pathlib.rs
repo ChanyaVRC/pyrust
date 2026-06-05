@@ -119,8 +119,8 @@ fn normalize_path(path: &str) -> String {
     // implementation-defined semantics for `//`).  We preserve them.
     let (prefix, rest) = if path.starts_with("//") && !path.starts_with("///") {
         ("//", &path[2..])
-    } else if path.starts_with('/') {
-        ("/", &path[1..])
+    } else if let Some(rest) = path.strip_prefix('/') {
+        ("/", rest)
     } else {
         ("", path)
     };
@@ -490,10 +490,10 @@ pyrust_module! {
                     components.push(Value::string(part));
                 }
             }
-        } else if p.starts_with('/') {
+        } else if let Some(rest) = p.strip_prefix('/') {
             components.push(Value::string("/"));
             // Drop the leading slash then split.
-            for part in p[1..].split('/') {
+            for part in rest.split('/') {
                 if !part.is_empty() {
                     components.push(Value::string(part));
                 }
@@ -1307,7 +1307,7 @@ fn glob_collect(base: &str, pattern: &str) -> Result<Vec<Value>> {
     let base_path = std::path::Path::new(base);
 
     // Check for `**` in pattern — triggers recursive walk.
-    let has_recursive = parts.iter().any(|p| *p == "**");
+    let has_recursive = parts.contains(&"**");
 
     let mut results: Vec<std::path::PathBuf> = Vec::new();
 
@@ -1425,7 +1425,7 @@ fn glob_component_matches(pattern: &str, name: &str) -> bool {
 
 /// Byte-level glob matcher for a single path component.  Handles:
 /// - `*`  — any sequence of bytes (but not `/`, which can't appear in a
-///           component anyway).
+///   component anyway).
 /// - `?`  — exactly one byte.
 /// - `[…]` — character class (only simple ranges, no negation for now).
 fn glob_match(pat: &[u8], s: &[u8]) -> bool {

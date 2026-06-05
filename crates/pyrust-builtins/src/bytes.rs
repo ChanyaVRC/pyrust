@@ -1311,7 +1311,7 @@ fn decode_utf16(
     } else {
         u16::from_le_bytes
     };
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         // Truncated: odd number of bytes.
         let trunc_start = bom_offset + bytes.len() - 1;
         let trunc_end = bom_offset + bytes.len();
@@ -1499,7 +1499,7 @@ fn decode_utf16_units_to_string(
                             // Skip the bad high surrogate; re-process the next unit.
                             let next_u = units[j];
                             match next_u {
-                                0xD800..=0xDBFF | 0xDC00..=0xDFFF => {
+                                0xD800..=0xDFFF => {
                                     let sub = decode_utf16_units_to_string(
                                         &units[j..],
                                         raw_bytes,

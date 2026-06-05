@@ -875,45 +875,27 @@ impl Interpreter {
                 if let Some(cls) = self.exc_classes.get("RuntimeError") {
                     instantiate_exception(cls, vec![Value::string(msg)])
                 } else {
-                    match self.instantiate_named_exception("RuntimeError", msg) {
-                        Ok(v) => v,
-                        Err(e2) => return Err(e2),
-                    }
+                    self.instantiate_named_exception("RuntimeError", msg)?
                 }
             }
             PyError::Named(cls, msg) => {
-                match self.instantiate_named_exception(&cls, msg) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                self.instantiate_named_exception(&cls, msg)?
             }
             PyError::Class(cls, msg) => {
                 let args = if msg.is_empty() { vec![] } else { vec![Value::string(msg)] };
                 instantiate_exception(cls, args)
             }
             PyError::KeyError(key) => {
-                match self.instantiate_named_exception_with_value("KeyError", key) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                self.instantiate_named_exception_with_value("KeyError", key)?
             }
             PyError::NameError { class_name, message, name } => {
-                match self.instantiate_name_error_exception(class_name, message, name) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                self.instantiate_name_error_exception(class_name, message, name)?
             }
             PyError::AttributeError { message, name, obj } => {
-                match self.instantiate_attribute_error_exception(message, name, obj) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                self.instantiate_attribute_error_exception(message, name, obj)?
             }
             PyError::ImportError { class_name, message, module_name } => {
-                match self.instantiate_import_error_exception(class_name, message, module_name) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                self.instantiate_import_error_exception(class_name, message, module_name)?
             }
             PyError::OsError {
                 class_name,
@@ -922,12 +904,8 @@ impl Interpreter {
                 filename,
                 filename2,
             } => {
-                match self
-                    .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)
-                {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                self
+                    .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)?
             }
             PyError::UnicodeDecodeError {
                 encoding,
@@ -936,12 +914,9 @@ impl Interpreter {
                 end,
                 reason,
             } => {
-                match self.instantiate_unicode_decode_error_exception(
+                self.instantiate_unicode_decode_error_exception(
                     encoding, object, start, end, reason,
-                ) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                )?
             }
             PyError::UnicodeEncodeError {
                 encoding,
@@ -950,12 +925,9 @@ impl Interpreter {
                 end,
                 reason,
             } => {
-                match self.instantiate_unicode_encode_error_exception(
+                self.instantiate_unicode_encode_error_exception(
                     encoding, object, start, end, reason,
-                ) {
-                    Ok(v) => v,
-                    Err(e2) => return Err(e2),
-                }
+                )?
             }
             other => return Err(other),
         };
@@ -2926,16 +2898,12 @@ impl Interpreter {
                                         iter_next_cache[*slot as usize] = mv.clone();
                                         mv
                                     };
-                                    if let Some(method_val) = method_val {
-                                        Some(invoke_class_method(
+                                    method_val.map(|method_val| invoke_class_method(
                                             self,
                                             method_val,
                                             Value::py_instance(inst_rc),
                                             &[],
                                         ))
-                                    } else {
-                                        None
-                                    }
                                 } else if let ValueKind::BuiltinObject { ops, state } =
                                     iter_val.kind()
                                 {
@@ -3304,10 +3272,7 @@ impl Interpreter {
                     let exc_val = match exc {
                         PyError::Raised(v) => v,
                         PyError::Named(name, msg) => {
-                            match self.instantiate_named_exception(name.as_ref(), msg) {
-                                Ok(v) => v,
-                                Err(e) => return Err(e),
-                            }
+                            self.instantiate_named_exception(name.as_ref(), msg)?
                         }
                         other => return Err(other),
                     };
@@ -3726,7 +3691,7 @@ mod vm_tests {
     use crate::interpreter::Interpreter;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry, GLOBAL_CACHE_EMPTY};
+        use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry};
         let n = insns.len();
         FnCode {
             insns,
@@ -3742,7 +3707,7 @@ mod vm_tests {
             is_generator: false,
             is_class_method: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
-            global_cache: std::cell::RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); 0]),
+            global_cache: std::cell::RefCell::new(Vec::new()),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.

@@ -50,7 +50,7 @@ impl BuiltinTypeOps for GenericAliasOps {
         // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
         // rather than the empty string that joining an empty list yields.
         let args_repr = match s.args.kind() {
-            ValueKind::Tuple(items) if items.is_empty() => "()".to_string(),
+            ValueKind::Tuple([]) => "()".to_string(),
             ValueKind::Tuple(items) => items
                 .iter()
                 .map(repr_type_arg)
@@ -182,7 +182,7 @@ fn repr_type_arg(v: &Value) -> String {
 fn collect_parameters(args: &Value) -> Value {
     let mut out: Vec<Value> = Vec::new();
     let items: Vec<Value> = match args.kind() {
-        ValueKind::Tuple(items) => items.iter().cloned().collect(),
+        ValueKind::Tuple(items) => items.to_vec(),
         _ => vec![args.clone()],
     };
     for item in items {
@@ -212,7 +212,7 @@ fn collect_parameters(args: &Value) -> Value {
 /// (preserving first-seen order), matching CPython's tuple-dedup in
 /// `_Py_make_parameters`.
 fn push_unique(out: &mut Vec<Value>, v: Value) {
-    if !out.iter().any(|existing| *existing == v) {
+    if !out.contains(&v) {
         out.push(v);
     }
 }

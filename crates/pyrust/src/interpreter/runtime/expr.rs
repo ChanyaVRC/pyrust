@@ -1475,19 +1475,19 @@ impl Interpreter {
                 // a is not less than b; try b < a to tell Equal from Greater.
                 match self.try_dunder_binary(b, a, "__lt__", "__gt__") {
                     Some(Ok(v2)) => {
-                        return Ok(if self.truthy_value(&v2)? {
+                        Ok(if self.truthy_value(&v2)? {
                             Ordering::Greater
                         } else {
                             Ordering::Equal
-                        });
+                        })
                     }
-                    Some(Err(e)) => return Err(e),
+                    Some(Err(e)) => Err(e),
                     // No reverse dunder found: incomparable pair — raise
                     // TypeError just as CPython does for these builtins.
-                    None => return compare_values(a, b),
+                    None => compare_values(a, b),
                 }
             }
-            Some(Err(e)) => return Err(e),
+            Some(Err(e)) => Err(e),
             // No __lt__/__gt__ on either operand; fall through to primitive
             // comparison, which raises TypeError for incomparable instance
             // pairs — matches CPython's behaviour when no comparison dunder
@@ -1540,21 +1540,21 @@ impl Interpreter {
                 // a is not greater than b; try b > a to tell Equal from Less.
                 match self.try_dunder_binary(b, a, "__gt__", "__lt__") {
                     Some(Ok(v2)) => {
-                        return Ok(if self.truthy_value(&v2)? {
+                        Ok(if self.truthy_value(&v2)? {
                             Ordering::Less
                         } else {
                             Ordering::Equal
-                        });
+                        })
                     }
-                    Some(Err(e)) => return Err(e),
+                    Some(Err(e)) => Err(e),
                     // No reverse dunder found: incomparable pair — raise
                     // TypeError just as CPython does for max().
-                    None => return Err(pyrust_core::type_err!("'>' not supported between instances of '{}' and '{}'",
+                    None => Err(pyrust_core::type_err!("'>' not supported between instances of '{}' and '{}'",
                             value_type_name_str(a),
                             value_type_name_str(b),)),
                 }
             }
-            Some(Err(e)) => return Err(e),
+            Some(Err(e)) => Err(e),
             // No __gt__/__lt__ on either operand; emit '>' error matching
             // CPython's max() TypeError wording.
             None => Err(pyrust_core::type_err!("'>' not supported between instances of '{}' and '{}'",
@@ -2039,7 +2039,7 @@ impl Interpreter {
             for cand in candidate_keys {
                 let cand_val = pykey_object_or_none_value(&cand);
                 if self.values_user_eq(&cand_val, target)? {
-                    return Ok(self.set_index_by_key(receiver, &cand)?);
+                    return self.set_index_by_key(receiver, &cand);
                 }
             }
         }
@@ -2059,7 +2059,7 @@ impl Interpreter {
             for cand in candidate_keys {
                 let cand_val = pykey_object_or_none_value(&cand);
                 if self.values_user_eq(&none_val, &cand_val)? {
-                    return Ok(self.set_index_by_key(receiver, &cand)?);
+                    return self.set_index_by_key(receiver, &cand);
                 }
             }
         }
@@ -3414,15 +3414,7 @@ impl Interpreter {
                 let str_backing = if matches!(left.kind(), ValueKind::Str(_)) {
                     Some(left.clone())
                 } else if let Some(inst_rc) = left.as_py_instance_rc() {
-                    if let Some(backing) = instance_builtin_data(inst_rc) {
-                        if matches!(backing.kind(), ValueKind::Str(_)) {
-                            Some(backing)
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
+                    instance_builtin_data(inst_rc).filter(|backing| matches!(backing.kind(), ValueKind::Str(_)))
                 } else {
                     None
                 };
@@ -3524,7 +3516,7 @@ impl Interpreter {
                 // already a Complex value; pure int/float/bigint pairs
                 // route through the canonical NumericOps slot below.
                 if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right)? {
-                    return Ok(complex_pow(zr, zi, wr, wi)?);
+                    return complex_pow(zr, zi, wr, wi);
                 }
                 // Canonical numeric `**` via the NumericOps slot table
                 // (#458): int**int (BigInt promotion on overflow, #421/#484),
@@ -4859,6 +4851,10 @@ impl Interpreter {
                         None
                     }
                 };
+                // A float-literal pattern (`Complex(re, 0.0)`) would trigger the
+                // deprecated `illegal_floating_point_literal_pattern` lint, so
+                // keep the equality guard despite `redundant_guards`.
+                #[allow(clippy::redundant_guards)]
                 let as_int: Option<PyBigInt> = match item.kind() {
                     ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {
                         value_to_bigint(&item)

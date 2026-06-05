@@ -5015,7 +5015,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
         for exit in exits {
             sink_at
                 .entry(exit)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .extend(sink_insns.iter().cloned());
         }
     }
@@ -5611,7 +5611,7 @@ fn pass_loop_inversion(insns: Vec<Insn>) -> Vec<Insn> {
                 }
                 // Replace unconditional back-edge with CmpJumpIfTrueConst targeting [j+1].
                 // new_offset = -k  because  (j+k) + 1 + (-k) = j+1. ✓
-                out[back] = Insn::CmpJumpIfTrueConst(r, op, c, -(k as i32));
+                out[back] = Insn::CmpJumpIfTrueConst(r, op, c, -k);
             }
             Insn::CmpJumpIfFalse(r, op, b, k) => {
                 if k < 2 {
@@ -5625,7 +5625,7 @@ fn pass_loop_inversion(insns: Vec<Insn>) -> Vec<Insn> {
                     Insn::Jump(bk) if bk == -(k + 1) => {}
                     _ => continue,
                 }
-                out[back] = Insn::CmpJumpIfTrue(r, op, b, -(k as i32));
+                out[back] = Insn::CmpJumpIfTrue(r, op, b, -k);
             }
             // Case: `while True: if cond: break; body` shape.
             //
@@ -5652,7 +5652,7 @@ fn pass_loop_inversion(insns: Vec<Insn>) -> Vec<Insn> {
                 }
                 // Replace with CmpJumpIfFalseConst targeting [j+1].
                 // new_offset = -k  because  (j+k) + 1 + (-k) = j+1. ✓
-                out[back] = Insn::CmpJumpIfFalseConst(r, op, c, -(k as i32));
+                out[back] = Insn::CmpJumpIfFalseConst(r, op, c, -k);
             }
             Insn::CmpJumpIfTrue(r, op, b, k) => {
                 if k < 2 {
@@ -5666,7 +5666,7 @@ fn pass_loop_inversion(insns: Vec<Insn>) -> Vec<Insn> {
                     Insn::Jump(bk) if bk == -(k + 1) => {}
                     _ => continue,
                 }
-                out[back] = Insn::CmpJumpIfFalse(r, op, b, -(k as i32));
+                out[back] = Insn::CmpJumpIfFalse(r, op, b, -k);
             }
             _ => {}
         }
@@ -11203,7 +11203,7 @@ elif x == 2:
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // t2 should now use r0 (reg 0) directly instead of t1 (reg 1).
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _, ..)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, ..)),
             "reassoc should rewrite t2's lhs from t1 to r0 when r0 is a known int: {:?}",
             out[2]
         );
@@ -11230,7 +11230,7 @@ elif x == 2:
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Mul, _, ..)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Mul, ..)),
             "reassoc should rewrite t2 to use r0 (reg 0) directly"
         );
         let ci = match out[2] {
@@ -11283,7 +11283,7 @@ elif x == 2:
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::BitOr, _, ..)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::BitOr, ..)),
             "BitOr chain should be reassociated when source is known-int"
         );
         let ci = match out[2] {
@@ -11489,7 +11489,7 @@ elif x == 2:
         let out = pass_reassoc(insns, &mut consts, num_locals);
         // t2 should be rewritten to use r0 directly with combined constant 3.
         assert!(
-            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _, ..)),
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, ..)),
             "reassoc must fire when inner_src (r0) is a known-int register: {:?}",
             out[2]
         );
@@ -12295,6 +12295,10 @@ elif x == 2:
         let mut old_pos = 0usize;
         let mut result = Vec::with_capacity(new_insns.len());
         'outer: for new_insn in new_insns {
+            // `old_pos` advances across outer iterations; the inner range is
+            // evaluated once per outer pass and the mutation only takes effect
+            // on the next pass, which is the intended scan behaviour.
+            #[allow(clippy::mut_range_bound)]
             for i in old_pos..old_insns.len() {
                 if &old_insns[i] == new_insn {
                     result.push(old_linenos.get(i).copied().unwrap_or(0));

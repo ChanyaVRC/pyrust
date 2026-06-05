@@ -374,7 +374,8 @@ pub enum Insn {
     /// match, jump to pc + offset.  Otherwise:
     ///   - R[matched_dst] = new sub-group containing only matching exceptions
     ///   - R[src_group]   = new sub-group containing only non-matching exceptions
-    ///                       (or None if all exceptions were matched)
+    ///     (or None if all exceptions were matched)
+    ///
     /// Multiple handlers are compiled sequentially; after each matched handler
     /// runs, the compiler emits code that moves the remaining sub-group back
     /// into R[src_group] so the next MatchExceptStar sees only leftovers.

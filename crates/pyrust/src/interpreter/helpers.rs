@@ -1164,8 +1164,8 @@ pub(crate) fn is_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// class.  Called from `call_function_expanded`'s `PyClass` arm to
 /// skip the `call_class_expanded` PyInstance-alloc + `__init__`-walk
 /// + recursive `call_function_expanded` chain — three layers of
-/// dispatch collapsed into one `HashMap` lookup and one fn-pointer
-/// call.
+///   dispatch collapsed into one `HashMap` lookup and one fn-pointer
+///   call.
 #[inline]
 pub(crate) fn primitive_class_dispatch(
     class: &Rc<RefCell<PyClass>>,
@@ -2096,11 +2096,9 @@ pub(crate) fn bind_constructor_kwargs(
     let mut slots: Vec<Option<Value>> = vec![None; params.len()];
 
     // Assign positional args to leading slots in order.
-    let mut next_pos = 0usize;
-    for a in args.iter().filter(|a| a.name.is_none()) {
+    for (next_pos, a) in args.iter().filter(|a| a.name.is_none()).enumerate() {
         // `args.len() <= max_args` already guarantees we don't overrun.
         slots[next_pos] = Some(a.value.clone());
-        next_pos += 1;
     }
 
     // Bind keyword args by name.
@@ -3538,9 +3536,11 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
 ///     each generator resume (the frame view's regs pointer comes
 ///     from the heap-allocated `GeneratorFrame::regs`, which is
 ///     stable across yields).
+///
 /// Class-body evaluation (`Insn::MakeClass`) publishes a `FrameKind::Class`
 /// view so that `locals()` inside a class body returns the partially-built
 /// class attrs dict (issue #487).
+///
 /// The slice is read-only here.
 fn merge_frame_view_into_dict(
     view: &VmFrameView,

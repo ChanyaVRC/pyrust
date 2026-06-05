@@ -286,7 +286,7 @@ fn decode_text_bytes(raw: &[u8], enc: &str) -> Result<String> {
 /// Minimal UTF-16 decoder: handles BOM-prefixed streams (LE or BE).
 /// Falls back to native endian when no BOM is present.
 fn decode_utf16(raw: &[u8]) -> Result<String> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         // Odd byte count → truncated sequence.
         return Err(PyError::named(
             "UnicodeDecodeError",
@@ -1124,7 +1124,7 @@ fn call_stdio_method(state: &BuiltinState, method: &str, args: &[Value]) -> Resu
             let lines: Vec<Value> = std::io::stdin()
                 .lock()
                 .lines()
-                .filter_map(|l| l.ok())
+                .map_while(|l| l.ok())
                 .map(|l| Value::string(l + "\n"))
                 .collect();
             Ok(Value::list(lines))

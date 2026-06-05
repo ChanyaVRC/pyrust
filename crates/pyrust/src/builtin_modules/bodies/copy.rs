@@ -125,10 +125,10 @@ pyrust_module! {
 /// per-object identity worth memoising (those are returned as-is anyway).
 fn value_identity(obj: &Value) -> Option<i64> {
     match obj.kind() {
-        ValueKind::PyInstance(rc) => Some(Rc::as_ptr(&rc) as i64),
-        ValueKind::PyClass(rc) => Some(Rc::as_ptr(&rc) as i64),
-        ValueKind::PyModule(rc) => Some(Rc::as_ptr(&rc) as i64),
-        ValueKind::UserFunction(rc) => Some(Rc::as_ptr(&rc) as i64),
+        ValueKind::PyInstance(rc) => Some(Rc::as_ptr(rc) as i64),
+        ValueKind::PyClass(rc) => Some(Rc::as_ptr(rc) as i64),
+        ValueKind::PyModule(rc) => Some(Rc::as_ptr(rc) as i64),
+        ValueKind::UserFunction(rc) => Some(Rc::as_ptr(rc) as i64),
         _ => obj.value_id(),
     }
 }

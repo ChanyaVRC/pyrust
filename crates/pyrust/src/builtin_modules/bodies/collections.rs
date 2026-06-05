@@ -264,7 +264,7 @@ pyrust_module! {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            pairs.sort_by(|a, b| value_as_count(&b.1).cmp(&value_as_count(&a.1)));
+            pairs.sort_by_key(|p| std::cmp::Reverse(value_as_count(&p.1)));
             let upper = n.unwrap_or(pairs.len()).min(pairs.len());
             Ok(Value::list(
                 pairs
@@ -778,7 +778,7 @@ pyrust_module! {
             }
             // Store `maxlen` under the public name so `d.maxlen` resolves directly.
             let maxlen_val = match maxlen {
-                Some(n) => Value::int(n as i64),
+                Some(n) => Value::int(n),
                 None => Value::none(),
             };
             let mut attrs = inst.borrow_mut();
@@ -1085,8 +1085,8 @@ pyrust_module! {
                     ));
                 }
             };
-            for i in start..stop {
-                if _interp.values_user_eq(&items[i], &target)? {
+            for (i, item) in items.iter().enumerate().take(stop).skip(start) {
+                if _interp.values_user_eq(item, &target)? {
                     return Ok(Value::int(i as i64));
                 }
             }
