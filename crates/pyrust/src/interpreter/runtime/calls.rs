@@ -8825,10 +8825,12 @@ impl Interpreter {
                     };
                 }
             }
-            // InstanceAttr / SetInstanceAttr are GetAttr / SetAttr-only entries
-            // (#1912 / #1998).  A CallMethod site never produces them, but be
-            // defensive: drop to Empty so the next pass can refill correctly.
-            AttrCacheEntry::InstanceAttr { .. } | AttrCacheEntry::SetInstanceAttr { .. } => {
+            // InstanceAttr / SlotAttr / SetInstanceAttr are GetAttr / SetAttr-only
+            // entries (#1912 / #2207 / #1998).  A CallMethod site never produces
+            // them, but be defensive: drop to Empty so the next pass refills.
+            AttrCacheEntry::InstanceAttr { .. }
+            | AttrCacheEntry::SlotAttr { .. }
+            | AttrCacheEntry::SetInstanceAttr { .. } => {
                 cache[call_site_pc] = AttrCacheEntry::Empty;
             }
         }

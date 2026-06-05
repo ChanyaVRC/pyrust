@@ -552,6 +552,30 @@ pub enum AttrCacheEntry {
         class_version: u64,
         epoch: u64,
     },
+    /// Monomorphic `__slots__` slot read cache (issue #2207).  Filled when a
+    /// `GetAttr` site resolves to a `member_descriptor` data descriptor (the
+    /// data descriptor installed for each `__slots__` name, #2084).  The slot's
+    /// value lives in the same `inst.attrs` store as a plain instance attribute,
+    /// so a hit reads `inst.attrs.get(name)` directly — exactly the read
+    /// `member_descriptor.__get__` performs — skipping the full
+    /// `lookup_class_attr` + data-descriptor dispatch path that made slotted
+    /// reads ~15× slower than plain instance reads.
+    ///
+    /// Correctness: the cached fact is "name `name` resolves to a slot
+    /// member_descriptor on this class's MRO, and there is no custom
+    /// `__getattribute__`".  Invalidated by the same `class_version` (this class
+    /// mutated) + `epoch` (any ancestor mutated) + `class_ptr` (`__class__`
+    /// reassignment) guards as `InstanceAttr`.  Crucially, an **unset** slot
+    /// (name absent from `inst.attrs`) is NOT served from the cache: the VM
+    /// falls through to the slow path, which raises the correct
+    /// `AttributeError: '<cls>' object has no attribute '<name>'` (and honours
+    /// `__getattr__`), preserving the descriptor path's unset-slot semantics
+    /// byte-for-byte.
+    SlotAttr {
+        class_ptr: *const (),
+        class_version: u64,
+        epoch: u64,
+    },
     /// Monomorphic instance-attribute write cache (mirrors CPython's
     /// `STORE_ATTR_INSTANCE_VALUE`).  Filled when a `SetAttr` site resolves to a
     /// plain instance `__dict__` write: no `__setattr__` override, no `__set__`
@@ -631,6 +655,13 @@ impl std::fmt::Debug for AttrCacheEntry {
                 epoch,
             } => {
                 write!(f, "InstanceAttr({class_ptr:?}, v{class_version}, e{epoch})")
+            }
+            AttrCacheEntry::SlotAttr {
+                class_ptr,
+                class_version,
+                epoch,
+            } => {
+                write!(f, "SlotAttr({class_ptr:?}, v{class_version}, e{epoch})")
             }
             AttrCacheEntry::SetInstanceAttr {
                 class_ptr,
