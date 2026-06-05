@@ -1192,6 +1192,28 @@ impl Interpreter {
                             }],
                         )
                     }
+                } else if class
+                    .borrow()
+                    .attrs
+                    .get("__type_params__")
+                    .is_some_and(|tp| matches!(tp.kind(), ValueKind::Tuple(items) if !items.is_empty()))
+                {
+                    // PEP 695 generic class (`class C[T]: ...`): CPython gives it
+                    // an implicit `__class_getitem__` that returns a generic
+                    // alias, so `C[int]` is subscriptable and `C[int]()`
+                    // constructs an instance.  We detect the generic class via a
+                    // non-empty `__type_params__` tuple and build the alias
+                    // directly, mirroring the built-in-collection path above.
+                    let index_is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
+                    let type_args = if index_is_tuple {
+                        index
+                    } else {
+                        Value::tuple(vec![index])
+                    };
+                    Ok(pyrust_builtins::generic_alias::generic_alias(
+                        Value::py_class(class),
+                        type_args,
+                    ))
                 } else {
                     Err(pyrust_core::type_err!("type '{}' is not subscriptable", class.borrow().name))
                 }

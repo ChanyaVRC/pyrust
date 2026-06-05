@@ -7929,6 +7929,11 @@ impl Interpreter {
         for i in 0..bases_n as usize {
             let reg = (bases_base as usize + i) as crate::bytecode::Reg;
             let base_val = vm_read(regs, reg, num_locals)?;
+            // A generic alias used as a base (`class Sub[T](Base[T])` or
+            // `class L(list[int])`) contributes its `__origin__` to the MRO,
+            // matching CPython's `__mro_entries__` protocol.
+            let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(&base_val)
+                .unwrap_or(base_val);
             let ValueKind::PyClass(c) = base_val.kind() else {
                 return Err(PyError::Runtime("class base must be a class".to_string()));
             };
