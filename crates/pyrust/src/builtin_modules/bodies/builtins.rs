@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of, class_suppresses_instance_dict,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
@@ -6045,8 +6045,27 @@ pyrust_module! {
         } else {
             String::new()
         };
+        // A builtin subclass (`class I(int)`, `class S(str)`, …) that does not
+        // override `__format__` resolves `super().__format__(spec)` and the
+        // method-call form `inst.__format__(spec)` to *this* `object.__format__`
+        // body, because the backing primitive's `__format__` is not exposed as a
+        // distinct class attribute in pyrust's MRO.  CPython instead resolves
+        // them to the backing type's `__format__` (`int.__format__`), which
+        // formats the underlying value.  Emulate that by delegating to the
+        // backing formatter when the receiver carries `__builtin_data__`, so
+        // `super().__format__('x')` / `I(255).__format__('x')` → `'ff'`
+        // (issues #2211, #2214).  The error names the actual subclass, not the
+        // backing primitive (issue #2212).
+        if let ValueKind::PyInstance(inst) = self_val.kind() {
+            let inst_rc = Rc::clone(inst);
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                let owner = value_type_name_str(&self_val);
+                return apply_format_spec_named(&backing, &spec_str, Some(&owner));
+            }
+        }
         // CPython raises TypeError when a non-empty spec is passed to
-        // object.__format__ directly.
+        // object.__format__ on a value with no backing primitive (a pure user
+        // class or `object()` itself).
         if !spec_str.is_empty() {
             let type_name = value_type_name_str(&self_val);
             return Err(PyError::named(

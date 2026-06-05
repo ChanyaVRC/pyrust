@@ -1042,10 +1042,14 @@ impl Interpreter {
             // `None.__format__('')`, …).  Route through the same
             // `apply_format_spec` machinery the `format()` builtin uses, so that
             // `x.__format__(spec)` and `format(x, spec)` agree byte-for-byte.
-            // Only primitives reach here as a bound `__format__` (see
-            // `builtin_has_method`); user `__format__` overrides resolve to a
-            // PyFunction, not this wrapper.  Gated under the `__` prefix so the
-            // common method-name path is untouched.
+            // Primitives reach here as a bound `__format__` (see
+            // `builtin_has_method`); a built-in *subclass* instance
+            // (`class I(int)`) that inherits `object.__format__` also reaches
+            // here as a bound wrapper (issue #2214) — for it, delegate to
+            // `dispatch_dunder_format` so the backing primitive formats the
+            // value, matching `format(inst, spec)`.  User `__format__` overrides
+            // resolve to a PyFunction, not this wrapper.  Gated under the `__`
+            // prefix so the common method-name path is untouched.
             if method == "__format__" {
                 if has_kw {
                     return Err(pyrust_core::type_err!(
@@ -1054,6 +1058,9 @@ impl Interpreter {
                     ));
                 }
                 let spec = format_dunder_spec_arg(&receiver, pos)?;
+                if matches!(receiver.kind(), ValueKind::PyInstance(_)) {
+                    return self.dispatch_dunder_format(&receiver, spec);
+                }
                 return apply_format_spec(&receiver, spec);
             }
         }
@@ -4799,6 +4806,20 @@ impl Interpreter {
 ///
 /// [docs]: https://docs.python.org/3/library/string.html#format-specification-mini-language
 pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
+    apply_format_spec_named(value, spec, None)
+}
+
+/// Like [`apply_format_spec`], but lets the caller name the type reported in the
+/// "unsupported format string passed to <type>.__format__" `TypeError`.  When
+/// `owner` is `Some`, that name is used verbatim (the actual subclass, e.g. `B`
+/// for `class B(bytes)`); when `None`, the value's own builtin type name is
+/// used.  CPython names the *actual* type the spec was passed to, not the
+/// backing primitive a subclass wraps (issue #2212).
+pub(crate) fn apply_format_spec_named(
+    value: &Value,
+    spec: &str,
+    owner: Option<&str>,
+) -> Result<Value> {
     if spec.is_empty() {
         // gh-95778: an empty spec renders an int in base 10 — enforce the
         // int_max_str_digits limit.  The `value_may_exceed_int_str_limit` tag
@@ -4816,9 +4837,12 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
     // provide a real `__format__` (str / int / bool / float / complex) accept
     // a spec; everything else is rejected here.
     if !value_has_real_format(value) {
+        let type_name = owner
+            .map(std::borrow::Cow::Borrowed)
+            .unwrap_or_else(|| pyrust_core::builtin_type_name(value));
         return Err(pyrust_core::type_err!(
             "unsupported format string passed to {}.__format__",
-            pyrust_core::builtin_type_name(value)
+            type_name
         ));
     }
 
@@ -4879,6 +4903,15 @@ fn format_dunder_owner(receiver: &Value) -> std::borrow::Cow<'static, str> {
     // `__format__` in the MRO, so `True.__format__(...)` errors name `int`.
     if matches!(receiver.kind(), ValueKind::Bool(_)) {
         return std::borrow::Cow::Borrowed("int");
+    }
+    // A built-in subclass instance (`class I(int)`) without a `__format__`
+    // override resolves the method to the backing type's `__format__` in
+    // CPython, so an arg error names that backing type (`int`), not `object`
+    // (issue #2214).
+    if let ValueKind::PyInstance(inst) = receiver.kind()
+        && let Some(backing) = instance_builtin_data(inst)
+    {
+        return format_dunder_owner(&backing);
     }
     if value_has_real_format(receiver) {
         pyrust_core::builtin_type_name(receiver)
@@ -6655,7 +6688,12 @@ impl Interpreter {
         }
         // No user __format__ in MRO (or only the object builtin).
         if let Some(backing) = instance_builtin_data(&inst_rc) {
-            return apply_format_spec(&backing, spec);
+            // CPython names the *actual* subclass in an unsupported-spec
+            // TypeError, not the backing primitive (`B.__format__`, not
+            // `bytes.__format__`), so thread the receiver's own type name
+            // through to `apply_format_spec` (issue #2212).
+            let owner = value_type_name_str(value);
+            return apply_format_spec_named(&backing, spec, Some(&owner));
         }
         // Pure user class with no custom __format__ and no backing data.
         if spec.is_empty() {
