@@ -556,8 +556,8 @@ impl Interpreter {
         // and an exception is being injected (generator.throw() / generator.close()),
         // forward the exception to the sub-iterator rather than injecting it into our
         // own body.  This matches CPython's implementation of the PEP 380 algorithm.
-        if let Some(ref exc) = inject_exc {
-            if let Some(crate::bytecode::Insn::YieldFrom { iter_reg, sent_reg, result_reg }) =
+        if let Some(ref exc) = inject_exc
+            && let Some(crate::bytecode::Insn::YieldFrom { iter_reg, sent_reg, result_reg }) =
                 frame.code.insns.get(frame.pc)
             {
                 let iter_reg = *iter_reg;
@@ -600,7 +600,6 @@ impl Interpreter {
                     }
                 }
             }
-        }
 
         // Write the sent value into the yield destination register.
         // Skipped for fresh generators (pc == 0) because yield_dst is not
@@ -1159,11 +1158,10 @@ impl Interpreter {
             // Register-resident line tracker (issue #348): update from the
             // lineno table without touching the thread-local.  A non-zero entry
             // marks a new source line; `0` keeps the previous line.
-            if let Some(&ln) = code.lineno_table.get(pc) {
-                if ln != 0 {
+            if let Some(&ln) = code.lineno_table.get(pc)
+                && ln != 0 {
                     cur_line = ln;
                 }
-            }
             pc += 1;
 
             macro_rules! jump_pc {
@@ -3126,11 +3124,10 @@ impl Interpreter {
                 // — ignore them silently rather than panic, since reordering
                 // / inlining passes could in principle hoist them.
                 Insn::RecordClassStore(slot) => {
-                    if let Some(order) = self.class_store_order.last_mut() {
-                        if !order.contains(slot) {
+                    if let Some(order) = self.class_store_order.last_mut()
+                        && !order.contains(slot) {
                             order.push(*slot);
                         }
-                    }
                 }
                 Insn::RecordClassDel(slot) => {
                     if let Some(order) = self.class_store_order.last_mut() {
@@ -3194,9 +3191,9 @@ impl Interpreter {
                             // extract_stop_iteration_value() can retrieve it in the
                             // YieldFrom handler.  self.env is restored at this point
                             // (resume_generator_with_exc swaps it back on return).
-                            if let Some(rv) = frame.last_return_value.clone() {
-                                if !rv.is_none() {
-                                    if let Some(cls) =
+                            if let Some(rv) = frame.last_return_value.clone()
+                                && !rv.is_none()
+                                    && let Some(cls) =
                                         lookup_name_in_module(&self.env, "StopIteration")
                                             .and_then(|v| match v.kind() {
                                                 ValueKind::PyClass(c) => Some(Rc::clone(c)),
@@ -3206,8 +3203,6 @@ impl Interpreter {
                                         let exc = instantiate_exception(cls, vec![rv]);
                                         return Err(PyError::Raised(exc));
                                     }
-                                }
-                            }
                             return Err(e);
                         }
                         Err(e) => return Err(e),
@@ -3220,8 +3215,8 @@ impl Interpreter {
                 let inst_rc = Rc::clone(inst_rc);
                 let class = Rc::clone(&inst_rc.borrow().class);
                 // Try send() first (PEP 342 compliant generators).
-                if !sent_val.is_none() {
-                    if let Some(send_method) = lookup_class_attr(&class, "send") {
+                if !sent_val.is_none()
+                    && let Some(send_method) = lookup_class_attr(&class, "send") {
                         return invoke_class_method(
                             self,
                             send_method,
@@ -3229,7 +3224,6 @@ impl Interpreter {
                             &[ExpandedCallArg { name: None, value: sent_val }],
                         );
                     }
-                }
                 // Fall back to __next__().
                 if let Some(next_method) = lookup_class_attr(&class, "__next__") {
                     invoke_class_method(self, next_method, Value::py_instance(inst_rc), &[])
@@ -3280,9 +3274,9 @@ impl Interpreter {
                         Err(e) if is_stop_iteration_error(&e) => {
                             // Inner generator returned after handling the throw.
                             // Encode the return value in the StopIteration error.
-                            if let Some(rv) = frame.last_return_value.clone() {
-                                if !rv.is_none() {
-                                    if let Some(cls) =
+                            if let Some(rv) = frame.last_return_value.clone()
+                                && !rv.is_none()
+                                    && let Some(cls) =
                                         lookup_name_in_module(&self.env, "StopIteration")
                                             .and_then(|v| match v.kind() {
                                                 ValueKind::PyClass(c) => Some(Rc::clone(c)),
@@ -3293,8 +3287,6 @@ impl Interpreter {
                                             instantiate_exception(cls, vec![rv]);
                                         return Err(PyError::Raised(exc_with_val));
                                     }
-                                }
-                            }
                             return Err(e);
                         }
                         Err(e) => return Err(e),
@@ -3523,21 +3515,17 @@ fn extract_stop_iteration_value(err: &PyError) -> Option<Value> {
                 // Check for a `value` attribute first (set by our exception
                 // machinery), then fall back to args[0].
                 let borrow = inst.borrow();
-                if let Some(v) = borrow.attrs.get("value") {
-                    if !v.is_none() {
+                if let Some(v) = borrow.attrs.get("value")
+                    && !v.is_none() {
                         return Some(v.clone());
                     }
-                }
                 // Try args[0].
-                if let Some(args_val) = borrow.attrs.get("args") {
-                    if let Some(args) = args_val.as_tuple().or_else(|| args_val.as_list()) {
-                        if let Some(first) = args.first() {
-                            if !first.is_none() {
+                if let Some(args_val) = borrow.attrs.get("args")
+                    && let Some(args) = args_val.as_tuple().or_else(|| args_val.as_list())
+                        && let Some(first) = args.first()
+                            && !first.is_none() {
                                 return Some(first.clone());
                             }
-                        }
-                    }
-                }
                 None
             }
             _ => None,
@@ -3635,8 +3623,8 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
     // instance (they are the same object: `e.__context__ is e.__cause__`), and
     // sets __suppress_context__ = True so the "During handling of..." context
     // chain is suppressed in tracebacks.
-    if let Some(cause) = cause_val {
-        if let Some(rt_cls) = lookup_name_in_module(env, "RuntimeError").and_then(|v| match v.kind() {
+    if let Some(cause) = cause_val
+        && let Some(rt_cls) = lookup_name_in_module(env, "RuntimeError").and_then(|v| match v.kind() {
             ValueKind::PyClass(c) => Some(Rc::clone(c)),
             _ => None,
         }) {
@@ -3660,7 +3648,6 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
             }
             return PyError::Raised(rt_err);
         }
-    }
 
     // Fallback: builtins not yet installed (startup) or materialisation failed.
     pyrust_core::runtime_err!("generator raised StopIteration")

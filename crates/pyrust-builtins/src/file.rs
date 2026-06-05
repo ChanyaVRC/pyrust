@@ -406,10 +406,10 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             Ok(v.unwrap_or_else(|| {
                 // EOF: return empty bytes or empty str depending on mode
                 let borrow = state.borrow();
-                if let Some(s) = borrow.downcast_ref::<FileState>() {
-                    if s.is_binary {
-                        return Value::bytes(Vec::new());
-                    }
+                if let Some(s) = borrow.downcast_ref::<FileState>()
+                    && s.is_binary
+                {
+                    return Value::bytes(Vec::new());
                 }
                 Value::string(String::new())
             }))

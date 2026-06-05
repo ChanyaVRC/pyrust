@@ -465,14 +465,13 @@ pyrust_module! {
                 .first()
                 .map(|a| a.value.clone())
                 .unwrap_or_else(Value::none);
-            if !factory.is_none() {
-                if !value_is_callable(&factory) {
+            if !factory.is_none()
+                && !value_is_callable(&factory) {
                     return Err(PyError::named(
                         "TypeError",
                         "first argument must be callable or None".to_string(),
                     ));
                 }
-            }
             // Everything after the factory is forwarded to dict init. CPython
             // allows at most one such positional (the dict initialiser).
             let dict_positionals = &positional[positional.len().min(1)..];
@@ -798,12 +797,11 @@ pyrust_module! {
                 return Ok(Value::none()); // maxlen=0: discard all appends
             }
             let items_val = deque_items_val(&inst)?;
-            if let Some(ml) = maxlen {
-                if items_val.list_len().unwrap_or(0) >= ml {
+            if let Some(ml) = maxlen
+                && items_val.list_len().unwrap_or(0) >= ml {
                     // Drop from left to make room.
                     items_val.list_pop_at(0)?;
                 }
-            }
             items_val.list_push(x)?;
             deque_bump_state(&inst);
             Ok(Value::none())
@@ -876,11 +874,10 @@ pyrust_module! {
             }
             let items_val = deque_items_val(&inst)?;
             for x in new_items {
-                if let Some(ml) = maxlen {
-                    if items_val.list_len().unwrap_or(0) >= ml {
+                if let Some(ml) = maxlen
+                    && items_val.list_len().unwrap_or(0) >= ml {
                         items_val.list_pop_at(0)?;
                     }
-                }
                 items_val.list_push(x)?;
                 deque_bump_state(&inst);
             }
@@ -900,12 +897,11 @@ pyrust_module! {
             let items_val = deque_items_val(&inst)?;
             for x in new_items {
                 let cur_len = items_val.list_len().unwrap_or(0);
-                if let Some(ml) = maxlen {
-                    if cur_len >= ml {
+                if let Some(ml) = maxlen
+                    && cur_len >= ml {
                         // Trim from the right end before prepending.
                         items_val.list_pop_at(cur_len - 1)?;
                     }
-                }
                 items_val.list_insert(0, x)?;
                 deque_bump_state(&inst);
             }
@@ -1113,14 +1109,13 @@ pyrust_module! {
             let maxlen = deque_maxlen(&inst);
             let items_val = deque_items_val(&inst)?;
             let cur_len = items_val.list_len().unwrap_or(0);
-            if let Some(ml) = maxlen {
-                if cur_len >= ml {
+            if let Some(ml) = maxlen
+                && cur_len >= ml {
                     return Err(PyError::named(
                         "IndexError",
                         "deque already at its maximum size".to_string(),
                     ));
                 }
-            }
             let i: i64 = match args[1].value.kind() {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
@@ -2027,11 +2022,10 @@ fn counter_inplace_op(
 fn deque_state_cell(inst: &Rc<RefCell<PyInstance>>) -> Value {
     {
         let borrow = inst.borrow();
-        if let Some(v) = borrow.attrs.get("_state") {
-            if v.is_list() {
+        if let Some(v) = borrow.attrs.get("_state")
+            && v.is_list() {
                 return v.clone();
             }
-        }
     }
     let cell = Value::list(vec![Value::int(0)]);
     inst.borrow_mut()
@@ -2171,12 +2165,11 @@ fn deque_from_items(
     mut items: Vec<Value>,
     maxlen: Option<usize>,
 ) -> Value {
-    if let Some(ml) = maxlen {
-        if items.len() > ml {
+    if let Some(ml) = maxlen
+        && items.len() > ml {
             let drop = items.len() - ml;
             items.drain(..drop);
         }
-    }
     let maxlen_val = match maxlen {
         Some(n) => Value::int(n as i64),
         None => Value::none(),

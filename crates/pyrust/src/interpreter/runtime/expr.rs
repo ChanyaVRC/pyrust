@@ -787,11 +787,10 @@ fn slot_to_bigint(s: &NumericSlot) -> PyBigInt {
 /// `7 & 3` yields `int` rather than a BigInt-tagged value (CPython has no
 /// such distinction, but pyrust's fast paths key off the `Int` tag).
 fn collapse_bigint(v: Value) -> Value {
-    if let ValueKind::BigInt(b) = v.kind() {
-        if let Some(n) = b.to_i64() {
+    if let ValueKind::BigInt(b) = v.kind()
+        && let Some(n) = b.to_i64() {
             return Value::int(n);
         }
-    }
     v
 }
 
@@ -1295,8 +1294,8 @@ impl Interpreter {
             }
         };
 
-        if right_has_subtype_priority {
-            if let ValueKind::PyInstance(inst) = right.kind() {
+        if right_has_subtype_priority
+            && let ValueKind::PyInstance(inst) = right.kind() {
                 let class = Rc::clone(&inst.borrow().class);
                 if let Some(m) = lookup_class_attr(&class, rmethod) {
                     match self.dispatch_binary_slot(m, right, inst, left) {
@@ -1306,7 +1305,6 @@ impl Interpreter {
                     }
                 }
             }
-        }
 
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
@@ -1334,8 +1332,8 @@ impl Interpreter {
                 (ValueKind::PyInstance(li), ValueKind::PyInstance(ri))
                     if Rc::ptr_eq(&li.borrow().class, &ri.borrow().class)
             );
-        if !right_has_subtype_priority && !same_type_reflected_arith {
-            if let ValueKind::PyInstance(inst) = right.kind() {
+        if !right_has_subtype_priority && !same_type_reflected_arith
+            && let ValueKind::PyInstance(inst) = right.kind() {
                 let class = Rc::clone(&inst.borrow().class);
                 if let Some(m) = lookup_class_attr(&class, rmethod) {
                     match self.dispatch_binary_slot(m, right, inst, left) {
@@ -1345,7 +1343,6 @@ impl Interpreter {
                     }
                 }
             }
-        }
         None
     }
 
@@ -1605,8 +1602,8 @@ impl Interpreter {
         // at the end of this function would blame `'slice'` rather than the
         // actual offending component.  Detect that case here too and surface
         // the correct type name (issue #893).
-        if let ValueKind::BuiltinObject { ops, state } = value.kind() {
-            if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
+        if let ValueKind::BuiltinObject { ops, state } = value.kind()
+            && ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
                 let borrow = state.borrow();
                 let s = borrow
                     .downcast_ref::<pyrust_builtins::slice::SliceState>()
@@ -1644,7 +1641,6 @@ impl Interpreter {
                     value: value.clone(),
                 });
             }
-        }
         if let Some(k) = value.to_key() {
             return Ok(k);
         }
@@ -2163,8 +2159,8 @@ impl Interpreter {
             }
             _ => false,
         };
-        if needs_dedup {
-            if let Some((idx, _)) = self.dict_lookup_in(dict, &key)? {
+        if needs_dedup
+            && let Some((idx, _)) = self.dict_lookup_in(dict, &key)? {
                 // Replace value in-place via index access to preserve order.
                 let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
                 if let Some(k) = existing_key {
@@ -2172,7 +2168,6 @@ impl Interpreter {
                     return Ok(());
                 }
             }
-        }
         dict.insert(key, value);
         Ok(())
     }
@@ -3978,8 +3973,8 @@ impl Interpreter {
         // would drop the subclass type).  A user-defined `__i*__` (a
         // `UserFunction`, e.g. `MySet2.__ior__`) is a genuine override and is
         // dispatched normally.
-        if let ValueKind::BuiltinFunction(name) = method_value.kind() {
-            if matches!(
+        if let ValueKind::BuiltinFunction(name) = method_value.kind()
+            && matches!(
                 name,
                 "set.__ior__"
                     | "set.__iand__"
@@ -3993,7 +3988,6 @@ impl Interpreter {
             ) {
                 return Ok(None);
             }
-        }
         let self_val = Value::py_instance(Rc::clone(&inst));
         let arg = ExpandedCallArg {
             name: None,
@@ -4212,22 +4206,21 @@ impl Interpreter {
             _ => return Ok(None),
         };
         let result = self.try_call_binary_method(left, dunder, right.clone())?;
-        if let Some(ref v) = result {
-            if !is_not_implemented(v) {
+        if let Some(ref v) = result
+            && !is_not_implemented(v) {
                 return Ok(result);
             }
-        }
         // PEP 584 fallback: PyInstance dict subclass |= other when no `__ior__`
         // was found.  Call update() on the backing dict (so dict_with_mut works)
         // and return `left` to preserve object identity.
         // For binary | (not augmented assign), only dict-compatible RHS is valid;
         // fall through to eval_binary which uses the subclass type name correctly
         // (e.g. 'D' rather than 'dict') in the unsupported-operand TypeError.
-        if op == BinaryOp::BitOr {
-            if let Some(inst_rc) = left.as_py_instance_rc() {
-                if let Some(backing) = instance_builtin_data(inst_rc) {
-                    if matches!(backing.kind(), ValueKind::Dict(_)) {
-                        if is_augmented_assign || dict_entries_from_value(right).is_some() {
+        if op == BinaryOp::BitOr
+            && let Some(inst_rc) = left.as_py_instance_rc()
+                && let Some(backing) = instance_builtin_data(inst_rc)
+                    && matches!(backing.kind(), ValueKind::Dict(_))
+                        && (is_augmented_assign || dict_entries_from_value(right).is_some()) {
                             // #1914: dedup `PyKey::Object` keys via user `__eq__`.
                             if let Some(entries) = dict_entries_from_value(right) {
                                 self.dict_extend_value_dedup(&backing, entries)?;
@@ -4237,10 +4230,6 @@ impl Interpreter {
                             pyrust_builtins::dict::call("update", &backing, vec![right.clone()], &empty_kw)?;
                             return Ok(Some(left.clone()));
                         }
-                    }
-                }
-            }
-        }
         // Issue #1006 + #1007: PyInstance set subclass |= / &= / -= / ^= — when
         // no user-defined __ior__ / __iand__ / __isub__ / __ixor__ was found,
         // fall back to mutating the backing set in-place and returning `left`
@@ -4256,8 +4245,8 @@ impl Interpreter {
             BinaryOp::BitOr | BinaryOp::BitAnd | BinaryOp::Sub | BinaryOp::BitXor
         ) {
             if let Some(inst_rc) = left.as_py_instance_rc() {
-                if let Some(backing) = instance_builtin_data(inst_rc) {
-                    if matches!(backing.kind(), ValueKind::Set(_)) {
+                if let Some(backing) = instance_builtin_data(inst_rc)
+                    && matches!(backing.kind(), ValueKind::Set(_)) {
                         let op_sym = match op {
                             BinaryOp::BitOr => "|=",
                             BinaryOp::BitAnd => "&=",
@@ -4303,7 +4292,6 @@ impl Interpreter {
                         });
                         return Ok(Some(left.clone()));
                     }
-                }
             } else {
                 // Plain frozenset (BuiltinObject) — not caught by the is_set
                 // branch above (which only matches ValueKind::Set).
@@ -4989,11 +4977,10 @@ impl Interpreter {
             Tag::Instance(rc) => rc,
         };
         // Int subclass: extract the backing primitive (Int or BigInt).
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
-            if matches!(backing.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+        if let Some(backing) = instance_builtin_data(&inst_rc)
+            && matches!(backing.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
                 return Ok(backing);
             }
-        }
         // Non-int-subclass: look for __index__.
         let class = Rc::clone(&inst_rc.borrow().class);
         let Some(method_val) = lookup_class_attr(&class, "__index__") else {
@@ -5038,14 +5025,13 @@ impl Interpreter {
             Tag::Instance(rc) => rc,
         };
         // Float or int subclass: extract the backing primitive directly.
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
-            if matches!(
+        if let Some(backing) = instance_builtin_data(&inst_rc)
+            && matches!(
                 backing.kind(),
                 ValueKind::Float(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
             ) {
                 return Ok(backing);
             }
-        }
         let class = Rc::clone(&inst_rc.borrow().class);
         // Try __float__ first.
         if let Some(method_val) = lookup_class_attr(&class, "__float__") {
@@ -5251,11 +5237,10 @@ impl Interpreter {
                     // Alt-form (#) with precision 0 keeps the decimal point even
                     // though no fractional digits are emitted: "3.e+00" (#2029).
                     // Non-finite values (inf/nan) never get a point.
-                    if flag_hash && prec == 0 && f.is_finite() {
-                        if let Some(e_pos) = s.find(['e', 'E']) {
+                    if flag_hash && prec == 0 && f.is_finite()
+                        && let Some(e_pos) = s.find(['e', 'E']) {
                             s.insert(e_pos, '.');
                         }
-                    }
                     if f.is_sign_positive() && flag_plus {
                         s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
@@ -5568,11 +5553,10 @@ impl Interpreter {
         }
 
         // Unconsumed positional arguments: raise TypeError.
-        if let Some(pos) = positional {
-            if pos_idx < pos.len() {
+        if let Some(pos) = positional
+            && pos_idx < pos.len() {
                 return Err(pyrust_core::type_err!("not all arguments converted during string formatting"));
             }
-        }
 
         Ok(Value::string(out))
     }
@@ -5814,13 +5798,12 @@ impl Interpreter {
         }
 
         // Unconsumed positional arguments: raise TypeError.
-        if let Some(pos) = positional {
-            if pos_idx < pos.len() {
+        if let Some(pos) = positional
+            && pos_idx < pos.len() {
                 return Err(pyrust_core::type_err!(
                     "not all arguments converted during bytes formatting"
                 ));
             }
-        }
 
         if as_bytearray {
             Ok(pyrust_builtins::bytearray::bytearray(out))
@@ -5844,11 +5827,10 @@ impl Interpreter {
         }
         if let Some(inst_rc) = arg.as_py_instance_rc() {
             // bytes subclass: extract the backing bytes directly.
-            if let Some(backing) = instance_builtin_data(inst_rc) {
-                if let ValueKind::Bytes(rc) = backing.kind() {
+            if let Some(backing) = instance_builtin_data(inst_rc)
+                && let ValueKind::Bytes(rc) = backing.kind() {
                     return Ok(rc.to_vec());
                 }
-            }
             let class = Rc::clone(&inst_rc.borrow().class);
             if let Some(method) = lookup_class_attr(&class, "__bytes__") {
                 let self_val = Value::py_instance(Rc::clone(inst_rc));
@@ -6232,11 +6214,10 @@ fn apply_printf_width(
                 n += 1;
                 // base prefix after sign: 0x, 0X, 0o
                 let mut peek = s[n..].chars();
-                if peek.next() == Some('0') {
-                    if matches!(peek.next(), Some('x' | 'X' | 'o')) {
+                if peek.next() == Some('0')
+                    && matches!(peek.next(), Some('x' | 'X' | 'o')) {
                         n += 2;
                     }
-                }
             } else if s.starts_with("0x") || s.starts_with("0X") || s.starts_with("0o") {
                 n = 2;
             }
@@ -6399,8 +6380,8 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
     // that arithmetic and concatenation operations on bare subclass instances
     // (e.g. `MyInt(42) + 1`) fall through to the primitive fast paths below.
     // This mirrors CPython's slot delegation for `tp_as_number` / `tp_as_sequence`.
-    if let Some(inst_rc) = v.as_py_instance_rc() {
-        if let Some(backing) = instance_builtin_data(inst_rc) {
+    if let Some(inst_rc) = v.as_py_instance_rc()
+        && let Some(backing) = instance_builtin_data(inst_rc) {
             let is_scalar = matches!(
                 backing.kind(),
                 ValueKind::Int(_)
@@ -6413,7 +6394,6 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
                 return backing;
             }
         }
-    }
     v.clone()
 }
 
@@ -6432,8 +6412,8 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
     if let ValueKind::Bool(b) = v.kind() {
         return Value::int(b as i64);
     }
-    if let Some(inst_rc) = v.as_py_instance_rc() {
-        if let Some(backing) = instance_builtin_data(inst_rc) {
+    if let Some(inst_rc) = v.as_py_instance_rc()
+        && let Some(backing) = instance_builtin_data(inst_rc) {
             let is_primitive = matches!(
                 backing.kind(),
                 ValueKind::Int(_)
@@ -6450,7 +6430,6 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
                 return backing;
             }
         }
-    }
     v.clone()
 }
 
@@ -6539,11 +6518,10 @@ pub(crate) fn coerce_subclass_backing(v: &Value, override_dunders: &[&str]) -> O
 
 pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // list/dict/set subclass: delegate to the backing primitive value.
-    if let Some(inst_rc) = value.as_py_instance_rc() {
-        if let Some(backing) = instance_builtin_data(inst_rc) {
+    if let Some(inst_rc) = value.as_py_instance_rc()
+        && let Some(backing) = instance_builtin_data(inst_rc) {
             return iter_values(&backing);
         }
-    }
     match value.kind() {
         ValueKind::List(items) => Ok(items.to_vec()),
         ValueKind::Tuple(items) => Ok(items.to_vec()),
@@ -6808,11 +6786,10 @@ fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
     }) {
         return Some(entries);
     }
-    if let Some(inst_rc) = v.as_py_instance_rc() {
-        if let Some(backing) = instance_builtin_data(inst_rc) {
+    if let Some(inst_rc) = v.as_py_instance_rc()
+        && let Some(backing) = instance_builtin_data(inst_rc) {
             return dict_entries_from_value(&backing);
         }
-    }
     None
 }
 
@@ -6833,11 +6810,10 @@ fn set_items_from_value(v: &Value) -> Option<(PySet, bool)> {
     if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
         return Some(((*rc).clone(), true));
     }
-    if let Some(inst_rc) = v.as_py_instance_rc() {
-        if let Some(backing) = instance_builtin_data(inst_rc) {
+    if let Some(inst_rc) = v.as_py_instance_rc()
+        && let Some(backing) = instance_builtin_data(inst_rc) {
             return set_items_from_value(&backing);
         }
-    }
     None
 }
 
@@ -7391,12 +7367,11 @@ impl Interpreter {
             regs[obj as usize].as_some().map(|v| v.kind()),
             Some(ValueKind::Dict(_) | ValueKind::BuiltinObject { .. })
         );
-        if !obj_is_mapping {
-            if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+        if !obj_is_mapping
+            && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 return self.eval_slice(&obj_val, lo, hi, st);
             }
-        }
         enum FastResult {
             Value(Value),
             DictLookup(Value),
@@ -7512,8 +7487,8 @@ impl Interpreter {
         idx: crate::bytecode::Reg,
         val: crate::bytecode::Reg,
     ) -> Result<()> {
-        if let Some(raw_i) = regs[idx as usize].as_int() {
-            if let Some(len) = regs[obj as usize].list_len() {
+        if let Some(raw_i) = regs[idx as usize].as_int()
+            && let Some(len) = regs[obj as usize].list_len() {
                 let j = if raw_i < 0 { raw_i + len as i64 } else { raw_i };
                 if j >= 0 && (j as usize) < len {
                     let v = regs[val as usize].clone();
@@ -7525,12 +7500,11 @@ impl Interpreter {
                 }
                 return Ok(());
             }
-        }
         let idx_val = vm_read(regs, idx, num_locals)?;
         let val_val = vm_read(regs, val, num_locals)?;
         let is_list_target = regs[obj as usize].list_len().is_some();
-        if is_list_target {
-            if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+        if is_list_target
+            && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                 let lo = self.resolve_slice_bound_val(lo)?;
                 let hi = self.resolve_slice_bound_val(hi)?;
                 let st = self.resolve_slice_bound_val(st)?;
@@ -7559,7 +7533,6 @@ impl Interpreter {
                     }
                 };
             }
-        }
         let target_kind = regs[obj as usize]
             .as_some()
             .map(|v| match v.kind() {
@@ -7810,8 +7783,7 @@ impl Interpreter {
                 .vm_frame_views
                 .iter()
                 .find(|v| v.kind == FrameKind::Script)
-            {
-                if let Some(&slot) = script_view.local_index.get(&name) {
+                && let Some(&slot) = script_view.local_index.get(&name) {
                     let slot = slot as usize;
                     if slot < script_view.regs_len {
                         // SAFETY: slot < regs_len; regs_ptr is the script frame's
@@ -7822,7 +7794,6 @@ impl Interpreter {
                         }
                     }
                 }
-            }
         }
         Ok(())
     }
@@ -7842,8 +7813,8 @@ impl Interpreter {
     ) -> Result<()> {
         let idx_val = vm_read(regs, idx, num_locals)?;
         let is_list_target = regs[obj as usize].list_len().is_some();
-        if is_list_target {
-            if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+        if is_list_target
+            && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                 let lo = self.resolve_slice_bound_val(lo)?;
                 let hi = self.resolve_slice_bound_val(hi)?;
                 let st = self.resolve_slice_bound_val(st)?;
@@ -7858,7 +7829,6 @@ impl Interpreter {
                     }
                 };
             }
-        }
         let target_kind = regs[obj as usize]
             .as_some()
             .map(|v| match v.kind() {
@@ -7926,8 +7896,7 @@ impl Interpreter {
                     .vm_frame_views
                     .iter()
                     .find(|v| v.kind == FrameKind::Script)
-                {
-                    if let Some(&slot) = script_view.local_index.get(&name) {
+                    && let Some(&slot) = script_view.local_index.get(&name) {
                         let slot = slot as usize;
                         if slot < script_view.regs_len {
                             // SAFETY: same as SetItem (issue #547, PR #646).
@@ -7936,7 +7905,6 @@ impl Interpreter {
                             }
                         }
                     }
-                }
             }
             return Ok(());
         }

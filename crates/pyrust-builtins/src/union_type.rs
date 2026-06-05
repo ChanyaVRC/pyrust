@@ -225,17 +225,17 @@ fn same_type_identity(a: &Value, b: &Value) -> bool {
 /// Push all the leaf type components of `v` into `out`, unwrapping nested
 /// `UnionType` values so the result stays flat.
 fn collect_union_components(v: Value, out: &mut Vec<Value>) {
-    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
-        if ops.type_name() == TYPE_NAME {
-            let borrow = state.borrow();
-            if let Some(s) = borrow.downcast_ref::<UnionTypeState>() {
-                if let ValueKind::Tuple(items) = s.args.kind() {
-                    for item in items.iter() {
-                        out.push(item.clone());
-                    }
-                    return;
-                }
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && ops.type_name() == TYPE_NAME
+    {
+        let borrow = state.borrow();
+        if let Some(s) = borrow.downcast_ref::<UnionTypeState>()
+            && let ValueKind::Tuple(items) = s.args.kind()
+        {
+            for item in items.iter() {
+                out.push(item.clone());
             }
+            return;
         }
     }
     out.push(v);
@@ -252,12 +252,12 @@ pub fn is_union_type(v: &Value) -> bool {
 /// Return the `__args__` tuple from a `UnionType` value, or `None` if `v`
 /// is not a `UnionType`.
 pub fn union_type_args(v: &Value) -> Option<Value> {
-    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
-        if ops.type_name() == TYPE_NAME {
-            let borrow = state.borrow();
-            let s = borrow.downcast_ref::<UnionTypeState>()?;
-            return Some(s.args.clone());
-        }
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && ops.type_name() == TYPE_NAME
+    {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<UnionTypeState>()?;
+        return Some(s.args.clone());
     }
     None
 }

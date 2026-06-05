@@ -160,10 +160,10 @@ fn repr_type_arg(v: &Value) -> String {
         ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
         ValueKind::PyInstance(inst_rc) => {
-            if let Some(name_val) = inst_rc.borrow().attrs.get("__name__") {
-                if let Some(s) = name_val.as_str() {
-                    return s.to_string();
-                }
+            if let Some(name_val) = inst_rc.borrow().attrs.get("__name__")
+                && let Some(s) = name_val.as_str()
+            {
+                return s.to_string();
             }
             v.repr()
         }
@@ -190,19 +190,17 @@ fn collect_parameters(args: &Value) -> Value {
             // Nested GenericAlias: pull its parameters in.
             ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
                 let borrow = state.borrow();
-                if let Some(s) = borrow.downcast_ref::<GenericAliasState>() {
-                    if let ValueKind::Tuple(nested) = collect_parameters(&s.args).kind() {
-                        for p in nested.iter() {
-                            push_unique(&mut out, p.clone());
-                        }
+                if let Some(s) = borrow.downcast_ref::<GenericAliasState>()
+                    && let ValueKind::Tuple(nested) = collect_parameters(&s.args).kind()
+                {
+                    for p in nested.iter() {
+                        push_unique(&mut out, p.clone());
                     }
                 }
             }
             // A TypeVar is a PyInstance with a `__name__` attribute.
-            ValueKind::PyInstance(inst_rc) => {
-                if inst_rc.borrow().attrs.get("__name__").is_some() {
-                    push_unique(&mut out, item.clone());
-                }
+            ValueKind::PyInstance(inst_rc) if inst_rc.borrow().attrs.get("__name__").is_some() => {
+                push_unique(&mut out, item.clone());
             }
             _ => {}
         }
@@ -264,12 +262,12 @@ fn value_hash_u64(v: &Value) -> Option<u64> {
 /// interpreter access to run the origin's constructor — so the interpreter
 /// asks for the origin here and re-dispatches the call itself.
 pub fn as_generic_alias_origin(v: &Value) -> Option<Value> {
-    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
-        if ops.type_name() == TYPE_NAME {
-            let borrow = state.borrow();
-            let s = borrow.downcast_ref::<GenericAliasState>()?;
-            return Some(s.origin.clone());
-        }
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && ops.type_name() == TYPE_NAME
+    {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<GenericAliasState>()?;
+        return Some(s.origin.clone());
     }
     None
 }

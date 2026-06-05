@@ -170,12 +170,12 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
 /// to compare two slices as `(start, stop, step)` tuples, matching CPython's
 /// `slice_richcompare` (issue #2127).
 pub fn slice_fields(value: &Value) -> Option<(Value, Value, Value)> {
-    if let ValueKind::BuiltinObject { ops, state } = value.kind() {
-        if ops.type_name() == TYPE_NAME {
-            let borrow = state.borrow();
-            let s = borrow.downcast_ref::<SliceState>()?;
-            return Some((s.start.clone(), s.stop.clone(), s.step.clone()));
-        }
+    if let ValueKind::BuiltinObject { ops, state } = value.kind()
+        && ops.type_name() == TYPE_NAME
+    {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<SliceState>()?;
+        return Some((s.start.clone(), s.stop.clone(), s.step.clone()));
     }
     None
 }

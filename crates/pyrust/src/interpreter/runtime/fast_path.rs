@@ -1249,8 +1249,7 @@ impl Interpreter {
                 class_version,
                 epoch,
             } = &cache[pc - 1]
-            {
-                if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                && let Some(inst_rc) = obj_val.as_py_instance_rc() {
                     let (same_class, version_ok) = {
                         let inst = inst_rc.borrow();
                         (
@@ -1267,7 +1266,6 @@ impl Interpreter {
                         handled = true;
                     }
                 }
-            }
         }
         if !handled {
             self.assign_attr(obj_val.clone(), name, val_val)?;

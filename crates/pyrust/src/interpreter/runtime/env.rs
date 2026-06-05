@@ -13,11 +13,10 @@ impl Interpreter {
         // value's *type* docstring (#2151): `(5).__doc__ is int.__doc__`.  Only
         // primitive/builtin data values are routed here; functions, modules,
         // classes, properties keep their own `__doc__` handling below.
-        if name == "__doc__" {
-            if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
+        if name == "__doc__"
+            && let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
                 return self.get_attr_class(cls, "__doc__");
             }
-        }
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
@@ -31,8 +30,7 @@ impl Interpreter {
                     let class = { Rc::clone(&instance.borrow().class) };
                     if let Some(getattribute_val) =
                         lookup_class_attr(&class, "__getattribute__")
-                    {
-                        if matches!(getattribute_val.kind(), ValueKind::UserFunction(_)) {
+                        && matches!(getattribute_val.kind(), ValueKind::UserFunction(_)) {
                             let result = invoke_class_method(
                                 self,
                                 getattribute_val,
@@ -66,7 +64,6 @@ impl Interpreter {
                                 other => other,
                             };
                         }
-                    }
                 }
                 self.get_attr_instance_raw(instance, name)
             }
@@ -459,11 +456,10 @@ impl Interpreter {
                         // returns `None`, not an empty dict).
                         let mut d: PyDict = PyDict::default();
                         for p in &func.params {
-                            if p.is_keyword_only {
-                                if let Some(def) = &p.default {
+                            if p.is_keyword_only
+                                && let Some(def) = &p.default {
                                     d.insert(PyKey::str_from(&p.name), def.clone());
                                 }
-                            }
                         }
                         return Ok(if d.is_empty() {
                             Value::none()
@@ -538,11 +534,10 @@ impl Interpreter {
                 }
                 // Fall through to arbitrary dynamic attrs.
                 // Short-circuit without initialising if no attrs have been stored yet.
-                if let Some(rc) = func.attrs.borrow().as_ref().map(Rc::clone) {
-                    if let Some(v) = rc.borrow().as_dict().and_then(|d| d.get(&StrKey(name)).cloned()) {
+                if let Some(rc) = func.attrs.borrow().as_ref().map(Rc::clone)
+                    && let Some(v) = rc.borrow().as_dict().and_then(|d| d.get(&StrKey(name)).cloned()) {
                         return Ok(v);
                     }
-                }
                 let type_name = match func.kind {
                     UserFunctionKind::StaticMethod => "staticmethod",
                     UserFunctionKind::ClassMethod => "classmethod",
@@ -725,11 +720,9 @@ impl Interpreter {
                                 | "__copy__"
                                 | "__deepcopy__"
                         )
-                    {
-                        if let Some(origin) = ops.getattr(state, "__origin__") {
+                        && let Some(origin) = ops.getattr(state, "__origin__") {
                             return self.get_attr(&origin, name);
                         }
-                    }
                 }
                 if builtin_has_method(target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(
@@ -743,11 +736,10 @@ impl Interpreter {
                 // scalar/container `_` arm below.  Without this fall-through
                 // `hasattr(frozenset(), '__eq__')` was False while
                 // `dir(frozenset())` listed it.
-                if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
-                    if let Some(val) = lookup_class_attr(&cls, name) {
+                if let Some(cls) = crate::interpreter::primitive_class_for_value(target)
+                    && let Some(val) = lookup_class_attr(&cls, name) {
                         return Ok(val);
                     }
-                }
                 let type_name = pyrust_core::builtin_type_name(target);
                 Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
@@ -791,14 +783,13 @@ impl Interpreter {
                         // `frame.pc == 0` means the generator body hasn't started yet —
                         // don't inspect insns[0] in that case (iter_reg unloaded).
                         "gi_yieldfrom" => {
-                            if !frame.done && frame.pc != 0 {
-                                if let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
+                            if !frame.done && frame.pc != 0
+                                && let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
                                     frame.code.insns.get(frame.pc)
                                 {
                                     let sub_iter = frame.regs[*iter_reg as usize].clone();
                                     return Ok(sub_iter);
                                 }
-                            }
                             return Ok(Value::none());
                         }
                         // gi_frame: the suspended generator's frame object (or
@@ -868,11 +859,10 @@ impl Interpreter {
                 // `BuiltinTypeOps::getattr` (e.g. `GenericAlias.__origin__`,
                 // `GenericAlias.__args__`).  Probe before the generic
                 // `has_method` bound-method path.
-                if let ValueKind::BuiltinObject { ops, state } = target.kind() {
-                    if let Some(val) = ops.getattr(state, name) {
+                if let ValueKind::BuiltinObject { ops, state } = target.kind()
+                    && let Some(val) = ops.getattr(state, name) {
                         return Ok(val);
                     }
-                }
                 // Built-in type instance method lookup: list.append, str.upper, etc.
                 if builtin_has_method(target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(
@@ -896,11 +886,10 @@ impl Interpreter {
                 }
                 // Fallback: check the primitive class attrs for classmethods
                 // accessible on instances (e.g. `(1.0).fromhex`).
-                if let Some(cls) = crate::interpreter::primitive_class_for_value(target) {
-                    if let Some(val) = lookup_class_attr(&cls, name) {
+                if let Some(cls) = crate::interpreter::primitive_class_for_value(target)
+                    && let Some(val) = lookup_class_attr(&cls, name) {
                         return Ok(val);
                     }
-                }
                 let type_name = pyrust_core::builtin_type_name(target);
                 Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
@@ -1101,8 +1090,8 @@ impl Interpreter {
         // by class-own entries.  Check the metaclass MRO first and, when the
         // attribute found there is a data descriptor (e.g. a `property`), invoke
         // its `__get__(cls, type(cls))`.
-        if let Some(meta_val) = metaclass_dunder(&class, name) {
-            if is_data_descriptor(&meta_val) {
+        if let Some(meta_val) = metaclass_dunder(&class, name)
+            && is_data_descriptor(&meta_val) {
                 return call_descriptor_get(
                     self,
                     &meta_val,
@@ -1111,7 +1100,6 @@ impl Interpreter {
                     name,
                 );
             }
-        }
         if let Some(value) = lookup_class_attr(&class, name) {
             // Descriptor protocol for class-level access: if the class
             // attribute is a user-defined descriptor (PyInstance with
@@ -1243,8 +1231,8 @@ impl Interpreter {
         // (e.g. a `_instances` cache used by a singleton `__call__`) be reached
         // via `cls.attr`.  `metaclass_dunder` resolves user-defined attributes
         // on the metaclass MRO, returning `None` for ordinary classes.
-        if name != "__getattr__" {
-            if let Some(meta_val) = metaclass_dunder(&class, name) {
+        if name != "__getattr__"
+            && let Some(meta_val) = metaclass_dunder(&class, name) {
                 if let ValueKind::UserFunction(f) = meta_val.kind() {
                     // A metaclass method accessed via `cls.method` binds `cls`
                     // as the receiver (cls is an "instance" of the metaclass),
@@ -1267,14 +1255,13 @@ impl Interpreter {
                 }
                 return Ok(meta_val);
             }
-        }
         // Issue #1960: on an MRO miss, fall back to the metaclass's
         // `__getattr__` (CPython's `type.__getattribute__` ends by invoking
         // `type(cls).__getattr__(cls, name)` if the metaclass defines one).
         // `metaclass_dunder` returns `Some` only for a user override, so
         // ordinary classes keep raising `AttributeError` directly.
-        if let Some(getattr_val) = metaclass_dunder(&class, "__getattr__") {
-            if let ValueKind::UserFunction(f) = getattr_val.kind() {
+        if let Some(getattr_val) = metaclass_dunder(&class, "__getattr__")
+            && let ValueKind::UserFunction(f) = getattr_val.kind() {
                 let func = Rc::clone(f);
                 return self.call_user_function_expanded(
                     func,
@@ -1285,7 +1272,6 @@ impl Interpreter {
                     &[Value::py_class(Rc::clone(&class))],
                 );
             }
-        }
         // Issue #2096: every class is callable (to construct instances) via the
         // built-in `type` metaclass slot `type.__call__`.  When a class defines
         // no `__call__` of its own (so the MRO lookup above missed) and its
@@ -1382,8 +1368,8 @@ impl Interpreter {
         // defined) rather than propagating immediately — only
         // non-AttributeError exceptions propagate without __getattr__.
         let class = { Rc::clone(&instance.borrow().class) };
-        if let Some(class_val) = lookup_class_attr(&class, name) {
-            if is_data_descriptor(&class_val) {
+        if let Some(class_val) = lookup_class_attr(&class, name)
+            && is_data_descriptor(&class_val) {
                 let desc_result = call_descriptor_get(
                     self,
                     &class_val,
@@ -1405,7 +1391,6 @@ impl Interpreter {
                 }
                 return desc_result;
             }
-        }
 
         // Step 2: Instance __dict__.
         if let Some(value) = instance.borrow().attrs.get(name).cloned() {
@@ -1418,15 +1403,13 @@ impl Interpreter {
         // subclass instances inherit them.  Pyrust intercepts them via the
         // backing `__builtin_data__` value rather than registering real
         // descriptors on the primitive class (issue #1341).
-        if matches!(name, "real" | "imag" | "numerator" | "denominator") {
-            if let Some(backing) = instance_builtin_data(&instance) {
-                if let Some(v) =
+        if matches!(name, "real" | "imag" | "numerator" | "denominator")
+            && let Some(backing) = instance_builtin_data(&instance)
+                && let Some(v) =
                     pyrust_builtins::numeric_attrs_descriptor::numeric_tower_attr(&backing, name)
                 {
                     return Ok(v);
                 }
-            }
-        }
 
         // Step 3: Non-data descriptor or plain class attribute.
         // `cached_property` and user-defined non-data descriptors
@@ -1529,13 +1512,12 @@ impl Interpreter {
                     if let Some(dot) = fn_name.rfind('.') {
                         let defining_type = &fn_name[..dot];
                         let method_name = &fn_name[dot + 1..];
-                        if let Some(defining_class) = primitive_class_by_name(defining_type) {
-                            if !class_is_subclass_of(&class, &defining_class) {
+                        if let Some(defining_class) = primitive_class_by_name(defining_type)
+                            && !class_is_subclass_of(&class, &defining_class) {
                                 let instance_type = class.borrow().name.clone();
                                 return Err(pyrust_core::type_err!("descriptor '{}' for '{}' objects doesn't apply to a '{}' object",
                                         method_name, defining_type, instance_type));
                             }
-                        }
                         if method_name == name {
                             Ok(pyrust_builtins::bound_method::bound_method(
                                 name.to_string(),
@@ -1605,8 +1587,8 @@ impl Interpreter {
         let class = { Rc::clone(&instance.borrow().class) };
         // General data descriptor protocol: if the class (or MRO) has
         // a data descriptor (has __set__) for this name, call __set__.
-        if let Some(class_val) = lookup_class_attr(&class, name) {
-            if let Some(result) = call_descriptor_set(
+        if let Some(class_val) = lookup_class_attr(&class, name)
+            && let Some(result) = call_descriptor_set(
                 self,
                 &class_val,
                 Value::py_instance(Rc::clone(&instance)),
@@ -1615,7 +1597,6 @@ impl Interpreter {
             )? {
                 return result;
             }
-        }
         // Issue #1198: bare `object()` instances have no __dict__.
         if Rc::ptr_eq(&class, &object_class_singleton()) {
             return Err(pyrust_core::py_err!("AttributeError", "'object' object has no attribute '{name}'"));
@@ -1634,11 +1615,10 @@ impl Interpreter {
                                 if name == "__cause__" { "cause" } else { "context" }));
                     }
                 }
-                "__suppress_context__" => {
-                    if !matches!(value.kind(), ValueKind::Bool(_)) {
+                "__suppress_context__"
+                    if !matches!(value.kind(), ValueKind::Bool(_)) => {
                         return Err(pyrust_core::type_err!("attribute value type must be bool"));
                     }
-                }
                 "__traceback__" => {
                     let ok = match value.kind() {
                         ValueKind::None => true,
@@ -1737,8 +1717,8 @@ impl Interpreter {
         name: &str,
     ) -> Result<()> {
         let class = { Rc::clone(&instance.borrow().class) };
-        if let Some(class_val) = lookup_class_attr(&class, name) {
-            if let Some(result) = call_descriptor_delete(
+        if let Some(class_val) = lookup_class_attr(&class, name)
+            && let Some(result) = call_descriptor_delete(
                 self,
                 &class_val,
                 Value::py_instance(Rc::clone(&instance)),
@@ -1746,7 +1726,6 @@ impl Interpreter {
             )? {
                 return result;
             }
-        }
         // CPython 3.12: SyntaxError's structured slots reset to None on
         // delete rather than removing the attribute (issue #1588).
         if class_chain_contains_name(&class, "SyntaxError")
@@ -1948,13 +1927,12 @@ impl Interpreter {
             }
             // General data descriptor protocol: if the class (or MRO) has
             // a data descriptor (has __set__) for this name, call __set__.
-            if let Some(class_val) = lookup_class_attr(&class, name) {
-                if let Some(result) =
+            if let Some(class_val) = lookup_class_attr(&class, name)
+                && let Some(result) =
                     call_descriptor_set(self, &class_val, Value::py_instance(Rc::clone(instance)), value.clone(), name)?
                 {
                     return result;
                 }
-            }
             // Issue #1198: bare `object()` instances have no __dict__ in
             // CPython.  Only the object singleton itself is blocked; any
             // user-defined class (even `class Foo(object): pass`) gets its
@@ -1982,11 +1960,10 @@ impl Interpreter {
                                     if name == "__cause__" { "cause" } else { "context" }));
                         }
                     }
-                    "__suppress_context__" => {
-                        if !matches!(value.kind(), ValueKind::Bool(_)) {
+                    "__suppress_context__"
+                        if !matches!(value.kind(), ValueKind::Bool(_)) => {
                             return Err(pyrust_core::type_err!("attribute value type must be bool"));
                         }
-                    }
                     // Issue #1441: __traceback__ must be None or a traceback
                     // object.  CPython raises TypeError for any other value.
                     "__traceback__" => {
@@ -2450,13 +2427,12 @@ impl Interpreter {
             }
             // General data descriptor protocol: if the class (or MRO)
             // has a descriptor with __delete__ for this name, call it.
-            if let Some(class_val) = lookup_class_attr(&class, name) {
-                if let Some(result) =
+            if let Some(class_val) = lookup_class_attr(&class, name)
+                && let Some(result) =
                     call_descriptor_delete(self, &class_val, Value::py_instance(Rc::clone(instance)), name)?
                 {
                     return result;
                 }
-            }
             // CPython 3.12: SyntaxError's structured slots are C-level
             // member descriptors that reset to None on delete rather than
             // removing the attribute entirely (issue #1588).  Mirror that
@@ -2842,8 +2818,7 @@ impl Interpreter {
                 .vm_frame_views
                 .iter()
                 .find(|v| v.kind == FrameKind::Script)
-            {
-                if let Some(&slot) = script_view.local_index.get(name) {
+                && let Some(&slot) = script_view.local_index.get(name) {
                     let slot = slot as usize;
                     if slot < script_view.regs_len {
                         unsafe {
@@ -2851,7 +2826,6 @@ impl Interpreter {
                         }
                     }
                 }
-            }
             return;
         }
         if is_nonlocal
@@ -3057,15 +3031,14 @@ fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate
         _ => {
             // Arbitrary dynamic attrs delegate to the underlying function.
             // Short-circuit without initialising if no attrs set yet.
-            if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone) {
-                if let Some(v) = rc
+            if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone)
+                && let Some(v) = rc
                     .borrow()
                     .as_dict()
                     .and_then(|d| d.get(&StrKey(name)).cloned())
                 {
                     return Some(Ok(v));
                 }
-            }
             None
         }
     }
@@ -3911,8 +3884,7 @@ impl Interpreter {
                 .vm_frame_views
                 .iter()
                 .find(|v| v.kind == FrameKind::Script)
-            {
-                if let Some(&slot) = script_view.local_index.get(name.as_str()) {
+                && let Some(&slot) = script_view.local_index.get(name.as_str()) {
                     let slot = slot as usize;
                     if slot < script_view.regs_len {
                         unsafe {
@@ -3920,7 +3892,6 @@ impl Interpreter {
                         }
                     }
                 }
-            }
             let del_candidate = from_env.or(from_dict);
             if let Some(val) = del_candidate {
                 call_del_if_last_binding(self, val, regs, code.num_locals as usize);

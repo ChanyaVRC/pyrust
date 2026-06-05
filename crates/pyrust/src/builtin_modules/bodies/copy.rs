@@ -230,11 +230,10 @@ fn apply_state_dict(rc: &Rc<RefCell<PyInstance>>, state: &Value) {
     if let Some(pairs) = pairs {
         let mut borrow = rc.borrow_mut();
         for (k, v) in pairs {
-            if let PyKey::Str(s) = &k {
-                if let Some(name) = s.as_str() {
+            if let PyKey::Str(s) = &k
+                && let Some(name) = s.as_str() {
                     borrow.attrs.insert(name.to_string(), v);
                 }
-            }
         }
     }
 }
@@ -356,11 +355,10 @@ fn deep_copy(
 ) -> Result<Value> {
     // Cycle / sharing short-circuit: if we've already copied this object,
     // return the same copy.  Atomic values (value_identity == None) skip this.
-    if let Some(id) = value_identity(&obj) {
-        if let Some(existing) = memo_get(memo, id) {
+    if let Some(id) = value_identity(&obj)
+        && let Some(existing) = memo_get(memo, id) {
             return Ok(existing);
         }
-    }
 
     match obj.kind() {
         // Immutable scalars.
@@ -423,11 +421,10 @@ fn deep_copy(
             }
             // A child may have cycled back and inserted a copy of this tuple
             // under our identity while we recursed — honour it.
-            if let Some(id) = value_identity(&obj) {
-                if let Some(existing) = memo_get(memo, id) {
+            if let Some(id) = value_identity(&obj)
+                && let Some(existing) = memo_get(memo, id) {
                     return Ok(existing);
                 }
-            }
             if all_same {
                 // Every element is the same object as in the source → CPython
                 // returns the original tuple unchanged.

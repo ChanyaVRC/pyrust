@@ -922,16 +922,16 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                         'v' => 0x0b,
                         '0'..='7' => {
                             let mut val = esc as u32 - '0' as u32;
-                            if let Some(&d) = chars.get(pos + 1) {
-                                if ('0'..='7').contains(&d) {
-                                    val = val * 8 + (d as u32 - '0' as u32);
+                            if let Some(&d) = chars.get(pos + 1)
+                                && ('0'..='7').contains(&d)
+                            {
+                                val = val * 8 + (d as u32 - '0' as u32);
+                                pos += 1;
+                                if let Some(&d2) = chars.get(pos + 1)
+                                    && ('0'..='7').contains(&d2)
+                                {
+                                    val = val * 8 + (d2 as u32 - '0' as u32);
                                     pos += 1;
-                                    if let Some(&d2) = chars.get(pos + 1) {
-                                        if ('0'..='7').contains(&d2) {
-                                            val = val * 8 + (d2 as u32 - '0' as u32);
-                                            pos += 1;
-                                        }
-                                    }
                                 }
                             }
                             // CPython 3.12: values > 0xFF emit SyntaxWarning and truncate
@@ -1052,16 +1052,16 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                     // CPython 3.12: values > 0xFF emit SyntaxWarning and truncate to
                     // the low byte. pyrust omits the warning for now.
                     let mut val = esc as u32 - '0' as u32;
-                    if let Some(&d) = chars.get(pos + 1) {
-                        if ('0'..='7').contains(&d) {
-                            val = val * 8 + (d as u32 - '0' as u32);
+                    if let Some(&d) = chars.get(pos + 1)
+                        && ('0'..='7').contains(&d)
+                    {
+                        val = val * 8 + (d as u32 - '0' as u32);
+                        pos += 1;
+                        if let Some(&d2) = chars.get(pos + 1)
+                            && ('0'..='7').contains(&d2)
+                        {
+                            val = val * 8 + (d2 as u32 - '0' as u32);
                             pos += 1;
-                            if let Some(&d2) = chars.get(pos + 1) {
-                                if ('0'..='7').contains(&d2) {
-                                    val = val * 8 + (d2 as u32 - '0' as u32);
-                                    pos += 1;
-                                }
-                            }
                         }
                     }
                     (val & 0xFF) as u8
@@ -1731,16 +1731,16 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
             let d1 = c as u32 - '0' as u32;
             let mut val = d1;
             let mut end = pos + 1;
-            if let Some(&d) = chars.get(end) {
-                if ('0'..='7').contains(&d) {
-                    val = val * 8 + (d as u32 - '0' as u32);
+            if let Some(&d) = chars.get(end)
+                && ('0'..='7').contains(&d)
+            {
+                val = val * 8 + (d as u32 - '0' as u32);
+                end += 1;
+                if let Some(&d2) = chars.get(end)
+                    && ('0'..='7').contains(&d2)
+                {
+                    val = val * 8 + (d2 as u32 - '0' as u32);
                     end += 1;
-                    if let Some(&d2) = chars.get(end) {
-                        if ('0'..='7').contains(&d2) {
-                            val = val * 8 + (d2 as u32 - '0' as u32);
-                            end += 1;
-                        }
-                    }
                 }
             }
             let ch = char::from_u32(val).ok_or_else(|| {
@@ -1868,7 +1868,7 @@ mod tests {
     use crate::token::Token;
 
     fn lex_one(src: &str) -> Token {
-        let mut lexer = Lexer::new(src).expect("lex failed");
+        let lexer = Lexer::new(src).expect("lex failed");
         let mut tokens = lexer.into_tokens();
         // tokens: [<the token>, Newline, Eof]
         tokens.remove(0)

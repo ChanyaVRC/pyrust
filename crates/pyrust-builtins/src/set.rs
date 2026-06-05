@@ -189,14 +189,14 @@ pub fn leaf_unhashable_type_name(v: &Value) -> String {
         return pyrust_core::builtin_type_name(v).into_owned();
     }
     // Slice: recurse into components.
-    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
-        if ops.type_name() == crate::slice::TYPE_NAME {
-            let borrow = state.borrow();
-            if let Some(s) = borrow.downcast_ref::<crate::slice::SliceState>() {
-                for component in [&s.start, &s.stop, &s.step] {
-                    if component.to_key().is_none() {
-                        return leaf_unhashable_type_name(component);
-                    }
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && ops.type_name() == crate::slice::TYPE_NAME
+    {
+        let borrow = state.borrow();
+        if let Some(s) = borrow.downcast_ref::<crate::slice::SliceState>() {
+            for component in [&s.start, &s.stop, &s.step] {
+                if component.to_key().is_none() {
+                    return leaf_unhashable_type_name(component);
                 }
             }
         }

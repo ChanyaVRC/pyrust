@@ -858,8 +858,7 @@ impl Interpreter {
         // mutably while holding the shared borrow would panic.
         if let (ValueKind::PyInstance(src), ValueKind::PyInstance(dst)) =
             (group.kind(), derived.kind())
-        {
-            if !Rc::ptr_eq(src, dst) {
+            && !Rc::ptr_eq(src, dst) {
                 let src_b = src.borrow();
                 let mut dst_b = dst.borrow_mut();
                 for key in ["__traceback__", "__cause__", "__context__", "__notes__"] {
@@ -868,7 +867,6 @@ impl Interpreter {
                     }
                 }
             }
-        }
         Ok(derived)
     }
 

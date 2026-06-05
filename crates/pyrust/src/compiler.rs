@@ -61,10 +61,10 @@ pub fn compile_script_with_linenos(
         match stmts {
             [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
                 // Record lineno of the docstring statement if available.
-                if let Some(&ln) = linenos.first() {
-                    if ln != 0 {
-                        c.set_lineno(ln);
-                    }
+                if let Some(&ln) = linenos.first()
+                    && ln != 0
+                {
+                    c.set_lineno(ln);
                 }
                 let r = c.compile_literal(Value::string(s.clone()));
                 c.compile_store_name("__doc__", r);
@@ -78,10 +78,10 @@ pub fn compile_script_with_linenos(
     };
     if repl_mode {
         for (idx, stmt) in body.iter().enumerate() {
-            if let Some(&ln) = body_linenos.get(idx) {
-                if ln != 0 {
-                    c.set_lineno(ln);
-                }
+            if let Some(&ln) = body_linenos.get(idx)
+                && ln != 0
+            {
+                c.set_lineno(ln);
             }
             if let Stmt::Expr(e) = stmt {
                 let r = c.compile_expr(e);
@@ -1164,10 +1164,10 @@ fn lambda_captures_in_expr(
             // vars so they're accessible via the env chain.
             if !is_class_scope {
                 let mut inner_uses: HashSet<String> = HashSet::new();
-                if let Some(first) = clauses.first() {
-                    if let Some(c) = &first.cond {
-                        collect_free_var_reads_in_expr(c, &mut inner_uses);
-                    }
+                if let Some(first) = clauses.first()
+                    && let Some(c) = &first.cond
+                {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
                 }
                 for clause in clauses.iter().skip(1) {
                     collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
@@ -1210,10 +1210,10 @@ fn lambda_captures_in_expr(
             }
             if !is_class_scope {
                 let mut inner_uses: HashSet<String> = HashSet::new();
-                if let Some(first) = clauses.first() {
-                    if let Some(c) = &first.cond {
-                        collect_free_var_reads_in_expr(c, &mut inner_uses);
-                    }
+                if let Some(first) = clauses.first()
+                    && let Some(c) = &first.cond
+                {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
                 }
                 for clause in clauses.iter().skip(1) {
                     collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
@@ -1298,15 +1298,15 @@ fn collect_class_body_names_textual(
             Stmt::Assign(target, _) => {
                 collect_assign_target_textual(target, ordered, seen, body_local);
             }
-            Stmt::AnnAssign { name, .. } => {
-                if body_local.contains(name) && seen.insert(name.clone()) {
-                    ordered.push(name.clone());
-                }
+            Stmt::AnnAssign { name, .. }
+                if body_local.contains(name) && seen.insert(name.clone()) =>
+            {
+                ordered.push(name.clone());
             }
-            Stmt::Def { name, .. } | Stmt::Class { name, .. } | Stmt::TypeAlias { name, .. } => {
-                if body_local.contains(name) && seen.insert(name.clone()) {
-                    ordered.push(name.clone());
-                }
+            Stmt::Def { name, .. } | Stmt::Class { name, .. } | Stmt::TypeAlias { name, .. }
+                if body_local.contains(name) && seen.insert(name.clone()) =>
+            {
+                ordered.push(name.clone());
             }
             Stmt::If {
                 branches,
@@ -2377,11 +2377,11 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
             }
             // Inner body free vars (subtract clause-bound names).
             let mut inner_uses: HashSet<String> = HashSet::new();
-            if let Some(first) = clauses.first() {
-                if let Some(c) = &first.cond {
-                    collect_free_var_reads_in_expr(c, &mut inner_uses);
-                    collect_transitive_free_vars_in_expr(c, &mut inner_uses);
-                }
+            if let Some(first) = clauses.first()
+                && let Some(c) = &first.cond
+            {
+                collect_free_var_reads_in_expr(c, &mut inner_uses);
+                collect_transitive_free_vars_in_expr(c, &mut inner_uses);
             }
             for clause in clauses.iter().skip(1) {
                 collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
@@ -2409,11 +2409,11 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 collect_free_var_reads_in_expr(&first.iter, uses);
             }
             let mut inner_uses: HashSet<String> = HashSet::new();
-            if let Some(first) = clauses.first() {
-                if let Some(c) = &first.cond {
-                    collect_free_var_reads_in_expr(c, &mut inner_uses);
-                    collect_transitive_free_vars_in_expr(c, &mut inner_uses);
-                }
+            if let Some(first) = clauses.first()
+                && let Some(c) = &first.cond
+            {
+                collect_free_var_reads_in_expr(c, &mut inner_uses);
+                collect_transitive_free_vars_in_expr(c, &mut inner_uses);
             }
             for clause in clauses.iter().skip(1) {
                 collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
@@ -2564,18 +2564,18 @@ pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
             // compilation; oversized cases fall through to the runtime
             // (which shares the same slot).
             Pow => {
-                if let ValueKind::Int(b) = r.kind() {
-                    if (0..=u32::MAX as i64).contains(&b) {
-                        return dispatch_numeric_binop(op, l, r)?.ok();
-                    }
+                if let ValueKind::Int(b) = r.kind()
+                    && (0..=u32::MAX as i64).contains(&b)
+                {
+                    return dispatch_numeric_binop(op, l, r)?.ok();
                 }
                 return None;
             }
             LShift | RShift => {
-                if let ValueKind::Int(b) = r.kind() {
-                    if (0..=1_000_000).contains(&b) {
-                        return dispatch_numeric_binop(op, l, r)?.ok();
-                    }
+                if let ValueKind::Int(b) = r.kind()
+                    && (0..=1_000_000).contains(&b)
+                {
+                    return dispatch_numeric_binop(op, l, r)?.ok();
                 }
                 return None;
             }
@@ -4971,10 +4971,10 @@ impl Compiler {
                 return;
             }
             // Update the current line number when info is available.
-            if let Some(&ln) = linenos.get(idx) {
-                if ln != 0 {
-                    self.set_lineno(ln);
-                }
+            if let Some(&ln) = linenos.get(idx)
+                && ln != 0
+            {
+                self.set_lineno(ln);
             }
             // #289: rewrite `while i < len(c): ...; i += 1` → `for i in c: ...`
             // when `i` is unused after the loop.  Needs the post-loop suffix
@@ -6304,28 +6304,20 @@ impl Compiler {
                 return;
             }
             match stmt {
-                Stmt::Break => {
-                    if !in_loop {
-                        self.set_syntax_error("'break' outside loop");
-                    }
+                Stmt::Break if !in_loop => {
+                    self.set_syntax_error("'break' outside loop");
                 }
-                Stmt::Continue => {
-                    if !in_loop {
-                        self.set_syntax_error("'continue' not properly in loop");
-                    }
+                Stmt::Continue if !in_loop => {
+                    self.set_syntax_error("'continue' not properly in loop");
                 }
-                Stmt::Return(_) => {
-                    if !self.is_function_scope {
-                        self.set_syntax_error("'return' outside function");
-                    }
+                Stmt::Return(_) if !self.is_function_scope => {
+                    self.set_syntax_error("'return' outside function");
                 }
                 Stmt::Expr(expr) => {
                     self.check_dead_expr(expr);
                 }
-                Stmt::Nonlocal(_) => {
-                    if !self.is_function_scope && !self.is_class_body {
-                        self.set_syntax_error("nonlocal declaration not allowed at module level");
-                    }
+                Stmt::Nonlocal(_) if !self.is_function_scope && !self.is_class_body => {
+                    self.set_syntax_error("nonlocal declaration not allowed at module level");
                 }
                 Stmt::If {
                     branches,
@@ -6466,10 +6458,8 @@ impl Compiler {
             return;
         }
         match expr {
-            Expr::Yield(_) | Expr::YieldFrom(_) => {
-                if !self.is_function_scope {
-                    self.set_syntax_error("'yield' outside function");
-                }
+            Expr::Yield(_) | Expr::YieldFrom(_) if !self.is_function_scope => {
+                self.set_syntax_error("'yield' outside function");
             }
             Expr::Await(_) => {
                 if !self.is_function_scope {
@@ -7305,12 +7295,10 @@ impl Compiler {
         // For an infinite while (e.g. `while True:`) the else clause is unreachable:
         // the loop never exits naturally, and `break` deliberately skips the else.
         // Skip the emit entirely — semantics-preserving, avoids dead bytecode.
-        if !is_infinite {
-            if let Some(else_stmts) = else_branch {
-                self.compile_block_with_linenos(else_stmts, else_linenos);
-                if self.failed {
-                    return;
-                }
+        if !is_infinite && let Some(else_stmts) = else_branch {
+            self.compile_block_with_linenos(else_stmts, else_linenos);
+            if self.failed {
+                return;
             }
         }
         for idx in ctx.break_patches {
@@ -9685,10 +9673,11 @@ impl Compiler {
     /// Try to extract a small i16 integer immediate from an expression.
     /// Returns `Some(imm)` when `expr` is an integer literal in `i16` range.
     fn try_imm_i16(expr: &Expr) -> Option<i16> {
-        if let Expr::Int(v) = expr {
-            if *v >= i16::MIN as i64 && *v <= i16::MAX as i64 {
-                return Some(*v as i16);
-            }
+        if let Expr::Int(v) = expr
+            && *v >= i16::MIN as i64
+            && *v <= i16::MAX as i64
+        {
+            return Some(*v as i16);
         }
         None
     }
