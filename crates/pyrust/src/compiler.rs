@@ -5227,6 +5227,9 @@ impl Compiler {
             // Empty until the optimizer's `build_exc_table` pass runs; while
             // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
+            // Conservative: un-optimized bytecode is never trampolined.  The
+            // optimizer recomputes this from the real `exc_table` (#2234).
+            has_exc_handlers: true,
         })
     }
 

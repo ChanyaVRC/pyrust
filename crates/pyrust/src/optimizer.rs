@@ -183,6 +183,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // back unchanged with an empty table, and the VM falls back to the dynamic
     // SetupExcept/PopExcept handler stack — always correct, never wrong.
     let (insns, exc_table) = build_exc_table(insns);
+    let has_exc_handlers = exc_table.iter().any(|&t| t != EXC_NO_HANDLER);
 
     let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
@@ -206,6 +207,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
         binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
         exc_table,
+        has_exc_handlers,
     }
 }
 
