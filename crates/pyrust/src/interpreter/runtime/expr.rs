@@ -960,6 +960,28 @@ fn pykey_object_or_none_value(key: &PyKey) -> Value {
     }
 }
 
+/// True if `key` is — or transitively contains — a `PyKey::Object` (a user
+/// instance whose equality requires `__eq__` dispatch).  Recurses into
+/// `Tuple` / `FrozenSet` keys so a nested object inside a tuple key is found
+/// (issue #2059).  Primitive keys (`Int`, `Str`, …) and tuples of primitives
+/// return `false` and stay on the raw `IndexSet`/`IndexMap` fast path.
+fn key_contains_object(key: &PyKey) -> bool {
+    match key {
+        PyKey::Object { .. } => true,
+        PyKey::Tuple(items) | PyKey::FrozenSet(items) => items.iter().any(key_contains_object),
+        _ => false,
+    }
+}
+
+/// Returns `true` when `key` is a `Tuple` / `FrozenSet` key that nests a
+/// user-object element (so the raw identity-based `PyKey` equality misses an
+/// `__eq__`-equal-but-distinct match).  A bare top-level `PyKey::Object` is
+/// *not* included here — that case is already handled by the dedicated
+/// `Object`-key slow paths.  Issue #2059.
+fn nested_object_tuple_key(key: &PyKey) -> bool {
+    matches!(key, PyKey::Tuple(_) | PyKey::FrozenSet(_)) && key_contains_object(key)
+}
+
 impl Interpreter {
     pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
@@ -1824,6 +1846,19 @@ impl Interpreter {
         Err(pyrust_core::type_err!("unhashable type: '{type_name}'"))
     }
 
+    /// `__eq__`-aware comparison of two `PyKey`s that may nest user objects.
+    /// Converts both keys back to their Python `Value` and dispatches through
+    /// [`Self::values_user_eq`], which already recurses element-wise into
+    /// tuples / frozensets and fires user `__eq__` for `PyInstance` elements.
+    /// Used to confirm a same-hash-bucket candidate matches a tuple/frozenset
+    /// lookup key whose nested object compares by `__eq__`, not identity
+    /// (issue #2059).
+    fn nested_object_keys_eq(&mut self, stored: &PyKey, probe: &PyKey) -> Result<bool> {
+        let stored_val = crate::interpreter::key_to_value(stored.clone());
+        let probe_val = crate::interpreter::key_to_value(probe.clone());
+        self.values_user_eq(&stored_val, &probe_val)
+    }
+
     /// Look up a key in a dict where the key may be a `PyKey::Object`.
     ///
     /// IndexMap's `get` will find entries whose `PyKey` matches by
@@ -1904,6 +1939,23 @@ impl Interpreter {
                 }
             }
         }
+        // Nested-object slow path (issue #2059): a Tuple/FrozenSet key that
+        // nests a user object compares its nested element by `__eq__`, not the
+        // raw `PyKey` identity used by `get_full`.  Probe the lookup key's hash
+        // bucket for same-shape candidates and dispatch element-wise `__eq__`.
+        if nested_object_tuple_key(key) {
+            let candidate_keys = {
+                let dict = receiver
+                    .as_dict()
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                collect_object_bucket_keys_map(dict, key, nested_object_tuple_key)
+            };
+            for cand in candidate_keys {
+                if self.nested_object_keys_eq(&cand, key)? {
+                    return self.dict_entry_by_key(receiver, &cand);
+                }
+            }
+        }
         Ok(None)
     }
 
@@ -1968,6 +2020,16 @@ impl Interpreter {
             for cand in candidate_keys {
                 let cand_val = pykey_object_or_none_value(&cand);
                 if self.values_user_eq(&none_val, &cand_val)? {
+                    return Ok(dict.get_full(&cand).map(|(idx, _, v)| (idx, v.clone())));
+                }
+            }
+        }
+        // Nested-object slow path (issue #2059).
+        if nested_object_tuple_key(key) {
+            let candidate_keys =
+                collect_object_bucket_keys_map(dict, key, nested_object_tuple_key);
+            for cand in candidate_keys {
+                if self.nested_object_keys_eq(&cand, key)? {
                     return Ok(dict.get_full(&cand).map(|(idx, _, v)| (idx, v.clone())));
                 }
             }
@@ -2063,6 +2125,21 @@ impl Interpreter {
                 }
             }
         }
+        // Nested-object slow path (issue #2059): a Tuple/FrozenSet element key
+        // nesting a user object compares that element by `__eq__`.
+        if nested_object_tuple_key(key) {
+            let candidate_keys = {
+                let set = receiver
+                    .as_set()
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                collect_object_bucket_keys_set(set, key, nested_object_tuple_key)
+            };
+            for cand in candidate_keys {
+                if self.nested_object_keys_eq(&cand, key)? {
+                    return self.set_index_by_key(receiver, &cand);
+                }
+            }
+        }
         Ok(None)
     }
 
@@ -2123,6 +2200,16 @@ impl Interpreter {
                 }
             }
         }
+        // Nested-object slow path (issue #2059).
+        if nested_object_tuple_key(key) {
+            let candidate_keys =
+                collect_object_bucket_keys_set(set, key, nested_object_tuple_key);
+            for cand in candidate_keys {
+                if self.nested_object_keys_eq(&cand, key)? {
+                    return Ok(set.get_index_of(&cand));
+                }
+            }
+        }
         Ok(None)
     }
 
@@ -2152,6 +2239,9 @@ impl Interpreter {
         // entire lookup call in the common case.
         let needs_dedup = match &key {
             PyKey::Object { .. } => true,
+            // Issue #2059: a tuple/frozenset key nesting a user object must
+            // dedup against an `__eq__`-equal-but-distinct existing key.
+            PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
             PyKey::None => {
                 let none_hash = pyrust_core::py_hash_none() as u64;
                 dict.keys()
@@ -2189,8 +2279,8 @@ impl Interpreter {
         dict: &mut PyDict,
         pairs: Vec<(PyKey, Value)>,
     ) -> Result<()> {
-        let dest_has_object = dict.keys().any(|k| matches!(k, PyKey::Object { .. }));
-        let src_has_object = pairs.iter().any(|(k, _)| matches!(k, PyKey::Object { .. }));
+        let dest_has_object = dict.keys().any(key_contains_object);
+        let src_has_object = pairs.iter().any(|(k, _)| key_contains_object(k));
         if !dest_has_object && !src_has_object {
             // Primitive-key fast path: raw IndexMap::extend (last value wins).
             dict.extend(pairs);
@@ -2219,9 +2309,9 @@ impl Interpreter {
         pairs: Vec<(PyKey, Value)>,
     ) -> Result<()> {
         let dest_has_object = receiver
-            .dict_with(|d| d.keys().any(|k| matches!(k, PyKey::Object { .. })))
+            .dict_with(|d| d.keys().any(key_contains_object))
             .unwrap_or(false);
-        let src_has_object = pairs.iter().any(|(k, _)| matches!(k, PyKey::Object { .. }));
+        let src_has_object = pairs.iter().any(|(k, _)| key_contains_object(k));
         if !dest_has_object && !src_has_object {
             // Primitive-key fast path: raw IndexMap::extend (last value wins).
             receiver
@@ -2263,6 +2353,9 @@ impl Interpreter {
         // hash `py_hash_none()` (rare cross-variant case, issue #906).
         let needs_dedup = match &key {
             PyKey::Object { .. } => true,
+            // Issue #2059: dedup a tuple/frozenset key nesting a user object
+            // against an `__eq__`-equal-but-distinct existing element.
+            PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
             PyKey::None => {
                 let none_hash = pyrust_core::py_hash_none() as u64;
                 set.iter()
@@ -6847,7 +6940,10 @@ fn set_items_from_value(v: &Value) -> Option<(PySet, bool)> {
 /// raw `IndexSet` identity comparison (issue #1907).  All-primitive sets take
 /// the fast raw path.
 fn set_has_object_key(s: &PySet) -> bool {
-    s.iter().any(|k| matches!(k, PyKey::Object { .. }))
+    // Recurse into Tuple/FrozenSet element keys so a user object nested inside
+    // a tuple key also forces the eq-aware path (issue #2059); a set of
+    // primitive (or primitive-tuple) keys stays on the raw fast path.
+    s.iter().any(key_contains_object)
 }
 
 /// Cheap, borrow-only check for whether an iterable operand to a set-algebra
@@ -6866,7 +6962,7 @@ fn value_iterable_has_object(v: &Value) -> bool {
         ValueKind::Tuple(items) => {
             items.iter().any(|x| matches!(x.kind(), ValueKind::PyInstance(_)))
         }
-        ValueKind::Dict(d) => d.keys().any(|k| matches!(k, PyKey::Object { .. })),
+        ValueKind::Dict(d) => d.keys().any(key_contains_object),
         // Primitive flat iterables can never hold user instances.
         ValueKind::Str(_) | ValueKind::Bytes(_) | ValueKind::Range { .. } => false,
         _ => {

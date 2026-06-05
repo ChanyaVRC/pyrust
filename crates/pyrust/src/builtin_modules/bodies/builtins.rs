@@ -1723,14 +1723,12 @@ pyrust_module! {
             }
             // Issue #1677: reject bases tuples that contain two or more
             // "solid" primitive types (int, str, float, bytes, tuple, list,
-            // dict, set, frozenset).  These have incompatible C-level instance
-            // layouts; CPython raises the same error.
+            // dict, set, frozenset) or two bases with non-empty `__slots__`
+            // (issue #2109).  These have incompatible instance layouts; CPython
+            // raises the same error via its `best_base`/`solid_base` check.
             {
-                let all_bases = base.iter().chain(extra_bases.iter());
-                let solid_count = all_bases
-                    .filter(|c| crate::interpreter::is_solid_primitive_class(c))
-                    .count();
-                if solid_count >= 2 {
+                let all_bases: Vec<_> = base.iter().chain(extra_bases.iter()).cloned().collect();
+                if crate::interpreter::bases_have_layout_conflict(&all_bases) {
                     return Err(PyError::named(
                         "TypeError",
                         "multiple bases have instance lay-out conflict".to_string(),
@@ -5587,13 +5585,11 @@ pyrust_module! {
                 }
             }
         }
-        // Issue #1677: reject bases with incompatible C-level layouts.
+        // Issue #1677 / #2109: reject bases with incompatible instance layouts
+        // (two C-level primitive bases, or two non-empty `__slots__` bases).
         {
-            let all_bases = base.iter().chain(extra_bases.iter());
-            let solid_count = all_bases
-                .filter(|c| crate::interpreter::is_solid_primitive_class(c))
-                .count();
-            if solid_count >= 2 {
+            let all_bases: Vec<_> = base.iter().chain(extra_bases.iter()).cloned().collect();
+            if crate::interpreter::bases_have_layout_conflict(&all_bases) {
                 return Err(PyError::named(
                     "TypeError",
                     "multiple bases have instance lay-out conflict".to_string(),

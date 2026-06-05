@@ -7976,11 +7976,10 @@ impl Interpreter {
             }
             classes.push(cls);
         }
-        let solid_count = classes
-            .iter()
-            .filter(|c| crate::interpreter::is_solid_primitive_class(c))
-            .count();
-        if solid_count >= 2 {
+        // CPython's `best_base` layout check (issue #1677 for C types,
+        // issue #2109 for user `__slots__`): two bases whose instance layouts
+        // (solid bases) are unrelated cannot be combined.
+        if crate::interpreter::bases_have_layout_conflict(&classes) {
             return Err(pyrust_core::type_err!("multiple bases have instance lay-out conflict"));
         }
         let mut iter = classes.into_iter();
