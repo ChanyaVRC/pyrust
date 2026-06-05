@@ -29,3 +29,11 @@ for a, b in [((1, None), (1, 2)), ([None], [1])]:
 print((1, 2, 3) < (1, 2, 4))
 print(["a", "b"] < ["a", "c"])
 print((3, 1) > (2, 9))
+
+# A NaN prefix element is `!=` itself but orders Equal, so the same `x is y`
+# object skips past it (CPython's Py_EQ identity shortcut) and the next
+# element decides — it must not short-circuit to the NaN's Equal ordering.
+nan = float("nan")
+print((nan, 1) < (nan, 2))
+print((nan, 2) < (nan, 1))
+print([nan, "a"] < [nan, "b"])

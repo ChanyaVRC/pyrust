@@ -136,6 +136,32 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
 /// the operand types are incompatible.  CPython's `do_richcompare` emits the
 /// operator token that was actually requested (`<`, `>`, `<=`, `>=`), so
 /// `eval_binary` calls this variant directly for `Gt`, `Le`, and `Ge`.
+/// One lexicographic-compare step for a `(List, List)` / `(Tuple, Tuple)`
+/// element pair (issue #2216). Mirrors CPython's `list_richcompare`: scan the
+/// `==`-equal prefix and only order the first *differing* element.
+///
+/// The common all-comparable path pays exactly one `compare` dispatch per
+/// field (the orderable-Equal arm just `continue`s, incl. `NaN` which orders
+/// Equal). The `==` fallback is only consulted on the rare *unorderable* pair
+/// (two `None`s) — there it distinguishes an equal-but-unorderable prefix
+/// element (`continue`) from a genuine first-differing pair (propagate the
+/// `TypeError`). Keeping `==` off the hot path avoids a per-field double
+/// dispatch.
+macro_rules! seq_prefix_step {
+    ($a:expr, $b:expr, $op_name:expr) => {
+        match compare_values_with_op($a, $b, $op_name) {
+            Ok(std::cmp::Ordering::Equal) => continue,
+            Ok(ord) => return Ok(ord),
+            Err(e) => {
+                if $a == $b {
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    };
+}
+
 pub(crate) fn compare_values_with_op(
     a: &Value,
     b: &Value,
@@ -178,26 +204,13 @@ pub(crate) fn compare_values_with_op(
         }
         (ValueKind::List(x), ValueKind::List(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                // Scan the `==`-equal prefix first so that equal but
-                // individually-unorderable fields (e.g. two `None`s) don't
-                // raise; only the first *differing* pair is ordered, matching
-                // CPython's `list_richcompare` (issue #2216).
-                if a == b {
-                    continue;
-                }
-                return compare_values_with_op(a, b, op_name);
+                seq_prefix_step!(a, b, op_name);
             }
             Ok(x.len().cmp(&y.len()))
         }
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                // Equal-prefix skip (see the List arm / issue #2216): equal
-                // unorderable fields like two `None`s don't error; only the
-                // first differing pair is ordered.
-                if a == b {
-                    continue;
-                }
-                return compare_values_with_op(a, b, op_name);
+                seq_prefix_step!(a, b, op_name);
             }
             Ok(x.len().cmp(&y.len()))
         }
