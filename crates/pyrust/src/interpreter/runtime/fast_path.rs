@@ -596,6 +596,23 @@ fn bind_param(
     val: Value,
 ) -> Result<()> {
     bound[pi] = true;
+    bind_param_direct(function, num_regs, regs, local_env, pi, val)
+}
+
+/// Route a bound value to parameter `pi`'s compile-time destination without
+/// touching a per-param `bound` flag array.  Used by the exact-arity
+/// positional fast bind in `call_user_function_expanded`, where every
+/// parameter is filled exactly once in order so the bound-flag bookkeeping is
+/// unnecessary.  `bind_param` delegates here after marking the flag.
+#[inline]
+pub(crate) fn bind_param_direct(
+    function: &Rc<UserFunction>,
+    num_regs: usize,
+    regs: &mut RegsBuf,
+    local_env: &Option<EnvRef>,
+    pi: usize,
+    val: Value,
+) -> Result<()> {
     match function.param_binds[pi] {
         pyrust_core::ParamBind::Reg(reg) => {
             if reg as usize >= num_regs {
