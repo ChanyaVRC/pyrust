@@ -789,7 +789,7 @@ pub(crate) fn validate_kwargs_and_collect_positional<'a>(
         match &arg.name {
             None => positional.push(arg),
             Some(name) => {
-                if !allowed_kwargs.iter().any(|k| *k == name.as_str()) {
+                if !allowed_kwargs.contains(&name.as_str()) {
                     return Err(type_error(format!(
                         "{fn_name}() got an unexpected keyword argument '{name}'"
                     )));
@@ -871,6 +871,7 @@ pub(crate) fn no_overload_matched<T>(
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 literals are deliberate test data, not π.
 mod tests {
     //! Pin the strict-1:1 contract for every wrapper.  These tests double as
     //! the executable spec the `pyrust_module!` overload dispatcher relies on:
@@ -1090,7 +1091,7 @@ mod tests {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            pyrust_core::install_iter_values(|v| crate::interpreter::iter_values(v));
+            pyrust_core::install_iter_values(crate::interpreter::iter_values);
         });
     }
 

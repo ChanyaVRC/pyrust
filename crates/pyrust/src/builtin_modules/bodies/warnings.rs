@@ -198,10 +198,7 @@ fn message_text(v: &Value) -> String {
             if let Some(args_val) = borrow.attrs.get("args") {
                 match args_val.kind() {
                     ValueKind::Tuple(items) if !items.is_empty() => {
-                        match items[0].kind() {
-                            ValueKind::Str(s) => return s.to_string(),
-                            _ => {}
-                        }
+                        if let ValueKind::Str(s) = items[0].kind() { return s.to_string() }
                     }
                     _ => {}
                 }

@@ -987,7 +987,7 @@ impl Parser {
             // Build a Stmt::Assign / AttrAssign / IndexAssign / SliceAssign for
             // each target group.  For chained assignment we evaluate the RHS
             // exactly once and reuse the value for every target.
-            return Ok(build_assign_stmts(target_groups, rhs)?);
+            return build_assign_stmts(target_groups, rhs);
         }
 
         // Starred item outside assignment is invalid

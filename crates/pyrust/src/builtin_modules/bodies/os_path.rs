@@ -416,10 +416,7 @@ fn posix_relpath(path: &str, start: &str) -> Result<String> {
         .zip(start_parts.iter())
         .take_while(|(a, b)| a == b)
         .count();
-    let mut rel: Vec<&str> = Vec::new();
-    for _ in common..start_parts.len() {
-        rel.push("..");
-    }
+    let mut rel: Vec<&str> = vec![".."; start_parts.len() - common];
     rel.extend_from_slice(&path_parts[common..]);
     if rel.is_empty() {
         Ok(".".to_string())

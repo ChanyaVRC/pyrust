@@ -3850,7 +3850,7 @@ impl Interpreter {
             && let ValueKind::PyInstance(inst_rc) = instance.kind() {
                 inst_rc.borrow_mut().attrs.insert("path", path_val);
             }
-        return Ok(instance);
+        Ok(instance)
     }
 
     /// Instantiate a normal (non-exception) class: walk the MRO for a
@@ -5674,12 +5674,12 @@ fn assemble_numeric(
     match effective_align {
         '=' => {
             // sign + prefix + fill + body
-            let body_grouped = if effective_fill == '0' && fs.grouping.is_some() {
+            let body_grouped = if let (true, Some(grouping)) = (effective_fill == '0', fs.grouping) {
                 // CPython interleaves the grouping separator with the zero
                 // pad characters so the resulting body still groups in
                 // threes-or-fours.  Apply by left-padding the body with
                 // zeros first, then re-grouping the integer portion.
-                regroup_with_zero_pad(&body, pad, fs.grouping.unwrap(), group_size, alt_prefix)
+                regroup_with_zero_pad(&body, pad, grouping, group_size, alt_prefix)
             } else {
                 let mut s = String::with_capacity(pad + body.len());
                 s.push_str(&fill_str);

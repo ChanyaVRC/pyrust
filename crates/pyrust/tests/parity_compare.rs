@@ -94,7 +94,7 @@ fn warn_if_python_version_off_target(python: &Path) {
         _ => return,
     };
     let raw = String::from_utf8_lossy(&out);
-    let mut parts = raw.trim().split_whitespace();
+    let mut parts = raw.split_whitespace();
     let major: u32 = match parts.next().and_then(|s| s.parse().ok()) {
         Some(n) => n,
         None => return,
@@ -123,7 +123,7 @@ fn is_cpython_warning_header(line: &str) -> bool {
     let prefix = &line[..warn_pos];
     let mut chars = prefix.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == ':' && chars.peek().map_or(false, |d| d.is_ascii_digit()) {
+        if c == ':' && chars.peek().is_some_and(|d| d.is_ascii_digit()) {
             return true;
         }
     }

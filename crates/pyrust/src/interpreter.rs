@@ -134,6 +134,7 @@ pub struct Interpreter {
     ///   * `vm.rs::resume_generator_with_exc` — each generator resume
     ///     (`Function`; the regs pointer comes from the heap-allocated
     ///     `GeneratorFrame::regs`, stable across yields)
+    ///
     /// Class bodies (`Insn::MakeClass`) publish a `FrameKind::Class` view
     /// so that `locals()` inside a class body returns the partially-built
     /// class attrs dict (issue #487).

@@ -522,7 +522,7 @@ pyrust_module! {
             for item in &encoded {
                 if let ValueKind::Tuple(pair) = item.kind() {
                     let pair = pair.to_vec();
-                    let name = match pair.get(0).map(|v| v.kind()) {
+                    let name = match pair.first().map(|v| v.kind()) {
                         Some(ValueKind::Str(s)) => Some(s.to_string()),
                         _ => None,
                     };

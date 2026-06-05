@@ -1885,10 +1885,16 @@ fn libm_pow(x: f64, y: f64) -> f64 {
 // ── Lanczos gamma / lgamma (math.gamma, math.lgamma) ─────────────────────────
 //
 // Constants and algorithm ported verbatim from CPython 3.12 Modules/mathmodule.c.
-
+// The literal digits are kept verbatim from the C source (they round to the
+// identical f64 either way); silence clippy's precision/constant lints so the
+// port stays a 1:1 textual match with CPython.
+#[allow(clippy::excessive_precision, clippy::approx_constant)]
 const PI_M: f64 = 3.141592653589793238462643383279502884197;
+#[allow(clippy::excessive_precision)]
 const LANCZOS_G: f64 = 6.024680040776729583740234375;
+#[allow(clippy::excessive_precision)]
 const LANCZOS_G_MINUS_HALF: f64 = 5.524680040776729583740234375;
+#[allow(clippy::excessive_precision)]
 const LANCZOS_NUM_COEFFS: [f64; 13] = [
     23531376880.410759688572007674451636754734846804940,
     42919803642.649098768957899047001988850926355848959,

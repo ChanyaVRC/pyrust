@@ -534,7 +534,8 @@ impl BuiltinTypeOps for ByteArrayOps {
                     Some(v) => match v.kind() {
                         ValueKind::Int(n) => {
                             let len = data.len();
-                            let i = if n < 0 {
+
+                            if n < 0 {
                                 let from_end = (-n) as usize;
                                 len.checked_sub(from_end).ok_or_else(|| {
                                     PyError::named(
@@ -551,8 +552,7 @@ impl BuiltinTypeOps for ByteArrayOps {
                                     ));
                                 }
                                 ui
-                            };
-                            i
+                            }
                         }
                         ValueKind::Bool(b) => b as usize,
                         _ => {
@@ -748,11 +748,11 @@ fn slice_indices(start: i64, stop: i64, step: i64) -> impl Iterator<Item = usize
     impl Iterator for SliceIter {
         type Item = usize;
         fn next(&mut self) -> Option<usize> {
-            if self.step > 0 && self.current < self.stop {
-                let c = self.current as usize;
-                self.current += self.step;
-                Some(c)
-            } else if self.step < 0 && self.current > self.stop {
+            // Forward (step > 0) and backward (step < 0) slices share the same
+            // advance step; only the bound test differs.
+            let in_range = (self.step > 0 && self.current < self.stop)
+                || (self.step < 0 && self.current > self.stop);
+            if in_range {
                 let c = self.current as usize;
                 self.current += self.step;
                 Some(c)

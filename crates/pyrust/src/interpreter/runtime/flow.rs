@@ -457,7 +457,7 @@ impl Interpreter {
     /// Returns `Some((matched_group, remaining_group))` where:
     ///   - `matched_group`    = new group containing only matching exceptions
     ///   - `remaining_group`  = `Some(group)` with non-matching exceptions,
-    ///                          or `None` if all exceptions were matched
+    ///     or `None` if all exceptions were matched
     fn split_exception_group(
         &self,
         group_in: &Value,

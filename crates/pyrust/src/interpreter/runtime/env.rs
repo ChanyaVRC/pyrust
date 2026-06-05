@@ -2672,7 +2672,7 @@ impl Interpreter {
                 && let ValueKind::PyModule(m) = val.kind()
             {
                 crate::builtin_modules::collections::inject_python_members(
-                    self, &m,
+                    self, m,
                 )?;
             }
             // Parent-package identity fix-up: a built-in module like
