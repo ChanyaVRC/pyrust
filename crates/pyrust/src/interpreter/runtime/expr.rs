@@ -4213,8 +4213,10 @@ impl Interpreter {
                     //  - `|=` inserts RHS keys into the LHS. Raw insertion of a
                     //    primitive RHS key is exact regardless of the LHS, so we
                     //    only need to dispatch `__eq__` when the *RHS* holds an
-                    //    object key. The LHS is never scanned — this is what
-                    //    keeps `s |= t` allocation- and scan-neutral.
+                    //    object key. The LHS is never scanned, and the per-key
+                    //    object check is folded into the single insert pass (no
+                    //    separate full RHS pre-scan) — this is what keeps the
+                    //    `s |= t` hot loop scan-neutral vs the pre-#2244 path.
                     //  - `&=` / `-=` / `^=` test LHS keys against the RHS (and,
                     //    for `^=`, vice versa), so an object key on *either* side
                     //    means raw `contains` would compare by identity and miss
@@ -4223,26 +4225,31 @@ impl Interpreter {
                     //    same single `set_with_mut` borrow (so the backing
                     //    `RefCell` is acquired once) and bails *before* mutating
                     //    to avoid a partial in-place update.
-                    let rhs_has_object = set_has_object_key(&rhs_items);
                     let needs_eq = left
                         .set_with_mut(|lhs| {
                             match op {
                                 BinaryOp::BitOr => {
-                                    if rhs_has_object {
-                                        return true;
-                                    }
+                                    // Fold the object-key check into the single
+                                    // insert pass (no separate full RHS pre-scan):
+                                    // bail on the first object key.  Primitive
+                                    // keys inserted before the bail are exact and
+                                    // are re-inserted idempotently by the slow
+                                    // path, so a partial in-place insert is safe.
                                     for k in &rhs_items {
+                                        if key_contains_object(k) {
+                                            return true;
+                                        }
                                         lhs.insert(k.clone());
                                     }
                                 }
                                 BinaryOp::BitAnd => {
-                                    if rhs_has_object || set_has_object_key(lhs) {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
                                         return true;
                                     }
                                     lhs.retain(|k| rhs_items.contains(k));
                                 }
                                 BinaryOp::Sub => {
-                                    if rhs_has_object || set_has_object_key(lhs) {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
                                         return true;
                                     }
                                     for k in &rhs_items {
@@ -4250,7 +4257,7 @@ impl Interpreter {
                                     }
                                 }
                                 BinaryOp::BitXor => {
-                                    if rhs_has_object || set_has_object_key(lhs) {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
                                         return true;
                                     }
                                     let mut to_add: Vec<PyKey> = Vec::new();
