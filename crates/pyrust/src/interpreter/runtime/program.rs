@@ -403,15 +403,14 @@ impl Interpreter {
     }
 
     /// Parse a Python source string into a statement list.
-    /// Converts lexer/parse errors into `SyntaxError` exceptions.
+    /// Converts lexer/parse errors into `SyntaxError` (or its `IndentationError`
+    /// subclass for indentation failures) exceptions.
     pub(crate) fn parse_source_to_stmts(source: &str) -> Result<Vec<crate::ast::Stmt>> {
         let tokens = crate::lexer::Lexer::new(source)
-            .map_err(|e| pyrust_core::py_err!("SyntaxError", lex_parse_message(e)))?
+            .map_err(lex_parse_to_exc)?
             .into_tokens();
         let mut parser = crate::parser::Parser::new(tokens);
-        parser
-            .parse_program()
-            .map_err(|e| pyrust_core::py_err!("SyntaxError", lex_parse_message(e)))
+        parser.parse_program().map_err(lex_parse_to_exc)
     }
 
     /// Execute a source string as statements, optionally in an explicit
@@ -874,13 +873,27 @@ impl Interpreter {
     }
 }
 
-/// Extract the raw message from a `PyError::Lex` or `PyError::Parse` error,
-/// stripping the `"Lex error: "` / `"Parse error: "` prefixes that `Display`
-/// would add.  Used by `parse_source_to_stmts` so that lex/parse failures
-/// raised as `SyntaxError` carry the same message text as CPython.
-fn lex_parse_message(e: PyError) -> String {
-    match e {
+/// Convert a `PyError::Lex` / `PyError::Parse` produced during source parsing
+/// into the Python exception CPython raises for it.  The raw message is used
+/// directly (the `"Lex error: "` / `"Parse error: "` `Display` prefixes are
+/// stripped) so the text matches CPython.  Indentation failures map to the
+/// `IndentationError` subclass of `SyntaxError`, matching CPython 3.12's type
+/// (e.g. `too many levels of indentation`, issue #2221); everything else is a
+/// plain `SyntaxError`.
+fn lex_parse_to_exc(e: PyError) -> PyError {
+    let msg = match e {
         PyError::Lex(s) | PyError::Parse(s) => s,
         other => other.to_string(),
+    };
+    if is_indentation_message(&msg) {
+        pyrust_core::py_err!("IndentationError", msg)
+    } else {
+        pyrust_core::py_err!("SyntaxError", msg)
     }
+}
+
+/// Whether a lexer/parser error message describes an indentation failure that
+/// CPython reports as `IndentationError` rather than a bare `SyntaxError`.
+fn is_indentation_message(msg: &str) -> bool {
+    msg == "too many levels of indentation"
 }
