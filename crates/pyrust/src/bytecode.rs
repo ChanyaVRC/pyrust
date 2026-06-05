@@ -731,6 +731,14 @@ pub struct FnCode {
     /// lookup.  Empty when bytecode was built without the optimizer (the VM then
     /// falls back to the dynamic `SetupExcept`/`PopExcept` handler stack).
     pub(crate) exc_table: Vec<u32>,
+    /// `true` when `exc_table` contains at least one real handler target (i.e.
+    /// the function body has a reachable `try`/`except`/`finally`/`with`).
+    /// Precomputed by the optimizer so the self-recursion trampoline (#2234)
+    /// can gate on it with an O(1) check: a handler-free function can be
+    /// trampolined because an unhandled raise in a trampolined frame correctly
+    /// propagates straight out (no frame on the stack could catch it).
+    /// Conservatively `true` for un-optimized bytecode (no trampolining).
+    pub(crate) has_exc_handlers: bool,
 }
 
 pub(crate) use crate::optimizer::EXC_NO_HANDLER;

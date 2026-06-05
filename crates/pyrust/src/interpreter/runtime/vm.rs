@@ -1068,7 +1068,64 @@ impl Interpreter {
             self.active_exception = gen_active_exception;
         }
 
+        // ── Self-recursion trampoline (#2234) ───────────────────────────────
+        // A direct self-recursive call (callee == the function currently
+        // executing) keeps `code` / env / `num_locals` invariant, so only
+        // `regs` and `pc` need swapping.  Instead of recursing through
+        // `call_function_expanded` -> `call_user_function_expanded` ->
+        // `run_bytecode_for_fn` (native call machinery, ~156ns/call), push the
+        // caller's frame onto `tramp_stack` and loop back to pc=0 in the same
+        // dispatch loop — ~2x on recursive workloads (e.g. fib).  Gated (see the
+        // `CallMemo` arm) to the simple shape: a handler-free, non-generator,
+        // loop-free, non-variadic self-call with no cell/global/nonlocal names,
+        // so env is unchanged and an unhandled raise propagates straight out
+        // with no cross-frame unwinding.  Each callee gets a pooled `Vec<Value>`
+        // register file (stable heap address ⇒ the active `RegSlice` and any
+        // saved one stay valid across `tramp_stack` reallocations).  `TrampFrame`
+        // records what the caller needs restored on the callee's `Return`.
+        struct TrampFrame {
+            /// Caller's register slice (a raw pointer into its own — stable —
+            /// register buffer; valid until this frame is restored).
+            saved_regs: RegSlice,
+            /// Caller's resume pc (already advanced past the call instruction).
+            saved_pc: usize,
+            /// Caller register that receives the call's result.
+            dst: u32,
+            /// Caller's owned register buffer (`None` for the bottom,
+            /// natively-called frame, which uses the param `regs`).  Moved here
+            /// while the callee runs; restored on return.
+            owned: Option<Vec<Value>>,
+            /// Caller's source line at the call site (restored for tracebacks).
+            saved_cur_line: u32,
+        }
+        let mut tramp_stack: Vec<TrampFrame> = Vec::new();
+        let mut tramp_active_owned: Option<Vec<Value>> = None;
+        let mut tramp_pool: Vec<Vec<Value>> = Vec::new();
+
         'vm: loop {
+        // Return `$v` from the current frame: if a self-recursion trampoline
+        // frame is active (#2234), pop it (return its regs buffer to the pool,
+        // restore the caller) and resume the caller with `$v` in its
+        // destination register; otherwise return out of the VM.  Used at every
+        // `Returned` exit so a trampolined frame is never leaked.
+        macro_rules! tramp_return {
+            ($v:expr) => {{
+                let __v = $v;
+                if let Some(__saved) = tramp_stack.pop() {
+                    if let Some(mut __buf) = tramp_active_owned.take() {
+                        __buf.clear();
+                        tramp_pool.push(__buf);
+                    }
+                    tramp_active_owned = __saved.owned;
+                    regs = __saved.saved_regs;
+                    pc = __saved.saved_pc;
+                    cur_line = __saved.saved_cur_line;
+                    regs[__saved.dst as usize] = __v;
+                    continue 'vm;
+                }
+                return Ok(FrameOutcome::Returned(__v));
+            }};
+        }
         // Dispatch errors through the active exception handler stack.
         // Defined inside the loop so `continue 'vm` resolves to this loop.
         macro_rules! vm_try {
@@ -1146,7 +1203,9 @@ impl Interpreter {
             }
             let Some(insn) = code.insns.get(pc) else {
                 if pc == code.insns.len() {
-                    return Ok(FrameOutcome::Returned(Value::none()));
+                    // Implicit fall-off-the-end return (no trailing ReturnNone);
+                    // pop any active trampoline frame like an explicit return.
+                    tramp_return!(Value::none());
                 }
                 pyrust_core::set_current_vm_line(cur_line);
                 return Err(PyError::Runtime(format!(
@@ -2075,6 +2134,82 @@ impl Interpreter {
                     // that essentially never hit) and grew the cache without
                     // bound.  Execution is now identical to a plain `Call`.
                     let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
+                    // Self-recursion trampoline (#2234): a direct self-recursive
+                    // call keeps `code` / env / `num_locals` invariant, so only
+                    // `regs` and `pc` need swapping.  Push the caller's frame and
+                    // loop back to pc=0 instead of recursing through the native
+                    // call machinery (~156ns/call).
+                    'trampoline: {
+                        let ValueKind::UserFunction(f) = func_val.kind() else {
+                            break 'trampoline;
+                        };
+                        // Gate (all O(1)):
+                        // - self-recursion (callee == current fn) ⇒ same code/env;
+                        // - no generator / loops / cell vars / global / nonlocal
+                        //   (so env is unchanged and binds are plain registers);
+                        // - `!has_exc_handlers`: a raise in a trampolined frame has
+                        //   no handler at any level, so it correctly propagates
+                        //   straight out — no cross-frame unwinding needed.
+                        if Some(f.id) != current_fn_id
+                            || code.is_generator
+                            || code.num_iters != 0
+                            || code.has_exc_handlers
+                            || !code.cell_vars.is_empty()
+                            || !f.global_names.is_empty()
+                            || !f.nonlocal_names.is_empty()
+                        {
+                            break 'trampoline;
+                        }
+                        let nparams = f.params.len();
+                        if (*argc as usize) != nparams
+                            || f.params.iter().any(|p| {
+                                p.is_args || p.is_kwargs || p.is_keyword_only
+                            })
+                        {
+                            break 'trampoline;
+                        }
+                        // Recursion limit: the trampoline bypasses the native
+                        // `CallDepthGuard`, so combine the native depth consumed
+                        // before trampolining started (`call_depth()`, constant
+                        // here) with the trampoline depth so the effective limit
+                        // matches the normal call path (and CPython).
+                        if call_depth() + tramp_stack.len() >= max_call_depth() {
+                            let exc = self.instantiate_named_exception(
+                                "RecursionError",
+                                "maximum recursion depth exceeded".to_string(),
+                            )?;
+                            return Err(PyError::Raised(exc));
+                        }
+                        let num_regs = code.num_regs as usize;
+                        let mut new_regs = tramp_pool.pop().unwrap_or_default();
+                        new_regs.clear();
+                        new_regs.resize(num_regs, Value::unset());
+                        for i in 0..nparams {
+                            let v = vm_try!(vm_read(
+                                &regs,
+                                *func_reg + 1 + i as u32,
+                                num_locals
+                            ));
+                            if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
+                                new_regs[r as usize] = v;
+                            }
+                        }
+                        if let Some(slot) = f.self_bind {
+                            new_regs[slot as usize] = func_val.clone();
+                        }
+                        let new_ptr = new_regs.as_mut_ptr();
+                        tramp_stack.push(TrampFrame {
+                            saved_regs: regs,
+                            saved_pc: pc,
+                            dst: *func_reg,
+                            owned: tramp_active_owned.take(),
+                            saved_cur_line: cur_line,
+                        });
+                        tramp_active_owned = Some(new_regs);
+                        regs = unsafe { RegSlice::from_raw(new_ptr, num_regs) };
+                        pc = 0;
+                        continue 'vm;
+                    }
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
                     for i in 0..crate::bytecode::Reg::from(*argc) {
@@ -2101,10 +2236,11 @@ impl Interpreter {
 
                 // ── Returns ──────────────────────────────────────────────
                 Insn::Return(src) => {
-                    return Ok(FrameOutcome::Returned(vm_try!(vm_read(&regs, *src, num_locals))));
+                    let v = vm_try!(vm_read(&regs, *src, num_locals));
+                    tramp_return!(v);
                 }
                 Insn::ReturnNone => {
-                    return Ok(FrameOutcome::Returned(Value::none()));
+                    tramp_return!(Value::none());
                 }
 
                 // ── Tail-call ────────────────────────────────────────────
@@ -2197,7 +2333,7 @@ impl Interpreter {
                         }
                         let call_result = self.call_function_expanded(callee_val, &buf);
                         self.call_arg_buf = buf;
-                        return Ok(FrameOutcome::Returned(vm_try!(call_result)));
+                        tramp_return!(vm_try!(call_result));
                     }
                 }
 
@@ -3747,6 +3883,7 @@ mod vm_tests {
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
+            has_exc_handlers: false,
         }
     }
 
