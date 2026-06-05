@@ -7579,17 +7579,40 @@ impl Interpreter {
         // *before* the slice even ran — the dominant cost in the #2114 tuple
         // pathology (a `t[100:100]` of a 1000-tuple was 25× slower than the
         // list equivalent).  Slice the tuple through a borrow so the source is
-        // never cloned.  Every other kind keeps the cheap owned-clone path,
-        // byte-identical to before, so the list/bytes/str hot paths are
-        // unaffected.
-        let obj_ref = vm_read_ref(regs, obj, num_locals)?;
-        // `is_tuple()` checks the NaN-box tag directly — no `RefCell` borrow,
-        // unlike `.kind()` on a list — so this guard adds no cost to the
-        // list/bytes/str hot paths below.
-        if obj_ref.is_tuple() {
-            return self.eval_slice(obj_ref, lo, hi, st);
+        // never cloned.  Every other kind keeps the exact master path
+        // (`vm_read` → owned clone), so the list/bytes/str hot loops are
+        // byte-identical to before.
+        //
+        // `is_tuple()` is a NaN-box tag compare on the raw register — no
+        // `RefCell` borrow, no clone — so the non-tuple branch below reaches
+        // `vm_read` having done only this one extra compare.
+        if regs[obj as usize].is_tuple() {
+            let obj_ref = vm_read_ref(regs, obj, num_locals)?;
+            // SAFETY/soundness: only take the borrow fast path when every bound
+            // is a plain int/None.  `eval_slice` resolves the bounds via
+            // `resolve_slice_bound_val`, which runs no Python code for
+            // None/Int/Bool/BigInt but dispatches user `__index__` otherwise —
+            // and that `__index__` can reassign the source register
+            // (`t[Evil():900]` with `Evil.__index__` doing `t = ...`), freeing
+            // the tuple's backing `Vec` while we hold a reference into it
+            // (use-after-free).  When a bound is an `__index__` object we fall
+            // through to the owned-clone path below, which is independent of the
+            // register and so survives any reassignment — identical to master.
+            let bound_is_plain = |v: &Value| {
+                v.is_none()
+                    || matches!(
+                        v.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    )
+            };
+            if lo.as_ref().is_none_or(&bound_is_plain)
+                && hi.as_ref().is_none_or(&bound_is_plain)
+                && st.as_ref().is_none_or(&bound_is_plain)
+            {
+                return self.eval_slice(obj_ref, lo, hi, st);
+            }
         }
-        let obj_val = obj_ref.clone();
+        let obj_val = vm_read(regs, obj, num_locals)?;
         // Mapping targets (dict) treat slice notation as a *key lookup*, not a
         // slice: `d[1:2]` builds the slice object and looks it up as a key
         // (KeyError if absent), matching CPython and the prior BuildSlice +
