@@ -3,13 +3,37 @@ use num_bigint::BigInt;
 use crate::error::{PyError, Result};
 use crate::token::{FStringPart, Token};
 
+/// Maximum number of indentation levels the lexer accepts, matching CPython's
+/// tokenizer `MAXINDENT` (100).  The base (column-0) level is always present,
+/// so this permits 99 nested indents and rejects the 100th with
+/// `IndentationError: too many levels of indentation` — exactly CPython 3.12's
+/// boundary.  Bounding indentation bounds compound-statement nesting depth,
+/// which is what prevents deeply nested blocks from overflowing the parser's
+/// native stack (issue #2221).
+const MAX_INDENT_LEVELS: usize = 100;
+
 pub struct Lexer {
     tokens: Vec<Token>,
+    /// 1-based source line number of each token, recorded as the token is
+    /// emitted (parallel to `tokens`).  Tracking the line during lexing — as
+    /// opposed to counting `Token::Newline` post-hoc — is what lets tokens that
+    /// follow a physical newline *inside* an open bracket group (implicit line
+    /// continuation, where no `Newline` token is emitted) or *inside* a
+    /// multi-line string literal carry their true line number (issue #2227).
+    line_nos: Vec<u32>,
+    /// Current 1-based physical line.  Advanced on every physical `\n` consumed
+    /// anywhere — including newlines suppressed inside brackets and newlines
+    /// spanned by a single multi-line string/f-string token.
+    line: u32,
 }
 
 impl Lexer {
     pub fn new(src: &str) -> Result<Self> {
-        let mut lexer = Self { tokens: Vec::new() };
+        let mut lexer = Self {
+            tokens: Vec::new(),
+            line_nos: Vec::new(),
+            line: 1,
+        };
         lexer.lex_source(src)?;
         Ok(lexer)
     }
@@ -18,33 +42,33 @@ impl Lexer {
         self.tokens
     }
 
+    /// Push a token, recording the current physical line alongside it.
+    #[inline]
+    fn emit(&mut self, tok: Token) {
+        self.line_nos.push(self.line);
+        self.tokens.push(tok);
+    }
+
+    /// Advance the physical-line counter by the number of `\n` characters in
+    /// `chars[from..to]`.  Used after sub-lexers that may consume a span
+    /// crossing physical lines (multi-line strings / f-strings).
+    #[inline]
+    fn advance_line_over(&mut self, chars: &[char], from: usize, to: usize) {
+        for &c in &chars[from..to] {
+            if c == '\n' {
+                self.line += 1;
+            }
+        }
+    }
+
     /// Consume the lexer, returning the token stream together with a parallel
-    /// vector of 1-based source line numbers (one entry per token).  A
-    /// `Token::Newline` is assigned the line it terminates; the token after
-    /// it gets the next line number.  Tokens emitted by `handle_indent`
-    /// (Indent / Dedent) receive the line of the physical line that caused
-    /// the indentation change.
-    ///
-    /// The line numbers are computed post-hoc by counting `Token::Newline`
-    /// occurrences in the flat token stream, which is equivalent to scanning
-    /// the source text for `\n` characters.  Multi-line expressions (those
-    /// inside `( [ {`) do not emit intermediate `Newline` tokens, so all
-    /// tokens within the expression are assigned the line of the opening
-    /// delimiter — this is a known approximation.
+    /// vector of 1-based source line numbers (one entry per token), recorded
+    /// during lexing by [`Lexer::emit`].  A token that begins on a continuation
+    /// line inside brackets, or after a multi-line string, carries its true
+    /// physical line number.
     pub fn into_tokens_with_linenos(self) -> (Vec<Token>, Vec<u32>) {
-        let mut line: u32 = 1;
-        let line_nos: Vec<u32> = self
-            .tokens
-            .iter()
-            .map(|tok| {
-                let l = line;
-                if matches!(tok, Token::Newline) {
-                    line += 1;
-                }
-                l
-            })
-            .collect();
-        (self.tokens, line_nos)
+        debug_assert_eq!(self.tokens.len(), self.line_nos.len());
+        (self.tokens, self.line_nos)
     }
 
     fn lex_source(&mut self, src: &str) -> Result<()> {
@@ -92,14 +116,15 @@ impl Lexer {
                 // logical-line tokens (they emit Newline only at the top level,
                 // matching CPython's behaviour for blank lines outside parens).
                 if paren_depth == 0 {
-                    self.tokens.push(Token::Newline);
+                    self.emit(Token::Newline);
                 }
                 // Advance past the '\n' (or reach end-of-source).
-                pos = if eol < chars.len() {
-                    eol + 1
+                if eol < chars.len() {
+                    pos = eol + 1;
+                    self.line += 1; // physical newline consumed
                 } else {
-                    chars.len() + 1
-                };
+                    pos = chars.len() + 1;
+                }
                 continue;
             }
 
@@ -121,25 +146,39 @@ impl Lexer {
 
         while indent_stack.len() > 1 {
             indent_stack.pop();
-            self.tokens.push(Token::Dedent);
+            self.emit(Token::Dedent);
         }
 
-        self.tokens.push(Token::Eof);
+        self.emit(Token::Eof);
         Ok(())
     }
 
     fn handle_indent(&mut self, indent: usize, stack: &mut Vec<usize>) -> Result<()> {
         let current = *stack.last().expect("indent stack is never empty");
         if indent > current {
+            // CPython's tokenizer caps indentation nesting at `MAXINDENT` (100)
+            // levels, raising `IndentationError: too many levels of indentation`.
+            // Because a deeper *compound statement* always requires a deeper
+            // indent, this is what bounds statement-nesting depth.  Enforcing it
+            // here turns pathological input — issue #2221's 10k-deep nested
+            // `if True:` blocks — into a catchable exception instead of
+            // overflowing the parser's native stack (SIGABRT).  `stack.len()`
+            // counts the open indentation levels (the base level `0` is always
+            // present), so a push would create level `stack.len()`; reject once
+            // we already hold `MAX_INDENT_LEVELS` levels, matching CPython 3.12
+            // which accepts 99 nested levels and rejects the 100th.
+            if stack.len() >= MAX_INDENT_LEVELS {
+                return Err(PyError::Lex("too many levels of indentation".to_string()));
+            }
             stack.push(indent);
-            self.tokens.push(Token::Indent);
+            self.emit(Token::Indent);
             return Ok(());
         }
 
         if indent < current {
             while indent < *stack.last().expect("indent stack is never empty") {
                 stack.pop();
-                self.tokens.push(Token::Dedent);
+                self.emit(Token::Dedent);
             }
             let after = *stack.last().expect("indent stack is never empty");
             if indent != after {
@@ -166,11 +205,18 @@ impl Lexer {
         let mut line_continued = false;
 
         loop {
+            // Position at the start of the token about to be lexed.  After the
+            // match, any physical newlines the token *span* crossed (only
+            // possible for multi-line string / f-string / bytes literals) are
+            // folded into the line counter.  The `'\n'` and EOF arms manage
+            // their own line tracking and `return`/`continue` before reaching
+            // the post-match advance, so they are never double-counted.
+            let tok_start = pos;
             match chars.get(pos).copied() {
                 None => {
                     // End of source.
                     if paren_depth == 0 && !line_continued {
-                        self.tokens.push(Token::Newline);
+                        self.emit(Token::Newline);
                     }
                     return Ok((chars.len() + 1, paren_depth));
                 }
@@ -179,6 +225,7 @@ impl Lexer {
                         // Backslash continuation: consume '\n' and keep going
                         // on the next physical line (do NOT emit Newline).
                         pos += 1;
+                        self.line += 1; // physical newline consumed
                         // Skip leading whitespace on the continuation line.
                         while matches!(chars.get(pos), Some(&' ') | Some(&'\t')) {
                             pos += 1;
@@ -187,10 +234,14 @@ impl Lexer {
                         continue;
                     }
                     if paren_depth == 0 {
-                        self.tokens.push(Token::Newline);
+                        self.emit(Token::Newline);
                     }
                     // Advance past '\n' and return so that lex_source can
-                    // process the indentation of the next line.
+                    // process the indentation of the next line.  The physical
+                    // newline is consumed here whether or not a `Newline` token
+                    // was emitted (inside brackets it is suppressed but the line
+                    // counter must still advance — issue #2227).
+                    self.line += 1;
                     return Ok((pos + 1, paren_depth));
                 }
                 Some('\r') => {
@@ -209,7 +260,7 @@ impl Lexer {
                 }
                 Some('0'..='9') => {
                     let (tok, next) = lex_number(chars, pos)?;
-                    self.tokens.push(tok);
+                    self.emit(tok);
                     pos = next;
                 }
                 Some('a'..='z') | Some('A'..='Z') | Some('_') => {
@@ -224,7 +275,7 @@ impl Lexer {
                     {
                         let quote = chars[pos + 2];
                         let (tok, next) = lex_fstring(chars, pos + 3, quote, true)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else if (c == 'f' || c == 'F')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
@@ -232,14 +283,14 @@ impl Lexer {
                         // Check for f-string prefix: f" or f' (or F" / F')
                         let quote = chars[pos + 1];
                         let (tok, next) = lex_fstring(chars, pos + 2, quote, false)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         // Bytes literal: b"..." or b'...'
                         let (tok, next) = lex_bytes(chars, pos + 1, false)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
                         && matches!(chars.get(pos + 1), Some('r') | Some('R'))
@@ -247,14 +298,14 @@ impl Lexer {
                     {
                         // Raw bytes literal: br"..." / bR"..." / BR"..." / Br"..."
                         let (tok, next) = lex_bytes(chars, pos + 2, true)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         // Raw string literal: r"..." / R"..."
                         let (tok, next) = lex_string(chars, pos + 1, true)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else if (c == 'r' || c == 'R')
                         && matches!(chars.get(pos + 1), Some('b') | Some('B'))
@@ -262,7 +313,7 @@ impl Lexer {
                     {
                         // Raw bytes literal: rb"..." / rB"..." / RB"..." / Rb"..."
                         let (tok, next) = lex_bytes(chars, pos + 2, true)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else if (c == 'u' || c == 'U')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
@@ -271,208 +322,208 @@ impl Lexer {
                         // In Python 3.3+, u"..." is identical to a plain string literal.
                         // Combinations like ur"", ub"" are not valid in Python 3.
                         let (tok, next) = lex_string(chars, pos + 1, false)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else {
                         let (tok, next) = lex_ident_or_keyword(chars, pos);
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     }
                 }
                 Some('"') | Some('\'') => {
                     let (tok, next) = lex_string(chars, pos, false)?;
-                    self.tokens.push(tok);
+                    self.emit(tok);
                     pos = next;
                 }
                 Some('+') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::PlusAssign);
+                        self.emit(Token::PlusAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Plus);
+                        self.emit(Token::Plus);
                         pos += 1;
                     }
                 }
                 Some('-') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::MinusAssign);
+                        self.emit(Token::MinusAssign);
                         pos += 2;
                     } else if chars.get(pos + 1) == Some(&'>') {
-                        self.tokens.push(Token::Arrow);
+                        self.emit(Token::Arrow);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Minus);
+                        self.emit(Token::Minus);
                         pos += 1;
                     }
                 }
                 Some('@') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::AtAssign);
+                        self.emit(Token::AtAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::At);
+                        self.emit(Token::At);
                         pos += 1;
                     }
                 }
                 Some(';') => {
-                    self.tokens.push(Token::Semicolon);
+                    self.emit(Token::Semicolon);
                     pos += 1;
                 }
                 Some('*') => {
                     if chars.get(pos + 1) == Some(&'*') {
                         if chars.get(pos + 2) == Some(&'=') {
-                            self.tokens.push(Token::StarStarAssign);
+                            self.emit(Token::StarStarAssign);
                             pos += 3;
                         } else {
-                            self.tokens.push(Token::StarStar);
+                            self.emit(Token::StarStar);
                             pos += 2;
                         }
                     } else if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::StarAssign);
+                        self.emit(Token::StarAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Star);
+                        self.emit(Token::Star);
                         pos += 1;
                     }
                 }
                 Some('/') => {
                     if chars.get(pos + 1) == Some(&'/') {
                         if chars.get(pos + 2) == Some(&'=') {
-                            self.tokens.push(Token::SlashSlashAssign);
+                            self.emit(Token::SlashSlashAssign);
                             pos += 3;
                         } else {
-                            self.tokens.push(Token::SlashSlash);
+                            self.emit(Token::SlashSlash);
                             pos += 2;
                         }
                     } else if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::SlashAssign);
+                        self.emit(Token::SlashAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Slash);
+                        self.emit(Token::Slash);
                         pos += 1;
                     }
                 }
                 Some('%') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::PercentAssign);
+                        self.emit(Token::PercentAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Percent);
+                        self.emit(Token::Percent);
                         pos += 1;
                     }
                 }
                 Some('&') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::AmpersandAssign);
+                        self.emit(Token::AmpersandAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Ampersand);
+                        self.emit(Token::Ampersand);
                         pos += 1;
                     }
                 }
                 Some('|') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::PipeAssign);
+                        self.emit(Token::PipeAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Pipe);
+                        self.emit(Token::Pipe);
                         pos += 1;
                     }
                 }
                 Some('^') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::CaretAssign);
+                        self.emit(Token::CaretAssign);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Caret);
+                        self.emit(Token::Caret);
                         pos += 1;
                     }
                 }
                 Some('~') => {
-                    self.tokens.push(Token::Tilde);
+                    self.emit(Token::Tilde);
                     pos += 1;
                 }
                 Some('<') => {
                     if chars.get(pos + 1) == Some(&'<') {
                         if chars.get(pos + 2) == Some(&'=') {
-                            self.tokens.push(Token::LShiftAssign);
+                            self.emit(Token::LShiftAssign);
                             pos += 3;
                         } else {
-                            self.tokens.push(Token::LShift);
+                            self.emit(Token::LShift);
                             pos += 2;
                         }
                     } else if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::Le);
+                        self.emit(Token::Le);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Lt);
+                        self.emit(Token::Lt);
                         pos += 1;
                     }
                 }
                 Some('>') => {
                     if chars.get(pos + 1) == Some(&'>') {
                         if chars.get(pos + 2) == Some(&'=') {
-                            self.tokens.push(Token::RShiftAssign);
+                            self.emit(Token::RShiftAssign);
                             pos += 3;
                         } else {
-                            self.tokens.push(Token::RShift);
+                            self.emit(Token::RShift);
                             pos += 2;
                         }
                     } else if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::Ge);
+                        self.emit(Token::Ge);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Gt);
+                        self.emit(Token::Gt);
                         pos += 1;
                     }
                 }
                 Some('(') => {
-                    self.tokens.push(Token::LParen);
+                    self.emit(Token::LParen);
                     paren_depth += 1;
                     pos += 1;
                 }
                 Some(')') => {
-                    self.tokens.push(Token::RParen);
+                    self.emit(Token::RParen);
                     paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
                 Some('[') => {
-                    self.tokens.push(Token::LBracket);
+                    self.emit(Token::LBracket);
                     paren_depth += 1;
                     pos += 1;
                 }
                 Some(']') => {
-                    self.tokens.push(Token::RBracket);
+                    self.emit(Token::RBracket);
                     paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
                 Some('{') => {
-                    self.tokens.push(Token::LBrace);
+                    self.emit(Token::LBrace);
                     paren_depth += 1;
                     pos += 1;
                 }
                 Some('}') => {
-                    self.tokens.push(Token::RBrace);
+                    self.emit(Token::RBrace);
                     paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
                 Some(',') => {
-                    self.tokens.push(Token::Comma);
+                    self.emit(Token::Comma);
                     pos += 1;
                 }
                 Some(':') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::Walrus);
+                        self.emit(Token::Walrus);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Colon);
+                        self.emit(Token::Colon);
                         pos += 1;
                     }
                 }
                 Some('.') => {
                     if chars.get(pos + 1) == Some(&'.') && chars.get(pos + 2) == Some(&'.') {
                         // Ellipsis literal: `...`
-                        self.tokens.push(Token::Ellipsis);
+                        self.emit(Token::Ellipsis);
                         pos += 3;
                     } else if matches!(chars.get(pos + 1), Some('0'..='9')) {
                         // Leading-dot float: `.5`, `.5e-3` etc.  Check whether the
@@ -481,25 +532,25 @@ impl Lexer {
                         // emit a plain Dot token (used for attribute access and import
                         // relative-path notation).
                         let (tok, next) = lex_leading_dot_float(chars, pos)?;
-                        self.tokens.push(tok);
+                        self.emit(tok);
                         pos = next;
                     } else {
-                        self.tokens.push(Token::Dot);
+                        self.emit(Token::Dot);
                         pos += 1;
                     }
                 }
                 Some('=') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::Eq);
+                        self.emit(Token::Eq);
                         pos += 2;
                     } else {
-                        self.tokens.push(Token::Assign);
+                        self.emit(Token::Assign);
                         pos += 1;
                     }
                 }
                 Some('!') => {
                     if chars.get(pos + 1) == Some(&'=') {
-                        self.tokens.push(Token::Ne);
+                        self.emit(Token::Ne);
                         pos += 2;
                     } else {
                         return Err(PyError::Lex("expected '=' after '!'".to_string()));
@@ -514,10 +565,16 @@ impl Lexer {
                 Some(c) if c.is_alphabetic() => {
                     // Unicode ID_Start character (non-ASCII): dispatch to identifier lexer.
                     let (tok, next) = lex_ident_or_keyword(chars, pos);
-                    self.tokens.push(tok);
+                    self.emit(tok);
                     pos = next;
                 }
                 Some(_) => return Err(PyError::Lex("invalid syntax".to_string())),
+            }
+            // Fold any physical newlines crossed by the token just lexed into
+            // the line counter (multi-line string / f-string / bytes literals).
+            // For single-line tokens this span contains no '\n' and is a no-op.
+            if pos > tok_start {
+                self.advance_line_over(chars, tok_start, pos);
             }
         }
     }
