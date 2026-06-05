@@ -1712,6 +1712,82 @@ pub fn is_numeric(c: char) -> bool {
     in_ranges(c as u32, NUMERIC_RANGES)
 }
 
+// ── Unicode 16.0/17.0 assigned-codepoint delta over Unicode 15.0 ─────────────
+// CPython 3.12 ships the Unicode 15.0.0 database, but the `unicode-properties`
+// crate (and Rust's `char::is_lowercase`/`is_uppercase`) track newer Unicode
+// versions. Every codepoint assigned in Unicode 16.0 or 17.0 was `Cn`
+// (Unassigned) in 15.0, so the `general_category`/`char::is_*` based `str.is*`
+// predicates over-count them as letters/digits/cased characters.
+//
+// These ranges are exactly the set of codepoints whose classification under the
+// newer database diverges from CPython 3.12: callers treat a codepoint here as
+// unassigned (Cn) so `isalpha`/`isalnum`/`isdecimal`/`isdigit`/`islower`/
+// `isupper`/`istitle` stay byte-identical to python3.12. Derived from a
+// full-range sweep of the two implementations (see
+// `crates/pyrust/tests/cases/string/test_is_unicode_version.py`).
+#[rustfmt::skip]
+static UNICODE_16_PLUS_RANGES: &[(u32, u32)] = &[
+    (0x88f, 0x88f),
+    (0xc5c, 0xc5c),
+    (0xcdc, 0xcdc),
+    (0x1c89, 0x1c8a),
+    (0xa7cb, 0xa7cf),
+    (0xa7d2, 0xa7d2),
+    (0xa7d4, 0xa7d4),
+    (0xa7da, 0xa7dc),
+    (0xa7f1, 0xa7f1),
+    (0x105c0, 0x105f3),
+    (0x10940, 0x10959),
+    (0x10d40, 0x10d65),
+    (0x10d6f, 0x10d85),
+    (0x10ec2, 0x10ec7),
+    (0x11380, 0x11389),
+    (0x1138b, 0x1138b),
+    (0x1138e, 0x1138e),
+    (0x11390, 0x113b5),
+    (0x113b7, 0x113b7),
+    (0x113d1, 0x113d1),
+    (0x113d3, 0x113d3),
+    (0x116d0, 0x116e3),
+    (0x11bc0, 0x11be0),
+    (0x11bf0, 0x11bf9),
+    (0x11db0, 0x11ddb),
+    (0x11de0, 0x11de9),
+    (0x13460, 0x143fa),
+    (0x16100, 0x1611d),
+    (0x16130, 0x16139),
+    (0x16d40, 0x16d6c),
+    (0x16d70, 0x16d79),
+    (0x16ea0, 0x16eb8),
+    (0x16ebb, 0x16ed3),
+    (0x16ff2, 0x16ff3),
+    (0x187f8, 0x187ff),
+    (0x18cff, 0x18cff),
+    (0x18d09, 0x18d1e),
+    (0x18d80, 0x18df2),
+    (0x1ccf0, 0x1ccf9),
+    (0x1e5d0, 0x1e5ed),
+    (0x1e5f0, 0x1e5fa),
+    (0x1e6c0, 0x1e6de),
+    (0x1e6e0, 0x1e6e2),
+    (0x1e6e4, 0x1e6e5),
+    (0x1e6e7, 0x1e6ed),
+    (0x1e6f0, 0x1e6f4),
+    (0x1e6fe, 0x1e6ff),
+    (0x2b73a, 0x2b73f),
+    (0x2cea2, 0x2cead),
+    (0x2ebf0, 0x2ee5d),
+    (0x323b0, 0x33479),
+];
+
+/// True if `c` was assigned in Unicode 16.0 or later (i.e. unassigned in the
+/// Unicode 15.0 database CPython 3.12 ships). The version-skewed `str.is*`
+/// predicates must treat such codepoints as `Cn` to match CPython 3.12.
+#[inline]
+pub fn is_assigned_after_15_0(c: char) -> bool {
+    in_ranges(c as u32, UNICODE_16_PLUS_RANGES)
+}
+
 // ── Titlecase mapping (str.title / str.capitalize) ──────────────────────────
 // Codepoints whose Unicode titlecase mapping differs from their uppercase
 // mapping. For all other characters, titlecase == uppercase, so callers fall
@@ -2194,6 +2270,7 @@ mod tests {
         assert_sorted_disjoint(XID_START_RANGES);
         assert_sorted_disjoint(XID_CONTINUE_RANGES);
         assert_sorted_disjoint(NUMERIC_RANGES);
+        assert_sorted_disjoint(UNICODE_16_PLUS_RANGES);
     }
 
     #[test]
