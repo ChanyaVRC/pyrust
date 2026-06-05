@@ -292,8 +292,13 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
                     cesu8_codepoints(s).all(|n| {
-                        char::from_u32(n)
-                            .is_some_and(|c| c.general_category() == GeneralCategory::DecimalNumber)
+                        char::from_u32(n).is_some_and(|c| {
+                            // general_category tracks a newer Unicode than CPython
+                            // 3.12 (Unicode 15.0); codepoints assigned in 16.0+ were
+                            // Cn in 15.0 and must not count as decimal.
+                            !unicode_data::is_assigned_after_15_0(c)
+                                && c.general_category() == GeneralCategory::DecimalNumber
+                        })
                     })
                 },
         )),
@@ -720,6 +725,11 @@ fn str_islower(s: &str) -> bool {
     let mut has_cased = false;
     for n in cesu8_codepoints(s) {
         let Some(c) = char::from_u32(n) else { continue };
+        // char::is_*case tracks a newer Unicode than CPython 3.12 (Unicode 15.0);
+        // codepoints assigned in 16.0+ were Cn in 15.0 and have no case.
+        if unicode_data::is_assigned_after_15_0(c) {
+            continue;
+        }
         if c.is_uppercase() {
             return false;
         }
@@ -747,6 +757,11 @@ fn str_isupper(s: &str) -> bool {
     let mut has_cased = false;
     for n in cesu8_codepoints(s) {
         let Some(c) = char::from_u32(n) else { continue };
+        // char::is_*case tracks a newer Unicode than CPython 3.12 (Unicode 15.0);
+        // codepoints assigned in 16.0+ were Cn in 15.0 and have no case.
+        if unicode_data::is_assigned_after_15_0(c) {
+            continue;
+        }
         if c.is_lowercase() {
             return false;
         }
@@ -791,6 +806,13 @@ fn str_istitle(s: &str) -> bool {
                 continue;
             }
         };
+        // char::is_*case / general_category track a newer Unicode than CPython
+        // 3.12 (Unicode 15.0); codepoints assigned in 16.0+ were Cn in 15.0, so
+        // treat them as uncased separators.
+        if unicode_data::is_assigned_after_15_0(c) {
+            prev_cased = false;
+            continue;
+        }
         // CPython's unicode_istitle treats titlecase (Lt) characters like
         // uppercase: they must start a word (follow a non-cased character).
         // Rust's char::is_uppercase covers only Lu, so test Lt explicitly.
@@ -885,8 +907,12 @@ fn is_python_alnum(c: char) -> bool {
 /// Python's str.isdigit(): Unicode Nd (DecimalNumber) category plus all codepoints with
 /// Numeric_Type=Digit (category No). Authoritative list from CPython 3.12 / Unicode 15.
 fn is_python_digit(c: char) -> bool {
-    // Nd covers all decimal digit scripts (Arabic-Indic, Devanagari, etc.)
-    if c.general_category() == GeneralCategory::DecimalNumber {
+    // Nd covers all decimal digit scripts (Arabic-Indic, Devanagari, etc.).
+    // `general_category` tracks a newer Unicode than CPython 3.12 (Unicode 15.0),
+    // so skip codepoints assigned in 16.0+ (Cn in 15.0) to keep parity.
+    if !unicode_data::is_assigned_after_15_0(c)
+        && c.general_category() == GeneralCategory::DecimalNumber
+    {
         return true;
     }
     // Remaining codepoints with Numeric_Type=Digit (category No) per Unicode 15 / CPython 3.12.
@@ -914,15 +940,20 @@ fn is_python_digit(c: char) -> bool {
 }
 
 /// Python's str.isalpha(): Unicode general category L* (Letter).
+///
+/// `general_category` tracks a newer Unicode database than CPython 3.12
+/// (Unicode 15.0); codepoints assigned in Unicode 16.0+ were `Cn` in 15.0, so
+/// they must classify as non-alphabetic to stay byte-identical to python3.12.
 fn is_python_alpha(c: char) -> bool {
-    matches!(
-        c.general_category(),
-        GeneralCategory::UppercaseLetter
-            | GeneralCategory::LowercaseLetter
-            | GeneralCategory::TitlecaseLetter
-            | GeneralCategory::ModifierLetter
-            | GeneralCategory::OtherLetter
-    )
+    !unicode_data::is_assigned_after_15_0(c)
+        && matches!(
+            c.general_category(),
+            GeneralCategory::UppercaseLetter
+                | GeneralCategory::LowercaseLetter
+                | GeneralCategory::TitlecaseLetter
+                | GeneralCategory::ModifierLetter
+                | GeneralCategory::OtherLetter
+        )
 }
 
 /// Validate that the first argument to a `str` search method is itself a `str`,
