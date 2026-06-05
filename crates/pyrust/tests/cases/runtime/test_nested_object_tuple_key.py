@@ -47,6 +47,20 @@ print({(1, K(1)), (1, K(2))} & {(1, K(1))} == {(1, K(1))})  # True
 print({(1, K(1))} | {(1, K(1))} == {(1, K(1))})             # True
 print({(1, K(1)), (1, K(2))} - {(1, K(1))} == {(1, K(2))})  # True
 
+# Mutation paths must also be eq-aware (issue #2059 follow-up in review):
+# del d[key] finds the equal-but-distinct stored key.
+d3 = {(1, K(1)): 'x'}
+del d3[(1, K(1))]
+print(len(d3))                                  # 0
+
+# d[key] = v overwrites the equal-but-distinct stored key (no duplicate).
+d4 = {(1, K(1)): 'old'}
+d4[(1, K(1))] = 'new'
+print(len(d4), d4[(1, K(1))])                   # 1 new
+
+# Set comprehension dedups nested-object tuple keys.
+print(len({(1, K(i % 2)) for i in range(4)}))   # 2
+
 # Primitive-tuple keys remain unaffected (fast path).
 print((1, 2) in {(1, 2), (3, 4)})               # True
 print({(1, 2): 'a'}[(1, 2)])                    # a

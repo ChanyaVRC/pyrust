@@ -7853,6 +7853,11 @@ impl Interpreter {
             globals_sync_name.as_ref().map(|_| val_val.clone());
         let needs_dedup = match &key {
             PyKey::Object { .. } => true,
+            // Issue #2059: `d[k] = v` where `k` is a tuple/frozenset key nesting
+            // a user object must overwrite an `__eq__`-equal-but-distinct
+            // existing key instead of appending a duplicate.  `dict_lookup`
+            // below performs the eq-aware probe.
+            PyKey::Tuple(_) | PyKey::FrozenSet(_) if nested_object_tuple_key(&key) => true,
             PyKey::None => {
                 let none_hash = pyrust_core::py_hash_none() as u64;
                 regs[obj as usize]
@@ -7983,7 +7988,11 @@ impl Interpreter {
             } else {
                 None
             };
-            if let PyKey::Object { .. } = &key {
+            // A bare `Object` key, or a tuple/frozenset key nesting a user
+            // object (issue #2059), must use the eq-aware `dict_lookup` so that
+            // `del d[k]` finds an `__eq__`-equal-but-distinct stored key rather
+            // than relying on raw `PyKey` identity.
+            if matches!(&key, PyKey::Object { .. }) || nested_object_tuple_key(&key) {
                 let dict_val = regs[obj as usize]
                     .as_some()
                     .cloned()
