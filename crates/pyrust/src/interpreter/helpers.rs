@@ -178,19 +178,26 @@ pub(crate) fn compare_values_with_op(
         }
         (ValueKind::List(x), ValueKind::List(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                let ord = compare_values_with_op(a, b, op_name)?;
-                if ord != std::cmp::Ordering::Equal {
-                    return Ok(ord);
+                // Scan the `==`-equal prefix first so that equal but
+                // individually-unorderable fields (e.g. two `None`s) don't
+                // raise; only the first *differing* pair is ordered, matching
+                // CPython's `list_richcompare` (issue #2216).
+                if a == b {
+                    continue;
                 }
+                return compare_values_with_op(a, b, op_name);
             }
             Ok(x.len().cmp(&y.len()))
         }
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                let ord = compare_values_with_op(a, b, op_name)?;
-                if ord != std::cmp::Ordering::Equal {
-                    return Ok(ord);
+                // Equal-prefix skip (see the List arm / issue #2216): equal
+                // unorderable fields like two `None`s don't error; only the
+                // first differing pair is ordered.
+                if a == b {
+                    continue;
                 }
+                return compare_values_with_op(a, b, op_name);
             }
             Ok(x.len().cmp(&y.len()))
         }
