@@ -7569,10 +7569,27 @@ impl Interpreter {
         let start = vm_read(regs, base, num_locals)?;
         let stop = vm_read(regs, base + 1, num_locals)?;
         let step = vm_read(regs, base + 2, num_locals)?;
-        let obj_val = vm_read(regs, obj, num_locals)?;
         let lo = if start.is_none() { None } else { Some(start) };
         let hi = if stop.is_none() { None } else { Some(stop) };
         let st = if step.is_none() { None } else { Some(step) };
+        // `tuple` is the only source kind whose `Value::clone` is a full O(n)
+        // deep copy of the backing `Vec` (list/bytes/str clones are an Rc bump,
+        // a shared-buffer slice, or a bit copy).  Cloning the source before
+        // slicing therefore turned every tuple slice into an O(source_len) copy
+        // *before* the slice even ran — the dominant cost in the #2114 tuple
+        // pathology (a `t[100:100]` of a 1000-tuple was 25× slower than the
+        // list equivalent).  Slice the tuple through a borrow so the source is
+        // never cloned.  Every other kind keeps the cheap owned-clone path,
+        // byte-identical to before, so the list/bytes/str hot paths are
+        // unaffected.
+        let obj_ref = vm_read_ref(regs, obj, num_locals)?;
+        // `is_tuple()` checks the NaN-box tag directly — no `RefCell` borrow,
+        // unlike `.kind()` on a list — so this guard adds no cost to the
+        // list/bytes/str hot paths below.
+        if obj_ref.is_tuple() {
+            return self.eval_slice(obj_ref, lo, hi, st);
+        }
+        let obj_val = obj_ref.clone();
         // Mapping targets (dict) treat slice notation as a *key lookup*, not a
         // slice: `d[1:2]` builds the slice object and looks it up as a key
         // (KeyError if absent), matching CPython and the prior BuildSlice +

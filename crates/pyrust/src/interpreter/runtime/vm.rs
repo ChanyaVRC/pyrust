@@ -3458,6 +3458,34 @@ fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecod
     Ok(v.clone())
 }
 
+/// Borrow a register's value without cloning, applying the same unset check as
+/// [`vm_read`].  Used by read-only dispatch paths (e.g. `GetSlice`) where the
+/// source value is only consumed by reference — cloning the source first is
+/// wasteful and, for a `tuple`, pathological: `Value::clone` deep-copies the
+/// whole backing `Vec`, so slicing an N-element tuple cloned the entire source
+/// in O(N) before the slice even ran (#2114).
+#[inline]
+fn vm_read_ref(
+    regs: &[Value],
+    reg: crate::bytecode::Reg,
+    num_locals: crate::bytecode::Reg,
+) -> crate::interpreter::Result<&Value> {
+    let v = &regs[reg as usize];
+    if v.is_unset() {
+        if reg < num_locals {
+            return Err(pyrust_core::py_err!(
+                "NameError",
+                "local variable referenced before assignment"
+            ));
+        } else {
+            return Err(crate::error::PyError::Runtime(
+                "internal: temp register read before write".to_string(),
+            ));
+        }
+    }
+    Ok(v)
+}
+
 /// Canonical unary `-`/`+`/`~`/`not` evaluation for built-in operands.
 ///
 /// The single definition of unary-op semantics (i64::MIN negation promoting to
