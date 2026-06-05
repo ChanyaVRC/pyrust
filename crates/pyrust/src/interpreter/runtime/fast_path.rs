@@ -1089,6 +1089,40 @@ impl Interpreter {
                         AttrFastResult::Miss
                     }
                 }
+                // `__slots__` slot read (#2207): the slot's value lives in the
+                // same `inst.attrs` store as a plain instance attribute, so a
+                // hit reads it directly — exactly what `member_descriptor.__get__`
+                // does — skipping the data-descriptor dispatch path that made
+                // slotted reads ~15× slower than plain instance reads.  An UNSET
+                // slot (name absent from `inst.attrs`) is NOT served here: it
+                // falls through to the slow path so the descriptor raises the
+                // proper `AttributeError` (and any `__getattr__` runs), preserving
+                // #2084's unset-slot semantics byte-for-byte.
+                AttrCacheEntry::SlotAttr {
+                    class_ptr,
+                    class_version,
+                    epoch,
+                } => {
+                    if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                        let inst = inst_rc.borrow();
+                        let same_class = Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                        let version_ok =
+                            inst.class.borrow().mutation_version.get() == *class_version;
+                        let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                        if same_class && version_ok && epoch_ok {
+                            let name = code.names.get(name_idx as usize).map(|s| s.as_str());
+                            match name.and_then(|n| inst.attrs.get(n)) {
+                                Some(v) => AttrFastResult::Hit(v.clone()),
+                                // Unset slot — slow path raises AttributeError.
+                                None => AttrFastResult::Miss,
+                            }
+                        } else {
+                            AttrFastResult::Miss
+                        }
+                    } else {
+                        AttrFastResult::Miss
+                    }
+                }
                 AttrCacheEntry::ClassAttr {
                     class_ptr,
                     class_version,
@@ -1377,6 +1411,10 @@ fn fill_get_attr_cache(
         | AttrCacheEntry::InstanceAttr {
             class_ptr: existing_ptr,
             ..
+        }
+        | AttrCacheEntry::SlotAttr {
+            class_ptr: existing_ptr,
+            ..
         } => {
             if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                 let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
@@ -1417,14 +1455,34 @@ fn fill_get_attr_cache(
                         name,
                         "real" | "imag" | "numerator" | "denominator"
                     );
-                    let shadowed_by_data_desc = lookup_class_attr(&inst.class, name)
-                        .is_some_and(|v| is_data_descriptor(&v));
-                    if !has_custom_getattribute && !is_numeric_tower && !shadowed_by_data_desc {
-                        cache[pc - 1] = AttrCacheEntry::InstanceAttr {
-                            class_ptr: Rc::as_ptr(&inst.class) as *const (),
-                            class_version: inst.class.borrow().mutation_version.get(),
-                            epoch: pyrust_core::class_epoch(),
-                        };
+                    let class_attr = lookup_class_attr(&inst.class, name);
+                    // A `__slots__` slot is shadowed by a `member_descriptor`
+                    // data descriptor whose `__get__` reads this very
+                    // `inst.attrs[name]` (#2084).  That read is identical to a
+                    // plain InstanceAttr probe, so cache a dedicated `SlotAttr`
+                    // entry instead of giving up to the slow descriptor-dispatch
+                    // path on every read (#2207).  Any OTHER data descriptor
+                    // (property, user `__set__`/`__delete__`, numeric tower) is
+                    // NOT cacheable here — it can run arbitrary code.
+                    let is_slot_descriptor = class_attr.as_ref().is_some_and(|v| {
+                        pyrust_builtins::member_descriptor::as_member_descriptor(v).is_some()
+                    });
+                    let shadowed_by_data_desc =
+                        class_attr.as_ref().is_some_and(is_data_descriptor);
+                    if !has_custom_getattribute && !is_numeric_tower {
+                        if is_slot_descriptor {
+                            cache[pc - 1] = AttrCacheEntry::SlotAttr {
+                                class_ptr: Rc::as_ptr(&inst.class) as *const (),
+                                class_version: inst.class.borrow().mutation_version.get(),
+                                epoch: pyrust_core::class_epoch(),
+                            };
+                        } else if !shadowed_by_data_desc {
+                            cache[pc - 1] = AttrCacheEntry::InstanceAttr {
+                                class_ptr: Rc::as_ptr(&inst.class) as *const (),
+                                class_version: inst.class.borrow().mutation_version.get(),
+                                epoch: pyrust_core::class_epoch(),
+                            };
+                        }
                     }
                 } else {
                     // No instance attr — resolve via the class.  Don't cache when
@@ -1450,7 +1508,20 @@ fn fill_get_attr_cache(
                                 |_| (),
                             )
                             .is_some();
-                            if !is_cached_prop && !is_property {
+                            // A `member_descriptor` reached here means an UNSET
+                            // `__slots__` slot (the name is absent from the
+                            // instance dict).  The slow path correctly raised
+                            // `AttributeError`; caching it as a `ClassAttr` would
+                            // wrongly return the raw descriptor object on the next
+                            // read.  Leave the site Empty so it refills via the
+                            // descriptor slow path until the slot is set (then it
+                            // becomes a `SlotAttr` via the contains_key branch).
+                            let is_slot_descriptor =
+                                pyrust_builtins::member_descriptor::as_member_descriptor(
+                                    &unbound_val,
+                                )
+                                .is_some();
+                            if !is_cached_prop && !is_property && !is_slot_descriptor {
                                 let class_ptr = Rc::as_ptr(&inst.class) as *const ();
                                 let class_version = inst.class.borrow().mutation_version.get();
                                 let epoch = pyrust_core::class_epoch();
