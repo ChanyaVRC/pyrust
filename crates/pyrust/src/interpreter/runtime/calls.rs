@@ -7319,29 +7319,11 @@ fn str_merge_kwargs(
             }
             Ok(())
         }
-        // splitlines(keepends=False)
+        // splitlines(keepends=False) — single positional-or-keyword arg.  Reuse
+        // the shared merge from the bytes path (#1990) so the overflow / clash /
+        // unknown-kwarg wording matches CPython byte-for-byte.
         "splitlines" => {
-            let mut keepends: Option<Value> = None;
-            for (k, v) in kw {
-                let key_str = match &k {
-                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
-                    _ => String::new(),
-                };
-                match key_str.as_str() {
-                    "keepends" => {
-                        if !pos.is_empty() {
-                            return Err(pyrust_core::type_err!("argument for splitlines() given by name ('keepends') and position (1)"));
-                        }
-                        keepends = Some(v);
-                    }
-                    other => {
-                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for splitlines()"));
-                    }
-                }
-            }
-            if let Some(ke) = keepends {
-                pos.push(ke);
-            }
+            *pos = pyrust_builtins::bytes::merge_single_kwarg("splitlines", "keepends", pos, &kw)?;
             Ok(())
         }
         // encode(encoding='utf-8', errors='strict')
@@ -7400,31 +7382,11 @@ fn str_merge_kwargs(
             }
             Ok(())
         }
-        // expandtabs(tabsize=8)
+        // expandtabs(tabsize=8) — single positional-or-keyword arg.  Reuse the
+        // shared merge from the bytes path (#1990) for CPython-matching error
+        // wording (overflow / name+position clash / unknown kwarg).
         "expandtabs" => {
-            let mut tabsize: Option<Value> = None;
-            for (k, v) in kw {
-                let key_str = match &k {
-                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
-                    _ => String::new(),
-                };
-                match key_str.as_str() {
-                    "tabsize" => {
-                        if !pos.is_empty() {
-                            return Err(pyrust_core::type_err!("argument for expandtabs() given by name ('tabsize') and position (1)"));
-                        }
-                        tabsize = Some(v);
-                    }
-                    other => {
-                        // CPython: "expandtabs() takes at most 1 keyword argument (N given)"
-                        // but for unknown kwarg it raises "'foo' is an invalid keyword argument"
-                        return Err(pyrust_core::type_err!("'{other}' is an invalid keyword argument for expandtabs()"));
-                    }
-                }
-            }
-            if let Some(ts) = tabsize {
-                pos.push(ts);
-            }
+            *pos = pyrust_builtins::bytes::merge_single_kwarg("expandtabs", "tabsize", pos, &kw)?;
             Ok(())
         }
         // All str methods that take no keyword arguments use the `str.` prefix

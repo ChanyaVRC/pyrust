@@ -522,6 +522,16 @@ fn str_rpartition(s: &str, sep: &str) -> Result<Value> {
 }
 
 fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
+    // splitlines() takes at most 1 argument (<got> given)
+    if args.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "splitlines() takes at most 1 argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
     // CPython coerces keepends via the standard truth protocol — any value is
     // accepted.  Delegate to Value::truthy() which covers all ValueKind arms
     // (including Dict, Set, BigInt, Range, Complex, BuiltinObject, etc.).

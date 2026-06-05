@@ -459,7 +459,7 @@ impl Interpreter {
     ///   - `remaining_group`  = `Some(group)` with non-matching exceptions,
     ///     or `None` if all exceptions were matched
     fn split_exception_group(
-        &self,
+        &mut self,
         group_in: &Value,
         kind: &Value,
     ) -> Result<Option<(Value, Option<Value>)>> {
@@ -493,114 +493,21 @@ impl Interpreter {
         };
 
         // Must be an instance of BaseExceptionGroup.
-        let inst_rc = match group.kind() {
-            ValueKind::PyInstance(i) => Rc::clone(i),
+        match group.kind() {
+            ValueKind::PyInstance(i)
+                if class_chain_contains_name(&i.borrow().class, "BaseExceptionGroup") => {}
             _ => return Ok(None),
-        };
-        let class = Rc::clone(&inst_rc.borrow().class);
-        if !class_chain_contains_name(&class, "BaseExceptionGroup") {
-            return Ok(None);
         }
-        // Read `.exceptions` attribute.
-        let exceptions_val = inst_rc.borrow().attrs.get("exceptions").cloned();
-        let exceptions = match exceptions_val {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let items: Vec<Value> = if let Some(t) = exceptions.as_tuple() {
-            t.to_vec()
-        } else if let Some(l) = exceptions.as_list() {
-            l.to_vec()
-        } else {
-            return Ok(None);
-        };
-        // Split into matched and remaining.
-        let mut matched: Vec<Value> = Vec::new();
-        let mut remaining: Vec<Value> = Vec::new();
-        for exc_val in &items {
-            let exc_inst = match exc_val.kind() {
-                ValueKind::PyInstance(i) => Rc::clone(i),
-                _ => {
-                    remaining.push(exc_val.clone());
-                    continue;
-                }
-            };
-            let exc_class = Rc::clone(&exc_inst.borrow().class);
-            if self.exception_matches_class(&exc_class, kind)? {
-                matched.push(exc_val.clone());
-            } else {
-                remaining.push(exc_val.clone());
-            }
-        }
-        if matched.is_empty() {
-            return Ok(None);
-        }
-        // Read `.message` attribute.
-        let message = inst_rc
-            .borrow()
-            .attrs
-            .get("message")
-            .cloned()
-            .unwrap_or_else(|| Value::string(String::new()));
 
-        let make_group = |excs: Vec<Value>| -> Value {
-            let all_exc = excs.iter().all(|v| {
-                if let ValueKind::PyInstance(i) = v.kind() {
-                    class_chain_contains_name(&i.borrow().class, "Exception")
-                } else {
-                    false
-                }
-            });
-            let cls_name = if all_exc { "ExceptionGroup" } else { "BaseExceptionGroup" };
-            let cls = lookup_exc_class(cls_name).unwrap_or_else(|| Rc::clone(&class));
-            instantiate_exception(cls, vec![message.clone(), Value::tuple(excs)])
-        };
-
-        let matched_group = make_group(matched);
-        let remaining_group = if remaining.is_empty() {
-            None
-        } else {
-            Some(make_group(remaining))
-        };
-        Ok(Some((matched_group, remaining_group)))
-    }
-
-    /// Check whether an exception `class` (already an Rc<RefCell<PyClass>>) is an
-    /// instance of `kind` (a Value that is a PyClass or tuple of PyClass).
-    fn exception_matches_class(
-        &self,
-        exc_class: &Rc<RefCell<PyClass>>,
-        kind: &Value,
-    ) -> Result<bool> {
-        match kind.kind() {
-            ValueKind::PyClass(expected) => {
-                let expected = Rc::clone(expected);
-                if !is_exception_class(&expected) {
-                    return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
-                }
-                Ok(class_is_subclass_of(exc_class, &expected))
-            }
-            ValueKind::Tuple(items) => {
-                let mut matched = false;
-                for item in items {
-                    match item.kind() {
-                        ValueKind::PyClass(expected) => {
-                            let expected = Rc::clone(expected);
-                            if !is_exception_class(&expected) {
-                                return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
-                            }
-                            if class_is_subclass_of(exc_class, &expected) {
-                                matched = true;
-                            }
-                        }
-                        _ => {
-                            return Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed"));
-                        }
-                    }
-                }
-                Ok(matched)
-            }
-            _ => Err(pyrust_core::type_err!("catching classes that do not inherit from BaseException is not allowed")),
+        // PEP 654: recurse the whole tree so a matching leaf at any nesting
+        // depth is collected, preserving the nested group structure.  Reuse the
+        // recursive `eg_split` from PR #2203 (which backs `ExceptionGroup.split`)
+        // instead of a flat direct-children-only scan.
+        let matcher = EgMatcher::Type(kind.clone());
+        let (matched, remaining) = self.eg_split(group, &matcher)?;
+        match matched {
+            Some(matched_group) => Ok(Some((matched_group, remaining))),
+            None => Ok(None),
         }
     }
 
