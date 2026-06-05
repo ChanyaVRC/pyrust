@@ -222,20 +222,19 @@ impl BuiltinTypeOps for ByteArrayOps {
             ops,
             state: slice_state,
         } = key.kind()
+            && ops.type_name() == crate::slice::TYPE_NAME
         {
-            if ops.type_name() == crate::slice::TYPE_NAME {
-                let sb = slice_state.borrow();
-                let sl = sb
-                    .downcast_ref::<crate::slice::SliceState>()
-                    .expect("slice state");
-                let len = data.len() as i64;
-                let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
-                let result: Vec<u8> = slice_indices(start, stop, step)
-                    .filter_map(|i| data.get(i).copied())
-                    .collect();
-                drop(sb);
-                return Ok(bytearray(result));
-            }
+            let sb = slice_state.borrow();
+            let sl = sb
+                .downcast_ref::<crate::slice::SliceState>()
+                .expect("slice state");
+            let len = data.len() as i64;
+            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
+            let result: Vec<u8> = slice_indices(start, stop, step)
+                .filter_map(|i| data.get(i).copied())
+                .collect();
+            drop(sb);
+            return Ok(bytearray(result));
         }
         // Integer subscript.
         let idx = value_to_index(key, data.len(), "bytearray")?;
@@ -253,45 +252,44 @@ impl BuiltinTypeOps for ByteArrayOps {
             ops,
             state: slice_state,
         } = key.kind()
+            && ops.type_name() == crate::slice::TYPE_NAME
         {
-            if ops.type_name() == crate::slice::TYPE_NAME {
-                let sb = slice_state.borrow();
-                let sl = sb
-                    .downcast_ref::<crate::slice::SliceState>()
-                    .expect("slice state");
-                let len = data.len() as i64;
-                let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
-                drop(sb);
-                let replacement = bytes_from_value(&value, "bytearray slice assignment")?;
-                if step == 1 {
-                    // Simple slice: replace range [start, stop) with replacement.
-                    // For step == 1 both bounds are forward, clamped to [0, len].
-                    // An empty/reversed range (start > stop) inserts at `start`,
-                    // matching CPython (e.g. `ba[5:2] = b"XY"` inserts at 5).
-                    let s2 = (start.max(0) as usize).min(data.len());
-                    let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
-                    data.splice(s2..e2, replacement);
-                } else {
-                    // Extended slice: replacement must have the exact same length.
-                    let indices: Vec<usize> = slice_indices(start, stop, step)
-                        .filter(|&i| i < data.len())
-                        .collect();
-                    if indices.len() != replacement.len() {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!(
-                                "attempt to assign bytes of size {} to extended slice of size {}",
-                                replacement.len(),
-                                indices.len()
-                            ),
-                        ));
-                    }
-                    for (&pos, &byte) in indices.iter().zip(replacement.iter()) {
-                        data[pos] = byte;
-                    }
+            let sb = slice_state.borrow();
+            let sl = sb
+                .downcast_ref::<crate::slice::SliceState>()
+                .expect("slice state");
+            let len = data.len() as i64;
+            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
+            drop(sb);
+            let replacement = bytes_from_value(&value, "bytearray slice assignment")?;
+            if step == 1 {
+                // Simple slice: replace range [start, stop) with replacement.
+                // For step == 1 both bounds are forward, clamped to [0, len].
+                // An empty/reversed range (start > stop) inserts at `start`,
+                // matching CPython (e.g. `ba[5:2] = b"XY"` inserts at 5).
+                let s2 = (start.max(0) as usize).min(data.len());
+                let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
+                data.splice(s2..e2, replacement);
+            } else {
+                // Extended slice: replacement must have the exact same length.
+                let indices: Vec<usize> = slice_indices(start, stop, step)
+                    .filter(|&i| i < data.len())
+                    .collect();
+                if indices.len() != replacement.len() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!(
+                            "attempt to assign bytes of size {} to extended slice of size {}",
+                            replacement.len(),
+                            indices.len()
+                        ),
+                    ));
                 }
-                return Ok(());
+                for (&pos, &byte) in indices.iter().zip(replacement.iter()) {
+                    data[pos] = byte;
+                }
             }
+            return Ok(());
         }
         // Integer item assignment: value must be an integer 0..255.
         let idx = value_to_index(key, data.len(), "bytearray")?;
@@ -311,34 +309,33 @@ impl BuiltinTypeOps for ByteArrayOps {
             ops,
             state: slice_state,
         } = key.kind()
+            && ops.type_name() == crate::slice::TYPE_NAME
         {
-            if ops.type_name() == crate::slice::TYPE_NAME {
-                let sb = slice_state.borrow();
-                let sl = sb
-                    .downcast_ref::<crate::slice::SliceState>()
-                    .expect("slice state");
-                let len = data.len() as i64;
-                let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
-                drop(sb);
-                if step == 1 {
-                    // For step == 1 both bounds are forward, clamped to [0, len].
-                    // An empty/reversed range (start > stop) deletes nothing.
-                    let s2 = (start.max(0) as usize).min(data.len());
-                    let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
-                    data.drain(s2..e2);
-                } else {
-                    // Extended slice deletion: collect indices in reverse and remove.
-                    let mut indices: Vec<usize> = slice_indices(start, stop, step)
-                        .filter(|&i| i < data.len())
-                        .collect();
-                    // Remove from back to front to keep indices valid.
-                    indices.sort_unstable_by(|a, b| b.cmp(a));
-                    for i in indices {
-                        data.remove(i);
-                    }
+            let sb = slice_state.borrow();
+            let sl = sb
+                .downcast_ref::<crate::slice::SliceState>()
+                .expect("slice state");
+            let len = data.len() as i64;
+            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
+            drop(sb);
+            if step == 1 {
+                // For step == 1 both bounds are forward, clamped to [0, len].
+                // An empty/reversed range (start > stop) deletes nothing.
+                let s2 = (start.max(0) as usize).min(data.len());
+                let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
+                data.drain(s2..e2);
+            } else {
+                // Extended slice deletion: collect indices in reverse and remove.
+                let mut indices: Vec<usize> = slice_indices(start, stop, step)
+                    .filter(|&i| i < data.len())
+                    .collect();
+                // Remove from back to front to keep indices valid.
+                indices.sort_unstable_by(|a, b| b.cmp(a));
+                for i in indices {
+                    data.remove(i);
                 }
-                return Ok(());
             }
+            return Ok(());
         }
         // Integer deletion.
         let idx = value_to_index(key, data.len(), "bytearray")?;

@@ -138,10 +138,8 @@ pub fn value_may_exceed_int_str_limit(value: &Value) -> bool {
 
 fn check_value_digits(value: &Value, limit: usize) -> std::result::Result<(), PyError> {
     match value.kind() {
-        ValueKind::BigInt(b) => {
-            if bigint_exceeds_digit_limit(b, limit) {
-                return Err(int_max_str_digits_format_error());
-            }
+        ValueKind::BigInt(b) if bigint_exceeds_digit_limit(b, limit) => {
+            return Err(int_max_str_digits_format_error());
         }
         ValueKind::List(items) => {
             // Reuse the `repr` cycle guard (#364): a self-referential container
@@ -200,10 +198,8 @@ fn check_value_digits(value: &Value, limit: usize) -> std::result::Result<(), Py
 
 fn check_key_digits(key: &PyKey, limit: usize) -> std::result::Result<(), PyError> {
     match key {
-        PyKey::BigInt(b) => {
-            if bigint_exceeds_digit_limit(b, limit) {
-                return Err(int_max_str_digits_format_error());
-            }
+        PyKey::BigInt(b) if bigint_exceeds_digit_limit(b, limit) => {
+            return Err(int_max_str_digits_format_error());
         }
         PyKey::Tuple(items) | PyKey::FrozenSet(items) => {
             for item in items.iter() {
@@ -849,11 +845,12 @@ impl Hash for PyKey {
                     // `PyKey::Float(1e20)` and `PyKey::BigInt(10**20)` collide.
                     let f = f64::from_bits(*bits);
                     1u8.hash(state);
-                    if f.is_finite() && f.fract() == 0.0 {
-                        if let Some(big) = BigInt::from_f64(f) {
-                            pykey_hash_bigint(&big).hash(state);
-                            return;
-                        }
+                    if f.is_finite()
+                        && f.fract() == 0.0
+                        && let Some(big) = BigInt::from_f64(f)
+                    {
+                        pykey_hash_bigint(&big).hash(state);
+                        return;
                     }
                     bits.hash(state);
                 }
@@ -4571,10 +4568,10 @@ pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
     {
         return true;
     }
-    if let Some(base) = &borrowed.base {
-        if class_chain_contains_exception(base) {
-            return true;
-        }
+    if let Some(base) = &borrowed.base
+        && class_chain_contains_exception(base)
+    {
+        return true;
     }
     borrowed
         .extra_bases

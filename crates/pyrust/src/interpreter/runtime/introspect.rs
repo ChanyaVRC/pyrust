@@ -483,13 +483,11 @@ fn collect_loadglobal_names(
     out: &mut Vec<String>,
 ) {
     for insn in &fncode.insns {
-        if let crate::bytecode::Insn::LoadGlobal(_, name_idx) = insn {
-            if let Some(name) = fncode.names.get(*name_idx as usize) {
-                if seen.insert(name.clone()) {
+        if let crate::bytecode::Insn::LoadGlobal(_, name_idx) = insn
+            && let Some(name) = fncode.names.get(*name_idx as usize)
+                && seen.insert(name.clone()) {
                     out.push(name.clone());
                 }
-            }
-        }
     }
     for proto in &fncode.fn_protos {
         collect_loadglobal_names(&proto.code, seen, out);

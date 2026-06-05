@@ -169,10 +169,9 @@ impl BuiltinTypeOps for FrozenSetOps {
         if matches!(
             method,
             "copy" | "union" | "intersection" | "difference" | "symmetric_difference"
-        ) {
-            if let ValueKind::Set(s) = result.kind() {
-                return Ok(frozenset(s.clone()));
-            }
+        ) && let ValueKind::Set(s) = result.kind()
+        {
+            return Ok(frozenset(s.clone()));
         }
         Ok(result)
     }

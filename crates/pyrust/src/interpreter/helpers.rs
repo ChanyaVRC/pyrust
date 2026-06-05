@@ -264,11 +264,10 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
         }
         return None;
     }
-    if let Some(base) = &borrowed.base {
-        if let Some(v) = lookup_class_attr(base, name) {
+    if let Some(base) = &borrowed.base
+        && let Some(v) = lookup_class_attr(base, name) {
             return Some(v);
         }
-    }
     // Issue #1378: every class implicitly has `object` as its ultimate ancestor
     // (CPython's invariant).  When the MRO chain terminates (no explicit primary
     // base) and the class is not itself `object`, fall through to the object
@@ -1051,11 +1050,10 @@ fn lookup_user_metaclass_attr(meta: &Rc<RefCell<PyClass>>, name: &str) -> Option
     if value.is_some() {
         return value;
     }
-    if let Some(base) = base {
-        if let Some(v) = lookup_user_metaclass_attr(&base, name) {
+    if let Some(base) = base
+        && let Some(v) = lookup_user_metaclass_attr(&base, name) {
             return Some(v);
         }
-    }
     for extra in &extra_bases {
         if let Some(v) = lookup_user_metaclass_attr(extra, name) {
             return Some(v);
@@ -1445,10 +1443,10 @@ pub(crate) fn find_mutable_primitive_base(
         (borrowed.name.clone(), borrowed.base.clone())
     };
     match name.as_str() {
-        "dict" | "list" | "set" => {
+        "dict" | "list" | "set"
             // Check that this is actually the primitive singleton, not a
             // user class that happens to be named "dict".
-            if is_primitive_class(class) {
+            if is_primitive_class(class) => {
                 return Some(match name.as_str() {
                     "dict" => "dict",
                     "list" => "list",
@@ -1456,7 +1454,6 @@ pub(crate) fn find_mutable_primitive_base(
                     _ => unreachable!(),
                 });
             }
-        }
         _ => {}
     }
     base.and_then(|b| find_mutable_primitive_base(&b))
@@ -1478,17 +1475,16 @@ pub(crate) fn find_immutable_primitive_base(
         (borrowed.name.clone(), borrowed.base.clone())
     };
     match name.as_str() {
-        "frozenset" | "tuple" => {
+        "frozenset" | "tuple"
             // Check that this is actually the primitive singleton, not a
             // user class that happens to share the name.
-            if is_primitive_class(class) {
+            if is_primitive_class(class) => {
                 return Some(match name.as_str() {
                     "frozenset" => "frozenset",
                     "tuple" => "tuple",
                     _ => unreachable!(),
                 });
             }
-        }
         _ => {}
     }
     base.and_then(|b| find_immutable_primitive_base(&b))
@@ -1512,8 +1508,8 @@ pub(crate) fn find_scalar_primitive_base(
         (borrowed.name.clone(), borrowed.base.clone())
     };
     match name.as_str() {
-        "str" | "int" | "float" | "bytes" | "bytearray" | "complex" => {
-            if is_primitive_class(class) {
+        "str" | "int" | "float" | "bytes" | "bytearray" | "complex"
+            if is_primitive_class(class) => {
                 return Some(match name.as_str() {
                     "str" => "str",
                     "int" => "int",
@@ -1524,7 +1520,6 @@ pub(crate) fn find_scalar_primitive_base(
                     _ => unreachable!(),
                 });
             }
-        }
         _ => {}
     }
     base.and_then(|b| find_scalar_primitive_base(&b))
@@ -1572,11 +1567,10 @@ pub(crate) fn extract_str_value(v: &Value) -> String {
         ValueKind::Str(s) => s.to_string(),
         ValueKind::PyInstance(inst) => {
             let borrowed = inst.borrow();
-            if let Some(backing) = borrowed.attrs.get(BUILTIN_DATA_ATTR) {
-                if let ValueKind::Str(s) = backing.kind() {
+            if let Some(backing) = borrowed.attrs.get(BUILTIN_DATA_ATTR)
+                && let ValueKind::Str(s) = backing.kind() {
                     return s.to_string();
                 }
-            }
             debug_assert!(false, "extract_str_value called on non-str instance");
             v.to_py_str()
         }
@@ -1836,8 +1830,8 @@ pub(crate) fn invoke_class_method(
             // through the operator machinery.  Route them here (covering the
             // implicit `in` / `[]` operator dispatch on a primitive *subclass*
             // and `super().__contains__(...)` calls) before the registry probe.
-            if let Some((type_name, method)) = name.split_once('.') {
-                if method.starts_with("__")
+            if let Some((type_name, method)) = name.split_once('.')
+                && method.starts_with("__")
                     && builtin_protocol_dunders(type_name).contains(&method)
                 {
                     // Resolve the receiver to its backing primitive when the
@@ -1857,7 +1851,6 @@ pub(crate) fn invoke_class_method(
                         .collect();
                     return interp.dispatch_builtin_protocol_dunder(&method, receiver, rest);
                 }
-            }
             // PEP 654: BaseExceptionGroup.derive / subgroup / split are not
             // registry builtins (they need interpreter access for predicates and
             // a subclass's overridden `derive`).  Dispatch them here with the
@@ -1957,11 +1950,10 @@ pub(crate) fn mapping_pairs_via_protocol(
         .is_some_and(|dict_class| class_is_subclass_of(&class, &dict_class));
     if is_dict_subclass {
         // Concrete builtin backing dict (e.g. OrderedDict) — extract directly.
-        if let Some(backing) = instance_builtin_data(&inst) {
-            if let Some(map) = backing.as_dict() {
+        if let Some(backing) = instance_builtin_data(&inst)
+            && let Some(map) = backing.as_dict() {
                 return Ok(Some(map.clone().into_iter().collect()));
             }
-        }
         // No builtin backing (defaultdict / Counter): iterate the instance for
         // its keys and subscript via `__getitem__`, exactly as `dict()` does.
         let getitem = match getitem {
@@ -2333,11 +2325,10 @@ pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str
     if borrowed.name == name {
         return true;
     }
-    if let Some(base) = &borrowed.base {
-        if class_chain_contains_name(base, name) {
+    if let Some(base) = &borrowed.base
+        && class_chain_contains_name(base, name) {
             return true;
         }
-    }
     borrowed
         .extra_bases
         .iter()
@@ -2454,11 +2445,10 @@ pub(crate) fn mro_has_unslotted_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
     if slots.is_none() {
         return true;
     }
-    if let Some(ref b) = base {
-        if !Rc::ptr_eq(b, &object_class_singleton()) && mro_has_unslotted_ancestor(b) {
+    if let Some(ref b) = base
+        && !Rc::ptr_eq(b, &object_class_singleton()) && mro_has_unslotted_ancestor(b) {
             return true;
         }
-    }
     extra_bases
         .iter()
         .filter(|b| !Rc::ptr_eq(b, &object_class_singleton()))
@@ -2477,16 +2467,14 @@ pub(crate) fn mro_slot_allows(class: &Rc<RefCell<PyClass>>, name: &str) -> bool 
         let borrowed = class.borrow();
         (borrowed.slots.clone(), borrowed.base.clone(), borrowed.extra_bases.clone())
     };
-    if let Some(ref slot_set) = slots {
-        if slot_set.contains(name) {
+    if let Some(ref slot_set) = slots
+        && slot_set.contains(name) {
             return true;
         }
-    }
-    if let Some(ref b) = base {
-        if !Rc::ptr_eq(b, &object_class_singleton()) && mro_slot_allows(b, name) {
+    if let Some(ref b) = base
+        && !Rc::ptr_eq(b, &object_class_singleton()) && mro_slot_allows(b, name) {
             return true;
         }
-    }
     extra_bases
         .iter()
         .filter(|b| !Rc::ptr_eq(b, &object_class_singleton()))
@@ -2761,16 +2749,14 @@ pub(crate) fn instantiate_exception_with_kinds(
         // least 2 args and the first is an integer.  Single-arg calls (e.g.
         // OSError(2)) are NOT remapped.  Subclasses (FileNotFoundError, …) are
         // also not remapped — only the plain OSError call triggers the lookup.
-        if args.len() >= 2 && class.borrow().name == "OSError" {
-            if let Some(errno_int) = args[0].as_int() {
-                if let Some(subclass) = oserror_subclass_for_errno(errno_int) {
+        if args.len() >= 2 && class.borrow().name == "OSError"
+            && let Some(errno_int) = args[0].as_int()
+                && let Some(subclass) = oserror_subclass_for_errno(errno_int) {
                     return Value::py_instance(Rc::new(RefCell::new(PyInstance {
                         class: subclass,
                         attrs,
                     })));
                 }
-            }
-        }
     } else if is_unicode_decode_error || is_unicode_encode_error || is_unicode_translate_error {
         // CPython 3.12: UnicodeDecodeError(encoding, object, start, end, reason)
         //               UnicodeEncodeError(encoding, object, start, end, reason)
@@ -3346,8 +3332,8 @@ pub(crate) fn cached_builtins_module() -> Value {
         } else {
             true
         };
-        if !already_processed {
-            if let ValueKind::PyModule(m) = module.kind() {
+        if !already_processed
+            && let ValueKind::PyModule(m) = module.kind() {
                 let mut mod_attrs = m.borrow_mut();
                 // Primitive types.
                 for prim in [
@@ -3391,7 +3377,6 @@ pub(crate) fn cached_builtins_module() -> Value {
                     }
                 }
             }
-        }
         Value::clone(module)
     })
 }
@@ -3880,13 +3865,11 @@ pub(crate) fn lookup_enclosing_function_value(env: &EnvRef, name: &str) -> Optio
                 borrowed.parent.clone(),
             )
         };
-        if is_function_scope {
-            if let Some(v) = value {
-                if !v.is_unset() {
+        if is_function_scope
+            && let Some(v) = value
+                && !v.is_unset() {
                     return Some(v);
                 }
-            }
-        }
         current = next;
     }
     None
@@ -4456,13 +4439,12 @@ fn check_global_nonlocal_order_block(
                 if let Some(msg) = check_global_nonlocal_order_block(body, assigned, used) {
                     return Some(msg);
                 }
-                if let Some(branch) = else_branch {
-                    if let Some(msg) =
+                if let Some(branch) = else_branch
+                    && let Some(msg) =
                         check_global_nonlocal_order_block(branch, assigned, used)
                     {
                         return Some(msg);
                     }
-                }
             }
             Stmt::With { items, body, .. } => {
                 for (expr, alias) in items {
@@ -4491,26 +4473,24 @@ fn check_global_nonlocal_order_block(
                         return Some(msg);
                     }
                 }
-                if let Some(branch) = else_branch {
-                    if let Some(msg) =
+                if let Some(branch) = else_branch
+                    && let Some(msg) =
                         check_global_nonlocal_order_block(branch, assigned, used)
                     {
                         return Some(msg);
                     }
-                }
             }
             Stmt::While { cond, body, else_branch, .. } => {
                 collect_var_refs_in_expr(cond, used, assigned);
                 if let Some(msg) = check_global_nonlocal_order_block(body, assigned, used) {
                     return Some(msg);
                 }
-                if let Some(branch) = else_branch {
-                    if let Some(msg) =
+                if let Some(branch) = else_branch
+                    && let Some(msg) =
                         check_global_nonlocal_order_block(branch, assigned, used)
                     {
                         return Some(msg);
                     }
-                }
             }
             Stmt::Try { body, handlers, else_branch, finally_branch, .. } => {
                 if let Some(msg) = check_global_nonlocal_order_block(body, assigned, used) {
@@ -4529,20 +4509,18 @@ fn check_global_nonlocal_order_block(
                         return Some(msg);
                     }
                 }
-                if let Some(branch) = else_branch {
-                    if let Some(msg) =
+                if let Some(branch) = else_branch
+                    && let Some(msg) =
                         check_global_nonlocal_order_block(branch, assigned, used)
                     {
                         return Some(msg);
                     }
-                }
-                if let Some(branch) = finally_branch {
-                    if let Some(msg) =
+                if let Some(branch) = finally_branch
+                    && let Some(msg) =
                         check_global_nonlocal_order_block(branch, assigned, used)
                     {
                         return Some(msg);
                     }
-                }
             }
             Stmt::Match { subject, arms } => {
                 collect_var_refs_in_expr(subject, used, assigned);
@@ -5957,11 +5935,10 @@ pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
             match cause {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
                     // Check the predecessor for cycles before pushing it.
-                    if let ValueKind::PyInstance(next_inst) = c.kind() {
-                        if seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
+                    if let ValueKind::PyInstance(next_inst) = c.kind()
+                        && seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
                             break;
                         }
-                    }
                     chain.push((c.clone(), true));
                     current = c;
                 }
@@ -5974,11 +5951,10 @@ pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
             match context {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
                     // Check the predecessor for cycles before pushing it.
-                    if let ValueKind::PyInstance(next_inst) = c.kind() {
-                        if seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
+                    if let ValueKind::PyInstance(next_inst) = c.kind()
+                        && seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
                             break;
                         }
-                    }
                     chain.push((c.clone(), false));
                     current = c;
                 }
@@ -6083,19 +6059,17 @@ pub(crate) fn call_del_if_last_binding(
         if r.is_unset() {
             continue;
         }
-        if let Some(other_rc) = r.as_py_instance_rc() {
-            if Rc::ptr_eq(other_rc, del_rc) {
+        if let Some(other_rc) = r.as_py_instance_rc()
+            && Rc::ptr_eq(other_rc, del_rc) {
                 return; // another named local still holds the instance
             }
-        }
     }
     // Scan env.values for a Python-level binding (globals / nonlocals / cells).
     for v in interp.env.borrow().values.values() {
-        if let Some(other_rc) = v.as_py_instance_rc() {
-            if Rc::ptr_eq(other_rc, del_rc) {
+        if let Some(other_rc) = v.as_py_instance_rc()
+            && Rc::ptr_eq(other_rc, del_rc) {
                 return; // a global/nonlocal/cell var still holds the instance
             }
-        }
     }
     // No other Python-visible binding — invoke __del__.
     let class_name = del_rc.borrow().class.borrow().name.clone();

@@ -835,10 +835,10 @@ fn is_slot_member(name: &str, class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool
     if let Some(v) = attr {
         return crate::member_descriptor::as_member_descriptor(&v).is_some();
     }
-    if let Some(b) = base {
-        if is_slot_member(name, &b) {
-            return true;
-        }
+    if let Some(b) = base
+        && is_slot_member(name, &b)
+    {
+        return true;
     }
     extra_bases.iter().any(|b| is_slot_member(name, b))
 }
@@ -856,10 +856,10 @@ fn class_chain_has(class: &Rc<RefCell<pyrust_core::PyClass>>, target_name: &str)
     if name == target_name {
         return true;
     }
-    if let Some(b) = base {
-        if class_chain_has(&b, target_name) {
-            return true;
-        }
+    if let Some(b) = base
+        && class_chain_has(&b, target_name)
+    {
+        return true;
     }
     extra_bases.iter().any(|b| class_chain_has(b, target_name))
 }

@@ -231,8 +231,7 @@ impl Interpreter {
             && let Some((type_name, method)) = name.split_once('.')
             && method.starts_with("__")
             && builtin_protocol_dunders(type_name).contains(&method)
-        {
-            if let Some(self_arg) = args.first() {
+            && let Some(self_arg) = args.first() {
                 let recv = self_arg.value.clone();
                 let recv_is_match = !matches!(recv.kind(), ValueKind::PyInstance(_))
                     && pyrust_core::builtin_type_name(&recv) == type_name;
@@ -252,7 +251,6 @@ impl Interpreter {
                     return self.dispatch_builtin_protocol_dunder(&method, recv, rest);
                 }
             }
-        }
 
         if let ValueKind::BuiltinFunction(name) = function.kind()
             && let Some(dispatch) = crate::builtin_registry::lookup(name)
@@ -1101,14 +1099,12 @@ impl Interpreter {
         // element of the argument is in the view.  Iterating the argument (and
         // probing the view's `__contains__`) means a `dict_items` view whose
         // own values are unhashable still works, matching CPython.
-        if !has_kw && method == "isdisjoint" {
-            if let Some(kind) = pyrust_builtins::dict_views::view_kind(&receiver) {
-                if kind == 0 || kind == 2 {
+        if !has_kw && method == "isdisjoint"
+            && let Some(kind) = pyrust_builtins::dict_views::view_kind(&receiver)
+                && (kind == 0 || kind == 2) {
                     let args_vec: Vec<Value> = std::mem::take(pos);
                     return self.dict_view_isdisjoint(receiver, args_vec);
                 }
-            }
-        }
         // #2093: dict views are reversible by insertion order; expose
         // `view.__reversed__()` so the dunder is callable (and `reversed(view)`
         // works through the builtin).  Routes back through the `reversed`
@@ -1426,12 +1422,12 @@ impl Interpreter {
                 // This avoids the `kind_ok` type guard in
                 // `call_function_expanded` rejecting the PyInstance receiver.
                 // Issue #1204: same mechanism for str/int/float/bytes subclasses.
-                if let ValueKind::BuiltinFunction(fn_name) = method_val.kind() {
-                    if fn_name.split_once('.').is_some_and(|(t, _)| {
+                if let ValueKind::BuiltinFunction(fn_name) = method_val.kind()
+                    && fn_name.split_once('.').is_some_and(|(t, _)| {
                         matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
                             | "str" | "int" | "float" | "bytes")
-                    }) {
-                        if let Some(backing) = instance_builtin_data(inst) {
+                    })
+                        && let Some(backing) = instance_builtin_data(inst) {
                             // Issue #1909: container protocol dunders
                             // (`MyList().__len__()`, `MyDict().__getitem__(k)`)
                             // operate on the backing primitive — route through
@@ -1653,8 +1649,6 @@ impl Interpreter {
                                 ))),
                             };
                         }
-                    }
-                }
                 // Reconstitute kwargs as ExpandedCallArgs (the
                 // bound_method dispatch split them into pos+kw maps).
                 // Drain pos so its capacity is preserved in the buf.
@@ -2100,11 +2094,10 @@ impl Interpreter {
             let class = Rc::clone(&inst_rc.borrow().class);
             // Check __builtin_data__ before __getitem__: list/dict/set subclasses
             // with no user-defined __iter__ should iterate the backing primitive.
-            if lookup_class_attr(&class, "__iter__").is_none() {
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if lookup_class_attr(&class, "__iter__").is_none()
+                && let Some(backing) = instance_builtin_data(&inst_rc) {
                     return self.collect_iterable(&backing);
                 }
-            }
             let iterator = if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
                 invoke_class_method(
                     self,
@@ -2257,13 +2250,12 @@ impl Interpreter {
         // Gated on the scalar types so the container `__add__`/`__mul__`/`__or__`
         // arms below keep their sequence/set semantics.  Returns `NotImplemented`
         // when the operand type is outside the receiver's accepted set.
-        if matches!(&*type_name, "int" | "float" | "complex" | "bool") {
-            if let Some(result) =
+        if matches!(&*type_name, "int" | "float" | "complex" | "bool")
+            && let Some(result) =
                 self.primitive_numeric_dunder(method, &receiver, &mut args)?
             {
                 return Ok(result);
             }
-        }
         match method {
             "__len__" => {
                 let arg = ExpandedCallArg {
@@ -2753,11 +2745,10 @@ impl Interpreter {
         // First pass: reject any unknown keyword name before type-checking valid ones.
         // CPython 3.12 raises the unknown-keyword error first regardless of argument order.
         for arg in args {
-            if let Some(name) = arg.name.as_deref() {
-                if !matches!(name, "sep" | "end" | "file" | "flush") {
+            if let Some(name) = arg.name.as_deref()
+                && !matches!(name, "sep" | "end" | "file" | "flush") {
                     return Err(pyrust_core::type_err!("'{}' is an invalid keyword argument for print()", name));
                 }
-            }
         }
 
         // Second pass: extract and validate known keyword arguments.
@@ -3521,8 +3512,8 @@ impl Interpreter {
         // `type.__call__` (see `default_construct`).  Ordinary classes (metatype
         // is the built-in `type`) return `None` here and fall through to the
         // existing default construct, preserving the fast path.
-        if let Some(call_fn) = crate::interpreter::metaclass_dunder(&class, "__call__") {
-            if let ValueKind::UserFunction(f) = call_fn.kind() {
+        if let Some(call_fn) = crate::interpreter::metaclass_dunder(&class, "__call__")
+            && let ValueKind::UserFunction(f) = call_fn.kind() {
                 let func = Rc::clone(f);
                 return self.call_user_function_expanded(
                     func,
@@ -3530,7 +3521,6 @@ impl Interpreter {
                     &[Value::py_class(Rc::clone(&class))],
                 );
             }
-        }
 
         self.default_construct(class, args)
     }
@@ -3596,8 +3586,8 @@ impl Interpreter {
                 let inst_class = inst_rc.borrow().class.clone();
                 if class_is_subclass_of(&inst_class, &class) {
                     let init = lookup_class_attr(&inst_class, "__init__");
-                    if let Some(init_val) = init {
-                        if matches!(
+                    if let Some(init_val) = init
+                        && matches!(
                             init_val.kind(),
                             ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
                         ) {
@@ -3614,7 +3604,6 @@ impl Interpreter {
                                     )));
                             }
                         }
-                    }
                 }
             }
             return Ok(new_result);
@@ -3816,11 +3805,10 @@ impl Interpreter {
             let is_eg = actual_class_name.as_str() == "ExceptionGroup";
             if is_eg {
                 for exc_val in &exc_items {
-                    if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
-                        if !class_chain_contains_name(&inst_rc.borrow().class, "Exception") {
+                    if let ValueKind::PyInstance(inst_rc) = exc_val.kind()
+                        && !class_chain_contains_name(&inst_rc.borrow().class, "Exception") {
                             return Err(pyrust_core::type_err!("Cannot nest BaseExceptions in an ExceptionGroup"));
                         }
-                    }
                 }
             }
             // CPython: if calling BaseExceptionGroup and all exceptions are Exception
@@ -3854,16 +3842,14 @@ impl Interpreter {
         // `instantiate_exception` already initialised `.name` (and `.path`) to
         // `None`; override them with the caller-supplied values when provided.
         // CPython 3.12: keyword values are NOT included in `.args`.
-        if let Some(name_val) = kw_name {
-            if let ValueKind::PyInstance(inst_rc) = instance.kind() {
+        if let Some(name_val) = kw_name
+            && let ValueKind::PyInstance(inst_rc) = instance.kind() {
                 inst_rc.borrow_mut().attrs.insert("name".to_string(), name_val);
             }
-        }
-        if let Some(path_val) = kw_path {
-            if let ValueKind::PyInstance(inst_rc) = instance.kind() {
+        if let Some(path_val) = kw_path
+            && let ValueKind::PyInstance(inst_rc) = instance.kind() {
                 inst_rc.borrow_mut().attrs.insert("path".to_string(), path_val);
             }
-        }
         return Ok(instance);
     }
 
@@ -3933,8 +3919,8 @@ impl Interpreter {
                 let inst_class = inst_rc.borrow().class.clone();
                 if class_is_subclass_of(&inst_class, &class) {
                     let init = lookup_class_attr(&inst_class, "__init__");
-                    if let Some(init_val) = init {
-                        if matches!(
+                    if let Some(init_val) = init
+                        && matches!(
                             init_val.kind(),
                             ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
                         ) {
@@ -3951,7 +3937,6 @@ impl Interpreter {
                                     )));
                             }
                         }
-                    }
                 }
             }
             // Issue #1385: metaclass protocol — if __new__ returned a PyClass
@@ -3964,8 +3949,8 @@ impl Interpreter {
                 let type_cls = type_class_singleton();
                 if class_is_subclass_of(&class, &type_cls) {
                     let init = lookup_class_attr(&class, "__init__");
-                    if let Some(init_val) = init {
-                        if matches!(
+                    if let Some(init_val) = init
+                        && matches!(
                             init_val.kind(),
                             ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
                         ) {
@@ -3990,7 +3975,6 @@ impl Interpreter {
                                 }
                             }
                         }
-                    }
                 }
             }
             return Ok(new_result);
@@ -4009,8 +3993,8 @@ impl Interpreter {
         // the None arm below calls the primitive constructor with the user's
         // args to populate the backing value.
         let prim_base = find_mutable_primitive_base(&class);
-        if let Some(prim_name) = prim_base {
-            if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+        if let Some(prim_name) = prim_base
+            && let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
                 // Empty args → empty primitive (dict/list/set with no content).
                 let backing = dispatch(self, &[])?;
                 instance
@@ -4018,22 +4002,20 @@ impl Interpreter {
                     .attrs
                     .insert(BUILTIN_DATA_ATTR.to_string(), backing);
             }
-        }
 
         // Issue #994: if this class inherits from frozenset/tuple (immutable
         // primitives), build the backing from the constructor args immediately.
         // Unlike mutable types, there is no empty pre-initialisation step —
         // the content is fixed at construction and __init__ cannot change it.
         let immutable_prim_base = find_immutable_primitive_base(&class);
-        if let Some(prim_name) = immutable_prim_base {
-            if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+        if let Some(prim_name) = immutable_prim_base
+            && let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
                 let backing = dispatch(self, args)?;
                 instance
                     .borrow_mut()
                     .attrs
                     .insert(BUILTIN_DATA_ATTR.to_string(), backing);
             }
-        }
 
         // Issue #1204: if this class inherits from str/int/float/bytes (scalar
         // primitives), build the backing from the constructor args immediately,
@@ -4041,15 +4023,14 @@ impl Interpreter {
         // primitive value so that method dispatch can delegate to it (e.g.
         // `MyStr("hello").upper()` extracts the str backing and calls str.upper).
         let scalar_prim_base = find_scalar_primitive_base(&class);
-        if let Some(prim_name) = scalar_prim_base {
-            if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+        if let Some(prim_name) = scalar_prim_base
+            && let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
                 let backing = dispatch(self, args)?;
                 instance
                     .borrow_mut()
                     .attrs
                     .insert(BUILTIN_DATA_ATTR.to_string(), backing);
             }
-        }
 
         let init = lookup_class_attr(&class, "__init__");
         match init {
@@ -4679,14 +4660,13 @@ impl Interpreter {
         // Issue #1929: an int/bool subclass *is* the int it backs, so the
         // backing value is used directly (it wins over a user `__index__`
         // override, matching CPython's C-level int reuse).
-        if let Some(backing) = coerce_subclass_backing(val, &[]) {
-            if matches!(
+        if let Some(backing) = coerce_subclass_backing(val, &[])
+            && matches!(
                 backing.kind(),
                 ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
             ) {
                 return Ok(backing);
             }
-        }
         let inst_rc = match val.kind() {
             ValueKind::PyInstance(inst) => Rc::clone(inst),
             _ => unreachable!("value_to_index: kind() changed under us"),
@@ -4748,18 +4728,16 @@ impl Interpreter {
         if method != "to_bytes" {
             return Ok(());
         }
-        if let Some(first) = pos.first().cloned() {
-            if let Some(resolved) = self.try_resolve_index_value(&first)? {
+        if let Some(first) = pos.first().cloned()
+            && let Some(resolved) = self.try_resolve_index_value(&first)? {
                 pos[0] = resolved;
             }
-        }
         // Keyword `length=` form.
         let length_key = PyKey::Str(Value::string("length"));
-        if let Some(v) = kw.get(&length_key).cloned() {
-            if let Some(resolved) = self.try_resolve_index_value(&v)? {
+        if let Some(v) = kw.get(&length_key).cloned()
+            && let Some(resolved) = self.try_resolve_index_value(&v)? {
                 kw.insert(length_key, resolved);
             }
-        }
         Ok(())
     }
 
@@ -5226,11 +5204,10 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
     // 'n' already implies locale-aware grouping, so CPython rejects an
     // explicit ',' / '_' combined with it (reported against the original 'n'
     // type, not the effective 'd' it maps to).
-    if let Some(g) = fs.grouping {
-        if t == 'n' {
+    if let Some(g) = fs.grouping
+        && t == 'n' {
             return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
         }
-    }
 
     // 'n' = same as 'd' for now (no locale-aware grouping).
     let effective_t = if t == 'n' { 'd' } else { t };
@@ -5308,11 +5285,10 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
     // 'n' already implies locale-aware grouping, so CPython rejects an
     // explicit ',' / '_' combined with it (reported against the original 'n'
     // type, not the effective 'd' it maps to).
-    if let Some(g) = fs.grouping {
-        if t == 'n' {
+    if let Some(g) = fs.grouping
+        && t == 'n' {
             return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
         }
-    }
 
     // 'n' = same as 'd' for now (no locale-aware grouping).
     let effective_t = if t == 'n' { 'd' } else { t };
@@ -5420,11 +5396,10 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
     // Validate grouping vs type.  Comma and '_' are allowed on all float
     // types except 'n', which already implies locale-aware grouping and so
     // CPython rejects an explicit ',' / '_' combined with it.
-    if let Some(g) = fs.grouping {
-        if t == 'n' {
+    if let Some(g) = fs.grouping
+        && t == 'n' {
             return Err(pyrust_core::value_err!("Cannot specify '{g}' with 'n'."));
         }
-    }
 
     let (mut body, alt_prefix) = match t {
         'f' | 'F' => {
@@ -5498,11 +5473,10 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
     };
 
     // Apply grouping on the integer part of the float body.
-    if let Some(g) = fs.grouping {
-        if g == ',' || g == '_' {
+    if let Some(g) = fs.grouping
+        && (g == ',' || g == '_') {
             body = group_float_int_part(&body, g);
         }
-    }
 
     Ok(assemble_numeric(sign_prefix, alt_prefix, body, fs, '>', 3))
 }
@@ -5569,15 +5543,14 @@ fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
         // float formatter emits for integer-valued floats.  With the alternate
         // form the decimal point is retained (`3.` not `3.0`); CPython keeps
         // the point but not the zero.
-        if no_type && component_type.is_none() {
-            if let Some(stripped) = s.strip_suffix(".0") {
+        if no_type && component_type.is_none()
+            && let Some(stripped) = s.strip_suffix(".0") {
                 s = if fs.alt {
                     format!("{stripped}.")
                 } else {
                     stripped.to_string()
                 };
             }
-        }
         Ok(s)
     };
 
@@ -6516,11 +6489,10 @@ impl Interpreter {
         // str.__str__ and bytes.__str__ return `self` directly without
         // delegating to __repr__.  int/float subclasses do NOT share this
         // property — their str() dispatches __repr__ if defined.
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
-            if matches!(backing.kind(), ValueKind::Str(_) | ValueKind::Bytes(_)) {
+        if let Some(backing) = instance_builtin_data(&inst_rc)
+            && matches!(backing.kind(), ValueKind::Str(_) | ValueKind::Bytes(_)) {
                 return Ok(backing.to_py_str());
             }
-        }
         // No user __str__ and no str/bytes backing: fall through to __repr__,
         // then to the numeric/container backing, matching CPython's str()
         // delegation chain for int/float subclasses and container subclasses.
@@ -8806,12 +8778,11 @@ impl Interpreter {
                                 // invoke_class_method cannot handle BuiltinFunction
                                 // method names — it looks them up in the top-level
                                 // registry which has no "list.append" entry.
-                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind() {
-                                    if let Some((prim_type, prim_method)) =
+                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind()
+                                    && let Some((prim_type, prim_method)) =
                                         fn_name.split_once('.')
                                         .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
-                                    {
-                                        if let Some(backing) = instance_builtin_data(&inst_rc_clone) {
+                                        && let Some(backing) = instance_builtin_data(&inst_rc_clone) {
                                             return self
                                                 .dispatch_backing_primitive_method(
                                                     prim_type,
@@ -8821,8 +8792,6 @@ impl Interpreter {
                                                 )
                                                 .map(Some);
                                         }
-                                    }
-                                }
                                 let inst_val = Value::py_instance(inst_rc_clone);
                                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                                 buf.clear();

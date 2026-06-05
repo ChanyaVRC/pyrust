@@ -81,12 +81,11 @@ pyrust_module! {
                 _ => vec![],
             };
             for t in &types {
-                if let ValueKind::PyClass(expected) = t.kind() {
-                    if class_is_subclass_of(&raised_class, expected) {
+                if let ValueKind::PyClass(expected) = t.kind()
+                    && class_is_subclass_of(&raised_class, expected) {
                         let _ = _interp;
                         return Ok(Value::bool_(true));
                     }
-                }
             }
             let _ = _interp;
             Ok(Value::bool_(false))

@@ -240,8 +240,8 @@ fn restore_filters(snapshot: &Value) {
         filters.clear();
         if let ValueKind::List(items) = snapshot.kind() {
             for item in items.iter() {
-                if let ValueKind::Tuple(pair) = item.kind() {
-                    if pair.len() == 2 {
+                if let ValueKind::Tuple(pair) = item.kind()
+                    && pair.len() == 2 {
                         let action = match pair[0].kind() {
                             ValueKind::Str(s) => s.to_string(),
                             _ => continue,
@@ -252,7 +252,6 @@ fn restore_filters(snapshot: &Value) {
                         };
                         filters.push(Filter { action, category_name });
                     }
-                }
             }
         }
     });

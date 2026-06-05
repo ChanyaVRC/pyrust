@@ -1400,10 +1400,10 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
             for pv in prefixes.iter() {
                 match pv.kind() {
                     ValueKind::Str(p) => {
-                        if let Some((start, end)) = window {
-                            if s[start..end].starts_with(p) {
-                                return Ok(Value::bool_(true));
-                            }
+                        if let Some((start, end)) = window
+                            && s[start..end].starts_with(p)
+                        {
+                            return Ok(Value::bool_(true));
                         }
                     }
                     _ => {
@@ -1450,10 +1450,10 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
             for sv in suffixes.iter() {
                 match sv.kind() {
                     ValueKind::Str(p) => {
-                        if let Some((start, end)) = window {
-                            if s[start..end].ends_with(p) {
-                                return Ok(Value::bool_(true));
-                            }
+                        if let Some((start, end)) = window
+                            && s[start..end].ends_with(p)
+                        {
+                            return Ok(Value::bool_(true));
                         }
                     }
                     _ => {

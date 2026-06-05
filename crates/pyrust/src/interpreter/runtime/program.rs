@@ -159,12 +159,11 @@ impl Interpreter {
                 .module_globals_dict
                 .dict_with(|d| d.contains_key(&StrKey(name)))
                 .unwrap_or(false);
-            if !has_key {
-                if let Some(v) = me.values.get(*name).cloned() {
+            if !has_key
+                && let Some(v) = me.values.get(*name).cloned() {
                     let key = PyKey::str_from(*name);
                     let _ = self.module_globals_dict.dict_insert(key, v);
                 }
-            }
         }
     }
 
@@ -848,11 +847,10 @@ impl Interpreter {
         // Seed from globals first.
         let seeded = globals_dict.dict_with(|d| {
             for (k, v) in d {
-                if let PyKey::Str(sv) = k {
-                    if let Some(s) = sv.as_str() {
+                if let PyKey::Str(sv) = k
+                    && let Some(s) = sv.as_str() {
                         exec_env.borrow_mut().values.insert(s.to_string(), v.clone());
                     }
-                }
             }
         });
         if seeded.is_none() {
@@ -862,11 +860,10 @@ impl Interpreter {
         if let Some(ldict) = locals_dict {
             let seeded_locals = ldict.dict_with(|d| {
                 for (k, v) in d {
-                    if let PyKey::Str(sv) = k {
-                        if let Some(s) = sv.as_str() {
+                    if let PyKey::Str(sv) = k
+                        && let Some(s) = sv.as_str() {
                             exec_env.borrow_mut().values.insert(s.to_string(), v.clone());
                         }
-                    }
                 }
             });
             if seeded_locals.is_none() {

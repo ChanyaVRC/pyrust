@@ -2612,10 +2612,10 @@ impl Parser {
         // at compile time.  `**dict` splats are not checked here.
         let mut seen_kw: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for a in &args {
-            if let Some(name) = &a.name {
-                if !seen_kw.insert(name.as_str()) {
-                    return Err(PyError::Parse(format!("keyword argument repeated: {name}")));
-                }
+            if let Some(name) = &a.name
+                && !seen_kw.insert(name.as_str())
+            {
+                return Err(PyError::Parse(format!("keyword argument repeated: {name}")));
             }
         }
         Ok(args)

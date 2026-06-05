@@ -1162,11 +1162,10 @@ fn math_arg_to_float(interp: &mut crate::Interpreter, val: &Value) -> Result<f64
         let backing = instance_builtin_data(&inst_rc);
         // (1) float subclass: use the backing float directly (PyFloat_Check
         // fast path bypasses any __float__ override).
-        if let Some(ref b) = backing {
-            if matches!(b.kind(), ValueKind::Float(_)) {
+        if let Some(ref b) = backing
+            && matches!(b.kind(), ValueKind::Float(_)) {
                 return value_to_float(b, "__SENTINEL__");
             }
-        }
         let self_val = Value::py_instance(Rc::clone(&inst_rc));
         // (2) __float__ — must return an exact float (not int/bool).
         if let Some(method) = lookup_class_attr(&class, "__float__") {
@@ -1186,14 +1185,13 @@ fn math_arg_to_float(interp: &mut crate::Interpreter, val: &Value) -> Result<f64
         }
         // (3) int subclass: the inherited int.__float__ (nb_float) uses the
         // backing value and ranks above a user __index__ override.
-        if let Some(ref b) = backing {
-            if matches!(
+        if let Some(ref b) = backing
+            && matches!(
                 b.kind(),
                 ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
             ) {
                 return value_to_float(b, "__SENTINEL__");
             }
-        }
         // (4) __index__ — math accepts it for float arguments on plain objects.
         if let Some(method) = lookup_class_attr(&class, "__index__") {
             let result = invoke_class_method(interp, method, self_val, &[])?;

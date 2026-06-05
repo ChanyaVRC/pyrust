@@ -736,9 +736,9 @@ pyrust_module! {
             _ => false,
         };
 
-        if b_is_proper_subtype_of_a {
-            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.kind()) {
-                if let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
+        if b_is_proper_subtype_of_a
+            && let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.kind())
+                && let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
                     let self_val = Value::py_instance(Rc::clone(inst));
                     let arg = ExpandedCallArg { name: None, value: a.clone() };
                     match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -747,12 +747,10 @@ pyrust_module! {
                         _ => {}
                     }
                 }
-            }
-        }
 
         // Try a.__divmod__(b).
-        if let (Some(ac), ValueKind::PyInstance(inst)) = (&a_class, a.kind()) {
-            if let Some(m) = lookup_class_attr(ac, "__divmod__") {
+        if let (Some(ac), ValueKind::PyInstance(inst)) = (&a_class, a.kind())
+            && let Some(m) = lookup_class_attr(ac, "__divmod__") {
                 let self_val = Value::py_instance(Rc::clone(inst));
                 let arg = ExpandedCallArg { name: None, value: b.clone() };
                 match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -761,12 +759,11 @@ pyrust_module! {
                     _ => {}
                 }
             }
-        }
 
         // Try b.__rdivmod__(a) (skipped above if already tried via subtype rule).
-        if !b_is_proper_subtype_of_a {
-            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.kind()) {
-                if let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
+        if !b_is_proper_subtype_of_a
+            && let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.kind())
+                && let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
                     let self_val = Value::py_instance(Rc::clone(inst));
                     let arg = ExpandedCallArg { name: None, value: a.clone() };
                     match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -775,8 +772,6 @@ pyrust_module! {
                         _ => {}
                     }
                 }
-            }
-        }
 
         // Issue #1433: if no user-defined dunder was found (or all returned
         // NotImplemented), coerce int/float subclass instances to their primitive
@@ -1065,9 +1060,9 @@ pyrust_module! {
                 _ => false,
             };
 
-            if exp_is_proper_subtype_of_base {
-                if let (Some(ec), ValueKind::PyInstance(inst)) = (&exp_class, exp_val.kind()) {
-                    if let Some(m) = lookup_class_attr(ec, "__rpow__") {
+            if exp_is_proper_subtype_of_base
+                && let (Some(ec), ValueKind::PyInstance(inst)) = (&exp_class, exp_val.kind())
+                    && let Some(m) = lookup_class_attr(ec, "__rpow__") {
                         let self_val = Value::py_instance(Rc::clone(inst));
                         let arg = ExpandedCallArg { name: None, value: base_val.clone() };
                         match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -1076,12 +1071,10 @@ pyrust_module! {
                             _ => {}
                         }
                     }
-                }
-            }
 
             // Try base.__pow__(exp).
-            if let (Some(bc), ValueKind::PyInstance(inst)) = (&base_class, base_val.kind()) {
-                if let Some(m) = lookup_class_attr(bc, "__pow__") {
+            if let (Some(bc), ValueKind::PyInstance(inst)) = (&base_class, base_val.kind())
+                && let Some(m) = lookup_class_attr(bc, "__pow__") {
                     let self_val = Value::py_instance(Rc::clone(inst));
                     let arg = ExpandedCallArg { name: None, value: exp_val.clone() };
                     match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -1090,7 +1083,6 @@ pyrust_module! {
                         _ => {}
                     }
                 }
-            }
 
             // Try exp.__rpow__(base), but only when:
             //   - the subtype rule didn't already try it, AND
@@ -1102,9 +1094,9 @@ pyrust_module! {
                 // base is PyInstance but exp is not, or both non-instance: skip reflected.
                 _ => false,
             };
-            if !exp_is_proper_subtype_of_base && types_differ {
-                if let (Some(ec), ValueKind::PyInstance(inst)) = (&exp_class, exp_val.kind()) {
-                    if let Some(m) = lookup_class_attr(ec, "__rpow__") {
+            if !exp_is_proper_subtype_of_base && types_differ
+                && let (Some(ec), ValueKind::PyInstance(inst)) = (&exp_class, exp_val.kind())
+                    && let Some(m) = lookup_class_attr(ec, "__rpow__") {
                         let self_val = Value::py_instance(Rc::clone(inst));
                         let arg = ExpandedCallArg { name: None, value: base_val.clone() };
                         match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -1113,8 +1105,6 @@ pyrust_module! {
                             _ => {}
                         }
                     }
-                }
-            }
 
             // Fall through to built-in numeric pow.  Route through the same
             // NumericOps slot dispatch the `**` operator uses (#458) so that
@@ -1326,8 +1316,8 @@ pyrust_module! {
             let keys: Vec<Value> = map.keys().map(|k| key_to_value(k.clone())).collect();
             return Ok(pyrust_builtins::iter_helpers::reversed(Value::list(keys)));
         }
-        if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0) {
-            if let Some(rc) = pyrust_builtins::dict_views::as_dict_rc(&seq.0) {
+        if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0)
+            && let Some(rc) = pyrust_builtins::dict_views::as_dict_rc(&seq.0) {
                 let map = rc.borrow();
                 let forward: Vec<Value> = match kind {
                     // dict_keys
@@ -1342,7 +1332,6 @@ pyrust_module! {
                 };
                 return Ok(pyrust_builtins::iter_helpers::reversed(Value::list(forward)));
             }
-        }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
         // and all BuiltinObject iterator types are not sequences and must
@@ -2977,11 +2966,10 @@ pyrust_module! {
                     let class = Rc::clone(&inst_rc.borrow().class);
                     // Issue #1204: if the instance is a bytes subclass extract the
                     // backing value first. `bytes(MyBytes(b"x"))` must return b'x'.
-                    if let Some(backing) = instance_builtin_data(&inst_rc) {
-                        if matches!(backing.kind(), ValueKind::Bytes(_)) {
+                    if let Some(backing) = instance_builtin_data(&inst_rc)
+                        && matches!(backing.kind(), ValueKind::Bytes(_)) {
                             return Ok(backing);
                         }
-                    }
                     let self_val = Value::py_instance(Rc::clone(&inst_rc));
                     if let Some(method) = lookup_class_attr(&class, "__bytes__") {
                         let result = invoke_class_method(_interp, method, self_val, &[])?;
@@ -5616,11 +5604,10 @@ pyrust_module! {
         let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
         if let Some(map) = namespace_val.as_dict() {
             for (k, v) in map.iter() {
-                if let PyKey::Str(s) = k {
-                    if let Some(key_str) = s.as_str() {
+                if let PyKey::Str(s) = k
+                    && let Some(key_str) = s.as_str() {
                         attrs.insert(key_str.to_string(), v.clone());
                     }
-                }
             }
         }
         // Issue #1626: record the actual metatype on the class so that
@@ -7333,11 +7320,10 @@ pub(crate) fn value_class(obj: &Value) -> Value {
         ValueKind::BuiltinObject { ops, .. } => {
             // instance_dict is a live-proxy for obj.__dict__; its Python
             // type is `dict` (same as CPython's actual __dict__).
-            if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME {
-                if let Some(dict_class) = crate::interpreter::primitive_class_by_name("dict") {
+            if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME
+                && let Some(dict_class) = crate::interpreter::primitive_class_by_name("dict") {
                     return Value::py_class(dict_class);
                 }
-            }
             Value::builtin_function(ops.type_name())
         }
         // Migrated primitives are handled above via
@@ -8158,11 +8144,10 @@ fn value_needs_slow_hash(v: &Value) -> bool {
     // hash_value_with_interp handles all three cases correctly: unhashable
     // primitive component (names the component type), PyInstance component
     // (dispatches __hash__), and all-hashable components (computes the hash).
-    if let ValueKind::BuiltinObject { ops, .. } = v.kind() {
-        if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
+    if let ValueKind::BuiltinObject { ops, .. } = v.kind()
+        && ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
             return true;
         }
-    }
     // Recurse into tuple elements.
     if let ValueKind::Tuple(items) = v.kind() {
         return items.iter().any(value_needs_slow_hash);
@@ -8442,8 +8427,8 @@ fn isinstance_check(
         // precedence, mirroring CPython's `type(cls).__instancecheck__(cls, x)`
         // dispatch.  `metaclass_dunder` returns `Some` only for a user
         // override, so ordinary classes skip this and keep the fast path.
-        if let Some(ic_fn) = crate::interpreter::metaclass_dunder(cls_rc, "__instancecheck__") {
-            if let ValueKind::UserFunction(f) = ic_fn.kind() {
+        if let Some(ic_fn) = crate::interpreter::metaclass_dunder(cls_rc, "__instancecheck__")
+            && let ValueKind::UserFunction(f) = ic_fn.kind() {
                 let func = Rc::clone(f);
                 let call_args = [crate::interpreter::ExpandedCallArg {
                     name: None,
@@ -8456,7 +8441,6 @@ fn isinstance_check(
                 )?;
                 return Ok(interp.truthy_value(&result)?);
             }
-        }
         // Legacy ABC path: ABC classes store `__instancecheck__` directly in
         // their own attrs dict (not on a metaclass).
         let has_ic = cls_rc.borrow().attrs.contains_key("__instancecheck__");
@@ -8515,8 +8499,7 @@ fn issubclass_check(
         // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.
         if let Some(sc_fn) =
             crate::interpreter::metaclass_dunder(classinfo_rc, "__subclasscheck__")
-        {
-            if let ValueKind::UserFunction(f) = sc_fn.kind() {
+            && let ValueKind::UserFunction(f) = sc_fn.kind() {
                 let func = Rc::clone(f);
                 let call_args = [crate::interpreter::ExpandedCallArg {
                     name: None,
@@ -8529,7 +8512,6 @@ fn issubclass_check(
                 )?;
                 return Ok(interp.truthy_value(&result)?);
             }
-        }
         // Legacy ABC path: ABC classes store `__subclasscheck__` directly in
         // their own attrs dict (not on a metaclass).
         let has_sc = classinfo_rc.borrow().attrs.contains_key("__subclasscheck__");
@@ -9484,11 +9466,10 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
 /// of the underlying generator state, matching `id()` / `Value::value_id`.
 fn generator_repr(value: &Value) -> String {
     let addr = value.value_id().unwrap_or(0) as usize;
-    if let ValueKind::Generator(state_rc) = value.kind() {
-        if let Some(frame) = state_rc.borrow().downcast_ref::<GeneratorFrame>() {
+    if let ValueKind::Generator(state_rc) = value.kind()
+        && let Some(frame) = state_rc.borrow().downcast_ref::<GeneratorFrame>() {
             return format!("<generator object {} at 0x{addr:x}>", frame.qualname);
         }
-    }
     let type_name = full_type_name_str(value);
     format!("<{type_name} object at 0x{addr:x}>")
 }
@@ -9596,19 +9577,18 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
         .unwrap_or(false);
     // str/bytes backing: return early unless a user __str__ is defined.
     // (A user __repr__ does NOT override str.__str__ in CPython.)
-    if !has_user_str_dunder {
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
+    if !has_user_str_dunder
+        && let Some(backing) = instance_builtin_data(&inst_rc) {
             match backing.kind() {
                 ValueKind::Str(_) | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
                 _ => {}
             }
         }
-    }
     // int/float/bool/BigInt backing: return early only when neither user
     // __str__ nor user __repr__ is defined (matching CPython's int.__str__
     // which calls __repr__).
-    if !has_user_str_dunder && !has_user_repr_dunder {
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
+    if !has_user_str_dunder && !has_user_repr_dunder
+        && let Some(backing) = instance_builtin_data(&inst_rc) {
             match backing.kind() {
                 ValueKind::Int(_)
                 | ValueKind::BigInt(_)
@@ -9618,7 +9598,6 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                 _ => {}
             }
         }
-    }
     // Issue #1537: skip `object.__str__` / `object.__repr__` sentinels when
     // the instance has a primitive backing store.  Primitive types now set
     // `object` as an explicit MRO base, making these reachable for user

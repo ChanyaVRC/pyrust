@@ -1138,19 +1138,15 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                                 && lhs >= num_locals
                                 && inner_src != dst
                                 && int_regs.contains(&inner_src)
+                                && let Some(combined) = fold_int_pair(c2, op, c1)
+                                && let Some(ci) = intern_const_in_pool(consts, Value::int(combined))
                             {
-                                if let Some(combined) = fold_int_pair(c2, op, c1) {
-                                    if let Some(ci) =
-                                        intern_const_in_pool(consts, Value::int(combined))
-                                    {
-                                        binop_const_out.insert(dst, (inner_src, op, combined));
-                                        load_const_val.remove(&dst);
-                                        // dst is Int since inner_src is Int and op is int-preserving.
-                                        int_regs.insert(dst);
-                                        out.push(Insn::BinOpConst(dst, inner_src, op, ci, is_aug));
-                                        rewritten = true;
-                                    }
-                                }
+                                binop_const_out.insert(dst, (inner_src, op, combined));
+                                load_const_val.remove(&dst);
+                                // dst is Int since inner_src is Int and op is int-preserving.
+                                int_regs.insert(dst);
+                                out.push(Insn::BinOpConst(dst, inner_src, op, ci, is_aug));
+                                rewritten = true;
                             }
                         }
                         if !rewritten {
@@ -1194,12 +1190,13 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                 // to `dst` (no-op in terms of register) but read the *new* value
                 // of dst rather than the original one, producing a wrong result.
                 let mut recorded = false;
-                if is_integer_associative(op) && dst != lhs {
-                    if let Some(&c_rhs) = load_const_val.get(&rhs) {
-                        // rhs is a constant register; record lhs as inner source.
-                        binop_const_out.insert(dst, (lhs, op, c_rhs));
-                        recorded = true;
-                    }
+                if is_integer_associative(op)
+                    && dst != lhs
+                    && let Some(&c_rhs) = load_const_val.get(&rhs)
+                {
+                    // rhs is a constant register; record lhs as inner source.
+                    binop_const_out.insert(dst, (lhs, op, c_rhs));
+                    recorded = true;
                 }
                 if !recorded {
                     binop_const_out.remove(&dst);
@@ -1888,14 +1885,14 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
             Insn::BinOpConst(dst, lhs, op, c, is_aug) => {
                 let lhs_int = int_regs.contains(&lhs);
                 let c_int = is_int_const(c, consts);
-                if lhs_int && c_int {
-                    if let Some(cv) = consts[c as usize].as_int() {
-                        if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
-                            int_regs.insert(dst);
-                            out.push(new);
-                            continue;
-                        }
-                    }
+                if lhs_int
+                    && c_int
+                    && let Some(cv) = consts[c as usize].as_int()
+                    && let Some(new) = identity_rewrite(dst, lhs, op, cv, consts)
+                {
+                    int_regs.insert(dst);
+                    out.push(new);
+                    continue;
                 }
                 if lhs_int && c_int && int_preserving(op) {
                     int_regs.insert(dst);
@@ -1927,14 +1924,13 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 // First: try the identity rewrite when `rhs` is an immutable
                 // int constant register (covers the loop case where
                 // `pass_binop_const_fusion` couldn't fuse across a back-edge).
-                if int_regs.contains(&lhs) {
-                    if let Some(&cv) = immutable_int_const.get(&rhs) {
-                        if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
-                            int_regs.insert(dst);
-                            out.push(new);
-                            continue;
-                        }
-                    }
+                if int_regs.contains(&lhs)
+                    && let Some(&cv) = immutable_int_const.get(&rhs)
+                    && let Some(new) = identity_rewrite(dst, lhs, op, cv, consts)
+                {
+                    int_regs.insert(dst);
+                    out.push(new);
+                    continue;
                 }
                 // Propagate Int-ness through type-preserving ops.
                 if int_regs.contains(&lhs) && int_regs.contains(&rhs) && int_preserving(op) {
@@ -2839,13 +2835,13 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> V
                     // BinOpImm's slow path still invokes try_inplace_op, so __iadd__
                     // and friends are preserved for user-defined types on the LHS.
                     // BinOpInPlace is always augmented → is_aug = true.
-                    if let Some(int_val) = consts[idx as usize].as_int() {
-                        if let Ok(imm) = i16::try_from(int_val) {
-                            if rhs >= num_locals {
-                                converted_regs.insert(rhs);
-                            }
-                            return Insn::BinOpImm(dst, lhs, op, imm, true);
+                    if let Some(int_val) = consts[idx as usize].as_int()
+                        && let Ok(imm) = i16::try_from(int_val)
+                    {
+                        if rhs >= num_locals {
+                            converted_regs.insert(rhs);
                         }
+                        return Insn::BinOpImm(dst, lhs, op, imm, true);
                     }
                     // Constant does not fit in i16.  Only safe to use BinOpConst
                     // when lhs is a temp register — temps are compiler-generated and
@@ -3770,10 +3766,11 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
         {
             return false;
         }
-        if let Insn::LoadNoneRange { start, count } = insn {
-            if r >= *start && r < start + *count as u32 {
-                return false;
-            }
+        if let Insn::LoadNoneRange { start, count } = insn
+            && r >= *start
+            && r < start + *count as u32
+        {
+            return false;
         }
     }
     false
@@ -4746,11 +4743,11 @@ fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<
             }
         } else {
             // Any other write to a temp register invalidates both trackers.
-            if let Some(dst) = writable_dst(insn) {
-                if dst >= num_locals {
-                    pure_reg.remove(&dst);
-                    const_reg.remove(&dst);
-                }
+            if let Some(dst) = writable_dst(insn)
+                && dst >= num_locals
+            {
+                pure_reg.remove(&dst);
+                const_reg.remove(&dst);
             }
             // LoadNoneRange writes a contiguous range — invalidate each slot.
             if let Insn::LoadNoneRange { start, count } = insn {
@@ -6338,13 +6335,12 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
             collect_writes(&transformed[scan], &mut written_tmp);
             if written_tmp.contains(&acc) {
                 // acc is written here — must be a LoadConst with an integer value.
-                if let Insn::LoadConst(r, idx) = transformed[scan] {
-                    if r == acc {
-                        if let Some(ValueKind::Int(v)) = consts.get(idx as usize).map(Value::kind) {
-                            acc_init = Some(v);
-                            break;
-                        }
-                    }
+                if let Insn::LoadConst(r, idx) = transformed[scan]
+                    && r == acc
+                    && let Some(ValueKind::Int(v)) = consts.get(idx as usize).map(Value::kind)
+                {
+                    acc_init = Some(v);
+                    break;
                 }
                 continue 'outer; // non-LoadConst write → unsafe
             }
@@ -6473,12 +6469,12 @@ fn pass_loadnone_merge(insns: Vec<Insn>) -> Vec<Insn> {
             let mut run_end = start;
             let mut j = i + 1;
             while j < n && !jump_targets.contains(&j) {
-                if let Insn::LoadNone(r) = transformed[j] {
-                    if r == run_end + 1 {
-                        run_end = r;
-                        j += 1;
-                        continue;
-                    }
+                if let Insn::LoadNone(r) = transformed[j]
+                    && r == run_end + 1
+                {
+                    run_end = r;
+                    j += 1;
+                    continue;
                 }
                 break;
             }
