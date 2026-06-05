@@ -122,7 +122,7 @@ impl Interpreter {
             .collect();
         body_locals.sort_by_key(|(slot, _)| *slot);
         for (_, name) in &body_locals {
-            varnames.push(Value::string(name.to_string()));
+            varnames.push(Value::string(name));
         }
         // co_nlocals == len(co_varnames).
         let nlocals = varnames.len() as i64;
@@ -370,7 +370,7 @@ impl Interpreter {
         locals.sort_by_key(|(slot, _)| *slot);
         let varnames: Vec<Value> = locals
             .iter()
-            .map(|(_, n)| Value::string(n.to_string()))
+            .map(|(_, n)| Value::string(n))
             .collect();
         let nlocals = varnames.len() as i64;
 

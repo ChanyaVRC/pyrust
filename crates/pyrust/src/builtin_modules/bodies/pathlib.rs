@@ -87,7 +87,7 @@ fn is_path_instance(rc: &Rc<RefCell<PyInstance>>) -> bool {
 fn make_path_instance(path: &str) -> Value {
     POSIX_PATH_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("_path".to_string(), Value::string(path));
+        attrs.insert("_path", Value::string(path));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
@@ -220,7 +220,7 @@ pyrust_module! {
         let _ = _interp;
         inst.borrow_mut()
             .attrs
-            .insert("_path".to_string(), Value::string(&joined));
+            .insert("_path", Value::string(&joined));
         Ok(Value::none())
     }
 

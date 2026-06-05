@@ -6012,7 +6012,7 @@ mod tests {
             qualname: "f".to_string(),
             user_name: RefCell::new(None),
             user_qualname: RefCell::new(None),
-            module: RefCell::new(Value::string("__main__".to_string())),
+            module: RefCell::new(Value::string("__main__")),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
             annotations: RefCell::new(Value::dict(PyDict::default())),

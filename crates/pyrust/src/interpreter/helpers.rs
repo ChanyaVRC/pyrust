@@ -2658,7 +2658,7 @@ pub(crate) fn instantiate_exception_with_kinds(
     attrs.insert("__traceback__", Value::none());
     if is_stop_iteration {
         let val = args.first().cloned().unwrap_or_else(Value::none);
-        attrs.insert("value".to_string(), val);
+        attrs.insert("value", val);
     } else if is_system_exit {
         // CPython 3.12 SystemExit.__init__: code = args[0] if 1 arg, tuple(args) if
         // multiple args, None if no args.  For the multi-arg case CPython sets
@@ -2669,7 +2669,7 @@ pub(crate) fn instantiate_exception_with_kinds(
             1 => args[0].clone(),
             _ => attrs.get("args").cloned().unwrap_or_else(Value::none),
         };
-        attrs.insert("code".to_string(), code);
+        attrs.insert("code", code);
     } else if is_syntax_error {
         // CPython 3.12 SyntaxError.__init__: always initialise all structured
         // attributes.  With 1 arg: msg = args[0], rest = None.  With 2 args
@@ -2706,42 +2706,42 @@ pub(crate) fn instantiate_exception_with_kinds(
                 }
             }
         }
-        attrs.insert("msg".to_string(), msg);
-        attrs.insert("filename".to_string(), filename);
-        attrs.insert("lineno".to_string(), lineno);
-        attrs.insert("offset".to_string(), offset);
-        attrs.insert("text".to_string(), text);
-        attrs.insert("end_lineno".to_string(), end_lineno);
-        attrs.insert("end_offset".to_string(), end_offset);
+        attrs.insert("msg", msg);
+        attrs.insert("filename", filename);
+        attrs.insert("lineno", lineno);
+        attrs.insert("offset", offset);
+        attrs.insert("text", text);
+        attrs.insert("end_lineno", end_lineno);
+        attrs.insert("end_offset", end_offset);
         // CPython 3.12 also initialises print_file_and_line (always None for
         // user-constructed instances; only set by the C compile-phase injector).
-        attrs.insert("print_file_and_line".to_string(), Value::none());
+        attrs.insert("print_file_and_line", Value::none());
     } else if is_os_error {
         // CPython 3.12 OSError.__init__: populate errno/strerror/filename/filename2.
         // With 0 or 1 args: all None.  With 2 args: errno=args[0], strerror=args[1].
         // With 3 args: additionally filename=args[2].
         // With 5 args: args[3]=winerror (ignored on non-Windows), args[4]=filename2.
         if args.len() >= 2 {
-            attrs.insert("errno".to_string(), args[0].clone());
-            attrs.insert("strerror".to_string(), args[1].clone());
+            attrs.insert("errno", args[0].clone());
+            attrs.insert("strerror", args[1].clone());
             // CPython 3.12: OSError.__init__ always sets self.args = (errno, strerror)
             // regardless of how many positional arguments were supplied.  The filename
             // (and filename2) are stored as dedicated instance attributes, not in args.
             attrs.insert(
-                "args".to_string(),
+                "args",
                 Value::tuple(vec![args[0].clone(), args[1].clone()]),
             );
         } else {
-            attrs.insert("errno".to_string(), Value::none());
-            attrs.insert("strerror".to_string(), Value::none());
+            attrs.insert("errno", Value::none());
+            attrs.insert("strerror", Value::none());
         }
         attrs.insert(
-            "filename".to_string(),
+            "filename",
             args.get(2).cloned().unwrap_or_else(Value::none),
         );
         // filename2 is set by the 5-arg form: OSError(errno, strerror, fname, winerror, fname2)
         attrs.insert(
-            "filename2".to_string(),
+            "filename2",
             args.get(4).cloned().unwrap_or_else(Value::none),
         );
         // CPython 3.12 OSError.__new__ remaps to an errno-specific subclass when
@@ -2769,21 +2769,21 @@ pub(crate) fn instantiate_exception_with_kinds(
         // CPython 3.12: user-constructed NameError (and UnboundLocalError) instances
         // always have a `.name` attribute, defaulting to `None`.  Interpreter-raised
         // instances set the name via `instantiate_name_error` with the actual identifier.
-        attrs.insert("name".to_string(), Value::none());
+        attrs.insert("name", Value::none());
     }
     if is_import_error {
         // CPython 3.12: user-constructed ImportError (and ModuleNotFoundError) instances
         // always have `.name` and `.path` attributes, both defaulting to `None`.
         // Interpreter-raised instances set them via `instantiate_import_error`.
-        attrs.insert("name".to_string(), Value::none());
-        attrs.insert("path".to_string(), Value::none());
+        attrs.insert("name", Value::none());
+        attrs.insert("path", Value::none());
     }
     if is_attribute_error {
         // CPython 3.12: user-constructed AttributeError instances always have `.name`
         // and `.obj` attributes, both defaulting to `None`.  Interpreter-raised
         // instances set them via `instantiate_attribute_error` with the actual values.
-        attrs.insert("name".to_string(), Value::none());
-        attrs.insert("obj".to_string(), Value::none());
+        attrs.insert("name", Value::none());
+        attrs.insert("obj", Value::none());
     }
     if is_base_exception_group {
         // PEP 654: BaseExceptionGroup(message, exceptions).
@@ -2800,8 +2800,8 @@ pub(crate) fn instantiate_exception_with_kinds(
         } else {
             Value::tuple(vec![])
         };
-        attrs.insert("message".to_string(), message);
-        attrs.insert("exceptions".to_string(), exceptions);
+        attrs.insert("message", message);
+        attrs.insert("exceptions", exceptions);
     }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
@@ -2824,17 +2824,17 @@ pub(crate) fn instantiate_os_error(
     let errno_val = Value::int(errno);
     let strerror_val = Value::string(strerror);
     attrs.insert(
-        "args".to_string(),
+        "args",
         Value::tuple(vec![errno_val.clone(), strerror_val.clone()]),
     );
-    attrs.insert("errno".to_string(), errno_val);
-    attrs.insert("strerror".to_string(), strerror_val);
+    attrs.insert("errno", errno_val);
+    attrs.insert("strerror", strerror_val);
     attrs.insert(
-        "filename".to_string(),
+        "filename",
         filename.map(Value::string).unwrap_or_else(Value::none),
     );
     attrs.insert(
-        "filename2".to_string(),
+        "filename2",
         filename2.map(Value::string).unwrap_or_else(Value::none),
     );
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
@@ -2853,13 +2853,13 @@ pub(crate) fn instantiate_import_error(
     module_name: Option<String>,
 ) -> Value {
     let mut attrs = InstanceAttrs::new();
-    attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
+    attrs.insert("args", Value::tuple(vec![Value::string(message)]));
     let name_val = match module_name {
         Some(n) => Value::string(n),
         None => Value::none(),
     };
-    attrs.insert("name".to_string(), name_val);
-    attrs.insert("path".to_string(), Value::none());
+    attrs.insert("name", name_val);
+    attrs.insert("path", Value::none());
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -2879,13 +2879,13 @@ pub(crate) fn instantiate_name_error(
     name: Option<String>,
 ) -> Value {
     let mut attrs = InstanceAttrs::new();
-    attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
-    attrs.insert("__traceback__".to_string(), Value::none());
+    attrs.insert("args", Value::tuple(vec![Value::string(message)]));
+    attrs.insert("__traceback__", Value::none());
     let name_val = match name {
         Some(n) => Value::string(n),
         None => Value::none(),
     };
-    attrs.insert("name".to_string(), name_val);
+    attrs.insert("name", name_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -2906,13 +2906,13 @@ pub(crate) fn instantiate_attribute_error(
     obj: Option<Value>,
 ) -> Value {
     let mut attrs = InstanceAttrs::new();
-    attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
-    attrs.insert("__traceback__".to_string(), Value::none());
+    attrs.insert("args", Value::tuple(vec![Value::string(message)]));
+    attrs.insert("__traceback__", Value::none());
     attrs.insert(
-        "name".to_string(),
+        "name",
         name.map(Value::string).unwrap_or_else(Value::none),
     );
-    attrs.insert("obj".to_string(), obj.unwrap_or_else(Value::none));
+    attrs.insert("obj", obj.unwrap_or_else(Value::none));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -2938,19 +2938,19 @@ pub(crate) fn unicode_exc_set_attrs(
         if args.len() != 5 {
             return;
         }
-        attrs.insert("encoding".to_string(), args[0].clone());
-        attrs.insert("object".to_string(), args[1].clone());
-        attrs.insert("start".to_string(), args[2].clone());
-        attrs.insert("end".to_string(), args[3].clone());
-        attrs.insert("reason".to_string(), args[4].clone());
+        attrs.insert("encoding", args[0].clone());
+        attrs.insert("object", args[1].clone());
+        attrs.insert("start", args[2].clone());
+        attrs.insert("end", args[3].clone());
+        attrs.insert("reason", args[4].clone());
     } else {
         if args.len() != 4 {
             return;
         }
-        attrs.insert("object".to_string(), args[0].clone());
-        attrs.insert("start".to_string(), args[1].clone());
-        attrs.insert("end".to_string(), args[2].clone());
-        attrs.insert("reason".to_string(), args[3].clone());
+        attrs.insert("object", args[0].clone());
+        attrs.insert("start", args[1].clone());
+        attrs.insert("end", args[2].clone());
+        attrs.insert("reason", args[3].clone());
     }
 }
 
@@ -2973,7 +2973,7 @@ pub(crate) fn instantiate_unicode_decode_error(
     let reason_val = Value::string(&reason);
     let mut attrs = InstanceAttrs::new();
     attrs.insert(
-        "args".to_string(),
+        "args",
         Value::tuple(vec![
             enc_val.clone(),
             obj_val.clone(),
@@ -2982,12 +2982,12 @@ pub(crate) fn instantiate_unicode_decode_error(
             reason_val.clone(),
         ]),
     );
-    attrs.insert("__traceback__".to_string(), Value::none());
-    attrs.insert("encoding".to_string(), enc_val);
-    attrs.insert("object".to_string(), obj_val);
-    attrs.insert("start".to_string(), start_val);
-    attrs.insert("end".to_string(), end_val);
-    attrs.insert("reason".to_string(), reason_val);
+    attrs.insert("__traceback__", Value::none());
+    attrs.insert("encoding", enc_val);
+    attrs.insert("object", obj_val);
+    attrs.insert("start", start_val);
+    attrs.insert("end", end_val);
+    attrs.insert("reason", reason_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -3010,7 +3010,7 @@ pub(crate) fn instantiate_unicode_encode_error(
     let reason_val = Value::string(&reason);
     let mut attrs = InstanceAttrs::new();
     attrs.insert(
-        "args".to_string(),
+        "args",
         Value::tuple(vec![
             enc_val.clone(),
             obj_val.clone(),
@@ -3019,12 +3019,12 @@ pub(crate) fn instantiate_unicode_encode_error(
             reason_val.clone(),
         ]),
     );
-    attrs.insert("__traceback__".to_string(), Value::none());
-    attrs.insert("encoding".to_string(), enc_val);
-    attrs.insert("object".to_string(), obj_val);
-    attrs.insert("start".to_string(), start_val);
-    attrs.insert("end".to_string(), end_val);
-    attrs.insert("reason".to_string(), reason_val);
+    attrs.insert("__traceback__", Value::none());
+    attrs.insert("encoding", enc_val);
+    attrs.insert("object", obj_val);
+    attrs.insert("start", start_val);
+    attrs.insert("end", end_val);
+    attrs.insert("reason", reason_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

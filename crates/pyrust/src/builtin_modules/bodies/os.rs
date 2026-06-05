@@ -1111,8 +1111,8 @@ thread_local! {
 fn make_terminal_size(columns: i64, lines: i64) -> Value {
     TERMINAL_SIZE_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("columns".to_string(), Value::int(columns));
-        attrs.insert("lines".to_string(), Value::int(lines));
+        attrs.insert("columns", Value::int(columns));
+        attrs.insert("lines", Value::int(lines));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
@@ -1170,16 +1170,16 @@ fn make_stat_result(meta: &std::fs::Metadata) -> Value {
 
     STAT_RESULT_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("st_mode".to_string(), Value::int(mode));
-        attrs.insert("st_ino".to_string(), Value::int(ino));
-        attrs.insert("st_dev".to_string(), Value::int(dev));
-        attrs.insert("st_nlink".to_string(), Value::int(nlink));
-        attrs.insert("st_uid".to_string(), Value::int(uid));
-        attrs.insert("st_gid".to_string(), Value::int(gid));
-        attrs.insert("st_size".to_string(), Value::int(meta.len() as i64));
-        attrs.insert("st_atime".to_string(), Value::float(atime));
-        attrs.insert("st_mtime".to_string(), Value::float(mtime));
-        attrs.insert("st_ctime".to_string(), Value::float(ctime));
+        attrs.insert("st_mode", Value::int(mode));
+        attrs.insert("st_ino", Value::int(ino));
+        attrs.insert("st_dev", Value::int(dev));
+        attrs.insert("st_nlink", Value::int(nlink));
+        attrs.insert("st_uid", Value::int(uid));
+        attrs.insert("st_gid", Value::int(gid));
+        attrs.insert("st_size", Value::int(meta.len() as i64));
+        attrs.insert("st_atime", Value::float(atime));
+        attrs.insert("st_mtime", Value::float(mtime));
+        attrs.insert("st_ctime", Value::float(ctime));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,

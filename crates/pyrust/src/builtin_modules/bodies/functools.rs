@@ -135,13 +135,13 @@ pyrust_module! {
                 }
             }
             let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("func".to_string(), func);
+            attrs.attrs.insert("func", func);
             attrs
                 .attrs
-                .insert("args".to_string(), Value::tuple(bound_args));
+                .insert("args", Value::tuple(bound_args));
             attrs
                 .attrs
-                .insert("keywords".to_string(), Value::dict(bound_kwargs));
+                .insert("keywords", Value::dict(bound_kwargs));
             Ok(Value::none())
         }
 
@@ -348,12 +348,12 @@ pyrust_module! {
             let mut borrow = inst.borrow_mut();
             borrow
                 .attrs
-                .insert("_cache".to_string(), Value::dict(PyDict::default()));
+                .insert("_cache", Value::dict(PyDict::default()));
             borrow
                 .attrs
-                .insert("_order".to_string(), Value::list(Vec::new()));
-            borrow.attrs.insert("_hits".to_string(), Value::int(0));
-            borrow.attrs.insert("_misses".to_string(), Value::int(0));
+                .insert("_order", Value::list(Vec::new()));
+            borrow.attrs.insert("_hits", Value::int(0));
+            borrow.attrs.insert("_misses", Value::int(0));
             let _ = _interp;
             Ok(Value::none())
         }
@@ -569,7 +569,7 @@ pyrust_module! {
         }
         let _ = _interp;
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("_cmp".to_string(), args[0].value.clone());
+        attrs.insert("_cmp", args[0].value.clone());
         Ok(make_instance("_cmp_to_key", attrs))
     }
 
@@ -602,8 +602,8 @@ pyrust_module! {
                 .ok_or_else(|| internal(FN_NAME))?;
             let _ = _interp;
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("obj".to_string(), user[0].value.clone());
-            attrs.insert("_cmp".to_string(), cmp);
+            attrs.insert("obj", user[0].value.clone());
+            attrs.insert("_cmp", cmp);
             Ok(make_instance("_cmp_key", attrs))
         }
     }
@@ -936,17 +936,17 @@ fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
     let mut attrs = InstanceAttrs::new();
     // `wrapper.__wrapped__` exposes the original function (CPython sets this
     // on the wrapper so `inspect.unwrap` / introspection can reach it).
-    attrs.insert("__wrapped__".to_string(), func.clone());
-    attrs.insert("_func".to_string(), func);
+    attrs.insert("__wrapped__", func.clone());
+    attrs.insert("_func", func);
     attrs.insert(
-        "_maxsize".to_string(),
+        "_maxsize",
         maxsize.map_or_else(Value::none, Value::int),
     );
-    attrs.insert("_typed".to_string(), Value::bool_(typed));
-    attrs.insert("_cache".to_string(), Value::dict(PyDict::default()));
-    attrs.insert("_order".to_string(), Value::list(Vec::new()));
-    attrs.insert("_hits".to_string(), Value::int(0));
-    attrs.insert("_misses".to_string(), Value::int(0));
+    attrs.insert("_typed", Value::bool_(typed));
+    attrs.insert("_cache", Value::dict(PyDict::default()));
+    attrs.insert("_order", Value::list(Vec::new()));
+    attrs.insert("_hits", Value::int(0));
+    attrs.insert("_misses", Value::int(0));
     make_instance("_lru_cache_wrapper", attrs)
 }
 
@@ -955,10 +955,10 @@ fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
 fn make_lru_factory(maxsize: Option<i64>, typed: bool) -> Value {
     let mut attrs = InstanceAttrs::new();
     attrs.insert(
-        "_maxsize".to_string(),
+        "_maxsize",
         maxsize.map_or_else(Value::none, Value::int),
     );
-    attrs.insert("_typed".to_string(), Value::bool_(typed));
+    attrs.insert("_typed", Value::bool_(typed));
     make_instance("_lru_cache_factory", attrs)
 }
 
@@ -972,7 +972,7 @@ fn bump_counter(inst: &Rc<RefCell<PyInstance>>, key: &str) {
     };
     borrow
         .attrs
-        .insert(key.to_string(), Value::int(cur.wrapping_add(1)));
+        .insert(key, Value::int(cur.wrapping_add(1)));
 }
 
 /// Read an integer counter from the instance attrs, defaulting to 0.
@@ -1070,7 +1070,7 @@ class CacheInfo(tuple):
 
 fn make_wraps_partial(wrapped: Value) -> Value {
     let mut attrs = InstanceAttrs::new();
-    attrs.insert("__wraps_func".to_string(), wrapped);
+    attrs.insert("__wraps_func", wrapped);
     make_instance("_wraps_partial", attrs)
 }
 

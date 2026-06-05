@@ -74,8 +74,8 @@ pyrust_module! {
         // CPython's lazy timing.
         let outer = make_iter(_interp, &args[0].value)?;
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("_outer".to_string(), outer);
-        attrs.insert("_inner".to_string(), Value::none());
+        attrs.insert("_outer", outer);
+        attrs.insert("_inner", Value::none());
         make_itertools_instance("_chain_from_iterable", attrs)
     }
 
@@ -112,7 +112,7 @@ pyrust_module! {
                     let new_inner = make_iter(_interp, &next_iterable)?;
                     inst.borrow_mut()
                         .attrs
-                        .insert("_inner".to_string(), new_inner);
+                        .insert("_inner", new_inner);
                     continue;
                 }
                 // Drain the current inner iterator; on exhaustion drop it and
@@ -122,7 +122,7 @@ pyrust_module! {
                     Err(e) if is_stop_iteration(&e) => {
                         inst.borrow_mut()
                             .attrs
-                            .insert("_inner".to_string(), Value::none());
+                            .insert("_inner", Value::none());
                     }
                     Err(e) => return Err(e),
                 }
@@ -189,12 +189,12 @@ pyrust_module! {
             }
             let remaining: Option<i64> = stop.map(|s| (s - start).max(0));
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_iter", iter);
             a.attrs.insert(
-                "_remaining_stop".to_string(),
+                "_remaining_stop",
                 remaining.map_or_else(Value::none, Value::int),
             );
-            a.attrs.insert("_step".to_string(), Value::int(step));
+            a.attrs.insert("_step", Value::int(step));
             Ok(Value::none())
         }
 
@@ -220,7 +220,7 @@ pyrust_module! {
             }
             let new_remaining = remaining.map(|r| if tail_exhausted { 0 } else { r - step });
             inst.borrow_mut().attrs.insert(
-                "_remaining_stop".to_string(),
+                "_remaining_stop",
                 new_remaining.map_or_else(Value::none, Value::int),
             );
             Ok(item)
@@ -256,8 +256,8 @@ pyrust_module! {
             require_numeric(&start, FN_NAME, "start")?;
             require_numeric(&step, FN_NAME, "step")?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_cur".to_string(), start);
-            a.attrs.insert("_step".to_string(), step);
+            a.attrs.insert("_cur", start);
+            a.attrs.insert("_step", step);
             Ok(Value::none())
         }
 
@@ -271,7 +271,7 @@ pyrust_module! {
                 )
             };
             let next = _interp.eval_binary(cur.clone(), crate::ast::BinaryOp::Add, step)?;
-            inst.borrow_mut().attrs.insert("_cur".to_string(), next);
+            inst.borrow_mut().attrs.insert("_cur", next);
             Ok(cur)
         }
 
@@ -333,9 +333,9 @@ pyrust_module! {
                 )?),
             };
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_object".to_string(), object);
+            a.attrs.insert("_object", object);
             a.attrs.insert(
-                "_remaining".to_string(),
+                "_remaining",
                 // Negative or zero `times` yields nothing (CPython behaviour).
                 times.map_or_else(Value::none, |t| Value::int(t.max(0))),
             );
@@ -356,7 +356,7 @@ pyrust_module! {
                 ValueKind::Int(n) if n > 0 => {
                     inst.borrow_mut()
                         .attrs
-                        .insert("_remaining".to_string(), Value::int(n - 1));
+                        .insert("_remaining", Value::int(n - 1));
                     Ok(object)
                 }
                 _ => Err(PyError::named("StopIteration", String::new())),
@@ -404,12 +404,12 @@ pyrust_module! {
             }
             let iter = make_iter(_interp, &user[0].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_iter", iter);
             // `_cache` accumulates each yielded element during the first
             // pass; once `_iter` exhausts, we walk `_cache` indefinitely.
-            a.attrs.insert("_cache".to_string(), Value::list(Vec::new()));
-            a.attrs.insert("_pos".to_string(), Value::int(0));
-            a.attrs.insert("_first_pass".to_string(), Value::bool_(true));
+            a.attrs.insert("_cache", Value::list(Vec::new()));
+            a.attrs.insert("_pos", Value::int(0));
+            a.attrs.insert("_first_pass", Value::bool_(true));
             Ok(Value::none())
         }
 
@@ -446,7 +446,7 @@ pyrust_module! {
                         // First pass ended; switch over to walking _cache.
                         inst.borrow_mut()
                             .attrs
-                            .insert("_first_pass".to_string(), Value::bool_(false));
+                            .insert("_first_pass", Value::bool_(false));
                         // Fall through to the cached-walk path below.
                     }
                     Err(e) => return Err(e),
@@ -479,7 +479,7 @@ pyrust_module! {
             };
             inst.borrow_mut()
                 .attrs
-                .insert("_pos".to_string(), Value::int((pos + 1) % cache_len as i64));
+                .insert("_pos", Value::int((pos + 1) % cache_len as i64));
             Ok(item)
         }
     }
@@ -501,9 +501,9 @@ pyrust_module! {
             }
             let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_pred".to_string(), user[0].value.clone());
-            a.attrs.insert("_iter".to_string(), iter);
-            a.attrs.insert("_done".to_string(), Value::bool_(false));
+            a.attrs.insert("_pred", user[0].value.clone());
+            a.attrs.insert("_iter", iter);
+            a.attrs.insert("_done", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -534,7 +534,7 @@ pyrust_module! {
             } else {
                 inst.borrow_mut()
                     .attrs
-                    .insert("_done".to_string(), Value::bool_(true));
+                    .insert("_done", Value::bool_(true));
                 Err(PyError::named("StopIteration", String::new()))
             }
         }
@@ -559,11 +559,11 @@ pyrust_module! {
             }
             let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_pred".to_string(), user[0].value.clone());
-            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_pred", user[0].value.clone());
+            a.attrs.insert("_iter", iter);
             // `_started` flips True once we've seen the first non-matching
             // element; from then on we just drain `_iter` unconditionally.
-            a.attrs.insert("_started".to_string(), Value::bool_(false));
+            a.attrs.insert("_started", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -602,7 +602,7 @@ pyrust_module! {
                 if !_interp.truthy_value(&verdict)? {
                     inst.borrow_mut()
                         .attrs
-                        .insert("_started".to_string(), Value::bool_(true));
+                        .insert("_started", Value::bool_(true));
                     return Ok(item);
                 }
             }
@@ -626,8 +626,8 @@ pyrust_module! {
             }
             let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_func".to_string(), user[0].value.clone());
-            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_func", user[0].value.clone());
+            a.attrs.insert("_iter", iter);
             Ok(Value::none())
         }
 
@@ -703,14 +703,14 @@ pyrust_module! {
             let func = positional.get(1).cloned().unwrap_or_else(Value::none);
             let use_initial = initial.is_some();
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_func".to_string(), func);
-            a.attrs.insert("_iter".to_string(), iter);
-            a.attrs.insert("_acc".to_string(), initial.unwrap_or_else(Value::none));
-            a.attrs.insert("_use_initial".to_string(), Value::bool_(use_initial));
+            a.attrs.insert("_func", func);
+            a.attrs.insert("_iter", iter);
+            a.attrs.insert("_acc", initial.unwrap_or_else(Value::none));
+            a.attrs.insert("_use_initial", Value::bool_(use_initial));
             // `_started`: false until we've yielded something.  The
             // first-yield path branches on `_use_initial`; everything
             // after walks the source-pull-and-fold loop.
-            a.attrs.insert("_started".to_string(), Value::bool_(false));
+            a.attrs.insert("_started", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -725,7 +725,7 @@ pyrust_module! {
                 // first source element (which becomes the seed acc).
                 inst.borrow_mut()
                     .attrs
-                    .insert("_started".to_string(), Value::bool_(true));
+                    .insert("_started", Value::bool_(true));
                 let use_initial = matches!(
                     inst.borrow().attrs.get("_use_initial").map(|v| v.kind()),
                     Some(ValueKind::Bool(true))
@@ -747,7 +747,7 @@ pyrust_module! {
                 let first = _interp.call_next(&iter, None)?;
                 inst.borrow_mut()
                     .attrs
-                    .insert("_acc".to_string(), first.clone());
+                    .insert("_acc", first.clone());
                 return Ok(first);
             }
             // Steady state: pull next from source, fold with acc.
@@ -773,7 +773,7 @@ pyrust_module! {
             };
             inst.borrow_mut()
                 .attrs
-                .insert("_acc".to_string(), new_acc.clone());
+                .insert("_acc", new_acc.clone());
             Ok(new_acc)
         }
     }
@@ -835,15 +835,15 @@ pyrust_module! {
             //     pre-empt the first `__next__`.
             let empty_input = pools.iter().any(|p| p.is_empty());
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_pools".to_string(), Value::list(
+            a.attrs.insert("_pools", Value::list(
                 pools.into_iter().map(Value::list).collect(),
             ));
             a.attrs.insert(
-                "_indices".to_string(),
+                "_indices",
                 Value::list(Vec::new()),
             );
-            a.attrs.insert("_started".to_string(), Value::bool_(false));
-            a.attrs.insert("_exhausted".to_string(), Value::bool_(empty_input));
+            a.attrs.insert("_started", Value::bool_(false));
+            a.attrs.insert("_exhausted", Value::bool_(empty_input));
             Ok(Value::none())
         }
 
@@ -917,7 +917,7 @@ pyrust_module! {
                 ProductStep::Exhausted => {
                     inst.borrow_mut()
                         .attrs
-                        .insert("_exhausted".to_string(), Value::bool_(true));
+                        .insert("_exhausted", Value::bool_(true));
                     Err(PyError::named("StopIteration", String::new()))
                 }
                 ProductStep::Yield {
@@ -928,7 +928,7 @@ pyrust_module! {
                     if !already_started {
                         inst.borrow_mut()
                             .attrs
-                            .insert("_started".to_string(), Value::bool_(true));
+                            .insert("_started", Value::bool_(true));
                     }
                     write_indices(&inst, "_indices", &indices);
                     Ok(Value::tuple(tuple))
@@ -1027,18 +1027,18 @@ pyrust_module! {
                 (0..r).map(|i| pool.len() - i).collect()
             };
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_pool".to_string(), Value::list(pool));
-            a.attrs.insert("_r".to_string(), Value::int(r as i64));
+            a.attrs.insert("_pool", Value::list(pool));
+            a.attrs.insert("_r", Value::int(r as i64));
             a.attrs.insert(
-                "_indices".to_string(),
+                "_indices",
                 Value::list(indices.into_iter().map(|i| Value::int(i as i64)).collect()),
             );
             a.attrs.insert(
-                "_cycles".to_string(),
+                "_cycles",
                 Value::list(cycles.into_iter().map(|i| Value::int(i as i64)).collect()),
             );
-            a.attrs.insert("_started".to_string(), Value::bool_(false));
-            a.attrs.insert("_exhausted".to_string(), Value::bool_(exhausted));
+            a.attrs.insert("_started", Value::bool_(false));
+            a.attrs.insert("_exhausted", Value::bool_(exhausted));
             Ok(Value::none())
         }
 
@@ -1119,7 +1119,7 @@ pyrust_module! {
                 Step::Exhausted => {
                     inst.borrow_mut()
                         .attrs
-                        .insert("_exhausted".to_string(), Value::bool_(true));
+                        .insert("_exhausted", Value::bool_(true));
                     return Err(PyError::named("StopIteration", String::new()));
                 }
                 Step::Yield {
@@ -1132,7 +1132,7 @@ pyrust_module! {
             if !already_started {
                 inst.borrow_mut()
                     .attrs
-                    .insert("_started".to_string(), Value::bool_(true));
+                    .insert("_started", Value::bool_(true));
             }
             write_indices(&inst, "_indices", &indices);
             write_indices(&inst, "_cycles", &cycles);
@@ -1193,21 +1193,21 @@ pyrust_module! {
                 .or_else(|| positional.get(1).cloned())
                 .unwrap_or_else(Value::none);
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_iter".to_string(), iter);
-            a.attrs.insert("_keyfn".to_string(), key_fn);
+            a.attrs.insert("_iter", iter);
+            a.attrs.insert("_keyfn", key_fn);
             // Shared-cursor state, mirroring CPython's `groupbyobject`:
             //   `_currkey`/`_currvalue` — the lookahead element and its key;
             //   `_has_curr` — whether that lookahead is valid;
             //   `_tgtkey`/`_has_tgt` — key of the group currently handed out;
             //   `_id` — monotonic group counter (staleness token);
             //   `_exhausted` — source iterator is drained.
-            a.attrs.insert("_currkey".to_string(), Value::none());
-            a.attrs.insert("_currvalue".to_string(), Value::none());
-            a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
-            a.attrs.insert("_tgtkey".to_string(), Value::none());
-            a.attrs.insert("_has_tgt".to_string(), Value::bool_(false));
-            a.attrs.insert("_id".to_string(), Value::int(0));
-            a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
+            a.attrs.insert("_currkey", Value::none());
+            a.attrs.insert("_currvalue", Value::none());
+            a.attrs.insert("_has_curr", Value::bool_(false));
+            a.attrs.insert("_tgtkey", Value::none());
+            a.attrs.insert("_has_tgt", Value::bool_(false));
+            a.attrs.insert("_id", Value::int(0));
+            a.attrs.insert("_exhausted", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -1223,7 +1223,7 @@ pyrust_module! {
                     _ => return Err(internal(FN_NAME)),
                 };
                 let next = cur + 1;
-                a.attrs.insert("_id".to_string(), Value::int(next));
+                a.attrs.insert("_id", Value::int(next));
                 next
             };
             // Skip past any unconsumed items of the previous group: keep
@@ -1260,14 +1260,14 @@ pyrust_module! {
             };
             {
                 let mut a = inst.borrow_mut();
-                a.attrs.insert("_tgtkey".to_string(), currkey.clone());
-                a.attrs.insert("_has_tgt".to_string(), Value::bool_(true));
+                a.attrs.insert("_tgtkey", currkey.clone());
+                a.attrs.insert("_has_tgt", Value::bool_(true));
             }
             // Hand out a lazy grouper bound to this group id + key.
             let mut attrs = InstanceAttrs::new();
-            attrs.insert("_parent".to_string(), parent);
-            attrs.insert("_tgtkey".to_string(), currkey.clone());
-            attrs.insert("_id".to_string(), Value::int(new_id));
+            attrs.insert("_parent", parent);
+            attrs.insert("_tgtkey", currkey.clone());
+            attrs.insert("_id", Value::int(new_id));
             let grouper = make_itertools_instance("_grouper", attrs)?;
             Ok(Value::tuple(vec![currkey, grouper]))
         }
@@ -1370,8 +1370,8 @@ pyrust_module! {
             let data_iter = make_iter(_interp, &user[0].value)?;
             let selectors_iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_data".to_string(), data_iter);
-            a.attrs.insert("_selectors".to_string(), selectors_iter);
+            a.attrs.insert("_data", data_iter);
+            a.attrs.insert("_selectors", selectors_iter);
             Ok(Value::none())
         }
 
@@ -1430,14 +1430,14 @@ pyrust_module! {
                 .collect::<Result<_>>()?;
             let n = iters.len();
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_iters".to_string(), Value::list(iters));
-            a.attrs.insert("_fillvalue".to_string(), fillvalue);
+            a.attrs.insert("_iters", Value::list(iters));
+            a.attrs.insert("_fillvalue", fillvalue);
             // `_active` tracks how many iterables have not yet raised
             // StopIteration.  Once it reaches zero we stop.
-            a.attrs.insert("_active".to_string(), Value::int(n as i64));
+            a.attrs.insert("_active", Value::int(n as i64));
             // `_done` is a parallel bool list (one per iterator).
             a.attrs.insert(
-                "_done".to_string(),
+                "_done",
                 Value::list(vec![Value::bool_(false); n]),
             );
             Ok(Value::none())
@@ -1496,10 +1496,10 @@ pyrust_module! {
             }
             inst.borrow_mut()
                 .attrs
-                .insert("_active".to_string(), Value::int(new_active));
+                .insert("_active", Value::int(new_active));
             inst.borrow_mut()
                 .attrs
-                .insert("_done".to_string(), Value::list(new_done));
+                .insert("_done", Value::list(new_done));
             // CPython behaviour: when the last active iterator(s) raise
             // StopIteration in the same step, zip_longest raises
             // StopIteration too — it does NOT yield the all-fill row.
@@ -1528,8 +1528,8 @@ pyrust_module! {
             }
             let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_pred".to_string(), user[0].value.clone());
-            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_pred", user[0].value.clone());
+            a.attrs.insert("_iter", iter);
             Ok(Value::none())
         }
 
@@ -1656,17 +1656,17 @@ pyrust_module! {
                 Err(e) if is_stop_iteration(&e) => {
                     // Empty source — mark exhausted immediately.
                     let mut a = inst.borrow_mut();
-                    a.attrs.insert("_iter".to_string(), iter);
-                    a.attrs.insert("_prev".to_string(), Value::none());
-                    a.attrs.insert("_exhausted".to_string(), Value::bool_(true));
+                    a.attrs.insert("_iter", iter);
+                    a.attrs.insert("_prev", Value::none());
+                    a.attrs.insert("_exhausted", Value::bool_(true));
                     return Ok(Value::none());
                 }
                 Err(e) => return Err(e),
             };
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_iter".to_string(), iter);
-            a.attrs.insert("_prev".to_string(), prev);
-            a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
+            a.attrs.insert("_iter", iter);
+            a.attrs.insert("_prev", prev);
+            a.attrs.insert("_exhausted", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -1684,13 +1684,13 @@ pyrust_module! {
                 Ok(next) => {
                     inst.borrow_mut()
                         .attrs
-                        .insert("_prev".to_string(), next.clone());
+                        .insert("_prev", next.clone());
                     Ok(Value::tuple(vec![prev, next]))
                 }
                 Err(e) if is_stop_iteration(&e) => {
                     inst.borrow_mut()
                         .attrs
-                        .insert("_exhausted".to_string(), Value::bool_(true));
+                        .insert("_exhausted", Value::bool_(true));
                     Err(PyError::named("StopIteration", String::new()))
                 }
                 Err(e) => Err(e),
@@ -1732,9 +1732,9 @@ pyrust_module! {
             }
             let iter = make_iter(_interp, &user[0].value)?;
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_iter".to_string(), iter);
-            a.attrs.insert("_n".to_string(), Value::int(n));
-            a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
+            a.attrs.insert("_iter", iter);
+            a.attrs.insert("_n", Value::int(n));
+            a.attrs.insert("_exhausted", Value::bool_(false));
             Ok(Value::none())
         }
 
@@ -1758,7 +1758,7 @@ pyrust_module! {
                     Err(e) if is_stop_iteration(&e) => {
                         inst.borrow_mut()
                             .attrs
-                            .insert("_exhausted".to_string(), Value::bool_(true));
+                            .insert("_exhausted", Value::bool_(true));
                         break;
                     }
                     Err(e) => return Err(e),
@@ -2022,17 +2022,17 @@ fn groupby_ensure_curr(
         Ok(v) => v,
         Err(e) if is_stop_iteration(&e) => {
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
-            a.attrs.insert("_exhausted".to_string(), Value::bool_(true));
+            a.attrs.insert("_has_curr", Value::bool_(false));
+            a.attrs.insert("_exhausted", Value::bool_(true));
             return Ok(false);
         }
         Err(e) => return Err(e),
     };
     let key = compute_key(interp, &key_fn, &item)?;
     let mut a = inst.borrow_mut();
-    a.attrs.insert("_currvalue".to_string(), item);
-    a.attrs.insert("_currkey".to_string(), key);
-    a.attrs.insert("_has_curr".to_string(), Value::bool_(true));
+    a.attrs.insert("_currvalue", item);
+    a.attrs.insert("_currkey", key);
+    a.attrs.insert("_has_curr", Value::bool_(true));
     Ok(true)
 }
 
@@ -2041,7 +2041,7 @@ fn groupby_ensure_curr(
 /// `gbo->currvalue`/`gbo->currkey` after a value is handed out.
 fn groupby_clear_curr(inst: &Rc<RefCell<PyInstance>>) {
     let mut a = inst.borrow_mut();
-    a.attrs.insert("_has_curr".to_string(), Value::bool_(false));
+    a.attrs.insert("_has_curr", Value::bool_(false));
 }
 
 /// Set `__module__ = "itertools"` on every class exposed by this module so
@@ -2127,7 +2127,7 @@ fn read_indices(
 
 fn write_indices(inst: &Rc<std::cell::RefCell<PyInstance>>, name: &str, indices: &[usize]) {
     inst.borrow_mut().attrs.insert(
-        name.to_string(),
+        name,
         Value::list(indices.iter().map(|&i| Value::int(i as i64)).collect()),
     );
 }
@@ -2215,14 +2215,14 @@ fn init_combo_state(
         (0..r).collect()
     };
     let mut a = inst.borrow_mut();
-    a.attrs.insert("_pool".to_string(), Value::list(pool));
-    a.attrs.insert("_r".to_string(), Value::int(r as i64));
+    a.attrs.insert("_pool", Value::list(pool));
+    a.attrs.insert("_r", Value::int(r as i64));
     a.attrs.insert(
-        "_indices".to_string(),
+        "_indices",
         Value::list(indices.iter().map(|&i| Value::int(i as i64)).collect()),
     );
-    a.attrs.insert("_started".to_string(), Value::bool_(false));
-    a.attrs.insert("_exhausted".to_string(), Value::bool_(exhausted));
+    a.attrs.insert("_started", Value::bool_(false));
+    a.attrs.insert("_exhausted", Value::bool_(exhausted));
     Ok(Value::none())
 }
 
@@ -2312,7 +2312,7 @@ fn advance_combinations(
             if set_started {
                 inst.borrow_mut()
                     .attrs
-                    .insert("_started".to_string(), Value::bool_(true));
+                    .insert("_started", Value::bool_(true));
             }
             write_indices(&inst, "_indices", &indices);
             Ok(Value::tuple(tuple))
@@ -2320,13 +2320,13 @@ fn advance_combinations(
         Outcome::EmptyTuple => {
             inst.borrow_mut()
                 .attrs
-                .insert("_started".to_string(), Value::bool_(true));
+                .insert("_started", Value::bool_(true));
             Ok(Value::tuple(Vec::new()))
         }
         Outcome::Exhausted => {
             inst.borrow_mut()
                 .attrs
-                .insert("_exhausted".to_string(), Value::bool_(true));
+                .insert("_exhausted", Value::bool_(true));
             Err(PyError::named("StopIteration", String::new()))
         }
     }

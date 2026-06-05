@@ -109,14 +109,14 @@ fn make_warning_message(
 ) -> Value {
     WARNING_MESSAGE_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("message".to_string(), message);
+        attrs.insert("message", message);
         attrs.insert(
-            "category".to_string(),
+            "category",
             warning_class_by_name(category_name),
         );
-        attrs.insert("filename".to_string(), Value::string(filename));
-        attrs.insert("lineno".to_string(), Value::int(lineno));
-        attrs.insert("source".to_string(), Value::none());
+        attrs.insert("filename", Value::string(filename));
+        attrs.insert("lineno", Value::int(lineno));
+        attrs.insert("source", Value::none());
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
@@ -456,7 +456,7 @@ pyrust_module! {
         let _ = _interp;
         inst.borrow_mut()
             .attrs
-            .insert("_record".to_string(), Value::bool_(record));
+            .insert("_record", Value::bool_(record));
         Ok(Value::none())
     }
 
@@ -469,7 +469,7 @@ pyrust_module! {
         let snap = snapshot_filters();
         inst.borrow_mut()
             .attrs
-            .insert("_saved_filters".to_string(), snap);
+            .insert("_saved_filters", snap);
         // If record=True, install an "always" filter and set up the sink.
         let record = matches!(
             inst.borrow().attrs.get("_record").map(|v| v.kind()),
@@ -486,7 +486,7 @@ pyrust_module! {
             });
             inst.borrow_mut()
                 .attrs
-                .insert("_log".to_string(), list_val.clone());
+                .insert("_log", list_val.clone());
             Ok(list_val)
         } else {
             Ok(Value::py_instance(inst))

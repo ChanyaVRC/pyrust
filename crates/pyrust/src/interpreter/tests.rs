@@ -1571,7 +1571,7 @@ result = fact(10)
                     p.push(q);
                 }
             }
-            Value::string(p.to_string_lossy().into_owned())
+            Value::string(&p.to_string_lossy())
         };
         assert_eq!(interp.lookup_name("a").unwrap(), Some(expect(&["a", "b", "c"])));
         assert_eq!(interp.lookup_name("b").unwrap(), Some(expect(&["/abs", "rel"])));
