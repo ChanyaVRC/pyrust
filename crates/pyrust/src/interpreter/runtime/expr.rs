@@ -4219,34 +4219,137 @@ impl Interpreter {
                             return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                         }
                     };
-                    left.set_with_mut(|lhs| match op {
+                    // Fast path: when no user-instance key is involved, raw
+                    // `IndexSet` identity comparison is exact (issue #2244).
+                    // Most sets are primitive, so keep this allocation-cheap
+                    // path with no `__eq__` dispatch, and — critically — without
+                    // adding a second full LHS scan that would regress the
+                    // primitive `s |= t` hot loop (issue #2244 perf-neutrality).
+                    //
+                    // Object-detection rules per op, mirroring the eq-aware
+                    // membership the existing dict/set machinery already
+                    // implements (a *primitive* key never dispatches `__eq__`
+                    // against object keys — `set_lookup_in` only scans object
+                    // buckets for object/None/nested-tuple probe keys):
+                    //
+                    //  - `|=` inserts RHS keys into the LHS. Raw insertion of a
+                    //    primitive RHS key is exact regardless of the LHS, so we
+                    //    only need to dispatch `__eq__` when the *RHS* holds an
+                    //    object key. The LHS is never scanned, and the per-key
+                    //    object check is folded into the single insert pass (no
+                    //    separate full RHS pre-scan) — this is what keeps the
+                    //    `s |= t` hot loop scan-neutral vs the pre-#2244 path.
+                    //  - `&=` / `-=` / `^=` test LHS keys against the RHS (and,
+                    //    for `^=`, vice versa), so an object key on *either* side
+                    //    means raw `contains` would compare by identity and miss
+                    //    an `__eq__`-equal element. Those ops already iterate the
+                    //    LHS during mutation; the object-check is folded into the
+                    //    same single `set_with_mut` borrow (so the backing
+                    //    `RefCell` is acquired once) and bails *before* mutating
+                    //    to avoid a partial in-place update.
+                    let needs_eq = left
+                        .set_with_mut(|lhs| {
+                            match op {
+                                BinaryOp::BitOr => {
+                                    // Fold the object-key check into the single
+                                    // insert pass (no separate full RHS pre-scan):
+                                    // bail on the first object key.  Primitive
+                                    // keys inserted before the bail are exact and
+                                    // are re-inserted idempotently by the slow
+                                    // path, so a partial in-place insert is safe.
+                                    for k in &rhs_items {
+                                        if key_contains_object(k) {
+                                            return true;
+                                        }
+                                        lhs.insert(k.clone());
+                                    }
+                                }
+                                BinaryOp::BitAnd => {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
+                                        return true;
+                                    }
+                                    lhs.retain(|k| rhs_items.contains(k));
+                                }
+                                BinaryOp::Sub => {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
+                                        return true;
+                                    }
+                                    for k in &rhs_items {
+                                        lhs.shift_remove(k);
+                                    }
+                                }
+                                BinaryOp::BitXor => {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
+                                        return true;
+                                    }
+                                    let mut to_add: Vec<PyKey> = Vec::new();
+                                    for k in &rhs_items {
+                                        if !lhs.contains(k) {
+                                            to_add.push(k.clone());
+                                        }
+                                    }
+                                    lhs.retain(|k| !rhs_items.contains(k));
+                                    for k in to_add {
+                                        lhs.insert(k);
+                                    }
+                                }
+                                _ => unreachable!(),
+                            }
+                            false
+                        })
+                        .unwrap_or(false);
+                    if !needs_eq {
+                        return Ok(Some(left.clone()));
+                    }
+                    // Slow path (issue #2244): a user instance is present on
+                    // either side, so membership and dedup must dispatch user
+                    // `__hash__`/`__eq__`.  Running user code can re-enter and
+                    // mutate the receiver, so the backing borrow must not be
+                    // held across it: snapshot the LHS, compute the result with
+                    // the eq-aware helpers (`set_lookup_in`/`set_insert`), then
+                    // replace the receiver's contents in place so aliases see
+                    // the update.
+                    let lhs = left.set_with(|s| s.clone()).ok_or_else(|| {
+                        PyError::Runtime("internal: expected set".to_string())
+                    })?;
+                    let mut out: PySet = PySet::default();
+                    match op {
                         BinaryOp::BitOr => {
-                            for k in &rhs_items {
-                                lhs.insert(k.clone());
+                            for k in lhs.iter().chain(rhs_items.iter()) {
+                                self.set_insert(&mut out, k.clone())?;
                             }
                         }
                         BinaryOp::BitAnd => {
-                            lhs.retain(|k| rhs_items.contains(k));
+                            for k in lhs.iter() {
+                                if self.set_lookup_in(&rhs_items, k)?.is_some() {
+                                    self.set_insert(&mut out, k.clone())?;
+                                }
+                            }
                         }
                         BinaryOp::Sub => {
-                            for k in &rhs_items {
-                                lhs.shift_remove(k);
+                            for k in lhs.iter() {
+                                if self.set_lookup_in(&rhs_items, k)?.is_none() {
+                                    self.set_insert(&mut out, k.clone())?;
+                                }
                             }
                         }
                         BinaryOp::BitXor => {
-                            let mut to_add: Vec<PyKey> = Vec::new();
-                            for k in &rhs_items {
-                                if !lhs.contains(k) {
-                                    to_add.push(k.clone());
+                            for k in lhs.iter() {
+                                if self.set_lookup_in(&rhs_items, k)?.is_none() {
+                                    self.set_insert(&mut out, k.clone())?;
                                 }
                             }
-                            lhs.retain(|k| !rhs_items.contains(k));
-                            for k in to_add {
-                                lhs.insert(k);
+                            for k in rhs_items.iter() {
+                                if self.set_lookup_in(&lhs, k)?.is_none() {
+                                    self.set_insert(&mut out, k.clone())?;
+                                }
                             }
                         }
                         _ => unreachable!(),
-                    });
+                    }
+                    left.set_with_mut(|s| *s = out).ok_or_else(|| {
+                        PyError::Runtime("internal: expected set".to_string())
+                    })?;
                     return Ok(Some(left.clone()));
                 }
                 _ => {}

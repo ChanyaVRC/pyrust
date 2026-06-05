@@ -7617,7 +7617,7 @@ mod tests {
                 .map(|(i, n)| (n.clone(), i))
                 .collect(),
         );
-        crate::compiler::compile_script(&stmts, local_index, false).unwrap()
+        crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[]).unwrap()
     }
 
     /// Like `compile_fn`, but supplies a per-top-level-statement line-number
