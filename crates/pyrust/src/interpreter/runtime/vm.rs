@@ -300,6 +300,108 @@ pub(crate) struct GeneratorFrame {
     pub(crate) qualname: std::sync::Arc<str>,
 }
 
+/// Call-trampoline frame (#2234): what the caller needs restored when a
+/// trampolined Python→Python callee returns.  Module-scoped so the cold error
+/// unwinder ([`Interpreter::vm_unwind_error`]) can name it; the dispatch loop's
+/// `tramp_stack` is `Vec<TrampFrame>`.
+struct TrampFrame {
+    /// Caller's register slice (raw pointer into its own — stable — register
+    /// buffer; valid until this frame is restored).
+    saved_regs: RegSlice,
+    /// Caller's resume pc (already advanced past the call instruction).
+    saved_pc: usize,
+    /// Caller register that receives the call's result.
+    dst: u32,
+    /// Caller's base offset in `tramp_arena` (`usize::MAX` for the bottom,
+    /// natively-called frame, which uses the param `regs`).
+    saved_base: usize,
+    /// Caller's source line at the call site (restored for tracebacks).
+    saved_cur_line: u32,
+    /// Caller's `code` pointer, `num_locals`, `fn_id`, and env — restored when
+    /// the callee returns.  (Equal to the callee's for a self-recursive call;
+    /// differ for a general Python→Python call.)
+    saved_code_ptr: *const crate::bytecode::FnCode,
+    saved_active_code_rc: Option<Rc<crate::bytecode::FnCode>>,
+    saved_num_locals: u32,
+    saved_fn_id: Option<u64>,
+    saved_env: EnvRef,
+}
+
+/// Placeholder left inside a generator's state cell (`Rc<RefCell<Box<dyn Any>>>`)
+/// while its `GeneratorFrame` is checked out and being driven (#2253).  Keeps the
+/// cell's contents valid (and the borrow released) during the drive, and lets a
+/// re-entrant `ForIter` on the same generator recognise "already executing"
+/// (→ `ValueError`) instead of mis-reading it as an exhausted iterator.
+struct GenDriving;
+
+/// Generator-trampoline frame (#2253): the generator's checked-out frame plus
+/// the consumer state restored when the generator yields / returns / raises.
+/// Module-scoped for the same reason as [`TrampFrame`].
+struct GenDriveFrame {
+    /// The generator's state cell; the checked-out frame is written back here on
+    /// yield / return / error.
+    state_rc: Rc<RefCell<Box<dyn std::any::Any>>>,
+    /// The checked-out generator frame (a placeholder occupies the cell while it
+    /// is driving, so the frame's heap address — and a `RegSlice` into its
+    /// `regs` — stays stable).
+    gframe: Box<GeneratorFrame>,
+    /// Consumer's register slice (stable buffer; restored on switch-back).
+    saved_regs: RegSlice,
+    /// Consumer pc after the `ForIter` (resume point on a yield).
+    saved_pc: usize,
+    /// Consumer's `ForIter` loop-exit pc (jumped to on a generator return).
+    exit_pc: usize,
+    /// Consumer register that receives each yielded value.
+    dst: u32,
+    /// Consumer's `tramp_active_base`.
+    saved_base: usize,
+    saved_cur_line: u32,
+    saved_code_ptr: *const crate::bytecode::FnCode,
+    saved_active_code_rc: Option<Rc<crate::bytecode::FnCode>>,
+    saved_num_locals: u32,
+    saved_fn_id: Option<u64>,
+    saved_env: EnvRef,
+    saved_iters: ItersBuf,
+    saved_iter_cache: IterCacheBuf,
+    saved_exc_handlers: ExcHandlersBuf,
+    /// `tramp_stack` depth at switch-in (error-unwind floor for this generator).
+    tramp_floor: usize,
+}
+
+/// Mutable references to the dispatch loop's live frame state, handed to the
+/// cold error unwinder ([`Interpreter::vm_unwind_error`]) so the heavy
+/// interleaved unwinding logic lives in a single `#[inline(never)]` function
+/// rather than being duplicated into the stack frame at all ~180 `vm_try!` sites
+/// (which, in debug builds, inflated the frame enough to overflow the native
+/// stack on deep non-trampolined recursion).
+struct UnwindState<'a> {
+    regs: &'a mut RegSlice,
+    /// Used by `vm_enter_gen_drive` (saved as the consumer resume pc, then set to
+    /// the generator's pc); the unwinder reports its resume pc via `Resume`
+    /// instead and leaves this untouched.
+    pc: &'a mut usize,
+    cur_line: &'a mut u32,
+    code_ptr: &'a mut *const crate::bytecode::FnCode,
+    active_code_rc: &'a mut Option<Rc<crate::bytecode::FnCode>>,
+    num_locals: &'a mut u32,
+    current_fn_id: &'a mut Option<u64>,
+    iters: &'a mut ItersBuf,
+    iter_next_cache: &'a mut IterCacheBuf,
+    exc_handlers: &'a mut ExcHandlersBuf,
+    tramp_active_base: &'a mut usize,
+    tramp_stack: &'a mut Vec<TrampFrame>,
+    gen_drive_stack: &'a mut Vec<GenDriveFrame>,
+    exc_ctx_frame_base: usize,
+}
+
+/// Result of [`Interpreter::vm_unwind_error`].
+enum UnwindOutcome {
+    /// A generator consumer caught the error: resume the dispatch loop here.
+    Resume(usize),
+    /// The error escaped every active frame: return it from the VM.
+    Escape(PyError),
+}
+
 /// Explicit suspension state for a generator frame.
 ///
 /// Replaces the old `GEN_SAVE` thread-local + `GenSaveState` tuple alias.
@@ -868,6 +970,227 @@ impl Interpreter {
         result
     }
 
+    /// Switch the active dispatch frame to a drivable generator (#2253): check
+    /// its `GeneratorFrame` out of its `Value` (leaving a placeholder so the
+    /// frame's heap address stays stable and a re-entrant self-drive errors
+    /// cleanly), publish its frame view, save the consumer onto `gen_drive_stack`,
+    /// and rebind the dispatch state to the generator.  On `Ok(())` the caller
+    /// `continue`s the loop in the generator; on `Err` (recursion limit) the
+    /// caller routes it through the normal error path.
+    ///
+    /// `#[cold]` + `#[inline(never)]` keeps this (one-off-per-drive-entry) setup
+    /// out of the hot `ForIter` arm so it doesn't bloat the dispatch frame or the
+    /// per-step iteration code.
+    #[cold]
+    #[inline(never)]
+    fn vm_enter_gen_drive(
+        &mut self,
+        state_rc: Rc<RefCell<Box<dyn std::any::Any>>>,
+        dst: u32,
+        exit_pc: usize,
+        st: &mut UnwindState,
+    ) -> Result<()> {
+        // Recursion limit spans native depth + both trampolines.
+        if call_depth() + st.tramp_stack.len() + st.gen_drive_stack.len()
+            >= max_call_depth()
+        {
+            let exc = self.instantiate_named_exception(
+                "RecursionError",
+                "maximum recursion depth exceeded".to_string(),
+            )?;
+            return Err(PyError::Raised(exc));
+        }
+        // Check the generator frame out of its `Value`.
+        let mut gframe: Box<GeneratorFrame> = {
+            let mut b = state_rc.borrow_mut();
+            let taken =
+                std::mem::replace(&mut *b, Box::new(GenDriving) as Box<dyn std::any::Any>);
+            match taken.downcast::<GeneratorFrame>() {
+                Ok(g) => g,
+                Err(orig) => {
+                    *b = orig;
+                    unreachable!("vm_enter_gen_drive on a non-GeneratorFrame")
+                }
+            }
+        };
+        // Deliver the implicit `None` sent value to a suspended generator
+        // (skipped for a fresh one, pc == 0, whose yield_dst is not yet meaningful).
+        if gframe.pc != 0 {
+            let yd = gframe.yield_dst as usize;
+            gframe.regs[yd] = Value::none();
+        }
+        let gen_regs_ptr =
+            unsafe { std::ptr::NonNull::new_unchecked(gframe.regs.as_mut_ptr()) };
+        let gen_regs_len = gframe.regs.len();
+        // Publish the generator's frame view (mirrors `resume_generator_with_exc`).
+        let gen_nonlocal_names = {
+            let env = gframe.saved_env.borrow();
+            if env.nonlocal_names.is_empty() {
+                None
+            } else {
+                Some(Rc::clone(&env.nonlocal_names))
+            }
+        };
+        let gen_env_opt = if gen_nonlocal_names.is_some() {
+            Some(Rc::clone(&gframe.saved_env))
+        } else {
+            None
+        };
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Function,
+            regs_ptr: gen_regs_ptr,
+            regs_len: gen_regs_len,
+            local_index: Rc::clone(&gframe.local_index),
+            nonlocal_names: gen_nonlocal_names,
+            env: gen_env_opt,
+            is_class_method: gframe.code.is_class_method,
+            function: None,
+        });
+        let gen_code_rc = Rc::clone(&gframe.code);
+        let gen_code_ptr: *const crate::bytecode::FnCode = Rc::as_ptr(&gen_code_rc);
+        let gen_num_locals = gframe.code.num_locals;
+        let gen_pc = gframe.pc;
+        let gen_iters = std::mem::take(&mut gframe.iters);
+        let gen_exc_handlers = std::mem::take(&mut gframe.exc_handlers);
+        let gen_env = Rc::clone(&gframe.saved_env);
+        let gen_iters_len = gen_iters.len();
+        st.gen_drive_stack.push(GenDriveFrame {
+            state_rc,
+            gframe,
+            saved_regs: std::mem::replace(st.regs, unsafe {
+                RegSlice::from_raw(gen_regs_ptr.as_ptr(), gen_regs_len)
+            }),
+            saved_pc: *st.pc,
+            exit_pc,
+            dst,
+            saved_base: *st.tramp_active_base,
+            saved_cur_line: *st.cur_line,
+            saved_code_ptr: *st.code_ptr,
+            saved_active_code_rc: st.active_code_rc.take(),
+            saved_num_locals: *st.num_locals,
+            saved_fn_id: *st.current_fn_id,
+            saved_env: std::mem::replace(&mut self.env, gen_env),
+            saved_iters: std::mem::replace(st.iters, gen_iters),
+            saved_iter_cache: std::mem::replace(
+                st.iter_next_cache,
+                smallvec::smallvec![None; gen_iters_len],
+            ),
+            saved_exc_handlers: std::mem::replace(st.exc_handlers, gen_exc_handlers),
+            tramp_floor: st.tramp_stack.len(),
+        });
+        // Rebind the dispatch state to the generator.  `regs` / `iters` /
+        // `iter_next_cache` / `exc_handlers` were swapped in place above.
+        *st.code_ptr = gen_code_ptr;
+        *st.active_code_rc = Some(gen_code_rc);
+        *st.num_locals = gen_num_locals;
+        *st.current_fn_id = None;
+        *st.tramp_active_base = usize::MAX;
+        *st.pc = gen_pc;
+        Ok(())
+    }
+
+    /// Unwind active trampolined frames on the error path, interleaving the call
+    /// trampoline (#2234) and the generator trampoline (#2253).
+    ///
+    /// Pops call frames (recording each in the traceback, popping its frame view,
+    /// restoring the caller's env) down to the current generator's `tramp_floor`;
+    /// if a gen-drive frame is then at the boundary, the error belongs to *its*
+    /// consumer, so the generator is finalized (marked done, its traceback
+    /// recorded, an escaping `StopIteration` PEP 479-wrapped), the consumer is
+    /// restored, and the error is re-dispatched at the consumer's `ForIter` site
+    /// through the consumer's handler stack — which either catches it
+    /// (`Resume(pc)`) or lets it continue unwinding.  With both stacks empty this
+    /// is the bottom frame's escape (`Escape(err)`).
+    ///
+    /// `#[cold]` + `#[inline(never)]`: keeping this whole body out of line is
+    /// what prevents the ~180 `vm_try!` expansion sites from each carrying a copy
+    /// of it in `run_bytecode_inner_impl`'s (debug) stack frame, which would
+    /// overflow the native stack on deep non-trampolined recursion.
+    #[cold]
+    #[inline(never)]
+    fn vm_unwind_error(&mut self, mut err: PyError, st: &mut UnwindState) -> UnwindOutcome {
+        let mut line = *st.cur_line;
+        loop {
+            let floor = st.gen_drive_stack.last().map_or(0, |g| g.tramp_floor);
+            while st.tramp_stack.len() > floor {
+                let saved = st.tramp_stack.pop().unwrap();
+                if let Some(view) = self.vm_frame_views.pop()
+                    && let Some(func) = view.function
+                {
+                    let file = self
+                        .script_filename
+                        .clone()
+                        .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                    pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                        filename: file,
+                        lineno: if line == 0 { None } else { Some(line) },
+                        source_line: None,
+                        funcname: std::sync::Arc::from(func.name.as_str()),
+                    });
+                }
+                self.env = saved.saved_env;
+                line = saved.saved_cur_line;
+            }
+            let Some(mut gd) = st.gen_drive_stack.pop() else {
+                break;
+            };
+            // The error escaped the generator body: finalize it.
+            gd.gframe.done = true;
+            if self.vm_frame_views.pop().is_some() {
+                let file = self
+                    .script_filename
+                    .clone()
+                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                    filename: file,
+                    lineno: if line == 0 { None } else { Some(line) },
+                    source_line: None,
+                    funcname: gd.gframe.fn_name.clone(),
+                });
+            }
+            // Restore the consumer frame.
+            let foriter_pc = gd.saved_pc.wrapping_sub(1);
+            *st.regs = gd.saved_regs;
+            line = gd.saved_cur_line;
+            *st.code_ptr = gd.saved_code_ptr;
+            *st.active_code_rc = gd.saved_active_code_rc;
+            *st.num_locals = gd.saved_num_locals;
+            *st.current_fn_id = gd.saved_fn_id;
+            self.env = gd.saved_env;
+            *st.iters = gd.saved_iters;
+            *st.iter_next_cache = gd.saved_iter_cache;
+            *st.exc_handlers = gd.saved_exc_handlers;
+            *st.tramp_active_base = gd.saved_base;
+            let boxed: Box<dyn std::any::Any> = gd.gframe;
+            *gd.state_rc.borrow_mut() = boxed;
+            // PEP 479: a `StopIteration` escaping a generator body becomes
+            // `RuntimeError` in the *consumer's* env.
+            err = pep479_wrap_stop_iteration(&self.env, err);
+            // Re-raise at the consumer's `ForIter` instruction.
+            let ccode: &crate::bytecode::FnCode = unsafe { &**st.code_ptr };
+            match self.handle_vm_error(
+                err,
+                st.exc_handlers,
+                st.exc_ctx_frame_base,
+                &ccode.exc_table,
+                foriter_pc,
+                line,
+            ) {
+                Ok(h) => {
+                    *st.cur_line = line;
+                    return UnwindOutcome::Resume(h);
+                }
+                Err(e2) => {
+                    err = e2;
+                    continue;
+                }
+            }
+        }
+        *st.cur_line = line;
+        pyrust_core::set_current_vm_line(line);
+        UnwindOutcome::Escape(err)
+    }
+
     /// Materialise a `PyError` into a Python exception value and route it
     /// through the active handler stack.
     ///
@@ -1110,48 +1433,90 @@ impl Interpreter {
         // locality.  The arena is reserved up front to its recursion-limit
         // bound so it never reallocates (which would dangle the active/saved
         // `RegSlice`s); a call that would exceed the reservation falls back to
-        // the native path.  `TrampFrame` records what the caller needs restored
-        // on the callee's `Return`.
-        struct TrampFrame {
-            /// Caller's register slice (raw pointer into its own — stable —
-            /// register buffer; valid until this frame is restored).
-            saved_regs: RegSlice,
-            /// Caller's resume pc (already advanced past the call instruction).
-            saved_pc: usize,
-            /// Caller register that receives the call's result.
-            dst: u32,
-            /// Caller's base offset in `tramp_arena` (`usize::MAX` for the
-            /// bottom, natively-called frame, which uses the param `regs`).
-            saved_base: usize,
-            /// Caller's source line at the call site (restored for tracebacks).
-            saved_cur_line: u32,
-            /// Caller's `code` pointer, `num_locals`, `fn_id`, and env — restored
-            /// when the callee returns.  (Equal to the callee's for a
-            /// self-recursive call; differ for a general Python→Python call.)
-            saved_code_ptr: *const crate::bytecode::FnCode,
-            saved_active_code_rc: Option<Rc<crate::bytecode::FnCode>>,
-            saved_num_locals: u32,
-            saved_fn_id: Option<u64>,
-            saved_env: EnvRef,
-        }
+        // the native path.  `TrampFrame` (module-scoped) records what the caller
+        // needs restored on the callee's `Return`.
         let mut tramp_stack: Vec<TrampFrame> = Vec::new();
         let mut tramp_arena: Vec<Value> = Vec::new();
         // Base offset of the active frame's registers in `tramp_arena`.
         // `usize::MAX` ⇒ the active frame is the bottom (param `regs`).
         let mut tramp_active_base: usize = usize::MAX;
 
+        // ── Generator trampoline (#2253) ───────────────────────────────────
+        // When a `ForIter` consumer drives a plain, handler-free generator, the
+        // generator's `GeneratorFrame` is switched in as the active frame
+        // *within this dispatch loop* (run to its `Yield`, switch back with the
+        // value) instead of re-entering `run_bytecode_inner` per element — the
+        // generator counterpart of the call trampoline above.  Each
+        // `GenDriveFrame` checks the generator's frame *out* of its `Value`
+        // (a placeholder `Box` sits in the cell while it is driving) so the
+        // frame's `regs` buffer has a stable heap address for a `RegSlice`, and
+        // records everything needed to restore the consumer on yield, on the
+        // generator's return (→ the `ForIter` loop-exit), or on an escaping
+        // error.  `tramp_floor` is the `tramp_stack` depth at switch-in: an
+        // error unwinds the call frames above it, then hands the error to this
+        // generator's consumer.  The active frame is *this* gen-driven
+        // generator iff `gen_drive_stack.last().tramp_floor == tramp_stack.len()`
+        // (a deeper `tramp_stack` means a call the generator made is active).
+        // `GenDriveFrame` is module-scoped (shared with `vm_unwind_error`).
+        let mut gen_drive_stack: Vec<GenDriveFrame> = Vec::new();
+
         'vm: loop {
         // Re-derive the active frame's `code` from `code_ptr` (updated on a
         // trampolined frame switch).  Zero-cost: a raw-pointer reborrow.
         let code: &crate::bytecode::FnCode = unsafe { &*code_ptr };
-        // Return `$v` from the current frame: if a self-recursion trampoline
-        // frame is active (#2234), pop it (truncate the arena, restore the
-        // caller) and resume the caller with `$v` in its destination register;
-        // otherwise return out of the VM.  Used at every `Returned` exit so a
-        // trampolined frame is never leaked.
+        // `true` when the active frame is a generator currently being driven
+        // by a `ForIter` consumer (#2253) — i.e. the most recent frame switch
+        // was a gen-drive switch, with no call the generator made still active
+        // on top of it.  Cheap: a `Vec::is_empty` short-circuit on every
+        // non-generator workload (`gen_drive_stack` is empty there).
+        macro_rules! active_is_gen_drive {
+            () => {
+                gen_drive_stack
+                    .last()
+                    .is_some_and(|__g| __g.tramp_floor == tramp_stack.len())
+            };
+        }
+        // The driven generator returned (`return` / fell off the end): mark it
+        // exhausted, switch back to its consumer, and jump the consumer to the
+        // `ForIter` loop-exit (a generator return is `StopIteration` to a
+        // `for`).  `$v` is the return value (observable only via `yield from`'s
+        // `StopIteration.value`; discarded by a plain `for`, but stashed for a
+        // subsequent `next()` which raises immediately since `done`).
+        macro_rules! gen_drive_return {
+            ($v:expr) => {{
+                let mut __gd = gen_drive_stack.pop().unwrap();
+                __gd.gframe.done = true;
+                __gd.gframe.last_return_value = Some($v);
+                self.vm_frame_views.pop();
+                regs = __gd.saved_regs;
+                pc = __gd.exit_pc;
+                cur_line = __gd.saved_cur_line;
+                code_ptr = __gd.saved_code_ptr;
+                active_code_rc = __gd.saved_active_code_rc;
+                num_locals = __gd.saved_num_locals;
+                current_fn_id = __gd.saved_fn_id;
+                self.env = __gd.saved_env;
+                iters = __gd.saved_iters;
+                iter_next_cache = __gd.saved_iter_cache;
+                exc_handlers = __gd.saved_exc_handlers;
+                tramp_active_base = __gd.saved_base;
+                let __boxed: Box<dyn std::any::Any> = __gd.gframe;
+                *__gd.state_rc.borrow_mut() = __boxed;
+                continue 'vm;
+            }};
+        }
+        // Return `$v` from the current frame: if the active frame is a driven
+        // generator (#2253), finalize it (→ the consumer's loop-exit); else if a
+        // call-trampoline frame is active (#2234), pop it (truncate the arena,
+        // restore the caller) and resume the caller with `$v` in its destination
+        // register; otherwise return out of the VM.  Used at every `Returned`
+        // exit so a trampolined frame is never leaked.
         macro_rules! tramp_return {
             ($v:expr) => {{
                 let __v = $v;
+                if active_is_gen_drive!() {
+                    gen_drive_return!(__v);
+                }
                 if let Some(__saved) = tramp_stack.pop() {
                     self.vm_frame_views.pop();
                     tramp_arena.truncate(tramp_active_base);
@@ -1202,36 +1567,45 @@ impl Interpreter {
                 }
             };
         }
-        // Unwind active trampolined frames (#2234) on the error path: record each
-        // in the traceback (innermost first), pop its frame view, and restore the
-        // caller's env, leaving only the bottom (natively-called) frame for
-        // `call_user_function_expanded` to record.  A no-op when `tramp_stack` is
-        // empty (the common case).  Then publish the bottom frame's line and
-        // return the error.
+        // Unwind active trampolined frames on the error path.  Interleaves the
+        // call trampoline (#2234) and the generator trampoline (#2253): pop call
+        // frames (record each in the traceback, pop its view, restore the
+        // caller's env) down to the current generator's `tramp_floor`; if a
+        // gen-drive frame is then at the boundary, the error belongs to *its*
+        // consumer, so finalize the generator (mark done, record its traceback,
+        // PEP 479-wrap an escaping `StopIteration`), restore the consumer, and
+        // re-dispatch the error at the consumer's `ForIter` site through the
+        // consumer's handler stack — which may catch it or continue unwinding.
+        // A no-op fast path (both stacks empty) returns the error directly.
         macro_rules! tramp_unwind_err {
             ($e:expr) => {{
-                let mut __line = cur_line;
-                while let Some(__saved) = tramp_stack.pop() {
-                    if let Some(__view) = self.vm_frame_views.pop() {
-                        if let Some(__func) = __view.function {
-                            let __file = self
-                                .script_filename
-                                .clone()
-                                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
-                            pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-                                filename: __file,
-                                lineno: if __line == 0 { None } else { Some(__line) },
-                                source_line: None,
-                                funcname: std::sync::Arc::from(__func.name.as_str()),
-                            });
-                        }
+                // Thin wrapper: hand the live frame state to the cold, out-of-line
+                // `vm_unwind_error` so this expansion stays tiny at every site.
+                let mut __st = UnwindState {
+                    regs: &mut regs,
+                    pc: &mut pc,
+                    cur_line: &mut cur_line,
+                    code_ptr: &mut code_ptr,
+                    active_code_rc: &mut active_code_rc,
+                    num_locals: &mut num_locals,
+                    current_fn_id: &mut current_fn_id,
+                    iters: &mut iters,
+                    iter_next_cache: &mut iter_next_cache,
+                    exc_handlers: &mut exc_handlers,
+                    tramp_active_base: &mut tramp_active_base,
+                    tramp_stack: &mut tramp_stack,
+                    gen_drive_stack: &mut gen_drive_stack,
+                    exc_ctx_frame_base,
+                };
+                match self.vm_unwind_error($e, &mut __st) {
+                    UnwindOutcome::Resume(__h) => {
+                        pc = __h;
+                        continue 'vm;
                     }
-                    self.env = __saved.saved_env;
-                    __line = __saved.saved_cur_line;
+                    UnwindOutcome::Escape(__err) => {
+                        return Err(__err);
+                    }
                 }
-                cur_line = __line;
-                pyrust_core::set_current_vm_line(cur_line);
-                return Err($e);
             }};
         }
         macro_rules! pool_get {
@@ -2738,6 +3112,39 @@ impl Interpreter {
                     // overwrites this with the sent value (None for next(),
                     // the caller's argument for send()) before resuming.
                     regs[*dst as usize] = Value::none();
+                    // ── Generator trampoline switch-back (#2253) ─────────────
+                    // If this generator is being driven by a `ForIter` consumer
+                    // within this same dispatch loop, save its resume state, put
+                    // its frame back into its `Value`, restore the consumer, and
+                    // deliver the yielded value to the `ForIter` destination —
+                    // instead of returning `FrameOutcome::Yielded` up through a
+                    // native `run_bytecode_inner` re-entry.  The `!has_exc_handlers`
+                    // gate means there is no handled-exception slice to split off.
+                    if active_is_gen_drive!() {
+                        let mut gd = gen_drive_stack.pop().unwrap();
+                        gd.gframe.pc = pc;
+                        gd.gframe.iters = std::mem::take(&mut iters);
+                        gd.gframe.exc_handlers = std::mem::take(&mut exc_handlers);
+                        gd.gframe.yield_dst = *dst;
+                        self.vm_frame_views.pop();
+                        let dst_reg = gd.dst as usize;
+                        regs = gd.saved_regs;
+                        pc = gd.saved_pc;
+                        cur_line = gd.saved_cur_line;
+                        code_ptr = gd.saved_code_ptr;
+                        active_code_rc = gd.saved_active_code_rc;
+                        num_locals = gd.saved_num_locals;
+                        current_fn_id = gd.saved_fn_id;
+                        self.env = gd.saved_env;
+                        iters = gd.saved_iters;
+                        iter_next_cache = gd.saved_iter_cache;
+                        exc_handlers = gd.saved_exc_handlers;
+                        tramp_active_base = gd.saved_base;
+                        let boxed: Box<dyn std::any::Any> = gd.gframe;
+                        *gd.state_rc.borrow_mut() = boxed;
+                        regs[dst_reg] = yielded;
+                        continue 'vm;
+                    }
                     // PEP 3134: split the interpreter's handled-exception
                     // stack at this frame's base.  Entries pushed by THIS
                     // generator frame (above `exc_ctx_frame_base`) are saved
@@ -3059,6 +3466,17 @@ impl Interpreter {
                     iter_next_cache[*slot as usize] = None;
                 }
                 Insn::ForIter(dst, slot, offset) => {
+                    // Generator trampoline (#2253): set inside the match when the
+                    // iterator is a drivable generator; the switch-in is performed
+                    // after the match closes (it needs `&mut iters`, borrowed here).
+                    let mut gen_to_drive: Option<Rc<RefCell<Box<dyn std::any::Any>>>> = None;
+                    // Set when the iterator is a generator that is *already
+                    // executing* (its state cell is borrowed by an enclosing
+                    // resume, or holds the `GenDriving` placeholder because it is
+                    // being driven up the stack) → CPython `ValueError: generator
+                    // already executing`, rather than the re-entrant-borrow panic
+                    // the per-step dispatch would hit.
+                    let mut gen_executing = false;
                     #[allow(clippy::collapsible_match)]
                     match iters[*slot as usize].as_mut() {
                         // Hot path: indexed iteration over a list/tuple held in a register.
@@ -3159,10 +3577,62 @@ impl Interpreter {
                             }
                         }
                         Some(IterState::UserDefined(iter_obj)) => {
+                            // Generator trampoline (#2253): a plain, handler-free
+                            // generator suspended at a `Yield` (or fresh) is driven
+                            // within this dispatch loop instead of re-entering
+                            // `run_bytecode_inner` per element.  Detected here (where
+                            // the iterator is in hand); the switch-in happens after
+                            // this match closes, since `iters` is borrowed by it.
+                            // Falls through to the per-step dispatch for everything
+                            // else: generators with try/except/finally, suspended in
+                            // `yield from`, the special iterator adapters (map/zip/…),
+                            // PyInstance `__next__`, and built-in objects.
+                            if let ValueKind::Generator(state_rc) = iter_obj.kind() {
+                                // `try_borrow` rather than `borrow`: a generator
+                                // already executing up the stack holds its cell
+                                // borrowed (native resume) — `borrow` would abort.
+                                match state_rc.try_borrow() {
+                                    Ok(b) => {
+                                        if let Some(g) =
+                                            b.downcast_ref::<GeneratorFrame>()
+                                        {
+                                            let drivable = !g.done
+                                                && !g.code.has_exc_handlers
+                                                && g.handled_exc_slice.is_empty()
+                                                && g.active_exception.is_none()
+                                                && g.exc_saved_active_slice.is_empty()
+                                                && !matches!(
+                                                    g.code.insns.get(g.pc),
+                                                    Some(Insn::YieldFrom { .. })
+                                                );
+                                            if drivable {
+                                                drop(b);
+                                                gen_to_drive = Some(Rc::clone(state_rc));
+                                            }
+                                        } else if b.is::<GenDriving>() {
+                                            // Checked out by a gen-drive frame up
+                                            // the stack ⇒ already executing.
+                                            gen_executing = true;
+                                        }
+                                    }
+                                    // Borrowed elsewhere ⇒ executing via a native
+                                    // resume in an enclosing frame.
+                                    Err(_) => gen_executing = true,
+                                }
+                            }
                             // Call __next__() on the iterator object; stop on StopIteration.
                             let iter_val: &Value = iter_obj;
                             let next_result: Option<Result<Value>> =
-                                if let ValueKind::Generator(state_rc) = iter_val.kind() {
+                                if gen_to_drive.is_some() {
+                                    // Driven below after the match closes.
+                                    None
+                                } else if gen_executing {
+                                    // CPython: ValueError("generator already executing").
+                                    Some(Err(pyrust_core::py_err!(
+                                        "ValueError",
+                                        "generator already executing".to_string()
+                                    )))
+                                } else if let ValueKind::Generator(state_rc) = iter_val.kind() {
                                     let state_rc = Rc::clone(state_rc);
                                     // Probe for shapes that need &mut self
                                     // before taking borrow_mut — these must
@@ -3319,6 +3789,9 @@ impl Interpreter {
                                     pc = jump_pc!(*offset);
                                 }
                                 Some(Err(e)) => { vm_try!(Err(e)); }
+                                // `gen_to_drive` set ⇒ next_result is the skip
+                                // sentinel; the switch-in happens after the match.
+                                None if gen_to_drive.is_some() => {}
                                 None => {
                                     vm_try!(Err(pyrust_core::type_err!("iter() returned non-iterator of type '{}'",
                                             value_type_name_str(iter_val),)));
@@ -3328,6 +3801,32 @@ impl Interpreter {
                         None => {
                             pc = jump_pc!(*offset);
                         }
+                    }
+                    // ── Generator trampoline switch-in (#2253) ───────────────
+                    // `iters` is no longer borrowed here, so the consumer frame
+                    // can be saved and the generator's frame switched in.  The
+                    // setup itself lives in the cold, out-of-line
+                    // `vm_enter_gen_drive` so it does not bloat this hot arm.
+                    if let Some(state_rc) = gen_to_drive {
+                        let exit_pc = jump_pc!(*offset);
+                        let mut st = UnwindState {
+                            regs: &mut regs,
+                            pc: &mut pc,
+                            cur_line: &mut cur_line,
+                            code_ptr: &mut code_ptr,
+                            active_code_rc: &mut active_code_rc,
+                            num_locals: &mut num_locals,
+                            current_fn_id: &mut current_fn_id,
+                            iters: &mut iters,
+                            iter_next_cache: &mut iter_next_cache,
+                            exc_handlers: &mut exc_handlers,
+                            tramp_active_base: &mut tramp_active_base,
+                            tramp_stack: &mut tramp_stack,
+                            gen_drive_stack: &mut gen_drive_stack,
+                            exc_ctx_frame_base,
+                        };
+                        vm_try!(self.vm_enter_gen_drive(state_rc, *dst, exit_pc, &mut st));
+                        continue 'vm;
                     }
                 }
                 Insn::ForCountReg(var, cmp_op, stop_reg, step_idx, offset) => {
