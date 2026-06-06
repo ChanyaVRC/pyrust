@@ -327,6 +327,13 @@ struct TrampFrame {
     saved_env: EnvRef,
 }
 
+/// Placeholder left inside a generator's state cell (`Rc<RefCell<Box<dyn Any>>>`)
+/// while its `GeneratorFrame` is checked out and being driven (#2253).  Keeps the
+/// cell's contents valid (and the borrow released) during the drive, and lets a
+/// re-entrant `ForIter` on the same generator recognise "already executing"
+/// (→ `ValueError`) instead of mis-reading it as an exhausted iterator.
+struct GenDriving;
+
 /// Generator-trampoline frame (#2253): the generator's checked-out frame plus
 /// the consumer state restored when the generator yields / returns / raises.
 /// Module-scoped for the same reason as [`TrampFrame`].
@@ -997,7 +1004,7 @@ impl Interpreter {
         let mut gframe: Box<GeneratorFrame> = {
             let mut b = state_rc.borrow_mut();
             let taken =
-                std::mem::replace(&mut *b, Box::new(()) as Box<dyn std::any::Any>);
+                std::mem::replace(&mut *b, Box::new(GenDriving) as Box<dyn std::any::Any>);
             match taken.downcast::<GeneratorFrame>() {
                 Ok(g) => g,
                 Err(orig) => {
@@ -3463,6 +3470,13 @@ impl Interpreter {
                     // iterator is a drivable generator; the switch-in is performed
                     // after the match closes (it needs `&mut iters`, borrowed here).
                     let mut gen_to_drive: Option<Rc<RefCell<Box<dyn std::any::Any>>>> = None;
+                    // Set when the iterator is a generator that is *already
+                    // executing* (its state cell is borrowed by an enclosing
+                    // resume, or holds the `GenDriving` placeholder because it is
+                    // being driven up the stack) → CPython `ValueError: generator
+                    // already executing`, rather than the re-entrant-borrow panic
+                    // the per-step dispatch would hit.
+                    let mut gen_executing = false;
                     #[allow(clippy::collapsible_match)]
                     match iters[*slot as usize].as_mut() {
                         // Hot path: indexed iteration over a list/tuple held in a register.
@@ -3574,22 +3588,36 @@ impl Interpreter {
                             // `yield from`, the special iterator adapters (map/zip/…),
                             // PyInstance `__next__`, and built-in objects.
                             if let ValueKind::Generator(state_rc) = iter_obj.kind() {
-                                let drivable = {
-                                    let b = state_rc.borrow();
-                                    b.downcast_ref::<GeneratorFrame>().is_some_and(|g| {
-                                        !g.done
-                                            && !g.code.has_exc_handlers
-                                            && g.handled_exc_slice.is_empty()
-                                            && g.active_exception.is_none()
-                                            && g.exc_saved_active_slice.is_empty()
-                                            && !matches!(
-                                                g.code.insns.get(g.pc),
-                                                Some(Insn::YieldFrom { .. })
-                                            )
-                                    })
-                                };
-                                if drivable {
-                                    gen_to_drive = Some(Rc::clone(state_rc));
+                                // `try_borrow` rather than `borrow`: a generator
+                                // already executing up the stack holds its cell
+                                // borrowed (native resume) — `borrow` would abort.
+                                match state_rc.try_borrow() {
+                                    Ok(b) => {
+                                        if let Some(g) =
+                                            b.downcast_ref::<GeneratorFrame>()
+                                        {
+                                            let drivable = !g.done
+                                                && !g.code.has_exc_handlers
+                                                && g.handled_exc_slice.is_empty()
+                                                && g.active_exception.is_none()
+                                                && g.exc_saved_active_slice.is_empty()
+                                                && !matches!(
+                                                    g.code.insns.get(g.pc),
+                                                    Some(Insn::YieldFrom { .. })
+                                                );
+                                            if drivable {
+                                                drop(b);
+                                                gen_to_drive = Some(Rc::clone(state_rc));
+                                            }
+                                        } else if b.is::<GenDriving>() {
+                                            // Checked out by a gen-drive frame up
+                                            // the stack ⇒ already executing.
+                                            gen_executing = true;
+                                        }
+                                    }
+                                    // Borrowed elsewhere ⇒ executing via a native
+                                    // resume in an enclosing frame.
+                                    Err(_) => gen_executing = true,
                                 }
                             }
                             // Call __next__() on the iterator object; stop on StopIteration.
@@ -3598,6 +3626,12 @@ impl Interpreter {
                                 if gen_to_drive.is_some() {
                                     // Driven below after the match closes.
                                     None
+                                } else if gen_executing {
+                                    // CPython: ValueError("generator already executing").
+                                    Some(Err(pyrust_core::py_err!(
+                                        "ValueError",
+                                        "generator already executing".to_string()
+                                    )))
                                 } else if let ValueKind::Generator(state_rc) = iter_val.kind() {
                                     let state_rc = Rc::clone(state_rc);
                                     // Probe for shapes that need &mut self

@@ -217,3 +217,31 @@ print([x for x in safe(5)])
 # --- 12. zip / enumerate over driven generators ---
 print(list(enumerate(squares(4))))
 print(list(zip(squares(3), "abc")))
+
+
+# --- 13. Re-entrant execution → ValueError (not a panic / wrong result) ---
+# (a) self-reference while driven by a native consumer (list()).
+def selfref_native():
+    yield 1
+    for _ in sn:
+        yield 2
+
+
+sn = selfref_native()
+try:
+    list(sn)
+except ValueError as e:
+    print("reentrant-native:", e)
+
+# (b) self-reference while driven by a plain `for` (trampoline placeholder path).
+def selfref_drive():
+    yield 1
+    for _ in sd:
+        yield 2
+
+
+sd = selfref_drive()
+try:
+    print([x for x in sd])
+except ValueError as e:
+    print("reentrant-drive:", e)
