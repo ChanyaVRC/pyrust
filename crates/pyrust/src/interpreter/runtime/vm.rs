@@ -444,6 +444,15 @@ pub(crate) enum FrameOutcome {
     Yielded { value: Value, saved: GenSaveState },
 }
 
+/// Boxed payload for [`IterState::BigRange`] (kept out-of-line so the cold
+/// arbitrary-precision range variant doesn't inflate `IterState`).
+#[derive(Clone)]
+pub(crate) struct BigRangeState {
+    pub(crate) cur: PyBigInt,
+    pub(crate) stop: PyBigInt,
+    pub(crate) step: PyBigInt,
+}
+
 #[derive(Clone)]
 pub(crate) enum IterState {
     Materialized(Vec<Value>, usize),
@@ -451,7 +460,13 @@ pub(crate) enum IterState {
     /// Lazy arbitrary-precision range iteration (#2118): advances a `BigInt`
     /// cursor by `step` each tick, never materializing the (potentially huge)
     /// sequence.  Only produced for ranges with out-of-i64 bounds.
-    BigRange { cur: PyBigInt, stop: PyBigInt, step: PyBigInt },
+    ///
+    /// Boxed to keep `IterState` small: three inline `PyBigInt`s (96 bytes)
+    /// would make this cold, rarely-produced variant the largest, inflating
+    /// `ItersBuf` (on every VM frame) and `GeneratorFrame` (per suspended
+    /// generator).  The single heap allocation is paid once per big-range
+    /// iterator (out-of-`i64` ranges only), never on the common iteration path.
+    BigRange(Box<BigRangeState>),
     /// Lazy: reads directly from the source register on each ForIter call.
     /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
     /// Behaves like CPython's list_iterator: checks pos < len each tick; no
@@ -3353,7 +3368,11 @@ impl Interpreter {
                             }
                             IterTag::BigRange(start, stop, step) => {
                                 // step is guaranteed non-zero by `Value::range_big`.
-                                IterState::BigRange { cur: start, stop, step }
+                                IterState::BigRange(Box::new(BigRangeState {
+                                    cur: start,
+                                    stop,
+                                    step,
+                                }))
                             }
                             IterTag::Generator => IterState::UserDefined(src_val),
                             IterTag::ListOrTuple => {
@@ -3562,7 +3581,8 @@ impl Interpreter {
                                 regs[*dst as usize] = v;
                             }
                         }
-                        Some(IterState::BigRange { cur, stop, step }) => {
+                        Some(IterState::BigRange(st)) => {
+                            let BigRangeState { cur, stop, step } = &mut **st;
                             let exhausted = if step.sign() == pyrust_core::PyBigIntSign::Plus {
                                 *cur >= *stop
                             } else {
