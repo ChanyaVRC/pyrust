@@ -1296,6 +1296,29 @@ pub struct UserFunction {
     pub wrapped_func: Option<Rc<UserFunction>>,
 }
 
+impl UserFunction {
+    /// `f.__annotations__` — the function's annotation dict.
+    ///
+    /// Lazily materialised (#2256): a function with no annotations stores the
+    /// `Value::unset()` sentinel rather than an eagerly-allocated empty dict, so
+    /// the (very common) unannotated function/closure does not each carry a heap
+    /// dict.  On first access the empty dict is created and stored, so repeated
+    /// reads return the same object — matching CPython's
+    /// `f.__annotations__ is f.__annotations__` identity.  `unset()` is never a
+    /// user-visible value, so it is unambiguous as the "not yet created" marker.
+    pub fn annotations_value(&self) -> Value {
+        {
+            let cur = self.annotations.borrow();
+            if !cur.is_unset() {
+                return cur.clone();
+            }
+        }
+        let dict = Value::dict(PyDict::default());
+        *self.annotations.borrow_mut() = dict.clone();
+        dict
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PyClass {
     pub name: String,
@@ -2841,7 +2864,7 @@ impl Value {
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
                 attrs: RefCell::new(None),
-                annotations: RefCell::new(Value::dict(PyDict::default())),
+                annotations: RefCell::new(Value::unset()),
                 params: Vec::new(),
                 param_binds: Rc::new(Vec::new()),
                 self_bind: None,
@@ -6084,7 +6107,7 @@ mod tests {
             module: RefCell::new(Value::string("__main__")),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
-            annotations: RefCell::new(Value::dict(PyDict::default())),
+            annotations: RefCell::new(Value::unset()),
             params: Vec::new(),
             param_binds: Rc::new(Vec::new()),
             self_bind: None,

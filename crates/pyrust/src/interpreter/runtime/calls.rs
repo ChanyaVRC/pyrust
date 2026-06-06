@@ -7567,7 +7567,14 @@ impl Interpreter {
             let val = vm_read(regs, annots_base + i as u32, num_locals)?;
             annotations_map.insert(PyKey::str_from(key.as_str()), val);
         }
-        let annotations = Value::dict(annotations_map);
+        // #2256: don't eagerly allocate an empty dict for the (common)
+        // unannotated function — store the `unset()` sentinel and let
+        // `__annotations__` materialise lazily on first access.
+        let annotations = if annotations_map.is_empty() {
+            Value::unset()
+        } else {
+            Value::dict(annotations_map)
+        };
         for name in proto_nonlocal_names.iter() {
             if !has_local_binding_in_current_or_ancestor(&self.env, name) {
                 return Err(pyrust_core::py_err!("SyntaxError", "no binding for nonlocal '{}' found", name));
