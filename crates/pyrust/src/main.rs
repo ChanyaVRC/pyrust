@@ -33,10 +33,26 @@ fn parse_source_with_linenos(src: &str) -> Result<(Vec<ast::Stmt>, Vec<u32>)> {
     parser.parse_program_with_linenos()
 }
 
-// 256 MB stack so that deep Python recursion (up to RecursionError limit of
-// 1000 calls) never overflows the OS default (1 MB on Windows), even in
-// debug builds where Rust stack frames can be 80–100 KB each.
+// Interpreter-thread stack, sized so deep Python recursion (up to the default
+// `RecursionError` limit of 1000 calls) never overflows the OS default (1 MB on
+// Windows) with comfortable margin for an elevated `sys.setrecursionlimit()`.
+//
+// The release VM frame for the worst recursion shape (a `try`/`except` body
+// driven through the native memoized-call path) is ~52 KB, so 1000-deep
+// recursion peaks at ~56 MB; 128 MB gives ~2.3× headroom and supports an
+// elevated limit up to ~2000 in the worst case (far more for ordinary
+// recursion).  Halving the reservation from the previous 256 MB cuts the
+// worst-case committed memory and virtual footprint under deep recursion in two,
+// with zero effect on normal programs (the stack is committed lazily, so a
+// non-recursing script still resides in ~5 MB).
+//
+// Debug builds keep 256 MB: `-Copt-level=0` frames are 80–100 KB each, so a
+// 1000-deep recursion needs ~100 MB, and CI's debug parity suite exercises
+// recursion fixtures.
+#[cfg(debug_assertions)]
 const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
+#[cfg(not(debug_assertions))]
+const INTERPRETER_STACK_SIZE: usize = 128 * 1024 * 1024;
 
 fn run_file(path: &str) -> Result<()> {
     let src = std::fs::read_to_string(path)
