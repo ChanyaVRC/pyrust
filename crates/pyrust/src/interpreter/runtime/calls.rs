@@ -112,7 +112,11 @@ impl Interpreter {
         let num_iters = code.num_iters as usize;
         let frame = GeneratorFrame {
             code: Rc::clone(code),
-            regs,
+            // Tighten to an exactly-sized `Vec` for the generator's lifetime
+            // (#2257): `into_vec` reuses the buffer when the param-binding
+            // `RegsBuf` already spilled to the heap, and otherwise allocates a
+            // snug `num_regs`-length `Vec` (vs the 128-byte inline buffer).
+            regs: regs.into_vec(),
             iters: smallvec![None; num_iters],
             exc_handlers: ExcHandlersBuf::new(),
             pc: 0,
