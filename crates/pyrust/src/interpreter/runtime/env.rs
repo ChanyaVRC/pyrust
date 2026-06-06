@@ -427,10 +427,10 @@ impl Interpreter {
                         return Ok(attrs_rc.borrow().clone());
                     }
                     "__annotations__" => {
-                        // Return the stored dict Value directly (Rc-clone) so that
-                        // repeated reads yield the same object identity, matching
-                        // CPython: `f.__annotations__ is f.__annotations__` is True.
-                        return Ok(func.annotations.borrow().clone());
+                        // Lazily materialised (#2256) and stored, so repeated reads
+                        // yield the same object identity, matching CPython:
+                        // `f.__annotations__ is f.__annotations__` is True.
+                        return Ok(func.annotations_value());
                     }
                     "__defaults__" => {
                         // Tuple of defaults for the positional (non-keyword-only)
@@ -3022,7 +3022,7 @@ fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate
             let attrs_rc = func_attrs_rc(function);
             Some(Ok(attrs_rc.borrow().clone()))
         }
-        "__annotations__" => Some(Ok(function.annotations.borrow().clone())),
+        "__annotations__" => Some(Ok(function.annotations_value())),
         "__defaults__" => {
             // Collect defaults for positional-or-keyword params (not *args,
             // **kwargs, or keyword-only).  Returns None if no defaults exist,

@@ -246,7 +246,15 @@ pub(crate) struct ZipIter {
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
     pub(crate) code: Rc<crate::bytecode::FnCode>,
-    pub(crate) regs: RegsBuf,
+    /// The suspended frame's register file.  A tight `Vec<Value>` (sized to the
+    /// body's `num_regs`) rather than the dispatch loop's inline-16 `RegsBuf`
+    /// (#2257): a suspended generator keeps its register file alive for its whole
+    /// lifetime, and the 128-byte inline buffer wasted ~96 bytes for the common
+    /// small-bodied generator.  Never moved out of the frame — the dispatch loop
+    /// (native resume and the #2253 trampoline) operates on a `RegSlice` *into*
+    /// this buffer — so a `Vec` needs no per-resume conversion; the one-time tight
+    /// allocation is paid at generator creation.
+    pub(crate) regs: Vec<Value>,
     pub(crate) iters: ItersBuf,
     pub(crate) exc_handlers: ExcHandlersBuf,
     /// Program counter for the NEXT instruction to execute on resumption.

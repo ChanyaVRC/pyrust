@@ -112,7 +112,11 @@ impl Interpreter {
         let num_iters = code.num_iters as usize;
         let frame = GeneratorFrame {
             code: Rc::clone(code),
-            regs,
+            // Tighten to an exactly-sized `Vec` for the generator's lifetime
+            // (#2257): `into_vec` reuses the buffer when the param-binding
+            // `RegsBuf` already spilled to the heap, and otherwise allocates a
+            // snug `num_regs`-length `Vec` (vs the 128-byte inline buffer).
+            regs: regs.into_vec(),
             iters: smallvec![None; num_iters],
             exc_handlers: ExcHandlersBuf::new(),
             pc: 0,
@@ -7563,7 +7567,14 @@ impl Interpreter {
             let val = vm_read(regs, annots_base + i as u32, num_locals)?;
             annotations_map.insert(PyKey::str_from(key.as_str()), val);
         }
-        let annotations = Value::dict(annotations_map);
+        // #2256: don't eagerly allocate an empty dict for the (common)
+        // unannotated function — store the `unset()` sentinel and let
+        // `__annotations__` materialise lazily on first access.
+        let annotations = if annotations_map.is_empty() {
+            Value::unset()
+        } else {
+            Value::dict(annotations_map)
+        };
         for name in proto_nonlocal_names.iter() {
             if !has_local_binding_in_current_or_ancestor(&self.env, name) {
                 return Err(pyrust_core::py_err!("SyntaxError", "no binding for nonlocal '{}' found", name));
