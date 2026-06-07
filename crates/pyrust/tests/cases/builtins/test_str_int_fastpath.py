@@ -16,3 +16,10 @@ print(str(10**30))
 print(str(42) + "!", len(str(123456789)))
 print([str(i) for i in range(-3, 4)])
 print(str(True), str(False))  # bool is not int fast-path → "True"/"False"
+
+# repr() and f-strings share the same Value::int_string fast path
+print(repr(0), repr(-7), repr(9223372036854775807), repr(-9223372036854775808))
+print(repr(2**63), repr(-(2**63) - 1))  # BigInt slow path still correct
+print(f"{0}", f"{-9223372036854775808}", f"a={42} b={1000000}")
+print(f"{255:08x}", f"{42:+05d}")  # with a format spec → generic path, not the fast path
+print(repr(True), f"{True}", repr(None), f"{3.14}")  # non-int kinds unaffected

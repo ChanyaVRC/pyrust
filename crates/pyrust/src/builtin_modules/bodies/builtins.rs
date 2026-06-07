@@ -13,7 +13,6 @@
 // Reference: <https://docs.python.org/3/library/functions.html>
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
 use std::rc::Rc;
 
 use crate::ast::BinaryOp;
@@ -620,6 +619,11 @@ pyrust_module! {
     /// `PyInstance` values (and transitively for instances inside containers),
     /// which may invoke arbitrary user code.
     fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
+        // Fast path (#alloc): `repr(int)` == the digits, formatted straight into
+        // the string Value (one allocation, no intermediate heap `String`).
+        if let ValueKind::Int(n) = obj.0.kind() {
+            return Ok(Value::int_string(n));
+        }
         pyrust_core::check_int_str_conversion(&obj.0)?;
         let s = render_value_repr(_interp, &obj.0)?;
         Ok(Value::string(s))
@@ -3581,9 +3585,7 @@ pyrust_module! {
             // of the intermediate heap `String` that `render_instance_str`
             // returns before `Value::string` copies it.
             if let ValueKind::Int(n) = object.kind() {
-                let mut buf = StackItoa::new();
-                let _ = write!(buf, "{n}");
-                return Ok(Value::string(buf.as_str()));
+                return Ok(Value::int_string(n));
             }
             return Ok(Value::string(render_instance_str(_interp, object)?));
         }
@@ -9550,38 +9552,6 @@ pub(crate) fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> R
 /// user-defined `__str__` fall back to `Value::to_py_str()` (matching
 /// CPython's `BaseException.__str__`); those with a user-defined `__str__`
 /// call it via the normal dunder dispatch loop.
-/// Small stack buffer for formatting a scalar (an `i64` fits in ≤20 ASCII
-/// bytes) without a heap `String` (#alloc).  Implements `fmt::Write` so it can
-/// receive `write!(buf, "{n}")`; `as_str` is then fed straight to
-/// `Value::string`, which copies the bytes into its own inline allocation.
-struct StackItoa {
-    buf: [u8; 24],
-    len: usize,
-}
-
-impl StackItoa {
-    fn new() -> Self {
-        StackItoa { buf: [0; 24], len: 0 }
-    }
-    fn as_str(&self) -> &str {
-        // SAFETY: only written via `write_str` with `&str` inputs (valid UTF-8).
-        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len]) }
-    }
-}
-
-impl std::fmt::Write for StackItoa {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let b = s.as_bytes();
-        let end = self.len + b.len();
-        if end > self.buf.len() {
-            return Err(std::fmt::Error);
-        }
-        self.buf[self.len..end].copy_from_slice(b);
-        self.len = end;
-        Ok(())
-    }
-}
-
 fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
     // gh-95778: reject a base-10 int->str conversion (directly or nested inside
     // a container) that exceeds `sys.get_int_max_str_digits()`.

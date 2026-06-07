@@ -2638,6 +2638,33 @@ impl Value {
         }
     }
 
+    /// `str(n)` / `repr(n)` for an `i64` without the intermediate heap `String`
+    /// that `n.to_string()` allocates (#alloc): format the digits into a stack
+    /// buffer (an `i64` is at most 20 ASCII bytes including the sign) and copy
+    /// them once into the string `Value`.  Used by `str()`, `repr()`, and
+    /// f-string formatting for the common bare-integer case.
+    pub fn int_string(n: i64) -> Self {
+        use std::fmt::Write as _;
+        // i64::MIN is "-9223372036854775808" — exactly 20 bytes.
+        struct Buf {
+            b: [u8; 20],
+            n: usize,
+        }
+        impl std::fmt::Write for Buf {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                let bytes = s.as_bytes();
+                self.b[self.n..self.n + bytes.len()].copy_from_slice(bytes);
+                self.n += bytes.len();
+                Ok(())
+            }
+        }
+        let mut buf = Buf { b: [0; 20], n: 0 };
+        let _ = write!(buf, "{n}");
+        // SAFETY: the `Display` impl for `i64` emits only ASCII digits and an
+        // optional leading '-', so the written prefix is valid UTF-8.
+        Value::string(unsafe { std::str::from_utf8_unchecked(&buf.b[..buf.n]) })
+    }
+
     pub fn string_slice(&self, byte_start: usize, byte_end: usize) -> Self {
         // Guard against inverted indices: wrapping subtraction would produce a
         // colossal sub_len and the resulting slice descriptor would be invalid.
