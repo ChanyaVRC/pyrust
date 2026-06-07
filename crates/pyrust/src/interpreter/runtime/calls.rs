@@ -3109,15 +3109,8 @@ impl Interpreter {
                     // (When `needs_local_env` is false, `gen_env` ==
                     // `function.env` — the GeneratorFrame keeps it alive.)
                     let gen_env = std::mem::replace(&mut self.env, previous_env);
-                    let gen_qualname = std::sync::Arc::from(
-                        function
-                            .user_qualname
-                            .borrow()
-                            .as_deref()
-                            .unwrap_or(&function.qualname)
-                            .to_string()
-                            .as_str(),
-                    );
+                    let gen_qualname =
+                        std::sync::Arc::from(function.effective_qualname().as_str());
                     return Ok(Self::build_generator_value(
                         &code,
                         regs,
@@ -3426,15 +3419,8 @@ impl Interpreter {
             // so the body's `yield` isn't observed as a runtime error.
             if code.is_generator {
                 let gen_env = std::mem::replace(&mut self.env, previous_env);
-                let gen_qualname = std::sync::Arc::from(
-                    function
-                        .user_qualname
-                        .borrow()
-                        .as_deref()
-                        .unwrap_or(&function.qualname)
-                        .to_string()
-                        .as_str(),
-                );
+                let gen_qualname =
+                    std::sync::Arc::from(function.effective_qualname().as_str());
                 return Ok(Self::build_generator_value(
                     &code,
                     regs,
@@ -7585,8 +7571,7 @@ impl Interpreter {
             kind: crate::value::UserFunctionKind::Regular,
             name: proto_name,
             qualname: proto_qualname,
-            user_name: std::cell::RefCell::new(None),
-            user_qualname: std::cell::RefCell::new(None),
+            name_overrides: std::cell::RefCell::new(None),
             module: std::cell::RefCell::new(Value::string("__main__")),
             doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
             attrs: std::cell::RefCell::new(None),

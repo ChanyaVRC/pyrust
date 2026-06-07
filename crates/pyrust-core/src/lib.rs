@@ -1218,6 +1218,15 @@ pub enum UserFunctionKind {
     Builtin(&'static str),
 }
 
+/// Boxed `f.__name__` / `f.__qualname__` overrides (#2256).  Held behind an
+/// `Option<Box<…>>` on `UserFunction` so the common case (no override) costs a
+/// single null pointer rather than two inline `RefCell<Option<String>>`.
+#[derive(Debug, Clone, Default)]
+pub struct FnNameOverrides {
+    pub name: Option<String>,
+    pub qualname: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct UserFunction {
     /// Globally unique identity for fn_cache keying — stable across Rc drops/reallocations.
@@ -1225,16 +1234,20 @@ pub struct UserFunction {
     pub kind: UserFunctionKind,
     /// The bare function name as declared.  Used for self-recursive slot lookup
     /// and error messages.  Do not mutate through this field; user code that
-    /// assigns `f.__name__ = "x"` writes to `user_name` instead.
+    /// assigns `f.__name__ = "x"` writes to `name_overrides` instead.
     pub name: String,
     /// Fully-qualified compile-time name (e.g. `"outer.<locals>.inner"`).
     /// Exposed as `f.__qualname__`.  User code that assigns `f.__qualname__ = "x"`
-    /// writes to `user_qualname` instead.
+    /// writes to `name_overrides` instead.
     pub qualname: String,
-    /// Mutable override for `f.__name__`.  `None` means fall back to `name`.
-    pub user_name: RefCell<Option<String>>,
-    /// Mutable override for `f.__qualname__`.  `None` means fall back to `qualname`.
-    pub user_qualname: RefCell<Option<String>>,
+    /// Lazily-boxed user overrides for `f.__name__` / `f.__qualname__` (#2256).
+    /// `None` (the common case — virtually every function and closure) falls back
+    /// to `name` / `qualname` and costs one pointer instead of two inline
+    /// `RefCell<Option<String>>` (64 bytes), trimming `UserFunction` per object;
+    /// the `Box` is allocated only when user code actually reassigns one of these
+    /// dunders.  Access via `effective_name` / `effective_qualname` /
+    /// `set_user_name` / `set_user_qualname`.
+    pub name_overrides: RefCell<Option<Box<FnNameOverrides>>>,
     /// `f.__module__` — the name of the module in which the function was defined.
     /// Defaults to `"__main__"` (module-name tracking is not yet implemented).
     /// User code may assign any value; `del f.__module__` resets it to `None`.
@@ -1297,6 +1310,41 @@ pub struct UserFunction {
 }
 
 impl UserFunction {
+    /// `f.__name__`: the user override (`f.__name__ = …`) when set, else the
+    /// declared `name` (#2256).
+    pub fn effective_name(&self) -> String {
+        match self.name_overrides.borrow().as_deref() {
+            Some(FnNameOverrides { name: Some(n), .. }) => n.clone(),
+            _ => self.name.clone(),
+        }
+    }
+
+    /// `f.__qualname__`: the user override when set, else the declared `qualname`.
+    pub fn effective_qualname(&self) -> String {
+        match self.name_overrides.borrow().as_deref() {
+            Some(FnNameOverrides {
+                qualname: Some(q), ..
+            }) => q.clone(),
+            _ => self.qualname.clone(),
+        }
+    }
+
+    /// Assign `f.__name__` (allocates the overrides box on first use).
+    pub fn set_user_name(&self, name: String) {
+        self.name_overrides
+            .borrow_mut()
+            .get_or_insert_with(Box::<FnNameOverrides>::default)
+            .name = Some(name);
+    }
+
+    /// Assign `f.__qualname__` (allocates the overrides box on first use).
+    pub fn set_user_qualname(&self, qualname: String) {
+        self.name_overrides
+            .borrow_mut()
+            .get_or_insert_with(Box::<FnNameOverrides>::default)
+            .qualname = Some(qualname);
+    }
+
     /// `f.__annotations__` — the function's annotation dict.
     ///
     /// Lazily materialised (#2256): a function with no annotations stores the
@@ -2859,8 +2907,7 @@ impl Value {
                 kind: UserFunctionKind::Builtin(name),
                 name: name.to_string(),
                 qualname: name.to_string(),
-                user_name: RefCell::new(None),
-                user_qualname: RefCell::new(None),
+                name_overrides: RefCell::new(None),
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
                 attrs: RefCell::new(None),
@@ -2956,8 +3003,7 @@ impl Value {
             kind,
             name: f.name.clone(),
             qualname: f.qualname.clone(),
-            user_name: RefCell::new(f.user_name.borrow().clone()),
-            user_qualname: RefCell::new(f.user_qualname.borrow().clone()),
+            name_overrides: RefCell::new(f.name_overrides.borrow().clone()),
             module: RefCell::new(f.module.borrow().clone()),
             doc: RefCell::new(f.doc.borrow().clone()),
             attrs: RefCell::new(f.attrs.borrow().as_ref().map(Rc::clone)),
@@ -6102,8 +6148,7 @@ mod tests {
             kind: UserFunctionKind::Regular,
             name: "f".to_string(),
             qualname: "f".to_string(),
-            user_name: RefCell::new(None),
-            user_qualname: RefCell::new(None),
+            name_overrides: RefCell::new(None),
             module: RefCell::new(Value::string("__main__")),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),

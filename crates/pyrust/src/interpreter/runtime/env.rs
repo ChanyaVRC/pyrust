@@ -400,21 +400,10 @@ impl Interpreter {
             ValueKind::UserFunction(func) => {
                 match name {
                     "__name__" => {
-                        let n = func
-                            .user_name
-                            .borrow()
-                            .as_deref()
-                            .unwrap_or(&func.name)
-                            .to_string();
-                        return Ok(Value::string(n));
+                        return Ok(Value::string(func.effective_name()));
                     }
                     "__qualname__" => {
-                        let q = func
-                            .user_qualname
-                            .borrow()
-                            .as_deref()
-                            .unwrap_or(&func.qualname)
-                            .to_string();
+                        let q = func.effective_qualname();
                         return Ok(Value::string(q));
                     }
                     "__module__" => return Ok(func.module.borrow().clone()),
@@ -2122,9 +2111,9 @@ impl Interpreter {
                     match as_str {
                         Some(s) => {
                             if name == "__name__" {
-                                *func.user_name.borrow_mut() = Some(s);
+                                func.set_user_name(s);
                             } else {
-                                *func.user_qualname.borrow_mut() = Some(s);
+                                func.set_user_qualname(s);
                             }
                             Ok(())
                         }
@@ -2998,24 +2987,8 @@ fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
 /// raised, or `None` to signal fall-through to the caller's error path.
 fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate::error::Result<Value>> {
     match name {
-        "__name__" => {
-            let n = function
-                .user_name
-                .borrow()
-                .as_deref()
-                .unwrap_or(&function.name)
-                .to_string();
-            Some(Ok(Value::string(n)))
-        }
-        "__qualname__" => {
-            let q = function
-                .user_qualname
-                .borrow()
-                .as_deref()
-                .unwrap_or(&function.qualname)
-                .to_string();
-            Some(Ok(Value::string(q)))
-        }
+        "__name__" => Some(Ok(Value::string(function.effective_name()))),
+        "__qualname__" => Some(Ok(Value::string(function.effective_qualname()))),
         "__module__" => Some(Ok(function.module.borrow().clone())),
         "__doc__" => Some(Ok(function.doc.borrow().clone())),
         "__dict__" => {
