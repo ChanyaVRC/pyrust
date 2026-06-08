@@ -1511,7 +1511,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | MakeClass(r, _, _, _, _, _, _)
         | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
-        | MakeTypeVar(r, _) => Some(*r),
+        | MakeTypeVar(r, _, _, _) => Some(*r),
         CallMethod { dst, .. }
         | CallMethodExpanded { dst, .. }
         | Concat { dst, .. }
@@ -2487,7 +2487,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
                 || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n as u32)
         }
         MakeTypeAlias(_, _, value_reg, params_reg) => *value_reg == r || *params_reg == r,
-        MakeTypeVar(_, _) => false,
+        MakeTypeVar(_, _, bound_kind, bound_reg) => *bound_kind != 0 && *bound_reg == r,
 
         // Yield reads src and writes dst.
         Yield { src, dst: _ } => *src == r,
@@ -2691,7 +2691,11 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             reads.insert(*value_reg);
             reads.insert(*params_reg);
         }
-        MakeTypeVar(_, _) => {}
+        MakeTypeVar(_, _, bound_kind, bound_reg) => {
+            if *bound_kind != 0 {
+                reads.insert(*bound_reg);
+            }
+        }
         Yield { src, .. } => {
             reads.insert(*src);
         }
@@ -3460,7 +3464,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | MakeClass(r, _, _, _, _, _, _)
         | MakeClassMeta(r, _, _, _, _, _, _, _)
         | MakeTypeAlias(r, _, _, _)
-        | MakeTypeVar(r, _)
+        | MakeTypeVar(r, _, _, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
@@ -6552,7 +6556,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             }
             Insn::ForCountReg(_, _, _, step, _) => mark(&mut used, *step),
             Insn::MakeTypeAlias(_, name_idx, _, _) => mark(&mut used, *name_idx),
-            Insn::MakeTypeVar(_, name_idx) => mark(&mut used, *name_idx),
+            Insn::MakeTypeVar(_, name_idx, _, _) => mark(&mut used, *name_idx),
             _ => {}
         }
     }
@@ -6590,7 +6594,9 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             Insn::MakeTypeAlias(dst, name_idx, value_reg, params_reg) => {
                 Insn::MakeTypeAlias(dst, remap(name_idx), value_reg, params_reg)
             }
-            Insn::MakeTypeVar(dst, name_idx) => Insn::MakeTypeVar(dst, remap(name_idx)),
+            Insn::MakeTypeVar(dst, name_idx, bound_kind, bound_reg) => {
+                Insn::MakeTypeVar(dst, remap(name_idx), bound_kind, bound_reg)
+            }
             other => other,
         })
         .collect();
@@ -7281,7 +7287,11 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*value_reg);
             f(*params_reg);
         }
-        MakeTypeVar(_, _) => {}
+        MakeTypeVar(_, _, bound_kind, bound_reg) => {
+            if *bound_kind != 0 {
+                f(*bound_reg);
+            }
+        }
         Yield { src, .. } => f(*src),
         YieldFrom {
             iter_reg, sent_reg, ..
