@@ -293,10 +293,10 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| pyrust_core::type_err!("descriptor 'format' of 'str' object needs an argument"))?;
+                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!("format", "str"))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(pyrust_core::type_err!("descriptor 'format' requires a 'str' object")),
+                    _ => return Err(pyrust_core::descriptor_requires!("format", "str")),
                 };
                 let mut positional: Vec<Value> = Vec::new();
                 let mut keyword: Vec<(String, Value)> = Vec::new();
@@ -369,11 +369,11 @@ impl Interpreter {
                     .first()
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        pyrust_core::type_err!("descriptor '{method}' of 'generator' object needs an argument")
+                        pyrust_core::descriptor_needs_arg!(method, "generator")
                     })?;
                 if !matches!(self_val.kind(), ValueKind::Generator(_)) {
                     let actual = pyrust_core::builtin_type_name(&self_val);
-                    return Err(pyrust_core::type_err!("descriptor '{method}' requires a 'generator' object but received a '{actual}'",));
+                    return Err(pyrust_core::descriptor_requires!(method, "generator", actual));
                 }
                 let pos: Vec<Value> = args[1..].iter().filter(|a| a.name.is_none()).map(|a| a.value.clone()).collect();
                 self.call_generator_method(self_val, method, pos)
@@ -389,7 +389,7 @@ impl Interpreter {
                     .first()
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        pyrust_core::type_err!("descriptor '{method}' of 'float' object needs an argument")
+                        pyrust_core::descriptor_needs_arg!(method, "float")
                     })?;
                 let f = match self_val.kind() {
                     ValueKind::Float(f) => f,
@@ -614,7 +614,7 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())
-                    .ok_or_else(|| pyrust_core::type_err!("descriptor '{method}' of '{type_name}' object needs an argument"))?;
+                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!(method, type_name))?;
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
                 let mut kw: PyDict = PyDict::default();
                 for a in &args[1..] {
@@ -926,8 +926,7 @@ impl Interpreter {
                             attr_name));
                 }
                 if args.is_empty() {
-                    return Err(pyrust_core::type_err!("descriptor '{}' of '{}' object needs an argument",
-                            attr_name, _class_name));
+                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, _class_name));
                 }
                 // Re-dispatch as attribute access on the first argument.
                 let remaining = &args[1..];
@@ -1251,7 +1250,7 @@ impl Interpreter {
                     let template = match receiver.kind() {
                         ValueKind::Str(s) => s.to_string(),
                         _ => {
-                            return Err(pyrust_core::type_err!("descriptor 'format' requires a 'str' object"));
+                            return Err(pyrust_core::descriptor_requires!("format", "str"));
                         }
                     };
                     let keyword: Vec<(String, Value)> = kw
