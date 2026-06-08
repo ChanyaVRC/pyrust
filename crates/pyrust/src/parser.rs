@@ -332,12 +332,17 @@ impl Parser {
                     // the top-level `,` / `]`, so it captures exactly the bound
                     // expression.  A parenthesised tuple (`T: (int, str)`) parses
                     // to `Expr::Tuple` and is treated as constraints, matching
-                    // CPython; any other expression is a single upper bound.
+                    // CPython; any other expression is a single upper bound.  The
+                    // empty tuple `T: ()` is the sole exception: CPython treats it
+                    // as a (degenerate) bound value, leaving `__constraints__` ==
+                    // `()` and `__bound__` == `()`, so we route it through `Bound`.
                     let bound = if self.is(&Token::Colon) {
                         self.bump(); // consume `:`
                         let expr = self.parse_expr()?;
                         Some(match expr {
-                            Expr::Tuple(elems) => TypeParamBound::Constraints(elems),
+                            Expr::Tuple(elems) if !elems.is_empty() => {
+                                TypeParamBound::Constraints(elems)
+                            }
                             other => TypeParamBound::Bound(other),
                         })
                     } else {

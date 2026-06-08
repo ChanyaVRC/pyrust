@@ -85,3 +85,12 @@ def one[T: (int,)](x):
 
 print(one.__type_params__[0].__bound__)         # None
 print(one.__type_params__[0].__constraints__)   # (<class 'int'>,)
+
+# ── The empty tuple is a (degenerate) bound, not constraints ─────────────────
+# CPython leaves __constraints__ == () and sets __bound__ to the empty tuple.
+
+def empty[T: ()](x):
+    return x
+
+print(empty.__type_params__[0].__bound__)        # ()
+print(empty.__type_params__[0].__constraints__)  # ()
