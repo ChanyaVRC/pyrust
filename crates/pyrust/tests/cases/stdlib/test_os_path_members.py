@@ -57,6 +57,26 @@ if os.name == "posix":
     print("relpath-same", p.relpath("/a", "/a"))
     print("relpath-diverge", p.relpath("/a/b", "/c/d"))
 
+elif os.name == "nt":
+    # ntpath semantics (issue #2097). On Windows CPython binds os.path to
+    # ntpath and pyrust now matches via its nt_* helpers; this block is
+    # skipped by both interpreters on the (posix) CI host, so it documents
+    # the Windows-only parity without affecting the Linux run.
+    print("nt-split", p.split(r"C:\a\b"))
+    print("nt-split-unc", p.split(r"\\host\share\x\y"))
+    print("nt-splitdrive", p.splitdrive("c:/x"))
+    print("nt-splitdrive-unc", p.splitdrive("//host/share/x"))
+    print("nt-isabs-drive", p.isabs(r"C:\x"))
+    print("nt-isabs-rel", p.isabs("C:x"))
+    print("nt-join", p.join("C:\\a", "b"))
+    print("nt-join-abs", p.join("a", "C:\\b"))
+    print("nt-normpath", p.normpath("C:/a/../b"))
+    print("nt-normpath-unc", p.normpath("//host/share/a/../b"))
+    print("nt-dirname", p.dirname(r"C:\a\b"))
+    print("nt-basename", p.basename(r"C:\a\b"))
+    print("nt-splitext", p.splitext(r"C:\a\b.txt"))
+    print("nt-relpath", p.relpath(r"C:\a\b\c", r"C:\a\d"))
+
 # --- commonprefix (character-wise, identical in posixpath and ntpath) ---
 print("commonprefix-1", p.commonprefix(["/a/b", "/a/c"]))
 print("commonprefix-2", p.commonprefix(["abc", "abd"]))
