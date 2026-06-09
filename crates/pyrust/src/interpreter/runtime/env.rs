@@ -3154,7 +3154,7 @@ fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate
 /// cache reserves as the "not yet populated" marker.  Wraps through 0 so
 /// that the counter never collides with the sentinel.
 #[inline]
-fn bump_global_env_version(interp: &Interpreter) {
+pub(crate) fn bump_global_env_version(interp: &Interpreter) {
     let v = interp.global_env_version.get().wrapping_add(1);
     // Skip GLOBAL_CACHE_EMPTY (u32::MAX - 1); wrap back to 0.
     let v = if v == GLOBAL_CACHE_EMPTY { 0 } else { v };

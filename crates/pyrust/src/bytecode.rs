@@ -207,6 +207,20 @@ pub enum Insn {
     DeleteItem(Reg, Reg),
     /// del names[name_idx] from current env
     DeleteName(u16),
+    /// PEP 695: push a fresh child environment (parented to the current one)
+    /// that holds the type parameters of a generic `def` / `class`.  Subsequent
+    /// `StoreGlobal` for a type-param name binds it here instead of in the
+    /// enclosing namespace, and a generic function/class created while this
+    /// scope is active captures it so its body can still resolve the type
+    /// parameter lazily — yet the name never leaks into the enclosing scope
+    /// (mirrors CPython's hidden type-param/annotation scope).  Paired with
+    /// `PopTypeParamEnv`.
+    PushTypeParamEnv,
+    /// PEP 695: pop the type-parameter environment pushed by `PushTypeParamEnv`,
+    /// restoring the enclosing environment.  Emitted after the generic object is
+    /// built (and its `__type_params__` populated) but before the def/class name
+    /// is bound in the enclosing scope.
+    PopTypeParamEnv,
     /// Clear local register (del for a fastlocal).
     ///
     /// If `name_idx` is not `u16::MAX`, the VM checks whether the register

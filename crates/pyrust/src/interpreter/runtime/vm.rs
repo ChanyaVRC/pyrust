@@ -1427,6 +1427,16 @@ impl Interpreter {
         // EndExcept, RaiseReRaise, and Yield mirror the handling above.
         let exc_saved_active_frame_base: usize = self.exc_saved_active.len();
 
+        // PEP 695: the only thing that mutates `self.env` *within* a single VM
+        // frame is the type-parameter scope (`PushTypeParamEnv`/`PopTypeParamEnv`)
+        // emitted around a generic def/class header — class bodies run in their
+        // own frame.  When an exception raised inside that header (e.g. an
+        // annotation referencing an undefined name) is caught by a `try` in this
+        // same frame, the matching `PopTypeParamEnv` never executes, so restore
+        // the frame's base env on the in-frame catch path.  Cheap to capture (a
+        // single `Rc::clone`) and only compared on the cold catch path.
+        let frame_base_env: EnvRef = Rc::clone(&self.env);
+
         // PEP 3134: re-install the generator's persisted slice of
         // `handled_exc_stack` and its `active_exception` AFTER fixing the
         // frame base.  These entries are now owned by this frame, and the
@@ -1583,7 +1593,18 @@ impl Interpreter {
                         pc.wrapping_sub(1),
                         cur_line,
                     ) {
-                        Ok(h) => { pc = h; continue 'vm; }
+                        Ok(h) => {
+                            // PEP 695: if the exception was raised inside a
+                            // type-parameter scope (generic def/class header), the
+                            // matching `PopTypeParamEnv` was skipped — restore the
+                            // frame's base env before running the handler.
+                            if !Rc::ptr_eq(&self.env, &frame_base_env) {
+                                self.env = Rc::clone(&frame_base_env);
+                                bump_global_env_version(self);
+                            }
+                            pc = h;
+                            continue 'vm;
+                        }
                         Err(e) => {
                             // Error escapes this frame: unwind any active
                             // trampolined frames (record their traceback, pop
@@ -2243,6 +2264,42 @@ impl Interpreter {
                 }
                 Insn::DeleteName(name_idx) => {
                     vm_try!(self.exec_delete_name(code, &regs, *name_idx));
+                }
+                Insn::PushTypeParamEnv => {
+                    // PEP 695: enter a dedicated type-parameter scope.  Subsequent
+                    // StoreGlobal for the type-param names binds into this child
+                    // env (parented to the current one) instead of the enclosing
+                    // namespace, so the names never leak; a generic function/class
+                    // created while this scope is active captures it and can still
+                    // resolve the type parameters lazily in its body.
+                    let tp_env = self.alloc_env(Some(Rc::clone(&self.env)));
+                    self.env = tp_env;
+                    // Invalidate the LoadGlobal inline cache: a type-param name may
+                    // shadow a same-named enclosing global, and the cache holds the
+                    // enclosing value at the current version (the StoreGlobal that
+                    // binds the type param writes to the child env via
+                    // env_assign_local, which does not bump the version).  Without
+                    // this, an annotation `x: T` that follows a module-level
+                    // `T = ...` would read the stale enclosing value from the cache.
+                    bump_global_env_version(self);
+                }
+                Insn::PopTypeParamEnv => {
+                    // PEP 695: leave the type-parameter scope, restoring the
+                    // enclosing env.  The popped env stays alive via the Rc the
+                    // generic object captured at MakeFunction/MakeClass time; if it
+                    // was not captured (uncommon) `free_env` reclaims it.
+                    let parent = self
+                        .env
+                        .borrow()
+                        .parent
+                        .clone()
+                        .expect("PopTypeParamEnv without a matching PushTypeParamEnv");
+                    let tp_env = std::mem::replace(&mut self.env, parent);
+                    self.free_env(tp_env);
+                    // Re-invalidate the cache so the enclosing frame's later
+                    // references to a name that was shadowed by a type param
+                    // re-resolve against the restored enclosing scope.
+                    bump_global_env_version(self);
                 }
                 Insn::DeleteLocal(reg, name_idx) => {
                     // Raise NameError / UnboundLocalError when deleting an
