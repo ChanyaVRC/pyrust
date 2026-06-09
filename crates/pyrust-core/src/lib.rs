@@ -333,13 +333,15 @@ macro_rules! runtime_err {
 /// descriptor receiver-presence message so the ~59 open-coded copies can't
 /// drift.
 ///
-/// CPython 3.12 wording is `"descriptor '<m>' of '<type>' object needs an
-/// argument"`.  A handful of pre-existing pyrust slot wrappers (`int`/`str`
-/// numeric & comparison dunders, `float`/`TypeVar`/`TypeAliasType` reprs and a
-/// few `object` dunders) emit the variant *without* the `" object"` infix; the
-/// `no_object` arm preserves that exact text byte-for-byte.  (Both variants
-/// diverge from CPython's true output for some of those methods — see issue
-/// #2026 — but this is a pure dedup; fixing the wording is tracked separately.)
+/// CPython 3.12 raises one of two messages depending on the descriptor kind:
+///
+/// * **slot wrapper** (dunders backed by a type slot — `__len__`, `__add__`,
+///   comparison ops, `__repr__`, `__getitem__`, …):
+///   `"descriptor '<m>' of '<type>' object needs an argument"` — the default arm.
+/// * **method_descriptor** (C-level methods — `str.upper`, `list.append`,
+///   `int.conjugate`, and a few dunders like `object.__sizeof__` /
+///   `float.__trunc__`): `"unbound method <type>.<m>() needs an argument"` — the
+///   `method` arm.
 #[macro_export]
 macro_rules! descriptor_needs_arg {
     ($method:expr, $type_name:expr $(,)?) => {
@@ -351,12 +353,12 @@ macro_rules! descriptor_needs_arg {
             ),
         )
     };
-    ($method:expr, $type_name:expr, no_object $(,)?) => {
+    ($method:expr, $type_name:expr, method $(,)?) => {
         $crate::PyError::named(
             "TypeError",
             format!(
-                "descriptor '{}' of '{}' needs an argument",
-                $method, $type_name
+                "unbound method {}.{}() needs an argument",
+                $type_name, $method
             ),
         )
     };
@@ -367,12 +369,28 @@ macro_rules! descriptor_needs_arg {
 /// `str.__len__(5)`.  Single source of truth for the descriptor receiver-type
 /// message so the ~27 open-coded copies can't drift.
 ///
-/// Two arms preserve the two pre-existing wordings byte-for-byte: the full
-/// `"… requires a '<type>' object but received a '<actual>'"` (pass the actual
-/// type name) and the truncated `"… requires a '<type>' object"` (no actual,
-/// used by `str.format`/`str.format_map`).
+/// Like `descriptor_needs_arg!`, CPython 3.12 picks the wording by descriptor
+/// kind:
+///
+/// * **slot wrapper**: `"descriptor '<m>' requires a '<type>' object but
+///   received a '<actual>'"` — the default 3-arg arm.
+/// * **method_descriptor**: `"descriptor '<m>' for '<type>' objects doesn't
+///   apply to a '<actual>' object"` — the `method` arm.
+///
+/// The 2-arg arm (no actual type) is a defensive fallback for the native
+/// `<seq>.__getitem__` super() helpers, whose wrong-type branch is unreachable
+/// from ordinary Python code.
 #[macro_export]
 macro_rules! descriptor_requires {
+    ($method:expr, $type_name:expr, $actual:expr, method $(,)?) => {
+        $crate::PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '{}' for '{}' objects doesn't apply to a '{}' object",
+                $method, $type_name, $actual
+            ),
+        )
+    };
     ($method:expr, $type_name:expr, $actual:expr $(,)?) => {
         $crate::PyError::named(
             "TypeError",

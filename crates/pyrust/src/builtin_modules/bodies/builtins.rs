@@ -4744,17 +4744,25 @@ pyrust_module! {
     /// CPython signature: `dict.__getitem__(self, key)`
     #[py_name = "dict.__getitem__"]
     fn dict_getitem(args) -> Result<Value> {
-        let (inst_rc, key) = match (args.first(), args.get(1)) {
-            (Some(self_arg), Some(key_arg)) => {
-                let inst_rc = match self_arg.value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::clone(rc),
-                    _ => {
-                        return Err(pyrust_core::descriptor_requires!("__getitem__", "dict"));
-                    }
-                };
-                (inst_rc, key_arg.value.clone())
-            }
+        // CPython exposes dict.__getitem__ as a *method_descriptor* (#2266):
+        // missing receiver -> "unbound method ...", wrong receiver type ->
+        // "descriptor ... doesn't apply to a '<X>' object".  The receiver check
+        // happens before the arity check, matching CPython's slot ordering.
+        let self_arg = args.first().ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "dict", method)
+        })?;
+        let inst_rc = match self_arg.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
+                let actual = pyrust_core::builtin_type_name(&self_arg.value);
+                return Err(pyrust_core::descriptor_requires!(
+                    "__getitem__", "dict", actual, method
+                ));
+            }
+        };
+        let key = match args.get(1) {
+            Some(key_arg) => key_arg.value.clone(),
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     "dict.__getitem__ expected 2 arguments".to_string(),
@@ -4795,17 +4803,25 @@ pyrust_module! {
     /// CPython signature: `list.__getitem__(self, key)`
     #[py_name = "list.__getitem__"]
     fn list_getitem(args) -> Result<Value> {
-        let (inst_rc, key) = match (args.first(), args.get(1)) {
-            (Some(self_arg), Some(key_arg)) => {
-                let inst_rc = match self_arg.value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::clone(rc),
-                    _ => {
-                        return Err(pyrust_core::descriptor_requires!("__getitem__", "list"));
-                    }
-                };
-                (inst_rc, key_arg.value.clone())
-            }
+        // CPython exposes list.__getitem__ as a *method_descriptor* (#2266):
+        // missing receiver -> "unbound method ...", wrong receiver type ->
+        // "descriptor ... doesn't apply to a '<X>' object".  The receiver check
+        // happens before the arity check, matching CPython's slot ordering.
+        let self_arg = args.first().ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "list", method)
+        })?;
+        let inst_rc = match self_arg.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
+                let actual = pyrust_core::builtin_type_name(&self_arg.value);
+                return Err(pyrust_core::descriptor_requires!(
+                    "__getitem__", "list", actual, method
+                ));
+            }
+        };
+        let key = match args.get(1) {
+            Some(key_arg) => key_arg.value.clone(),
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     "list.__getitem__ expected 2 arguments".to_string(),
@@ -5022,7 +5038,7 @@ pyrust_module! {
     #[py_name = "object.__str__"]
     fn object_str_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__str__", "object", no_object)
+            pyrust_core::descriptor_needs_arg!("__str__", "object")
         })?;
         let s = render_value_repr(_interp, &self_val)?;
         Ok(Value::string(s))
@@ -5051,7 +5067,7 @@ pyrust_module! {
     #[py_name = "object.__repr__"]
     fn object_repr_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__repr__", "object", no_object)
+            pyrust_core::descriptor_needs_arg!("__repr__", "object")
         })?;
         // Issue #1600: for a PyInstance with backing primitive data, render the
         // backing value directly (bypassing MRO lookup) so that
@@ -5117,7 +5133,7 @@ pyrust_module! {
     fn object_eq_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "object", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "object")),
         };
         // Identity comparison: two PyInstance values are equal iff they are
         // the same object (Rc::ptr_eq), matching CPython's default __eq__.
@@ -5141,7 +5157,7 @@ pyrust_module! {
     fn object_ne_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "object", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "object")),
         };
         let same = match (a.kind(), b.kind()) {
             (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
@@ -5163,7 +5179,7 @@ pyrust_module! {
     #[py_name = "object.__hash__"]
     fn object_hash_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__hash__", "object", no_object)
+            pyrust_core::descriptor_needs_arg!("__hash__", "object")
         })?;
         // For user instances use the Rc pointer as the identity hash, matching
         // CPython's default `id(x) >> 4`.  Map -1 → -2 as CPython requires.
@@ -5185,7 +5201,7 @@ pyrust_module! {
     #[py_name = "object.__sizeof__"]
     fn object_sizeof_dunder(args) -> Result<Value> {
         if args.is_empty() {
-            return Err(pyrust_core::descriptor_needs_arg!("__sizeof__", "object"));
+            return Err(pyrust_core::descriptor_needs_arg!("__sizeof__", "object", method));
         }
         Ok(Value::int(std::mem::size_of::<Value>() as i64))
     }
@@ -5195,7 +5211,7 @@ pyrust_module! {
     #[py_name = "object.__dir__"]
     fn object_dir_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__dir__", "object")
+            pyrust_core::descriptor_needs_arg!("__dir__", "object", method)
         })?;
         let mut names = dir_names(&self_val);
         names.sort();
@@ -5210,7 +5226,7 @@ pyrust_module! {
     #[py_name = "object.__reduce_ex__"]
     fn object_reduce_ex_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__reduce_ex__", "object")
+            pyrust_core::descriptor_needs_arg!("__reduce_ex__", "object", method)
         })?;
         Ok(Value::tuple(vec![
             value_class(&self_val),
@@ -5223,7 +5239,7 @@ pyrust_module! {
     #[py_name = "object.__reduce__"]
     fn object_reduce_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__reduce__", "object")
+            pyrust_core::descriptor_needs_arg!("__reduce__", "object", method)
         })?;
         Ok(Value::tuple(vec![
             value_class(&self_val),
@@ -5985,7 +6001,7 @@ pyrust_module! {
     #[py_name = "object.__format__"]
     fn object_format_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__format__", "object", no_object)
+            pyrust_core::descriptor_needs_arg!("__format__", "object", method)
         })?;
         let spec_str = if args.len() >= 2 {
             match args[1].value.kind() {
@@ -6043,7 +6059,7 @@ pyrust_module! {
     fn int_add_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__add__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__add__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6056,7 +6072,7 @@ pyrust_module! {
     fn int_sub_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__sub__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__sub__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6069,7 +6085,7 @@ pyrust_module! {
     fn int_mul_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__mul__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__mul__", "int")),
         };
         // CPython's int.__mul__ only accepts integer types; string repetition
         // (1 * "x" = "x") is dispatched via str.__rmul__, not here.
@@ -6084,7 +6100,7 @@ pyrust_module! {
     fn int_truediv_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__truediv__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__truediv__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6097,7 +6113,7 @@ pyrust_module! {
     fn int_floordiv_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__floordiv__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__floordiv__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6110,7 +6126,7 @@ pyrust_module! {
     fn int_mod_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__mod__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__mod__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6123,7 +6139,7 @@ pyrust_module! {
     fn int_pow_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__pow__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__pow__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6136,7 +6152,7 @@ pyrust_module! {
     fn int_and_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__and__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__and__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6149,7 +6165,7 @@ pyrust_module! {
     fn int_or_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__or__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__or__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6162,7 +6178,7 @@ pyrust_module! {
     fn int_xor_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__xor__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__xor__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6175,7 +6191,7 @@ pyrust_module! {
     fn int_lshift_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__lshift__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__lshift__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6188,7 +6204,7 @@ pyrust_module! {
     fn int_rshift_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__rshift__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__rshift__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6201,7 +6217,7 @@ pyrust_module! {
     fn int_lt_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__lt__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__lt__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6214,7 +6230,7 @@ pyrust_module! {
     fn int_le_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__le__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__le__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6227,7 +6243,7 @@ pyrust_module! {
     fn int_gt_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__gt__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__gt__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6240,7 +6256,7 @@ pyrust_module! {
     fn int_ge_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__ge__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__ge__", "int")),
         };
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
@@ -6253,7 +6269,7 @@ pyrust_module! {
     fn int_eq_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "int")),
         };
         // CPython's int.__eq__ returns NotImplemented for non-integer types;
         // pyrust's eval_binary(Eq) falls through to values_user_eq which
@@ -6269,7 +6285,7 @@ pyrust_module! {
     fn int_ne_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "int", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "int")),
         };
         // CPython's int.__ne__ returns NotImplemented for non-integer types.
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
@@ -6286,7 +6302,7 @@ pyrust_module! {
     #[py_name = "float.__trunc__"]
     fn float_trunc_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__trunc__", "float", no_object)
+            pyrust_core::descriptor_needs_arg!("__trunc__", "float", method)
         })?;
         let self_val = coerce_numeric(&self_val);
         match self_val.kind() {
@@ -6330,7 +6346,7 @@ pyrust_module! {
     #[py_name = "float.__floor__"]
     fn float_floor_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__floor__", "float", no_object)
+            pyrust_core::descriptor_needs_arg!("__floor__", "float", method)
         })?;
         let self_val = coerce_numeric(&self_val);
         match self_val.kind() {
@@ -6374,7 +6390,7 @@ pyrust_module! {
     #[py_name = "float.__ceil__"]
     fn float_ceil_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__ceil__", "float", no_object)
+            pyrust_core::descriptor_needs_arg!("__ceil__", "float", method)
         })?;
         let self_val = coerce_numeric(&self_val);
         match self_val.kind() {
@@ -6432,7 +6448,7 @@ pyrust_module! {
     fn str_add_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__add__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__add__", "str")),
         };
         _interp.eval_binary(coerce_numeric(&a), BinaryOp::Add, b)
     }
@@ -6442,7 +6458,7 @@ pyrust_module! {
     fn str_mul_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__mul__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__mul__", "str")),
         };
         _interp.eval_binary(coerce_numeric(&a), BinaryOp::Mul, b)
     }
@@ -6452,7 +6468,7 @@ pyrust_module! {
     fn str_lt_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__lt__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__lt__", "str")),
         };
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
@@ -6465,7 +6481,7 @@ pyrust_module! {
     fn str_le_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__le__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__le__", "str")),
         };
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
@@ -6478,7 +6494,7 @@ pyrust_module! {
     fn str_gt_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__gt__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__gt__", "str")),
         };
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
@@ -6491,7 +6507,7 @@ pyrust_module! {
     fn str_ge_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__ge__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__ge__", "str")),
         };
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
@@ -6504,7 +6520,7 @@ pyrust_module! {
     fn str_eq_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__eq__", "str")),
         };
         // CPython's str.__eq__ returns NotImplemented for non-str types;
         // eval_binary(Eq) falls through to values_user_eq which returns False.
@@ -6519,7 +6535,7 @@ pyrust_module! {
     fn str_ne_dunder(args) -> Result<Value> {
         let (a, b) = match args {
             [a, b, ..] => (a.value.clone(), b.value.clone()),
-            _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "str", no_object)),
+            _ => return Err(pyrust_core::descriptor_needs_arg!("__ne__", "str")),
         };
         // CPython's str.__ne__ returns NotImplemented for non-str types.
         if !matches!(b.kind(), ValueKind::Str(_)) {
@@ -7118,7 +7134,7 @@ pyrust_module! {
     fn type_alias_type_repr(args) -> Result<Value> {
         let _ = _interp;
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__repr__", "TypeAliasType", no_object)
+            pyrust_core::descriptor_needs_arg!("__repr__", "TypeAliasType")
         })?;
         if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
             let borrowed = inst_rc.borrow();
@@ -7136,7 +7152,7 @@ pyrust_module! {
     fn typevar_repr(args) -> Result<Value> {
         let _ = _interp;
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
-            pyrust_core::descriptor_needs_arg!("__repr__", "TypeVar", no_object)
+            pyrust_core::descriptor_needs_arg!("__repr__", "TypeVar")
         })?;
         if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
             let borrowed = inst_rc.borrow();

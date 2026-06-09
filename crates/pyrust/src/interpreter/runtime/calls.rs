@@ -293,10 +293,15 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!("format", "str"))?;
+                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!("format", "str", method))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(pyrust_core::descriptor_requires!("format", "str")),
+                    _ => {
+                        let actual = pyrust_core::builtin_type_name(self_val);
+                        return Err(pyrust_core::descriptor_requires!(
+                            "format", "str", actual, method
+                        ));
+                    }
                 };
                 let mut positional: Vec<Value> = Vec::new();
                 let mut keyword: Vec<(String, Value)> = Vec::new();
@@ -365,15 +370,26 @@ impl Interpreter {
                 if name.split_once('.').is_some_and(|(t, _)| t == "generator") =>
             {
                 let (_, method) = name.split_once('.').unwrap();
+                // `__next__`/`__iter__` are slot wrappers; `send`/`close`/`throw`
+                // are method_descriptors — distinct receiver-guard wording (#2266).
+                let is_dunder = method.starts_with("__") && method.ends_with("__");
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        pyrust_core::descriptor_needs_arg!(method, "generator")
+                        if is_dunder {
+                            pyrust_core::descriptor_needs_arg!(method, "generator")
+                        } else {
+                            pyrust_core::descriptor_needs_arg!(method, "generator", method)
+                        }
                     })?;
                 if !matches!(self_val.kind(), ValueKind::Generator(_)) {
                     let actual = pyrust_core::builtin_type_name(&self_val);
-                    return Err(pyrust_core::descriptor_requires!(method, "generator", actual));
+                    return Err(if is_dunder {
+                        pyrust_core::descriptor_requires!(method, "generator", actual)
+                    } else {
+                        pyrust_core::descriptor_requires!(method, "generator", actual, method)
+                    });
                 }
                 let pos: Vec<Value> = args[1..].iter().filter(|a| a.name.is_none()).map(|a| a.value.clone()).collect();
                 self.call_generator_method(self_val, method, pos)
@@ -389,7 +405,7 @@ impl Interpreter {
                     .first()
                     .map(|a| a.value.clone())
                     .ok_or_else(|| {
-                        pyrust_core::descriptor_needs_arg!(method, "float")
+                        pyrust_core::descriptor_needs_arg!(method, "float", method)
                     })?;
                 let f = match self_val.kind() {
                     ValueKind::Float(f) => f,
@@ -611,10 +627,31 @@ impl Interpreter {
                     .is_some_and(|(t, _)| matches!(t, "int" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
+                // CPython exposes most dunders (`str.__getitem__`, `list.__add__`,
+                // …) as *slot wrappers* and regular methods (`str.upper`, …) as
+                // *method_descriptors*; the two raise differently worded receiver
+                // guards.  See issue #2266.  A handful of dunders are *per-type*
+                // method_descriptors rather than slot wrappers — e.g.
+                // `dict`/`set`/`frozenset`.__contains__ (but `str`/`list`/`tuple`/
+                // `bytes`.__contains__ stay slot wrappers).  Treat those as
+                // method_descriptors so they get the "unbound method …" / "doesn't
+                // apply to …" wording.
+                let is_method_descriptor_dunder = matches!(
+                    (type_name, method),
+                    ("dict" | "set" | "frozenset", "__contains__")
+                );
+                let is_dunder =
+                    method.starts_with("__") && method.ends_with("__") && !is_method_descriptor_dunder;
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())
-                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!(method, type_name))?;
+                    .ok_or_else(|| {
+                        if is_dunder {
+                            pyrust_core::descriptor_needs_arg!(method, type_name)
+                        } else {
+                            pyrust_core::descriptor_needs_arg!(method, type_name, method)
+                        }
+                    })?;
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
                 let mut kw: PyDict = PyDict::default();
                 for a in &args[1..] {
@@ -666,7 +703,11 @@ impl Interpreter {
                 };
                 if !kind_ok {
                     let actual = pyrust_core::builtin_type_name(&self_val);
-                    return Err(pyrust_core::type_err!("descriptor '{method}' for '{type_name}' objects doesn't apply to a '{actual}' object",));
+                    return Err(if is_dunder {
+                        pyrust_core::descriptor_requires!(method, type_name, actual)
+                    } else {
+                        pyrust_core::descriptor_requires!(method, type_name, actual, method)
+                    });
                 }
                 match type_name {
                     "int" => {
@@ -926,7 +967,7 @@ impl Interpreter {
                             attr_name));
                 }
                 if args.is_empty() {
-                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, _class_name));
+                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, _class_name, method));
                 }
                 // Re-dispatch as attribute access on the first argument.
                 let remaining = &args[1..];
@@ -1250,7 +1291,10 @@ impl Interpreter {
                     let template = match receiver.kind() {
                         ValueKind::Str(s) => s.to_string(),
                         _ => {
-                            return Err(pyrust_core::descriptor_requires!("format", "str"));
+                            let actual = pyrust_core::builtin_type_name(&receiver);
+                            return Err(pyrust_core::descriptor_requires!(
+                                "format", "str", actual, method
+                            ));
                         }
                     };
                     let keyword: Vec<(String, Value)> = kw
