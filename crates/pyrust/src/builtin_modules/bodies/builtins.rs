@@ -2273,7 +2273,7 @@ pyrust_module! {
                 format!("{FN_NAME}() takes exactly one argument ({} given)", args.len()),
             ));
         }
-        let value = args[0].value.clone();
+        let value = &args[0].value;
         let size = match value.kind() {
             ValueKind::Str(text) => text.chars().count() as i64,
             ValueKind::List(items) => items.len() as i64,
@@ -2404,7 +2404,7 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "object of type '{}' has no len()",
-                        pyrust_core::builtin_type_name(&value),
+                        pyrust_core::builtin_type_name(value),
                     ),
                 ));
             }

@@ -2708,15 +2708,60 @@ impl Interpreter {
                             }
                         }
                     tramp_try!(*func_reg, *argc, func_val);
+                    // Heap-tuple args to a builtin: lend by move instead of
+                    // clone.  `Value::clone` of a heap tuple deep-copies the
+                    // backing `Vec<Value>` (O(N)), so cloning a 1000-element
+                    // tuple into the arg buffer for `len(t)`/`sum(t)`/`min(t)`/…
+                    // paid an O(N) copy on every call (#2251).  The builtin only
+                    // gets a borrowed `&[ExpandedCallArg]`, so it cannot retain
+                    // the value without cloning it itself — meaning a builtin
+                    // that needs ownership (`list(t)`, `iter(t)`) still copies,
+                    // while a read-only builtin pays nothing.  We move each arg
+                    // out of its (temporary) register into the buffer and restore
+                    // it afterwards, so register state is observably unchanged.
+                    //
+                    // Gated on `BuiltinFunction` callee + at least one heap-tuple
+                    // arg so the hot user-function and scalar-arg call paths take
+                    // the byte-identical clone path below with zero added work.
+                    let lend_by_move = matches!(func_val.kind(), ValueKind::BuiltinFunction(_))
+                        && (0..crate::bytecode::Reg::from(*argc)).any(|i| {
+                            regs.get((*func_reg + 1 + i) as usize)
+                                .is_some_and(|v| v.is_heap_tuple())
+                        });
+                    if lend_by_move {
+                        // Validate every arg slot is set *before* moving any out,
+                        // so an unset arg propagates the exact same error as the
+                        // clone path without leaving registers half-emptied.  Done
+                        // before the buffer is taken so the error path is trivial.
+                        // (`vm_read` on an unset slot always returns `Err`, which
+                        // `vm_try!` propagates — control never falls through.)
+                        for i in 0..crate::bytecode::Reg::from(*argc) {
+                            let reg = *func_reg + 1 + i;
+                            if regs[reg as usize].is_unset() {
+                                vm_try!(vm_read(&regs, reg, num_locals));
+                            }
+                        }
+                    }
                     // Reuse the interpreter-level buffer to avoid a per-call heap
                     // allocation in the common (non-recursive) case.
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
-                    for i in 0..crate::bytecode::Reg::from(*argc) {
-                        buf.push(ExpandedCallArg {
-                            name: None,
-                            value: vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals)),
-                        });
+                    if lend_by_move {
+                        for i in 0..crate::bytecode::Reg::from(*argc) {
+                            let reg = *func_reg + 1 + i;
+                            let value = std::mem::replace(
+                                &mut regs[reg as usize],
+                                pyrust_core::Value::unset(),
+                            );
+                            buf.push(ExpandedCallArg { name: None, value });
+                        }
+                    } else {
+                        for i in 0..crate::bytecode::Reg::from(*argc) {
+                            buf.push(ExpandedCallArg {
+                                name: None,
+                                value: vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals)),
+                            });
+                        }
                     }
                     // Publish the register-resident current line so that
                     // `sys._getframe()` reads the line its call is on, giving an
@@ -2731,6 +2776,14 @@ impl Interpreter {
                         pyrust_core::set_current_vm_line(cur_line);
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
+                    if lend_by_move {
+                        // Move the borrowed args back into their registers before
+                        // anything else can observe them (the result write below
+                        // overwrites `func_reg`, not the arg temps).
+                        for (i, arg) in buf.drain(..).enumerate() {
+                            regs[(*func_reg + 1 + i as crate::bytecode::Reg) as usize] = arg.value;
+                        }
+                    }
                     self.call_arg_buf = buf;
                     regs[*func_reg as usize] = vm_try!(call_result);
                 }

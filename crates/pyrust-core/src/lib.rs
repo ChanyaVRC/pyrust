@@ -3209,6 +3209,17 @@ impl Value {
         false
     }
 
+    /// `true` only for a heap-backed tuple (`TAG_TUPLE`) — the single `Value`
+    /// kind whose `clone` is a full O(N) deep copy of the backing `Vec<Value>`
+    /// (`str`/`list`/`bytes` share/rc-bump, scalars bit-copy, and `SmallTuple2/3`
+    /// clone an inline fixed-size array).  Used to gate the VM's by-move
+    /// builtin-arg fast path so the common no-heap-tuple call stays untouched
+    /// (#2251).  Note `SmallTuple2/3` (≤3 elements) deliberately return `false`.
+    #[inline]
+    pub fn is_heap_tuple(&self) -> bool {
+        top16(self.0) == TAG_TUPLE
+    }
+
     pub fn is_list(&self) -> bool {
         top16(self.0) == TAG_LIST
     }
