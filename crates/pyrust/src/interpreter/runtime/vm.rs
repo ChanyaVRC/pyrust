@@ -4579,6 +4579,19 @@ impl Interpreter {
             }
             return Err(self.make_stop_async_iteration());
         }
+        // CPython: sending a non-None value into a *just-started* async
+        // generator (one never resumed, `pc == 0`) via `asend(v)` is a
+        // TypeError, raised when the awaitable is first driven (#2280).
+        // `athrow`/`aclose` (which carry an injected exception) and
+        // `__anext__`/`asend(None)` are exempt.
+        if frame.pc == 0
+            && throw_exc.is_none()
+            && send_value.as_ref().is_some_and(|v| !v.is_none())
+        {
+            return Err(pyrust_core::type_err!(
+                "can't send non-None value to a just-started async generator"
+            ));
+        }
         let resume = self.resume_generator_with_exc(
             frame,
             throw_exc,

@@ -4248,6 +4248,11 @@ struct Compiler {
     /// Used to distinguish `'await' outside async function` (inside a non-async
     /// `def`) from `'await' outside function` (at module or class scope).
     is_async_function: bool,
+    /// True when this function is an *async generator* (`async def` whose body
+    /// contains a bare `yield`, #2280).  Computed from the body AST when the
+    /// sub-compiler is set up.  CPython rejects `return <value>` in an async
+    /// generator with `SyntaxError: 'return' with value in async generator`.
+    is_async_generator_fn: bool,
     /// True when a compile-time `SyntaxError` has been detected (e.g. a
     /// `nonlocal` declaration with no enclosing binding).  Controls whether
     /// `finish()` emits `PyError::Named("SyntaxError", …)` or `PyError::Runtime`.
@@ -4712,6 +4717,7 @@ impl Compiler {
             outer_locals: SmallVec::new(),
             is_function_scope: false,
             is_async_function: false,
+            is_async_generator_fn: false,
             is_syntax_error: false,
             is_module_scope: false,
             past_future_zone: false,
@@ -5369,6 +5375,13 @@ impl Compiler {
             Stmt::Return(Some(expr)) => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'return' outside function");
+                    return;
+                }
+                // `return <value>` (including a literal `return None`) inside an
+                // async generator is a SyntaxError (#2280); only a bare `return`
+                // is allowed.  Matches CPython 3.12.
+                if self.is_async_generator_fn {
+                    self.set_syntax_error("'return' with value in async generator");
                     return;
                 }
                 let r = self.compile_expr(expr);
@@ -8386,6 +8399,11 @@ impl Compiler {
         }
         sub.is_function_scope = true;
         sub.is_async_function = is_async;
+        // An `async def` whose body contains a bare `yield` is an async
+        // generator (#2280); `return <value>` inside it is a SyntaxError.
+        // Detect it from the body AST here (CPython derives the analogous
+        // `ste_generator && ste_coroutine` flag the same way).
+        sub.is_async_generator_fn = is_async && stmts_contain_yield(body);
         // Propagate PEP 563 lazy-annotation flag to the inner compiler.
         sub.future_annotations = self.future_annotations;
         // A function compiled directly inside a class body is a class method and

@@ -154,6 +154,49 @@ async def drive_athrow():
         print("athrow uncaught:", e)
 
 
+# --- aclose / asend error semantics ---------------------------------------
+
+
+async def swallows_genexit():
+    try:
+        yield 1
+    except GeneratorExit:
+        # Ignoring GeneratorExit (yielding again during close) is a RuntimeError.
+        yield 2
+
+
+async def drive_close_errors():
+    # asend(non-None) to a just-started async generator is a TypeError.
+    g = squares(3)
+    try:
+        await g.asend(5)
+    except TypeError as e:
+        print("asend_just_started:", e)
+    await g.aclose()
+
+    # awaiting the async generator object itself (not __anext__) is a TypeError.
+    g = squares(3)
+    try:
+        await g
+    except TypeError as e:
+        print("await_agen:", e)
+    await g.aclose()
+
+    # aclose on a never-started generator, then a second aclose: both no-ops.
+    g = squares(3)
+    await g.aclose()
+    await g.aclose()
+    print("double_aclose: ok")
+
+    # A generator that swallows GeneratorExit and yields again → RuntimeError.
+    g = swallows_genexit()
+    await g.asend(None)
+    try:
+        await g.aclose()
+    except RuntimeError as e:
+        print("ignored_genexit:", e)
+
+
 async def main():
     await collect_basic()
     await collect_mixed()
@@ -163,6 +206,7 @@ async def main():
     await introspect()
     await drive_asend()
     await drive_athrow()
+    await drive_close_errors()
 
 
 asyncio.run(main())
