@@ -327,6 +327,72 @@ macro_rules! runtime_err {
     ($($t:tt)+) => { $crate::py_err!("RuntimeError", $($t)+) };
 }
 
+/// Build the `TypeError` raised when a type-qualified builtin method (an
+/// unbound descriptor such as `str.__len__` / `int.__add__`) is called with no
+/// `self` argument, e.g. `str.__len__()`.  Single source of truth for the
+/// descriptor receiver-presence message so the ~59 open-coded copies can't
+/// drift.
+///
+/// CPython 3.12 wording is `"descriptor '<m>' of '<type>' object needs an
+/// argument"`.  A handful of pre-existing pyrust slot wrappers (`int`/`str`
+/// numeric & comparison dunders, `float`/`TypeVar`/`TypeAliasType` reprs and a
+/// few `object` dunders) emit the variant *without* the `" object"` infix; the
+/// `no_object` arm preserves that exact text byte-for-byte.  (Both variants
+/// diverge from CPython's true output for some of those methods — see issue
+/// #2026 — but this is a pure dedup; fixing the wording is tracked separately.)
+#[macro_export]
+macro_rules! descriptor_needs_arg {
+    ($method:expr, $type_name:expr $(,)?) => {
+        $crate::PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '{}' of '{}' object needs an argument",
+                $method, $type_name
+            ),
+        )
+    };
+    ($method:expr, $type_name:expr, no_object $(,)?) => {
+        $crate::PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '{}' of '{}' needs an argument",
+                $method, $type_name
+            ),
+        )
+    };
+}
+
+/// Build the `TypeError` raised when a type-qualified builtin method (an
+/// unbound descriptor) receives a `self` argument of the wrong type, e.g.
+/// `str.__len__(5)`.  Single source of truth for the descriptor receiver-type
+/// message so the ~27 open-coded copies can't drift.
+///
+/// Two arms preserve the two pre-existing wordings byte-for-byte: the full
+/// `"… requires a '<type>' object but received a '<actual>'"` (pass the actual
+/// type name) and the truncated `"… requires a '<type>' object"` (no actual,
+/// used by `str.format`/`str.format_map`).
+#[macro_export]
+macro_rules! descriptor_requires {
+    ($method:expr, $type_name:expr, $actual:expr $(,)?) => {
+        $crate::PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '{}' requires a '{}' object but received a '{}'",
+                $method, $type_name, $actual
+            ),
+        )
+    };
+    ($method:expr, $type_name:expr $(,)?) => {
+        $crate::PyError::named(
+            "TypeError",
+            format!(
+                "descriptor '{}' requires a '{}' object",
+                $method, $type_name
+            ),
+        )
+    };
+}
+
 // Global class-mutation epoch counter.  Bumped on every PyClass attribute write
 // or delete, regardless of which class was mutated.  Inline attribute caches
 // store the epoch at fill time and re-validate it on each hit; a mismatch means
