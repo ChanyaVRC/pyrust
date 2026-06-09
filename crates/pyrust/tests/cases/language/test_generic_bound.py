@@ -94,3 +94,42 @@ def empty[T: ()](x):
 
 print(empty.__type_params__[0].__bound__)        # ()
 print(empty.__type_params__[0].__constraints__)  # ()
+
+# ── PEP 695 lazy bounds (#2264): self/forward-referential bounds ─────────────
+# CPython evaluates bounds/constraints lazily in a scope where every type
+# parameter is visible, so a bound may reference its own parameter or a later
+# one.  The bound is the *same* TypeVar object as the referenced parameter.
+
+# A bound that references itself: `T: T` -> __bound__ is T.
+def selfb[T: T](x):
+    return x
+
+print(selfb.__type_params__[0].__bound__.__name__)                    # T
+print(selfb.__type_params__[0].__bound__ is selfb.__type_params__[0])  # True
+
+# A bound that references a *later* parameter (forward reference).
+def fwdlater[T: U, U](x):
+    return x
+
+print(fwdlater.__type_params__[0].__bound__.__name__)                       # U
+print(fwdlater.__type_params__[0].__bound__ is fwdlater.__type_params__[1])  # True
+
+# Class: a later bound references an earlier parameter, identity preserved.
+class CFwd[T, U: T]:
+    pass
+
+print(CFwd.__type_params__[1].__bound__.__name__)                  # T
+print(CFwd.__type_params__[1].__bound__ is CFwd.__type_params__[0])  # True
+
+# Type alias: forward-referential bound resolves.
+type XFwd[T, U: T] = list[U]
+print(XFwd.__type_params__[1].__bound__.__name__)                  # T
+print(XFwd.__type_params__[1].__bound__ is XFwd.__type_params__[0])  # True
+
+# Constraints may reference type parameters too.
+def cfwd[T, U: (T, int)](x):
+    return x
+
+print(cfwd.__type_params__[1].__constraints__[0].__name__)                  # T
+print(cfwd.__type_params__[1].__constraints__[0] is cfwd.__type_params__[0])  # True
+print(cfwd.__type_params__[1].__constraints__[1])                           # <class 'int'>

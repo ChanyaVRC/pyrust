@@ -4012,7 +4012,7 @@ impl Interpreter {
                 }
 
                 // ── PEP 695 type alias ───────────────────────────────────
-                Insn::MakeTypeVar(dst, name_idx, bound_kind, bound_reg) => {
+                Insn::MakeTypeVar(dst, name_idx) => {
                     let name_val = pool_get!(code.consts, *name_idx, "const");
                     let name_str = match name_val.kind() {
                         pyrust_core::ValueKind::Str(s) => s.to_string(),
@@ -4023,18 +4023,10 @@ impl Interpreter {
                             unreachable!()
                         }
                     };
-                    let (bound, constraints) = match *bound_kind {
-                        1 => {
-                            let v = vm_try!(vm_read(&regs, *bound_reg, num_locals)).clone();
-                            (v, Value::tuple(vec![]))
-                        }
-                        2 => {
-                            let v = vm_try!(vm_read(&regs, *bound_reg, num_locals)).clone();
-                            (Value::none(), v)
-                        }
-                        _ => (Value::none(), Value::tuple(vec![])),
-                    };
-                    regs[*dst as usize] = make_typevar_instance(name_str, bound, constraints);
+                    // The TypeVar is created unbounded; any bound/constraint is
+                    // populated lazily via SetAttr once every type parameter is in
+                    // scope (PEP 695 lazy evaluation, see emit_typevar_bound).
+                    regs[*dst as usize] = make_typevar_instance(name_str);
                 }
                 Insn::MakeTypeAlias(dst, name_idx, value_reg, params_reg) => {
                     let name_val = pool_get!(code.consts, *name_idx, "const");
@@ -4664,19 +4656,19 @@ thread_local! {
     };
 }
 
-/// Construct a `TypeVar` `PyInstance` with `__name__`, `__constraints__`, and
-/// `__bound__` attributes, matching the observable surface of CPython's
-/// `typing.TypeVar` as created by PEP 695 type parameter syntax.
-///
-/// `bound` is the upper bound (`Value::none()` for an unbounded parameter) and
-/// `constraints` is the constraint tuple (an empty tuple when unconstrained).
-/// A PEP 695 parameter is never both bounded and constrained.
-pub(crate) fn make_typevar_instance(name: String, bound: Value, constraints: Value) -> Value {
+/// Construct an (initially unbounded) `TypeVar` `PyInstance` with `__name__`,
+/// `__constraints__`, and `__bound__` attributes, matching the observable
+/// surface of CPython's `typing.TypeVar` as created by PEP 695 type parameter
+/// syntax.  `__bound__` starts as `None` and `__constraints__` as `()`; a
+/// bounded/constrained parameter's clause is evaluated lazily (after every type
+/// parameter is in scope) and written back via `SetAttr` — see
+/// `Compiler::emit_typevar_bound`.
+pub(crate) fn make_typevar_instance(name: String) -> Value {
     TYPEVAR_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__", Value::string(name));
-        attrs.insert("__constraints__", constraints);
-        attrs.insert("__bound__", bound);
+        attrs.insert("__constraints__", Value::tuple(vec![]));
+        attrs.insert("__bound__", Value::none());
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,
