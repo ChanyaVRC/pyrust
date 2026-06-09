@@ -1089,6 +1089,26 @@ impl Interpreter {
                     name,
                 );
             }
+        // Issue #2291: the unhashable built-in types set `__hash__ = None` on
+        // the *type* (CPython: `list.__hash__ is None`).  Accessing
+        // `list.__hash__` / `dict.__hash__` / `set.__hash__` /
+        // `bytearray.__hash__` therefore yields `None`, and calling it raises
+        // `'NoneType' object is not callable`.  Mirror the instance path
+        // (`[1].__hash__` → `None`) here for the class attribute, but only when
+        // no closer user override exists (an MRO lookup that lands on the
+        // inherited `object.__hash__` sentinel) so a subclass that defines its
+        // own `__hash__` still resolves to that function.
+        if name == "__hash__"
+            && matches!(
+                lookup_class_attr(&class, name).as_ref().map(|v| v.kind()),
+                Some(ValueKind::BuiltinFunction("object.__hash__"))
+            )
+            && ["list", "dict", "set", "bytearray"]
+                .iter()
+                .any(|t| class_chain_contains_name(&class, t))
+        {
+            return Ok(Value::none());
+        }
         // Issue #2276: object-level dunders that a primitive type *overrides* in
         // CPython are attributed to the called type, not `object`
         // (`str.__hash__()` → "... of 'str' object ...", not 'object').  When the
