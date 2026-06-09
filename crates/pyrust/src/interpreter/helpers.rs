@@ -4884,7 +4884,15 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         // surfaced by `value_id()` — `b = a; a is b` is True after Rc-sharing
         // storage on clone (#305/#523).  Two distinct literals of the same
         // shape/value produce different ids, matching CPython.
-        (ValueKind::BigInt(_), ValueKind::BigInt(_))
+        //
+        // Str is included so that `is` stays consistent with `id()` for strings
+        // (#2287): cloning a TAG_STR value copies the NaN-box bits verbatim
+        // (`Value(self.0)`, only bumping the embedded refcount), so an aliased
+        // string shares the same header-pointer id that `value_id()` surfaces.
+        // Two separately-allocated equal strings get distinct ids — `is`/`id`
+        // agree either way.
+        (ValueKind::Str(_), ValueKind::Str(_))
+        | (ValueKind::BigInt(_), ValueKind::BigInt(_))
         | (ValueKind::List(_), ValueKind::List(_))
         | (ValueKind::Set(_), ValueKind::Set(_))
         | (ValueKind::Dict(_), ValueKind::Dict(_))
