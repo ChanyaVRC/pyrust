@@ -4814,6 +4814,28 @@ impl Interpreter {
         };
         let (start, end, step) = Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
 
+        // Full-slice identity short-circuit (#2277): CPython's `tuple` / `bytes`
+        // `__getitem__` return the original object when the resolved slice
+        // covers the whole sequence with unit step (`start == 0 && end == len &&
+        // step == 1`), so `t[:] is t`, `t[0:len(t)] is t`, `t[::1] is t`,
+        // `t[0:100] is t` (stop clamps to len) all hold.  The Rc-shared tuple
+        // backing (#2268) and Rc-shared bytes make the clone identity-preserving
+        // (`value_id` reads the same obj_id / Rc pointer), so this is cheap and
+        // correct.  `list` is excluded — `l[:]` always copies in CPython.
+        //
+        // `str` is intentionally NOT short-circuited: pyrust strings have no
+        // stable object identity even under plain aliasing (`x = s; x is s` is
+        // already False), so a full str slice cannot match CPython's `s[:] is s`
+        // == True regardless of what this returns.  That is a broader str
+        // identity gap tracked separately, not a slice bug.
+        if step == 1
+            && start == 0
+            && end == len
+            && matches!(target.kind(), ValueKind::Tuple(_) | ValueKind::Bytes(_))
+        {
+            return Ok(target.clone());
+        }
+
         // Contiguous fast path: `step == 1` produces the contiguous run
         // `[start, end)` (memcpy for bytes, range clone for list/tuple, zero-copy
         // shared-buffer slice for ASCII str) — see #2066 / #2111 / #2116 / #2136.
