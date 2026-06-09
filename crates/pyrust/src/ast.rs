@@ -178,6 +178,9 @@ pub enum Stmt {
         body_linenos: Vec<u32>,
         /// Per-statement 1-based line numbers for the else body.
         else_linenos: Vec<u32>,
+        /// Whether this is an `async for` (drives the async-iterator protocol
+        /// `__aiter__` / `await __anext__()`).  Only valid inside an `async def`.
+        is_async: bool,
     },
     Try {
         body: Vec<Stmt>,
@@ -216,6 +219,9 @@ pub enum Stmt {
         body: Vec<Stmt>,
         /// Per-statement 1-based line numbers for the with body.
         body_linenos: Vec<u32>,
+        /// Whether this is an `async with` (drives `await __aenter__()` /
+        /// `await __aexit__(...)`).  Only valid inside an `async def`.
+        is_async: bool,
     },
     Match {
         subject: Expr,

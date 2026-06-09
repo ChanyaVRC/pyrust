@@ -3336,6 +3336,7 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
         else_branch: None,
         body_linenos: vec![],
         else_linenos: vec![],
+        is_async: false,
     })
 }
 
@@ -5490,15 +5491,27 @@ impl Compiler {
                 else_branch,
                 body_linenos,
                 else_linenos,
+                is_async,
             } => {
-                self.compile_for(
-                    target,
-                    iter,
-                    body,
-                    else_branch.as_deref(),
-                    body_linenos,
-                    else_linenos,
-                );
+                if *is_async {
+                    self.compile_async_for(
+                        target,
+                        iter,
+                        body,
+                        else_branch.as_deref(),
+                        body_linenos,
+                        else_linenos,
+                    );
+                } else {
+                    self.compile_for(
+                        target,
+                        iter,
+                        body,
+                        else_branch.as_deref(),
+                        body_linenos,
+                        else_linenos,
+                    );
+                }
             }
             Stmt::Global(_) => {
                 // Purely a compile-time declaration; no runtime effect.
@@ -5593,8 +5606,13 @@ impl Compiler {
                 items,
                 body,
                 body_linenos,
+                is_async,
             } => {
-                self.compile_with(items, body, body_linenos);
+                if *is_async {
+                    self.compile_async_with(items, body, body_linenos);
+                } else {
+                    self.compile_with(items, body, body_linenos);
+                }
             }
             Stmt::Match { subject, arms } => {
                 self.compile_match(subject, arms);
@@ -9652,7 +9670,7 @@ impl Compiler {
             enter_reg,
             ctx_reg,
             enter_name_idx,
-            false,
+            0, // sync with: __enter__
         ));
         // Call __enter__() with no args: result goes to enter_reg
         self.emit(Insn::Call(enter_reg, 0));
@@ -9715,7 +9733,7 @@ impl Compiler {
             exit_frame,
             ctx_reg,
             exit_name_idx,
-            true,
+            1, // sync with: __exit__
         ));
         self.emit(Insn::LoadNone(exit_frame + 1));
         self.emit(Insn::LoadNone(exit_frame + 2));
@@ -9747,7 +9765,7 @@ impl Compiler {
             exit_frame2,
             ctx_reg,
             exit_name_idx,
-            true,
+            1, // sync with: __exit__
         ));
         self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
         self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
@@ -9764,6 +9782,270 @@ impl Compiler {
 
         self.patch_jump(end_patch);
         self.free_temp(ctx_reg);
+    }
+
+    /// Compile an `async with` statement (issue #2279).
+    ///
+    /// Mirrors [`compile_with`] but drives the async context-manager protocol:
+    /// `v = await mgr.__aenter__()` on entry and
+    /// `await mgr.__aexit__(exc_type, exc, tb)` on exit, awaiting each coroutine
+    /// to completion via the shared `GetAwaitable` + `YieldFrom` drive.  The
+    /// suppression contract is identical: if `__aexit__` returns truthy while an
+    /// exception is in flight, the exception is swallowed.
+    ///
+    /// `async with` is only legal inside an `async def`; the gate lives here so
+    /// it fires even for a manager that never reaches the await (CPython reports
+    /// the SyntaxError at compile time regardless).
+    fn compile_async_with(
+        &mut self,
+        items: &[(Expr, Option<AssignTarget>)],
+        body: &[Stmt],
+        body_linenos: &[u32],
+    ) {
+        if items.is_empty() {
+            self.compile_block_with_linenos(body, body_linenos);
+            return;
+        }
+        if !self.is_async_function {
+            self.set_syntax_error("'async with' outside async function");
+            return;
+        }
+        let (expr, alias) = &items[0];
+        let rest = &items[1..];
+
+        // mgr = expr
+        let ctx_reg = self.compile_expr(expr);
+
+        // v = await mgr.__aenter__()
+        // GetAttrForWith maps a missing dunder to TypeError (#1656), matching the
+        // async-context-manager protocol error CPython raises.
+        let aenter_name_idx = self.intern_name("__aenter__");
+        let aenter_reg = self.alloc_temp();
+        self.emit(Insn::GetAttrForWith(
+            aenter_reg,
+            ctx_reg,
+            aenter_name_idx,
+            3, // async with: __aenter__
+        ));
+        self.emit(Insn::Call(aenter_reg, 0));
+        // Drive the returned awaitable; result_reg holds __aenter__'s value.
+        let entered_reg = self.alloc_temp();
+        self.emit_await_drive_into(aenter_reg, entered_reg);
+        self.free_temp(aenter_reg);
+
+        // Bind alias if present.
+        if let Some(tgt) = alias {
+            self.compile_store_unpack_target(tgt, entered_reg);
+        }
+        self.free_temp(entered_reg);
+
+        // SetupExcept for the body.
+        let setup_patch = self.emit(Insn::SetupExcept(0));
+
+        if rest.is_empty() {
+            self.compile_block_with_linenos(body, body_linenos);
+        } else {
+            self.compile_async_with(rest, body, body_linenos);
+        }
+        if self.failed {
+            return;
+        }
+
+        // Normal exit: await mgr.__aexit__(None, None, None); discard result.
+        self.emit(Insn::PopExcept);
+        let aexit_name_idx = self.intern_name("__aexit__");
+        let exit_frame = self.next_temp;
+        if exit_frame.checked_add(4).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for 'async with' statement".to_string());
+            }
+            return;
+        }
+        self.next_temp = exit_frame + 4;
+        if exit_frame + 3 > self.max_reg {
+            self.max_reg = exit_frame + 3;
+        }
+        self.emit(Insn::GetAttrForWith(
+            exit_frame,
+            ctx_reg,
+            aexit_name_idx,
+            4, // async with: __aexit__
+        ));
+        self.emit(Insn::LoadNone(exit_frame + 1));
+        self.emit(Insn::LoadNone(exit_frame + 2));
+        self.emit(Insn::LoadNone(exit_frame + 3));
+        self.emit(Insn::Call(exit_frame, 3));
+        // Drive the awaitable returned by __aexit__; result discarded on the
+        // normal path.  Allocate the result below the call frame so the temp
+        // allocator stays balanced.
+        self.next_temp = exit_frame + 1;
+        let exit_res = self.next_temp; // == exit_frame + 1
+        self.next_temp = exit_frame + 2;
+        if self.next_temp - 1 > self.max_reg {
+            self.max_reg = self.next_temp - 1;
+        }
+        self.emit_await_drive_into(exit_frame, exit_res);
+        self.next_temp = exit_frame;
+        let end_patch = self.emit(Insn::Jump(0));
+
+        // Exception path: res = await mgr.__aexit__(type, exc, None).
+        self.patch_jump(setup_patch);
+        let exc_tmp = self.alloc_temp();
+        self.emit(Insn::LoadExc(exc_tmp));
+        let exit_frame2 = self.next_temp;
+        if exit_frame2.checked_add(4).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many registers for 'async with' exception handler".to_string());
+            }
+            return;
+        }
+        self.next_temp = exit_frame2 + 4;
+        if exit_frame2 + 3 > self.max_reg {
+            self.max_reg = exit_frame2 + 3;
+        }
+        let class_name_idx = self.intern_name("__class__");
+        self.emit(Insn::GetAttrForWith(
+            exit_frame2,
+            ctx_reg,
+            aexit_name_idx,
+            4, // async with: __aexit__
+        ));
+        self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
+        self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
+        self.emit(Insn::LoadNone(exit_frame2 + 3)); // traceback: None
+        self.emit(Insn::Call(exit_frame2, 3));
+        // Drive the awaitable returned by __aexit__; its value decides
+        // suppression.  The result goes to `suppress_reg` (the slot just above
+        // the call frame); the await-drive scratch temps are allocated above it
+        // and reclaimed, leaving `suppress_reg` live for the JumpIfTrue below.
+        let suppress_reg = exit_frame2 + 4;
+        self.next_temp = suppress_reg + 1;
+        if suppress_reg > self.max_reg {
+            self.max_reg = suppress_reg;
+        }
+        self.emit_await_drive_into(exit_frame2, suppress_reg);
+        self.next_temp = suppress_reg + 1;
+        // If __aexit__ returned truthy, suppress; otherwise re-raise.
+        let suppress_patch = self.emit(Insn::JumpIfTrue(suppress_reg, 0));
+        self.free_temp(exc_tmp);
+        self.emit(Insn::RaiseReRaise);
+        self.patch_jump(suppress_patch);
+        self.emit(Insn::EndExcept);
+
+        self.patch_jump(end_patch);
+        self.free_temp(ctx_reg);
+    }
+
+    /// Compile an `async for` statement (issue #2279).
+    ///
+    /// Lowers to the asynchronous-iterator protocol: `it = aiter.__aiter__()`
+    /// then a loop body that does `x = await type(it).__anext__(it)`, exiting on
+    /// `StopAsyncIteration` (running the `else` clause on a clean exit).  The
+    /// `await` reuses the shared `GetAwaitable` + `YieldFrom` drive.
+    ///
+    /// `async for` is only legal inside an `async def`.
+    fn compile_async_for(
+        &mut self,
+        target: &AssignTarget,
+        aiter_expr: &Expr,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+        body_linenos: &[u32],
+        else_linenos: &[u32],
+    ) {
+        if !self.is_async_function {
+            self.set_syntax_error("'async for' outside async function");
+            return;
+        }
+
+        // it = aiter.__aiter__()  (not awaited — __aiter__ returns the iterator
+        // synchronously per PEP 492).
+        let aiter_src = self.compile_expr(aiter_expr);
+        let aiter_name_idx = self.intern_name("__aiter__");
+        let it_reg = self.alloc_temp();
+        self.emit(Insn::GetAttrForWith(it_reg, aiter_src, aiter_name_idx, 2)); // async for: __aiter__
+        self.emit(Insn::Call(it_reg, 0));
+        self.free_temp(aiter_src);
+
+        // Pre-load the StopAsyncIteration type once, in a register that lives for
+        // the whole loop (used by MatchExcept on every iteration's exit check).
+        let stop_async_reg = self.compile_expr(&Expr::Var("StopAsyncIteration".to_string()));
+
+        let loop_start = self.pc();
+        // Each iteration runs `await it.__anext__()` inside a SetupExcept so a
+        // StopAsyncIteration (raised by the coroutine) can break the loop.
+        let setup_patch = self.emit(Insn::SetupExcept(0));
+        let anext_name_idx = self.intern_name("__anext__");
+        let anext_reg = self.alloc_temp();
+        self.emit(Insn::GetAttrForWith(
+            anext_reg,
+            it_reg,
+            anext_name_idx,
+            5, // async for: __anext__
+        ));
+        self.emit(Insn::Call(anext_reg, 0));
+        let item_reg = self.alloc_temp();
+        self.emit_await_drive_into(anext_reg, item_reg);
+        self.free_temp(anext_reg);
+        // Item obtained successfully: leave the per-iteration handler.
+        self.emit(Insn::PopExcept);
+
+        // Assign the item to the loop target, then run the body.
+        self.compile_store_unpack_target(target, item_reg);
+        self.free_temp(item_reg);
+        if self.failed {
+            return;
+        }
+
+        self.loops.push(LoopCtx {
+            break_patches: SmallVec::new(),
+            continue_target: Some(loop_start),
+            continue_patches: SmallVec::new(),
+            cleanup_depth: self.except_cleanups.len(),
+        });
+        let saved_def_set = self.def_set;
+        self.mark_target_def(target);
+        self.compile_block_with_linenos(body, body_linenos);
+        self.def_set = saved_def_set;
+        if self.failed {
+            return;
+        }
+        // Back-edge to the top of the loop.
+        let back_from = self.pc() as i32 + 1;
+        let back_offset = loop_start as i32 - back_from;
+        self.emit(Insn::Jump(back_offset));
+
+        // ── Loop-exit handler: reached when __anext__ raised. ──
+        self.patch_jump(setup_patch);
+        let exc_tmp = self.alloc_temp();
+        self.emit(Insn::LoadExc(exc_tmp));
+        // If it's NOT StopAsyncIteration, re-raise; otherwise fall through and
+        // exit the loop normally (StopAsyncIteration is swallowed).
+        let not_stop_patch = self.emit(Insn::MatchExcept(stop_async_reg, 0));
+        self.emit(Insn::EndExcept);
+        let exit_to_else = self.emit(Insn::Jump(0));
+        self.patch_jump(not_stop_patch);
+        self.emit(Insn::RaiseReRaise);
+        self.patch_jump(exit_to_else);
+        self.free_temp(exc_tmp);
+
+        let ctx = self.loops.pop().unwrap();
+        self.free_temp(stop_async_reg);
+        self.free_temp(it_reg);
+
+        // `else` runs on normal (StopAsyncIteration) exit, not after `break`.
+        if let Some(else_stmts) = else_branch {
+            self.compile_block_with_linenos(else_stmts, else_linenos);
+            if self.failed {
+                return;
+            }
+        }
+        for idx in ctx.break_patches {
+            self.patch_jump(idx);
+        }
     }
 
     // ── Expression compilation ────────────────────────────────────────────────
@@ -10213,26 +10495,39 @@ impl Compiler {
                 // spurious "object is not iterable".
                 let result_reg = self.alloc_temp();
                 let awaited_src = self.compile_expr(awaited_expr);
-                let iter_reg = self.alloc_temp();
-                self.emit(Insn::GetAwaitable(iter_reg, awaited_src));
-
-                let sent_reg = self.alloc_temp();
-                self.emit(Insn::LoadNone(sent_reg));
-                self.emit(Insn::LoadNone(result_reg));
-
-                self.emit(Insn::YieldFrom {
-                    iter_reg,
-                    sent_reg,
-                    result_reg,
-                });
-
-                self.free_temp(sent_reg);
-                self.free_temp(iter_reg);
+                self.emit_await_drive_into(awaited_src, result_reg);
                 self.free_temp(awaited_src);
-
                 result_reg
             }
         }
+    }
+
+    /// Emit the `await` drive for an awaitable already living in `awaited_src`,
+    /// placing the awaited result into `result_reg` (which the caller has
+    /// allocated *below* `awaited_src` so the LIFO temp allocator can reclaim
+    /// the scratch temps without clobbering it).
+    ///
+    /// This is the same `GetAwaitable` + `YieldFrom` sequence the `Expr::Await`
+    /// lowering uses (issue #1039); `async for` / `async with` reuse it to drive
+    /// `__anext__` / `__aenter__` / `__aexit__` coroutines to completion
+    /// (issue #2279).  Both `awaited_src` and `result_reg` must outlive this
+    /// call; only the internal scratch temps are freed here.
+    fn emit_await_drive_into(&mut self, awaited_src: Reg, result_reg: Reg) {
+        let iter_reg = self.alloc_temp();
+        self.emit(Insn::GetAwaitable(iter_reg, awaited_src));
+
+        let sent_reg = self.alloc_temp();
+        self.emit(Insn::LoadNone(sent_reg));
+        self.emit(Insn::LoadNone(result_reg));
+
+        self.emit(Insn::YieldFrom {
+            iter_reg,
+            sent_reg,
+            result_reg,
+        });
+
+        self.free_temp(sent_reg);
+        self.free_temp(iter_reg);
     }
 
     /// Compile an f-string into a series of str-conversions concatenated with `+`.
@@ -10436,6 +10731,7 @@ impl Compiler {
                 else_branch: None,
                 body_linenos: vec![],
                 else_linenos: vec![],
+                is_async: false,
             }];
         }
         if let Some(cond) = &clauses[0].cond {
@@ -10453,6 +10749,7 @@ impl Compiler {
             else_branch: None,
             body_linenos: vec![],
             else_linenos: vec![],
+            is_async: false,
         }];
         body
     }
@@ -11110,6 +11407,7 @@ impl Compiler {
                 else_branch: None,
                 body_linenos: vec![],
                 else_linenos: vec![],
+                is_async: false,
             }];
         }
         // Wrap the first clause's optional if-cond around the body.
@@ -11129,6 +11427,7 @@ impl Compiler {
             else_branch: None,
             body_linenos: vec![],
             else_linenos: vec![],
+            is_async: false,
         }];
 
         // Parameter spec for the anonymous generator function.

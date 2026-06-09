@@ -2188,7 +2188,7 @@ impl Interpreter {
                     // fast_path.rs::exec_get_attr.
                     vm_try!(self.exec_get_attr(&mut regs, code, pc, *dst, *obj, *name_idx, num_locals));
                 }
-                Insn::GetAttrForWith(dst, obj, name_idx, missed_exit) => {
+                Insn::GetAttrForWith(dst, obj, name_idx, proto) => {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     let type_name = value_type_name_str(&obj_val);
@@ -2196,18 +2196,37 @@ impl Interpreter {
                         Ok(v) => regs[*dst as usize] = v,
                         Err(_) => {
                             // CPython converts any lookup failure (AttributeError or
-                            // otherwise) to TypeError for the context manager protocol.
-                            let msg = if *missed_exit {
-                                format!(
+                            // otherwise) to the protocol's TypeError.  `proto`
+                            // selects the message (see Insn::GetAttrForWith docs).
+                            let msg = match *proto {
+                                1 => format!(
                                     "'{}' object does not support the context manager protocol \
                                      (missed __exit__ method)",
                                     type_name
-                                )
-                            } else {
-                                format!(
+                                ),
+                                2 => format!(
+                                    "'async for' requires an object with __aiter__ method, got {}",
+                                    type_name
+                                ),
+                                3 => format!(
+                                    "'{}' object does not support the asynchronous context \
+                                     manager protocol",
+                                    type_name
+                                ),
+                                4 => format!(
+                                    "'{}' object does not support the asynchronous context \
+                                     manager protocol (missed __aexit__ method)",
+                                    type_name
+                                ),
+                                5 => format!(
+                                    "'async for' received an object from __aiter__ that does \
+                                     not implement __anext__: {}",
+                                    type_name
+                                ),
+                                _ => format!(
                                     "'{}' object does not support the context manager protocol",
                                     type_name
-                                )
+                                ),
                             };
                             vm_try!(Err(pyrust_core::type_err!(msg)));
                         }
