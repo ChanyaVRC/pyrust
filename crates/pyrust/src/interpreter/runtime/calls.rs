@@ -627,11 +627,21 @@ impl Interpreter {
                     .is_some_and(|(t, _)| matches!(t, "int" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
-                // CPython exposes dunders (`str.__getitem__`, `list.__add__`, …)
-                // as *slot wrappers* and regular methods (`str.upper`, …) as
-                // *method_descriptors*; the two raise differently worded
-                // receiver guards.  See issue #2266.
-                let is_dunder = method.starts_with("__") && method.ends_with("__");
+                // CPython exposes most dunders (`str.__getitem__`, `list.__add__`,
+                // …) as *slot wrappers* and regular methods (`str.upper`, …) as
+                // *method_descriptors*; the two raise differently worded receiver
+                // guards.  See issue #2266.  A handful of dunders are *per-type*
+                // method_descriptors rather than slot wrappers — e.g.
+                // `dict`/`set`/`frozenset`.__contains__ (but `str`/`list`/`tuple`/
+                // `bytes`.__contains__ stay slot wrappers).  Treat those as
+                // method_descriptors so they get the "unbound method …" / "doesn't
+                // apply to …" wording.
+                let is_method_descriptor_dunder = matches!(
+                    (type_name, method),
+                    ("dict" | "set" | "frozenset", "__contains__")
+                );
+                let is_dunder =
+                    method.starts_with("__") && method.ends_with("__") && !is_method_descriptor_dunder;
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())

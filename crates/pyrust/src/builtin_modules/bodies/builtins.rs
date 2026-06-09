@@ -4744,17 +4744,25 @@ pyrust_module! {
     /// CPython signature: `dict.__getitem__(self, key)`
     #[py_name = "dict.__getitem__"]
     fn dict_getitem(args) -> Result<Value> {
-        let (inst_rc, key) = match (args.first(), args.get(1)) {
-            (Some(self_arg), Some(key_arg)) => {
-                let inst_rc = match self_arg.value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::clone(rc),
-                    _ => {
-                        return Err(pyrust_core::descriptor_requires!("__getitem__", "dict"));
-                    }
-                };
-                (inst_rc, key_arg.value.clone())
-            }
+        // CPython exposes dict.__getitem__ as a *method_descriptor* (#2266):
+        // missing receiver -> "unbound method ...", wrong receiver type ->
+        // "descriptor ... doesn't apply to a '<X>' object".  The receiver check
+        // happens before the arity check, matching CPython's slot ordering.
+        let self_arg = args.first().ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "dict", method)
+        })?;
+        let inst_rc = match self_arg.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
+                let actual = pyrust_core::builtin_type_name(&self_arg.value);
+                return Err(pyrust_core::descriptor_requires!(
+                    "__getitem__", "dict", actual, method
+                ));
+            }
+        };
+        let key = match args.get(1) {
+            Some(key_arg) => key_arg.value.clone(),
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     "dict.__getitem__ expected 2 arguments".to_string(),
@@ -4795,17 +4803,25 @@ pyrust_module! {
     /// CPython signature: `list.__getitem__(self, key)`
     #[py_name = "list.__getitem__"]
     fn list_getitem(args) -> Result<Value> {
-        let (inst_rc, key) = match (args.first(), args.get(1)) {
-            (Some(self_arg), Some(key_arg)) => {
-                let inst_rc = match self_arg.value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::clone(rc),
-                    _ => {
-                        return Err(pyrust_core::descriptor_requires!("__getitem__", "list"));
-                    }
-                };
-                (inst_rc, key_arg.value.clone())
-            }
+        // CPython exposes list.__getitem__ as a *method_descriptor* (#2266):
+        // missing receiver -> "unbound method ...", wrong receiver type ->
+        // "descriptor ... doesn't apply to a '<X>' object".  The receiver check
+        // happens before the arity check, matching CPython's slot ordering.
+        let self_arg = args.first().ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "list", method)
+        })?;
+        let inst_rc = match self_arg.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
+                let actual = pyrust_core::builtin_type_name(&self_arg.value);
+                return Err(pyrust_core::descriptor_requires!(
+                    "__getitem__", "list", actual, method
+                ));
+            }
+        };
+        let key = match args.get(1) {
+            Some(key_arg) => key_arg.value.clone(),
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     "list.__getitem__ expected 2 arguments".to_string(),

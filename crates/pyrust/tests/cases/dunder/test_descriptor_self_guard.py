@@ -44,6 +44,15 @@ show("float.__trunc__", lambda: float.__trunc__())
 show("float.__floor__", lambda: float.__floor__())
 show("float.__ceil__", lambda: float.__ceil__())
 show("str.format", lambda: str.format())
+# __getitem__ is per-type: dict/list are method_descriptors (str/tuple/bytes
+# are slot wrappers, asserted below).
+show("dict.__getitem__", lambda: dict.__getitem__())
+show("list.__getitem__", lambda: list.__getitem__())
+# __contains__ is also per-type: dict/set/frozenset are method_descriptors
+# (str/list/tuple/bytes are slot wrappers, asserted below).
+show("dict.__contains__", lambda: dict.__contains__())
+show("set.__contains__", lambda: set.__contains__())
+show("frozenset.__contains__", lambda: frozenset.__contains__())
 
 
 # --- method_descriptor wrong receiver: "... doesn't apply to a '<X>' object" -
@@ -56,6 +65,10 @@ show("set.add(int)", lambda: set.add(5))
 show("int.bit_length(str)", lambda: int.bit_length("x"))
 show("float.is_integer(str)", lambda: float.is_integer("x"))
 show("str.format(int)", lambda: str.format(5))
+show("dict.__getitem__(int)", lambda: dict.__getitem__(5, 0))
+show("list.__getitem__(int)", lambda: list.__getitem__(5, 0))
+show("dict.__contains__(int)", lambda: dict.__contains__(5, "k"))
+show("set.__contains__(int)", lambda: set.__contains__(5, "k"))
 
 
 # === slot wrappers: "descriptor '<m>' of '<type>' object needs an argument" ==
@@ -68,6 +81,9 @@ show("bytes.__len__", lambda: bytes.__len__())
 show("frozenset.__len__", lambda: frozenset.__len__())
 show("str.__add__", lambda: str.__add__())
 show("str.__contains__", lambda: str.__contains__())
+show("list.__contains__", lambda: list.__contains__())
+show("tuple.__contains__", lambda: tuple.__contains__())
+show("bytes.__contains__", lambda: bytes.__contains__())
 show("list.__add__", lambda: list.__add__())
 show("int.__add__", lambda: int.__add__())
 show("int.__lt__", lambda: int.__lt__())
