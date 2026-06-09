@@ -4847,17 +4847,26 @@ pyrust_module! {
     /// CPython signature: `tuple.__getitem__(self, key)`
     #[py_name = "tuple.__getitem__"]
     fn tuple_getitem(args) -> Result<Value> {
-        let (inst_rc, key) = match (args.first(), args.get(1)) {
-            (Some(self_arg), Some(key_arg)) => {
-                let inst_rc = match self_arg.value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::clone(rc),
-                    _ => {
-                        return Err(pyrust_core::descriptor_requires!("__getitem__", "tuple"));
-                    }
-                };
-                (inst_rc, key_arg.value.clone())
-            }
+        // CPython exposes tuple.__getitem__ as a *slot wrapper* (#2266/#2276):
+        // missing receiver -> "descriptor '__getitem__' of 'tuple' object needs
+        // an argument", wrong receiver type -> "descriptor '__getitem__'
+        // requires a 'tuple' object but received a '<X>'".  The receiver check
+        // precedes the arity check, matching CPython's slot ordering.
+        let self_arg = args.first().ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "tuple")
+        })?;
+        let inst_rc = match self_arg.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
+                let actual = pyrust_core::builtin_type_name(&self_arg.value);
+                return Err(pyrust_core::descriptor_requires!(
+                    "__getitem__", "tuple", actual
+                ));
+            }
+        };
+        let key = match args.get(1) {
+            Some(key_arg) => key_arg.value.clone(),
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     "tuple.__getitem__ expected 2 arguments".to_string(),
@@ -4877,17 +4886,26 @@ pyrust_module! {
     /// CPython signature: `bytes.__getitem__(self, key)`
     #[py_name = "bytes.__getitem__"]
     fn bytes_getitem(args) -> Result<Value> {
-        let (inst_rc, key) = match (args.first(), args.get(1)) {
-            (Some(self_arg), Some(key_arg)) => {
-                let inst_rc = match self_arg.value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::clone(rc),
-                    _ => {
-                        return Err(pyrust_core::descriptor_requires!("__getitem__", "bytes"));
-                    }
-                };
-                (inst_rc, key_arg.value.clone())
-            }
+        // CPython exposes bytes.__getitem__ as a *slot wrapper* (#2266/#2276):
+        // missing receiver -> "descriptor '__getitem__' of 'bytes' object needs
+        // an argument", wrong receiver type -> "descriptor '__getitem__'
+        // requires a 'bytes' object but received a '<X>'".  The receiver check
+        // precedes the arity check, matching CPython's slot ordering.
+        let self_arg = args.first().ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "bytes")
+        })?;
+        let inst_rc = match self_arg.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
             _ => {
+                let actual = pyrust_core::builtin_type_name(&self_arg.value);
+                return Err(pyrust_core::descriptor_requires!(
+                    "__getitem__", "bytes", actual
+                ));
+            }
+        };
+        let key = match args.get(1) {
+            Some(key_arg) => key_arg.value.clone(),
+            None => {
                 return Err(PyError::named(
                     "TypeError",
                     "bytes.__getitem__ expected 2 arguments".to_string(),

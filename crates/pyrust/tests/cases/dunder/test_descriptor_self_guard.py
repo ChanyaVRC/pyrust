@@ -108,3 +108,54 @@ show("str.__len__(list)", lambda: str.__len__([1, 2, 3]))
 show("dict.__len__(str)", lambda: dict.__len__("ab"))
 show("str.__contains__(int)", lambda: str.__contains__(5, "x"))
 show("str.__getitem__(int)", lambda: str.__getitem__(5, 0))
+
+
+# === Issue #2276: residual unbound-descriptor edge cases =====================
+
+# (1) tuple/bytes __getitem__ are slot wrappers (not method_descriptors): no-arg
+# uses the centralised "descriptor '<m>' of '<type>' object needs an argument"
+# wording, and the wrong-type form names the actual received type — previously
+# both emitted a per-method "expected 2 arguments" message.
+show("tuple.__getitem__", lambda: tuple.__getitem__())
+show("bytes.__getitem__", lambda: bytes.__getitem__())
+show("tuple.__getitem__(int)", lambda: tuple.__getitem__(5))
+show("bytes.__getitem__(int)", lambda: bytes.__getitem__(5))
+
+# (2) Inherited-but-overridden dunders are attributed to the *called* type, not
+# `object`.  `__hash__`/`__repr__`/`__str__` are slot wrappers; `__format__`
+# (int/str/float) is a method_descriptor.  Every primitive overrides
+# `__hash__`/`__repr__`; `__str__` only str/bytes; `__format__` only
+# int/str/float.
+show("str.__hash__", lambda: str.__hash__())
+show("str.__repr__", lambda: str.__repr__())
+show("str.__str__", lambda: str.__str__())
+show("int.__hash__", lambda: int.__hash__())
+show("int.__repr__", lambda: int.__repr__())
+show("float.__hash__", lambda: float.__hash__())
+show("float.__repr__", lambda: float.__repr__())
+show("tuple.__hash__", lambda: tuple.__hash__())
+show("tuple.__repr__", lambda: tuple.__repr__())
+show("list.__repr__", lambda: list.__repr__())
+show("bytes.__str__", lambda: bytes.__str__())
+show("complex.__hash__", lambda: complex.__hash__())
+show("complex.__repr__", lambda: complex.__repr__())
+# wrong-receiver attribution (slot wrappers)
+show("str.__hash__(int)", lambda: str.__hash__(5))
+show("str.__repr__(int)", lambda: str.__repr__(5))
+# __format__ method_descriptor: no-arg, wrong-type, and missing-spec arity
+show("int.__format__", lambda: int.__format__())
+show("str.__format__", lambda: str.__format__())
+show("float.__format__", lambda: float.__format__())
+show("int.__format__(str)", lambda: int.__format__("", "x"))
+show("str.__format__(int)", lambda: str.__format__(5, "x"))
+show("int.__format__(int)", lambda: int.__format__(5))
+# __format__ receiver-correct: formats the backing value
+print("int.__format__(5, 'x')", int.__format__(5, "x"))
+print("str.__format__('a', '>3')", repr(str.__format__("a", ">3")))
+print("float.__format__(1.5, '.2f')", float.__format__(1.5, ".2f"))
+
+# (3) method_descriptors that were not exposed unbound (`str.encode`): no-arg
+# and wrong-type receiver guards, plus the receiver-correct call.
+show("str.encode", lambda: str.encode())
+show("str.encode(int)", lambda: str.encode(5))
+print("str.encode('ab')", str.encode("ab"))
