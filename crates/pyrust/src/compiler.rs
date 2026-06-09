@@ -5615,12 +5615,12 @@ impl Compiler {
         // Each TypeVar is stored to the current namespace so that the RHS
         // expression can reference it by name.  After evaluating the RHS we
         // delete them again so they do not leak into the enclosing scope.
+        // Phase 1: create every TypeVar (unbounded) and bind its name, so the RHS
+        // and any bound/constraint can reference every parameter by name.
         let mut typevar_regs: Vec<Reg> = Vec::with_capacity(type_params.len());
         for param in type_params {
             let tv_reg = self.alloc_temp();
-            // Evaluates the bound/constraint clause (if any) and emits MakeTypeVar.
-            // Earlier params are already bound, so a later bound may reference them.
-            self.emit_make_typevar(tv_reg, param);
+            self.emit_make_typevar(tv_reg, &param.name);
             // Bind the TypeVar to the param name so the RHS expression can
             // load it via LoadGlobal.  We use StoreGlobal unconditionally
             // (even if `param` happens to be in local_index) because DeleteName
@@ -5631,6 +5631,12 @@ impl Compiler {
             let param_name_idx = self.intern_name(&param.name);
             self.emit(Insn::StoreGlobal(param_name_idx, tv_reg));
             typevar_regs.push(tv_reg);
+        }
+        // Phase 2: with every name bound, evaluate each bound/constraint and store
+        // it onto the corresponding TypeVar.  Doing this after binding all names
+        // lets a self/forward-referential bound (`type X[T, U: T] = ...`) resolve.
+        for (param, &tv_reg) in type_params.iter().zip(typevar_regs.iter()) {
+            self.emit_typevar_bound(tv_reg, param);
         }
 
         // ── Step 2: build the __type_params__ tuple ──────────────────────────
@@ -5761,38 +5767,57 @@ impl Compiler {
         if self.next_temp - 1 > self.max_reg {
             self.max_reg = self.next_temp - 1;
         }
+        // Phase 1: create every TypeVar (initially unbounded) and bind its name.
+        // All type parameters must exist and be in scope before any bound is
+        // evaluated, so a self/forward-referential bound (`def f[T: T]`,
+        // `def g[T, U: T]`) can resolve every parameter name — PEP 695 evaluates
+        // bounds/constraints lazily in a scope where all the type params (and the
+        // enclosing name) are visible.
         for (i, param) in type_params.iter().enumerate() {
             let tv_reg = base + i as Reg;
-            self.emit_make_typevar(tv_reg, param);
+            self.emit_make_typevar(tv_reg, &param.name);
             // Bind via StoreGlobal so the name lands in `env.values`, which is
             // exactly where a body's `LoadGlobal` for a free variable looks.
-            // Binding before the next param's bound is compiled lets later
-            // bounds reference earlier params (`def f[T, U: T]`), as in CPython.
             let name_idx = self.intern_name(&param.name);
             self.emit(Insn::StoreGlobal(name_idx, tv_reg));
+        }
+        // Phase 2: with every name now bound, evaluate each bound/constraint and
+        // store it onto the already-created TypeVar.
+        for (i, param) in type_params.iter().enumerate() {
+            let tv_reg = base + i as Reg;
+            self.emit_typevar_bound(tv_reg, param);
         }
         (base, n)
     }
 
-    /// Emit a `MakeTypeVar` into `tv_reg` for `param`, first evaluating its
-    /// bound/constraint clause (if any) into a scratch register so the TypeVar
-    /// carries the correct `__bound__` / `__constraints__`.  The bound expression
-    /// is evaluated in the current scope, where any earlier type parameters are
-    /// already bound.
-    fn emit_make_typevar(&mut self, tv_reg: Reg, param: &TypeParam) {
-        let name_const = self.intern_const(crate::value::Value::string(param.name.clone()));
+    /// Emit a `MakeTypeVar` into `tv_reg` for the type parameter named `name`.
+    /// The TypeVar is created unbounded (`__bound__ == None`, `__constraints__
+    /// == ()`); any bound/constraint clause is populated later by
+    /// `emit_typevar_bound`, once every type parameter is in scope.
+    fn emit_make_typevar(&mut self, tv_reg: Reg, name: &str) {
+        let name_const = self.intern_const(crate::value::Value::string(name));
+        self.emit(Insn::MakeTypeVar(tv_reg, name_const));
+    }
+
+    /// Populate the `__bound__` / `__constraints__` of an already-created TypeVar
+    /// in `tv_reg` from `param`'s bound/constraint clause.  The bound expression
+    /// is evaluated in the current scope, where every type parameter of the
+    /// enclosing def/class/alias is already bound, so self- and
+    /// forward-referential bounds (`T: T`, `U: T`) resolve.  A bare parameter
+    /// (no clause) leaves the TypeVar's `__bound__`/`__constraints__` untouched.
+    fn emit_typevar_bound(&mut self, tv_reg: Reg, param: &TypeParam) {
         match &param.bound {
-            None => {
-                self.emit(Insn::MakeTypeVar(tv_reg, name_const, 0, 0));
-            }
+            None => {}
             Some(TypeParamBound::Bound(expr)) => {
                 let bound_reg = self.compile_expr(expr);
-                self.emit(Insn::MakeTypeVar(tv_reg, name_const, 1, bound_reg));
+                let attr_idx = self.intern_name("__bound__");
+                self.emit(Insn::SetAttr(tv_reg, attr_idx, bound_reg));
                 self.free_temp(bound_reg);
             }
             Some(TypeParamBound::Constraints(elems)) => {
                 let tuple_reg = self.compile_constraint_tuple(elems);
-                self.emit(Insn::MakeTypeVar(tv_reg, name_const, 2, tuple_reg));
+                let attr_idx = self.intern_name("__constraints__");
+                self.emit(Insn::SetAttr(tv_reg, attr_idx, tuple_reg));
                 self.free_temp(tuple_reg);
             }
         }

@@ -404,13 +404,16 @@ pub enum Insn {
     /// Tuple: (dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base,
     /// kwarg_n, meta_reg).
     MakeClassMeta(Reg, u8, Reg, u8, u16, Reg, u8, Reg),
-    /// R[dst] = TypeVar(name=consts[name_idx], <bound or constraints from R[bound_reg]>)
-    /// PEP 695: construct a `TypeVar` object for a generic type parameter.
-    /// `bound_kind` selects how `R[bound_reg]` populates the TypeVar:
-    /// `0` = no bound (`bound_reg` ignored, `__bound__` is `None`,
-    /// `__constraints__` is `()`); `1` = `R[bound_reg]` is the `__bound__`;
-    /// `2` = `R[bound_reg]` is the `__constraints__` tuple.
-    MakeTypeVar(Reg, u16, u8, Reg),
+    /// R[dst] = TypeVar(name=consts[name_idx])
+    /// PEP 695: construct an (initially unbounded) `TypeVar` object for a generic
+    /// type parameter — `__bound__` is `None` and `__constraints__` is `()`.
+    /// Any bound/constraint clause is populated lazily, after every type
+    /// parameter of the enclosing def/class/alias is in scope, via `SetAttr` on
+    /// `__bound__` / `__constraints__` (see `Compiler::emit_typevar_bound`).
+    /// This matches PEP 695's lazy evaluation of bounds in an annotation scope,
+    /// so a self/forward-referential bound (`def f[T: T]`, `def g[T, U: T]`)
+    /// resolves instead of raising `NameError`.
+    MakeTypeVar(Reg, u16),
     /// R[dst] = TypeAliasType(name=consts[name_idx], value=R[value_reg], type_params=R[params_reg])
     /// PEP 695: construct a `TypeAliasType` object from a string name, the evaluated value
     /// expression, and a tuple of TypeVar objects (may be an empty tuple).
