@@ -1499,6 +1499,12 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
         | GetSlice(r, _, _)
+        // GetAwaitable writes the driving iterator into `r`; without this arm
+        // copy-prop fails to kill a `Move(r, src)` alias on `r`, mis-substituting
+        // a later read of the iterator (e.g. `YieldFrom.iter_reg`) back to `src`
+        // — surfaced by `await f(…, kw=v)`, whose variadic-call lowering emits an
+        // arg `Move` into the slot that becomes the await iterator (issue #2298).
+        | GetAwaitable(r, _)
         | Call(r, _)
         | CallMemo(r, _)
         | BuildList(r, _, _)
