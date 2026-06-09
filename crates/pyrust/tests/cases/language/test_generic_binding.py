@@ -189,3 +189,41 @@ def default_scope[DV](x=DV):
     return x
 
 print(default_scope())                            # enclosing DV
+
+# ── Exception-safety: a raise inside a generic header / body must restore the ─
+# enclosing env so the frame keeps resolving names correctly (issue #2275).
+# A parameter annotation referencing an undefined name raises NameError eagerly
+# (in every Python 3), inside the type-param scope; if the matching pop is
+# skipped, `self.env` would be left on the orphaned child env and later name
+# resolution in the same frame would break.
+
+def exc_host():
+    out = []
+    try:
+        def bad[T](x: undefined_name):
+            return x
+    except NameError:
+        out.append("caught")
+    # The type-param scope must be popped: the following generic def and the
+    # module-global read both resolve against the restored enclosing scope.
+    def good[U](x):
+        return x
+    out.append(good.__type_params__[0].__name__)     # U
+    out.append(MOD_AFTER)                            # module-global
+    return out
+
+MOD_AFTER = "module-global"
+print(exc_host())                                    # ['caught', 'U', 'module-global']
+print(MOD_AFTER)                                     # module-global
+
+# A try/except *inside* a generic function body: raise, catch, then read a
+# module global and the type parameter — env must be intact on the handler path.
+
+def exc_body[T](x):
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        return (x, MOD_AFTER, T.__name__)
+
+print(exc_body(42))                                  # (42, 'module-global', 'T')
+print(MOD_AFTER)                                     # module-global
