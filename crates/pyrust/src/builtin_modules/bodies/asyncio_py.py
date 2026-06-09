@@ -246,6 +246,12 @@ def _get_running_loop():
     return _running_loop
 
 
+def get_running_loop():
+    if _running_loop is None:
+        raise RuntimeError("no running event loop")
+    return _running_loop
+
+
 def get_event_loop():
     if _running_loop is not None:
         return _running_loop
