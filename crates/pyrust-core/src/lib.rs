@@ -2164,6 +2164,17 @@ pub struct ListInner {
     pub obj_id: u64,
 }
 
+/// Shared backing for a Python `tuple` (heap variant, ≥4 elements).  Tuples are
+/// immutable, so the backing is a plain `Vec<Value>` behind an `Rc` with no
+/// `RefCell` — `Value::clone` / `Insn::Move` is an O(1) strong-count bump that
+/// shares the backing instead of deep-copying it (#2268).  `obj_id` is captured
+/// at construction and inherited by every aliased clone so `id(x) == id(y)` for
+/// `y = x`.  The 2-/3-element shapes stay inline in `Opaque::SmallTuple2/3`.
+pub struct TupleInner {
+    pub items: Vec<Value>,
+    pub obj_id: u64,
+}
+
 /// Shared backing for a Python `set`.  Same shape and rationale as
 /// [`ListInner`]; `items` is an [`IndexSet`] (insertion-ordered) so iteration
 /// order matches the rest of the interpreter's set surface.
@@ -2562,49 +2573,10 @@ unsafe fn pool_opaque_dealloc(ptr: *mut u8) {
     })
 }
 
-// Pool for Vec<Value> struct headers (list / tuple).
-// Layout: [ptr: *mut Value][len: usize][cap: usize][obj_id: u64] = 32 bytes / align 8.
-// The extra 8 bytes at offset 24 hold a unique monotonic id for id() identity.
-
-const VEC_HDR_SIZE: usize = 32; // Vec<Value>(24) + obj_id(8) — asserted in Value impl
-const VEC_HDR_ALIGN: usize = 8;
-const POOL_VEC_HDR_CAP: usize = 64;
-
-thread_local! {
-    static POOL_VEC_HDR: Cell<(*mut u8, usize)> = const { Cell::new((std::ptr::null_mut(), 0)) };
-}
-
-#[inline(always)]
-unsafe fn pool_vec_hdr_alloc() -> *mut u8 {
-    POOL_VEC_HDR.with(|c| {
-        let (head, len) = c.get();
-        if len > 0 {
-            let next = unsafe { *(head as *const *mut u8) };
-            c.set((next, len - 1));
-            head
-        } else {
-            unsafe { alloc(Layout::from_size_align(VEC_HDR_SIZE, VEC_HDR_ALIGN).unwrap()) }
-        }
-    })
-}
-
-#[inline(always)]
-unsafe fn pool_vec_hdr_dealloc(ptr: *mut u8) {
-    POOL_VEC_HDR.with(|c| {
-        let (head, len) = c.get();
-        if len < POOL_VEC_HDR_CAP {
-            unsafe { *(ptr as *mut *mut u8) = head };
-            c.set((ptr, len + 1));
-        } else {
-            unsafe {
-                dealloc(
-                    ptr,
-                    Layout::from_size_align(VEC_HDR_SIZE, VEC_HDR_ALIGN).unwrap(),
-                )
-            };
-        }
-    })
-}
+// The pre-#2268 `Vec<Value>` struct-header pool (32-byte slab, manual obj_id at
+// offset 24) backed heap tuples.  Tuples moved to an `Rc<TupleInner>` payload in
+// #2268 (matching the list `Rc<ListInner>` move from #305) so `Value::clone` is
+// an O(1) refcount bump rather than a deep copy; the pool is gone with it.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Value — NaN-boxed u64
@@ -2614,12 +2586,6 @@ unsafe fn pool_vec_hdr_dealloc(ptr: *mut u8) {
 pub struct Value(u64);
 
 impl Value {
-    const _ASSERT_VEC_HDR: () = {
-        assert!(std::mem::size_of::<Vec<Value>>() == 24); // Vec<Value> must be 24 bytes
-        assert!(std::mem::align_of::<Vec<Value>>() == VEC_HDR_ALIGN);
-        assert!(VEC_HDR_SIZE >= 32); // room for obj_id at offset 24
-    };
-
     // ── Constructors ─────────────────────────────────────────────────────────
 
     pub fn none() -> Self {
@@ -2851,19 +2817,13 @@ impl Value {
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
-    // Shared allocator for the tuple pool header.  Writes Vec<Value> at offset 0
-    // and the unique obj_id at offset 24, then tags with the supplied tag bits.
-    //
-    // Tuple is the only TAG_*_BITS payload that still uses this 32-byte slab
-    // layout.  List moved to an `Rc<ListInner>` payload in #305 to make
-    // `Value::clone` an alias rather than a deep copy.
-    unsafe fn alloc_seq_hdr(tag_bits: u64, v: Vec<Value>, obj_id: u64) -> Self {
-        let hdr = unsafe { pool_vec_hdr_alloc() };
-        unsafe {
-            std::ptr::write(hdr as *mut Vec<Value>, v);
-            std::ptr::write(hdr.add(24) as *mut u64, obj_id);
-        }
-        Value(tag_bits | (hdr as u64 & PAYLOAD_MASK))
+    /// Construct a heap-tuple Value from an existing `Rc<TupleInner>` — used when
+    /// multiple Values must share the same immutable backing (cloning).  Consumes
+    /// one strong-count reference from `rc`; the matching drop happens in
+    /// `Drop for Value` when `TAG_TUPLE` is observed (#2268).
+    unsafe fn tuple_from_rc(rc: Rc<TupleInner>) -> Self {
+        let raw = Rc::into_raw(rc);
+        Value(TAG_TUPLE_BITS | (raw as u64 & PAYLOAD_MASK))
     }
 
     /// Construct a new `list` Value.  Storage is an `Rc<ListInner>` so that
@@ -2912,12 +2872,14 @@ impl Value {
                     obj_id: next_obj_id(),
                 })
             }
-            _ => unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, next_obj_id()) },
+            _ => {
+                let inner = Rc::new(TupleInner {
+                    items: v,
+                    obj_id: next_obj_id(),
+                });
+                unsafe { Self::tuple_from_rc(inner) }
+            }
         }
-    }
-
-    fn tuple_with_id(v: Vec<Value>, obj_id: u64) -> Self {
-        unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, obj_id) }
     }
 
     pub fn dict(d: PyDict) -> Self {
@@ -3209,12 +3171,12 @@ impl Value {
         false
     }
 
-    /// `true` only for a heap-backed tuple (`TAG_TUPLE`) — the single `Value`
-    /// kind whose `clone` is a full O(N) deep copy of the backing `Vec<Value>`
-    /// (`str`/`list`/`bytes` share/rc-bump, scalars bit-copy, and `SmallTuple2/3`
-    /// clone an inline fixed-size array).  Used to gate the VM's by-move
-    /// builtin-arg fast path so the common no-heap-tuple call stays untouched
-    /// (#2251).  Note `SmallTuple2/3` (≤3 elements) deliberately return `false`.
+    /// `true` only for a heap-backed tuple (`TAG_TUPLE`, an `Rc<TupleInner>`).
+    /// Since #2268 a heap-tuple `clone` is an O(1) refcount bump like `list`, so
+    /// this no longer marks the O(N)-clone outlier; it still gates the VM's
+    /// by-move builtin-arg fast path (#2251), which is now a cheap micro-opt
+    /// rather than an O(N) avoidance.  `SmallTuple2/3` (≤3 elements) return
+    /// `false` — they are inline, not heap.
     #[inline]
     pub fn is_heap_tuple(&self) -> bool {
         top16(self.0) == TAG_TUPLE
@@ -3247,7 +3209,8 @@ impl Value {
     }
 
     /// Returns a stable identity value for pool-allocated and Rc-shared types:
-    /// - tuple: reads the monotonic obj_id stored at hdr+24
+    /// - tuple: reads `obj_id` from the shared [`TupleInner`]; aliased clones
+    ///   (Rc-shared) all surface the same id, matching `b = a` aliasing (#2268)
     /// - list: reads `obj_id` from the shared [`ListInner`]; aliased clones
     ///   (Rc-shared) all surface the same id, matching Python's `id()`
     ///   semantics for `b = a` aliasing (#305).
@@ -3259,10 +3222,7 @@ impl Value {
         // `as i64` wraps past 2^63; tracked separately, not specific to this
         // PR (tuple has the same shape).
         match top16(self.0) {
-            TAG_TUPLE => {
-                let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
-                Some(unsafe { *(hdr.add(24) as *const u64) } as i64)
-            }
+            TAG_TUPLE => Some(unsafe { self.tuple_inner() }.obj_id as i64),
             TAG_LIST => Some(unsafe { self.list_inner() }.obj_id as i64),
             TAG_STR => Some((self.0 & PAYLOAD_MASK) as i64),
             TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
@@ -3320,8 +3280,16 @@ impl Value {
         }
     }
 
-    unsafe fn tuple_ptr(&self) -> *mut Vec<Value> {
-        (self.0 & PAYLOAD_MASK) as *mut _
+    /// Raw pointer to the shared [`TupleInner`] backing.  Caller must guarantee
+    /// `self` is a TAG_TUPLE value (#2268).
+    unsafe fn tuple_inner_ptr(&self) -> *const TupleInner {
+        (self.0 & PAYLOAD_MASK) as *const TupleInner
+    }
+
+    /// Borrow the inner tuple header.  SAFETY: `self` must be a TAG_TUPLE value
+    /// and the Rc must be live (which it is for any reachable `Value`).
+    unsafe fn tuple_inner(&self) -> &TupleInner {
+        unsafe { &*self.tuple_inner_ptr() }
     }
 
     /// Raw pointer to the shared [`ListInner`] backing.  Caller must guarantee
@@ -3469,9 +3437,9 @@ impl Value {
     // and forced callers to manually re-derive the aliasing-safety
     // property that `RefCell` already enforces internally.
 
-    /// Borrow the tuple's elements as a slice.  Backs both the pool-allocated
-    /// path (`TAG_TUPLE`) and the inline small-tuple path
-    /// (`Opaque::SmallTuple2/3`); see #281.
+    /// Borrow the tuple's elements as a slice.  Backs both the heap path
+    /// (`TAG_TUPLE`, an `Rc<TupleInner>` since #2268) and the inline small-tuple
+    /// path (`Opaque::SmallTuple2/3`); see #281.
     pub fn as_tuple(&self) -> Option<&[Value]> {
         debug_assert!(
             !self.is_unset(),
@@ -3479,7 +3447,7 @@ impl Value {
              A CheckLocal instruction is missing for this read."
         );
         if top16(self.0) == TAG_TUPLE {
-            return Some(unsafe { &*self.tuple_ptr() });
+            return Some(&unsafe { self.tuple_inner() }.items);
         }
         if top16(self.0) == TAG_OPAQUE {
             match unsafe { &*self.opaque_ptr() } {
@@ -3888,7 +3856,7 @@ impl Value {
             TAG_BOOL => ValueKind::Bool(self.as_bool()),
             TAG_INT => ValueKind::Int(self.as_int_raw()),
             TAG_STR => ValueKind::Str(unsafe { self.str_as_str() }),
-            TAG_TUPLE => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
+            TAG_TUPLE => ValueKind::Tuple(&unsafe { self.tuple_inner() }.items),
             // List/Dict/Set views: take a scoped `RefCell::borrow()` so
             // the cell's runtime borrow check is *honoured*.  A
             // concurrent `borrow_mut()` while the resulting ValueKind
@@ -4247,12 +4215,15 @@ impl Clone for Value {
                 } // rc++ (bits 31:3)
                 Value(self.0) // same bits, 0 allocations
             }
-            // Tuple — copy the stored obj_id so the clone shares the same identity
+            // Tuple — share the backing `Rc<TupleInner>` with the original; an
+            // O(1) strong-count bump rather than a deep copy of the backing
+            // `Vec<Value>`.  Tuples are immutable, so sharing is sound and
+            // identity (`id()`) is inherent to the shared `TupleInner` (#2268).
             TAG_TUPLE => {
-                let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
-                let obj_id = unsafe { *(hdr.add(24) as *const u64) };
-                let v = unsafe { &*self.tuple_ptr() };
-                Value::tuple_with_id(v.clone(), obj_id)
+                unsafe {
+                    Rc::increment_strong_count(self.tuple_inner_ptr());
+                }
+                Value(self.0)
             }
             // List — share the backing Rc<ListInner> with the original so that
             // mutations through any alias propagate to all clones (#305).  The
@@ -4306,10 +4277,11 @@ impl Drop for Value {
                     }
                 }
             },
+            // Tuple — decrement the Rc strong count; the Rc layer drops the
+            // underlying `TupleInner` (and its `Vec<Value>`) when the count
+            // reaches zero (#2268).
             TAG_TUPLE => unsafe {
-                let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
-                std::ptr::drop_in_place(hdr as *mut Vec<Value>);
-                pool_vec_hdr_dealloc(hdr);
+                Rc::decrement_strong_count(self.tuple_inner_ptr());
             },
             // List — decrement the Rc strong count; the Rc layer drops the
             // underlying `ListInner` (and its `Vec<Value>`) when the count
