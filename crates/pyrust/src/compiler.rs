@@ -5201,11 +5201,23 @@ impl Compiler {
         // CPython determines generator status from the AST — the presence of
         // `yield` anywhere in the source makes the function a generator even
         // if that `yield` is unreachable at runtime (issue #1758).
-        let is_generator = self
-            .insns
-            .iter()
-            .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }))
-            || self.has_dead_yield;
+        //
+        // In an `async def` body (#2280) the `is_generator` flag distinguishes
+        // an *async generator* (`async def` containing `yield`) from a plain
+        // coroutine.  `await` lowers to a `GetAwaitable` + `Insn::YieldFrom`
+        // pair, so YieldFrom must NOT count here — otherwise every coroutine
+        // that awaits anything would be mis-tagged as an async generator.  A
+        // bare `yield` (the only thing that makes an `async def` an async
+        // generator; `yield from` inside `async def` is a SyntaxError) emits
+        // `Insn::Yield`, so for async functions we scan for `Insn::Yield` only.
+        let is_generator = if self.is_async_function {
+            self.insns.iter().any(|i| matches!(i, Insn::Yield { .. })) || self.has_dead_yield
+        } else {
+            self.insns
+                .iter()
+                .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }))
+                || self.has_dead_yield
+        };
         let insns = self.insns;
         let insns_len = insns.len();
         let names_len = self.names.len();
@@ -10410,6 +10422,16 @@ impl Compiler {
             Expr::YieldFrom(iter_expr) => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'yield' outside function");
+                    return 0;
+                }
+                // `yield from` is not allowed inside an `async def` body
+                // (#2280): CPython raises SyntaxError.  (A bare `yield` is fine
+                // — it makes the function an async generator.)  `await` lowers
+                // to the same `YieldFrom` *instruction* internally, but that
+                // path goes through `Expr::Await`, not this user-facing
+                // `Expr::YieldFrom` compilation, so it is unaffected.
+                if self.is_async_function {
+                    self.set_syntax_error("'yield from' inside async function");
                     return 0;
                 }
                 // PEP 380 `yield from` delegation via the single YieldFrom instruction.

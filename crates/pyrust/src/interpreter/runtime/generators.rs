@@ -21,6 +21,58 @@ impl Interpreter {
         method: &str,
         args: Vec<Value>,
     ) -> Result<Value> {
+        // Async-generator protocol (#2280): `__aiter__` returns the async
+        // generator itself; `__anext__`/`asend`/`athrow`/`aclose` return an
+        // awaitable (`AsyncGenASend`) that the `await` machinery drives.
+        match method {
+            "__aiter__" => {
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "__aiter__() takes no arguments ({} given)",
+                        args.len()
+                    ));
+                }
+                return Ok(receiver);
+            }
+            "__anext__" => {
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "__anext__() takes no arguments ({} given)",
+                        args.len()
+                    ));
+                }
+                return self.make_async_gen_asend(&receiver, None, None, false);
+            }
+            "asend" => {
+                if args.len() != 1 {
+                    return Err(pyrust_core::type_err!(
+                        "asend() takes exactly one argument ({} given)",
+                        args.len()
+                    ));
+                }
+                let v = args.into_iter().next().unwrap();
+                return self.make_async_gen_asend(&receiver, Some(v), None, false);
+            }
+            "athrow" => {
+                if args.is_empty() || args.len() > 3 {
+                    return Err(pyrust_core::type_err!("athrow() takes 1 to 3 arguments"));
+                }
+                let exc_arg = args.into_iter().next().unwrap();
+                let exc_val = self.coerce_to_exception(exc_arg)?;
+                return self.make_async_gen_asend(&receiver, None, Some(PyError::Raised(exc_val)), false);
+            }
+            "aclose" => {
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "aclose() takes no arguments ({} given)",
+                        args.len()
+                    ));
+                }
+                let inject = pyrust_core::py_err!("GeneratorExit", String::new());
+                return self.make_async_gen_asend(&receiver, None, Some(inject), true);
+            }
+            _ => {}
+        }
         match method {
             "__iter__" => {
                 if !args.is_empty() {
@@ -327,5 +379,34 @@ impl Interpreter {
             Err(e) if e.class_name_is("StopIteration") => Err(e),
             Err(e) => Err(e),
         }
+    }
+
+    /// Build the awaitable returned by an async generator's
+    /// `__anext__`/`asend`/`athrow`/`aclose` (#2280).  `receiver` must be an
+    /// async-generator `Value`.  The returned `Value::generator(AsyncGenASend)`
+    /// is accepted by `get_awaitable` and stepped by `YieldFrom`.
+    fn make_async_gen_asend(
+        &self,
+        receiver: &Value,
+        send_value: Option<Value>,
+        throw_exc: Option<PyError>,
+        is_aclose: bool,
+    ) -> Result<Value> {
+        let agen = match receiver.kind() {
+            ValueKind::Generator(rc) => Rc::clone(rc),
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "asynchronous generator method called on non-async-generator"
+                ));
+            }
+        };
+        let asend = AsyncGenASend {
+            agen,
+            send_value,
+            throw_exc,
+            started: false,
+            is_aclose,
+        };
+        Ok(Value::generator(Box::new(asend)))
     }
 }

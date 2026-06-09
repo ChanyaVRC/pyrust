@@ -70,7 +70,12 @@ pyrust_module! {
             ));
         }
         let coro = positional[0].value.clone();
-        if !crate::builtin_modules::builtins::is_coroutine_value(&coro) {
+        // An async generator (`async def` containing `yield`, #2280) is
+        // coroutine-tagged but is not a runnable coroutine: CPython's
+        // `asyncio.run` rejects it with the same ValueError as any non-coroutine.
+        if !crate::builtin_modules::builtins::is_coroutine_value(&coro)
+            || crate::builtin_modules::builtins::is_async_generator_value(&coro)
+        {
             // CPython raises ValueError with the argument's repr.
             let r = crate::builtin_modules::builtins::render_value_repr(_interp, &coro)?;
             return Err(crate::error::PyError::named(
