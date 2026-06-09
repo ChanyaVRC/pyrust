@@ -1478,6 +1478,12 @@ pyrust_module! {
                     SelfIterator,
                     Other,
                 }
+                // A coroutine (`async def`, issue #1039) is not iterable.
+                if is_coroutine_value(&val) {
+                    return Err(pyrust_core::type_err!(
+                        "'coroutine' object is not iterable"
+                    ));
+                }
                 let kind = match val.kind() {
                     ValueKind::Generator(_) => IterKind::Generator,
                     ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
@@ -7218,6 +7224,14 @@ pub(crate) fn value_class(obj: &Value) -> Value {
                 Value::builtin_function("longrange_iterator")
             } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
                 Value::builtin_function(native.type_name)
+            } else if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
+                // Coroutines (`async def`, issue #1039) share the Generator
+                // value tag but report `type(coro).__name__ == "coroutine"`.
+                if frame.is_coroutine {
+                    Value::builtin_function("coroutine")
+                } else {
+                    Value::builtin_function("generator")
+                }
             } else {
                 Value::builtin_function("generator")
             }
@@ -7659,6 +7673,10 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         // re-wrapped in a fresh `NativeIterFrame` (#2117).
         SelfIterator,
         Other,
+    }
+    // A coroutine (`async def`, issue #1039) is not iterable.
+    if is_coroutine_value(v) {
+        return Err(pyrust_core::type_err!("'coroutine' object is not iterable"));
     }
     let kind = match v.kind() {
         ValueKind::Generator(_) => IterKind::Generator,
@@ -9364,6 +9382,25 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
     }
 }
 
+/// True when `v` is a *coroutine* object (an `async def` frame, issue #1039).
+///
+/// Coroutines share the `ValueKind::Generator` value tag but must behave
+/// distinctly from plain generators: they are not iterable with `for` and they
+/// report `type(coro).__name__ == "coroutine"`.
+pub(crate) fn is_coroutine_value(v: &Value) -> bool {
+    if let ValueKind::Generator(state_rc) = v.kind()
+        // `try_borrow`: when the frame is currently checked out (mid-drive), the
+        // borrow is held by the driver.  A frame being driven is not something
+        // these iterability guards ever query, so treat a busy cell as "not a
+        // coroutine" rather than panicking on a double borrow.
+        && let Ok(borrow) = state_rc.try_borrow()
+        && let Some(frame) = borrow.downcast_ref::<GeneratorFrame>()
+    {
+        return frame.is_coroutine;
+    }
+    false
+}
+
 /// Render the CPython-compatible repr of a `ValueKind::Generator` value
 /// (#2019).  True generator frames carry a qualname
 /// (`<generator object {qualname} at 0x...>`); built-in iterators use their
@@ -9373,7 +9410,10 @@ fn generator_repr(value: &Value) -> String {
     let addr = value.value_id().unwrap_or(0) as usize;
     if let ValueKind::Generator(state_rc) = value.kind()
         && let Some(frame) = state_rc.borrow().downcast_ref::<GeneratorFrame>() {
-            return format!("<generator object {} at 0x{addr:x}>", frame.qualname);
+            // Coroutines (`async def`, issue #1039) render as
+            // `<coroutine object {qualname} at 0x...>`.
+            let kind = if frame.is_coroutine { "coroutine" } else { "generator" };
+            return format!("<{kind} object {} at 0x{addr:x}>", frame.qualname);
         }
     let type_name = full_type_name_str(value);
     format!("<{type_name} object at 0x{addr:x}>")
@@ -9696,6 +9736,11 @@ fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
         }
         if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
             return std::borrow::Cow::Borrowed(native.type_name);
+        }
+        if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>()
+            && frame.is_coroutine
+        {
+            return std::borrow::Cow::Borrowed("coroutine");
         }
     }
     value_type_name_str(v)
