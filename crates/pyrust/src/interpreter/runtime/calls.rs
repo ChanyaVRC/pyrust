@@ -6708,6 +6708,13 @@ impl Interpreter {
     /// `__format__`/`__str__`), we delegate to the real `format` builtin so the
     /// dispatch is byte-for-byte identical to the call-based lowering.
     pub(crate) fn format_value_default(&mut self, value: &Value) -> Result<Value> {
+        // Fast path (#alloc): a bare `{i}` field for an int (no format spec) is
+        // `str(i)` — format the digits directly into the string Value, one
+        // allocation instead of the int→`String`→`Value::string` pair the
+        // generic `apply_format_spec("")` path takes.
+        if let ValueKind::Int(n) = value.kind() {
+            return Ok(Value::int_string(n));
+        }
         if matches!(value.kind(), ValueKind::PyInstance(_)) {
             return self.call_function_expanded(
                 Value::builtin_function("format"),

@@ -2146,13 +2146,15 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
 ///
 /// Returns one slot per declared parameter (`None` for an unfilled slot), so
 /// each constructor can apply its own per-parameter defaults / arity logic.
+pub(crate) type ConstructorSlots = smallvec::SmallVec<[Option<Value>; 4]>;
+
 pub(crate) fn bind_constructor_kwargs(
     function_name: &str,
     args: &[ExpandedCallArg],
     params: &[&str],
     keyword_ok: &[bool],
     max_args: usize,
-) -> Result<Vec<Option<Value>>> {
+) -> Result<ConstructorSlots> {
     debug_assert_eq!(params.len(), keyword_ok.len());
 
     // CPython checks total arity before validating individual keyword names:
@@ -2174,7 +2176,9 @@ pub(crate) fn bind_constructor_kwargs(
         ));
     }
 
-    let mut slots: Vec<Option<Value>> = vec![None; params.len()];
+    // SmallVec: every constructor here has ≤4 params (str=3, int/float/complex/
+    // round=2), so the common case binds args with no heap allocation (#alloc).
+    let mut slots: ConstructorSlots = smallvec::smallvec![None; params.len()];
 
     // Assign positional args to leading slots in order.
     for (next_pos, a) in args.iter().filter(|a| a.name.is_none()).enumerate() {

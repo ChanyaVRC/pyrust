@@ -619,6 +619,11 @@ pyrust_module! {
     /// `PyInstance` values (and transitively for instances inside containers),
     /// which may invoke arbitrary user code.
     fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
+        // Fast path (#alloc): `repr(int)` == the digits, formatted straight into
+        // the string Value (one allocation, no intermediate heap `String`).
+        if let ValueKind::Int(n) = obj.0.kind() {
+            return Ok(Value::int_string(n));
+        }
         pyrust_core::check_int_str_conversion(&obj.0)?;
         let s = render_value_repr(_interp, &obj.0)?;
         Ok(Value::string(s))
@@ -3575,6 +3580,13 @@ pyrust_module! {
         // The decoding form is selected when *either* encoding or errors is
         // supplied; otherwise this is the plain `str(object)` form.
         if encoding.is_none() && errors.is_none() {
+            // Scalar fast path (#alloc): `str(int)` formats the digits straight
+            // into the string Value via a stack buffer — one allocation instead
+            // of the intermediate heap `String` that `render_instance_str`
+            // returns before `Value::string` copies it.
+            if let ValueKind::Int(n) = object.kind() {
+                return Ok(Value::int_string(n));
+            }
             return Ok(Value::string(render_instance_str(_interp, object)?));
         }
 
