@@ -10771,7 +10771,8 @@ impl Compiler {
                 else_branch: None,
                 body_linenos: vec![],
                 else_linenos: vec![],
-                is_async: false,
+                // `async for` clause (#2283): lowers to compile_async_for.
+                is_async: clause.is_async,
             }];
         }
         if let Some(cond) = &clauses[0].cond {
@@ -10789,7 +10790,7 @@ impl Compiler {
             else_branch: None,
             body_linenos: vec![],
             else_linenos: vec![],
-            is_async: false,
+            is_async: clauses[0].is_async,
         }];
         body
     }
@@ -10978,6 +10979,7 @@ impl Compiler {
         iter_reg: Reg,
         fn_body: Vec<Stmt>,
         comp_name: &str,
+        is_async: bool,
     ) -> Reg {
         const IT_PARAM: &str = ".0";
 
@@ -11083,6 +11085,13 @@ impl Compiler {
         }
         sub.is_function_scope = true;
         sub.future_annotations = self.future_annotations;
+        // An async comprehension (`[x async for x in ait]`, #2283) compiles its
+        // implicit function as a coroutine: the `async for` clauses lower to the
+        // `__aiter__`/`await __anext__()` drive, and the enclosing async frame
+        // awaits the returned coroutine (below).  No bare `yield` is emitted, so
+        // `is_generator` stays false and this is a plain coroutine, not an async
+        // generator (only `compile_gen_exp` produces async generators).
+        sub.is_async_function = is_async;
         // Set comprehensions lower `.acc.add(elt)` to `Insn::SetAdd` (issue #1861).
         sub.is_set_comp = comp_name == "setcomp";
         // List comprehensions lower `.acc.append(elt)` to `Insn::ListAppend` (issue #1862).
@@ -11164,6 +11173,18 @@ impl Compiler {
         self.next_temp = fn_reg + 1;
         self.free_temp(iter_reg);
 
+        if is_async {
+            // The call produced a coroutine; the enclosing async frame awaits it
+            // to materialise the collection (#2283).  A distinct result register
+            // above `fn_reg` (the awaited source) receives the awaited value —
+            // same register discipline as `compile_async_with`'s `__aenter__`
+            // drive; the `GetAwaitable`/`YieldFrom` scratch temps sit above it.
+            let result_reg = self.alloc_temp();
+            self.emit_await_drive_into(fn_reg, result_reg);
+            self.next_temp = result_reg + 1;
+            return result_reg;
+        }
+
         fn_reg
     }
 
@@ -11176,8 +11197,9 @@ impl Compiler {
             }
             return 0;
         }
-        if clauses.iter().any(|c| c.is_async) {
-            self.set_syntax_error("async comprehension is not yet supported");
+        let is_async = clauses.iter().any(|c| c.is_async);
+        if is_async && !self.is_async_function {
+            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
         }
         if let Some(msg) = check_comprehension(&[elt], clauses, "list comprehension") {
@@ -11212,7 +11234,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp")
+        self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp", is_async)
     }
 
     fn compile_dict_comp(&mut self, key: &Expr, val: &Expr, clauses: &[CompClause]) -> Reg {
@@ -11224,8 +11246,9 @@ impl Compiler {
             }
             return 0;
         }
-        if clauses.iter().any(|c| c.is_async) {
-            self.set_syntax_error("async comprehension is not yet supported");
+        let is_async = clauses.iter().any(|c| c.is_async);
+        if is_async && !self.is_async_function {
+            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
         }
 
@@ -11252,7 +11275,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp")
+        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async)
     }
 
     /// When compiling the implicit function body of a set comprehension
@@ -11338,8 +11361,9 @@ impl Compiler {
             }
             return 0;
         }
-        if clauses.iter().any(|c| c.is_async) {
-            self.set_syntax_error("async comprehension is not yet supported");
+        let is_async = clauses.iter().any(|c| c.is_async);
+        if is_async && !self.is_async_function {
+            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
         }
 
@@ -11378,7 +11402,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp")
+        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async)
     }
 
     /// Compile a generator expression `(elt for target in iter ...)`.
@@ -11399,10 +11423,12 @@ impl Compiler {
             }
             return 0;
         }
-        if clauses.iter().any(|c| c.is_async) {
-            self.set_syntax_error("async comprehension is not yet supported");
-            return 0;
-        }
+        // An `async for` clause makes this an *async generator* expression
+        // (#2283): `(x async for x in ait)`.  Unlike a collection comprehension
+        // it does NOT require an enclosing async function — it constructs an
+        // `async_generator` object anywhere, just like an `async def` with a
+        // bare `yield` (#2280).
+        let is_async = clauses.iter().any(|c| c.is_async);
         if let Some(msg) = check_comprehension(&[elt], clauses, "generator expression") {
             self.set_syntax_error(&msg);
             return 0;
@@ -11418,57 +11444,12 @@ impl Compiler {
         // shadow it.
         const IT_PARAM: &str = ".0";
 
-        // Build the inner body working from the innermost clause outward.
-        // Start with: yield elt
+        // Build the inner body working from the innermost clause outward:
+        // `yield elt` wrapped in the clause loop nest (shared with the
+        // collection comprehensions, so `async for` clauses thread through to
+        // `compile_async_for` identically — #2283).
         let yield_stmt = Stmt::Expr(Expr::Yield(Some(Box::new(elt.clone()))));
-
-        // Wrap in if-cond guard for the first clause if present, then
-        // for each additional clause build a nested for-if structure.
-        //
-        // clauses[0]: for target in IT_PARAM (if cond0)?
-        // clauses[1..]: for target in iter (if cond)?
-        //
-        // Inner body (innermost clause to outermost inner clause):
-        let mut body = vec![yield_stmt];
-        for clause in clauses[1..].iter().rev() {
-            // Optional if-cond filter.
-            if let Some(cond) = &clause.cond {
-                body = vec![Stmt::If {
-                    branches: vec![(cond.clone(), body)],
-                    else_branch: None,
-                    branch_linenos: vec![],
-                    else_linenos: vec![],
-                }];
-            }
-            body = vec![Stmt::For {
-                target: clause.target.clone(),
-                iter: clause.iter.clone(),
-                body,
-                else_branch: None,
-                body_linenos: vec![],
-                else_linenos: vec![],
-                is_async: false,
-            }];
-        }
-        // Wrap the first clause's optional if-cond around the body.
-        if let Some(cond) = &clauses[0].cond {
-            body = vec![Stmt::If {
-                branches: vec![(cond.clone(), body)],
-                else_branch: None,
-                branch_linenos: vec![],
-                else_linenos: vec![],
-            }];
-        }
-        // Outermost loop: iterate over the parameter.
-        body = vec![Stmt::For {
-            target: clauses[0].target.clone(),
-            iter: Expr::Var(IT_PARAM.to_string()),
-            body,
-            else_branch: None,
-            body_linenos: vec![],
-            else_linenos: vec![],
-            is_async: false,
-        }];
+        let body = Self::build_comp_loop_body(clauses, yield_stmt);
 
         // Parameter spec for the anonymous generator function.
         let params = vec![FunctionParam {
@@ -11539,6 +11520,11 @@ impl Compiler {
         }
         sub.is_function_scope = true;
         sub.future_annotations = self.future_annotations;
+        // An async generator expression (`(x async for x in ait)`): the bare
+        // `yield elt` plus `is_async_function` makes the synthesized function an
+        // async generator (#2280/#2283).  The result is the async-gen object —
+        // NOT awaited here, unlike a collection comprehension.
+        sub.is_async_function = is_async;
         sub.compile_block(&body);
         let inner_code = match sub.finish() {
             Ok(c) => c,

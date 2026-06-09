@@ -15,6 +15,13 @@ cases = [
     "async def f():\n    return 5\n    yield 1",
     # Even a literal `return None` is rejected (any return value is illegal).
     "async def f():\n    yield 1\n    return None",
+    # An async comprehension (`async for` clause) outside an async function is a
+    # SyntaxError (PEP 530, issue #2283) — at module level and in a sync def,
+    # for list / set / dict comprehensions alike.
+    "[x async for x in y]",
+    "def f():\n    return [x async for x in y]",
+    "{x async for x in y}",
+    "{x: x async for x in y}",
 ]
 
 for src in cases:
