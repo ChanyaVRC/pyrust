@@ -499,6 +499,15 @@ pub(crate) enum FrameOutcome {
     Yielded { value: Value, saved: GenSaveState },
 }
 
+/// Outcome of a single event-loop step of a coroutine (issue #2281).
+/// See [`Interpreter::coro_step`].
+pub(crate) enum CoroStep {
+    /// Coroutine suspended, yielding this value (the awaited Future).
+    Yielded(Value),
+    /// Coroutine completed, returning this value.
+    Returned(Value),
+}
+
 /// Boxed payload for [`IterState::BigRange`] (kept out-of-line so the cold
 /// arbitrary-precision range variant doesn't inflate `IterState`).
 #[derive(Clone)]
@@ -4319,17 +4328,25 @@ impl Interpreter {
         ))
     }
 
-    /// Drive a coroutine (`async def` frame) to completion (issue #1039).
+    /// Step a coroutine exactly once for the real event loop (issue #2281).
     ///
-    /// This is the minimal event loop behind `asyncio.run`: it repeatedly steps
-    /// the top coroutine with `send(None)` until it returns, surfacing the
-    /// coroutine's return value (the `StopIteration.value` it raises on
-    /// completion).  Any value the coroutine *yields* (a bare future, a sleep
-    /// scheduling point) is treated as an immediate no-op scheduling tick and
-    /// the loop steps it again — sufficient for coroutines that only await other
-    /// coroutines or `asyncio.sleep(0)`.  Real I/O / timer scheduling is out of
-    /// scope (see the PR's follow-ups).
-    pub(crate) fn drive_coroutine_to_completion(&mut self, coro: &Value) -> Result<Value> {
+    /// Sends `sent_value` (or injects `inject_exc`) into the coroutine and runs
+    /// until its next suspension or completion.  Unlike
+    /// `drive_coroutine_to_completion`, this does NOT loop — the yielded value
+    /// (the awaitable that bubbled up the `YieldFrom` chain, typically an
+    /// `asyncio.Future`) is returned to the caller so the Python-level loop can
+    /// suspend the task on it.
+    ///
+    /// Returns:
+    /// - `Ok(CoroStep::Yielded(v))` — coroutine suspended, yielding `v`;
+    /// - `Ok(CoroStep::Returned(v))` — coroutine completed, returning `v`;
+    /// - `Err(e)` — coroutine raised `e` (or was already done / executing).
+    pub(crate) fn coro_step(
+        &mut self,
+        coro: &Value,
+        sent_value: Value,
+        inject_exc: Option<PyError>,
+    ) -> Result<CoroStep> {
         let state_rc = match coro.kind() {
             ValueKind::Generator(s) => Rc::clone(s),
             _ => {
@@ -4339,54 +4356,19 @@ impl Interpreter {
                 ));
             }
         };
-        // A coroutine that has already run to completion cannot be re-run:
-        // `asyncio.run(c)` on an already-driven coroutine raises the same
-        // `RuntimeError("cannot reuse already awaited coroutine")` CPython does
-        // (issue #2282).  `try_borrow`: a busy cell means it is currently
-        // executing — fall through to the step loop, whose `try_borrow_mut`
-        // raises the "already executing" error.
-        if let Ok(b) = state_rc.try_borrow()
-            && let Some(frame) = b.downcast_ref::<GeneratorFrame>()
-            && frame.is_coroutine
-            && frame.done
-        {
-            return Err(pyrust_core::runtime_err!(
-                "cannot reuse already awaited coroutine"
-            ));
-        }
-        // Guard rail against runaway loops from a misbehaving awaitable that
-        // never completes (e.g. a future that is never resolved).
-        const MAX_STEPS: u64 = 100_000_000;
-        let mut steps: u64 = 0;
-        loop {
-            steps += 1;
-            if steps > MAX_STEPS {
-                return Err(pyrust_core::runtime_err!(
-                    "coroutine did not complete (event loop step limit exceeded)"
-                ));
+        let mut borrow = state_rc
+            .try_borrow_mut()
+            .map_err(|_| pyrust_core::value_err!("coroutine already executing"))?;
+        let frame = borrow
+            .downcast_mut::<GeneratorFrame>()
+            .ok_or_else(|| pyrust_core::type_err!("a coroutine was expected"))?;
+        match self.resume_generator_with_exc(frame, inject_exc, sent_value) {
+            Ok(v) => Ok(CoroStep::Yielded(v)),
+            Err(e) if is_stop_iteration_error(&e) => {
+                let result = frame.last_return_value.clone().unwrap_or_else(Value::none);
+                Ok(CoroStep::Returned(result))
             }
-            let mut borrow = state_rc
-                .try_borrow_mut()
-                .map_err(|_| pyrust_core::value_err!("coroutine already executing"))?;
-            let frame = borrow.downcast_mut::<GeneratorFrame>().ok_or_else(|| {
-                pyrust_core::type_err!("a coroutine was expected")
-            })?;
-            match self.resume_generator(frame) {
-                // Coroutine yielded a scheduling point — step it again.
-                Ok(_) => {
-                    drop(borrow);
-                    continue;
-                }
-                Err(e) if is_stop_iteration_error(&e) => {
-                    let result = frame.last_return_value.clone().unwrap_or_else(Value::none);
-                    drop(borrow);
-                    return Ok(result);
-                }
-                Err(e) => {
-                    drop(borrow);
-                    return Err(e);
-                }
-            }
+            Err(e) => Err(e),
         }
     }
 
