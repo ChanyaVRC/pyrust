@@ -185,10 +185,19 @@ pub enum Insn {
     MatchMapping(Reg, Reg),
     /// R[dst] = R[obj].names[name_idx]
     GetAttr(Reg, Reg, u16),
-    /// Like GetAttr but converts AttributeError to TypeError for the context manager
-    /// protocol.  `missed_exit` is true when fetching `__exit__` (object already has
-    /// `__enter__`), which appends " (missed __exit__ method)" to match CPython 3.12.
-    GetAttrForWith(Reg, Reg, u16, bool),
+    /// Like GetAttr but converts any lookup failure to the TypeError CPython
+    /// raises for the (a)synchronous context-manager / async-iterator protocols.
+    /// The trailing `u8` selects which message:
+    ///   0 = `with` `__enter__`  — "does not support the context manager protocol"
+    ///   1 = `with` `__exit__`   — adds " (missed __exit__ method)"
+    ///   2 = `async for` `__aiter__` — "'async for' requires an object with
+    ///        __aiter__ method, got X"
+    ///   3 = `async with` `__aenter__` — "does not support the asynchronous
+    ///        context manager protocol"
+    ///   4 = `async with` `__aexit__`  — adds " (missed __aexit__ method)"
+    ///   5 = `async for` `__anext__`  — "'async for' received an object from
+    ///        __aiter__ that does not implement __anext__: X"
+    GetAttrForWith(Reg, Reg, u16, u8),
     /// R[obj].names[name_idx] = R[val]
     SetAttr(Reg, u16, Reg),
     /// del R[obj].names[name_idx]

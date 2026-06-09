@@ -130,6 +130,17 @@ impl Parser {
             Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::Def)) => {
                 Ok(vec![self.parse_async_def(decorators, deco_lineno)?])
             }
+            // `async for` / `async with` — soft keyword `async` followed by
+            // `for`/`with`.  Whether they appear inside an `async def` is checked
+            // by the compiler (SyntaxError otherwise), matching CPython.
+            Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::For)) => {
+                self.bump(); // consume `async`
+                Ok(vec![self.parse_for(true)?])
+            }
+            Some(Token::Ident(kw)) if kw == "async" && matches!(self.peek(), Some(Token::With)) => {
+                self.bump(); // consume `async`
+                Ok(vec![self.parse_with(true)?])
+            }
             _ if !decorators.is_empty() => Err(PyError::Parse(
                 "decorator must be followed by def or class".to_string(),
             )),
@@ -137,14 +148,14 @@ impl Parser {
             Some(Token::Nonlocal) => Ok(vec![self.parse_nonlocal()?]),
             Some(Token::If) => Ok(vec![self.parse_if()?]),
             Some(Token::While) => Ok(vec![self.parse_while()?]),
-            Some(Token::For) => Ok(vec![self.parse_for()?]),
+            Some(Token::For) => Ok(vec![self.parse_for(false)?]),
             Some(Token::Try) => Ok(vec![self.parse_try()?]),
             Some(Token::Raise) => Ok(vec![self.parse_raise()?]),
             Some(Token::Import) => Ok(vec![self.parse_import()?]),
             Some(Token::From) => Ok(vec![self.parse_import_from()?]),
             Some(Token::Del) => Ok(vec![self.parse_del()?]),
             Some(Token::Assert) => Ok(vec![self.parse_assert()?]),
-            Some(Token::With) => Ok(vec![self.parse_with()?]),
+            Some(Token::With) => Ok(vec![self.parse_with(false)?]),
             // `match` is a soft keyword: `match <expr>:` followed by indented `case` arms.
             Some(Token::Ident(kw)) if kw == "match" && self.is_match_stmt() => {
                 Ok(vec![self.parse_match()?])
@@ -1321,7 +1332,7 @@ impl Parser {
         })
     }
 
-    fn parse_for(&mut self) -> Result<Stmt> {
+    fn parse_for(&mut self, is_async: bool) -> Result<Stmt> {
         self.expect(&Token::For)?;
         // Parse possibly-tuple target, supporting starred items like `for a, *b in ...`
         let target = self.parse_for_target()?;
@@ -1337,6 +1348,7 @@ impl Parser {
             else_branch,
             body_linenos,
             else_linenos,
+            is_async,
         })
     }
 
@@ -1654,7 +1666,7 @@ impl Parser {
         Ok(Stmt::Assert { test, msg })
     }
 
-    fn parse_with(&mut self) -> Result<Stmt> {
+    fn parse_with(&mut self, is_async: bool) -> Result<Stmt> {
         self.expect(&Token::With)?;
         let mut items = Vec::new();
 
@@ -1708,6 +1720,7 @@ impl Parser {
             items,
             body,
             body_linenos,
+            is_async,
         })
     }
 
