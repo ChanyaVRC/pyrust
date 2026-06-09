@@ -1,6 +1,6 @@
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, DictItem, ExceptHandler, Expr, FStringPart,
-    FunctionParam, MatchArm, Pattern, Stmt, UnaryOp,
+    FunctionParam, MatchArm, Pattern, Stmt, TypeParam, TypeParamBound, UnaryOp,
 };
 use crate::error::{PyError, Result};
 use crate::token::{FStringPart as LexFStringPart, Token};
@@ -284,46 +284,10 @@ impl Parser {
         // Consume `type` (soft keyword, tokenised as Ident).
         self.bump();
         let name = self.expect_ident("type alias name")?;
-        // Parse optional generic type parameters `[T, U, ...]`.
-        // PEP 695: each parameter is a simple identifier (TypeVar name).
-        // We only support the simple `[T]` / `[T, U]` form here; bound/constraint
-        // syntax (`T: int`, `*Ts`, `**P`) is not yet supported.
-        let type_params = if self.is(&Token::LBracket) {
-            self.bump(); // consume `[`
-            let mut params: Vec<String> = Vec::new();
-            loop {
-                match self.current() {
-                    None | Some(Token::Eof) => {
-                        return Err(PyError::Parse(
-                            "unterminated type parameter list in type alias".to_string(),
-                        ));
-                    }
-                    Some(Token::RBracket) => {
-                        self.bump(); // consume `]`
-                        break;
-                    }
-                    Some(Token::Comma) => {
-                        self.bump(); // consume `,`
-                    }
-                    Some(Token::Ident(_)) => {
-                        let param_name = self.expect_ident("type parameter name")?;
-                        if params.iter().any(|p| p == &param_name) {
-                            return Err(PyError::Parse(format!(
-                                "duplicate type parameter '{param_name}'"
-                            )));
-                        }
-                        params.push(param_name);
-                    }
-                    _ => {
-                        // Skip any non-identifier token (e.g. `:` in `T: int`).
-                        self.bump();
-                    }
-                }
-            }
-            params
-        } else {
-            vec![]
-        };
+        // Parse optional generic type parameters `[T, U: int, ...]` via the
+        // shared helper so bounds/constraints are captured uniformly with the
+        // function/class paths.
+        let type_params = self.parse_type_params("type alias")?;
         self.expect(&Token::Assign)?;
         let value = self.parse_expr_or_tuple()?;
         Ok(Stmt::TypeAlias {
@@ -337,12 +301,12 @@ impl Parser {
     /// Returns the list of type parameter names (bounds are parsed and discarded).
     /// Consumes `[` through the matching `]`; returns an empty `Vec` if no `[`
     /// is present.  Used by `parse_def` and `parse_class`.
-    fn parse_type_params(&mut self, ctx: &str) -> Result<Vec<String>> {
+    fn parse_type_params(&mut self, ctx: &str) -> Result<Vec<TypeParam>> {
         if !self.is(&Token::LBracket) {
             return Ok(vec![]);
         }
         self.bump(); // consume `[`
-        let mut params: Vec<String> = Vec::new();
+        let mut params: Vec<TypeParam> = Vec::new();
         loop {
             match self.current() {
                 None | Some(Token::Eof) => {
@@ -359,46 +323,35 @@ impl Parser {
                 }
                 Some(Token::Ident(_)) => {
                     let param_name = self.expect_ident("type parameter name")?;
-                    if params.iter().any(|p| p == &param_name) {
+                    if params.iter().any(|p| p.name == param_name) {
                         return Err(PyError::Parse(format!(
                             "duplicate type parameter '{param_name}'"
                         )));
                     }
-                    params.push(param_name);
-                    // Skip optional bound: `: expr` — consume until `,` or `]`,
-                    // tracking nested bracket depth for complex expressions.
-                    if self.is(&Token::Colon) {
+                    // Optional bound/constraints: `: expr`.  `parse_expr` stops at
+                    // the top-level `,` / `]`, so it captures exactly the bound
+                    // expression.  A parenthesised tuple (`T: (int, str)`) parses
+                    // to `Expr::Tuple` and is treated as constraints, matching
+                    // CPython; any other expression is a single upper bound.  The
+                    // empty tuple `T: ()` is the sole exception: CPython treats it
+                    // as a (degenerate) bound value, leaving `__constraints__` ==
+                    // `()` and `__bound__` == `()`, so we route it through `Bound`.
+                    let bound = if self.is(&Token::Colon) {
                         self.bump(); // consume `:`
-                        let mut depth = 0usize;
-                        loop {
-                            match self.current() {
-                                None | Some(Token::Eof) => {
-                                    return Err(PyError::Parse(format!(
-                                        "unterminated type parameter bound in {ctx}"
-                                    )));
-                                }
-                                Some(Token::LBracket)
-                                | Some(Token::LParen)
-                                | Some(Token::LBrace) => {
-                                    depth += 1;
-                                    self.bump();
-                                }
-                                Some(Token::RBracket)
-                                | Some(Token::RParen)
-                                | Some(Token::RBrace) => {
-                                    if depth == 0 {
-                                        break; // let outer loop handle `]`
-                                    }
-                                    depth -= 1;
-                                    self.bump();
-                                }
-                                Some(Token::Comma) if depth == 0 => break,
-                                _ => {
-                                    self.bump();
-                                }
+                        let expr = self.parse_expr()?;
+                        Some(match expr {
+                            Expr::Tuple(elems) if !elems.is_empty() => {
+                                TypeParamBound::Constraints(elems)
                             }
-                        }
-                    }
+                            other => TypeParamBound::Bound(other),
+                        })
+                    } else {
+                        None
+                    };
+                    params.push(TypeParam {
+                        name: param_name,
+                        bound,
+                    });
                 }
                 _ => {
                     // Skip unexpected token (e.g. `*Ts`, `**P` variance markers).

@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CompClause, DictItem, Expr, FStringPart, FunctionParam,
-    MatchArm, Pattern, Stmt, UnaryOp,
+    MatchArm, Pattern, Stmt, TypeParam, TypeParamBound, UnaryOp,
 };
 use crate::bytecode::{
     AttrCacheEntry, BinOpCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY,
@@ -5610,17 +5610,17 @@ impl Compiler {
 
     // ── Type alias (PEP 695) ──────────────────────────────────────────────────
 
-    fn compile_type_alias(&mut self, name: &str, type_params: &[String], value: &Expr) {
+    fn compile_type_alias(&mut self, name: &str, type_params: &[TypeParam], value: &Expr) {
         // ── Step 1: create TypeVar objects for each type parameter ───────────
         // Each TypeVar is stored to the current namespace so that the RHS
         // expression can reference it by name.  After evaluating the RHS we
         // delete them again so they do not leak into the enclosing scope.
         let mut typevar_regs: Vec<Reg> = Vec::with_capacity(type_params.len());
         for param in type_params {
-            let param_name_str = crate::value::Value::string(param.clone());
-            let param_const_idx = self.intern_const(param_name_str);
             let tv_reg = self.alloc_temp();
-            self.emit(Insn::MakeTypeVar(tv_reg, param_const_idx));
+            // Evaluates the bound/constraint clause (if any) and emits MakeTypeVar.
+            // Earlier params are already bound, so a later bound may reference them.
+            self.emit_make_typevar(tv_reg, param);
             // Bind the TypeVar to the param name so the RHS expression can
             // load it via LoadGlobal.  We use StoreGlobal unconditionally
             // (even if `param` happens to be in local_index) because DeleteName
@@ -5628,7 +5628,7 @@ impl Compiler {
             // that writes there.  compile_store_name would use Move+SyncModuleGlobal
             // for names in local_index, which writes only to a register and
             // module_globals_dict — neither of which DeleteName removes from.
-            let param_name_idx = self.intern_name(param);
+            let param_name_idx = self.intern_name(&param.name);
             self.emit(Insn::StoreGlobal(param_name_idx, tv_reg));
             typevar_regs.push(tv_reg);
         }
@@ -5689,7 +5689,7 @@ impl Compiler {
         // Mirrors CPython's hidden annotation scope: type params must NOT be
         // visible in the enclosing scope after the type alias statement.
         for param in type_params {
-            let name_idx = self.intern_name(param);
+            let name_idx = self.intern_name(&param.name);
             self.emit(Insn::DeleteName(name_idx));
         }
 
@@ -5744,7 +5744,7 @@ impl Compiler {
     /// `LoadGlobal`, so the binding must outlive the definition statement. This
     /// leaks the parameter name into the enclosing namespace, which CPython hides
     /// behind a dedicated annotation scope; see the deferred note in the PR.
-    fn emit_bind_type_params(&mut self, type_params: &[String]) -> (Reg, Reg) {
+    fn emit_bind_type_params(&mut self, type_params: &[TypeParam]) -> (Reg, Reg) {
         let n = type_params.len() as Reg;
         if n == 0 {
             return (0, 0);
@@ -5762,15 +5762,60 @@ impl Compiler {
             self.max_reg = self.next_temp - 1;
         }
         for (i, param) in type_params.iter().enumerate() {
-            let name_const = self.intern_const(crate::value::Value::string(param.clone()));
             let tv_reg = base + i as Reg;
-            self.emit(Insn::MakeTypeVar(tv_reg, name_const));
+            self.emit_make_typevar(tv_reg, param);
             // Bind via StoreGlobal so the name lands in `env.values`, which is
             // exactly where a body's `LoadGlobal` for a free variable looks.
-            let name_idx = self.intern_name(param);
+            // Binding before the next param's bound is compiled lets later
+            // bounds reference earlier params (`def f[T, U: T]`), as in CPython.
+            let name_idx = self.intern_name(&param.name);
             self.emit(Insn::StoreGlobal(name_idx, tv_reg));
         }
         (base, n)
+    }
+
+    /// Emit a `MakeTypeVar` into `tv_reg` for `param`, first evaluating its
+    /// bound/constraint clause (if any) into a scratch register so the TypeVar
+    /// carries the correct `__bound__` / `__constraints__`.  The bound expression
+    /// is evaluated in the current scope, where any earlier type parameters are
+    /// already bound.
+    fn emit_make_typevar(&mut self, tv_reg: Reg, param: &TypeParam) {
+        let name_const = self.intern_const(crate::value::Value::string(param.name.clone()));
+        match &param.bound {
+            None => {
+                self.emit(Insn::MakeTypeVar(tv_reg, name_const, 0, 0));
+            }
+            Some(TypeParamBound::Bound(expr)) => {
+                let bound_reg = self.compile_expr(expr);
+                self.emit(Insn::MakeTypeVar(tv_reg, name_const, 1, bound_reg));
+                self.free_temp(bound_reg);
+            }
+            Some(TypeParamBound::Constraints(elems)) => {
+                let tuple_reg = self.compile_constraint_tuple(elems);
+                self.emit(Insn::MakeTypeVar(tv_reg, name_const, 2, tuple_reg));
+                self.free_temp(tuple_reg);
+            }
+        }
+    }
+
+    /// Evaluate the constraint expressions of a `T: (a, b, ...)` parameter into a
+    /// fresh contiguous register block and pack them into a tuple, returning the
+    /// register holding the tuple.  Caller is responsible for freeing it.
+    fn compile_constraint_tuple(&mut self, elems: &[Expr]) -> Reg {
+        let n = elems.len() as Reg;
+        let base = self.alloc_temp();
+        for _ in 1..n as usize {
+            self.alloc_temp();
+        }
+        for (i, elem) in elems.iter().enumerate() {
+            self.compile_expr_into(elem, base + i as Reg);
+        }
+        let tuple_reg = self.alloc_temp();
+        self.emit(Insn::BuildTuple(tuple_reg, base, n));
+        for i in 0..n as usize {
+            self.free_temp(base + i as Reg);
+        }
+        tuple_reg
     }
 
     /// Build the `__type_params__` tuple from an already-bound contiguous block
@@ -8555,7 +8600,7 @@ impl Compiler {
         decorators: &[Expr],
         return_annotation: Option<&Expr>,
         is_async: bool,
-        type_params: &[String],
+        type_params: &[TypeParam],
     ) {
         let (proto_idx, is_pure, has_kwonly_params) = match self.build_def_proto(
             name,
@@ -8926,7 +8971,7 @@ impl Compiler {
         keywords: &[(String, Expr)],
         body: &[Stmt],
         decorators: &[Expr],
-        type_params: &[String],
+        type_params: &[TypeParam],
     ) {
         let proto_idx = match self.build_class_proto(name, keywords, body) {
             Some(idx) => idx,

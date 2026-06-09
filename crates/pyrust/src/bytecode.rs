@@ -404,9 +404,13 @@ pub enum Insn {
     /// Tuple: (dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base,
     /// kwarg_n, meta_reg).
     MakeClassMeta(Reg, u8, Reg, u8, u16, Reg, u8, Reg),
-    /// R[dst] = TypeVar(name=consts[name_idx])
+    /// R[dst] = TypeVar(name=consts[name_idx], <bound or constraints from R[bound_reg]>)
     /// PEP 695: construct a `TypeVar` object for a generic type parameter.
-    MakeTypeVar(Reg, u16),
+    /// `bound_kind` selects how `R[bound_reg]` populates the TypeVar:
+    /// `0` = no bound (`bound_reg` ignored, `__bound__` is `None`,
+    /// `__constraints__` is `()`); `1` = `R[bound_reg]` is the `__bound__`;
+    /// `2` = `R[bound_reg]` is the `__constraints__` tuple.
+    MakeTypeVar(Reg, u16, u8, Reg),
     /// R[dst] = TypeAliasType(name=consts[name_idx], value=R[value_reg], type_params=R[params_reg])
     /// PEP 695: construct a `TypeAliasType` object from a string name, the evaluated value
     /// expression, and a tuple of TypeVar objects (may be an empty tuple).

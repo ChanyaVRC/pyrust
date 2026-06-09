@@ -3959,7 +3959,7 @@ impl Interpreter {
                 }
 
                 // ── PEP 695 type alias ───────────────────────────────────
-                Insn::MakeTypeVar(dst, name_idx) => {
+                Insn::MakeTypeVar(dst, name_idx, bound_kind, bound_reg) => {
                     let name_val = pool_get!(code.consts, *name_idx, "const");
                     let name_str = match name_val.kind() {
                         pyrust_core::ValueKind::Str(s) => s.to_string(),
@@ -3970,7 +3970,18 @@ impl Interpreter {
                             unreachable!()
                         }
                     };
-                    regs[*dst as usize] = make_typevar_instance(name_str);
+                    let (bound, constraints) = match *bound_kind {
+                        1 => {
+                            let v = vm_try!(vm_read(&regs, *bound_reg, num_locals)).clone();
+                            (v, Value::tuple(vec![]))
+                        }
+                        2 => {
+                            let v = vm_try!(vm_read(&regs, *bound_reg, num_locals)).clone();
+                            (Value::none(), v)
+                        }
+                        _ => (Value::none(), Value::tuple(vec![])),
+                    };
+                    regs[*dst as usize] = make_typevar_instance(name_str, bound, constraints);
                 }
                 Insn::MakeTypeAlias(dst, name_idx, value_reg, params_reg) => {
                     let name_val = pool_get!(code.consts, *name_idx, "const");
@@ -4603,15 +4614,16 @@ thread_local! {
 /// Construct a `TypeVar` `PyInstance` with `__name__`, `__constraints__`, and
 /// `__bound__` attributes, matching the observable surface of CPython's
 /// `typing.TypeVar` as created by PEP 695 type parameter syntax.
-pub(crate) fn make_typevar_instance(name: String) -> Value {
+///
+/// `bound` is the upper bound (`Value::none()` for an unbounded parameter) and
+/// `constraints` is the constraint tuple (an empty tuple when unconstrained).
+/// A PEP 695 parameter is never both bounded and constrained.
+pub(crate) fn make_typevar_instance(name: String, bound: Value, constraints: Value) -> Value {
     TYPEVAR_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__", Value::string(name));
-        attrs.insert(
-            "__constraints__",
-            Value::tuple(vec![]),
-        );
-        attrs.insert("__bound__", Value::none());
+        attrs.insert("__constraints__", constraints);
+        attrs.insert("__bound__", bound);
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,

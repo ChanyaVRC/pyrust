@@ -9,6 +9,28 @@ pub struct FunctionParam {
     pub is_positional_only: bool, // declared before / separator
 }
 
+/// A single PEP 695 type parameter, e.g. `T`, `T: int`, or `T: (int, str)`.
+#[derive(Debug, Clone)]
+pub struct TypeParam {
+    pub name: String,
+    /// The bound or constraint clause following `:`, if present.
+    pub bound: Option<TypeParamBound>,
+}
+
+/// The clause following the `:` in a PEP 695 type parameter.
+///
+/// CPython distinguishes a single *bound* (`T: int`) from a tuple of
+/// *constraints* (`T: (int, str)`): the former populates `__bound__`, the
+/// latter `__constraints__`.  A parenthesised expression list is treated as
+/// constraints; anything else is a bound.
+#[derive(Debug, Clone)]
+pub enum TypeParamBound {
+    /// `T: int` — a single upper bound, stored on `__bound__`.
+    Bound(Expr),
+    /// `T: (int, str)` — a constraint tuple, stored on `__constraints__`.
+    Constraints(Vec<Expr>),
+}
+
 #[derive(Debug, Clone)]
 pub struct CallArg {
     pub name: Option<String>,
@@ -103,9 +125,9 @@ pub enum Stmt {
         /// the compiler currently rejects `await` expressions regardless.
         #[allow(dead_code)]
         is_async: bool,
-        /// PEP 695 type parameter names from `def foo[T, U]():`.
-        /// Bounds are not yet evaluated; only the names are stored.
-        type_params: Vec<String>,
+        /// PEP 695 type parameters from `def foo[T, U: int]():`, carrying each
+        /// parameter's name and optional bound/constraint clause.
+        type_params: Vec<TypeParam>,
     },
     Class {
         name: String,
@@ -121,9 +143,9 @@ pub enum Stmt {
         keywords: Vec<(String, Expr)>,
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
-        /// PEP 695 type parameter names from `class Foo[T, U]:`.
-        /// Bounds are not yet evaluated; only the names are stored.
-        type_params: Vec<String>,
+        /// PEP 695 type parameters from `class Foo[T, U: int]:`, carrying each
+        /// parameter's name and optional bound/constraint clause.
+        type_params: Vec<TypeParam>,
     },
     Global(Vec<String>),
     Nonlocal(Vec<String>),
@@ -199,14 +221,14 @@ pub enum Stmt {
         subject: Expr,
         arms: Vec<MatchArm>,
     },
-    /// PEP 695 type alias statement: `type <name>[T, U] = <value>`.
+    /// PEP 695 type alias statement: `type <name>[T, U: int] = <value>`.
     /// Creates a `TypeAliasType` object and binds it to `name`.
-    /// `type_params` holds the names of the generic type parameters (e.g. `["T", "U"]`).
+    /// `type_params` holds the generic type parameters (name + optional bound).
     /// When non-empty, each param becomes a `TypeVar` bound in the scope where `value` is
     /// evaluated; the resulting alias gets a `__type_params__` attribute.
     TypeAlias {
         name: String,
-        type_params: Vec<String>,
+        type_params: Vec<TypeParam>,
         value: Expr,
     },
 }
