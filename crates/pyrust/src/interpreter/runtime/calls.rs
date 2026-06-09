@@ -293,6 +293,26 @@ impl Interpreter {
             ValueKind::BuiltinFunction("BaseExceptionGroup.split") => {
                 self.exception_group_subgroup_or_split(args, true)
             }
+            // Issue #2276: the unbound type-qualified object-level dunders
+            // (`str.__hash__` / `int.__repr__` / `str.__str__` /
+            // `int.__format__` / …) synthesised by `get_attr_class` for the
+            // primitives that override them in CPython.  CPython attributes the
+            // receiver guard to the *called* type (not `object`) and dispatches
+            // through the type's own slot; emulate that by validating the
+            // receiver here (slot-wrapper wording for `__hash__`/`__repr__`/
+            // `__str__`, method_descriptor wording for `__format__`) and then
+            // delegating to the shared `object.__X__` body / `apply_format_spec`
+            // — the implementations that already render a bare primitive and a
+            // subclass `PyInstance` correctly.
+            ValueKind::BuiltinFunction(name)
+                if name
+                    .split_once('.')
+                    .is_some_and(|(_, m)| matches!(m, "__hash__" | "__repr__" | "__str__" | "__format__"))
+                    && primitive_object_dunder_owner(name).is_some() =>
+            {
+                let (type_name, method) = name.split_once('.').unwrap();
+                self.call_primitive_object_dunder(type_name, method, args)
+            }
             ValueKind::BuiltinFunction("str.format") => {
                 let self_val = args
                     .first()
@@ -2210,6 +2230,109 @@ impl Interpreter {
         } else {
             iter_values(val)
         }
+    }
+
+    /// Issue #2276: dispatch an unbound type-qualified object-level dunder
+    /// (`str.__hash__(x)`, `int.__format__(5, 'x')`, …) whose owner is the
+    /// primitive `type_name`.  Validates the receiver against the called type
+    /// (CPython names the *called* type, not `object`, and picks slot-wrapper vs
+    /// method_descriptor wording by descriptor kind), then delegates:
+    ///   * `__hash__`/`__repr__`/`__str__` (slot wrappers) → the shared
+    ///     `object.__X__` registry body, which renders both a bare primitive and
+    ///     a subclass `PyInstance` (backing form, or set/frozenset type name).
+    ///   * `__format__` (method_descriptor; int/str/float) → `apply_format_spec`
+    ///     on the backing value, matching the bound form and `format()`.
+    fn call_primitive_object_dunder(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[ExpandedCallArg],
+    ) -> Result<Value> {
+        let is_format = method == "__format__";
+        // Receiver presence guard.  Slot wrappers use "descriptor '<m>' of
+        // '<type>' object needs an argument"; `__format__` is a method_descriptor
+        // ("unbound method <type>.__format__() needs an argument").
+        let self_arg = args.first().ok_or_else(|| {
+            if is_format {
+                pyrust_core::descriptor_needs_arg!(method, type_name, method)
+            } else {
+                pyrust_core::descriptor_needs_arg!(method, type_name)
+            }
+        })?;
+        // Receiver-type guard: accept a bare primitive of `type_name` or a
+        // subclass `PyInstance` whose backing data is that type.
+        let recv_ok = match (type_name, self_arg.value.kind()) {
+            ("int" | "bool", ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)) => true,
+            ("float", ValueKind::Float(_)) => true,
+            ("complex", ValueKind::Complex(_, _)) => true,
+            ("str", ValueKind::Str(_)) => true,
+            ("bytes", ValueKind::Bytes(_)) => true,
+            ("list", ValueKind::List(_)) => true,
+            ("tuple", ValueKind::Tuple(_)) => true,
+            ("dict", ValueKind::Dict(_)) => true,
+            ("set", ValueKind::Set(_)) => true,
+            ("frozenset", ValueKind::BuiltinObject { ops, .. })
+                if ops.type_name() == "frozenset" => true,
+            (_, ValueKind::PyInstance(inst)) => instance_builtin_data(inst)
+                .is_some_and(|b| pyrust_core::builtin_type_name(&b) == type_name),
+            _ => false,
+        };
+        if !recv_ok {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(if is_format {
+                pyrust_core::descriptor_requires!(method, type_name, actual, method)
+            } else {
+                pyrust_core::descriptor_requires!(method, type_name, actual)
+            });
+        }
+        if is_format {
+            if args.iter().any(|a| a.name.is_some()) {
+                return Err(pyrust_core::type_err!(
+                    "{type_name}.__format__() takes no keyword arguments"
+                ));
+            }
+            if args.len() != 2 {
+                return Err(pyrust_core::type_err!(
+                    "{type_name}.__format__() takes exactly one argument ({} given)",
+                    args.len() - 1
+                ));
+            }
+            let spec = match args[1].value.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => {
+                    return Err(pyrust_core::type_err!(
+                        "__format__() argument must be str, not {}",
+                        pyrust_core::builtin_type_name(&args[1].value)
+                    ));
+                }
+            };
+            return apply_format_spec(&self_arg.value, &spec);
+        }
+        // __hash__/__repr__/__str__ take no further positional/keyword args.
+        if args.iter().skip(1).any(|a| a.name.is_some()) {
+            return Err(pyrust_core::type_err!(
+                "{type_name}.{method}() takes no keyword arguments"
+            ));
+        }
+        // `__hash__` routes through `hash_value_with_interp` (the same path the
+        // `hash()` builtin uses) rather than `object.__hash__`, so a scalar
+        // subclass instance (`int.__hash__(MyInt(5))`) hashes its backing value
+        // to `5` as CPython does — `object.__hash__` returns the identity hash.
+        if method == "__hash__" {
+            let h = crate::builtin_modules::builtins::hash_value_with_interp(
+                self,
+                &self_arg.value,
+            )?;
+            return Ok(Value::int(h));
+        }
+        let object_fn: &'static str = if method == "__repr__" {
+            "object.__repr__"
+        } else {
+            "object.__str__"
+        };
+        let dispatch = crate::builtin_registry::lookup(object_fn)
+            .unwrap_or_else(|| panic!("{object_fn} must be in the registry"));
+        dispatch(self, args)
     }
 
     /// Issue #1909: execute a container/sequence protocol dunder on a built-in
@@ -6427,6 +6550,26 @@ fn is_container_protocol_dunder_name(name: &str) -> bool {
             // the per-receiver membership check restricts it to `dict`.
             | "__reversed__"
     )
+}
+
+/// Issue #2276: `Some((type_name, dunder))` when `qualified` is one of the
+/// type-qualified object-level dunder sentinels synthesised by
+/// `get_attr_class::primitive_owned_object_dunder` (`"str.__hash__"`,
+/// `"int.__format__"`, …); `None` otherwise (including `"object.__hash__"`).
+/// Keep the ownership in sync with `primitive_owned_object_dunder`.
+fn primitive_object_dunder_owner(qualified: &str) -> Option<(&str, &str)> {
+    let (type_name, dunder) = qualified.split_once('.')?;
+    let owned = match type_name {
+        "bool" => matches!(dunder, "__repr__"),
+        "int" | "float" => matches!(dunder, "__hash__" | "__repr__" | "__format__"),
+        "complex" => matches!(dunder, "__hash__" | "__repr__"),
+        "str" => matches!(dunder, "__hash__" | "__repr__" | "__str__" | "__format__"),
+        "bytes" => matches!(dunder, "__hash__" | "__repr__" | "__str__"),
+        "tuple" | "frozenset" => matches!(dunder, "__hash__" | "__repr__"),
+        "list" | "dict" | "set" => dunder == "__repr__",
+        _ => false,
+    };
+    owned.then_some((type_name, dunder))
 }
 
 /// Numeric-tower rank used by the scalar forward dunders (#2070):

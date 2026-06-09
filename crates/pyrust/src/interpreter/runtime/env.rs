@@ -1089,6 +1089,31 @@ impl Interpreter {
                     name,
                 );
             }
+        // Issue #2276: object-level dunders that a primitive type *overrides* in
+        // CPython are attributed to the called type, not `object`
+        // (`str.__hash__()` → "... of 'str' object ...", not 'object').  When the
+        // MRO lookup below would resolve such a dunder to the inherited
+        // `object.__X__` sentinel — i.e. there is no closer user override — we
+        // instead return a type-qualified `BuiltinFunction("<type>.__X__")`
+        // sentinel.  It is synthesised only for direct `T.__X__` attribute
+        // access and is deliberately NOT stored in the class `attrs` (which
+        // would shadow the `object.__X__` sentinel that the repr/hash rendering
+        // paths key on via `lookup_class_attr`).  The matching dispatch arm in
+        // `call_function_expanded` validates the receiver (naming the called
+        // type) and delegates to the shared `object.__X__` / formatting
+        // machinery.  Ownership verified against python3.12
+        // (`[c for c in T.__mro__ if '__X__' in c.__dict__]`).
+        if matches!(name, "__hash__" | "__repr__" | "__str__" | "__format__")
+            && let Some(qualified) = primitive_owned_object_dunder(&class, name)
+            && matches!(
+                lookup_class_attr(&class, name).as_ref().map(|v| v.kind()),
+                Some(ValueKind::BuiltinFunction(
+                    "object.__hash__" | "object.__repr__" | "object.__str__" | "object.__format__"
+                ))
+            )
+        {
+            return Ok(Value::builtin_function(qualified));
+        }
         if let Some(value) = lookup_class_attr(&class, name) {
             // Descriptor protocol for class-level access: if the class
             // attribute is a user-defined descriptor (PyInstance with
@@ -2972,6 +2997,75 @@ impl Interpreter {
         Ok(value.truthy())
     }
 
+}
+
+/// Issue #2276: for a primitive type (or a subclass of one) that *overrides* an
+/// object-level dunder in CPython, return the `'static` type-qualified sentinel
+/// name (`"str.__hash__"`, `"int.__format__"`, …) so an unbound `T.__X__` access
+/// is attributed to the called type rather than `object`.  Returns `None` for a
+/// type that inherits the dunder straight from `object`.
+///
+/// Ownership table verified against python3.12
+/// (`[c.__name__ for c in T.__mro__ if '__X__' in c.__dict__]`):
+///   * `__hash__` / `__repr__`: every scalar/sequence primitive owns its slot
+///     (list/dict/set/bytearray set `__hash__` to `None`, so they are excluded
+///     from `__hash__`).
+///   * `__str__`: only `str` and `bytes`.
+///   * `__format__`: only `int`, `str`, `float`.
+///
+/// The nearest primitive in the class chain wins (a `class S(str)` subclass is
+/// attributed to `str`; `bool` chains to `int`).
+fn primitive_owned_object_dunder(
+    class: &Rc<RefCell<PyClass>>,
+    name: &str,
+) -> Option<&'static str> {
+    // Walk the primitive bases most-derived first; `bool` before `int` so a
+    // bare `bool` attributes `__format__`/`__hash__` to `int` (CPython:
+    // `bool.__format__` is inherited from `int`).
+    const OWNERS: &[(&str, &[&str])] = &[
+        ("bool", &["__repr__"]),
+        ("int", &["__hash__", "__repr__", "__format__"]),
+        ("float", &["__hash__", "__repr__", "__format__"]),
+        ("complex", &["__hash__", "__repr__"]),
+        ("str", &["__hash__", "__repr__", "__str__", "__format__"]),
+        ("bytes", &["__hash__", "__repr__", "__str__"]),
+        ("tuple", &["__hash__", "__repr__"]),
+        ("frozenset", &["__hash__", "__repr__"]),
+        ("list", &["__repr__"]),
+        ("dict", &["__repr__"]),
+        ("set", &["__repr__"]),
+    ];
+    for (type_name, dunders) in OWNERS {
+        if dunders.contains(&name) && class_chain_contains_name(class, type_name) {
+            return Some(match (*type_name, name) {
+                ("bool", "__repr__") => "bool.__repr__",
+                ("int", "__hash__") => "int.__hash__",
+                ("int", "__repr__") => "int.__repr__",
+                ("int", "__format__") => "int.__format__",
+                ("float", "__hash__") => "float.__hash__",
+                ("float", "__repr__") => "float.__repr__",
+                ("float", "__format__") => "float.__format__",
+                ("complex", "__hash__") => "complex.__hash__",
+                ("complex", "__repr__") => "complex.__repr__",
+                ("str", "__hash__") => "str.__hash__",
+                ("str", "__repr__") => "str.__repr__",
+                ("str", "__str__") => "str.__str__",
+                ("str", "__format__") => "str.__format__",
+                ("bytes", "__hash__") => "bytes.__hash__",
+                ("bytes", "__repr__") => "bytes.__repr__",
+                ("bytes", "__str__") => "bytes.__str__",
+                ("tuple", "__hash__") => "tuple.__hash__",
+                ("tuple", "__repr__") => "tuple.__repr__",
+                ("frozenset", "__hash__") => "frozenset.__hash__",
+                ("frozenset", "__repr__") => "frozenset.__repr__",
+                ("list", "__repr__") => "list.__repr__",
+                ("dict", "__repr__") => "dict.__repr__",
+                ("set", "__repr__") => "set.__repr__",
+                _ => return None,
+            });
+        }
+    }
+    None
 }
 
 /// Returns the attrs `Rc` for `func`, initialising it lazily on first call.

@@ -948,6 +948,13 @@ const STR_METHODS: &[&str] = &[
     "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric",
     "islower", "isupper", "istitle", "isascii", "isidentifier", "isprintable",
     "translate",
+    // Issue #2276: `str.encode` is a method_descriptor whose implementation
+    // already exists (`pyrust_builtins::string::str_encode`); it was simply not
+    // exposed unbound, so `str.encode()` raised `AttributeError` instead of the
+    // CPython descriptor `TypeError`.  Registering it routes both the unbound
+    // call (`str.encode("ab")`) and the receiver guards through the generic
+    // `str.*` method_descriptor arm.
+    "encode",
 ];
 
 const LIST_METHODS: &[&str] = &[
