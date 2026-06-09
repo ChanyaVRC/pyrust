@@ -16,8 +16,16 @@ from pathlib import Path
 
 # ── Setup: scratch directory ──────────────────────────────────────────────────
 
+# Start from a clean scratch dir so a prior run that crashed before its cleanup
+# (e.g. on an assertion failure) can't leave stale files that perturb the glob
+# assertions below (#2269). Uses only iterdir/unlink/rmdir — the same APIs the
+# end-of-test cleanup relies on — so it stays parity-safe across pyrust/CPython.
 _test_dir = Path('/tmp/pyrust_pathlib_fixes_test')
-_test_dir.mkdir(exist_ok=True)
+if _test_dir.exists():
+    for _stale in _test_dir.iterdir():
+        _stale.unlink()
+    os.rmdir(str(_test_dir))
+_test_dir.mkdir()
 (_test_dir / 'apple.txt').write_text('a')
 (_test_dir / 'banana.txt').write_text('b')
 (_test_dir / 'cherry.py').write_text('c')
