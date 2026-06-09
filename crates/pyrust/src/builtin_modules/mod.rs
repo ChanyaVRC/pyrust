@@ -148,4 +148,8 @@ pyrust_builtin_modules! {
     contextlib,
     "__future__" as future,
     warnings,
+    // Minimal async/await support (issue #1039): `asyncio.run` is native;
+    // `sleep` / `gather` are injected from `asyncio_py.py` by the post-load
+    // hook in `env.rs::load_module`.
+    asyncio,
 }

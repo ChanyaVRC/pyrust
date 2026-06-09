@@ -202,6 +202,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         fn_protos,
         cell_vars: code.cell_vars,
         is_generator: code.is_generator,
+        is_coroutine: code.is_coroutine,
         is_class_method: code.is_class_method,
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
@@ -289,7 +290,7 @@ fn build_inline_plan(proto: &FnProto, caller_consts: &mut Vec<Value>) -> Option<
         return None;
     }
     let code = &proto.code;
-    if code.is_generator {
+    if code.is_generator || code.is_coroutine {
         return None;
     }
     // No closure capture of own locals, and no global/nonlocal interaction.
@@ -2406,6 +2407,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
         | GetIter(_, s)
+        | GetAwaitable(_, s)
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
@@ -2551,6 +2553,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
         | GetIter(_, s)
+        | GetAwaitable(_, s)
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
@@ -3479,6 +3482,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
         | GetSlice(r, _, _)
+        | GetAwaitable(r, _)
         | Call(r, _)
         | CallMemo(r, _)
         | Move(r, _)
@@ -5206,6 +5210,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::ImportFromAttr(dst, obj, n) => Insn::ImportFromAttr(dst, s(&copies, obj), n),
             Insn::GetItem(dst, obj, idx) => Insn::GetItem(dst, s(&copies, obj), s(&copies, idx)),
             Insn::GetIter(slot, src) => Insn::GetIter(slot, s(&copies, src)),
+            Insn::GetAwaitable(dst, src) => Insn::GetAwaitable(dst, s(&copies, src)),
             Insn::Unpack(dst, src, n) => Insn::Unpack(dst, s(&copies, src), n),
             Insn::UnpackEx {
                 src,
@@ -7149,6 +7154,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
         | GetIter(_, s)
+        | GetAwaitable(_, s)
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)

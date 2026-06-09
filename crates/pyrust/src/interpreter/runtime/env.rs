@@ -2694,6 +2694,14 @@ impl Interpreter {
                     }
                 }
             }
+            // `asyncio` Python-source members (issue #1039): inject `sleep`
+            // and `gather`, defined as real coroutines in `asyncio_py.py`, by
+            // exec'ing that source after the native `run` is registered.
+            if name == "asyncio"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::asyncio::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*

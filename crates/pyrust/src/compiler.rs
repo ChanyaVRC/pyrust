@@ -5220,6 +5220,7 @@ impl Compiler {
             fn_protos: self.fn_protos,
             cell_vars: self.cell_vars.into_iter().collect(),
             is_generator,
+            is_coroutine: self.is_async_function,
             is_class_method: self.is_class_method,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
@@ -6569,10 +6570,6 @@ impl Compiler {
                     self.set_syntax_error("'await' outside function");
                 } else if !self.is_async_function {
                     self.set_syntax_error("'await' outside async function");
-                } else {
-                    self.set_syntax_error(
-                        "'await' not supported: async functions are not yet implemented",
-                    );
                 }
             }
             Expr::Binary { left, right, .. } => {
@@ -8268,7 +8265,11 @@ impl Compiler {
         // Include `name` so self-recursive calls are treated as pure (fixpoint assumption).
         let mut pure_fns_with_self = self.pure_locals.clone();
         pure_fns_with_self.insert(name.to_string());
-        let is_pure = crate::interpreter::is_pure_body(body, &pure_fns_with_self, &inner_index_rc);
+        // A coroutine function (`async def`, issue #1039) is never pure: calling
+        // it must build a coroutine object (an observable side effect), so it
+        // must not be inlined, memoized, or const-folded by the optimizer.
+        let is_pure = !is_async
+            && crate::interpreter::is_pure_body(body, &pure_fns_with_self, &inner_index_rc);
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
@@ -10151,17 +10152,53 @@ impl Compiler {
                 result_reg
             }
 
-            Expr::Await(_) => {
+            Expr::Await(awaited_expr) => {
                 if !self.is_function_scope {
                     self.set_syntax_error("'await' outside function");
-                } else if !self.is_async_function {
-                    self.set_syntax_error("'await' outside async function");
-                } else {
-                    self.set_syntax_error(
-                        "'await' not supported: async functions are not yet implemented",
-                    );
+                    return 0;
                 }
-                0
+                if !self.is_async_function {
+                    self.set_syntax_error("'await' outside async function");
+                    return 0;
+                }
+                // `await expr` lowers to roughly `yield from GET_AWAITABLE(expr)`
+                // (issue #1039).  `GetAwaitable` resolves the awaitable to its
+                // driving iterator (a coroutine drives itself; an object with
+                // `__await__` yields its `__await__()` result); `YieldFrom` then
+                // reuses the PEP 380 suspend/resume machinery to drive it to
+                // completion, surfacing its return value (StopIteration.value).
+                //
+                // The result register is allocated FIRST so it sits below the
+                // scratch temps (`awaited_src`/`iter_reg`/`sent_reg`).  The temp
+                // allocator is strictly LIFO — `free_temp` only reclaims the top
+                // of the stack — so the scratch temps are freed in reverse
+                // allocation order while `result_reg` (the expression's value,
+                // which outlives them) stays below.  An earlier version freed
+                // `awaited_src` before the temps allocated above it, making those
+                // frees silent no-ops; the leaked slots then corrupted register
+                // allocation for a *subsequent* await when this await was nested
+                // in a larger expression (e.g. `print(await x)`), surfacing as a
+                // spurious "object is not iterable".
+                let result_reg = self.alloc_temp();
+                let awaited_src = self.compile_expr(awaited_expr);
+                let iter_reg = self.alloc_temp();
+                self.emit(Insn::GetAwaitable(iter_reg, awaited_src));
+
+                let sent_reg = self.alloc_temp();
+                self.emit(Insn::LoadNone(sent_reg));
+                self.emit(Insn::LoadNone(result_reg));
+
+                self.emit(Insn::YieldFrom {
+                    iter_reg,
+                    sent_reg,
+                    result_reg,
+                });
+
+                self.free_temp(sent_reg);
+                self.free_temp(iter_reg);
+                self.free_temp(awaited_src);
+
+                result_reg
             }
         }
     }

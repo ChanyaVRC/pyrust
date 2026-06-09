@@ -306,6 +306,11 @@ pub(crate) struct GeneratorFrame {
     /// Fully-qualified name of the generator function (issue #1270).
     /// Exposed as `g.__qualname__`.
     pub(crate) qualname: std::sync::Arc<str>,
+    /// True when this frame backs a *coroutine* (an `async def` body, issue
+    /// #1039) rather than a plain generator.  Coroutines reuse the entire
+    /// suspend/resume machinery but report `type(coro).__name__ == "coroutine"`,
+    /// render a `<coroutine object …>` repr, and are NOT iterable with `for`.
+    pub(crate) is_coroutine: bool,
 }
 
 /// Call-trampoline frame (#2234): what the caller needs restored when a
@@ -1697,10 +1702,15 @@ impl Interpreter {
                         None => break 'trampoline,
                     };
                     if callee_code.is_generator
+                        || callee_code.is_coroutine
                         || callee_code.num_iters != 0
                         || callee_code.has_exc_handlers
                         || !callee_code.cell_vars.is_empty()
                     {
+                        // A coroutine function (`async def`, issue #1039) must
+                        // build a coroutine object instead of executing inline,
+                        // even when its body has no `await` (so `is_generator`
+                        // is false).
                         break 'trampoline;
                     }
                     if call_depth() + tramp_stack.len() >= max_call_depth() {
@@ -3258,6 +3268,13 @@ impl Interpreter {
                     });
                 }
 
+                // ── GetAwaitable (await, issue #1039) ────────────────────
+                Insn::GetAwaitable(dst, src) => {
+                    let awaited = vm_try!(vm_read(&regs, *src, num_locals));
+                    let resolved = vm_try!(self.get_awaitable(&awaited));
+                    regs[*dst as usize] = resolved;
+                }
+
                 // ── YieldFrom (PEP 380) ──────────────────────────────────
                 Insn::YieldFrom { iter_reg, sent_reg, result_reg } => {
                     let iter_val = vm_try!(vm_read(&regs, *iter_reg, num_locals));
@@ -3394,6 +3411,13 @@ impl Interpreter {
                         IterState::Indexed { reg: *src, pos: 0 }
                     } else {
                         let src_val = vm_try!(vm_read(&regs, *src, num_locals));
+                        // A coroutine (`async def`, issue #1039) is not iterable
+                        // — `for x in coro:` raises TypeError, matching CPython.
+                        if crate::builtin_modules::builtins::is_coroutine_value(&src_val) {
+                            vm_try!(Err::<(), _>(pyrust_core::type_err!(
+                                "'coroutine' object is not iterable"
+                            )));
+                        }
                         // Detect the kind tag in a scoped block so the
                         // kind() Ref drops before we may move src_val
                         // into IterState / iter_values / make_getitem_iter
@@ -4085,6 +4109,107 @@ impl Interpreter {
         }
     }
 
+    /// Resolve an `await` target to the iterator that drives it (issue #1039).
+    ///
+    /// Mirrors CPython's `GET_AWAITABLE`:
+    /// - a coroutine (an `async def` frame) is its own awaitable → returned as-is;
+    /// - an object defining `__await__` → returns `obj.__await__()`;
+    /// - anything else → `TypeError: object … can't be used in 'await' expression`.
+    ///
+    /// The resolved value is then driven by the following `YieldFrom`.
+    pub(crate) fn get_awaitable(&mut self, awaited: &Value) -> Result<Value> {
+        // A coroutine drives itself.  `try_borrow`: a coroutine that is already
+        // executing (e.g. awaiting itself) has its cell checked out — treat a
+        // busy coroutine cell as awaitable here and let the following
+        // `YieldFrom` raise the proper "already executing" ValueError rather
+        // than panicking on a re-borrow.
+        if let ValueKind::Generator(state_rc) = awaited.kind() {
+            let is_coro_or_busy = match state_rc.try_borrow() {
+                Ok(b) => b
+                    .downcast_ref::<GeneratorFrame>()
+                    .map(|f| f.is_coroutine)
+                    .unwrap_or(false),
+                Err(_) => true,
+            };
+            if is_coro_or_busy {
+                return Ok(awaited.clone());
+            }
+        }
+        // An object with `__await__` (e.g. a future-like awaitable) — call it
+        // and drive the returned iterator.
+        if let ValueKind::PyInstance(inst_rc) = awaited.kind() {
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(await_method) = lookup_class_attr(&class, "__await__") {
+                return invoke_class_method(
+                    self,
+                    await_method,
+                    awaited.clone(),
+                    &[],
+                );
+            }
+        }
+        Err(pyrust_core::type_err!(
+            "object {} can't be used in 'await' expression",
+            value_type_name_str(awaited)
+        ))
+    }
+
+    /// Drive a coroutine (`async def` frame) to completion (issue #1039).
+    ///
+    /// This is the minimal event loop behind `asyncio.run`: it repeatedly steps
+    /// the top coroutine with `send(None)` until it returns, surfacing the
+    /// coroutine's return value (the `StopIteration.value` it raises on
+    /// completion).  Any value the coroutine *yields* (a bare future, a sleep
+    /// scheduling point) is treated as an immediate no-op scheduling tick and
+    /// the loop steps it again — sufficient for coroutines that only await other
+    /// coroutines or `asyncio.sleep(0)`.  Real I/O / timer scheduling is out of
+    /// scope (see the PR's follow-ups).
+    pub(crate) fn drive_coroutine_to_completion(&mut self, coro: &Value) -> Result<Value> {
+        let state_rc = match coro.kind() {
+            ValueKind::Generator(s) => Rc::clone(s),
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "a coroutine was expected, got {}",
+                    value_type_name_str(coro)
+                ));
+            }
+        };
+        // Guard rail against runaway loops from a misbehaving awaitable that
+        // never completes (e.g. a future that is never resolved).
+        const MAX_STEPS: u64 = 100_000_000;
+        let mut steps: u64 = 0;
+        loop {
+            steps += 1;
+            if steps > MAX_STEPS {
+                return Err(pyrust_core::runtime_err!(
+                    "coroutine did not complete (event loop step limit exceeded)"
+                ));
+            }
+            let mut borrow = state_rc
+                .try_borrow_mut()
+                .map_err(|_| pyrust_core::value_err!("coroutine already executing"))?;
+            let frame = borrow.downcast_mut::<GeneratorFrame>().ok_or_else(|| {
+                pyrust_core::type_err!("a coroutine was expected")
+            })?;
+            match self.resume_generator(frame) {
+                // Coroutine yielded a scheduling point — step it again.
+                Ok(_) => {
+                    drop(borrow);
+                    continue;
+                }
+                Err(e) if is_stop_iteration_error(&e) => {
+                    let result = frame.last_return_value.clone().unwrap_or_else(Value::none);
+                    drop(borrow);
+                    return Ok(result);
+                }
+                Err(e) => {
+                    drop(borrow);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
     /// Advance a `yield from` sub-iterator by one step, forwarding `sent_val`
     /// to the sub-iterator's `send()` method if it is a generator.
     ///
@@ -4099,7 +4224,16 @@ impl Interpreter {
                 let state_rc = Rc::clone(state_rc);
 
                 // Check for GetItemIter (lazy __getitem__ iterator).
-                let is_getitem = state_rc.borrow().downcast_ref::<GetItemIter>().is_some();
+                // `try_borrow`: when the sub-iterator is itself already executing
+                // (a `yield from` / `await` self-cycle), the cell is checked out;
+                // fall through to the `try_borrow_mut` below, which raises the
+                // proper "already executing" ValueError instead of panicking on a
+                // re-borrow (issue #1039 — surfaced by `await`-self; the same
+                // latent panic affected `yield from`-self generators).
+                let is_getitem = state_rc
+                    .try_borrow()
+                    .map(|b| b.downcast_ref::<GetItemIter>().is_some())
+                    .unwrap_or(false);
                 if is_getitem {
                     // GetItemIter doesn't support send; treat as next().
                     return match self.step_getitem_iter(&state_rc) {
@@ -4713,6 +4847,7 @@ mod vm_tests {
             fn_protos: vec![],
             cell_vars: smallvec::smallvec![],
             is_generator: false,
+            is_coroutine: false,
             is_class_method: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(Vec::new()),

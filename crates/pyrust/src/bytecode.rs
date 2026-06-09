@@ -451,6 +451,17 @@ pub enum Insn {
         sent_reg: Reg,
         result_reg: Reg,
     },
+    /// Resolve `R[src]` to an awaitable iterator for `await` (issue #1039).
+    ///
+    /// `R[dst] = GET_AWAITABLE(R[src])`:
+    /// - a coroutine (an `async def` frame) is its own awaitable → returned as-is;
+    /// - an object defining `__await__` → `R[dst] = R[src].__await__()`;
+    /// - anything else → `TypeError: object can't be used in 'await' expression`.
+    ///
+    /// The compiler emits this immediately before a `YieldFrom` over `R[dst]`,
+    /// reusing the PEP 380 send/throw drive machinery to suspend the awaiting
+    /// coroutine until the awaitable completes.
+    GetAwaitable(Reg, Reg),
     /// Self-tail-call: reuse current frame by resetting params from R[args_base..args_base+nargs]
     /// and jumping back to pc=0.  Emitted by the optimizer when Call(r,n)+Return(r) is detected
     /// and the callee is the same function as the one being executed.  Falls back to a normal
@@ -719,6 +730,15 @@ pub struct FnCode {
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
     pub(crate) is_generator: bool,
+    /// True if this function was declared with `async def` (issue #1039).
+    /// Such a function, when called, produces a *coroutine* object rather than
+    /// executing immediately.  The coroutine reuses the generator suspend/resume
+    /// machinery (`GeneratorFrame`) but is tagged so that `type(coro).__name__`
+    /// is `"coroutine"` and it is not iterable with `for`.  An `async def` body
+    /// is always a suspendable frame even when it contains no `await` (e.g.
+    /// `async def f(): return 1`), so `is_coroutine` implies the
+    /// generator-frame creation path independently of `is_generator`.
+    pub(crate) is_coroutine: bool,
     /// True when this function was compiled as a direct method inside a class
     /// body (i.e., the enclosing `Compiler` had `is_class_body = true`).
     /// Zero-argument `super()` is valid only in such functions — not in plain

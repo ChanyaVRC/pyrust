@@ -110,6 +110,7 @@ impl Interpreter {
         qualname: std::sync::Arc<str>,
     ) -> Value {
         let num_iters = code.num_iters as usize;
+        let is_coroutine = code.is_coroutine;
         let frame = GeneratorFrame {
             code: Rc::clone(code),
             // Tighten to an exactly-sized `Vec` for the generator's lifetime
@@ -139,6 +140,9 @@ impl Interpreter {
             // traceback frame when an exception propagates out (issue #908).
             fn_name,
             qualname,
+            // Coroutine tag (issue #1039): distinguishes an `async def` frame
+            // from a plain generator for type/repr/iterability purposes.
+            is_coroutine,
         };
         Value::generator(Box::new(frame))
     }
@@ -2008,6 +2012,11 @@ impl Interpreter {
 
     /// Collect all values from an iterable (including generators) into a Vec.
     pub(crate) fn collect_iterable(&mut self, val: &Value) -> Result<Vec<Value>> {
+        // A coroutine (`async def`, issue #1039) is not iterable — `list(coro)`,
+        // `tuple(coro)`, unpacking, etc. all raise TypeError, matching CPython.
+        if crate::builtin_modules::builtins::is_coroutine_value(val) {
+            return Err(pyrust_core::type_err!("'coroutine' object is not iterable"));
+        }
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);
 
@@ -3146,8 +3155,11 @@ impl Interpreter {
                     regs[slot as usize] = Value::user_function(Rc::clone(&function));
                 }
 
-                // Generator function: create a frame rather than executing.
-                if code.is_generator {
+                // Generator or coroutine function: create a frame rather than
+                // executing.  An `async def` body (issue #1039) is always a
+                // suspendable frame — even with no `await` — so it returns a
+                // coroutine object instead of running synchronously.
+                if code.is_generator || code.is_coroutine {
                     // Restore env before capturing it into the frame.
                     // (When `needs_local_env` is false, `gen_env` ==
                     // `function.env` — the GeneratorFrame keeps it alive.)
@@ -3460,7 +3472,8 @@ impl Interpreter {
             // GeneratorFrame instead of executed synchronously — the
             // simple-path branch already does this above; mirror it here
             // so the body's `yield` isn't observed as a runtime error.
-            if code.is_generator {
+            // Coroutines (`async def`, issue #1039) take the same path.
+            if code.is_generator || code.is_coroutine {
                 let gen_env = std::mem::replace(&mut self.env, previous_env);
                 let gen_qualname =
                     std::sync::Arc::from(function.effective_qualname().as_str());
