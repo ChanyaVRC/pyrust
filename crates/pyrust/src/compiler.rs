@@ -5830,13 +5830,13 @@ impl Compiler {
             Some(TypeParamBound::Bound(expr)) => {
                 let bound_reg = self.compile_expr(expr);
                 let attr_idx = self.intern_name("__bound__");
-                self.emit(Insn::SetAttr(tv_reg, attr_idx, bound_reg));
+                self.emit(Insn::SetTypeVarAttr(tv_reg, attr_idx, bound_reg));
                 self.free_temp(bound_reg);
             }
             Some(TypeParamBound::Constraints(elems)) => {
                 let tuple_reg = self.compile_constraint_tuple(elems);
                 let attr_idx = self.intern_name("__constraints__");
-                self.emit(Insn::SetAttr(tv_reg, attr_idx, tuple_reg));
+                self.emit(Insn::SetTypeVarAttr(tv_reg, attr_idx, tuple_reg));
                 self.free_temp(tuple_reg);
             }
         }

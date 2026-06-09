@@ -2440,7 +2440,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | GetItem(_, a, b)
         | DeleteItem(a, b) => *a == r || *b == r,
 
-        SetAttr(obj, _, val) => *obj == r || *val == r,
+        SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => *obj == r || *val == r,
         ForCountReg(_, _, stop, _, _) => *stop == r,
 
         // Three source registers.
@@ -2595,7 +2595,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             reads.insert(*b);
         }
 
-        SetAttr(obj, _, val) => {
+        SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => {
             reads.insert(*obj);
             reads.insert(*val);
         }
@@ -3547,6 +3547,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         StoreGlobal(..)
         | ImportStar(..)
         | SetAttr(..)
+        | SetTypeVarAttr(..)
         | SetItem(..)
         | DeleteAttr(..)
         | DeleteItem(..)
@@ -5206,6 +5207,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
             Insn::DictUpdate(dct, other) => Insn::DictUpdate(dct, s(&copies, other)),
             Insn::SetAttr(obj, n, val) => Insn::SetAttr(obj, n, s(&copies, val)),
+            Insn::SetTypeVarAttr(obj, n, val) => Insn::SetTypeVarAttr(obj, n, s(&copies, val)),
             Insn::DeleteAttr(obj, n) => Insn::DeleteAttr(obj, n),
             Insn::SetItem(obj, idx, val) => Insn::SetItem(obj, s(&copies, idx), s(&copies, val)),
             Insn::DeleteItem(obj, idx) => Insn::DeleteItem(obj, s(&copies, idx)),
@@ -7196,7 +7198,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*b);
         }
 
-        SetAttr(obj, _, val) => {
+        SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => {
             f(*obj);
             f(*val);
         }

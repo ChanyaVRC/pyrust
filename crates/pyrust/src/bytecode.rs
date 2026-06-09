@@ -431,12 +431,20 @@ pub enum Insn {
     /// PEP 695: construct an (initially unbounded) `TypeVar` object for a generic
     /// type parameter — `__bound__` is `None` and `__constraints__` is `()`.
     /// Any bound/constraint clause is populated lazily, after every type
-    /// parameter of the enclosing def/class/alias is in scope, via `SetAttr` on
-    /// `__bound__` / `__constraints__` (see `Compiler::emit_typevar_bound`).
+    /// parameter of the enclosing def/class/alias is in scope, via
+    /// `SetTypeVarAttr` on `__bound__` / `__constraints__` (see
+    /// `Compiler::emit_typevar_bound`).
     /// This matches PEP 695's lazy evaluation of bounds in an annotation scope,
     /// so a self/forward-referential bound (`def f[T: T]`, `def g[T, U: T]`)
     /// resolves instead of raising `NameError`.
     MakeTypeVar(Reg, u16),
+    /// R[obj].names[name_idx] = R[val], bypassing TypeVar's read-only-attribute
+    /// guard.  Emitted only by the compiler to populate a PEP 695 TypeVar's
+    /// `__bound__` / `__constraints__` after construction.  CPython sets these
+    /// fields at the C level (never through `__setattr__`), so user-level
+    /// `SetAttr` / `DeleteAttr` on these names raises `AttributeError` while this
+    /// internal write succeeds.
+    SetTypeVarAttr(Reg, u16, Reg),
     /// R[dst] = TypeAliasType(name=consts[name_idx], value=R[value_reg], type_params=R[params_reg])
     /// PEP 695: construct a `TypeAliasType` object from a string name, the evaluated value
     /// expression, and a tuple of TypeVar objects (may be an empty tuple).
