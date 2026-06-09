@@ -254,7 +254,14 @@ impl Interpreter {
                         .map(|a| a.value.clone())
                         .collect();
                     if args[1..].iter().any(|a| a.name.is_some()) {
-                        return Err(pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments"));
+                        // CPython's keyword-rejection wording depends on whether
+                        // the slot is a named method-wrapper or an anonymous slot
+                        // wrapper (issue #2291).
+                        return Err(if is_named_protocol_wrapper(method, type_name) {
+                            pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                        } else {
+                            pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                        });
                     }
                     // `method` borrows `name` from the matched `function.kind()`
                     // Ref; clone to a small owned str so the dispatcher can run
@@ -2309,9 +2316,13 @@ impl Interpreter {
             return apply_format_spec(&self_arg.value, &spec);
         }
         // __hash__/__repr__/__str__ take no further positional/keyword args.
+        // These are slot wrappers, so CPython's keyword-rejection message uses
+        // the anonymous "wrapper <name>() takes no keyword arguments" form
+        // (issue #2291), not the type-qualified `<type>.<name>()` form used by
+        // the `__format__` method_descriptor above.
         if args.iter().skip(1).any(|a| a.name.is_some()) {
             return Err(pyrust_core::type_err!(
-                "{type_name}.{method}() takes no keyword arguments"
+                "wrapper {method}() takes no keyword arguments"
             ));
         }
         // `__hash__` routes through `hash_value_with_interp` (the same path the
@@ -2366,12 +2377,7 @@ impl Interpreter {
             _ => 1,
         };
         if args.len() != want {
-            let named_wrapper = matches!(
-                (method, &*type_name),
-                ("__getitem__", "list" | "dict")
-                    | ("__contains__", "dict" | "set" | "frozenset")
-            );
-            if named_wrapper {
+            if is_named_protocol_wrapper(method, &type_name) {
                 return Err(pyrust_core::type_err!("{type_name}.{method}() takes exactly one argument ({} given)",
                         args.len()));
             }
@@ -6623,6 +6629,19 @@ fn richcmp_operand_accepted(recv: &Value, operand: &Value, is_equality: bool) ->
         // exact type (`'a'.__eq__(b'a')` → NotImplemented).
         _ => rt == ot,
     }
+}
+
+/// Issue #2291: whether a container protocol dunder is a *named* method-wrapper
+/// in CPython 3.12 (its error messages read `{type}.{method}()`) versus an
+/// anonymous slot wrapper (whose messages read `wrapper {method}()`).  The
+/// named set is `mp_subscript` (`list`/`dict` `__getitem__`) and `sq_contains`
+/// (`dict`/`set`/`frozenset` `__contains__`); every other protocol dunder is an
+/// anonymous slot wrapper.  Verified against `python3.12`.
+pub(crate) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
+    matches!(
+        (method, type_name),
+        ("__getitem__", "list" | "dict") | ("__contains__", "dict" | "set" | "frozenset")
+    )
 }
 
 pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
