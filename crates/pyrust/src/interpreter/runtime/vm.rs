@@ -313,6 +313,48 @@ pub(crate) struct GeneratorFrame {
     pub(crate) is_coroutine: bool,
 }
 
+impl GeneratorFrame {
+    /// True when this frame backs an *async generator* (`async def` body that
+    /// also contains `yield`, issue #2280): `is_coroutine` (async def) AND
+    /// `code.is_generator` (has a bare `yield`).  Async generators reuse the
+    /// suspend/resume machinery but report `type(g).__name__ == "async_generator"`,
+    /// are driven by `__anext__`/`asend` rather than `for`/`next()`, and
+    /// distinguish a bare `yield v` (→ produced item) from an inner-`await`
+    /// suspension (→ propagate to the event loop).
+    pub(crate) fn is_async_generator(&self) -> bool {
+        self.is_coroutine && self.code.is_generator
+    }
+}
+
+/// Awaitable returned by `async_generator.__anext__()` / `.asend(v)` (issue
+/// #2280).  Wraps the async generator's state cell plus the value to send into
+/// the next resumption (`None` for `__anext__`, the user's argument for
+/// `asend`) and the optional exception to inject (`athrow`/`aclose`).  Stored
+/// type-erased inside a `Value::generator` so that `get_awaitable` accepts it
+/// and `YieldFrom` drives it: each drive step resumes the async generator once
+/// and, per the yield/await duality, either completes the await with the
+/// produced item (a bare `yield v` → `StopIteration(v)`), propagates an
+/// inner-`await` suspension upward (yields the scheduling point), or raises
+/// `StopAsyncIteration` when the generator is exhausted.
+pub(crate) struct AsyncGenASend {
+    /// The async generator's state cell (its `GeneratorFrame`).
+    pub(crate) agen: Rc<RefCell<Box<dyn std::any::Any>>>,
+    /// Value to send into the next resume (the `asend` argument; `None` for
+    /// `__anext__`).  Taken on the first drive step, then `None` thereafter.
+    pub(crate) send_value: Option<Value>,
+    /// Exception to inject on the first drive step (`athrow`/`aclose`).
+    pub(crate) throw_exc: Option<PyError>,
+    /// True once the first drive step has run, so subsequent steps (when the
+    /// inner `await` re-enters) send `None` rather than re-sending the original
+    /// argument / re-injecting the exception.
+    pub(crate) started: bool,
+    /// True for the `aclose()` awaitable: a `GeneratorExit` injection whose
+    /// `GeneratorExit` / `StopAsyncIteration` / `StopIteration` outcome completes
+    /// the await with `None` (rather than propagating), and whose *yield* is a
+    /// `RuntimeError("async generator ignored GeneratorExit")`.
+    pub(crate) is_aclose: bool,
+}
+
 /// Call-trampoline frame (#2234): what the caller needs restored when a
 /// trampolined Python→Python callee returns.  Module-scoped so the cold error
 /// unwinder ([`Interpreter::vm_unwind_error`]) can name it; the dispatch loop's
@@ -3499,11 +3541,16 @@ impl Interpreter {
                         IterState::Indexed { reg: *src, pos: 0 }
                     } else {
                         let src_val = vm_try!(vm_read(&regs, *src, num_locals));
-                        // A coroutine (`async def`, issue #1039) is not iterable
-                        // — `for x in coro:` raises TypeError, matching CPython.
+                        // A coroutine (`async def`, issue #1039) — and an async
+                        // generator (#2280) — is not iterable: `for x in coro:`
+                        // raises TypeError, matching CPython.  The type name is
+                        // resolved dynamically so an async generator reports
+                        // `'async_generator' object is not iterable`.
                         if crate::builtin_modules::builtins::is_coroutine_value(&src_val) {
+                            let tn =
+                                crate::builtin_modules::builtins::full_type_name_str_pub(&src_val);
                             vm_try!(Err::<(), _>(pyrust_core::type_err!(
-                                "'coroutine' object is not iterable"
+                                "'{tn}' object is not iterable"
                             )));
                         }
                         // Detect the kind tag in a scoped block so the
@@ -4220,9 +4267,23 @@ impl Interpreter {
             // rather than silently yielding its stale return value (issue #2282).
             match state_rc.try_borrow() {
                 Ok(b) => {
+                    // The `asend`/`__anext__` awaitable of an async generator
+                    // (#2280) is itself a self-driving awaitable: pass it through
+                    // for `YieldFrom` to step.
+                    if b.downcast_ref::<AsyncGenASend>().is_some() {
+                        return Ok(awaited.clone());
+                    }
                     if let Some(frame) = b.downcast_ref::<GeneratorFrame>()
                         && frame.is_coroutine
                     {
+                        // An async generator's frame is coroutine-tagged but is
+                        // NOT directly awaitable (`await agen()` is a TypeError in
+                        // CPython); it is consumed via `async for` / `asend`.
+                        if frame.is_async_generator() {
+                            return Err(pyrust_core::type_err!(
+                                "object async_generator can't be used in 'await' expression"
+                            ));
+                        }
                         if frame.done {
                             return Err(pyrust_core::runtime_err!(
                                 "cannot reuse already awaited coroutine"
@@ -4342,6 +4403,18 @@ impl Interpreter {
             ValueKind::Generator(state_rc) => {
                 let state_rc = Rc::clone(state_rc);
 
+                // Async-generator `asend`/`__anext__` awaitable (#2280): a
+                // dedicated driver that resumes the underlying async generator
+                // and distinguishes a bare `yield v` (→ item delivered) from an
+                // inner-`await` suspension (→ propagate the scheduling point).
+                let is_asend = state_rc
+                    .try_borrow()
+                    .map(|b| b.downcast_ref::<AsyncGenASend>().is_some())
+                    .unwrap_or(false);
+                if is_asend {
+                    return self.step_async_gen_asend(&state_rc, sent_val);
+                }
+
                 // Check for GetItemIter (lazy __getitem__ iterator).
                 // `try_borrow`: when the sub-iterator is itself already executing
                 // (a `yield from` / `await` self-cycle), the cell is checked out;
@@ -4438,6 +4511,159 @@ impl Interpreter {
                 })
             }
             _ => Err(pyrust_core::type_err!("object is not iterable")),
+        }
+    }
+
+    /// Advance an async-generator `asend`/`__anext__` awaitable by one step
+    /// (#2280).  `asend_rc` is the `AsyncGenASend` state cell; `sent_val` is the
+    /// value the surrounding `await` machinery is sending into *this* awaitable
+    /// (always `None` for the async-for driver — the value the user `asend`s is
+    /// stored in the `AsyncGenASend` itself and delivered into the async
+    /// generator on its first step).
+    ///
+    /// Resumes the underlying async generator once and applies the yield/await
+    /// duality:
+    /// - bare `yield v` inside the async-gen body → the awaitable *completes*
+    ///   with `v`: raise `StopIteration(v)` so the consumer's `YieldFrom`
+    ///   captures `v` as the produced item.
+    /// - inner `await` suspension (the async-gen body is parked at a `YieldFrom`
+    ///   awaiting e.g. `asyncio.sleep(0)`) → `Ok(scheduling_value)`: propagate
+    ///   the scheduling point upward so the outer event loop steps it and the
+    ///   awaitable is re-driven.
+    /// - async-gen returned / exhausted → `StopAsyncIteration` (no value).
+    fn step_async_gen_asend(
+        &mut self,
+        asend_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        _sent_val: Value,
+    ) -> Result<Value> {
+        // Take the per-step injection state out of the AsyncGenASend.  Only the
+        // *first* step delivers the original `asend(v)` value / `athrow` exc;
+        // subsequent re-drives (after an inner-await suspension) send None.
+        let (agen_rc, send_value, throw_exc, is_aclose) = {
+            let mut b = asend_rc.borrow_mut();
+            let asend = b.downcast_mut::<AsyncGenASend>().ok_or_else(|| {
+                PyError::Runtime("invalid async-generator asend state".to_string())
+            })?;
+            let send_value = if asend.started {
+                None
+            } else {
+                asend.send_value.take()
+            };
+            let throw_exc = if asend.started {
+                None
+            } else {
+                asend.throw_exc.take()
+            };
+            asend.started = true;
+            (
+                Rc::clone(&asend.agen),
+                send_value,
+                throw_exc,
+                asend.is_aclose,
+            )
+        };
+
+        // Resume the async generator's frame once.
+        let mut borrow = agen_rc
+            .try_borrow_mut()
+            .map_err(|_| pyrust_core::value_err!("anext(): asynchronous generator is already running"))?;
+        let frame = borrow.downcast_mut::<GeneratorFrame>().ok_or_else(|| {
+            PyError::Runtime("invalid async-generator state".to_string())
+        })?;
+        if frame.done {
+            // `aclose()` on an already-finished async generator is a silent
+            // no-op (the awaitable completes with None); `__anext__`/`asend`
+            // raise StopAsyncIteration.
+            if is_aclose {
+                return Err(self.make_stop_iteration_with_value(Value::none()));
+            }
+            return Err(self.make_stop_async_iteration());
+        }
+        // CPython: sending a non-None value into a *just-started* async
+        // generator (one never resumed, `pc == 0`) via `asend(v)` is a
+        // TypeError, raised when the awaitable is first driven (#2280).
+        // `athrow`/`aclose` (which carry an injected exception) and
+        // `__anext__`/`asend(None)` are exempt.
+        if frame.pc == 0
+            && throw_exc.is_none()
+            && send_value.as_ref().is_some_and(|v| !v.is_none())
+        {
+            return Err(pyrust_core::type_err!(
+                "can't send non-None value to a just-started async generator"
+            ));
+        }
+        let resume = self.resume_generator_with_exc(
+            frame,
+            throw_exc,
+            send_value.unwrap_or_else(Value::none),
+        );
+        match resume {
+            Ok(value) => {
+                // Suspended.  Distinguish a bare `yield v` from an inner-`await`
+                // suspension by inspecting the instruction the frame is now
+                // parked at: a `YieldFrom` means we suspended inside an `await`
+                // (await lowers to GetAwaitable + YieldFrom), so propagate the
+                // scheduling value upward.  Anything else means we suspended at
+                // a bare `Insn::Yield` whose pc was advanced past it, so `value`
+                // is a produced item: complete the await with it.
+                let parked_at_yield_from = matches!(
+                    frame.code.insns.get(frame.pc),
+                    Some(crate::bytecode::Insn::YieldFrom { .. })
+                );
+                if parked_at_yield_from {
+                    // Inner-await scheduling point: propagate upward unchanged.
+                    Ok(value)
+                } else if is_aclose {
+                    // `aclose()` injected GeneratorExit and the body yielded a
+                    // value instead of exiting — CPython raises RuntimeError.
+                    frame.done = true;
+                    Err(pyrust_core::runtime_err!(
+                        "async generator ignored GeneratorExit"
+                    ))
+                } else {
+                    // Bare `yield value`: the awaitable completes with `value`.
+                    Err(self.make_stop_iteration_with_value(value))
+                }
+            }
+            // Async generator ran to completion (fell off the end or `return`).
+            // CPython: `__anext__`/`asend` then raise StopAsyncIteration with no
+            // value (an async-gen `return v` with non-None v is a SyntaxError,
+            // so the return value is always None and is discarded).
+            Err(ref e) if is_stop_iteration_error(e) => {
+                if is_aclose {
+                    // aclose: a clean StopAsyncIteration/return means the close
+                    // succeeded — complete the await with None.
+                    Err(self.make_stop_iteration_with_value(Value::none()))
+                } else {
+                    Err(self.make_stop_async_iteration())
+                }
+            }
+            // `aclose()`: the body let the injected GeneratorExit propagate
+            // (the normal, well-behaved case) — the close succeeded, so the
+            // awaitable completes with None rather than re-raising.
+            Err(ref e) if is_aclose && e.class_name_is("GeneratorExit") => {
+                Err(self.make_stop_iteration_with_value(Value::none()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Build a `StopAsyncIteration` error (async-generator exhaustion, #2280).
+    fn make_stop_async_iteration(&self) -> PyError {
+        if let Some(cls) = self.exc_classes.get("StopAsyncIteration") {
+            PyError::Raised(instantiate_exception(cls, vec![]))
+        } else {
+            pyrust_core::py_err!("StopAsyncIteration", String::new())
+        }
+    }
+
+    /// Build a `StopIteration(value)` error carrying a produced async-gen item
+    /// (#2280).  The consumer's `YieldFrom` reads `.value` to obtain the item.
+    fn make_stop_iteration_with_value(&self, value: Value) -> PyError {
+        if let Some(cls) = self.exc_classes.get("StopIteration") {
+            PyError::Raised(instantiate_exception(cls, vec![value]))
+        } else {
+            pyrust_core::py_err!("StopIteration", String::new())
         }
     }
 

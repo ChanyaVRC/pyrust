@@ -2919,6 +2919,14 @@ impl Interpreter {
             let frame = borrow
                 .downcast_mut::<GeneratorFrame>()
                 .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+            // Async generators (#2280) are not synchronous iterators: `next(g)`
+            // raises TypeError, matching CPython.  They are consumed via
+            // `async for` / `__anext__`.
+            if frame.is_async_generator() {
+                return Err(pyrust_core::type_err!(
+                    "'async_generator' object is not an iterator"
+                ));
+            }
             if frame.done {
                 drop(borrow);
                 return if let Some(d) = default {

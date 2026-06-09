@@ -741,19 +741,49 @@ impl Interpreter {
                 // All six attributes exposed by CPython 3.12's generator type:
                 //   __name__, __qualname__, gi_running, gi_yieldfrom, gi_frame, gi_code.
                 //
+                // Async generators (#2280) expose the *asynchronous* iteration
+                // protocol (`__aiter__`/`__anext__`/`asend`/`athrow`/`aclose`)
+                // and NOT the synchronous one (`__iter__`/`__next__`/`send`).
+                // Detect this before the generic method exposure below so the
+                // two surfaces don't overlap (CPython's `async_generator` has no
+                // `__next__`/`send`/`__iter__`).
+                let is_async_gen = {
+                    state_rc
+                        .try_borrow()
+                        .ok()
+                        .and_then(|b| {
+                            b.downcast_ref::<GeneratorFrame>()
+                                .map(|f| f.is_async_generator())
+                        })
+                        .unwrap_or(false)
+                };
+                if is_async_gen {
+                    match name {
+                        "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose" => {
+                            return Ok(pyrust_builtins::bound_method::bound_method(
+                                name.to_string(),
+                                target.clone(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 // Issue #1413: also expose the iteration protocol methods as
                 // bound-method values so that hasattr/getattr see them.
                 // These apply to all generator subtypes (GeneratorFrame,
                 // NativeIterFrame, CallableIter, …), so they are checked
-                // before the downcast.
-                match name {
-                    "__iter__" | "__next__" | "send" | "close" | "throw" => {
-                        return Ok(pyrust_builtins::bound_method::bound_method(
-                            name.to_string(),
-                            target.clone(),
-                        ));
+                // before the downcast.  Skipped for async generators, which
+                // expose the async protocol above instead.
+                if !is_async_gen {
+                    match name {
+                        "__iter__" | "__next__" | "send" | "close" | "throw" => {
+                            return Ok(pyrust_builtins::bound_method::bound_method(
+                                name.to_string(),
+                                target.clone(),
+                            ));
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
                 let state_rc = Rc::clone(state_rc);
                 let borrow = state_rc.borrow();
@@ -792,8 +822,9 @@ impl Interpreter {
                         _ => {}
                     }
                 }
+                let obj_name = if is_async_gen { "async_generator" } else { "generator" };
                 Err(PyError::attribute_error(
-                    format!("'generator' object has no attribute '{name}'"),
+                    format!("'{obj_name}' object has no attribute '{name}'"),
                     Some(name.to_string()),
                     Some(target.clone()),
                 ))

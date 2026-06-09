@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
+    AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of, class_suppresses_instance_dict,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
@@ -1478,10 +1478,12 @@ pyrust_module! {
                     SelfIterator,
                     Other,
                 }
-                // A coroutine (`async def`, issue #1039) is not iterable.
+                // A coroutine (`async def`, issue #1039) — and an async
+                // generator (#2280) — is not iterable.
                 if is_coroutine_value(&val) {
+                    let tn = full_type_name_str(&val);
                     return Err(pyrust_core::type_err!(
-                        "'coroutine' object is not iterable"
+                        "'{tn}' object is not iterable"
                     ));
                 }
                 let kind = match val.kind() {
@@ -7242,10 +7244,18 @@ pub(crate) fn value_class(obj: &Value) -> Value {
                 Value::builtin_function("longrange_iterator")
             } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
                 Value::builtin_function(native.type_name)
+            } else if borrow.downcast_ref::<AsyncGenASend>().is_some() {
+                // The awaitable returned by `__anext__`/`asend` (#2280) reports
+                // as `async_generator_asend`, matching CPython.
+                Value::builtin_function("async_generator_asend")
             } else if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
                 // Coroutines (`async def`, issue #1039) share the Generator
                 // value tag but report `type(coro).__name__ == "coroutine"`.
-                if frame.is_coroutine {
+                // An async generator (`async def` containing `yield`, #2280)
+                // reports `async_generator`.
+                if frame.is_async_generator() {
+                    Value::builtin_function("async_generator")
+                } else if frame.is_coroutine {
                     Value::builtin_function("coroutine")
                 } else {
                     Value::builtin_function("generator")
@@ -7692,9 +7702,11 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         SelfIterator,
         Other,
     }
-    // A coroutine (`async def`, issue #1039) is not iterable.
+    // A coroutine (`async def`, issue #1039) — and an async generator (#2280)
+    // — is not iterable.
     if is_coroutine_value(v) {
-        return Err(pyrust_core::type_err!("'coroutine' object is not iterable"));
+        let tn = full_type_name_str(v);
+        return Err(pyrust_core::type_err!("'{tn}' object is not iterable"));
     }
     let kind = match v.kind() {
         ValueKind::Generator(_) => IterKind::Generator,
@@ -9419,6 +9431,20 @@ pub(crate) fn is_coroutine_value(v: &Value) -> bool {
     false
 }
 
+/// True when `v` is an *async generator* object (`async def` containing
+/// `yield`, issue #2280).  Async generators are coroutine-tagged but are not
+/// themselves awaitable / runnable as coroutines: `asyncio.run(agen())` raises
+/// `ValueError("a coroutine was expected, ...")`, matching CPython.
+pub(crate) fn is_async_generator_value(v: &Value) -> bool {
+    if let ValueKind::Generator(state_rc) = v.kind()
+        && let Ok(borrow) = state_rc.try_borrow()
+        && let Some(frame) = borrow.downcast_ref::<GeneratorFrame>()
+    {
+        return frame.is_async_generator();
+    }
+    false
+}
+
 /// Render the CPython-compatible repr of a `ValueKind::Generator` value
 /// (#2019).  True generator frames carry a qualname
 /// (`<generator object {qualname} at 0x...>`); built-in iterators use their
@@ -9429,8 +9455,15 @@ fn generator_repr(value: &Value) -> String {
     if let ValueKind::Generator(state_rc) = value.kind()
         && let Some(frame) = state_rc.borrow().downcast_ref::<GeneratorFrame>() {
             // Coroutines (`async def`, issue #1039) render as
-            // `<coroutine object {qualname} at 0x...>`.
-            let kind = if frame.is_coroutine { "coroutine" } else { "generator" };
+            // `<coroutine object {qualname} at 0x...>`; async generators
+            // (#2280) as `<async_generator object {qualname} at 0x...>`.
+            let kind = if frame.is_async_generator() {
+                "async_generator"
+            } else if frame.is_coroutine {
+                "coroutine"
+            } else {
+                "generator"
+            };
             return format!("<{kind} object {} at 0x{addr:x}>", frame.qualname);
         }
     let type_name = full_type_name_str(value);
@@ -9755,11 +9788,24 @@ fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
         if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
             return std::borrow::Cow::Borrowed(native.type_name);
         }
-        if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>()
-            && frame.is_coroutine
-        {
-            return std::borrow::Cow::Borrowed("coroutine");
+        if borrow.downcast_ref::<AsyncGenASend>().is_some() {
+            return std::borrow::Cow::Borrowed("async_generator_asend");
+        }
+        if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
+            if frame.is_async_generator() {
+                return std::borrow::Cow::Borrowed("async_generator");
+            }
+            if frame.is_coroutine {
+                return std::borrow::Cow::Borrowed("coroutine");
+            }
         }
     }
     value_type_name_str(v)
+}
+
+/// Public wrapper over [`full_type_name_str`] for call sites outside this
+/// module (e.g. the VM's `for x in coro` TypeError, #2280) that need the
+/// async-aware type name (`coroutine` / `async_generator`).
+pub(crate) fn full_type_name_str_pub(v: &Value) -> std::borrow::Cow<'static, str> {
+    full_type_name_str(v)
 }
