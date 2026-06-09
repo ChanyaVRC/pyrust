@@ -5210,6 +5210,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::ImportFromAttr(dst, obj, n) => Insn::ImportFromAttr(dst, s(&copies, obj), n),
             Insn::GetItem(dst, obj, idx) => Insn::GetItem(dst, s(&copies, obj), s(&copies, idx)),
             Insn::GetIter(slot, src) => Insn::GetIter(slot, s(&copies, src)),
+            Insn::GetAwaitable(dst, src) => Insn::GetAwaitable(dst, s(&copies, src)),
             Insn::Unpack(dst, src, n) => Insn::Unpack(dst, s(&copies, src), n),
             Insn::UnpackEx {
                 src,
