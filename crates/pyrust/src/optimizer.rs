@@ -2377,6 +2377,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
+        | PushTypeParamEnv
+        | PopTypeParamEnv
         | DeleteLocal(..)
         | Jump(..)
         | SetupExcept(..)
@@ -2524,6 +2526,8 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
+        | PushTypeParamEnv
+        | PopTypeParamEnv
         | DeleteLocal(..)
         | Jump(..)
         | SetupExcept(..)
@@ -3547,6 +3551,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | DeleteAttr(..)
         | DeleteItem(..)
         | DeleteName(..)
+        | PushTypeParamEnv
+        | PopTypeParamEnv
         | GetIter(..)
         | Jump(..)
         | JumpIfFalse(..)
@@ -7119,6 +7125,8 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
+        | PushTypeParamEnv
+        | PopTypeParamEnv
         | DeleteLocal(..)
         | DeleteModuleGlobal(..)
         | Jump(..)

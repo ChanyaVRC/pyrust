@@ -117,3 +117,75 @@ try:
     Plain[int]
 except TypeError as e:
     print("TypeError:", e)                   # TypeError: type 'Plain' is not subscriptable
+
+# ── PEP 695 (#2275): type-param names do NOT leak into the enclosing scope ────
+# CPython confines a type parameter to a dedicated type-param scope; the name
+# must raise NameError when accessed in the enclosing namespace after the
+# def/class/type-alias statement, even though it is usable in the signature,
+# bound, body, and __type_params__.
+
+def leakfn[Q: int](x):
+    return x
+
+print(leakfn.__type_params__[0].__name__)         # Q
+print(leakfn.__type_params__[0].__bound__)        # <class 'int'>
+try:
+    Q
+except NameError:
+    print("NameError on Q after def")             # NameError on Q after def
+
+class LeakCls[R]:
+    pass
+
+print(LeakCls.__type_params__[0].__name__)        # R
+try:
+    R
+except NameError:
+    print("NameError on R after class")           # NameError on R after class
+
+type LeakAlias[S] = list[S]
+print(LeakAlias.__type_params__[0].__name__)      # S
+try:
+    S
+except NameError:
+    print("NameError on S after type alias")      # NameError on S after type alias
+
+# ── A type param must NOT clobber a same-named enclosing global ───────────────
+# Binding the param `G` for the generic must leave the module global `G`
+# untouched after the statement.
+
+G = "module G"
+
+def shadow_def[G](x):
+    return x
+
+print(G)                                          # module G
+
+class ShadowCls[G]:
+    pass
+
+print(G)                                          # module G
+
+type ShadowAlias[G] = list[G]
+print(G)                                          # module G
+
+# ── A type param of an OUTER generic is visible inside an INNER function body ─
+# The inner function captures the outer's type-param scope, so it can resolve
+# the outer type parameter lazily at call time.
+
+def outer_tp[T](x):
+    def inner():
+        return T.__name__
+    return inner()
+
+print(outer_tp(0))                                # T
+
+# Default values are evaluated in the ENCLOSING scope, not the type-param scope:
+# a default that references the type-param name sees the enclosing binding.
+
+DV = "enclosing DV"
+
+def default_scope[DV](x=DV):
+    return x
+
+print(default_scope())                            # enclosing DV

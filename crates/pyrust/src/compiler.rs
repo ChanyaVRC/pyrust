@@ -8641,19 +8641,32 @@ impl Compiler {
             None => return,
         };
 
-        // PEP 695: bind the type parameters (as TypeVar objects) in the current
-        // scope *before* the defaults/annotations are evaluated, so a parameter
-        // or return annotation that references `T` (e.g. `def f[T](x: T) -> T`)
-        // resolves.  The returned register block holds the same TypeVar objects
-        // reused for `__type_params__` below to preserve object identity.  The
-        // block sits below `dst`, so the `next_temp = dst + 1` watermark reset
-        // after `MakeFunction` keeps it live until the tuple is built.
-        let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
-
+        // PEP 695 default values are evaluated in the *enclosing* scope, not the
+        // type-parameter scope: a default that references a type parameter
+        // (`def g[T](x=T)`) sees the enclosing `T` (or raises NameError if none
+        // exists), matching CPython.  Evaluate defaults *before* pushing the
+        // type-param environment so they resolve against the enclosing scope.
         let (defs_base, defs_n) = match self.emit_def_default_values(params) {
             Some(v) => v,
             None => return,
         };
+
+        // PEP 695: push a dedicated type-parameter environment, then bind the
+        // type parameters (as TypeVar objects) into it *before* the annotations
+        // are evaluated, so a parameter or return annotation that references `T`
+        // (e.g. `def f[T](x: T) -> T`) resolves.  Binding them in a child env
+        // (rather than the enclosing namespace) keeps the parameter names from
+        // leaking after the def while the generic function — which captures this
+        // env via `MakeFunction` — can still resolve them lazily in its body.
+        // The returned register block holds the same TypeVar objects reused for
+        // `__type_params__` below to preserve object identity.  The block sits
+        // below `dst`, so the `next_temp = dst + 1` watermark reset after
+        // `MakeFunction` keeps it live until the tuple is built.
+        if !type_params.is_empty() {
+            self.emit(Insn::PushTypeParamEnv);
+        }
+        let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
+
         let (annots_base, annots_n) =
             match self.emit_def_annotation_values(params, return_annotation) {
                 Some(v) => v,
@@ -8692,6 +8705,14 @@ impl Compiler {
         // objects in __type_params__ are identical to those seen in annotations.
         if tp_n > 0 {
             self.emit_type_params_attr_from_regs(dst, tp_base, tp_n);
+        }
+
+        // PEP 695: pop the type-parameter environment before decorators run and
+        // before the def name is bound — decorators and the binding belong to the
+        // enclosing scope (a decorator referencing `T` must see the enclosing
+        // `T`, not the type parameter).
+        if !type_params.is_empty() {
+            self.emit(Insn::PopTypeParamEnv);
         }
 
         let val_reg = match self.emit_decorator_application(decorators, dst) {
@@ -9004,11 +9025,18 @@ impl Compiler {
             None => return,
         };
 
-        // PEP 695: bind the type parameters before the base-class expressions are
-        // evaluated (so `class C[T](Base[T])` resolves `T`) and before the class
-        // body runs (so a method annotation `def m(self, x: T)` resolves `T` at
-        // class-creation time).  The block sits below `dst`; the watermark resets
-        // below keep it live until `finish_class_definition` builds the tuple.
+        // PEP 695: push a dedicated type-parameter environment and bind the type
+        // parameters into it before the base-class expressions are evaluated (so
+        // `class C[T](Base[T])` resolves `T`) and before the class body runs (so
+        // a method annotation `def m(self, x: T)` resolves `T` at class-creation
+        // time).  Binding them in a child env keeps the names from leaking into
+        // the enclosing scope after the class statement, while the class object —
+        // which captures this env — can still resolve them.  The block sits below
+        // `dst`; the watermark resets below keep it live until
+        // `finish_class_definition` builds the tuple and pops the env.
+        if !type_params.is_empty() {
+            self.emit(Insn::PushTypeParamEnv);
+        }
         let (tp_base, tp_n) = self.emit_bind_type_params(type_params);
 
         let (bases_base, bases_n, kwarg_base, kwarg_n) =
@@ -9086,6 +9114,10 @@ impl Compiler {
                 self.next_temp = dst + 1;
             }
             self.emit_type_params_attr_from_regs(dst, tp_base, tp_n);
+            // PEP 695: pop the type-parameter environment now that the class
+            // object exists and its `__type_params__` is set.  Decorators and the
+            // class-name binding belong to the enclosing scope.
+            self.emit(Insn::PopTypeParamEnv);
         }
 
         // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
