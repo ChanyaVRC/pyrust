@@ -4118,21 +4118,37 @@ impl Interpreter {
     ///
     /// The resolved value is then driven by the following `YieldFrom`.
     pub(crate) fn get_awaitable(&mut self, awaited: &Value) -> Result<Value> {
-        // A coroutine drives itself.  `try_borrow`: a coroutine that is already
-        // executing (e.g. awaiting itself) has its cell checked out — treat a
-        // busy coroutine cell as awaitable here and let the following
-        // `YieldFrom` raise the proper "already executing" ValueError rather
-        // than panicking on a re-borrow.
+        // A coroutine drives itself: `await coro` resolves to the coroutine and
+        // the following `YieldFrom` steps it.
         if let ValueKind::Generator(state_rc) = awaited.kind() {
-            let is_coro_or_busy = match state_rc.try_borrow() {
-                Ok(b) => b
-                    .downcast_ref::<GeneratorFrame>()
-                    .map(|f| f.is_coroutine)
-                    .unwrap_or(false),
-                Err(_) => true,
-            };
-            if is_coro_or_busy {
-                return Ok(awaited.clone());
+            // Borrow the cell to inspect the coroutine's state.  A busy cell
+            // (`try_borrow` → `Err`) means the coroutine is *currently* being
+            // awaited / executing — CPython raises `RuntimeError("coroutine is
+            // being awaited already")` (the self-await re-entrant case surfaces
+            // later as `ValueError("coroutine already executing")` from the
+            // resume path; both are coroutine-only).  A done coroutine
+            // (`frame.done`) has already run to completion: re-awaiting it must
+            // raise `RuntimeError("cannot reuse already awaited coroutine")`
+            // rather than silently yielding its stale return value (issue #2282).
+            match state_rc.try_borrow() {
+                Ok(b) => {
+                    if let Some(frame) = b.downcast_ref::<GeneratorFrame>()
+                        && frame.is_coroutine
+                    {
+                        if frame.done {
+                            return Err(pyrust_core::runtime_err!(
+                                "cannot reuse already awaited coroutine"
+                            ));
+                        }
+                        return Ok(awaited.clone());
+                    }
+                }
+                Err(_) => {
+                    // Cell checked out ⇒ a coroutine that is already executing /
+                    // being awaited.  Pass it through so the resume path raises
+                    // the precise coroutine-already-executing error.
+                    return Ok(awaited.clone());
+                }
             }
         }
         // An object with `__await__` (e.g. a future-like awaitable) — call it
@@ -4174,6 +4190,21 @@ impl Interpreter {
                 ));
             }
         };
+        // A coroutine that has already run to completion cannot be re-run:
+        // `asyncio.run(c)` on an already-driven coroutine raises the same
+        // `RuntimeError("cannot reuse already awaited coroutine")` CPython does
+        // (issue #2282).  `try_borrow`: a busy cell means it is currently
+        // executing — fall through to the step loop, whose `try_borrow_mut`
+        // raises the "already executing" error.
+        if let Ok(b) = state_rc.try_borrow()
+            && let Some(frame) = b.downcast_ref::<GeneratorFrame>()
+            && frame.is_coroutine
+            && frame.done
+        {
+            return Err(pyrust_core::runtime_err!(
+                "cannot reuse already awaited coroutine"
+            ));
+        }
         // Guard rail against runaway loops from a misbehaving awaitable that
         // never completes (e.g. a future that is never resolved).
         const MAX_STEPS: u64 = 100_000_000;
