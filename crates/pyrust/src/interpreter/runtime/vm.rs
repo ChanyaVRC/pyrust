@@ -2248,6 +2248,18 @@ impl Interpreter {
                     let name = pool_get!(code.names, *name_idx, "name");
                     vm_try!(self.delete_attr(obj_val, name));
                 }
+                Insn::SetTypeVarAttr(obj, name_idx, val) => {
+                    // Internal PEP 695 bound/constraint population — writes
+                    // `__bound__` / `__constraints__` directly onto the freshly
+                    // created TypeVar, bypassing the user-facing read-only guard
+                    // on `Insn::SetAttr` (see `typevar_readonly_attr_error`).
+                    let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
+                    let val = vm_try!(vm_read(&regs, *val, num_locals));
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    if let ValueKind::PyInstance(inst) = obj_val.kind() {
+                        inst.borrow_mut().attrs.insert(name, val);
+                    }
+                }
                 Insn::GetItem(dst, obj, idx) => {
                     let r = self.exec_get_item(&regs, num_locals, *obj, *idx);
                     regs[*dst as usize] = vm_try!(r);
@@ -4883,7 +4895,7 @@ thread_local! {
 /// surface of CPython's `typing.TypeVar` as created by PEP 695 type parameter
 /// syntax.  `__bound__` starts as `None` and `__constraints__` as `()`; a
 /// bounded/constrained parameter's clause is evaluated lazily (after every type
-/// parameter is in scope) and written back via `SetAttr` — see
+/// parameter is in scope) and written back via `SetTypeVarAttr` — see
 /// `Compiler::emit_typevar_bound`.
 pub(crate) fn make_typevar_instance(name: String) -> Value {
     TYPEVAR_CLASS.with(|cls| {
@@ -4896,6 +4908,34 @@ pub(crate) fn make_typevar_instance(name: String) -> Value {
             attrs,
         })))
     })
+}
+
+/// True if `class` is the PEP 695 `TypeVar` singleton.  Used by the attribute
+/// assignment / deletion slow paths to enforce CPython's read-only getset
+/// descriptors on TypeVar objects.
+pub(crate) fn is_typevar_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPEVAR_CLASS.with(|cls| Rc::ptr_eq(class, cls))
+}
+
+/// Classify a would-be write/delete of `name` on a `TypeVar` instance against
+/// CPython 3.12's read-only getset descriptors.  Returns the exact
+/// `AttributeError` message CPython raises, or `None` if the name is not a
+/// protected descriptor (arbitrary attributes are writable, matching CPython).
+///
+///   * `__bound__` / `__constraints__` raise
+///     `attribute '<name>' of 'typing.TypeVar' objects is not writable`
+///   * `__name__` / `__covariant__` / `__contravariant__` /
+///     `__infer_variance__` raise the generic `readonly attribute`.
+pub(crate) fn typevar_readonly_attr_error(name: &str) -> Option<String> {
+    match name {
+        "__bound__" | "__constraints__" => Some(format!(
+            "attribute '{name}' of 'typing.TypeVar' objects is not writable"
+        )),
+        "__name__" | "__covariant__" | "__contravariant__" | "__infer_variance__" => {
+            Some("readonly attribute".to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`, and

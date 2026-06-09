@@ -1599,6 +1599,14 @@ impl Interpreter {
         value: Value,
     ) -> Result<()> {
         let class = { Rc::clone(&instance.borrow().class) };
+        // PEP 695 / issue #2274: enforce TypeVar's read-only getset
+        // descriptors here too, so `setattr(tv, '__bound__', X)` matches the
+        // `tv.__bound__ = X` path (see `assign_attr_instance`).
+        if is_typevar_class(&class)
+            && let Some(msg) = typevar_readonly_attr_error(name)
+        {
+            return Err(pyrust_core::py_err!("AttributeError", "{msg}"));
+        }
         // General data descriptor protocol: if the class (or MRO) has
         // a data descriptor (has __set__) for this name, call __set__.
         if let Some(class_val) = lookup_class_attr(&class, name)
@@ -1731,6 +1739,13 @@ impl Interpreter {
         name: &str,
     ) -> Result<()> {
         let class = { Rc::clone(&instance.borrow().class) };
+        // PEP 695 / issue #2274: `object.__delattr__(tv, '__bound__')` rejects
+        // TypeVar's read-only descriptors, same as the `del tv.__bound__` path.
+        if is_typevar_class(&class)
+            && let Some(msg) = typevar_readonly_attr_error(name)
+        {
+            return Err(pyrust_core::py_err!("AttributeError", "{msg}"));
+        }
         if let Some(class_val) = lookup_class_attr(&class, name)
             && let Some(result) = call_descriptor_delete(
                 self,
@@ -1911,6 +1926,15 @@ impl Interpreter {
         value: Value,
     ) -> Result<()> {
             let class = { Rc::clone(&instance.borrow().class) };
+            // PEP 695 / issue #2274: TypeVar exposes `__name__`, `__bound__`,
+            // `__constraints__`, and the variance flags as read-only getset
+            // descriptors.  CPython rejects writes to them with AttributeError
+            // before any dict write; arbitrary attributes remain writable.
+            if is_typevar_class(&class)
+                && let Some(msg) = typevar_readonly_attr_error(name)
+            {
+                return Err(pyrust_core::py_err!("AttributeError", "{msg}"));
+            }
             // Check for `__setattr__` first — CPython dispatches
             // __setattr__ before the descriptor protocol (object.__setattr__
             // is what does the descriptor lookup by default).
@@ -2418,6 +2442,14 @@ impl Interpreter {
         name: &str,
     ) -> Result<()> {
             let class = { Rc::clone(&instance.borrow().class) };
+            // PEP 695 / issue #2274: TypeVar's read-only getset descriptors
+            // reject deletion with the same AttributeError as assignment,
+            // before any existence check.  Arbitrary attributes delete normally.
+            if is_typevar_class(&class)
+                && let Some(msg) = typevar_readonly_attr_error(name)
+            {
+                return Err(pyrust_core::py_err!("AttributeError", "{msg}"));
+            }
             // Check for `__delattr__` first — symmetric with __setattr__
             // in assign_attr (issue #1174).  Skip only the
             // `object.__delattr__` builtin sentinel.
