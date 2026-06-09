@@ -10167,15 +10167,25 @@ impl Compiler {
                 // `__await__` yields its `__await__()` result); `YieldFrom` then
                 // reuses the PEP 380 suspend/resume machinery to drive it to
                 // completion, surfacing its return value (StopIteration.value).
+                //
+                // The result register is allocated FIRST so it sits below the
+                // scratch temps (`awaited_src`/`iter_reg`/`sent_reg`).  The temp
+                // allocator is strictly LIFO — `free_temp` only reclaims the top
+                // of the stack — so the scratch temps are freed in reverse
+                // allocation order while `result_reg` (the expression's value,
+                // which outlives them) stays below.  An earlier version freed
+                // `awaited_src` before the temps allocated above it, making those
+                // frees silent no-ops; the leaked slots then corrupted register
+                // allocation for a *subsequent* await when this await was nested
+                // in a larger expression (e.g. `print(await x)`), surfacing as a
+                // spurious "object is not iterable".
+                let result_reg = self.alloc_temp();
                 let awaited_src = self.compile_expr(awaited_expr);
                 let iter_reg = self.alloc_temp();
                 self.emit(Insn::GetAwaitable(iter_reg, awaited_src));
-                self.free_temp(awaited_src);
 
                 let sent_reg = self.alloc_temp();
                 self.emit(Insn::LoadNone(sent_reg));
-
-                let result_reg = self.alloc_temp();
                 self.emit(Insn::LoadNone(result_reg));
 
                 self.emit(Insn::YieldFrom {
@@ -10186,6 +10196,7 @@ impl Compiler {
 
                 self.free_temp(sent_reg);
                 self.free_temp(iter_reg);
+                self.free_temp(awaited_src);
 
                 result_reg
             }
