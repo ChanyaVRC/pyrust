@@ -838,6 +838,60 @@ pub(crate) fn missing_arg<T>(fn_name: &str, arg_name: &str) -> Result<T> {
     )))
 }
 
+// ─── C-level arity wordings (#2331) ────────────────────────────────────────────
+//
+// CPython's hand-written C builtins do *not* use the argument-clinic
+// "takes N positional arguments but M were given" / "missing required
+// argument" wordings the default dialect emits; they raise distinct
+// C-level messages.  The `#[arity_style(...)]` dialect attribute selects
+// one of these so a migrated builtin reproduces CPython byte-for-byte.
+// See `pyrust-derive`'s `ArityStyle` and the typed-prelude emit.
+
+/// `takes exactly one argument (N given)` — the METH_O / one-argument
+/// C-builtin wording (`len`, `repr`, `hash`, `ord`, `chr`, `abs`,
+/// `math.sqrt`, …).  Used for both the too-few and too-many cases (any
+/// `positional_len != 1`), so the per-parameter `missing_arg` path is
+/// never reached for these functions.
+pub(crate) fn check_exactly_one_argument(fn_name: &str, positional_len: usize) -> Result<()> {
+    if positional_len != 1 {
+        return Err(type_error(format!(
+            "{fn_name}() takes exactly one argument ({positional_len} given)"
+        )));
+    }
+    Ok(())
+}
+
+/// `NAME expected N arguments, got M` (and the `at least` / `at most`
+/// variants) — the METH_VARARGS C-builtin wording used by `isinstance`,
+/// `issubclass`, `divmod`, `hasattr`, … .  Note CPython prints the bare
+/// function name **without** trailing `()` for this style (unlike every
+/// other dialect message), so `fn_name` is interpolated raw.  Handles
+/// both the lower and upper bound; the per-parameter `missing_arg` path
+/// is unreachable when this guard is used.
+pub(crate) fn check_arity_expected_got(
+    fn_name: &str,
+    positional_len: usize,
+    min: usize,
+    max: usize,
+) -> Result<()> {
+    if positional_len < min || positional_len > max {
+        let bound = if min == max {
+            let plural = if max == 1 { "argument" } else { "arguments" };
+            format!("expected {max} {plural}")
+        } else if positional_len < min {
+            let plural = if min == 1 { "argument" } else { "arguments" };
+            format!("expected at least {min} {plural}")
+        } else {
+            let plural = if max == 1 { "argument" } else { "arguments" };
+            format!("expected at most {max} {plural}")
+        };
+        return Err(type_error(format!(
+            "{fn_name} {bound}, got {positional_len}"
+        )));
+    }
+    Ok(())
+}
+
 /// Construct the "no overload matched" error.  Emitted by the macro-
 /// generated dispatcher of a typed-overload builtin when every declared
 /// overload's parameter types failed `FromValue::matches` against the
@@ -1467,6 +1521,50 @@ mod tests {
             !msg.contains("from 2 to 2"),
             "should not contain 'from 2 to 2': {msg:?}"
         );
+    }
+
+    #[test]
+    fn check_exactly_one_argument_wording() {
+        // METH_O wording (#2331): any count != 1 → "takes exactly one
+        // argument (N given)"; count == 1 is accepted.
+        assert!(check_exactly_one_argument("repr", 1).is_ok());
+        let too_few = check_exactly_one_argument("repr", 0).unwrap_err();
+        assert_eq!(
+            err_msg(&too_few),
+            "repr() takes exactly one argument (0 given)"
+        );
+        let too_many = check_exactly_one_argument("repr", 2).unwrap_err();
+        assert_eq!(
+            err_msg(&too_many),
+            "repr() takes exactly one argument (2 given)"
+        );
+    }
+
+    #[test]
+    fn check_arity_expected_got_wording() {
+        // METH_VARARGS wording (#2331): bare name, no trailing parens.
+        assert!(check_arity_expected_got("isinstance", 2, 2, 2).is_ok());
+        let fixed = check_arity_expected_got("isinstance", 1, 2, 2).unwrap_err();
+        assert_eq!(err_msg(&fixed), "isinstance expected 2 arguments, got 1");
+        let fixed_many = check_arity_expected_got("isinstance", 3, 2, 2).unwrap_err();
+        assert_eq!(
+            err_msg(&fixed_many),
+            "isinstance expected 2 arguments, got 3"
+        );
+        // Range form: "at least" below min, "at most" above max.
+        let at_least = check_arity_expected_got("getattr", 1, 2, 3).unwrap_err();
+        assert_eq!(
+            err_msg(&at_least),
+            "getattr expected at least 2 arguments, got 1"
+        );
+        let at_most = check_arity_expected_got("getattr", 4, 2, 3).unwrap_err();
+        assert_eq!(
+            err_msg(&at_most),
+            "getattr expected at most 3 arguments, got 4"
+        );
+        // Singular noun when the bound is 1.
+        let one = check_arity_expected_got("f", 0, 1, 1).unwrap_err();
+        assert_eq!(err_msg(&one), "f expected 1 argument, got 0");
     }
 
     #[test]
