@@ -1184,15 +1184,16 @@ impl Interpreter {
         // (`[1].__hash__` → `None`) here for the class attribute, but only when
         // no closer user override exists (an MRO lookup that lands on the
         // inherited `object.__hash__` sentinel) so a subclass that defines its
-        // own `__hash__` still resolves to that function.
+        // own `__hash__` still resolves to that function.  Issue #2299:
+        // `class_hash_inherits_builtin_none` walks the MRO so that a subclass
+        // which re-enables hashing (`__hash__ = object.__hash__`) shadows the
+        // builtin's implicit `None` and keeps a callable `__hash__`.
         if name == "__hash__"
             && matches!(
                 lookup_class_attr(&class, name).as_ref().map(|v| v.kind()),
                 Some(ValueKind::BuiltinFunction("object.__hash__"))
             )
-            && ["list", "dict", "set", "bytearray"]
-                .iter()
-                .any(|t| class_chain_contains_name(&class, t))
+            && class_hash_inherits_builtin_none(&class)
         {
             return Ok(Value::none());
         }

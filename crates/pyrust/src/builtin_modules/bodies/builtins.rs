@@ -21,7 +21,8 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
-    class_chain_contains_name, class_is_subclass_of, class_suppresses_instance_dict,
+    class_chain_contains_name, class_hash_inherits_builtin_none, class_is_subclass_of,
+    class_suppresses_instance_dict,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
@@ -6026,6 +6027,16 @@ pyrust_module! {
     /// CPython signature: `object.__format__(self, format_spec, /)`
     #[py_name = "object.__format__"]
     fn object_format_dunder(args) -> Result<Value> {
+        // Issue #2299: `object.__format__` / the inherited `bytes.__format__`
+        // (both resolve to this slot) take no keyword arguments.  CPython names
+        // the slot owner `object` regardless of the calling type, so
+        // `bytes.__format__(b"", "", k=1)` reports `object.__format__()`.
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "object.__format__() takes no keyword arguments".to_string(),
+            ));
+        }
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__format__", "object", method)
         })?;
@@ -8196,6 +8207,25 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
                 // __hash__ = None means explicitly unhashable (CPython rule).
                 if matches!(hash_method.kind(), ValueKind::None) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{class_name}'"),
+                    ));
+                }
+                // Issue #2299: the unhashable built-in types (list/dict/set/
+                // bytearray) set `__hash__ = None` on the *type*, so a subclass
+                // that does not override `__hash__` inherits unhashability.  The
+                // MRO lookup lands on the inherited `object.__hash__` sentinel
+                // (not a user function and not the type-level `None`), so detect
+                // the inherited-`None` case directly: when the chain reaches an
+                // unhashable builtin before any class defines its own `__hash__`
+                // the instance is unhashable too.  A subclass that re-enables
+                // hashing (`__hash__ = object.__hash__`) shadows that `None`.
+                if matches!(
+                    hash_method.kind(),
+                    ValueKind::BuiltinFunction("object.__hash__")
+                ) && class_hash_inherits_builtin_none(&class)
+                {
                     return Err(PyError::named(
                         "TypeError",
                         format!("unhashable type: '{class_name}'"),
