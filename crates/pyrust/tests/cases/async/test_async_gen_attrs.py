@@ -34,6 +34,9 @@ print("ag has gi_yieldfrom", hasattr(a, "gi_yieldfrom"))
 print("ag has cr_running", hasattr(a, "cr_running"))
 print("ag has ag_yieldfrom", hasattr(a, "ag_yieldfrom"))
 print("ag name", a.__name__, a.__qualname__)
+# A non-ASCII attribute name whose byte index 3 lands inside a multibyte
+# character must raise AttributeError, not crash the prefix-splitting logic.
+print("ag has agé", hasattr(a, "agé"))
 
 # --- coroutine: cr_* present, gi_* / ag_* absent --------------------------
 print("cr_running", c.cr_running)

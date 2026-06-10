@@ -804,7 +804,12 @@ impl Interpreter {
                     //     gi_yieldfrom  (no gi_await in CPython).
                     // `__name__` / `__qualname__` apply to all three.
                     let is_coroutine_only = frame.is_coroutine && !frame.code.is_generator;
-                    let (prefix, suffix) = name.split_at(name.len().min(3));
+                    // Split off a 3-byte introspection prefix. `name.get(..3)`
+                    // is UTF-8-boundary-safe (returns None when byte index 3
+                    // falls inside a multibyte char, e.g. `getattr(g, "agé")`),
+                    // where the old `split_at(3)` panicked.
+                    let prefix = name.get(..3).unwrap_or("");
+                    let suffix = name.get(3..).unwrap_or("");
                     let prefix_matches = match prefix {
                         "ag_" => is_async_gen,
                         "cr_" => is_coroutine_only,
