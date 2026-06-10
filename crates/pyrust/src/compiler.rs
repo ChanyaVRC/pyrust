@@ -4483,6 +4483,73 @@ fn expr_contains_yield(expr: &Expr) -> bool {
     }
 }
 
+/// Whether an expression contains an `await` in the current scope. Used to
+/// decide whether a synthesized comprehension function is a coroutine / async
+/// generator (#2304): an `await` in a comprehension's element or condition (or
+/// a non-outermost clause iterable) makes the comprehension asynchronous even
+/// without an `async for` clause.
+///
+/// Mirrors `expr_contains_yield`: it does NOT descend into lambdas or nested
+/// comprehensions / generator expressions, which have their own scope.
+fn expr_contains_await(expr: &Expr) -> bool {
+    match expr {
+        Expr::Await(_) => true,
+        Expr::Yield(e) => e.as_deref().is_some_and(expr_contains_await),
+        Expr::YieldFrom(e) => expr_contains_await(e),
+        Expr::Binary { left, right, .. } => expr_contains_await(left) || expr_contains_await(right),
+        Expr::Unary { expr: e, .. } => expr_contains_await(e),
+        Expr::Compare { left, ops } => {
+            expr_contains_await(left) || ops.iter().any(|(_, e)| expr_contains_await(e))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            expr_contains_await(cond) || expr_contains_await(then) || expr_contains_await(else_)
+        }
+        Expr::Call { func, args } => {
+            expr_contains_await(func) || args.iter().any(|a| expr_contains_await(&a.value))
+        }
+        Expr::Attr { target, .. } => expr_contains_await(target),
+        Expr::Index { target, index } => expr_contains_await(target) || expr_contains_await(index),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_contains_await(target)
+                || lower.as_deref().is_some_and(expr_contains_await)
+                || upper.as_deref().is_some_and(expr_contains_await)
+                || step.as_deref().is_some_and(expr_contains_await)
+        }
+        Expr::Tuple(items) | Expr::List(items) | Expr::Set(items) => {
+            items.iter().any(expr_contains_await)
+        }
+        Expr::Dict(items) => items.iter().any(|item| match item {
+            crate::ast::DictItem::Pair(k, v) => expr_contains_await(k) || expr_contains_await(v),
+            crate::ast::DictItem::DoubleSplat(e) => expr_contains_await(e),
+        }),
+        Expr::Starred(e) => expr_contains_await(e),
+        Expr::Named { value, .. } => expr_contains_await(value),
+        // Lambda, comprehensions, and generator expressions are separate scopes.
+        Expr::Lambda { .. }
+        | Expr::ListComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::GenExp { .. } => false,
+        // Leaf nodes — cannot contain await.
+        Expr::Var(_)
+        | Expr::Int(_)
+        | Expr::BigInt(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::FString(_)
+        | Expr::Bool(_)
+        | Expr::None
+        | Expr::Ellipsis => false,
+    }
+}
+
 /// Produce Python's `repr()` of a string value, matching CPython's output.
 ///
 /// Rules (same as CPython's `repr()` for `str`):
@@ -10746,6 +10813,23 @@ impl Compiler {
 
     // ── Comprehension compilation ──────────────────────────────────────────────
 
+    /// Whether a comprehension is asynchronous due to an `await` in its body
+    /// (#2304), independent of any `async for` clause. `elts` are the element
+    /// expression(s) — one for list/set/gen, two (key, value) for dict.
+    ///
+    /// Scoping (matches CPython): the OUTERMOST iterable (`clauses[0].iter`) is
+    /// evaluated in the ENCLOSING scope, so an `await` there belongs to the
+    /// enclosing frame and does NOT make the comprehension async. We therefore
+    /// inspect only the element(s), every clause `cond`, and the
+    /// non-outermost clause iterables (`clauses[1..]`).
+    fn comp_body_has_await(elts: &[&Expr], clauses: &[CompClause]) -> bool {
+        elts.iter().any(|e| expr_contains_await(e))
+            || clauses
+                .iter()
+                .any(|c| c.cond.as_ref().is_some_and(expr_contains_await))
+            || clauses[1..].iter().any(|c| expr_contains_await(&c.iter))
+    }
+
     /// Build the loop-nest AST shared by list/set/dict comprehensions.
     ///
     /// Returns a `Vec<Stmt>` representing the `for`/`if` structure that wraps
@@ -11197,7 +11281,8 @@ impl Compiler {
             }
             return 0;
         }
-        let is_async = clauses.iter().any(|c| c.is_async);
+        let is_async =
+            clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[elt], clauses);
         if is_async && !self.is_async_function {
             self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
@@ -11246,7 +11331,8 @@ impl Compiler {
             }
             return 0;
         }
-        let is_async = clauses.iter().any(|c| c.is_async);
+        let is_async =
+            clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[key, val], clauses);
         if is_async && !self.is_async_function {
             self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
@@ -11361,7 +11447,8 @@ impl Compiler {
             }
             return 0;
         }
-        let is_async = clauses.iter().any(|c| c.is_async);
+        let is_async =
+            clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[elt], clauses);
         if is_async && !self.is_async_function {
             self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
@@ -11428,7 +11515,13 @@ impl Compiler {
         // it does NOT require an enclosing async function — it constructs an
         // `async_generator` object anywhere, just like an `async def` with a
         // bare `yield` (#2280).
-        let is_async = clauses.iter().any(|c| c.is_async);
+        // An `await` in the element/cond/non-outermost iter (without an
+        // `async for`) also makes the genexp an async generator (#2304):
+        // `(await f(x) for x in xs)` — matches CPython, which produces an
+        // `async_generator` object. Unlike collection comprehensions this does
+        // not require an enclosing async function.
+        let is_async =
+            clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[elt], clauses);
         if let Some(msg) = check_comprehension(&[elt], clauses, "generator expression") {
             self.set_syntax_error(&msg);
             return 0;

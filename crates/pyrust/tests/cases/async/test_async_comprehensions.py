@@ -22,6 +22,48 @@ async def double(x):
     return x * 2
 
 
+async def get_list():
+    await asyncio.sleep(0)
+    return [1, 2, 3]
+
+
+async def klist(x):
+    await asyncio.sleep(0)
+    return [x, x + 100]
+
+
+async def await_no_async_for():
+    # #2304: an `await` in the element / condition / non-outermost iterable
+    # (without any `async for` clause) makes the comprehension asynchronous.
+    xs = [1, 2, 3]
+
+    # await in the element of list / set / dict comprehensions.
+    print([await double(x) for x in xs])
+    print(sorted({await double(x) for x in xs}))
+    print({await double(x): x for x in xs})
+    print({x: await double(x) for x in xs})
+
+    # await in the condition.
+    print([x for x in xs if await is_even(x)])
+    print({x for x in xs if await is_even(x)})
+
+    # await in a NON-outermost clause iterable.
+    print([y for x in xs for y in await klist(x)])
+    print({y: y for x in xs for y in await klist(x)})
+
+    # await only in the OUTERMOST iterable is the enclosing scope's concern,
+    # so this is a plain (sync) comprehension.
+    print([x for x in await get_list()])
+
+    # await combined with an explicit `async for` clause.
+    print([await double(x) async for x in arange(3)])
+
+    # genexp with `await` but no `async for` is an async generator.
+    agen = (await double(x) for x in xs)
+    print(type(agen).__name__)
+    print([v async for v in agen])
+
+
 async def main():
     # list / set / dict comprehensions over an async iterator.
     print([x async for x in arange(4)])
@@ -52,6 +94,7 @@ async def main():
 
 
 asyncio.run(main())
+asyncio.run(await_no_async_for())
 
 # Sync comprehensions are unaffected.
 print([i * i for i in range(4)])
