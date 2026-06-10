@@ -679,6 +679,158 @@ pub(crate) fn bind_param_direct(
 // helper would be larger than the code it replaces and gains nothing).
 // ---------------------------------------------------------------------------
 
+/// Which primitive built-in (if any) `class` inherits its storage layout from.
+/// The three categories are mutually exclusive (a class cannot inherit from two
+/// incompatible primitive layouts), so a *single* base-chain walk classifies
+/// all of them.  `instantiate_normal_instance` previously walked the chain three
+/// times (`find_mutable_primitive_base` + `find_immutable_primitive_base` +
+/// `find_scalar_primitive_base`) on every instantiation; folding them into one
+/// walk removes two redundant chain traversals from the hot construction path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrimitiveBase {
+    /// No primitive base anywhere in the chain (the overwhelmingly common case
+    /// for ordinary user classes).
+    None,
+    /// Mutable container primitive (`dict` / `list` / `set`): needs an empty
+    /// backing store pre-initialised before `__init__` runs.
+    Mutable(&'static str),
+    /// Immutable container primitive (`frozenset` / `tuple`): backing built from
+    /// the constructor args at construction time.
+    Immutable(&'static str),
+    /// Scalar primitive (`str` / `int` / `float` / `bytes` / `bytearray` /
+    /// `complex`): backing built from the constructor args at construction time.
+    Scalar(&'static str),
+}
+
+/// Walk the (single-inheritance) base chain of `class` once and classify which
+/// primitive built-in — if any — it derives its storage layout from.  Mirrors
+/// the per-category `find_*_primitive_base` helpers exactly (same primitive
+/// names, same `is_primitive_class` gate), but in a single traversal.
+#[inline]
+fn classify_primitive_base(class: &Rc<RefCell<PyClass>>) -> PrimitiveBase {
+    let mut cur = Rc::clone(class);
+    loop {
+        if is_primitive_class(&cur) {
+            match cur.borrow().name.as_str() {
+                "dict" => return PrimitiveBase::Mutable("dict"),
+                "list" => return PrimitiveBase::Mutable("list"),
+                "set" => return PrimitiveBase::Mutable("set"),
+                "frozenset" => return PrimitiveBase::Immutable("frozenset"),
+                "tuple" => return PrimitiveBase::Immutable("tuple"),
+                "str" => return PrimitiveBase::Scalar("str"),
+                "int" => return PrimitiveBase::Scalar("int"),
+                "float" => return PrimitiveBase::Scalar("float"),
+                "bytes" => return PrimitiveBase::Scalar("bytes"),
+                "bytearray" => return PrimitiveBase::Scalar("bytearray"),
+                "complex" => return PrimitiveBase::Scalar("complex"),
+                _ => {}
+            }
+        }
+        let next = cur.borrow().base.clone();
+        match next {
+            Some(b) => cur = b,
+            None => return PrimitiveBase::None,
+        }
+    }
+}
+
+/// Resolved per-class construction facts that `instantiate_normal_instance`
+/// re-derives on *every* `Cls(...)` call: the MRO-resolved `__new__` and
+/// `__init__` values, plus which primitive built-in (if any) supplies the
+/// storage layout.  All three are read by walking the same base chain, so a
+/// single traversal yields them together.
+struct ConstructionPlan {
+    /// The `__new__` resolved via the MRO (identical to
+    /// `lookup_class_attr(class, "__new__")`), or `None` if none found.
+    new_val: Option<Value>,
+    /// The `__init__` resolved via the MRO (identical to
+    /// `lookup_class_attr(class, "__init__")`), or `None`.
+    init_val: Option<Value>,
+    /// Primitive storage-layout base classification.
+    prim: PrimitiveBase,
+}
+
+/// Resolve `__new__`, `__init__`, and the primitive-base classification for
+/// `class` in a *single* linear base-chain walk.  Returns `None` (so the caller
+/// falls back to the byte-identical per-attr `lookup_class_attr` path) whenever
+/// any node in the chain participates in *multiple* inheritance — attribute
+/// resolution there must follow the C3 MRO, which a plain depth-first chain walk
+/// does not reproduce.  For the single-inheritance case (the common path, and
+/// the one whose per-construction cost scales with MRO depth) this folds the
+/// three separate `lookup_class_attr` / `classify_primitive_base` traversals
+/// into one.
+///
+/// The walk mirrors `lookup_class_attr` exactly: a name resolves to the first
+/// class in the chain whose *own* `attrs` defines it, and a chain that
+/// terminates without an explicit base falls through to the `object` singleton
+/// (the same `!has_explicit_base && !is_primitive_class` fallback).
+#[inline]
+fn resolve_construction_plan(class: &Rc<RefCell<PyClass>>) -> Option<ConstructionPlan> {
+    let mut new_val: Option<Value> = None;
+    let mut init_val: Option<Value> = None;
+    let mut prim = PrimitiveBase::None;
+    let mut cur = Rc::clone(class);
+    loop {
+        let borrowed = cur.borrow();
+        // Multiple inheritance anywhere in the chain → bail to the C3 slow path.
+        if !borrowed.extra_bases.is_empty() {
+            return None;
+        }
+        if new_val.is_none() {
+            new_val = borrowed.attrs.get("__new__").cloned();
+        }
+        if init_val.is_none() {
+            init_val = borrowed.attrs.get("__init__").cloned();
+        }
+        let is_prim = is_primitive_class(&cur);
+        if prim == PrimitiveBase::None && is_prim {
+            prim = match borrowed.name.as_str() {
+                "dict" => PrimitiveBase::Mutable("dict"),
+                "list" => PrimitiveBase::Mutable("list"),
+                "set" => PrimitiveBase::Mutable("set"),
+                "frozenset" => PrimitiveBase::Immutable("frozenset"),
+                "tuple" => PrimitiveBase::Immutable("tuple"),
+                "str" => PrimitiveBase::Scalar("str"),
+                "int" => PrimitiveBase::Scalar("int"),
+                "float" => PrimitiveBase::Scalar("float"),
+                "bytes" => PrimitiveBase::Scalar("bytes"),
+                "bytearray" => PrimitiveBase::Scalar("bytearray"),
+                "complex" => PrimitiveBase::Scalar("complex"),
+                _ => PrimitiveBase::None,
+            };
+        }
+        let has_explicit_base = borrowed.base.is_some();
+        let next = borrowed.base.clone();
+        drop(borrowed);
+        match next {
+            Some(b) => cur = b,
+            None => {
+                // Chain terminated.  Mirror `lookup_class_attr`'s implicit
+                // `object` fallback: a class with no explicit base (and that is
+                // not itself a primitive singleton) inherits `object`'s attrs.
+                if !has_explicit_base && !is_prim {
+                    let obj = object_class_singleton();
+                    if !Rc::ptr_eq(&cur, &obj) {
+                        let ob = obj.borrow();
+                        if new_val.is_none() {
+                            new_val = ob.attrs.get("__new__").cloned();
+                        }
+                        if init_val.is_none() {
+                            init_val = ob.attrs.get("__init__").cloned();
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    Some(ConstructionPlan {
+        new_val,
+        init_val,
+        prim,
+    })
+}
+
 #[inline(always)]
 fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
     match op {

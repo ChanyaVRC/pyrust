@@ -1526,24 +1526,21 @@ pub(crate) fn bases_have_layout_conflict(bases: &[Rc<RefCell<PyClass>>]) -> bool
 pub(crate) fn find_mutable_primitive_base(
     class: &Rc<RefCell<PyClass>>,
 ) -> Option<&'static str> {
-    let (name, base) = {
-        let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
-    };
-    match name.as_str() {
-        "dict" | "list" | "set"
-            // Check that this is actually the primitive singleton, not a
-            // user class that happens to be named "dict".
-            if is_primitive_class(class) => {
-                return Some(match name.as_str() {
-                    "dict" => "dict",
-                    "list" => "list",
-                    "set" => "set",
-                    _ => unreachable!(),
-                });
-            }
-        _ => {}
+    // Only a genuine primitive *singleton* can be a primitive base, and
+    // `is_primitive_class` is a cheap pointer-keyed thread-local lookup.
+    // Gating on it first lets the common case (an ordinary user class node)
+    // skip borrowing + comparing the class name entirely — and never clone
+    // the name `String`, which used to dominate the hot instantiation path
+    // (issue: class-instance creation perf).
+    if is_primitive_class(class) {
+        match class.borrow().name.as_str() {
+            "dict" => return Some("dict"),
+            "list" => return Some("list"),
+            "set" => return Some("set"),
+            _ => {}
+        }
     }
+    let base = class.borrow().base.clone();
     base.and_then(|b| find_mutable_primitive_base(&b))
 }
 
@@ -1558,23 +1555,14 @@ pub(crate) fn find_mutable_primitive_base(
 pub(crate) fn find_immutable_primitive_base(
     class: &Rc<RefCell<PyClass>>,
 ) -> Option<&'static str> {
-    let (name, base) = {
-        let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
-    };
-    match name.as_str() {
-        "frozenset" | "tuple"
-            // Check that this is actually the primitive singleton, not a
-            // user class that happens to share the name.
-            if is_primitive_class(class) => {
-                return Some(match name.as_str() {
-                    "frozenset" => "frozenset",
-                    "tuple" => "tuple",
-                    _ => unreachable!(),
-                });
-            }
-        _ => {}
+    if is_primitive_class(class) {
+        match class.borrow().name.as_str() {
+            "frozenset" => return Some("frozenset"),
+            "tuple" => return Some("tuple"),
+            _ => {}
+        }
     }
+    let base = class.borrow().base.clone();
     base.and_then(|b| find_immutable_primitive_base(&b))
 }
 
@@ -1591,25 +1579,18 @@ pub(crate) fn find_immutable_primitive_base(
 pub(crate) fn find_scalar_primitive_base(
     class: &Rc<RefCell<PyClass>>,
 ) -> Option<&'static str> {
-    let (name, base) = {
-        let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
-    };
-    match name.as_str() {
-        "str" | "int" | "float" | "bytes" | "bytearray" | "complex"
-            if is_primitive_class(class) => {
-                return Some(match name.as_str() {
-                    "str" => "str",
-                    "int" => "int",
-                    "float" => "float",
-                    "bytes" => "bytes",
-                    "bytearray" => "bytearray",
-                    "complex" => "complex",
-                    _ => unreachable!(),
-                });
-            }
-        _ => {}
+    if is_primitive_class(class) {
+        match class.borrow().name.as_str() {
+            "str" => return Some("str"),
+            "int" => return Some("int"),
+            "float" => return Some("float"),
+            "bytes" => return Some("bytes"),
+            "bytearray" => return Some("bytearray"),
+            "complex" => return Some("complex"),
+            _ => {}
+        }
     }
+    let base = class.borrow().base.clone();
     base.and_then(|b| find_scalar_primitive_base(&b))
 }
 
