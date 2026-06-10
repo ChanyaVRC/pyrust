@@ -406,7 +406,7 @@ impl Interpreter {
                         let q = func.effective_qualname();
                         return Ok(Value::string(q));
                     }
-                    "__module__" => return Ok(func.module.borrow().clone()),
+                    "__module__" => return Ok(func.module_value()),
                     "__doc__" => return Ok(func.doc.borrow().clone()),
                     "__dict__" => {
                         // Return the live dict object — CPython returns the same
@@ -3261,7 +3261,7 @@ fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate
     match name {
         "__name__" => Some(Ok(Value::string(function.effective_name()))),
         "__qualname__" => Some(Ok(Value::string(function.effective_qualname()))),
-        "__module__" => Some(Ok(function.module.borrow().clone())),
+        "__module__" => Some(Ok(function.module_value())),
         "__doc__" => Some(Ok(function.doc.borrow().clone())),
         "__dict__" => {
             let attrs_rc = func_attrs_rc(function);

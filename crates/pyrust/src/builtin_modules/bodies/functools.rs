@@ -1135,9 +1135,9 @@ fn do_update_wrapper(
 /// caller substitutes a default.
 fn function_name(v: &Value) -> Option<String> {
     match v.kind() {
-        ValueKind::UserFunction(f) => Some(f.name.clone()),
+        ValueKind::UserFunction(f) => Some(f.name.to_string()),
         ValueKind::BuiltinFunction(s) => Some(s.to_string()),
-        ValueKind::BoundMethod { function, .. } => Some(function.name.clone()),
+        ValueKind::BoundMethod { function, .. } => Some(function.name.to_string()),
         ValueKind::PyClass(c) => Some(c.borrow().name.clone()),
         _ => None,
     }

@@ -1319,11 +1319,16 @@ pub struct UserFunction {
     /// The bare function name as declared.  Used for self-recursive slot lookup
     /// and error messages.  Do not mutate through this field; user code that
     /// assigns `f.__name__ = "x"` writes to `name_overrides` instead.
-    pub name: String,
+    ///
+    /// `Rc<str>` (#2256): the declared name is immutable per-`def`, so every
+    /// closure produced by the same `def` shares one allocation instead of each
+    /// carrying its own `String` copy.  Derefs to `str`, so read sites are
+    /// unchanged; `.clone()` is a cheap refcount bump.
+    pub name: Rc<str>,
     /// Fully-qualified compile-time name (e.g. `"outer.<locals>.inner"`).
     /// Exposed as `f.__qualname__`.  User code that assigns `f.__qualname__ = "x"`
-    /// writes to `name_overrides` instead.
-    pub qualname: String,
+    /// writes to `name_overrides` instead.  `Rc<str>` shared per-`def` (#2256).
+    pub qualname: Rc<str>,
     /// Lazily-boxed user overrides for `f.__name__` / `f.__qualname__` (#2256).
     /// `None` (the common case — virtually every function and closure) falls back
     /// to `name` / `qualname` and costs one pointer instead of two inline
@@ -1335,6 +1340,13 @@ pub struct UserFunction {
     /// `f.__module__` — the name of the module in which the function was defined.
     /// Defaults to `"__main__"` (module-name tracking is not yet implemented).
     /// User code may assign any value; `del f.__module__` resets it to `None`.
+    ///
+    /// Stored lazily (#2256): the `Value::unset()` sentinel means "not yet
+    /// materialised — falls back to the `"__main__"` default", so the common
+    /// case (every function/closure, none of which reassign `__module__`) costs
+    /// no per-object heap `String`.  An explicit `del f.__module__` writes
+    /// `Value::none()` (distinct from `unset`), and `f.__module__ = v` writes
+    /// `v`.  Read through `module_value()`, never `module.borrow()` directly.
     pub module: RefCell<Value>,
     /// `f.__doc__` — the function's docstring, or `None` if absent.
     /// pyrust does not yet extract docstrings at compile time, so this is always
@@ -1399,7 +1411,7 @@ impl UserFunction {
     pub fn effective_name(&self) -> String {
         match self.name_overrides.borrow().as_deref() {
             Some(FnNameOverrides { name: Some(n), .. }) => n.clone(),
-            _ => self.name.clone(),
+            _ => self.name.to_string(),
         }
     }
 
@@ -1409,7 +1421,7 @@ impl UserFunction {
             Some(FnNameOverrides {
                 qualname: Some(q), ..
             }) => q.clone(),
-            _ => self.qualname.clone(),
+            _ => self.qualname.to_string(),
         }
     }
 
@@ -1419,6 +1431,22 @@ impl UserFunction {
             .borrow_mut()
             .get_or_insert_with(Box::<FnNameOverrides>::default)
             .name = Some(name);
+    }
+
+    /// `f.__module__` — the module name in which the function was defined.
+    ///
+    /// Lazily materialised (#2256): when the stored cell is the `unset()`
+    /// sentinel (the common, never-reassigned case), this returns the
+    /// `"__main__"` default without the function having to carry a per-object
+    /// heap `String`.  An explicit `del f.__module__` stores `Value::none()`
+    /// (which is *not* `unset`), so this correctly returns `None` afterwards.
+    pub fn module_value(&self) -> Value {
+        let cur = self.module.borrow();
+        if cur.is_unset() {
+            Value::string("__main__")
+        } else {
+            cur.clone()
+        }
     }
 
     /// Assign `f.__qualname__` (allocates the overrides box on first use).
@@ -2978,8 +3006,8 @@ impl Value {
             let f = Rc::new(UserFunction {
                 id: next_fn_id(),
                 kind: UserFunctionKind::Builtin(name),
-                name: name.to_string(),
-                qualname: name.to_string(),
+                name: Rc::from(name),
+                qualname: Rc::from(name),
                 name_overrides: RefCell::new(None),
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
@@ -6240,10 +6268,10 @@ mod tests {
         Rc::new(UserFunction {
             id: next_fn_id(),
             kind: UserFunctionKind::Regular,
-            name: "f".to_string(),
-            qualname: "f".to_string(),
+            name: Rc::from("f"),
+            qualname: Rc::from("f"),
             name_overrides: RefCell::new(None),
-            module: RefCell::new(Value::string("__main__")),
+            module: RefCell::new(Value::unset()),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
             annotations: RefCell::new(Value::unset()),
