@@ -1451,6 +1451,35 @@ impl UserFunction {
     }
 }
 
+/// Cached, MRO-resolved construction facts for a single-inheritance class — the
+/// values `instantiate_normal_instance` otherwise re-derives by walking the base
+/// chain on *every* `Cls(...)` call (issue #2330).  Stored behind a `Box` on the
+/// lazily-populated `PyClass::construction_cache`, so an un-constructed class
+/// carries only a null pointer (`None`).
+///
+/// The interpreter (`runtime/fast_path.rs`) owns the *meaning* of these fields;
+/// the core only provides storage and the two validity stamps.  `prim_tag` /
+/// `prim_name` encode the interpreter's `PrimitiveBase` classification using only
+/// core-visible types (a small tag plus an interned `&'static str`).
+#[derive(Debug, Clone)]
+pub struct CachedConstructionPlan {
+    /// MRO-resolved `__new__`, or `None` if none found.
+    pub new_val: Option<Value>,
+    /// MRO-resolved `__init__`, or `None`.
+    pub init_val: Option<Value>,
+    /// Primitive-base classification tag (interpreter-defined encoding).
+    pub prim_tag: u8,
+    /// Primitive built-in name for the classification (`""` when not primitive).
+    pub prim_name: &'static str,
+    /// `PyClass::mutation_version` captured when this plan was resolved.  A
+    /// mismatch means *this* class was mutated since.
+    pub class_version: u64,
+    /// `class_epoch()` captured when resolved.  A mismatch means *some* class
+    /// (possibly a base in the chain) was mutated since — invalidates the cache
+    /// conservatively, mirroring how the attribute inline caches re-validate.
+    pub epoch: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct PyClass {
     pub name: String,
@@ -1491,6 +1520,15 @@ pub struct PyClass {
     /// `Some(set)` means only attributes whose names are in `set` may be stored
     /// on instances of this class (when no parent class adds a `__dict__` back).
     pub slots: Option<IndexSet<String>>,
+    /// Lazily-populated cache of the MRO-resolved construction plan (`__new__` /
+    /// `__init__` / primitive-base classification) used by
+    /// `instantiate_normal_instance` (issue #2330).  `None` until the class is
+    /// first constructed; re-resolved (cheap-path skipped) when `class_version`
+    /// or `epoch` no longer match.  `Box`ed so a never-constructed class only
+    /// pays a null pointer.  `RefCell` (not `Cell`) because `CachedConstructionPlan`
+    /// is not `Copy` (it holds `Option<Value>`); the borrow is short-lived and
+    /// never re-entrant.
+    pub construction_cache: RefCell<Option<Box<CachedConstructionPlan>>>,
 }
 
 impl Default for PyClass {
@@ -1510,6 +1548,7 @@ impl Default for PyClass {
             subclasses: RefCell::new(Vec::new()),
             metatype: None,
             slots: None,
+            construction_cache: RefCell::new(None),
         }
     }
 }
