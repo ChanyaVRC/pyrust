@@ -4529,6 +4529,10 @@ fn expr_contains_await(expr: &Expr) -> bool {
         }),
         Expr::Starred(e) => expr_contains_await(e),
         Expr::Named { value, .. } => expr_contains_await(value),
+        // An f-string's `{expr}` interpolations (and any `{expr}` inside a
+        // nested format spec) are real sub-expressions in the same scope, so an
+        // `await` there counts: `[f"{await f(x)}" for x in xs]` is async.
+        Expr::FString(parts) => fstring_parts_contain_await(parts),
         // Lambda, comprehensions, and generator expressions are separate scopes.
         Expr::Lambda { .. }
         | Expr::ListComp { .. }
@@ -4543,11 +4547,27 @@ fn expr_contains_await(expr: &Expr) -> bool {
         | Expr::Complex(_, _)
         | Expr::Str(_)
         | Expr::Bytes(_)
-        | Expr::FString(_)
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => false,
     }
+}
+
+/// Whether any `{expr}` interpolation in an f-string (or in a nested format
+/// spec) contains an `await` in the current scope. Helper for
+/// `expr_contains_await`.
+fn fstring_parts_contain_await(parts: &[crate::ast::FStringPart]) -> bool {
+    parts.iter().any(|part| match part {
+        crate::ast::FStringPart::Literal(_) => false,
+        crate::ast::FStringPart::Expr {
+            expr, format_spec, ..
+        } => {
+            expr_contains_await(expr)
+                || format_spec
+                    .as_deref()
+                    .is_some_and(fstring_parts_contain_await)
+        }
+    })
 }
 
 /// Produce Python's `repr()` of a string value, matching CPython's output.

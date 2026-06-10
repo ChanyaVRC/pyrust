@@ -43,6 +43,11 @@ async def await_no_async_for():
     print({await double(x): x for x in xs})
     print({x: await double(x) for x in xs})
 
+    # await inside an f-string interpolation in the element, including a
+    # nested format spec — these are real sub-expressions in the comp scope.
+    print([f"{await double(x)}" for x in xs])
+    print([f"{x:>{await double(x)}}" for x in xs])
+
     # await in the condition.
     print([x for x in xs if await is_even(x)])
     print({x for x in xs if await is_even(x)})
