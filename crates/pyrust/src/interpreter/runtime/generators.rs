@@ -219,6 +219,12 @@ impl Interpreter {
                 return Err(pyrust_core::value_err!("generator already executing"));
             }
         };
+        // A `GenDriving` placeholder: the frame is checked out by the
+        // gen-drive trampoline (#2253) — the generator is executing
+        // (issue #2285).
+        if borrow.is::<GenDriving>() {
+            return Err(pyrust_core::value_err!("generator already executing"));
+        }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
@@ -294,6 +300,12 @@ impl Interpreter {
                 return Err(pyrust_core::value_err!("generator already executing"));
             }
         };
+        // A `GenDriving` placeholder: the frame is checked out by the
+        // gen-drive trampoline (#2253) — the generator is executing
+        // (issue #2285).
+        if borrow.is::<GenDriving>() {
+            return Err(pyrust_core::value_err!("generator already executing"));
+        }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
@@ -352,6 +364,12 @@ impl Interpreter {
             ));
         }
 
+        // A `GenDriving` placeholder: the frame is checked out by the
+        // gen-drive trampoline (#2253) — the generator is executing
+        // (issue #2285).
+        if borrow.is::<GenDriving>() {
+            return Err(pyrust_core::value_err!("generator already executing"));
+        }
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;

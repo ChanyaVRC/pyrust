@@ -4332,10 +4332,18 @@ impl Interpreter {
                     }
                 }
                 Err(_) => {
-                    // Cell checked out ⇒ a coroutine that is already executing /
-                    // being awaited.  Pass it through so the resume path raises
-                    // the precise coroutine-already-executing error.
-                    return Ok(awaited.clone());
+                    // Cell checked out ⇒ the frame is currently executing on
+                    // this native stack, so this `await` is re-entrant (a
+                    // coroutine awaiting itself, directly or via a helper
+                    // chain).  Raise CPython's coroutine wording eagerly
+                    // (issue #2285): the generic resume path can only see an
+                    // opaque busy cell and would report the *generator*
+                    // wording.  The kind is unreadable while the cell is busy,
+                    // but the only realistic busy frame reachable from `await`
+                    // is a coroutine — a busy sync/async generator here would
+                    // require `asyncio.run` nested inside its own body, which
+                    // diverges from CPython before this point anyway.
+                    return Err(pyrust_core::value_err!("coroutine already executing"));
                 }
             }
         }
@@ -4450,6 +4458,14 @@ impl Interpreter {
                 let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
                     pyrust_core::value_err!("generator already executing")
                 })?;
+
+                // A `GenDriving` placeholder means the generator's frame is
+                // checked out by the gen-drive trampoline (#2253) up the stack
+                // — it is executing, same as the busy-cell case above
+                // (issue #2285).
+                if borrow.is::<GenDriving>() {
+                    return Err(pyrust_core::value_err!("generator already executing"));
+                }
 
                 if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                     // Built-in iterator: no send support, just advance.
@@ -4575,10 +4591,13 @@ impl Interpreter {
             )
         };
 
-        // Resume the async generator's frame once.
-        let mut borrow = agen_rc
-            .try_borrow_mut()
-            .map_err(|_| pyrust_core::value_err!("anext(): asynchronous generator is already running"))?;
+        // Resume the async generator's frame once.  Re-entrant stepping (the
+        // agen's own body driving another `__anext__`/`asend` on itself) is a
+        // RuntimeError in CPython 3.12 — with the `anext():` prefix even for
+        // `asend()` (issue #2285).
+        let mut borrow = agen_rc.try_borrow_mut().map_err(|_| {
+            pyrust_core::runtime_err!("anext(): asynchronous generator is already running")
+        })?;
         let frame = borrow.downcast_mut::<GeneratorFrame>().ok_or_else(|| {
             PyError::Runtime("invalid async-generator state".to_string())
         })?;

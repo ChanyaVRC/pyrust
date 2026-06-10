@@ -2048,8 +2048,16 @@ impl Interpreter {
             let state_rc = Rc::clone(state_rc);
 
             // Fast path: NativeIterFrame — drain remaining items in one shot.
+            //
+            // `try_borrow_mut`: the cell is mutably checked out while the
+            // generator's own body executes, so a re-entrant `list(g)` /
+            // `sum(g)` / unpack from inside `g` raises CPython's
+            // `ValueError: generator already executing` instead of panicking
+            // on the re-borrow (issue #2285).
             {
-                let mut borrow = state_rc.borrow_mut();
+                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                    pyrust_core::value_err!("generator already executing")
+                })?;
                 if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                     let remaining: Vec<Value> = native.items[native.pos..].to_vec();
                     native.pos = native.items.len();
@@ -2156,10 +2164,19 @@ impl Interpreter {
                 }
             }
 
-            // GeneratorFrame path: drive the generator to exhaustion.
+            // GeneratorFrame path: drive the generator to exhaustion.  A
+            // `GenDriving` placeholder means the frame is checked out by the
+            // gen-drive trampoline (#2253) — the generator is executing, so
+            // collecting it re-entrantly raises the already-executing error
+            // (issue #2285).
             let mut items = Vec::new();
             loop {
-                let mut borrow = state_rc.borrow_mut();
+                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                    pyrust_core::value_err!("generator already executing")
+                })?;
+                if borrow.is::<GenDriving>() {
+                    return Err(pyrust_core::value_err!("generator already executing"));
+                }
                 let frame = borrow
                     .downcast_mut::<GeneratorFrame>()
                     .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
@@ -2833,8 +2850,16 @@ impl Interpreter {
             let state_rc = Rc::clone(state_rc);
 
             // Fast path: NativeIterFrame (no VM required).
+            //
+            // `try_borrow_mut`: the cell is mutably checked out while the
+            // generator's own body executes (a native `resume_generator` up the
+            // stack), so a re-entrant `next(g)` from inside `g` must raise
+            // CPython's `ValueError: generator already executing` rather than
+            // panicking on the re-borrow (issue #2285).
             {
-                let mut borrow = state_rc.borrow_mut();
+                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                    pyrust_core::value_err!("generator already executing")
+                })?;
                 if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                     return match native.advance()? {
                         Some(v) => Ok(v),
@@ -2914,8 +2939,14 @@ impl Interpreter {
                 }
             }
 
-            // GeneratorFrame path.
+            // GeneratorFrame path.  A `GenDriving` placeholder means the frame
+            // is checked out by the gen-drive trampoline (#2253) up the stack —
+            // the generator is executing, so a re-entrant `next(g)` raises
+            // CPython's already-executing error (issue #2285).
             let mut borrow = state_rc.borrow_mut();
+            if borrow.is::<GenDriving>() {
+                return Err(pyrust_core::value_err!("generator already executing"));
+            }
             let frame = borrow
                 .downcast_mut::<GeneratorFrame>()
                 .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
