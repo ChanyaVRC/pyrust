@@ -6483,20 +6483,69 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::BuiltinObject { ops, .. } => {
             with_object_dunders(builtin_method_names(ops.type_name()))
         }
-        ValueKind::Generator(_) => vec![
-            "__class__".to_string(),
-            "__iter__".to_string(),
-            "__name__".to_string(),
-            "__next__".to_string(),
-            "__qualname__".to_string(),
-            "close".to_string(),
-            "gi_code".to_string(),
-            "gi_frame".to_string(),
-            "gi_running".to_string(),
-            "gi_yieldfrom".to_string(),
-            "send".to_string(),
-            "throw".to_string(),
-        ],
+        ValueKind::Generator(state_rc) => {
+            // CPython exposes a type-specific introspection surface per
+            // generator kind (issue #2302): a plain generator advertises the
+            // synchronous iteration protocol plus `gi_*`; an async generator
+            // advertises the asynchronous protocol plus `ag_*`; a coroutine
+            // advertises `send`/`throw`/`close` plus `cr_*` (but NOT
+            // `__iter__`/`__next__`).
+            let (is_async_gen, is_coroutine) = state_rc
+                .try_borrow()
+                .ok()
+                .and_then(|b| {
+                    b.downcast_ref::<GeneratorFrame>()
+                        .map(|f| (f.is_async_generator(), f.is_coroutine))
+                })
+                .unwrap_or((false, false));
+            let mut names = vec![
+                "__class__".to_string(),
+                "__name__".to_string(),
+                "__qualname__".to_string(),
+            ];
+            if is_async_gen {
+                names.extend(
+                    [
+                        "__aiter__",
+                        "__anext__",
+                        "asend",
+                        "athrow",
+                        "aclose",
+                        "ag_code",
+                        "ag_frame",
+                        "ag_running",
+                        "ag_await",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string()),
+                );
+            } else if is_coroutine {
+                names.extend(
+                    [
+                        "send", "throw", "close", "cr_code", "cr_frame", "cr_running", "cr_await",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string()),
+                );
+            } else {
+                names.extend(
+                    [
+                        "__iter__",
+                        "__next__",
+                        "send",
+                        "throw",
+                        "close",
+                        "gi_code",
+                        "gi_frame",
+                        "gi_running",
+                        "gi_yieldfrom",
+                    ]
+                    .iter()
+                    .map(|s| s.to_string()),
+                );
+            }
+            names
+        }
         _ => Vec::new(),
     }
 }
