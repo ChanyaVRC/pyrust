@@ -3279,7 +3279,7 @@ impl Interpreter {
             let template: &str = match receiver.kind() {
                 ValueKind::Str(s) => s,
                 _ => {
-                    return Err(pyrust_core::type_err!("descriptor 'format_map' requires a 'str' object"))
+                    return Err(pyrust_core::descriptor_requires!("format_map", "str"))
                 }
             };
             let mapping = args.into_iter().next().unwrap();
@@ -3348,7 +3348,7 @@ impl Interpreter {
             let (chars, out_capacity) = match receiver.kind() {
                 ValueKind::Str(s) => (s.chars().collect::<Vec<char>>(), s.len()),
                 _ => {
-                    return Err(pyrust_core::type_err!("descriptor 'translate' requires a 'str' object"))
+                    return Err(pyrust_core::descriptor_requires!("translate", "str"))
                 }
             };
             let table = args.into_iter().next().unwrap();

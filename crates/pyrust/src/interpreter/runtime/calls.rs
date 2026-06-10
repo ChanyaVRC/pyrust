@@ -497,10 +497,10 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| pyrust_core::type_err!("descriptor 'format_map' of 'str' object needs an argument"))?;
+                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!("format_map", "str"))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(pyrust_core::type_err!("descriptor 'format_map' requires a 'str' object")),
+                    _ => return Err(pyrust_core::descriptor_requires!("format_map", "str")),
                 };
                 // format_map takes exactly one positional argument (the mapping).
                 let rest = &args[1..];
@@ -1784,7 +1784,7 @@ impl Interpreter {
                             // Requires exactly one positional arg that is a type,
                             // with no extra positional or keyword arguments.
                             if pos.is_empty() {
-                                return Err(pyrust_core::type_err!("unbound method type.mro() needs an argument"));
+                                return Err(pyrust_core::descriptor_needs_arg!("mro", "type", method));
                             }
                             // pos[0] is the self (type) argument.
                             let maybe_class = match pos[0].kind() {
