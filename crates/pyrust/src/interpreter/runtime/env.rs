@@ -747,15 +747,27 @@ impl Interpreter {
                 // Detect this before the generic method exposure below so the
                 // two surfaces don't overlap (CPython's `async_generator` has no
                 // `__next__`/`send`/`__iter__`).
-                let is_async_gen = {
+                // Classify the generator subtype up-front so the protocol
+                // surfaces don't overlap.  CPython exposes a distinct set of
+                // methods per subtype:
+                //   - plain generator: __iter__/__next__/send/throw/close
+                //   - coroutine:       send/throw/close/__await__   (NO
+                //     __iter__/__next__ — coroutines are awaitable, not
+                //     iterable; issue #2314)
+                //   - async generator: __aiter__/__anext__/asend/athrow/aclose
+                let (is_async_gen, is_coroutine_only) = {
                     state_rc
                         .try_borrow()
                         .ok()
                         .and_then(|b| {
-                            b.downcast_ref::<GeneratorFrame>()
-                                .map(|f| f.is_async_generator())
+                            b.downcast_ref::<GeneratorFrame>().map(|f| {
+                                (
+                                    f.is_async_generator(),
+                                    f.is_coroutine && !f.code.is_generator,
+                                )
+                            })
                         })
-                        .unwrap_or(false)
+                        .unwrap_or((false, false))
                 };
                 if is_async_gen {
                     match name {
@@ -768,13 +780,31 @@ impl Interpreter {
                         _ => {}
                     }
                 }
+                if is_coroutine_only {
+                    // A coroutine exposes send/throw/close but NOT
+                    // __iter__/__next__ (CPython gates those off — you must
+                    // `await`, not iterate; issue #2314).  CPython also exposes
+                    // `__await__` (returning a `coroutine_wrapper`); pyrust
+                    // drives `await` through the native event-loop bridge and
+                    // does not surface that wrapper object, so `__await__` is
+                    // intentionally not exposed here (documented limitation).
+                    match name {
+                        "send" | "close" | "throw" => {
+                            return Ok(pyrust_builtins::bound_method::bound_method(
+                                name.to_string(),
+                                target.clone(),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
                 // Issue #1413: also expose the iteration protocol methods as
                 // bound-method values so that hasattr/getattr see them.
                 // These apply to all generator subtypes (GeneratorFrame,
                 // NativeIterFrame, CallableIter, …), so they are checked
-                // before the downcast.  Skipped for async generators, which
-                // expose the async protocol above instead.
-                if !is_async_gen {
+                // before the downcast.  Skipped for async generators and
+                // coroutines, which expose their own protocol above instead.
+                if !is_async_gen && !is_coroutine_only {
                     match name {
                         "__iter__" | "__next__" | "send" | "close" | "throw" => {
                             return Ok(pyrust_builtins::bound_method::bound_method(

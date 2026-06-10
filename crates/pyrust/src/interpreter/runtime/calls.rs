@@ -2927,6 +2927,14 @@ impl Interpreter {
                     "'async_generator' object is not an iterator"
                 ));
             }
+            // Coroutines (#2314) are awaitable, not iterable: `next(coro)` raises
+            // TypeError instead of driving the coroutine.  They are consumed via
+            // `await` / `.send()`.
+            if frame.is_coroutine && !frame.code.is_generator {
+                return Err(pyrust_core::type_err!(
+                    "'coroutine' object is not an iterator"
+                ));
+            }
             if frame.done {
                 drop(borrow);
                 return if let Some(d) = default {
