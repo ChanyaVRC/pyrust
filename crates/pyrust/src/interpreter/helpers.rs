@@ -2425,6 +2425,51 @@ pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str
         .any(|b| class_chain_contains_name(b, name))
 }
 
+/// Issue #2299: does `class`'s `__hash__` resolve to the implicit
+/// `__hash__ = None` that the unhashable built-in types (`list`/`dict`/`set`/
+/// `bytearray`) carry on their *type*?  Returns `true` only when an unhashable
+/// builtin is reached in the MRO *before* any class supplies its own
+/// `__hash__` in its own dict.
+///
+/// This distinguishes `class L(list): pass` (inherits the builtin's `None` →
+/// unhashable) from `class R(list): __hash__ = object.__hash__` (re-enables
+/// hashing, so the builtin's `None` is shadowed and `R` is hashable again),
+/// matching CPython.  A linear single-inheritance walk suffices for these
+/// builtin subclasses; the `extra_bases` branch keeps the same first-defining
+/// -class-wins order via the C3 MRO.
+pub(crate) fn class_hash_inherits_builtin_none(class: &Rc<RefCell<PyClass>>) -> bool {
+    let borrowed = class.borrow();
+    // A class that defines `__hash__` in its own dict shadows anything further
+    // down the MRO — so it is *not* unhashable-by-inheritance, regardless of
+    // what value it set (`None`, `object.__hash__`, or a function).
+    if borrowed.attrs.contains_key("__hash__") {
+        return false;
+    }
+    // An unhashable builtin carries its `__hash__ = None` implicitly (injected
+    // by `env.rs::get_attr_class`, not stored in `attrs`).  Reaching one before
+    // any explicit `__hash__` means the resolution lands on that `None`.
+    if matches!(borrowed.name.as_str(), "list" | "dict" | "set" | "bytearray") {
+        return true;
+    }
+    if !borrowed.extra_bases.is_empty() {
+        drop(borrowed);
+        for cls in c3_linearize_classes(class) {
+            let b = cls.borrow();
+            if b.attrs.contains_key("__hash__") {
+                return false;
+            }
+            if matches!(b.name.as_str(), "list" | "dict" | "set" | "bytearray") {
+                return true;
+            }
+        }
+        return false;
+    }
+    match &borrowed.base {
+        Some(base) => class_hash_inherits_builtin_none(base),
+        None => false,
+    }
+}
+
 /// Set of special-exception classifications a class may inherit, all derived
 /// in a single non-cloning MRO walk (issue #1967).  Previously
 /// `instantiate_exception` ran ~12 separate cloning base-chain scans per
