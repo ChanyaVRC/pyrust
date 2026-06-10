@@ -788,41 +788,92 @@ impl Interpreter {
                 let state_rc = Rc::clone(state_rc);
                 let borrow = state_rc.borrow();
                 if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
+                    // CPython exposes introspection attributes under a
+                    // type-specific prefix: `gi_*` on a plain generator,
+                    // `ag_*` on an async generator, `cr_*` on a coroutine
+                    // (issue #2302).  A given object exposes ONLY its own
+                    // prefix; the other two raise AttributeError.  The
+                    // underlying semantics are shared (suspended frame,
+                    // running flag, code stub, awaited/delegated sub-iterator),
+                    // so resolve the prefix first, then dispatch on the suffix.
+                    //   - async generator: ag_running / ag_frame / ag_code /
+                    //     ag_await  (no ag_yieldfrom in CPython).
+                    //   - coroutine:       cr_running / cr_frame / cr_code /
+                    //     cr_await.
+                    //   - plain generator: gi_running / gi_frame / gi_code /
+                    //     gi_yieldfrom  (no gi_await in CPython).
+                    // `__name__` / `__qualname__` apply to all three.
+                    let is_coroutine_only = frame.is_coroutine && !frame.code.is_generator;
+                    let (prefix, suffix) = name.split_at(name.len().min(3));
+                    let prefix_matches = match prefix {
+                        "ag_" => is_async_gen,
+                        "cr_" => is_coroutine_only,
+                        "gi_" => !is_async_gen && !is_coroutine_only,
+                        _ => false,
+                    };
                     match name {
                         "__name__" => return Ok(Value::string(frame.fn_name.as_ref())),
                         "__qualname__" => return Ok(Value::string(frame.qualname.as_ref())),
-                        // gi_running is always False when accessed from outside the
-                        // generator body (True is only observable from within — pyrust
-                        // does not expose re-entrant generator guards, matching CPython's
-                        // simple "False unless currently on the C call stack" rule).
-                        "gi_running" => return Ok(Value::bool_(false)),
-                        // gi_yieldfrom: the sub-iterator being delegated to via
-                        // `yield from`, or None.  When the generator is suspended at a
-                        // YieldFrom instruction the sub-iterator sits in iter_reg.
-                        // `frame.pc == 0` means the generator body hasn't started yet —
-                        // don't inspect insns[0] in that case (iter_reg unloaded).
-                        "gi_yieldfrom" => {
-                            if !frame.done && frame.pc != 0
-                                && let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
-                                    frame.code.insns.get(frame.pc)
+                        _ if prefix_matches => match suffix {
+                            // running is always False when accessed from outside
+                            // the body (True is only observable from within —
+                            // pyrust does not expose re-entrant guards, matching
+                            // CPython's "False unless currently on the C call
+                            // stack" rule).
+                            "running" => return Ok(Value::bool_(false)),
+                            // frame: the suspended frame object (or None once
+                            // exhausted), built from the retained FnCode (#2185).
+                            "frame" => return Ok(self.build_generator_frame_object(frame)),
+                            // code: pyrust does not expose a standalone code
+                            // object here; return None to avoid AttributeError
+                            // (issue #1270).
+                            "code" => return Ok(Value::none()),
+                            // gi_yieldfrom / ag_await / cr_await: the sub-iterator
+                            // being delegated to via `yield from`, or awaited via
+                            // an inner `await` (both compile to YieldFrom), else
+                            // None.  When suspended at a YieldFrom the sub-iterator
+                            // sits in iter_reg.  `frame.pc == 0` means the body
+                            // hasn't started — don't inspect insns[0] (iter_reg
+                            // unloaded).  CPython spells this `yieldfrom` for a
+                            // plain generator and `await` for an async gen /
+                            // coroutine, but never both on one object.
+                            "yieldfrom" if prefix == "gi_" => {
+                                if !frame.done && frame.pc != 0
+                                    && let Some(crate::bytecode::Insn::YieldFrom {
+                                        iter_reg, ..
+                                    }) = frame.code.insns.get(frame.pc)
                                 {
                                     let sub_iter = frame.regs[*iter_reg as usize].clone();
                                     return Ok(sub_iter);
                                 }
-                            return Ok(Value::none());
-                        }
-                        // gi_frame: the suspended generator's frame object (or
-                        // None once exhausted), built from the retained FnCode
-                        // (issue #2185).
-                        "gi_frame" => return Ok(self.build_generator_frame_object(frame)),
-                        // gi_code: pyrust does not expose a standalone code
-                        // object for the generator here; return None to avoid
-                        // AttributeError (issue #1270).
-                        "gi_code" => return Ok(Value::none()),
+                                return Ok(Value::none());
+                            }
+                            "await" if prefix == "ag_" || prefix == "cr_" => {
+                                if !frame.done && frame.pc != 0
+                                    && let Some(crate::bytecode::Insn::YieldFrom {
+                                        iter_reg, ..
+                                    }) = frame.code.insns.get(frame.pc)
+                                {
+                                    let sub_iter = frame.regs[*iter_reg as usize].clone();
+                                    return Ok(sub_iter);
+                                }
+                                return Ok(Value::none());
+                            }
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
-                let obj_name = if is_async_gen { "async_generator" } else { "generator" };
+                let obj_name = if is_async_gen {
+                    "async_generator"
+                } else if borrow
+                    .downcast_ref::<GeneratorFrame>()
+                    .is_some_and(|f| f.is_coroutine)
+                {
+                    "coroutine"
+                } else {
+                    "generator"
+                };
                 Err(PyError::attribute_error(
                     format!("'{obj_name}' object has no attribute '{name}'"),
                     Some(name.to_string()),
