@@ -38,14 +38,17 @@ use pyrust_derive::pyrust_module;
 const ASYNCIO_PY_SOURCE: &str = include_str!("asyncio_py.py");
 
 /// Names from `ASYNCIO_PY_SOURCE` exported onto the `asyncio` module.
-const ASYNCIO_PY_EXPORTS: [&str; 10] = [
+const ASYNCIO_PY_EXPORTS: [&str; 13] = [
     "sleep",
     "gather",
     "create_task",
     "ensure_future",
+    "wait_for",
     "Future",
     "Task",
     "CancelledError",
+    "InvalidStateError",
+    "TimeoutError",
     "get_event_loop",
     "get_running_loop",
     "_run_main",

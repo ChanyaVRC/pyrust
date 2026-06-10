@@ -18,6 +18,19 @@ cases = [
     "def f():\n    return {await g(x) for x in xs}",
     "def f():\n    return {x: await g(x) for x in xs}",
     "def f():\n    return [x for x in xs if await p(x)]",
+    # #2312: a nested async COLLECTION comprehension propagates async-ness to
+    # the outer comprehension, so these are illegal outside an async function.
+    "def f():\n    return [[await g(y) for y in range(x)] for x in xs]",
+    "def f():\n    return [{await g(y) for y in range(x)} for x in xs]",
+    "def f():\n    return [{y: await g(y) for y in range(x)} for x in xs]",
+    # nested async comp wrapped in an intervening expression still propagates.
+    "def f():\n    return [sum([await g(y) for y in range(x)]) for x in xs]",
+    # nested async comp in a NON-outermost iterable propagates.
+    "def f():\n    return [v for x in xs for v in [await g(y) for y in range(x)]]",
+    # async comp in the OUTERMOST iterable makes the ENCLOSING scope async.
+    "def f():\n    return [x for x in [await g(y) for y in range(2)]]",
+    # a nested async GENEXP does NOT propagate — this outer comp stays sync.
+    "def f():\n    return [(y async for y in g(x)) for x in xs]",
 ]
 
 for src in cases:

@@ -69,6 +69,50 @@ async def await_no_async_for():
     print([v async for v in agen])
 
 
+async def nested_comp_propagation():
+    # #2312: a nested async COLLECTION comprehension (list/set/dict) in the
+    # element / cond / non-outermost iterable makes the OUTER comprehension
+    # async (the outer body must await the inner comp's coroutine). A nested
+    # async genexp does NOT propagate (creating an async-gen object needs no
+    # await). The outermost-iterable rule still holds.
+    xs = [1, 2, 3]
+
+    # inner async list comp in the element of a sync-source outer list comp.
+    print([[await double(y) for y in range(x)] for x in xs])
+    # inner async set comp.
+    print([sorted({await double(y) for y in range(x)}) for x in xs])
+    # inner async dict comp (as the outer element).
+    print([{y: await double(y) for y in range(x)} for x in xs])
+
+    # outer set / dict comprehension with a nested async list comp.
+    print(sorted([tuple([await double(y) for y in range(x)]) for x in xs]))
+    print({x: [await double(y) for y in range(x)] for x in xs})
+
+    # depth-3 nesting.
+    print([[[await double(z) for z in range(y)] for y in range(x)] for x in range(3)])
+
+    # nested async list comp wrapped inside an intervening expression / call /
+    # sync genexp still propagates outward.
+    print([sum([await double(y) for y in range(x)]) for x in xs])
+    print([list(v for v in [await double(y) for y in range(x)]) for x in xs])
+
+    # nested async list comp in a NON-outermost iterable propagates.
+    print([v for x in xs for v in [await double(y) for y in range(x)]])
+
+    # nested async-for list comp propagates the same way.
+    print([[y async for y in arange(x)] for x in xs])
+
+    # a nested async GENEXP does NOT make the outer async: the outer stays a
+    # plain list comp producing async_generator objects.
+    gens = [(y async for y in arange(x)) for x in range(2)]
+    print([type(g).__name__ for g in gens])
+
+    # genexp-outer with a nested async list comp is itself an async generator.
+    agen = ([await double(y) for y in range(x)] for x in range(3))
+    print(type(agen).__name__)
+    print([item async for item in agen])
+
+
 async def main():
     # list / set / dict comprehensions over an async iterator.
     print([x async for x in arange(4)])
@@ -100,6 +144,7 @@ async def main():
 
 asyncio.run(main())
 asyncio.run(await_no_async_for())
+asyncio.run(nested_comp_propagation())
 
 # Sync comprehensions are unaffected.
 print([i * i for i in range(4)])

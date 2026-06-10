@@ -26,7 +26,15 @@ class InvalidStateError(Exception):
     """The operation is not allowed in this state."""
 
 
+# asyncio.TimeoutError is the builtin TimeoutError since CPython 3.11 (it used
+# to be a distinct subclass of OSError-era TimeoutError). Re-export the builtin
+# so `asyncio.TimeoutError is TimeoutError` and `except asyncio.TimeoutError`
+# both behave like CPython 3.12.
+TimeoutError = TimeoutError
+
+
 _PENDING = "PENDING"
+_CANCELLED = "CANCELLED"
 _FINISHED = "FINISHED"
 
 
@@ -40,6 +48,8 @@ class Future:
         self._result = None
         self._exception = None
         self._callbacks = []
+        # Cancellation message (passed to CancelledError), set by cancel().
+        self._cancel_message = None
         # Sentinel the Task driver checks to recognise a Future bubbling up
         # through `await` (CPython uses the same `_asyncio_future_blocking`).
         self._asyncio_future_blocking = False
@@ -48,9 +58,26 @@ class Future:
         return self._state != _PENDING
 
     def cancelled(self):
-        return False
+        return self._state == _CANCELLED
+
+    def cancel(self, msg=None):
+        """Cancel the future. Returns True if it transitioned to cancelled,
+        False if it was already done (CPython Future.cancel semantics)."""
+        if self._state != _PENDING:
+            return False
+        self._state = _CANCELLED
+        self._cancel_message = msg
+        self._schedule_callbacks()
+        return True
+
+    def _make_cancelled_error(self):
+        if self._cancel_message is None:
+            return CancelledError()
+        return CancelledError(self._cancel_message)
 
     def result(self):
+        if self._state == _CANCELLED:
+            raise self._make_cancelled_error()
         if self._state != _FINISHED:
             raise InvalidStateError("Result is not set.")
         if self._exception is not None:
@@ -58,6 +85,8 @@ class Future:
         return self._result
 
     def exception(self):
+        if self._state == _CANCELLED:
+            raise self._make_cancelled_error()
         if self._state != _FINISHED:
             raise InvalidStateError("Exception is not set.")
         return self._exception
@@ -110,26 +139,62 @@ class Task(Future):
     def __init__(self, coro, loop=None):
         super().__init__(loop=loop)
         self._coro = coro
+        # The pending Future this task is currently suspended on (None when the
+        # task is running or not yet suspended). Used by cancel() to inject a
+        # CancelledError at the task's await point.
+        self._fut_waiter = None
+        # Set by cancel() when the task is not currently suspended on a Future:
+        # the next step throws CancelledError into the coroutine.
+        self._must_cancel = False
         # Kick the coroutine off on the next loop turn.
         self._loop.call_soon(self._step_run)
+
+    def cancel(self, msg=None):
+        """Request cancellation of the task. Returns True if cancellation was
+        requested, False if the task is already done (CPython Task.cancel).
+
+        The CancelledError is injected at the task's current await point on the
+        next loop turn; the coroutine may catch and absorb it."""
+        if self.done():
+            return False
+        if self._fut_waiter is not None:
+            # Suspended on a Future: cancelling it wakes the task with a
+            # CancelledError (via _wakeup -> future.result()).
+            if self._fut_waiter.cancel(msg=msg):
+                return True
+        # Not suspended on a cancellable Future: throw at the next step.
+        self._must_cancel = True
+        self._cancel_message = msg
+        return True
 
     def _step_run(self, exc=None):
         if self.done():
             return
+        if self._must_cancel:
+            # A cancel() landed while the task was not blocked on a Future:
+            # turn it into a CancelledError injected at the await point.
+            if exc is None:
+                exc = self._make_cancelled_error()
+            self._must_cancel = False
+        self._fut_waiter = None
         try:
             if exc is None:
                 state, value = _step(self._coro, None)
             else:
                 state, value = _throw(self._coro, exc)
         except CancelledError:
-            Future.set_exception(self, CancelledError())
+            # The coroutine did not absorb the cancellation: the task ends
+            # cancelled (Future state CANCELLED, not a FINISHED exception).
+            Future.cancel(self, msg=self._cancel_message)
             return
         except BaseException as e:
             self.set_exception(e)
             return
 
         if state == 1:
-            # Coroutine returned: `value` is its result.
+            # Coroutine returned: `value` is its result. (If a cancellation was
+            # caught and the coroutine returned normally, the cancellation is
+            # absorbed and the task finishes with this result.)
             self.set_result(value)
             return
 
@@ -137,7 +202,12 @@ class Task(Future):
         if isinstance(value, Future):
             # Awaiting a (pending) Future: resume this task when it resolves.
             value._asyncio_future_blocking = False
+            self._fut_waiter = value
             value.add_done_callback(self._wakeup)
+            if self._must_cancel:
+                # A cancel() arrived during this step: propagate to the waiter.
+                if self._fut_waiter.cancel(msg=self._cancel_message):
+                    self._must_cancel = False
         elif value is None:
             # A bare `yield None` (sleep(0) fairness point): reschedule.
             self._loop.call_soon(self._step_run)
@@ -149,10 +219,11 @@ class Task(Future):
             )
 
     def _wakeup(self, future):
+        self._fut_waiter = None
         try:
             future.result()
         except BaseException as exc:
-            # The awaited future failed: throw the exception into the coro.
+            # The awaited future failed (or was cancelled): throw into the coro.
             self._step_run(exc)
         else:
             self._step_run()
@@ -164,8 +235,14 @@ class _Handle:
     def __init__(self, callback, args):
         self._callback = callback
         self._args = args
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def _run(self):
+        if self._cancelled:
+            return
         self._callback(*self._args)
 
 
@@ -322,6 +399,11 @@ class _GatheringFuture(Future):
         def _done(child):
             if self.done():
                 return
+            if child.cancelled():
+                # A child was cancelled: propagate cancellation to the gather
+                # (default return_exceptions=False).
+                Future.cancel(self)
+                return
             exc = child.exception()
             if exc is not None:
                 # First child error: propagate it immediately.
@@ -333,17 +415,71 @@ class _GatheringFuture(Future):
 
         return _done
 
+    def cancel(self, msg=None):
+        """Cancelling the gather cancels every still-pending child. The gather
+        future itself transitions to cancelled only once a child wakes with a
+        CancelledError and reports it via `_done` (CPython semantics — this
+        preserves the ordering where the children observe the cancellation at
+        their await points before the gather's awaiter resumes)."""
+        if self.done():
+            return False
+        ret = False
+        for child in self._children:
+            if child.cancel(msg=msg):
+                ret = True
+        return ret
 
-async def gather(*aws):
-    """Run the awaitables concurrently; return their results in argument order.
 
-    The default (return_exceptions=False) propagates the first exception as
-    soon as it occurs."""
-    if not aws:
-        return []
+def gather(*aws):
+    """Run the awaitables concurrently; return a Future resolving to their
+    results in argument order.
+
+    Like CPython, `gather` is a plain function that returns the
+    `_GatheringFuture` immediately (so it can be `.cancel()`led before being
+    awaited); `await asyncio.gather(...)` awaits that future. The default
+    (return_exceptions=False) propagates the first child exception, or
+    cancellation, as soon as it occurs."""
     loop = _get_running_loop()
+    if not aws:
+        # An empty gather resolves immediately to an empty list.
+        fut = Future(loop=loop)
+        fut.set_result([])
+        return fut
     children = [ensure_future(a, loop=loop) for a in aws]
-    return await _GatheringFuture(children, loop)
+    return _GatheringFuture(children, loop)
+
+
+async def wait_for(aw, timeout):
+    """Wait for `aw` to complete within `timeout` seconds.
+
+    Returns its result if it finishes in time. On timeout, cancels the inner
+    operation and raises `TimeoutError` (the builtin, per CPython 3.12). A
+    `timeout` of None waits forever (plain await)."""
+    loop = _get_running_loop()
+    if timeout is None:
+        return await ensure_future(aw, loop=loop)
+
+    fut = ensure_future(aw, loop=loop)
+
+    # A one-element box so the timer callback can flag that *it* triggered the
+    # cancellation (vs an external cancel), distinguishing TimeoutError from a
+    # propagated CancelledError.
+    timed_out = [False]
+
+    def _on_timeout():
+        if not fut.done():
+            timed_out[0] = True
+            fut.cancel()
+
+    timer = loop.call_later(timeout, _on_timeout)
+    try:
+        return await fut
+    except CancelledError:
+        if timed_out[0]:
+            raise TimeoutError() from None
+        raise
+    finally:
+        timer.cancel()
 
 
 def _run_main(coro):
