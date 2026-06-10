@@ -100,6 +100,48 @@ it_collect = g_collect()
 show(lambda: next(it_collect))
 
 
+# -- sync generator: re-entrant throw() while trampoline-driven --------------
+
+it_throw = None
+
+
+def g_throw():
+    it_throw.throw(ValueError("x"))
+    yield 1
+
+
+it_throw = g_throw()
+
+
+def drive_throw():
+    for _ in it_throw:
+        pass
+
+
+show(drive_throw)
+
+
+# -- sync generator: re-entrant close() while trampoline-driven --------------
+
+it_close = None
+
+
+def g_close():
+    it_close.close()
+    yield 1
+
+
+it_close = g_close()
+
+
+def drive_close():
+    for _ in it_close:
+        pass
+
+
+show(drive_close)
+
+
 # -- sync generator: re-entrant consume via genexpr sum() while driven -------
 
 def g_sum():
