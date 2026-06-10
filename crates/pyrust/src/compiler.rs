@@ -4147,6 +4147,10 @@ struct LoopCtx {
 
 /// Describes the cleanup that must be emitted before an early exit
 /// (`break`, `continue`, or `return`) that crosses a guarded block boundary.
+// The shared `Body` postfix (`TryBody`/`ExceptBody`/`WithBody`) names the kind
+// of guarded body each entry tracks; keeping it is clearer than the lint's
+// suggested rename.
+#[allow(clippy::enum_variant_names)]
 #[derive(Clone)]
 enum EarlyExitCleanup {
     /// Inside a try-body that has an active `SetupExcept` on the handler stack.
@@ -4162,6 +4166,18 @@ enum EarlyExitCleanup {
         /// `Name(name_idx)` \u2192 `DeleteName(name_idx)` (var lives in env).
         /// `None` \u2192 no `as VAR` clause.
         as_var_delete: Option<ExceptAsVarDel>,
+    },
+    /// Inside a `with`/`async with` body whose `SetupExcept` is live on the
+    /// handler stack.  A `break`/`continue`/`return` that leaves the body must
+    /// emit `PopExcept` then call `__exit__(None, None, None)` (sync) or
+    /// `await __aexit__(None, None, None)` (async) before jumping (issue #2295).
+    /// The exception path is handled separately by the body's `SetupExcept`,
+    /// so — like `TryBody` — a `raise` stops the early-exit walk here.
+    WithBody {
+        /// Register holding the context-manager object (lives for the body).
+        ctx_reg: Reg,
+        /// `true` for `async with` (drives `await __aexit__`), `false` for `with`.
+        is_async: bool,
     },
 }
 
@@ -5046,12 +5062,14 @@ impl Compiler {
             }
             let cleanup = self.except_cleanups[i].clone();
             match cleanup {
-                EarlyExitCleanup::TryBody { .. } => {
-                    // A TryBody entry means this `raise` site is inside a try body
-                    // whose SetupExcept is still live on the VM's exc_handlers stack.
-                    // The VM will dispatch the exception to that handler at runtime;
-                    // no compile-time inlining is needed for this entry or any outer
-                    // entries (which are also covered by their own SetupExcept).
+                EarlyExitCleanup::TryBody { .. } | EarlyExitCleanup::WithBody { .. } => {
+                    // A TryBody/WithBody entry means this `raise` site is inside a
+                    // try/with body whose SetupExcept is still live on the VM's
+                    // exc_handlers stack.  The VM will dispatch the exception to
+                    // that handler at runtime (for `with`, the exception-path
+                    // `__exit__` call); no compile-time inlining is needed for
+                    // this entry or any outer entries (also covered by their own
+                    // SetupExcept).
                     return;
                 }
                 EarlyExitCleanup::ExceptBody {
@@ -5165,6 +5183,18 @@ impl Compiler {
                     self.emit(Insn::EndExcept);
                     if let Some(stmts) = finally_stmts {
                         self.compile_block(&stmts);
+                    }
+                }
+                EarlyExitCleanup::WithBody { ctx_reg, is_async } => {
+                    // `with`/`async with` is `try: BODY finally: __exit__(...)`.
+                    // Pop the body's handler, then run the no-exception exit
+                    // (`__exit__(None, None, None)` / `await __aexit__(...)`)
+                    // before the break/continue/return jump (issue #2295).
+                    self.emit(Insn::PopExcept);
+                    if is_async {
+                        self.emit_async_with_normal_exit(ctx_reg);
+                    } else {
+                        self.emit_with_normal_exit(ctx_reg);
                     }
                 }
             }
@@ -9675,6 +9705,80 @@ impl Compiler {
         self.patch_jump(end_patch);
     }
 
+    /// Emit the no-exception `__exit__(None, None, None)` call for a sync
+    /// `with` whose context manager is in `ctx_reg`.  Shared by the normal
+    /// fall-through exit and the `break`/`continue`/`return` early-exit walk
+    /// (`emit_early_exit_cleanups`), so the cleanup runs in both cases
+    /// (issue #2295).  Does *not* emit `PopExcept`; the caller is responsible
+    /// for popping the handler before invoking this.
+    fn emit_with_normal_exit(&mut self, ctx_reg: Reg) {
+        let exit_name_idx = self.intern_name("__exit__");
+        let exit_frame = self.next_temp;
+        if exit_frame.checked_add(4).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for 'with' statement".to_string());
+            }
+            return;
+        }
+        self.next_temp = exit_frame + 4;
+        if exit_frame + 3 > self.max_reg {
+            self.max_reg = exit_frame + 3;
+        }
+        self.emit(Insn::GetAttrForWith(
+            exit_frame,
+            ctx_reg,
+            exit_name_idx,
+            1, // sync with: __exit__
+        ));
+        self.emit(Insn::LoadNone(exit_frame + 1));
+        self.emit(Insn::LoadNone(exit_frame + 2));
+        self.emit(Insn::LoadNone(exit_frame + 3));
+        self.emit(Insn::Call(exit_frame, 3));
+        self.next_temp = exit_frame;
+    }
+
+    /// Emit `await __aexit__(None, None, None)` (result discarded) for an
+    /// `async with` whose context manager is in `ctx_reg`.  Shared by the
+    /// normal fall-through exit and the early-exit walk (issue #2295).  Does
+    /// *not* emit `PopExcept`; the caller pops the handler first.
+    fn emit_async_with_normal_exit(&mut self, ctx_reg: Reg) {
+        let aexit_name_idx = self.intern_name("__aexit__");
+        let exit_frame = self.next_temp;
+        if exit_frame.checked_add(4).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for 'async with' statement".to_string());
+            }
+            return;
+        }
+        self.next_temp = exit_frame + 4;
+        if exit_frame + 3 > self.max_reg {
+            self.max_reg = exit_frame + 3;
+        }
+        self.emit(Insn::GetAttrForWith(
+            exit_frame,
+            ctx_reg,
+            aexit_name_idx,
+            4, // async with: __aexit__
+        ));
+        self.emit(Insn::LoadNone(exit_frame + 1));
+        self.emit(Insn::LoadNone(exit_frame + 2));
+        self.emit(Insn::LoadNone(exit_frame + 3));
+        self.emit(Insn::Call(exit_frame, 3));
+        // Drive the awaitable returned by __aexit__; result discarded.  Place
+        // the result slot just above the call frame so the temp allocator
+        // stays balanced.
+        self.next_temp = exit_frame + 1;
+        let exit_res = self.next_temp; // == exit_frame + 1
+        self.next_temp = exit_frame + 2;
+        if self.next_temp - 1 > self.max_reg {
+            self.max_reg = self.next_temp - 1;
+        }
+        self.emit_await_drive_into(exit_frame, exit_res);
+        self.next_temp = exit_frame;
+    }
+
     fn compile_with(
         &mut self,
         items: &[(Expr, Option<AssignTarget>)],
@@ -9733,12 +9837,22 @@ impl Compiler {
         // SetupExcept for the body
         let setup_patch = self.emit(Insn::SetupExcept(0));
 
+        // Register the with-exit cleanup so a `break`/`continue`/`return` that
+        // leaves the body runs `__exit__(None, None, None)` (issue #2295).
+        self.except_cleanups.push(EarlyExitCleanup::WithBody {
+            ctx_reg,
+            is_async: false,
+        });
+
         // Compile nested with items or body
         if rest.is_empty() {
             self.compile_block_with_linenos(body, body_linenos);
         } else {
             self.compile_with(rest, body, body_linenos);
         }
+        // Pop our cleanup entry; the normal/exception paths below emit the exit
+        // inline, and inner break/continue/return already consumed it.
+        self.except_cleanups.pop();
         if self.failed {
             return;
         }
@@ -9747,29 +9861,10 @@ impl Compiler {
         self.emit(Insn::PopExcept);
         // ctx.__exit__(None, None, None)
         let exit_name_idx = self.intern_name("__exit__");
-        let exit_frame = self.next_temp;
-        if exit_frame.checked_add(4).is_none() {
-            self.failed = true;
-            if self.error_msg.is_none() {
-                self.error_msg = Some("too many registers for 'with' statement".to_string());
-            }
+        self.emit_with_normal_exit(ctx_reg);
+        if self.failed {
             return;
         }
-        self.next_temp = exit_frame + 4;
-        if exit_frame + 3 > self.max_reg {
-            self.max_reg = exit_frame + 3;
-        }
-        self.emit(Insn::GetAttrForWith(
-            exit_frame,
-            ctx_reg,
-            exit_name_idx,
-            1, // sync with: __exit__
-        ));
-        self.emit(Insn::LoadNone(exit_frame + 1));
-        self.emit(Insn::LoadNone(exit_frame + 2));
-        self.emit(Insn::LoadNone(exit_frame + 3));
-        self.emit(Insn::Call(exit_frame, 3));
-        self.next_temp = exit_frame;
         let end_patch = self.emit(Insn::Jump(0));
 
         // Exception path
@@ -9872,11 +9967,19 @@ impl Compiler {
         // SetupExcept for the body.
         let setup_patch = self.emit(Insn::SetupExcept(0));
 
+        // Register the with-exit cleanup so a `break`/`continue`/`return` that
+        // leaves the body awaits `__aexit__(None, None, None)` (issue #2295).
+        self.except_cleanups.push(EarlyExitCleanup::WithBody {
+            ctx_reg,
+            is_async: true,
+        });
+
         if rest.is_empty() {
             self.compile_block_with_linenos(body, body_linenos);
         } else {
             self.compile_async_with(rest, body, body_linenos);
         }
+        self.except_cleanups.pop();
         if self.failed {
             return;
         }
@@ -9884,39 +9987,10 @@ impl Compiler {
         // Normal exit: await mgr.__aexit__(None, None, None); discard result.
         self.emit(Insn::PopExcept);
         let aexit_name_idx = self.intern_name("__aexit__");
-        let exit_frame = self.next_temp;
-        if exit_frame.checked_add(4).is_none() {
-            self.failed = true;
-            if self.error_msg.is_none() {
-                self.error_msg = Some("too many registers for 'async with' statement".to_string());
-            }
+        self.emit_async_with_normal_exit(ctx_reg);
+        if self.failed {
             return;
         }
-        self.next_temp = exit_frame + 4;
-        if exit_frame + 3 > self.max_reg {
-            self.max_reg = exit_frame + 3;
-        }
-        self.emit(Insn::GetAttrForWith(
-            exit_frame,
-            ctx_reg,
-            aexit_name_idx,
-            4, // async with: __aexit__
-        ));
-        self.emit(Insn::LoadNone(exit_frame + 1));
-        self.emit(Insn::LoadNone(exit_frame + 2));
-        self.emit(Insn::LoadNone(exit_frame + 3));
-        self.emit(Insn::Call(exit_frame, 3));
-        // Drive the awaitable returned by __aexit__; result discarded on the
-        // normal path.  Allocate the result below the call frame so the temp
-        // allocator stays balanced.
-        self.next_temp = exit_frame + 1;
-        let exit_res = self.next_temp; // == exit_frame + 1
-        self.next_temp = exit_frame + 2;
-        if self.next_temp - 1 > self.max_reg {
-            self.max_reg = self.next_temp - 1;
-        }
-        self.emit_await_drive_into(exit_frame, exit_res);
-        self.next_temp = exit_frame;
         let end_patch = self.emit(Insn::Jump(0));
 
         // Exception path: res = await mgr.__aexit__(type, exc, None).
