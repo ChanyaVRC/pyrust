@@ -326,6 +326,36 @@ impl GeneratorFrame {
     }
 }
 
+impl Drop for GeneratorFrame {
+    /// Emit CPython's `RuntimeWarning: coroutine '<name>' was never awaited`
+    /// when a *coroutine* object is dropped without ever having been driven
+    /// (issue #2306).
+    ///
+    /// A coroutine that was awaited / driven by the event loop has advanced
+    /// past its entry (`pc != 0`) or finished (`done`), so the never-started
+    /// condition is `pc == 0 && !done`.  Async generators (`code.is_generator`)
+    /// and plain generators (`!is_coroutine`) are excluded — the warning is
+    /// coroutine-specific.
+    ///
+    /// This fires once, when the backing `Rc` drops (cold path — never on the
+    /// resume hot path).  We match CPython's interpreter-shutdown GC shape,
+    /// `sys:1: RuntimeWarning: ...`, written to stderr; the file/line, source
+    /// line, and tracemalloc-hint form (emitted on an immediate `del`) is not
+    /// reproduced because pyrust has no deterministic mid-program object
+    /// finalisation point.
+    fn drop(&mut self) {
+        if self.is_coroutine && !self.code.is_generator && self.pc == 0 && !self.done {
+            use std::io::Write;
+            let mut stderr = std::io::stderr().lock();
+            let _ = writeln!(
+                stderr,
+                "sys:1: RuntimeWarning: coroutine '{}' was never awaited",
+                self.fn_name
+            );
+        }
+    }
+}
+
 /// Awaitable returned by `async_generator.__anext__()` / `.asend(v)` (issue
 /// #2280).  Wraps the async generator's state cell plus the value to send into
 /// the next resumption (`None` for `__anext__`, the user's argument for
