@@ -8781,8 +8781,8 @@ impl Compiler {
         let self_bind =
             crate::bytecode::compute_self_bind(name, &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
-            name: name.to_string(),
-            qualname: fn_qualname,
+            name: Rc::from(name),
+            qualname: Rc::from(fn_qualname.as_str()),
             param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
@@ -9252,8 +9252,8 @@ impl Compiler {
             _ => None,
         };
         self.fn_protos.push(FnProto {
-            name: name.to_string(),
-            qualname: class_qualname,
+            name: Rc::from(name),
+            qualname: Rc::from(class_qualname.as_str()),
             param_spec: Rc::new(FnParamSpec {
                 names: SmallVec::new(),
                 has_default: SmallVec::new(),
@@ -11501,8 +11501,8 @@ impl Compiler {
         let self_bind =
             crate::bytecode::compute_self_bind(&display, &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
-            name: display.clone(),
-            qualname: display,
+            name: Rc::from(display.as_str()),
+            qualname: Rc::from(display.as_str()),
             param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
@@ -11938,8 +11938,8 @@ impl Compiler {
         let self_bind =
             crate::bytecode::compute_self_bind("<genexpr>", &inner_index_rc, &inner_code.cell_vars);
         self.fn_protos.push(FnProto {
-            name: "<genexpr>".to_string(),
-            qualname: "<genexpr>".to_string(),
+            name: Rc::from("<genexpr>"),
+            qualname: Rc::from("<genexpr>"),
             param_spec,
             code: Rc::new(inner_code),
             local_index: inner_index_rc,

@@ -15,7 +15,7 @@ impl Interpreter {
     /// `co_consts`, `co_names`) in addition to `co_name`/`co_argcount`/
     /// `co_varnames`.
     pub(crate) fn build_code_object(&self, function: &UserFunction) -> Value {
-        let co_name = function.name.clone();
+        let co_name = function.name.to_string();
         // co_argcount: positional-only + positional-or-keyword params (excludes
         // *args/**kwargs and keyword-only), matching CPython.
         let argcount = function
@@ -66,7 +66,7 @@ impl Interpreter {
         // co_qualname (CPython 3.11+): the compile-time qualified name.  Unlike
         // `__qualname__`, this is fixed at compile time and ignores any later
         // `f.__qualname__ = ...` user override.
-        let qualname = function.qualname.clone();
+        let qualname = function.qualname.to_string();
 
         // co_flags: CPython sets CO_OPTIMIZED | CO_NEWLOCALS for every normal
         // function, plus CO_VARARGS / CO_VARKEYWORDS / CO_GENERATOR as the

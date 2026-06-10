@@ -3347,7 +3347,7 @@ impl Interpreter {
                         regs,
                         gen_env,
                         Rc::clone(&function.local_index),
-                        std::sync::Arc::from(function.name.as_str()),
+                        std::sync::Arc::from(&function.name[..]),
                         gen_qualname,
                     ));
                 }
@@ -3415,7 +3415,7 @@ impl Interpreter {
                         filename: tb_filename,
                         lineno: tb_lineno,
                         source_line: None,
-                        funcname: std::sync::Arc::from(function.name.as_str()),
+                        funcname: std::sync::Arc::from(&function.name[..]),
                     });
                 }
                 self.vm_frame_views.pop();
@@ -3658,7 +3658,7 @@ impl Interpreter {
                     regs,
                     gen_env,
                     Rc::clone(&function.local_index),
-                    std::sync::Arc::from(function.name.as_str()),
+                    std::sync::Arc::from(&function.name[..]),
                     gen_qualname,
                 ));
             }
@@ -3717,7 +3717,7 @@ impl Interpreter {
                     filename: tb_filename,
                     lineno: tb_lineno,
                     source_line: None,
-                    funcname: std::sync::Arc::from(function.name.as_str()),
+                    funcname: std::sync::Arc::from(&function.name[..]),
                 });
             }
             self.vm_frame_views.pop();
@@ -7908,7 +7908,10 @@ impl Interpreter {
             name: proto_name,
             qualname: proto_qualname,
             name_overrides: std::cell::RefCell::new(None),
-            module: std::cell::RefCell::new(Value::string("__main__")),
+            // #2256: lazy `__main__` default — store the `unset()` sentinel so
+            // the (universal) never-reassigned case carries no per-closure heap
+            // `String`; `module_value()` materialises `"__main__"` on read.
+            module: std::cell::RefCell::new(Value::unset()),
             doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
             attrs: std::cell::RefCell::new(None),
             annotations: std::cell::RefCell::new(annotations),
@@ -7970,7 +7973,9 @@ impl Interpreter {
         })?;
         let class_code = Rc::clone(&proto.code);
         let local_index = Rc::clone(&proto.local_index);
-        let proto_qualname = proto.qualname.clone();
+        // Classes (one per `def`) take an owned `String`; the `Rc<str>` sharing
+        // of #2256 targets the many-closures-per-def case, not class objects.
+        let proto_qualname = proto.qualname.to_string();
         let proto_global_names = Rc::clone(&proto.global_names);
         let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
         let class_docstring = proto.docstring.clone();
@@ -8068,7 +8073,9 @@ impl Interpreter {
         })?;
         let class_code = Rc::clone(&proto.code);
         let local_index = Rc::clone(&proto.local_index);
-        let proto_qualname = proto.qualname.clone();
+        // Classes (one per `def`) take an owned `String`; the `Rc<str>` sharing
+        // of #2256 targets the many-closures-per-def case, not class objects.
+        let proto_qualname = proto.qualname.to_string();
         let proto_global_names = Rc::clone(&proto.global_names);
         let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
         let class_kwarg_names = proto.class_kwarg_names.clone();

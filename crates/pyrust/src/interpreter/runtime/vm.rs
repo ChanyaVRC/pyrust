@@ -1234,7 +1234,7 @@ impl Interpreter {
                         filename: file,
                         lineno: if line == 0 { None } else { Some(line) },
                         source_line: None,
-                        funcname: std::sync::Arc::from(func.name.as_str()),
+                        funcname: std::sync::Arc::from(&func.name[..]),
                     });
                 }
                 self.env = saved.saved_env;

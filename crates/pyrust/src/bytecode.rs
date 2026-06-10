@@ -34,13 +34,16 @@ pub struct FnParamSpec {
 /// / `MakeClass`.
 #[derive(Debug, Clone)]
 pub struct FnProto {
-    pub name: String,
+    /// `Rc<str>` (#2256): every `UserFunction` built from this prototype
+    /// `Rc::clone`s these names instead of allocating its own `String`, so all
+    /// closures of one `def` share a single name/qualname allocation.
+    pub name: Rc<str>,
     /// Fully-qualified name (dotted path) computed at compile time.
     /// For a top-level `class Foo`, this equals `name`.
     /// For `class Outer: class Inner`, this equals `"Outer.Inner"`.
     /// For a class defined inside a function, this equals `"fn.<locals>.ClassName"`.
     /// Used by `MakeClass` to pre-populate the `__qualname__` register slot.
-    pub qualname: String,
+    pub qualname: Rc<str>,
     /// Shared param metadata — `Rc::clone` in `MakeFunction` instead of four `Vec::clone`s.
     pub param_spec: Rc<FnParamSpec>,
     pub code: Rc<FnCode>,
