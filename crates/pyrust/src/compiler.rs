@@ -4478,6 +4478,12 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         Expr::Starred(e) => expr_contains_yield(e),
         Expr::Named { value, .. } => expr_contains_yield(value),
         Expr::Await(e) => expr_contains_yield(e),
+        // An f-string's `{expr}` interpolations (and any `{expr}` inside a
+        // nested format spec) are real sub-expressions in the same scope, so a
+        // `yield` there counts: `(f"{(yield x)}" for x in xs)` is rejected as
+        // `'yield' inside generator expression`. Mirrors the
+        // `expr_contains_await` f-string handling (#2308 / #2313).
+        Expr::FString(parts) => fstring_parts_contain_yield(parts),
         // Lambda, comprehensions, and generator expressions are separate scopes.
         Expr::Lambda { .. }
         | Expr::ListComp { .. }
@@ -4492,11 +4498,27 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         | Expr::Complex(_, _)
         | Expr::Str(_)
         | Expr::Bytes(_)
-        | Expr::FString(_)
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => false,
     }
+}
+
+/// Whether any `{expr}` interpolation in an f-string (or in a nested format
+/// spec) contains a `yield` in the current scope. Helper for
+/// `expr_contains_yield`. Mirrors `fstring_parts_contain_await`.
+fn fstring_parts_contain_yield(parts: &[crate::ast::FStringPart]) -> bool {
+    parts.iter().any(|part| match part {
+        crate::ast::FStringPart::Literal(_) => false,
+        crate::ast::FStringPart::Expr {
+            expr, format_spec, ..
+        } => {
+            expr_contains_yield(expr)
+                || format_spec
+                    .as_deref()
+                    .is_some_and(fstring_parts_contain_yield)
+        }
+    })
 }
 
 /// Whether an expression contains an `await` in the current scope. Used to
