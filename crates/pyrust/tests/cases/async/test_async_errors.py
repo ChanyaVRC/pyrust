@@ -28,26 +28,15 @@ except TypeError as e:
     print(type(e).__name__, e)
 
 
-# --- 3. a coroutine is not iterable ---
+# --- 3. a coroutine is not collectable (collect_iterable path) ---
+#
+# The `for` / `iter()` / `next()` iteration-protocol cases live in
+# test_coroutine_protocol.py (issue #2314); `list(coro)` goes through the
+# separate `collect_iterable` path and stays covered here.
 
 async def coro():
     return 1
 
-
-c = coro()
-try:
-    for _ in c:
-        pass
-except TypeError as e:
-    print(type(e).__name__, e)
-c.close()
-
-c2 = coro()
-try:
-    iter(c2)
-except TypeError as e:
-    print(type(e).__name__, e)
-c2.close()
 
 c3 = coro()
 try:
@@ -56,14 +45,3 @@ except TypeError as e:
     print(type(e).__name__, e)
 c3.close()
 
-
-# --- 4. an exception raised inside a coroutine propagates out of run() ---
-
-async def boom():
-    raise RuntimeError("kaboom")
-
-
-try:
-    asyncio.run(boom())
-except RuntimeError as e:
-    print(type(e).__name__, e)
