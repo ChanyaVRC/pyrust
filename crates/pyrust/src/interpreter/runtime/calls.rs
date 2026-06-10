@@ -4185,13 +4185,29 @@ impl Interpreter {
         // Copilot review).  They land in the `None` arm of the
         // init match below.
 
+        // Resolve `__new__`, `__init__`, and the primitive-base classification
+        // in a *single* base-chain walk (the common single-inheritance case).
+        // Previously each of these did its own full MRO traversal on every
+        // instantiation, so the per-construction cost scaled with MRO depth.
+        // `resolve_construction_plan` returns `None` for multiply-inherited
+        // classes, where attribute resolution must follow the C3 MRO — those
+        // fall back to the byte-identical per-attr `lookup_class_attr` walks.
+        let plan = resolve_construction_plan(&class);
+        let prim = match &plan {
+            Some(p) => p.prim,
+            None => classify_primitive_base(&class),
+        };
+
         // `__new__` protocol: walk the MRO for `__new__`, skipping the
         // default `object.__new__` (which the normal allocation path below
         // already implements).  If a user-defined `__new__` (UserFunction) or
         // a non-object BuiltinFunction `__new__` is found, call it with `cls`
         // as the first argument, then call `__init__` on the result if it is
         // an instance of `cls` (CPython parity, issue #1143).
-        let mro_new = lookup_class_attr(&class, "__new__");
+        let mro_new = match &plan {
+            Some(p) => p.new_val.clone(),
+            None => lookup_class_attr(&class, "__new__"),
+        };
         let has_user_new = mro_new.as_ref().is_some_and(|v| {
             !matches!(v.kind(), ValueKind::BuiltinFunction("object.__new__"))
         });
@@ -4299,54 +4315,45 @@ impl Interpreter {
             attrs: InstanceAttrs::new(),
         }));
 
-        // Issue #976: if this class inherits from dict/list/set, pre-initialise
-        // an empty backing store on the instance *before* calling __init__.
-        // This ensures that `self[k] = v` (or any other subscript / method
-        // call on `self`) inside a user-defined __init__ sees a valid
-        // __builtin_data__ entry to delegate to.  When there is no __init__,
-        // the None arm below calls the primitive constructor with the user's
-        // args to populate the backing value.
-        let prim_base = find_mutable_primitive_base(&class);
-        if let Some(prim_name) = prim_base
-            && let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
-                // Empty args → empty primitive (dict/list/set with no content).
-                let backing = dispatch(self, &[])?;
-                instance
-                    .borrow_mut()
-                    .attrs
-                    .insert(BUILTIN_DATA_ATTR, backing);
+        // `prim` (the primitive-base classification) was resolved together with
+        // `__new__` / `__init__` in the single construction-plan walk above.
+        // The three primitive categories are mutually exclusive — a class cannot
+        // inherit two incompatible primitive storage layouts.
+        match prim {
+            // Issue #976: dict/list/set — pre-initialise an *empty* backing
+            // store *before* calling __init__, so that `self[k] = v` (or any
+            // method call on `self`) inside a user-defined __init__ sees a valid
+            // __builtin_data__ entry to delegate to.  When there is no __init__,
+            // the None arm below replaces it with the args-populated value.
+            PrimitiveBase::Mutable(prim_name) => {
+                if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                    let backing = dispatch(self, &[])?;
+                    instance
+                        .borrow_mut()
+                        .attrs
+                        .insert(BUILTIN_DATA_ATTR, backing);
+                }
             }
-
-        // Issue #994: if this class inherits from frozenset/tuple (immutable
-        // primitives), build the backing from the constructor args immediately.
-        // Unlike mutable types, there is no empty pre-initialisation step —
-        // the content is fixed at construction and __init__ cannot change it.
-        let immutable_prim_base = find_immutable_primitive_base(&class);
-        if let Some(prim_name) = immutable_prim_base
-            && let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
-                let backing = dispatch(self, args)?;
-                instance
-                    .borrow_mut()
-                    .attrs
-                    .insert(BUILTIN_DATA_ATTR, backing);
+            // Issue #994 (frozenset/tuple) and #1204 (str/int/float/bytes/…):
+            // immutable / scalar primitives build the backing from the
+            // constructor args immediately — the content is fixed at
+            // construction and __init__ cannot change it.
+            PrimitiveBase::Immutable(prim_name) | PrimitiveBase::Scalar(prim_name) => {
+                if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                    let backing = dispatch(self, args)?;
+                    instance
+                        .borrow_mut()
+                        .attrs
+                        .insert(BUILTIN_DATA_ATTR, backing);
+                }
             }
+            PrimitiveBase::None => {}
+        }
 
-        // Issue #1204: if this class inherits from str/int/float/bytes (scalar
-        // primitives), build the backing from the constructor args immediately,
-        // mirroring the immutable-primitive approach.  The backing stores the raw
-        // primitive value so that method dispatch can delegate to it (e.g.
-        // `MyStr("hello").upper()` extracts the str backing and calls str.upper).
-        let scalar_prim_base = find_scalar_primitive_base(&class);
-        if let Some(prim_name) = scalar_prim_base
-            && let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
-                let backing = dispatch(self, args)?;
-                instance
-                    .borrow_mut()
-                    .attrs
-                    .insert(BUILTIN_DATA_ATTR, backing);
-            }
-
-        let init = lookup_class_attr(&class, "__init__");
+        let init = match plan {
+            Some(p) => p.init_val,
+            None => lookup_class_attr(&class, "__init__"),
+        };
         match init {
             Some(method_val)
                 if matches!(
@@ -4380,20 +4387,28 @@ impl Interpreter {
                 // delegate to the backing value (issue #976).
                 // NOTE: the empty backing was already inserted above; replace it
                 // with the args-populated value now.
-                if let Some(prim_name) = prim_base {
-                    if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
-                        let backing = dispatch(self, args)?;
-                        instance
-                            .borrow_mut()
-                            .attrs
-                            .insert(BUILTIN_DATA_ATTR, backing);
+                match prim {
+                    PrimitiveBase::Mutable(prim_name) => {
+                        if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                            let backing = dispatch(self, args)?;
+                            instance
+                                .borrow_mut()
+                                .attrs
+                                .insert(BUILTIN_DATA_ATTR, backing);
+                        }
                     }
-                } else if immutable_prim_base.is_none() && scalar_prim_base.is_none() && !args.is_empty() {
-                    let class_name = class.borrow().name.clone();
-                    return Err(PyError::Runtime(format!(
-                        "{}() takes no arguments",
-                        class_name
-                    )));
+                    PrimitiveBase::None => {
+                        if !args.is_empty() {
+                            let class_name = class.borrow().name.clone();
+                            return Err(PyError::Runtime(format!(
+                                "{}() takes no arguments",
+                                class_name
+                            )));
+                        }
+                    }
+                    // Immutable / scalar primitives already populated their
+                    // args-based backing above; nothing more to do here.
+                    PrimitiveBase::Immutable(_) | PrimitiveBase::Scalar(_) => {}
                 }
             }
         }
