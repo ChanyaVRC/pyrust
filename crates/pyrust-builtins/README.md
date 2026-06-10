@@ -19,9 +19,10 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value> /*, kwargs */) -> R
 ## The interception contract
 
 Method-call dispatch enters the VM at `Insn::CallMethod` /
-`Insn::CallMethodExpanded`
-(`crates/pyrust/src/interpreter/runtime/vm.rs`). For the five tagged
-container types the VM routes through a single shared dispatcher,
+`Insn::CallMethodExpanded`, handled by
+`Interpreter::exec_call_method` / `exec_call_method_expanded`
+(`crates/pyrust/src/interpreter/runtime/calls.rs`). For the five tagged
+container types both opcodes route through a single shared dispatcher,
 `Interpreter::dispatch_builtin_container_method` (#431). That dispatcher
 decides, **per method**, one of three things:
 
@@ -39,9 +40,16 @@ never re-encodes the carve-out list:
 
 | Predicate | Methods | Why upstream |
 |---|---|---|
-| `list::requires_interpreter` | `sort`, `index`, `count` | `sort(key=)` runs a user callable; `index`/`count` may fire user `__eq__` |
+| `list::requires_interpreter` | `sort`, `index`, `count`, `remove` | `sort(key=)` runs a user callable; `index`/`count`/`remove` may fire user `__eq__` |
+| `tuple::requires_interpreter` | `index`, `count` | may fire user `__eq__` while scanning the tuple (mirrors `list`) |
 | `dict::needs_rc` | `keys`, `values`, `items` | live views need the `Rc<RefCell<IndexMap>>`, not a `Vec` snapshot |
 | `string::requires_vm_template` | `format`, `format_map`, `maketrans` | `format` needs kwargs + the interpreter's templating; `maketrans` is a staticmethod forwarded to `str_maketrans` |
+
+One narrow exception is *not* a routing predicate: `list.insert` / `list.pop`
+accept any `__index__` object as their index argument, so the dispatcher
+coerces `pos[0]` through `value_to_index` before delegating (#2022). This is
+argument coercion, not a "which path" decision, so it stays inline in the
+`list` arm rather than in `requires_interpreter`.
 
 A second layer of interception lives *inside* `Interpreter::call_<type>_method`
 — these are not VM-visible predicates because the methods always enter the

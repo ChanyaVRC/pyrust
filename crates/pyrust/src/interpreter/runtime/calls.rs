@@ -8808,7 +8808,7 @@ impl Interpreter {
                     ValueKind::Tuple(items) => items.to_vec(),
                     _ => return Err(PyError::Runtime("internal: expected tuple".to_string())),
                 };
-                if method == "index" || method == "count" {
+                if pyrust_builtins::tuple::requires_interpreter(method) {
                     let needs_dispatch = pos
                         .first()
                         .map(|t| Self::seq_search_needs_dispatch(t, &items))
