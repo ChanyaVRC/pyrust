@@ -4174,7 +4174,7 @@ impl Interpreter {
         // `resolve_construction_plan` returns `None` for multiply-inherited
         // classes, where attribute resolution must follow the C3 MRO — those
         // fall back to the byte-identical per-attr `lookup_class_attr` walks.
-        let plan = resolve_construction_plan(&class);
+        let plan = resolve_construction_plan_cached(&class);
         let prim = match &plan {
             Some(p) => p.prim,
             None => classify_primitive_base(&class),

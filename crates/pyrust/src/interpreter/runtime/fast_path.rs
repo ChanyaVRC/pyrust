@@ -831,6 +831,79 @@ fn resolve_construction_plan(class: &Rc<RefCell<PyClass>>) -> Option<Constructio
     })
 }
 
+// Tags used to round-trip `PrimitiveBase` through the core's
+// `CachedConstructionPlan` (which may only reference core-visible types).  The
+// `&'static str` payload is stored alongside in `prim_name`; `PrimitiveBase::None`
+// carries no name (`""`).
+const PRIM_TAG_NONE: u8 = 0;
+const PRIM_TAG_MUTABLE: u8 = 1;
+const PRIM_TAG_IMMUTABLE: u8 = 2;
+const PRIM_TAG_SCALAR: u8 = 3;
+
+impl PrimitiveBase {
+    #[inline]
+    fn to_cache_tag(self) -> (u8, &'static str) {
+        match self {
+            PrimitiveBase::None => (PRIM_TAG_NONE, ""),
+            PrimitiveBase::Mutable(n) => (PRIM_TAG_MUTABLE, n),
+            PrimitiveBase::Immutable(n) => (PRIM_TAG_IMMUTABLE, n),
+            PrimitiveBase::Scalar(n) => (PRIM_TAG_SCALAR, n),
+        }
+    }
+
+    #[inline]
+    fn from_cache_tag(tag: u8, name: &'static str) -> PrimitiveBase {
+        match tag {
+            PRIM_TAG_MUTABLE => PrimitiveBase::Mutable(name),
+            PRIM_TAG_IMMUTABLE => PrimitiveBase::Immutable(name),
+            PRIM_TAG_SCALAR => PrimitiveBase::Scalar(name),
+            _ => PrimitiveBase::None,
+        }
+    }
+}
+
+/// Resolve the construction plan for `class`, reusing the per-class cache when it
+/// is still valid (issue #2330).  The cache is validated exactly like the
+/// attribute inline caches: a hit requires both the class's own
+/// `mutation_version` and the global `class_epoch()` to match the values stamped
+/// when the plan was last resolved.  Either changing (a direct monkeypatch of
+/// this class, or *any* class mutation that bumps the global epoch — e.g. a base
+/// class being patched) forces a fresh `resolve_construction_plan` walk.
+///
+/// Multiply-inherited classes (`resolve_construction_plan` → `None`) are never
+/// cached; the caller keeps the byte-identical per-attr C3 fallback for them.
+#[inline]
+fn resolve_construction_plan_cached(class: &Rc<RefCell<PyClass>>) -> Option<ConstructionPlan> {
+    let epoch = pyrust_core::class_epoch();
+    let class_version = class.borrow().mutation_version.get();
+    // Fast path: a still-valid cached plan reproduces the resolved values with
+    // no base-chain walk (cheap `Value` clones + a Copy `PrimitiveBase`).
+    if let Some(cached) = class.borrow().construction_cache.borrow().as_deref()
+        && cached.class_version == class_version
+        && cached.epoch == epoch
+    {
+        return Some(ConstructionPlan {
+            new_val: cached.new_val.clone(),
+            init_val: cached.init_val.clone(),
+            prim: PrimitiveBase::from_cache_tag(cached.prim_tag, cached.prim_name),
+        });
+    }
+    // Miss (or stale): re-resolve and refresh the cache.  Only single-inheritance
+    // classes (the ones `resolve_construction_plan` resolves) are cacheable.
+    let plan = resolve_construction_plan(class)?;
+    let (prim_tag, prim_name) = plan.prim.to_cache_tag();
+    *class.borrow().construction_cache.borrow_mut() =
+        Some(Box::new(pyrust_core::CachedConstructionPlan {
+            new_val: plan.new_val.clone(),
+            init_val: plan.init_val.clone(),
+            prim_tag,
+            prim_name,
+            class_version,
+            epoch,
+        }));
+    Some(plan)
+}
+
 #[inline(always)]
 fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
     match op {
