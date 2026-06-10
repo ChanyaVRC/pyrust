@@ -2054,147 +2054,134 @@ impl Interpreter {
             // `sum(g)` / unpack from inside `g` raises CPython's
             // `ValueError: generator already executing` instead of panicking
             // on the re-borrow (issue #2285).
-            {
-                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
-                    pyrust_core::value_err!("generator already executing")
-                })?;
-                if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
-                    let remaining: Vec<Value> = native.items[native.pos..].to_vec();
-                    native.pos = native.items.len();
-                    return Ok(remaining);
+            let mut probe = state_rc.try_borrow_mut().map_err(|_| {
+                pyrust_core::value_err!("generator already executing")
+            })?;
+            if let Some(native) = probe.downcast_mut::<NativeIterFrame>() {
+                let remaining: Vec<Value> = native.items[native.pos..].to_vec();
+                native.pos = native.items.len();
+                return Ok(remaining);
+            }
+
+            // Single-probe dispatch on the concrete iterator-state type for
+            // everything else; see `call_next` for the rationale (#2315).
+            let tid = {
+                let any_ref: &dyn std::any::Any = &**probe;
+                any_ref.type_id()
+            };
+            drop(probe);
+            use std::any::TypeId;
+
+            // A `GenDriving` placeholder means the frame is checked out by
+            // the gen-drive trampoline (#2253) — the generator is executing,
+            // so collecting it re-entrantly raises the already-executing
+            // error (issue #2285).
+            if tid == TypeId::of::<GenDriving>() {
+                return Err(pyrust_core::value_err!("generator already executing"));
+            }
+
+            // GeneratorFrame path: drive the generator to exhaustion.
+            if tid == TypeId::of::<GeneratorFrame>() {
+                let mut items = Vec::new();
+                loop {
+                    let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                        pyrust_core::value_err!("generator already executing")
+                    })?;
+                    if borrow.is::<GenDriving>() {
+                        return Err(pyrust_core::value_err!("generator already executing"));
+                    }
+                    let frame = borrow
+                        .downcast_mut::<GeneratorFrame>()
+                        .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+                    if frame.done {
+                        break;
+                    }
+                    match self.resume_generator(frame) {
+                        Ok(yielded) => {
+                            drop(borrow);
+                            items.push(yielded);
+                        }
+                        Err(ref e) if e.class_name_is("StopIteration") => {
+                            break;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
+                return Ok(items);
             }
 
             // CallableIter path: drive iter(callable, sentinel) to exhaustion.
-            {
-                let is_callable_iter = state_rc
-                    .borrow()
-                    .downcast_ref::<CallableIter>()
-                    .is_some();
-                if is_callable_iter {
-                    let mut items = Vec::new();
-                    loop {
-                        match self.step_callable_iter(&state_rc) {
-                            Ok(Some(v)) => items.push(v),
-                            Ok(None) => break,
-                            // StopIteration raised by the callable stops the
-                            // iteration gracefully — CPython treats it the same
-                            // as hitting the sentinel (list/tuple exhaustion).
-                            Err(ref e) if e.class_name_is("StopIteration") => break,
-                            Err(e) => return Err(e),
-                        }
+            if tid == TypeId::of::<CallableIter>() {
+                let mut items = Vec::new();
+                loop {
+                    match self.step_callable_iter(&state_rc) {
+                        Ok(Some(v)) => items.push(v),
+                        Ok(None) => break,
+                        // StopIteration raised by the callable stops the
+                        // iteration gracefully — CPython treats it the same
+                        // as hitting the sentinel (list/tuple exhaustion).
+                        Err(ref e) if e.class_name_is("StopIteration") => break,
+                        Err(e) => return Err(e),
                     }
-                    return Ok(items);
                 }
+                return Ok(items);
             }
 
             // GetItemIter path: drive __getitem__(0), __getitem__(1), … to exhaustion.
-            {
-                let is_getitem_iter = state_rc
-                    .borrow()
-                    .downcast_ref::<GetItemIter>()
-                    .is_some();
-                if is_getitem_iter {
-                    let mut items = Vec::new();
-                    while let Some(v) = self.step_getitem_iter(&state_rc)? {
-                        items.push(v);
-                    }
-                    return Ok(items);
+            if tid == TypeId::of::<GetItemIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_getitem_iter(&state_rc)? {
+                    items.push(v);
                 }
+                return Ok(items);
             }
 
             // MapIter path: drive map() to exhaustion.
-            {
-                let is_map_iter = state_rc.borrow().downcast_ref::<MapIter>().is_some();
-                if is_map_iter {
-                    let mut items = Vec::new();
-                    while let Some(v) = self.step_map_iter(&state_rc)? {
-                        items.push(v);
-                    }
-                    return Ok(items);
+            if tid == TypeId::of::<MapIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_map_iter(&state_rc)? {
+                    items.push(v);
                 }
+                return Ok(items);
             }
 
             // FilterIter path: drive filter() to exhaustion.
-            {
-                let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
-                if is_filter_iter {
-                    let mut items = Vec::new();
-                    while let Some(v) = self.step_filter_iter(&state_rc)? {
-                        items.push(v);
-                    }
-                    return Ok(items);
+            if tid == TypeId::of::<FilterIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_filter_iter(&state_rc)? {
+                    items.push(v);
                 }
+                return Ok(items);
             }
 
             // EnumerateIter path: drive enumerate() to exhaustion.
-            {
-                let is_enumerate_iter =
-                    state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
-                if is_enumerate_iter {
-                    let mut items = Vec::new();
-                    while let Some(v) = self.step_enumerate_iter(&state_rc)? {
-                        items.push(v);
-                    }
-                    return Ok(items);
+            if tid == TypeId::of::<EnumerateIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_enumerate_iter(&state_rc)? {
+                    items.push(v);
                 }
+                return Ok(items);
             }
 
             // ZipIter path: drive zip() to exhaustion.
-            {
-                let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
-                if is_zip_iter {
-                    let mut items = Vec::new();
-                    while let Some(v) = self.step_zip_iter(&state_rc)? {
-                        items.push(v);
-                    }
-                    return Ok(items);
+            if tid == TypeId::of::<ZipIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_zip_iter(&state_rc)? {
+                    items.push(v);
                 }
+                return Ok(items);
             }
 
             // BigRangeIter path: drive a lazy big range to exhaustion (#2118).
-            {
-                let is_bigrange_iter = state_rc.borrow().downcast_ref::<BigRangeIter>().is_some();
-                if is_bigrange_iter {
-                    let mut items = Vec::new();
-                    while let Some(v) = self.step_bigrange_iter(&state_rc)? {
-                        items.push(v);
-                    }
-                    return Ok(items);
+            if tid == TypeId::of::<BigRangeIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_bigrange_iter(&state_rc)? {
+                    items.push(v);
                 }
+                return Ok(items);
             }
 
-            // GeneratorFrame path: drive the generator to exhaustion.  A
-            // `GenDriving` placeholder means the frame is checked out by the
-            // gen-drive trampoline (#2253) — the generator is executing, so
-            // collecting it re-entrantly raises the already-executing error
-            // (issue #2285).
-            let mut items = Vec::new();
-            loop {
-                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
-                    pyrust_core::value_err!("generator already executing")
-                })?;
-                if borrow.is::<GenDriving>() {
-                    return Err(pyrust_core::value_err!("generator already executing"));
-                }
-                let frame = borrow
-                    .downcast_mut::<GeneratorFrame>()
-                    .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
-                if frame.done {
-                    break;
-                }
-                match self.resume_generator(frame) {
-                    Ok(yielded) => {
-                        drop(borrow);
-                        items.push(yielded);
-                    }
-                    Err(ref e) if e.class_name_is("StopIteration") => {
-                        break;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            Ok(items)
+            Err(PyError::Runtime("invalid generator state".to_string()))
         } else if let ValueKind::PyInstance(inst) = val.kind() {
             // CPython fallback order is `__iter__` first, then the legacy
             // sequence-iter protocol via `__getitem__`.  Having only
@@ -2846,154 +2833,149 @@ impl Interpreter {
 
     /// Call next() on a generator or any object with __next__.
     pub(crate) fn call_next(&mut self, val: &Value, default: Option<Value>) -> Result<Value> {
+        use std::any::TypeId;
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);
 
-            // Fast path: NativeIterFrame (no VM required).
+            // Fast path: NativeIterFrame (no VM required) — probed exactly
+            // as before so this arm pays no extra cost.
             //
             // `try_borrow_mut`: the cell is mutably checked out while the
             // generator's own body executes (a native `resume_generator` up the
             // stack), so a re-entrant `next(g)` from inside `g` must raise
             // CPython's `ValueError: generator already executing` rather than
             // panicking on the re-borrow (issue #2285).
-            {
-                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
-                    pyrust_core::value_err!("generator already executing")
-                })?;
-                if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
-                    return match native.advance()? {
-                        Some(v) => Ok(v),
-                        None => {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                            }
+            let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                pyrust_core::value_err!("generator already executing")
+            })?;
+            if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                return match native.advance()? {
+                    Some(v) => Ok(v),
+                    None => {
+                        if let Some(d) = default {
+                            Ok(d)
+                        } else {
+                            Err(pyrust_core::py_err!("StopIteration", String::new()))
                         }
+                    }
+                };
+            }
+
+            // Single-probe dispatch on the concrete iterator-state type for
+            // everything else (issue #2315).  The previous probe cascade
+            // re-borrowed the RefCell and ran a failed `downcast` per
+            // variant, so a real generator — the most common kind in hot
+            // consumer loops — paid 8 failed probes per element, which
+            // dominated `sum(genexpr)`-style consumers.  `TypeId` equality
+            // is exactly the check `downcast` performs internally, so the
+            // per-arm downcasts below cannot fail.  The borrow is reused by
+            // the GeneratorFrame arm and dropped before the `step_*` arms,
+            // which re-borrow internally.
+            let tid = {
+                let any_ref: &dyn std::any::Any = &**borrow;
+                any_ref.type_id()
+            };
+
+            // A `GenDriving` placeholder means the frame is checked out by
+            // the gen-drive trampoline (#2253) up the stack — the generator
+            // is executing, so a re-entrant `next(g)` raises CPython's
+            // already-executing error (issue #2285).
+            if tid == TypeId::of::<GenDriving>() {
+                return Err(pyrust_core::value_err!("generator already executing"));
+            }
+
+            // GeneratorFrame path (hottest: every generator / genexpr).
+            if tid == TypeId::of::<GeneratorFrame>() {
+                let frame = borrow
+                    .downcast_mut::<GeneratorFrame>()
+                    .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+                // Async generators (#2280) are not synchronous iterators: `next(g)`
+                // raises TypeError, matching CPython.  They are consumed via
+                // `async for` / `__anext__`.
+                if frame.is_async_generator() {
+                    return Err(pyrust_core::type_err!(
+                        "'async_generator' object is not an iterator"
+                    ));
+                }
+                // Coroutines (#2314) are awaitable, not iterable: `next(coro)` raises
+                // TypeError instead of driving the coroutine.  They are consumed via
+                // `await` / `.send()`.
+                if frame.is_coroutine && !frame.code.is_generator {
+                    return Err(pyrust_core::type_err!(
+                        "'coroutine' object is not an iterator"
+                    ));
+                }
+                if frame.done {
+                    drop(borrow);
+                    return if let Some(d) = default {
+                        Ok(d)
+                    } else {
+                        // Exhausted generator: StopIteration() with no args → .value is None.
+                        let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                            PyError::Raised(instantiate_exception(cls, vec![]))
+                        } else {
+                            pyrust_core::py_err!("StopIteration", String::new())
+                        };
+                        Err(exc)
                     };
                 }
+                return match self.resume_generator(frame) {
+                    Ok(yielded) => Ok(yielded),
+                    Err(e) if e.class_name_is("StopIteration") => {
+                        drop(borrow);
+                        if let Some(d) = default {
+                            Ok(d)
+                        } else {
+                            // Propagate the original error so StopIteration.value
+                            // is preserved (PEP 380 / issue #600).
+                            Err(e)
+                        }
+                    }
+                    Err(e) => Err(e),
+                };
             }
+
+            // The step_* helpers below re-borrow the state internally.
+            drop(borrow);
 
             // GetItemIter path: drive one `__getitem__(i)` call lazily.
             // Borrow released by step_getitem_iter before invoking the
             // method (it would otherwise re-entrantly re-borrow).
-            {
-                let is_getitem = state_rc
-                    .borrow()
-                    .downcast_ref::<GetItemIter>()
-                    .is_some();
-                if is_getitem {
-                    return Self::step_or_stop(self.step_getitem_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<GetItemIter>() {
+                return Self::step_or_stop(self.step_getitem_iter(&state_rc)?, default);
             }
 
             // CallableIter path: invoke callable(), stop when result == sentinel.
-            {
-                let is_callable_iter = state_rc
-                    .borrow()
-                    .downcast_ref::<CallableIter>()
-                    .is_some();
-                if is_callable_iter {
-                    return Self::step_or_stop(self.step_callable_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<CallableIter>() {
+                return Self::step_or_stop(self.step_callable_iter(&state_rc)?, default);
             }
 
             // MapIter path: apply func to one row of columns per step.
-            {
-                let is_map_iter = state_rc.borrow().downcast_ref::<MapIter>().is_some();
-                if is_map_iter {
-                    return Self::step_or_stop(self.step_map_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<MapIter>() {
+                return Self::step_or_stop(self.step_map_iter(&state_rc)?, default);
             }
 
             // FilterIter path: scan forward for next passing element.
-            {
-                let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
-                if is_filter_iter {
-                    return Self::step_or_stop(self.step_filter_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<FilterIter>() {
+                return Self::step_or_stop(self.step_filter_iter(&state_rc)?, default);
             }
 
             // BigRangeIter path: lazy arbitrary-precision range iteration (#2118).
-            {
-                let is_bigrange_iter = state_rc.borrow().downcast_ref::<BigRangeIter>().is_some();
-                if is_bigrange_iter {
-                    return Self::step_or_stop(self.step_bigrange_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<BigRangeIter>() {
+                return Self::step_or_stop(self.step_bigrange_iter(&state_rc)?, default);
             }
 
             // EnumerateIter path: (counter, element) pair per step.
-            {
-                let is_enumerate_iter =
-                    state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
-                if is_enumerate_iter {
-                    return Self::step_or_stop(self.step_enumerate_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<EnumerateIter>() {
+                return Self::step_or_stop(self.step_enumerate_iter(&state_rc)?, default);
             }
 
             // ZipIter path: one row tuple per step.
-            {
-                let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
-                if is_zip_iter {
-                    return Self::step_or_stop(self.step_zip_iter(&state_rc)?, default);
-                }
+            if tid == TypeId::of::<ZipIter>() {
+                return Self::step_or_stop(self.step_zip_iter(&state_rc)?, default);
             }
 
-            // GeneratorFrame path.  A `GenDriving` placeholder means the frame
-            // is checked out by the gen-drive trampoline (#2253) up the stack —
-            // the generator is executing, so a re-entrant `next(g)` raises
-            // CPython's already-executing error (issue #2285).
-            let mut borrow = state_rc.borrow_mut();
-            if borrow.is::<GenDriving>() {
-                return Err(pyrust_core::value_err!("generator already executing"));
-            }
-            let frame = borrow
-                .downcast_mut::<GeneratorFrame>()
-                .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
-            // Async generators (#2280) are not synchronous iterators: `next(g)`
-            // raises TypeError, matching CPython.  They are consumed via
-            // `async for` / `__anext__`.
-            if frame.is_async_generator() {
-                return Err(pyrust_core::type_err!(
-                    "'async_generator' object is not an iterator"
-                ));
-            }
-            // Coroutines (#2314) are awaitable, not iterable: `next(coro)` raises
-            // TypeError instead of driving the coroutine.  They are consumed via
-            // `await` / `.send()`.
-            if frame.is_coroutine && !frame.code.is_generator {
-                return Err(pyrust_core::type_err!(
-                    "'coroutine' object is not an iterator"
-                ));
-            }
-            if frame.done {
-                drop(borrow);
-                return if let Some(d) = default {
-                    Ok(d)
-                } else {
-                    // Exhausted generator: StopIteration() with no args → .value is None.
-                    let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
-                        PyError::Raised(instantiate_exception(cls, vec![]))
-                    } else {
-                        pyrust_core::py_err!("StopIteration", String::new())
-                    };
-                    Err(exc)
-                };
-            }
-            match self.resume_generator(frame) {
-                Ok(yielded) => Ok(yielded),
-                Err(e) if e.class_name_is("StopIteration") => {
-                    drop(borrow);
-                    if let Some(d) = default {
-                        Ok(d)
-                    } else {
-                        // Propagate the original error so StopIteration.value
-                        // is preserved (PEP 380 / issue #600).
-                        Err(e)
-                    }
-                }
-                Err(e) => Err(e),
-            }
+            Err(PyError::Runtime("invalid generator state".to_string()))
         } else if let ValueKind::PyInstance(inst) = val.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
