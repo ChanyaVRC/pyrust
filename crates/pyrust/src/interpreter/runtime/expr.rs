@@ -1753,6 +1753,22 @@ impl Interpreter {
                     let class_name = class.borrow().name.clone();
                     return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
                 }
+                // Issue #2299/#2386: the unhashable builtins (list/dict/set/
+                // bytearray) carry `__hash__ = None` implicitly, so a subclass
+                // that does not override `__hash__` resolves to the inherited
+                // `object.__hash__` sentinel and would otherwise key by
+                // identity.  Mirror the `hash()` builtin path
+                // (`hash_value_with_interp`) and reject it as unhashable so a
+                // `bytearray` subclass cannot be used as a set element / dict
+                // key, matching CPython.
+                if matches!(
+                    hash_method.kind(),
+                    ValueKind::BuiltinFunction("object.__hash__")
+                ) && class_hash_inherits_builtin_none(&class)
+                {
+                    let class_name = class.borrow().name.clone();
+                    return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
+                }
                 // Issue #2055: a non-callable `__hash__` slot (`__hash__ = 5`)
                 // raises `TypeError: 'int' object is not callable` when hashed,
                 // matching CPython, instead of silently falling back to the
@@ -3823,17 +3839,26 @@ impl Interpreter {
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {
-        // Representation-substitutability boundary (#2386): a builtin-subclass
-        // operand with no user `__add__`/`__radd__` override (already dispatched
-        // at `BinaryOp::Add` before reaching here) acts as its inherited base.
-        // Unwrap each side so `BA(b'a') + BA(b'b')`, `b'a' + BA(b'b')`, etc.
-        // reach the bytearray/bytes concat arms below instead of falling through
-        // to a TypeError.  `coerce_operand_backing` (called later) only handles
-        // scalar/container backings; this covers `BuiltinObject` bytearray too.
-        let left = effective_builtin_receiver(&left, &[]).unwrap_or(left);
-        let right = effective_builtin_receiver(&right, &[]).unwrap_or(right);
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
+        }
+        // Representation-substitutability boundary (#2386): a bytearray-subclass
+        // operand acts as its inherited bytearray for concatenation.  Unwrap
+        // ONLY for the bytearray-snapshot probe below — `as_bytearray_snapshot`
+        // does not see through a `PyInstance`, so without this `BA(b'a') +
+        // BA(b'b')` would fall through to a TypeError.  A user `__add__`/
+        // `__radd__` was already dispatched at `BinaryOp::Add`, so no override
+        // gate is needed.  The original `left`/`right` are kept for the error
+        // arms below so CPython's subclass-named messages (`can only
+        // concatenate list (not "StrSub") to list`) are preserved.
+        let ba_left = effective_builtin_receiver(&left, &[])
+            .filter(|b| pyrust_builtins::bytearray::as_bytearray_snapshot(b).is_some());
+        let ba_right = effective_builtin_receiver(&right, &[])
+            .filter(|b| pyrust_builtins::bytearray::as_bytearray_snapshot(b).is_some());
+        if ba_left.is_some() || ba_right.is_some() {
+            let l = ba_left.unwrap_or_else(|| left.clone());
+            let r = ba_right.unwrap_or_else(|| right.clone());
+            return self.add(l, r);
         }
         // bytearray concatenation: handle before coerce_numeric since bytearray
         // is a BuiltinObject and would fall through the numeric match arms.
@@ -6696,7 +6721,8 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
                     | ValueKind::Tuple(_)
                     | ValueKind::Dict(_)
                     | ValueKind::Set(_)
-            ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
+            ) || pyrust_builtins::frozenset::as_items(&backing).is_some()
+                || pyrust_builtins::bytearray::as_bytearray_snapshot(&backing).is_some();
             if is_primitive {
                 return backing;
             }

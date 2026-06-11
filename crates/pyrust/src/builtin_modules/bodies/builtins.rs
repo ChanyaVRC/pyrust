@@ -9851,6 +9851,15 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                 }
                 return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
             }
+            // bytearray subclass (#2386): `str(BA(...))` == `repr(BA(...))` in
+            // CPython (bytearray has no `__str__`, so `object.__str__` calls
+            // `__repr__`), rendering `ClassName(b'...')`.  Delegate to
+            // `render_value_repr`, which now handles the bytearray subclass.
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+            {
+                return render_value_repr(interp, value);
+            }
             _ => {}
         }
     }
