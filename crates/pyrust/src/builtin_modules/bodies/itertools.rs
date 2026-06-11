@@ -71,63 +71,19 @@ pyrust_module! {
         // `iter(arg)` over the outer iterable.  This does not consume any
         // element yet (for a generator source it just returns the generator);
         // the first element is pulled on the first `__next__`, matching
-        // CPython's lazy timing.
-        let outer = make_iter(_interp, &args[0].value)?;
-        let mut attrs = InstanceAttrs::new();
-        attrs.insert("_outer", outer);
-        attrs.insert("_inner", Value::none());
-        make_itertools_instance("_chain_from_iterable", attrs)
-    }
-
-    /// CPython: the iterator returned by `itertools.chain.from_iterable`.
-    /// Holds the outer iterator (`_outer`) and the current inner iterator
-    /// (`_inner`, `None` until the first inner iterable is reached).  Inner
-    /// iterables are pulled from the outer source on demand and `iter()`-ed
-    /// lazily, so a non-iterable element raises `TypeError` only when
-    /// reached.
-    class _chain_from_iterable {
-        iter_self;
-        fn __next__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
-            loop {
-                let inner = inst
-                    .borrow()
-                    .attrs
-                    .get("_inner")
-                    .cloned()
-                    .ok_or_else(|| internal(FN_NAME))?;
-                if inner.is_none() {
-                    // No current inner iterator — pull the next inner iterable
-                    // from the outer source (StopIteration propagates to end
-                    // the whole chain), then `iter()` it lazily.  A
-                    // non-iterable element raises TypeError here, matching
-                    // CPython's "'<type>' object is not iterable".
-                    let outer = inst
-                        .borrow()
-                        .attrs
-                        .get("_outer")
-                        .cloned()
-                        .ok_or_else(|| internal(FN_NAME))?;
-                    let next_iterable = _interp.call_next(&outer, None)?;
-                    let new_inner = make_iter(_interp, &next_iterable)?;
-                    inst.borrow_mut()
-                        .attrs
-                        .insert("_inner", new_inner);
-                    continue;
-                }
-                // Drain the current inner iterator; on exhaustion drop it and
-                // loop back to fetch the next inner iterable.
-                match _interp.call_next(&inner, None) {
-                    Ok(v) => return Ok(v),
-                    Err(e) if is_stop_iteration(&e) => {
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_inner", Value::none());
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-        }
+        // CPython's lazy timing.  The returned `ChainFromIterableIter` is a
+        // generator-state iterator (like `map` / `filter`), so per-element
+        // iteration goes through the dedicated `step_chain_from_iterable`
+        // dispatch in `ForIter` / `call_next` — no PyInstance `__next__` VM
+        // re-entry per element (#2362).
+        let outer = crate::builtin_modules::builtins::make_iterator(_interp, &args[0].value)?;
+        Ok(Value::generator(Box::new(
+            crate::interpreter::ChainFromIterableIter {
+                outer,
+                inner: None,
+                done: false,
+            },
+        )))
     }
 
     /// `itertools.islice` — fully lazy slice with class-based dispatch.

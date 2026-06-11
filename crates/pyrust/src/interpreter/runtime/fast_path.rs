@@ -350,6 +350,116 @@ impl Interpreter {
         }
     }
 
+    /// One step of the lazy `itertools.chain.from_iterable(outer)` iterator
+    /// (#2362).
+    ///
+    /// Advances the current inner iterator by one element; on inner exhaustion
+    /// pulls the next inner iterable from `outer` (StopIteration ends the whole
+    /// chain) and `iter()`s it lazily (a non-iterable element raises
+    /// `TypeError` only when reached, matching CPython).  Both outer and inner
+    /// are driven one element at a time so an inner generator's interleaved
+    /// side effects run in step with the consumer (CPython laziness; an
+    /// `islice` that stops mid-inner must not over-consume).
+    ///
+    /// Fast path: when the inner is a `NativeIterFrame` (the common
+    /// `from_iterable(list_of_lists)` case — lists / tuples / ranges / dict
+    /// views), drive it with a direct index-walk under a single borrow,
+    /// skipping the `call_next` dispatch / re-borrow per element.
+    ///
+    /// `Ok(Some(v))` → next value; `Ok(None)` → exhausted; `Err(e)` → error
+    /// from a source iterator or a non-iterable inner element.
+    #[inline]
+    pub(crate) fn step_chain_from_iterable(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        loop {
+            // Snapshot the current inner (a cheap Rc bump) under a brief borrow,
+            // then release it before any per-element work.
+            let inner: Option<Value> = {
+                let borrow = state_rc.borrow();
+                let s = borrow.downcast_ref::<ChainFromIterableIter>().ok_or_else(|| {
+                    PyError::Runtime(
+                        "step_chain_from_iterable on non-ChainFromIterableIter state".to_string(),
+                    )
+                })?;
+                if s.done {
+                    return Ok(None);
+                }
+                s.inner.clone()
+            };
+            if let Some(inner) = inner {
+                // Fast path: a `NativeIterFrame` inner (lists / tuples / ranges /
+                // dict views — no Python-level side effects) is advanced with a
+                // direct index-walk, skipping the `call_next` dispatch per
+                // element.  The snapshot above already released the chain's own
+                // state borrow, so borrowing the inner's cell here is safe.
+                if let ValueKind::Generator(inner_rc) = inner.kind()
+                    && let Ok(mut inner_borrow) = inner_rc.try_borrow_mut()
+                    && let Some(native) = inner_borrow.downcast_mut::<NativeIterFrame>()
+                {
+                    native.guard_check()?;
+                    if native.pos < native.items.len() {
+                        let v = native.items[native.pos].clone();
+                        native.pos += 1;
+                        return Ok(Some(v));
+                    }
+                    // Native inner exhausted — drop it and loop to pull the next.
+                    drop(inner_borrow);
+                    state_rc
+                        .borrow_mut()
+                        .downcast_mut::<ChainFromIterableIter>()
+                        .unwrap()
+                        .inner = None;
+                    continue;
+                }
+                // Generic path: drive a non-native inner (generator / PyInstance)
+                // one element at a time.
+                match self.call_next(&inner, None) {
+                    Ok(v) => return Ok(Some(v)),
+                    Err(e) if e.class_name_is("StopIteration") => {
+                        state_rc
+                            .borrow_mut()
+                            .downcast_mut::<ChainFromIterableIter>()
+                            .unwrap()
+                            .inner = None;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // No current inner: pull the next inner iterable from the outer
+            // source (StopIteration ends the whole chain), then `iter()` it.
+            let outer = {
+                let borrow = state_rc.borrow();
+                borrow
+                    .downcast_ref::<ChainFromIterableIter>()
+                    .unwrap()
+                    .outer
+                    .clone()
+            };
+            let next_iterable = match self.call_next(&outer, None) {
+                Ok(v) => v,
+                Err(e) if e.class_name_is("StopIteration") => {
+                    state_rc
+                        .borrow_mut()
+                        .downcast_mut::<ChainFromIterableIter>()
+                        .unwrap()
+                        .done = true;
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            };
+            let new_inner = crate::builtin_modules::builtins::make_iterator(self, &next_iterable)?;
+            state_rc
+                .borrow_mut()
+                .downcast_mut::<ChainFromIterableIter>()
+                .unwrap()
+                .inner = Some(new_inner);
+            // loop to drain the freshly-pulled inner
+        }
+    }
+
     /// One step of the lazy `enumerate(iterable, start=N)` iterator.
     ///
     /// Advances the stored source iterator by one element via `call_next` and

@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
+    AsyncGenASend, BigRangeIter, CallableIter, ChainFromIterableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_hash_inherits_builtin_none, class_is_subclass_of,
     class_suppresses_instance_dict,
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
@@ -7301,6 +7301,11 @@ pub(crate) fn value_class(obj: &Value) -> Value {
                 Value::builtin_function("map")
             } else if borrow.downcast_ref::<FilterIter>().is_some() {
                 Value::builtin_function("filter")
+            } else if borrow.downcast_ref::<ChainFromIterableIter>().is_some() {
+                // `type(chain.from_iterable(...)).__name__ == "chain"` (bare
+                // name; repr / error messages keep the `itertools.` prefix via
+                // `full_type_name_str`), matching CPython (#2362).
+                Value::builtin_function("chain")
             } else if borrow.downcast_ref::<EnumerateIter>().is_some() {
                 Value::builtin_function("enumerate")
             } else if borrow.downcast_ref::<ZipIter>().is_some() {
@@ -9857,6 +9862,13 @@ fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
         }
         if borrow.downcast_ref::<FilterIter>().is_some() {
             return std::borrow::Cow::Borrowed("filter");
+        }
+        if borrow.downcast_ref::<ChainFromIterableIter>().is_some() {
+            // Fully-qualified for repr / error messages (`<itertools.chain
+            // object ...>`, `'itertools.chain' object ...`), matching the
+            // native `chain` BuiltinObject and CPython (#2362).  `type().__name__`
+            // strips the module prefix in `type_of`'s Generator arm below.
+            return std::borrow::Cow::Borrowed("itertools.chain");
         }
         if borrow.downcast_ref::<EnumerateIter>().is_some() {
             return std::borrow::Cow::Borrowed("enumerate");

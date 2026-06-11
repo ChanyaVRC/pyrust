@@ -206,6 +206,33 @@ pub(crate) struct FilterIter {
     pub(crate) done: bool,
 }
 
+/// Lazy iterator for `itertools.chain.from_iterable(outer)` (#2362).
+///
+/// `outer` is the already-`iter()`-ed outer iterator (one element per inner
+/// iterable).  `inner` is the current inner iterator (`None` until the first
+/// inner is reached, and again after each inner is exhausted).  Each
+/// `step_chain_from_iterable` advances `inner` by one element; on inner
+/// exhaustion it pulls the next inner iterable from `outer` and `iter()`s it
+/// lazily.  Both the outer and each inner are driven *one element at a time*
+/// (never materialised wholesale), so an inner generator with interleaved side
+/// effects runs exactly in step with the chain consumer — matching CPython's
+/// lazy timing (`islice(chain.from_iterable(gens), k)` must not over-consume).
+///
+/// Replaces the old `_chain_from_iterable` PyInstance class, whose
+/// Python-dispatched `__next__` cost a full VM re-entry per element; as a
+/// generator-state iterator it gets the dedicated `step_*` dispatch in
+/// `ForIter` / `call_next` with no re-entry, plus a direct index-walk fast
+/// path for the common `NativeIterFrame` inner (lists/tuples/ranges).
+pub(crate) struct ChainFromIterableIter {
+    /// Already-converted outer iterator object.
+    pub(crate) outer: Value,
+    /// Current inner iterator (`None` until the first inner is reached and
+    /// after each inner is drained).
+    pub(crate) inner: Option<Value>,
+    /// Set to `true` once the outer iterator raises `StopIteration`.
+    pub(crate) done: bool,
+}
+
 /// Lazy iterator for `enumerate(iterable, start=0)`.
 ///
 /// `source` is the already-converted iterator object (result of calling
@@ -4132,6 +4159,17 @@ impl Interpreter {
                                                 Err(e) => Err(e),
                                             })
                                         } else {
+                                        let is_chain_from_iterable = state_rc
+                                            .borrow()
+                                            .downcast_ref::<ChainFromIterableIter>()
+                                            .is_some();
+                                        if is_chain_from_iterable {
+                                            Some(match self.step_chain_from_iterable(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(pyrust_core::py_err!("StopIteration", String::new())),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
                                         let is_enumerate_iter = state_rc
                                             .borrow()
                                             .downcast_ref::<EnumerateIter>()
@@ -4200,6 +4238,7 @@ impl Interpreter {
                                         }   // closes is_bigrange_iter else
                                         }   // closes is_zip_iter else
                                         }   // closes is_enumerate_iter else
+                                        }   // closes is_chain_from_iterable else
                                         }   // closes is_filter_iter else
                                         }   // closes is_map_iter else
                                     }
