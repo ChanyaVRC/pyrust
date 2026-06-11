@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
+use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_hash_inherits_builtin_none, class_is_subclass_of,
@@ -658,22 +658,20 @@ pyrust_module! {
     /// CPython: divmod(a, b) — `(a // b, a % b)`.
     /// <https://docs.python.org/3/library/functions.html#divmod>
     ///
-    /// Uses the raw `(args)` dispatch style so that wrong-arity calls produce
-    /// CPython's exact message (`"divmod expected 2 arguments, got N"`) rather
-    /// than the generic `missing_arg` wording.  Type dispatch for the primitive
-    /// fast paths (int/bool/float combinations) is done inline by kind-matching;
-    /// the dunder-dispatch and coerce_numeric fallback paths are identical to
-    /// the former `(PyValue, PyValue)` catch-all overload body.
-    fn divmod(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("divmod expected 2 arguments, got {}", args.len()),
-            ));
-        }
-        let a = &args[0].value;
-        let b = &args[1].value;
+    /// Migrated to the typed-signature dialect (#400/#2331):
+    /// `#[arity_style(expected_got)]` reproduces CPython's METH_VARARGS
+    /// wording (`divmod expected 2 arguments, got N`) that previously
+    /// forced the raw `(args)` dispatch style.  Type dispatch for the
+    /// primitive fast paths (int/bool/float combinations) is done inline by
+    /// kind-matching; the dunder-dispatch and coerce_numeric fallback paths
+    /// are unchanged.
+    #[arity_style(expected_got)]
+    fn divmod(
+        #[positional_only] a: PyValue,
+        #[positional_only] b: PyValue,
+    ) -> Result<Value> {
+        let a = &a.0;
+        let b = &b.0;
 
         // Fast paths: primitive int/bool/float combinations, mirroring the
         // former typed overloads.  bool ⊆ int in CPython: bool arms coerce
@@ -1618,26 +1616,24 @@ pyrust_module! {
 
     /// CPython: issubclass(cls, classinfo) — true if `cls` is a subclass.
     /// <https://docs.python.org/3/library/functions.html#issubclass>
-    ///
-    /// Migrated to the typed-signature dialect (#400/#2331).  Both args
-    /// accept any object (`PyValue`); `#[arity_style(expected_got)]`
-    /// reproduces CPython's METH_VARARGS wording
-    /// (`issubclass expected 2 arguments, got N`).
-    #[arity_style(expected_got)]
-    fn issubclass(
-        #[positional_only] cls: PyValue,
-        #[positional_only] class_or_tuple: PyValue,
-    ) -> Result<Value> {
+    fn issubclass(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
+            ));
+        }
         // `cls` may be either a user-defined class (`PyClass`) or a
         // built-in type token (`BuiltinFunction("int")` etc.); anything
         // else is a `TypeError`, matching CPython.
-        if !is_class_like(&cls.0) {
+        if !is_class_like(&args[0].value) {
             return Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() arg 1 must be a class"),
             ));
         }
-        let result = issubclass_check(FN_NAME, &cls.0, &class_or_tuple.0, _interp)?;
+        let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
         Ok(Value::bool_(result))
     }
 
@@ -1661,17 +1657,15 @@ pyrust_module! {
 
     /// CPython: isinstance(obj, classinfo) — type check.
     /// <https://docs.python.org/3/library/functions.html#isinstance>
-    ///
-    /// Migrated to the typed-signature dialect (#400/#2331).  Both args
-    /// accept any object (`PyValue`); `#[arity_style(expected_got)]`
-    /// reproduces CPython's METH_VARARGS wording
-    /// (`isinstance expected 2 arguments, got N`).
-    #[arity_style(expected_got)]
-    fn isinstance(
-        #[positional_only] obj: PyValue,
-        #[positional_only] class_or_tuple: PyValue,
-    ) -> Result<Value> {
-        let result = isinstance_check(FN_NAME, &obj.0, &class_or_tuple.0, _interp)?;
+    fn isinstance(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
+            ));
+        }
+        let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
         Ok(Value::bool_(result))
     }
 
