@@ -4193,6 +4193,12 @@ enum ExceptAsVarDel {
 struct Compiler {
     local_index: Rc<HashMap<String, Reg>>,
     cell_vars: HashSet<String>,
+    /// Names declared `nonlocal` in this function body (issue #2339).  A
+    /// `nonlocal x` read/write resolves to an enclosing function scope's cell,
+    /// so — like `cell_vars` — it can use the dedicated `LoadCell`/`StoreCell`
+    /// opcodes that skip the global inline-cache / module-dict path.  Empty for
+    /// module and class scopes (`nonlocal` is invalid there).
+    nonlocal_names: HashSet<String>,
     insns: Vec<Insn>,
     /// Per-instruction 1-based source line numbers, parallel to `insns`.
     /// Filled by `emit()` from `current_lineno`.  0 = unknown.
@@ -4955,6 +4961,7 @@ impl Compiler {
         Self {
             local_index,
             cell_vars: cell_set,
+            nonlocal_names: HashSet::new(),
             insns: Vec::new(),
             lineno_table: Vec::new(),
             current_lineno: 0,
@@ -5234,6 +5241,19 @@ impl Compiler {
     /// True if `name` is a cell variable (lives in env, not registers).
     fn is_cell(&self, name: &str) -> bool {
         self.cell_vars.contains(name)
+    }
+
+    /// True when a non-register name is guaranteed to resolve to a
+    /// **function-scope cell** — either a cell var owned by this scope or a
+    /// `nonlocal x` declared here, which binds to an enclosing function's cell
+    /// (issue #2339).  Such a name never resolves to a module global or builtin,
+    /// so its read/write can use the dedicated `LoadCell`/`StoreCell` opcodes
+    /// that skip the `LoadGlobal` inline cache and the module-globals-dict
+    /// fallback.  Restricted to function scope: module scope has no cells worth
+    /// special-casing, and class bodies keep the name-keyed namespace path
+    /// (which `vars()`/`dir()` expose) and the #384 resolution rules untouched.
+    fn is_function_cell(&self, name: &str) -> bool {
+        self.is_function_scope && (self.is_cell(name) || self.nonlocal_names.contains(name))
     }
 
     /// Register index for a local variable, or None if the name is global/nonlocal/cell.
@@ -5597,7 +5617,11 @@ impl Compiler {
             }
         } else {
             let idx = self.intern_name(name);
-            self.emit(Insn::StoreGlobal(idx, src));
+            if self.is_function_cell(name) {
+                self.emit(Insn::StoreCell(idx, src));
+            } else {
+                self.emit(Insn::StoreGlobal(idx, src));
+            }
         }
     }
 
@@ -6653,12 +6677,20 @@ impl Compiler {
                         }
                     }
                 } else {
-                    // cell / global: load, compute, store
+                    // cell / global: load, compute, store.  A function-scope
+                    // cell / nonlocal uses LoadCell/StoreCell (issue #2339);
+                    // this is the hot path for `nonlocal c; c += 1`.
                     let name_idx = self.intern_name(name);
                     let lhs = self.alloc_temp();
-                    self.emit(Insn::LoadGlobal(lhs, name_idx));
-                    self.emit_aug_binop(lhs, op, expr);
-                    self.emit(Insn::StoreGlobal(name_idx, lhs));
+                    if self.is_function_cell(name) {
+                        self.emit(Insn::LoadCell(lhs, name_idx));
+                        self.emit_aug_binop(lhs, op, expr);
+                        self.emit(Insn::StoreCell(name_idx, lhs));
+                    } else {
+                        self.emit(Insn::LoadGlobal(lhs, name_idx));
+                        self.emit_aug_binop(lhs, op, expr);
+                        self.emit(Insn::StoreGlobal(name_idx, lhs));
+                    }
                     self.free_temp(lhs);
                 }
             }
@@ -8684,6 +8716,9 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        // Names declared `nonlocal` in this body resolve to an enclosing cell;
+        // record them so reads/writes emit LoadCell/StoreCell (issue #2339).
+        sub.nonlocal_names = (*inner_nonlocal_rc).clone();
         sub.is_async_function = is_async;
         // An `async def` whose body contains a bare `yield` is an async
         // generator (#2280); `return <value>` inside it is a SyntaxError.
@@ -10584,7 +10619,15 @@ impl Compiler {
                     // global / nonlocal / cell / free variable
                     let name_idx = self.intern_name(name);
                     let dst = self.alloc_temp();
-                    self.emit(Insn::LoadGlobal(dst, name_idx));
+                    // A function-scope cell / nonlocal resolves in the env chain;
+                    // emit LoadCell to skip the LoadGlobal inline-cache + module
+                    // -dict path (issue #2339).  Everything else (true globals,
+                    // builtins, module/class-scope free vars) keeps LoadGlobal.
+                    if self.is_function_cell(name) {
+                        self.emit(Insn::LoadCell(dst, name_idx));
+                    } else {
+                        self.emit(Insn::LoadGlobal(dst, name_idx));
+                    }
                     dst
                 }
             }

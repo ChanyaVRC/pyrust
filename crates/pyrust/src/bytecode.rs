@@ -135,6 +135,22 @@ pub enum Insn {
     LoadGlobal(Reg, u16),
     /// names[name_idx] = R[src]  (write to module / enclosing env)
     StoreGlobal(u16, Reg),
+    /// R[dst] = read a **function-scope cell variable** (a name captured by a
+    /// nested function, or one declared `nonlocal`) directly from the env chain
+    /// (issue #2339).  Unlike `LoadGlobal`, the compiler proves at emit time that
+    /// the name resolves to a cell (never a module global / builtin), so the VM
+    /// skips the `LoadGlobal` inline-cache probe and the module-globals-dict
+    /// fallback entirely — it goes straight to the env-chain cell read.  The
+    /// backing store is still the env (sibling cells, suspended generators, and
+    /// `__closure__` introspection are unchanged); only the per-access
+    /// global/cell multiplexing is removed.
+    LoadCell(Reg, u16),
+    /// names[name_idx] = R[src]  — write a **function-scope cell variable**
+    /// (cell or `nonlocal`) directly into the owning env (issue #2339).  The
+    /// compiler proves the target is a cell, so the VM bypasses the module-global
+    /// mirror / globals-dict sync path that `StoreGlobal` carries for true
+    /// globals; `nonlocal` writes still walk to the enclosing owning env.
+    StoreCell(u16, Reg),
     /// R[dst] = None
     LoadNone(Reg),
     /// R[start], R[start+1], ..., R[start+count-1] = None
