@@ -1711,7 +1711,11 @@ fn fill_get_attr_cache(
                     });
                     let shadowed_by_data_desc =
                         class_attr.as_ref().is_some_and(is_data_descriptor);
-                    if !has_custom_getattribute && !is_numeric_tower {
+                    // `__traceback__` is stored as a deferred placeholder that
+                    // must be materialised by get_attr's interceptor on every
+                    // read (issue #2351); a cache hit would return the raw
+                    // placeholder, so never fill the cache for this name.
+                    if !has_custom_getattribute && !is_numeric_tower && name != "__traceback__" {
                         if is_slot_descriptor {
                             cache[pc - 1] = AttrCacheEntry::SlotAttr {
                                 class_ptr: Rc::as_ptr(&inst.class) as *const (),

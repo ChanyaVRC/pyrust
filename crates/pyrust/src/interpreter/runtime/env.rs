@@ -1544,8 +1544,23 @@ impl Interpreter {
                 return desc_result;
             }
 
-        // Step 2: Instance __dict__.
-        if let Some(value) = instance.borrow().attrs.get(name).cloned() {
+        // Step 2: Instance __dict__.  Scope the shared borrow so it is dropped
+        // before any materialisation below re-borrows the instance.
+        let attr_value = instance.borrow().attrs.get(name).cloned();
+        if let Some(value) = attr_value {
+            // Issue #2351: `__traceback__` is stored as a deferred placeholder
+            // when an exception is caught; materialise it on first read and
+            // write the real chain back so later reads (and the `__dict__`
+            // proxy) see the same object.
+            if name == "__traceback__"
+                && let Some(real) = self.materialize_deferred_traceback(&value)
+            {
+                instance
+                    .borrow_mut()
+                    .attrs
+                    .insert("__traceback__", real.clone());
+                return Ok(real);
+            }
             return Ok(value);
         }
 

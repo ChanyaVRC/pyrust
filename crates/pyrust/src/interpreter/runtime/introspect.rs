@@ -421,20 +421,24 @@ impl Interpreter {
     ///
     /// `catch_lineno` is the source line in the catching frame where the
     /// exception propagated from (the call/raise that is being handled).
-    pub(crate) fn build_traceback_object(&self, catch_lineno: i64) -> Value {
-        // Captured frames are ordered outermost-first / innermost-last and
-        // contain only the *callee* frames the error unwound through.  The
-        // catching frame (the one whose handler caught the error) is one level
-        // more outer than all of them and is not in the list.
-        let captured = pyrust_core::clone_captured_error_frames();
-
-        // Determine the catching frame's code from the current innermost frame
-        // view (the frame running the handler).
-        let catch_code = match self.vm_frame_views.last() {
-            Some(view) => match &view.function {
-                Some(func) => self.build_code_object(func),
-                None => code_obj::code("<module>".to_string(), 0, Vec::new()),
-            },
+    /// Build the Python-visible traceback chain from an already-captured
+    /// `FrameInfo` snapshot plus the catching frame's `UserFunction`.
+    ///
+    /// Invoked by [`Self::materialize_deferred_traceback`] the first time
+    /// `e.__traceback__` is read.  Building the chain is the dominant cost of the
+    /// raise/catch path — the `build_code_object` for the catch frame plus a
+    /// `frame` + two dicts per node — so issue #2351 defers it from catch time to
+    /// first read.  `catch_func` is `None` for a module-scope (`<module>`)
+    /// catching frame.
+    pub(crate) fn build_traceback_from_snapshot(
+        &self,
+        captured: &[pyrust_core::FrameInfo],
+        catch_func: Option<&UserFunction>,
+        catch_lineno: i64,
+    ) -> Value {
+        // Determine the catching frame's code object.
+        let catch_code = match catch_func {
+            Some(func) => self.build_code_object(func),
             None => code_obj::code("<module>".to_string(), 0, Vec::new()),
         };
 
@@ -466,6 +470,72 @@ impl Interpreter {
             Value::dict(Default::default()),
         );
         tb_obj::traceback_node(catch_frame, node, catch_lineno, -1)
+    }
+
+    /// Build a *deferred* traceback placeholder for an exception being caught.
+    ///
+    /// Instead of eagerly materialising the (expensive) `traceback` object
+    /// chain — which builds a full `code` object for the catching frame plus
+    /// a `frame` and two dicts per node, none of which the overwhelming
+    /// majority of `try/except` blocks ever read — this captures only the
+    /// cheap snapshot the build needs (the `FrameInfo` list, the catching
+    /// frame's `UserFunction` `Rc`, and the catch line) and returns a
+    /// lightweight placeholder value.
+    ///
+    /// The first read of `e.__traceback__` materialises the real chain via
+    /// [`Self::materialize_deferred_traceback`] and replaces the placeholder, so
+    /// the Python-visible behaviour is identical to the eager build (issue
+    /// #2351).
+    pub(crate) fn build_deferred_traceback(&self, catch_lineno: i64) -> Value {
+        let captured = pyrust_core::clone_captured_error_frames();
+        let catch_func = self
+            .vm_frame_views
+            .last()
+            .and_then(|view| view.function.clone());
+        let state: Box<dyn std::any::Any> = Box::new(DeferredTracebackState {
+            frames: captured,
+            catch_func,
+            catch_lineno,
+        });
+        Value::builtin_object(DEFERRED_TRACEBACK_OPS, state)
+    }
+
+    /// If `value` is a deferred-traceback placeholder, materialise it into a real
+    /// traceback object chain; otherwise return `None`.  Used by every read site
+    /// that may observe an exception's `__traceback__` slot.
+    pub(crate) fn materialize_deferred_traceback(&self, value: &Value) -> Option<Value> {
+        let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+            return None;
+        };
+        if ops.type_name() != DEFERRED_TRACEBACK_NAME {
+            return None;
+        }
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<DeferredTracebackState>()?;
+        Some(self.build_traceback_from_snapshot(&s.frames, s.catch_func.as_deref(), s.catch_lineno))
+    }
+}
+
+/// Internal type name for the deferred-traceback placeholder.  Not user-visible
+/// (every read path materialises the placeholder before it can be inspected),
+/// but distinct from the real `"traceback"` type so the materialisation
+/// interceptor can recognise it.
+pub(crate) const DEFERRED_TRACEBACK_NAME: &str = "<deferred traceback>";
+pub(crate) const DEFERRED_TRACEBACK_OPS: &DeferredTracebackOps = &DeferredTracebackOps;
+
+/// Cheap snapshot carried by a deferred-traceback placeholder until the
+/// traceback object is first read (issue #2351).
+pub(crate) struct DeferredTracebackState {
+    frames: Vec<pyrust_core::FrameInfo>,
+    catch_func: Option<Rc<UserFunction>>,
+    catch_lineno: i64,
+}
+
+pub(crate) struct DeferredTracebackOps;
+
+impl pyrust_core::BuiltinTypeOps for DeferredTracebackOps {
+    fn type_name(&self) -> &'static str {
+        DEFERRED_TRACEBACK_NAME
     }
 }
 
