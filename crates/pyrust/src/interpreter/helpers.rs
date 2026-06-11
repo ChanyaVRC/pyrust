@@ -3211,6 +3211,17 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         "with_traceback".to_string(),
         Value::builtin_function("BaseException.with_traceback"),
     );
+    // Issue #2361: install `__reduce__`/`__reduce_ex__` so every exception
+    // subclass reduces to `(type, args[, __dict__])` — matching CPython and
+    // making `copy`/`deepcopy` drop the traceback (#2360).
+    base_exception.borrow_mut().attrs.insert(
+        "__reduce__".to_string(),
+        Value::builtin_function("BaseException.__reduce__"),
+    );
+    base_exception.borrow_mut().attrs.insert(
+        "__reduce_ex__".to_string(),
+        Value::builtin_function("BaseException.__reduce_ex__"),
+    );
     let exception = mk("Exception", Some(Rc::clone(&base_exception)));
     let arithmetic_error = mk("ArithmeticError", Some(Rc::clone(&exception)));
     let lookup_error = mk("LookupError", Some(Rc::clone(&exception)));

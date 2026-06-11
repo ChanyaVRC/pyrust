@@ -7038,6 +7038,39 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// Issue #2361: `BaseException.__reduce__(self)` — the pickle reduction.
+    ///
+    /// CPython's `BaseException.__reduce__` returns `(type(self), self.args)`,
+    /// with a third element (the instance `__dict__`) appended whenever the
+    /// instance carries any non-slot attributes.  The C-level exception slots
+    /// (`args`, `__traceback__`, `__cause__`, `__context__`,
+    /// `__suppress_context__`, and class-specific structured slots) are
+    /// excluded from that state dict — which is why `copy`/`deepcopy` of a
+    /// caught exception drop the traceback (#2360).
+    ///
+    /// CPython signature: `BaseException.__reduce__(self, /)`
+    #[py_name = "BaseException.__reduce__"]
+    fn base_exception_reduce(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__reduce__", "BaseException", method)
+        })?;
+        Ok(base_exception_reduce_value(&self_val))
+    }
+
+    /// Issue #2361: `BaseException.__reduce_ex__(self, protocol)` — CPython
+    /// inherits `object.__reduce_ex__`, which for an exception ends up calling
+    /// `self.__reduce__()`.  We return the same `(type, args[, state])` tuple so
+    /// that the protocol the `copy` module relies on is exception-correct.
+    ///
+    /// CPython signature: `BaseException.__reduce_ex__(self, protocol, /)`
+    #[py_name = "BaseException.__reduce_ex__"]
+    fn base_exception_reduce_ex(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__reduce_ex__", "BaseException", method)
+        })?;
+        Ok(base_exception_reduce_value(&self_val))
+    }
+
     /// Issue #1067: `BaseException.add_note(note)` — Python 3.11+ method.
     ///
     /// Appends `note` (a str) to `self.__notes__`, creating `__notes__` as
@@ -7268,6 +7301,34 @@ pyrust_module! {
 /// `obj.__class__`.  Extracted from the `type` builtin so the `__class__`
 /// attribute (issue #2150) and the object-protocol fallback (#2151) share a
 /// single source of truth: `obj.__class__ is type(obj)` for every value.
+/// Issue #2361: build the `BaseException.__reduce__` tuple for an exception
+/// instance: `(type(self), self.args)`, with a third element (the non-slot
+/// `__dict__` state) appended only when the instance has any such attributes.
+/// Matches CPython 3.12 `BaseException.__reduce__`.
+fn base_exception_reduce_value(self_val: &Value) -> Value {
+    let cls = value_class(self_val);
+    let ValueKind::PyInstance(inst_rc) = self_val.kind() else {
+        // Non-instance receiver — preserve the `(type, ())` shape.
+        return Value::tuple(vec![cls, Value::tuple(Vec::new())]);
+    };
+    // `self.args` is stored as the "args" attr (a tuple); default to ().
+    let args_val = inst_rc
+        .borrow()
+        .attrs
+        .get("args")
+        .cloned()
+        .unwrap_or_else(|| Value::tuple(Vec::new()));
+    let state = pyrust_builtins::instance_dict::exception_dict_state(inst_rc);
+    if state.is_empty() {
+        return Value::tuple(vec![cls, args_val]);
+    }
+    let mut dict: PyDict = PyDict::with_capacity_and_hasher(state.len(), Default::default());
+    for (k, v) in state {
+        dict.insert(PyKey::str_from(&k), v);
+    }
+    Value::tuple(vec![cls, args_val, Value::dict(dict)])
+}
+
 pub(crate) fn value_class(obj: &Value) -> Value {
     // User-defined class instances: return the actual Rc so that
     // `type(x) is type(x)` works via Rc::ptr_eq.

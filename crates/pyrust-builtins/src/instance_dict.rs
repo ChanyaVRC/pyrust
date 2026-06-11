@@ -671,6 +671,25 @@ pub fn as_instance_dict_items(value: &Value) -> Option<Vec<(PyKey, Value)>> {
     )
 }
 
+/// Return the public `__dict__` state of an exception instance: the attrs that
+/// are *not* C-level exception slots (`args`, `__traceback__`, `__cause__`,
+/// `__context__`, `__suppress_context__`, plus the class-specific structured
+/// slots like `StopIteration.value` / `SyntaxError.msg` / `OSError.errno`).
+///
+/// This is exactly the third element of CPython's `BaseException.__reduce__`
+/// (the instance `__dict__`), and the state that `copy`/`deepcopy` carry over.
+/// Slots such as `__traceback__` are deliberately excluded — they are reset on
+/// the copy, matching CPython 3.12.  Keys keep their insertion order.
+pub fn exception_dict_state(instance: &Rc<RefCell<PyInstance>>) -> Vec<(String, Value)> {
+    let inst = instance.borrow();
+    let class = Rc::clone(&inst.class);
+    inst.attrs
+        .iter()
+        .filter(|(k, _)| !is_exc_hidden_slot(k) && !is_exc_class_slot(k, &class))
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
 /// Construct an `instance_dict` proxy wrapping a live `PyInstance` reference.
 ///
 /// Each call returns a fresh `BuiltinObject` value whose backing `Rc` is
