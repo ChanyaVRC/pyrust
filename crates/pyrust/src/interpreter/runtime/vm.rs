@@ -3324,6 +3324,21 @@ impl Interpreter {
                     let s = vm_try!(self.format_value_default(&val));
                     regs[*dst as usize] = s;
                 }
+                Insn::FormatValueSpec(dst, src, spec_r) => {
+                    // f-string interpolation with a format spec (`f"{v:.2f}"`).
+                    // The spec register holds the already-built spec `str`
+                    // (literal, or a nested-f-string result for `f"{v:{w}}"`).
+                    // Dispatch through the same `__format__` path the `format`
+                    // builtin uses — preserving user `__format__` for
+                    // `PyInstance` — but without the `format` global lookup, the
+                    // call frame, or the call-arg expansion (issue companion of
+                    // #1926's spec-less `FormatValue`).
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    let spec_val = vm_try!(vm_read(&regs, *spec_r, num_locals));
+                    let spec = spec_val.as_str().unwrap_or("");
+                    let s = vm_try!(self.dispatch_dunder_format(&val, spec));
+                    regs[*dst as usize] = s;
+                }
                 Insn::BuildSlice(dst, base) => {
                     // Reads three contiguous registers (base, base+1, base+2) holding
                     // the start, stop, step bounds.  `None` values mean "absent bound".

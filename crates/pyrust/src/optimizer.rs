@@ -255,7 +255,8 @@ fn inline_body_insn_ok(insn: &Insn) -> bool {
         | BuildSlice(..)
         | BuildDict(..)
         | Concat { .. }
-        | FormatValue(..) => true,
+        | FormatValue(..)
+        | FormatValueSpec(..) => true,
         // Folded constant binops are admissible only in their *non-augmented*
         // form: an augmented (`is_aug == true`) fused op applies in-place
         // `__i<op>__` semantics, which could mutate an argument that aliases a
@@ -389,6 +390,11 @@ fn shift_insn_regs(insn: &mut Insn, base: u32) {
         Move(d, s) | CopyReg(d, s) | UnaryOp(d, _, s) | FormatValue(d, s) => {
             shift(d);
             shift(s);
+        }
+        FormatValueSpec(d, s, spec) => {
+            shift(d);
+            shift(s);
+            shift(spec);
         }
         BinOp(d, a, _, b) => {
             shift(d);
@@ -1493,6 +1499,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
         | FormatValue(r, _)
+        | FormatValueSpec(r, _, _)
         | MatchSeqExcluded(r, _)
         | MatchMapping(r, _)
         | GetAttr(r, _, _)
@@ -2447,6 +2454,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
+        | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => *a == r || *b == r,
 
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => *obj == r || *val == r,
@@ -2601,6 +2609,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
+        | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => {
             reads.insert(*a);
             reads.insert(*b);
@@ -3491,6 +3500,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BinOpImm(r, _, _, _, _)
         | UnaryOp(r, _, _)
         | FormatValue(r, _)
+        | FormatValueSpec(r, _, _)
         | MatchSeqExcluded(r, _)
         | MatchMapping(r, _)
         | GetAttr(r, _, _)
@@ -7213,6 +7223,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
+        | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => {
             f(*a);
             f(*b);
