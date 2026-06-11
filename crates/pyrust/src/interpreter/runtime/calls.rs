@@ -1697,7 +1697,56 @@ impl Interpreter {
                                     _ => unreachable!("BkKind::Tuple guard above"),
                                 },
                                 BkKind::Str => {
-                                    self.call_str_method(method, backing, args_vec)
+                                    // `str.format` on a subclass receiver: thread
+                                    // kwargs into the template, mirroring the
+                                    // plain-str bound-method path above.
+                                    // `call_str_method` only accepts positional
+                                    // args, so it can't reach `format` (it would
+                                    // hit the drift-guard sentinel in
+                                    // pyrust_builtins::string) and would silently
+                                    // drop keyword fields (#2376).
+                                    if method == "format" {
+                                        let template = match backing.kind() {
+                                            ValueKind::Str(s) => s.to_string(),
+                                            _ => unreachable!(
+                                                "BkKind::Str guard above"
+                                            ),
+                                        };
+                                        // CPython returns the receiver itself —
+                                        // subclass identity preserved — when the
+                                        // template contains no brace markup at all
+                                        // and is non-empty (CPython's
+                                        // unicode_result_unchanged; surplus args
+                                        // are ignored, so this holds regardless
+                                        // of arguments).
+                                        if !template.is_empty()
+                                            && !template.contains(['{', '}'])
+                                        {
+                                            return Ok(Value::py_instance(
+                                                Rc::clone(inst),
+                                            ));
+                                        }
+                                        let keyword: Vec<(String, Value)> = kw
+                                            .into_iter()
+                                            .filter_map(|(k, v)| {
+                                                if let PyKey::Str(name) = k {
+                                                    Some((
+                                                        name.as_str()
+                                                            .unwrap_or("")
+                                                            .to_owned(),
+                                                        v,
+                                                    ))
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        self.format_str_template(
+                                            &template, &args_vec, &keyword,
+                                        )
+                                    } else {
+                                        self.call_str_method(method, backing, args_vec)
+                                    }
                                 }
                                 BkKind::Int => {
                                     let mut int_args = args_vec;
