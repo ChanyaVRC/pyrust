@@ -12,10 +12,10 @@ This consolidates the per-site unwrap shims behind `effective_builtin_receiver`
 and is the root-cause fix for the #2324 class (bytearray subclasses broken,
 generic reprs, `BA+BA` TypeErrors, `BA == bytearray` False, unhashable keying).
 
-NOTE (carved out — tracked separately): builtin dunders are not exposed as
+NOTE (carved out — tracked as #2387): builtin dunders are not exposed as
 *attributes* on subclasses, so `LI([1]).__iter__()` and `hasattr(bytes,
 '__mod__')` diverge from CPython.  That is an attribute-exposure gap orthogonal
-to the substitutability routing, filed as a follow-up; not exercised here.
+to the substitutability routing; not exercised here.
 """
 
 
