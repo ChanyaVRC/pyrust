@@ -1,0 +1,5 @@
+error: unknown `#[arity_style]` value `takes_one` — expected one of `standard`, `takes_exactly_one`, `expected_got`
+  --> tests/compile_fail/arity_style_unknown.rs:11:19
+   |
+11 |     #[arity_style(takes_one)]
+   |                   ^^^^^^^^^

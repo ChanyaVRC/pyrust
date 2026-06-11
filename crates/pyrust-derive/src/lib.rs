@@ -158,7 +158,39 @@ struct ModuleFn {
     is_pure: bool,
     /// The argument-list dialect this fn uses.  See [`ModuleFnArgs`].
     args: ModuleFnArgs,
+    /// Arity-error wording style, set via `#[arity_style(...)]`.  Defaults
+    /// to [`ArityStyle::Standard`] (the argument-clinic wording the dialect
+    /// has always emitted).  See [`ArityStyle`] and issue #2331.
+    arity_style: ArityStyle,
+    /// `true` when `#[bare_name]` is present — generated dialect messages
+    /// use the unqualified short `__name__` instead of the fully-qualified
+    /// `FN_PREFIX + short`.  Matches CPython's wording for Python-level
+    /// functions in dotted modules (`os.path.exists` → `exists()`).
+    /// Defaults to `false` (qualified, as today).
+    bare_name: bool,
     body: Block,
+}
+
+/// Arity-error message wording for a typed-dialect builtin (#2331).
+///
+/// CPython's hand-written C builtins emit several distinct argument-count
+/// error wordings that the default argument-clinic dialect cannot
+/// reproduce.  `#[arity_style(...)]` selects one so a migrated builtin
+/// stays byte-identical with CPython.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArityStyle {
+    /// `NAME() takes N positional arguments but M were given` (too-many)
+    /// and `NAME() missing required argument: 'x'` (too-few).  The
+    /// historical default; unchanged when no `#[arity_style]` is given.
+    Standard,
+    /// `NAME() takes exactly one argument (M given)` for any count `!= 1`
+    /// (METH_O builtins — `len`, `repr`, `ord`, `abs`, `math.sqrt`, …).
+    /// Only valid on single-parameter signatures.
+    TakesExactlyOne,
+    /// `NAME expected N arguments, got M` (and `at least` / `at most`
+    /// variants).  Note: bare name, no trailing `()`.  METH_VARARGS
+    /// builtins (`isinstance`, `issubclass`, `divmod`, `hasattr`, …).
+    ExpectedGot,
 }
 
 /// Argument-list dialect — legacy `(args: &[ExpandedCallArg])` or typed.
@@ -309,9 +341,58 @@ impl ModuleInput {
         // `false` (conservative default — see issue #433).
         let mut py_name_override: Option<LitStr> = None;
         let mut is_pure = false;
+        let mut arity_style = ArityStyle::Standard;
+        let mut arity_style_set = false;
+        let mut bare_name = false;
         let mut attrs: Vec<syn::Attribute> = Vec::with_capacity(raw_attrs.len());
         for attr in raw_attrs {
-            if attr.path().is_ident("py_name") {
+            if attr.path().is_ident("arity_style") {
+                // `#[arity_style(takes_exactly_one)]` / `#[arity_style(expected_got)]`.
+                // List-form with exactly one bare ident selecting the wording.
+                if arity_style_set {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[arity_style(...)]` may appear at most once per fn",
+                    ));
+                }
+                let kind: Ident = attr.parse_args().map_err(|_| {
+                    syn::Error::new_spanned(
+                        &attr,
+                        "`#[arity_style(...)]` takes a single bare style name, \
+                         e.g. `#[arity_style(takes_exactly_one)]`",
+                    )
+                })?;
+                arity_style = match kind.to_string().as_str() {
+                    "standard" => ArityStyle::Standard,
+                    "takes_exactly_one" => ArityStyle::TakesExactlyOne,
+                    "expected_got" => ArityStyle::ExpectedGot,
+                    other => {
+                        return Err(syn::Error::new(
+                            kind.span(),
+                            format!(
+                                "unknown `#[arity_style]` value `{other}` — expected one of \
+                                 `standard`, `takes_exactly_one`, `expected_got`",
+                            ),
+                        ));
+                    }
+                };
+                arity_style_set = true;
+            } else if attr.path().is_ident("bare_name") {
+                // Marker attribute — path form only.
+                if !matches!(attr.meta, Meta::Path(_)) {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[bare_name]` is a marker attribute and takes no arguments",
+                    ));
+                }
+                if bare_name {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[bare_name]` may appear at most once per fn",
+                    ));
+                }
+                bare_name = true;
+            } else if attr.path().is_ident("py_name") {
                 let nv = attr.meta.require_name_value().map_err(|_| {
                     syn::Error::new_spanned(
                         &attr,
@@ -390,12 +471,49 @@ impl ModuleInput {
             let _: syn::Type = input.parse()?;
         }
         let body: Block = input.parse()?;
+
+        // `#[arity_style]` / `#[bare_name]` drive the *typed-dialect*
+        // prelude; the legacy `(args)` form has no prelude, so they'd be
+        // silently ignored.  Reject up front (#2331).
+        if let ModuleFnArgs::Legacy { .. } = &args {
+            if arity_style_set {
+                return Err(syn::Error::new(
+                    short_name.span(),
+                    "`#[arity_style(...)]` requires the typed-signature dialect; \
+                     the legacy `(args)` form must build its own arity error",
+                ));
+            }
+            if bare_name {
+                return Err(syn::Error::new(
+                    short_name.span(),
+                    "`#[bare_name]` requires the typed-signature dialect; \
+                     the legacy `(args)` form must build its own messages",
+                ));
+            }
+        }
+        // `takes_exactly_one` only makes sense for a one-positional-parameter
+        // signature — its wording hard-codes "exactly one argument".
+        if arity_style == ArityStyle::TakesExactlyOne
+            && let ModuleFnArgs::Typed { params } = &args
+        {
+            let pos = params.iter().filter(|p| !p.keyword_only).count();
+            if pos != 1 || params.iter().any(|p| p.default.is_some()) {
+                return Err(syn::Error::new(
+                    short_name.span(),
+                    "`#[arity_style(takes_exactly_one)]` requires exactly one \
+                     positional parameter with no default",
+                ));
+            }
+        }
+
         Ok(ModuleFn {
             attrs,
             short_name,
             py_name_override,
             is_pure,
             args,
+            arity_style,
+            bare_name,
             body,
         })
     }
@@ -690,9 +808,16 @@ fn emit_fn_artefacts(
     let suffix_lit = LitStr::new(name_suffix, short.span());
 
     // Dialect-specific binding of the args slice + optional typed prelude.
+    // The message name (`__pyrust_msg_name`) is what the dialect's
+    // error-wording calls interpolate — the qualified `FN_NAME` by
+    // default, or the bare short name under `#[bare_name]` (#2331).
+    let bare_lit = LitStr::new(&py_short_and_rust_short(f).0, short.span());
     let (args_binding, typed_prelude) = match &f.args {
         ModuleFnArgs::Legacy { args_ident } => (quote!(#args_ident), quote!()),
-        ModuleFnArgs::Typed { params } => (quote!(__pyrust_args), emit_typed_prelude(params)),
+        ModuleFnArgs::Typed { params } => (
+            quote!(__pyrust_args),
+            emit_typed_prelude(params, f.arity_style, f.bare_name, &bare_lit),
+        ),
     };
 
     let fn_item = quote! {
@@ -748,7 +873,56 @@ fn synthesized_iter_self(span: Span) -> ModuleFn {
         py_name_override: None,
         is_pure: false,
         args: ModuleFnArgs::Legacy { args_ident },
+        arity_style: ArityStyle::Standard,
+        bare_name: false,
         body,
+    }
+}
+
+/// Emit the `let __pyrust_msg_name: &str = …;` binding that every
+/// dialect-generated error wording interpolates (#2331).  Qualified
+/// (`FN_NAME`) by default; the bare short name under `#[bare_name]`.
+fn emit_msg_name_binding(bare_name: bool, bare_lit: &LitStr) -> proc_macro2::TokenStream {
+    if bare_name {
+        quote! { let __pyrust_msg_name: &str = #bare_lit; }
+    } else {
+        quote! { let __pyrust_msg_name: &str = FN_NAME; }
+    }
+}
+
+/// Emit the positional-count guard call for `arity_style` over
+/// `__pyrust_msg_name`.  `count_expr` is the token producing the
+/// observed positional length (e.g. `__positional.len()` or
+/// `__pyrust_args.len()`).  See [`ArityStyle`] (#2331).
+fn emit_arity_check(
+    arity_style: ArityStyle,
+    count_expr: proc_macro2::TokenStream,
+    min_pos: usize,
+    max_pos: usize,
+) -> proc_macro2::TokenStream {
+    match arity_style {
+        ArityStyle::Standard => quote! {
+            crate::interpreter::builtin_args::check_positional_count(
+                __pyrust_msg_name,
+                #count_expr,
+                #min_pos,
+                #max_pos,
+            )?;
+        },
+        ArityStyle::TakesExactlyOne => quote! {
+            crate::interpreter::builtin_args::check_exactly_one_argument(
+                __pyrust_msg_name,
+                #count_expr,
+            )?;
+        },
+        ArityStyle::ExpectedGot => quote! {
+            crate::interpreter::builtin_args::check_arity_expected_got(
+                __pyrust_msg_name,
+                #count_expr,
+                #min_pos,
+                #max_pos,
+            )?;
+        },
     }
 }
 
@@ -772,7 +946,12 @@ fn synthesized_iter_self(span: Span) -> ModuleFn {
 /// let path: PyStr = { ... resolve positional/kw, default or missing-arg, FromValue ... };
 /// let mode: PyStr = { ... };
 /// ```
-fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
+fn emit_typed_prelude(
+    params: &[TypedParam],
+    arity_style: ArityStyle,
+    bare_name: bool,
+    bare_lit: &LitStr,
+) -> proc_macro2::TokenStream {
     // Names of every parameter that may be passed as a keyword argument.
     // Positional-only params are excluded so the kwarg-validation step
     // produces "got an unexpected keyword argument 'x'" for them.
@@ -802,7 +981,14 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         && params.iter().all(|p| !p.keyword_only);
 
     if all_positional_only {
-        return emit_typed_prelude_positional_only(params, min_pos, max_pos);
+        return emit_typed_prelude_positional_only(
+            params,
+            min_pos,
+            max_pos,
+            arity_style,
+            bare_name,
+            bare_lit,
+        );
     }
 
     let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -828,18 +1014,18 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         let default_branch = match &p.default {
             Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
             None => {
-                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(FN_NAME, #name_lit) }
+                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(__pyrust_msg_name, #name_lit) }
             }
         };
 
         per_param.push(quote! {
             let #name_ident: #ty = {
                 let __found = crate::interpreter::builtin_args::locate_arg(
-                    __pyrust_args, &__positional, FN_NAME, #name_lit, #this_pos, #kw_allowed,
+                    __pyrust_args, &__positional, __pyrust_msg_name, #name_lit, #this_pos, #kw_allowed,
                 )?;
                 match __found {
                     Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
-                        __v, FN_NAME, #name_lit,
+                        __v, __pyrust_msg_name, #name_lit,
                     )?,
                     None => (#default_branch)?,
                 }
@@ -847,22 +1033,20 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         });
     }
 
+    let msg_name_binding = emit_msg_name_binding(bare_name, bare_lit);
+    let arity_check = emit_arity_check(arity_style, quote!(__positional.len()), min_pos, max_pos);
     quote! {
         // Pull the validation helpers + FromValue trait into scope.
         #[allow(unused_imports)]
         use crate::interpreter::builtin_args::FromValue as _;
+        #msg_name_binding
         let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
             crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
                 __pyrust_args,
-                FN_NAME,
+                __pyrust_msg_name,
                 &[#(#allowed_kwargs),*],
             )?;
-        crate::interpreter::builtin_args::check_positional_count(
-            FN_NAME,
-            __positional.len(),
-            #min_pos,
-            #max_pos,
-        )?;
+        #arity_check
         #(#per_param)*
     }
 }
@@ -878,6 +1062,9 @@ fn emit_typed_prelude_positional_only(
     params: &[TypedParam],
     min_pos: usize,
     max_pos: usize,
+    arity_style: ArityStyle,
+    bare_name: bool,
+    bare_lit: &LitStr,
 ) -> proc_macro2::TokenStream {
     let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
     for (idx, p) in params.iter().enumerate() {
@@ -888,7 +1075,7 @@ fn emit_typed_prelude_positional_only(
         let default_branch = match &p.default {
             Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
             None => {
-                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(FN_NAME, #name_lit) }
+                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(__pyrust_msg_name, #name_lit) }
             }
         };
 
@@ -896,7 +1083,7 @@ fn emit_typed_prelude_positional_only(
             let #name_ident: #ty = {
                 match __pyrust_args.get(#idx).map(|__a| &__a.value) {
                     Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
-                        __v, FN_NAME, #name_lit,
+                        __v, __pyrust_msg_name, #name_lit,
                     )?,
                     None => (#default_branch)?,
                 }
@@ -904,19 +1091,17 @@ fn emit_typed_prelude_positional_only(
         });
     }
 
+    let msg_name_binding = emit_msg_name_binding(bare_name, bare_lit);
+    let arity_check = emit_arity_check(arity_style, quote!(__pyrust_args.len()), min_pos, max_pos);
     quote! {
         // Fast path — all parameters are `#[positional_only]`, so any
         // keyword argument is a user error and the raw `__pyrust_args`
         // slice IS the positional list.
         #[allow(unused_imports)]
         use crate::interpreter::builtin_args::FromValue as _;
-        crate::interpreter::builtin_args::reject_named_args(__pyrust_args, FN_NAME)?;
-        crate::interpreter::builtin_args::check_positional_count(
-            FN_NAME,
-            __pyrust_args.len(),
-            #min_pos,
-            #max_pos,
-        )?;
+        #msg_name_binding
+        crate::interpreter::builtin_args::reject_named_args(__pyrust_args, __pyrust_msg_name)?;
+        #arity_check
         #(#per_param)*
     }
 }
@@ -1017,17 +1202,17 @@ fn emit_overload_set_artefacts(
                     .get(#idx)
                     .map(|__a| &__a.value)
                     .ok_or_else(|| crate::interpreter::builtin_args::missing_arg::<()>(
-                        FN_NAME, #name_lit,
+                        __pyrust_msg_name, #name_lit,
                     ).unwrap_err())?;
             });
         } else {
             per_arg_locate.push(quote! {
                 let #__arg_ident: &crate::value::Value =
                     crate::interpreter::builtin_args::locate_arg(
-                        __pyrust_args, &__positional, FN_NAME, #name_lit, #this_pos, #kw_allowed,
+                        __pyrust_args, &__positional, __pyrust_msg_name, #name_lit, #this_pos, #kw_allowed,
                     )?
                     .ok_or_else(|| crate::interpreter::builtin_args::missing_arg::<()>(
-                        FN_NAME, #name_lit,
+                        __pyrust_msg_name, #name_lit,
                     ).unwrap_err())?;
             });
         }
@@ -1094,7 +1279,7 @@ fn emit_overload_set_artefacts(
                 let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
                 quote! {
                     let #n: #ty = <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
-                        #__arg_ident, FN_NAME, #name_lit,
+                        #__arg_ident, __pyrust_msg_name, #name_lit,
                     )?;
                 }
             })
@@ -1123,33 +1308,45 @@ fn emit_overload_set_artefacts(
         })
         .collect();
 
+    // Arity-error wording for the overload set (#2331).  The whole set
+    // shares one registry entry and one dispatcher, so every overload
+    // must agree on `#[arity_style]` / `#[bare_name]`; validation below
+    // (mirroring the `#[pure]` agreement check) enforces that, so it is
+    // safe to read both off the head overload here.
+    let head_arity_style = head.arity_style;
+    let head_bare_name = head.bare_name;
+    let bare_lit = LitStr::new(py_short, head_span);
+    let msg_name_binding = emit_msg_name_binding(head_bare_name, &bare_lit);
+
     let phase1 = if all_positional_only {
         // Fast path — every parameter is `#[positional_only]`, so any
         // keyword argument is a user error and the raw `__pyrust_args`
         // slice IS the positional list.  No SmallVec, no kwarg loop.
+        let arity_check = emit_arity_check(
+            head_arity_style,
+            quote!(__pyrust_args.len()),
+            min_pos,
+            max_pos,
+        );
         quote! {
-            crate::interpreter::builtin_args::reject_named_args(__pyrust_args, FN_NAME)?;
-            crate::interpreter::builtin_args::check_positional_count(
-                FN_NAME,
-                __pyrust_args.len(),
-                #min_pos,
-                #max_pos,
-            )?;
+            crate::interpreter::builtin_args::reject_named_args(__pyrust_args, __pyrust_msg_name)?;
+            #arity_check
         }
     } else {
+        let arity_check = emit_arity_check(
+            head_arity_style,
+            quote!(__positional.len()),
+            min_pos,
+            max_pos,
+        );
         quote! {
             let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
                 crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
                     __pyrust_args,
-                    FN_NAME,
+                    __pyrust_msg_name,
                     &[#(#allowed_kwargs),*],
                 )?;
-            crate::interpreter::builtin_args::check_positional_count(
-                FN_NAME,
-                __positional.len(),
-                #min_pos,
-                #max_pos,
-            )?;
+            #arity_check
         }
     };
 
@@ -1162,6 +1359,7 @@ fn emit_overload_set_artefacts(
             #[allow(non_snake_case)]
             let FN_NAME: &'static str = *#name_static_ident;
             let _ = FN_NAME;
+            #msg_name_binding
 
             // Phase 1 — shared validation.
             #phase1
@@ -1177,7 +1375,7 @@ fn emit_overload_set_artefacts(
             // overload uses `PyValue` (whose `matches` is unconditional).
             let __actuals: &[std::borrow::Cow<'static, str>] = &[#(#no_match_args),*];
             crate::interpreter::builtin_args::no_overload_matched::<crate::value::Value>(
-                FN_NAME, __actuals,
+                __pyrust_msg_name, __actuals,
             )
         }
     };
@@ -1210,6 +1408,30 @@ fn emit_overload_set_artefacts(
                     "overload #{idx} disagrees on `#[pure]` with the first \
                      overload — all overloads of one Python-level name share \
                      a single registry entry and must agree on purity",
+                ),
+            ));
+        }
+        // The dispatcher is shared, so its arity/name wording is fixed by
+        // the head overload; a divergent `#[arity_style]` / `#[bare_name]`
+        // on a later overload would be silently ignored (#2331).  Reject
+        // it at macro-expand time, mirroring the `#[pure]` agreement check.
+        if f.arity_style != head_arity_style {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                format!(
+                    "overload #{idx} disagrees on `#[arity_style]` with the \
+                     first overload — all overloads share one dispatcher and \
+                     must agree on the arity-error wording",
+                ),
+            ));
+        }
+        if f.bare_name != head_bare_name {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                format!(
+                    "overload #{idx} disagrees on `#[bare_name]` with the \
+                     first overload — all overloads share one dispatcher and \
+                     must agree on the message name",
                 ),
             ));
         }

@@ -1,0 +1,5 @@
+error: `#[arity_style(takes_exactly_one)]` requires exactly one positional parameter with no default
+  --> tests/compile_fail/arity_style_takes_one_multiparam.rs:12:8
+   |
+12 |     fn bad(#[positional_only] x: PyInt, #[positional_only] y: PyInt) -> Result<Value> {
+   |        ^^^

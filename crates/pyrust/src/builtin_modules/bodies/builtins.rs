@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
+use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_hash_inherits_builtin_none, class_is_subclass_of,
@@ -57,6 +57,7 @@ pyrust_module! {
     /// int")` — matching CPython 3.12's exact wording (#1584).  Values
     /// that fit in i64 but exceed the Unicode range raise `ValueError` via
     /// `chr_from_code_point`.
+    #[arity_style(takes_exactly_one)]
     fn chr(#[positional_only] i: PyInt) -> Result<Value> {
         let code_point = i.as_i64().ok_or_else(|| {
             PyError::named(
@@ -67,11 +68,13 @@ pyrust_module! {
         chr_from_code_point(code_point)
     }
 
+    #[arity_style(takes_exactly_one)]
     fn chr(#[positional_only] i: PyBool) -> Result<Value> {
         // CPython: `chr(True) == '\x01'`, `chr(False) == '\x00'`.
         chr_from_code_point(if i.0 { 1 } else { 0 })
     }
 
+    #[arity_style(takes_exactly_one)]
     fn chr(#[positional_only] i: PyValue) -> Result<Value> {
         // CPython 3.12: chr() honors the __index__ protocol. A plain int /
         // bool is handled by the typed overloads above; here we resolve a
@@ -108,6 +111,7 @@ pyrust_module! {
     /// outright, but CPython has always accepted a 1-byte `bytes`
     /// (`ord(b"A") == 65`).
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn ord(#[positional_only] c: PyStr) -> Result<Value> {
         let s: &str = &c;
         // Use the surrogate-safe codepoint iterator, not `str::chars()`:
@@ -134,6 +138,7 @@ pyrust_module! {
     }
 
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn ord(#[positional_only] c: PyBytes) -> Result<Value> {
         // CPython: `ord(b"A") == 65`; reject empty/multi-byte with the
         // same wording shape used by the `PyStr` overload above.
@@ -150,6 +155,7 @@ pyrust_module! {
     }
 
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn ord(#[positional_only] c: PyValue) -> Result<Value> {
         Err(PyError::named(
             "TypeError",
@@ -619,6 +625,7 @@ pyrust_module! {
     /// Not marked `#[pure]` because it dispatches user `__repr__` for
     /// `PyInstance` values (and transitively for instances inside containers),
     /// which may invoke arbitrary user code.
+    #[arity_style(takes_exactly_one)]
     fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
         // Fast path (#alloc): `repr(int)` == the digits, formatted straight into
         // the string Value (one allocation, no intermediate heap `String`).
@@ -641,6 +648,7 @@ pyrust_module! {
     ///
     /// Not marked `#[pure]` because it dispatches user `__hash__` for
     /// `PyInstance` values, which may invoke arbitrary user code.
+    #[arity_style(takes_exactly_one)]
     fn hash(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = obj.0;
         let hash_val = hash_value_with_interp(_interp, &value)?;
@@ -650,22 +658,20 @@ pyrust_module! {
     /// CPython: divmod(a, b) — `(a // b, a % b)`.
     /// <https://docs.python.org/3/library/functions.html#divmod>
     ///
-    /// Uses the raw `(args)` dispatch style so that wrong-arity calls produce
-    /// CPython's exact message (`"divmod expected 2 arguments, got N"`) rather
-    /// than the generic `missing_arg` wording.  Type dispatch for the primitive
-    /// fast paths (int/bool/float combinations) is done inline by kind-matching;
-    /// the dunder-dispatch and coerce_numeric fallback paths are identical to
-    /// the former `(PyValue, PyValue)` catch-all overload body.
-    fn divmod(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("divmod expected 2 arguments, got {}", args.len()),
-            ));
-        }
-        let a = &args[0].value;
-        let b = &args[1].value;
+    /// Migrated to the typed-signature dialect (#400/#2331):
+    /// `#[arity_style(expected_got)]` reproduces CPython's METH_VARARGS
+    /// wording (`divmod expected 2 arguments, got N`) that previously
+    /// forced the raw `(args)` dispatch style.  Type dispatch for the
+    /// primitive fast paths (int/bool/float combinations) is done inline by
+    /// kind-matching; the dunder-dispatch and coerce_numeric fallback paths
+    /// are unchanged.
+    #[arity_style(expected_got)]
+    fn divmod(
+        #[positional_only] a: PyValue,
+        #[positional_only] b: PyValue,
+    ) -> Result<Value> {
+        let a = &a.0;
+        let b = &b.0;
 
         // Fast paths: primitive int/bool/float combinations, mirroring the
         // former typed overloads.  bool ⊆ int in CPython: bool arms coerce
