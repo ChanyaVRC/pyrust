@@ -5172,6 +5172,35 @@ impl Interpreter {
                 }
                 Err(pyrust_core::type_err!("argument of type '{}' is not iterable", class.borrow().name))
             }
+            // Generators and every native iterator object (map/filter/zip/
+            // enumerate/reversed/iter(...)/itertools iterators — all carried by
+            // the Generator value tag): CPython's last-resort sq_contains walks
+            // the iterator lazily with `__eq__`, short-circuiting on first
+            // match (and consuming it up to the hit).  Coroutines and async
+            // generators share the tag but are not iterable — they fall through
+            // to the TypeError below with their own type name.
+            ValueKind::Generator(_)
+                if !crate::builtin_modules::builtins::is_coroutine_value(&container)
+                    && !crate::builtin_modules::builtins::is_async_generator_value(&container) =>
+            {
+                loop {
+                    match self.call_next(&container, None) {
+                        Ok(elem) => {
+                            if self.values_user_eq(&elem, &item)? {
+                                return Ok(Value::bool_(true));
+                            }
+                        }
+                        Err(ref e) if e.class_name_is("StopIteration") => {
+                            return Ok(Value::bool_(false));
+                        }
+                        // class_name_is walks the hierarchy for Raised variants;
+                        // subclasses of StopIteration are caught by the arm above.
+                        // Any other Raised exception propagates.
+                        Err(PyError::Raised(exc)) => return Err(PyError::Raised(exc)),
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
             // Scalar non-iterables (int/float/bool/bigint/complex/None …) reach
             // here.  CPython raises `TypeError: argument of type '<type>' is not
             // iterable` with the operand's type name — matching the PyInstance
