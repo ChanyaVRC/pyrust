@@ -1745,6 +1745,22 @@ impl Interpreter {
                 }
             }
             let class = Rc::clone(&inst.borrow().class);
+            // Issue #2324: an instance of a subclass of an unhashable builtin
+            // (`list`/`dict`/`set`/`bytearray`) with no `__hash__`-re-enabling
+            // override is unhashable as a dict/set key — exactly like
+            // `hash(obj)`, which routes through `class_hash_inherits_builtin_none`.
+            // The `__hash__ = None` carried by those builtins is injected at
+            // attribute-resolution time (`env.rs::get_attr_class`), not stored
+            // in `attrs`, so the `lookup_class_attr` probe below never observes
+            // it.  Without this check `{L([1])}`, `d[L([1])] = …` and
+            // `{BA(b"a")}` silently succeeded (the direct `hash()` path already
+            // rejected them).  A class that re-enables hashing
+            // (`__hash__ = object.__hash__`) defines `__hash__` in its own dict,
+            // so the helper returns `false` and that case stays hashable.
+            if crate::interpreter::class_hash_inherits_builtin_none(&class) {
+                let class_name = class.borrow().name.clone();
+                return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
+            }
             // CPython treats a class that explicitly sets `__hash__ = None`
             // as unhashable.  In pyrust we treat the absence of `__hash__`
             // the same way for now.
