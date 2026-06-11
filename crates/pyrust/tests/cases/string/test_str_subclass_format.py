@@ -74,3 +74,13 @@ print("startswith", repr(S("ab").startswith("a")))
 print("encode", repr(S("ab").encode()))
 print("percent", repr(S("%s") % "x"))
 print("replace", repr(S("aXa").replace("X", "Y")))
+
+# CPython returns the receiver itself (subclass identity preserved) for a
+# markup-free, non-empty template — surplus arguments ignored.
+s_plain = S("noformat")
+r_plain = s_plain.format()
+print(type(r_plain).__name__, r_plain is s_plain)
+print(type(S("x").format(1, k=2)).__name__)
+# Brace markup (even escaped) and the empty template build a new plain str.
+print(type(S("{{}}").format()).__name__, S("{{}}").format())
+print(type(S("").format()).__name__)

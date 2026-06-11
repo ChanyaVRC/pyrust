@@ -1712,6 +1712,20 @@ impl Interpreter {
                                                 "BkKind::Str guard above"
                                             ),
                                         };
+                                        // CPython returns the receiver itself —
+                                        // subclass identity preserved — when the
+                                        // template contains no brace markup at all
+                                        // and is non-empty (CPython's
+                                        // unicode_result_unchanged; surplus args
+                                        // are ignored, so this holds regardless
+                                        // of arguments).
+                                        if !template.is_empty()
+                                            && !template.contains(['{', '}'])
+                                        {
+                                            return Ok(Value::py_instance(
+                                                Rc::clone(inst),
+                                            ));
+                                        }
                                         let keyword: Vec<(String, Value)> = kw
                                             .into_iter()
                                             .filter_map(|(k, v)| {
