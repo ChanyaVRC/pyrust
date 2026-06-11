@@ -43,3 +43,15 @@ assert f"{v:.{f'{p}'}f}" == "3.142"
 assert f"{ '''a}b''' }" == "a}b"
 
 print("fstring nested in spec OK")
+
+# Dict/set literals as the nested replacement field (brace depth inside the
+# nested expression must not terminate the field).
+w = 5
+print(f"{w:>{ {'a':3}['a'] }}")
+print(f"{w:>{ {1,2,3}.__len__() }}")
+print(f"{w:>{ {'}': 6}['}'] }}")
+print(f"{w:>{ {'k': {'n': 4}}['k']['n'] }}")
+
+# `!=` inside the nested field is the operator, not a conversion flag.
+print(f"{w:{1 if w!=5 else 2}}")
+print(f"{w:>{ {'a': 3 if w!=0 else 4}['a'] }}")

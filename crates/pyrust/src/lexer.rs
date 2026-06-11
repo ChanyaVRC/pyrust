@@ -1639,11 +1639,13 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                 *pos += 1;
                 // Collect expression source until matching `}` (no further
                 // *replacement-field* nesting permitted — matching CPython).
-                // We still respect paren / bracket depth so e.g. `{f(1)}`
-                // works, and we accept a trailing `!r`/`!s`/`!a` conversion
-                // flag on this nested expression below.
+                // We still respect paren / bracket / brace depth so e.g.
+                // `{f(1)}` and `{ {'a':3}['a'] }` (dict/set literals) work,
+                // and we accept a trailing `!r`/`!s`/`!a` conversion flag on
+                // this nested expression below.
                 let mut src = String::new();
                 let mut paren_depth = 0usize;
+                let mut brace_depth = 0usize; // dict/set literals in the nested expr
                 let mut conversion: Option<char> = None;
                 loop {
                     match chars.get(*pos).copied() {
@@ -1653,9 +1655,19 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                                     .to_string(),
                             ));
                         }
-                        Some('}') if paren_depth == 0 => {
+                        Some('}') if paren_depth == 0 && brace_depth == 0 => {
                             *pos += 1;
                             break;
+                        }
+                        Some('{') => {
+                            brace_depth += 1;
+                            src.push('{');
+                            *pos += 1;
+                        }
+                        Some('}') => {
+                            brace_depth = brace_depth.saturating_sub(1);
+                            src.push('}');
+                            *pos += 1;
                         }
                         Some('(') | Some('[') => {
                             paren_depth += 1;
@@ -1675,7 +1687,11 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                         Some(q @ ('"' | '\'')) => {
                             consume_string_literal(chars, pos, &mut src, q);
                         }
-                        Some('!') if paren_depth == 0 => {
+                        Some('!')
+                            if paren_depth == 0
+                                && brace_depth == 0
+                                && chars.get(*pos + 1) != Some(&'=') =>
+                        {
                             *pos += 1;
                             let conv = chars.get(*pos).copied().ok_or_else(|| {
                                 PyError::Lex("expected conversion flag after '!'".to_string())
