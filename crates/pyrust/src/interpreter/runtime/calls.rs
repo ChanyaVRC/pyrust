@@ -3616,7 +3616,7 @@ impl Interpreter {
                         .zip(param_vals.iter())
                     {
                         if *bind == pyrust_core::ParamBind::Cell {
-                            e.values.insert(param.name.clone(), val.clone());
+                            e.values.insert(&param.name, val.clone());
                         }
                     }
                 }
@@ -7999,7 +7999,7 @@ impl Interpreter {
         class_env_rc
             .borrow_mut()
             .values
-            .insert("__class__".to_string(), Value::py_class(Rc::clone(&class)));
+            .insert("__class__", Value::py_class(Rc::clone(&class)));
 
         // PEP 487 hooks: __set_name__ on every descriptor, then
         // __init_subclass__ on the base.
@@ -8150,7 +8150,7 @@ impl Interpreter {
         class_env_rc
             .borrow_mut()
             .values
-            .insert("__class__".to_string(), result.clone());
+            .insert("__class__", result.clone());
         Ok(result)
     }
 

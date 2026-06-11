@@ -290,6 +290,7 @@ dependencies = [
  "num-traits",
  "rustc-hash",
  "ryu",
+ "smallvec",
  "unicode-properties",
 ]
 

@@ -3884,7 +3884,7 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
     // Sync env.values (dunders, names stored via StoreGlobal or assign_name).
     let me = module_env(&interp.env);
     let pairs: Vec<(String, Value)> = me.borrow().values.iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
     for (k, v) in pairs {
         let _ = interp.module_globals_dict.dict_insert(PyKey::str_from(&k), v);
@@ -4011,7 +4011,7 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
 // Write `value` into `env` for `name`.
 #[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
-    env.borrow_mut().values.insert(name.to_string(), value);
+    env.borrow_mut().values.insert(name, value);
 }
 
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
