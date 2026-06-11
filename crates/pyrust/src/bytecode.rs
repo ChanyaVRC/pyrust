@@ -416,6 +416,12 @@ pub enum Insn {
     PopExcept,
     /// R[dst] = current active exception value.
     LoadExc(Reg),
+    /// R[dst] = R[exc].__traceback__, materialising the deferred-traceback
+    /// placeholder (issue #2351) and writing the real chain back onto the
+    /// exception instance so the object the `with`-statement passes to
+    /// `__exit__` is identical to the one a later `e.__traceback__` read sees
+    /// (issue #2359).  Yields `None` when the exception carries no traceback.
+    LoadExcTraceback(Reg, Reg),
     /// if active_exception is NOT an instance of R[type_reg]: pc += offset.
     MatchExcept(Reg, i32),
     /// PEP 654 `except*` filter.
