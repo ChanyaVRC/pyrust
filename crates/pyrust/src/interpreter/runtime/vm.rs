@@ -2345,6 +2345,53 @@ impl Interpreter {
                             result.push_str(v.as_str().unwrap());
                         }
                         regs[*dst as usize] = Value::string(result);
+                    } else if let Some(mut iacc) = regs[base_idx].as_int()
+                        && let Some(second) = regs[base_idx + 1].as_int()
+                        && let Some(sum) = iacc.checked_add(second)
+                    {
+                        // Int fast path (#2381): a chain `a + b + c + …` over
+                        // small ints. `pass_concat_merge` fuses *every* Add chain,
+                        // not just string concatenation, so this — not string
+                        // building — is the common case (`return a+b+c` in a hot
+                        // method body). Accumulate in an i64 with the same
+                        // left-to-right semantics as the BinOp chain it replaced,
+                        // bailing to `eval_binary` the moment an operand is not a
+                        // small int or the running sum overflows i64 (BigInt
+                        // promotion / `__add__` dispatch).
+                        iacc = sum;
+                        let mut k = 2;
+                        let mut overflow_or_obj = false;
+                        while k < n {
+                            match regs[base_idx + k].as_int() {
+                                Some(v) => match iacc.checked_add(v) {
+                                    Some(s) => iacc = s,
+                                    None => {
+                                        overflow_or_obj = true;
+                                        break;
+                                    }
+                                },
+                                None => {
+                                    overflow_or_obj = true;
+                                    break;
+                                }
+                            }
+                            k += 1;
+                        }
+                        if overflow_or_obj {
+                            // Resume the slow chain from the accumulated prefix so
+                            // BigInt promotion and user `__add__` see the exact
+                            // intermediate value CPython would.
+                            let mut acc = Value::int(iacc);
+                            while k < n {
+                                let next = vm_try!(vm_read(&regs, *base + k as u32, num_locals));
+                                acc =
+                                    vm_try!(self.eval_binary(acc, crate::ast::BinaryOp::Add, next));
+                                k += 1;
+                            }
+                            regs[*dst as usize] = acc;
+                        } else {
+                            regs[*dst as usize] = Value::int(iacc);
+                        }
                     } else {
                         // Fallback: sequential BinOp(Add) — correct but allocates intermediates.
                         let mut acc = vm_try!(vm_read(&regs, *base, num_locals));
