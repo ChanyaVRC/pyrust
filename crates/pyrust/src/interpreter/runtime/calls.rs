@@ -4336,6 +4336,28 @@ impl Interpreter {
             Some(p) => p.init_val,
             None => lookup_class_attr(&class, "__init__"),
         };
+
+        // CPython parity (issue #2323): for a plain (non-primitive) class that
+        // overrides neither `__new__` nor `__init__`, excess construction
+        // arguments are rejected by `object.__new__` *before* `object.__init__`
+        // runs, with the wording `<Cls>() takes no arguments` — not the
+        // `__init__`-arity wording.  We are past the `has_user_new` early return
+        // above, so reaching here means `__new__` is `object.__new__`; if the
+        // resolved `__init__` is also the `object.__init__` sentinel (or absent),
+        // neither slot is user-defined and the bare-class message applies.
+        // Primitive bases (`prim != None`) legitimately consume args via their
+        // backing constructor and must not be caught here.  The check reads the
+        // already-resolved `init` (from the cached construction plan) and adds no
+        // work to the steady-state path with a user `__init__`.
+        let init_is_object = matches!(
+            init.as_ref().map(|v| v.kind()),
+            None | Some(ValueKind::BuiltinFunction("object.__init__"))
+        );
+        if prim == PrimitiveBase::None && init_is_object && !args.is_empty() {
+            let class_name = class.borrow().name.clone();
+            return Err(pyrust_core::type_err!("{class_name}() takes no arguments"));
+        }
+
         match init {
             Some(method_val)
                 if matches!(
@@ -4380,13 +4402,9 @@ impl Interpreter {
                         }
                     }
                     PrimitiveBase::None => {
-                        if !args.is_empty() {
-                            let class_name = class.borrow().name.clone();
-                            return Err(PyError::Runtime(format!(
-                                "{}() takes no arguments",
-                                class_name
-                            )));
-                        }
+                        // Excess args with no `__init__`/`__new__` are already
+                        // rejected (as `TypeError`) by the bare-class guard above
+                        // (issue #2323); reaching here means `args` is empty.
                     }
                     // Immutable / scalar primitives already populated their
                     // args-based backing above; nothing more to do here.
