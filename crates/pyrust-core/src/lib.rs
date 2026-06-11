@@ -5642,6 +5642,28 @@ pub fn clone_captured_error_frames() -> Vec<FrameInfo> {
     CAPTURED_ERROR_FRAMES.with(|c| c.borrow().clone().unwrap_or_default())
 }
 
+// Set once the first deferred `__traceback__` placeholder is materialised
+// (issue #2359).  While false — the overwhelming majority of programs never
+// read `e.__traceback__` — no exception can be carrying a materialised
+// chain, so the catch site skips the keep-existing probe entirely and takes
+// the plain-insert fast path.  Sticky for the rest of the thread: once any
+// chain exists, every catch pays the (one key scan) probe.
+thread_local! {
+    static TB_MATERIALIZED_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Record that a deferred traceback placeholder was materialised.
+#[inline]
+pub fn note_tb_materialized() {
+    TB_MATERIALIZED_ANY.with(|c| c.set(true));
+}
+
+/// True when any deferred traceback has ever been materialised on this thread.
+#[inline]
+pub fn any_tb_materialized() -> bool {
+    TB_MATERIALIZED_ANY.with(|c| c.get())
+}
+
 /// Length of the captured error frame snapshot without cloning it.
 ///
 /// The catch-site `__traceback__` reuse check (issue #2359) only needs the

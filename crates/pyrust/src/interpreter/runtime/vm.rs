@@ -1449,17 +1449,25 @@ impl Interpreter {
             // uses the non-cloning length accessor; only the keep case (an
             // earlier read materialised the chain in this same frame) walks
             // the chain.
-            let mut inst = inst_rc.borrow_mut();
-            if let Some(slot) = inst.attrs.get_mut("__traceback__") {
-                let keep_existing = pyrust_builtins::traceback::is_traceback(slot)
-                    && pyrust_builtins::traceback::chain_len(slot)
-                        == pyrust_core::captured_error_frames_len() + 1;
-                if !keep_existing {
-                    *slot = self.build_deferred_traceback(catch_lineno as i64);
-                }
-            } else {
+            if !pyrust_core::any_tb_materialized() {
+                // No deferred placeholder has ever been materialised on this
+                // thread, so no exception can be carrying a real chain — skip
+                // the probe (it costs ~8% on a tight raise/catch loop).
                 let tb = self.build_deferred_traceback(catch_lineno as i64);
-                inst.attrs.insert("__traceback__", tb);
+                inst_rc.borrow_mut().attrs.insert("__traceback__", tb);
+            } else {
+                let mut inst = inst_rc.borrow_mut();
+                if let Some(slot) = inst.attrs.get_mut("__traceback__") {
+                    let keep_existing = pyrust_builtins::traceback::is_traceback(slot)
+                        && pyrust_builtins::traceback::chain_len(slot)
+                            == pyrust_core::captured_error_frames_len() + 1;
+                    if !keep_existing {
+                        *slot = self.build_deferred_traceback(catch_lineno as i64);
+                    }
+                } else {
+                    let tb = self.build_deferred_traceback(catch_lineno as i64);
+                    inst.attrs.insert("__traceback__", tb);
+                }
             }
         }
         // Save the current active_exception BEFORE the dedup-pop below.
