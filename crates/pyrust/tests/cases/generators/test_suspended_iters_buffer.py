@@ -1,9 +1,12 @@
 # Regression coverage for #2257: the suspended-generator iterator buffer
-# (`GeneratorFrame::iters`) is stored compactly (inline-1) and re-expanded into
-# the dispatch loop's inline-2 buffer on each resume.  Exercise every path where
-# the iters buffer crosses the suspend/resume boundary so the compact<->working
-# conversion stays correct: mid-for-loop suspension, nested for-loops (the spill
-# case), yield-from, send/throw/close, StopIteration.value, and re-entrancy.
+# (`GeneratorFrame::iters`) is stored compactly (inline-1).  The dispatch loop
+# and the suspended frame share the same `ItersBuf` type, so suspend/resume
+# moves the buffer by value (`mem::take`) with no per-resume conversion; a frame
+# with 2+ simultaneously-active for-loops simply spills its extra iterators to
+# the heap.  Exercise every path where the iters buffer crosses the
+# suspend/resume boundary so it stays correct: mid-for-loop suspension, nested
+# for-loops (the spill case), yield-from, send/throw/close, StopIteration.value,
+# and re-entrancy.
 
 
 # --- suspended mid-for-loop, then resumed (1 active iter on the stack) ---
