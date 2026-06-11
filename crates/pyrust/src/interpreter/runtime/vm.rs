@@ -13,7 +13,19 @@ pub(crate) type RegsBuf = smallvec::SmallVec<[Value; VM_REGS_INLINE]>;
 // SmallVec-backed types for per-frame collections.
 // Most Python functions have ≤2 for-loops and ≤2 nested try/except blocks,
 // so inline storage eliminates heap allocations for the common case.
-pub(crate) type ItersBuf = smallvec::SmallVec<[Option<IterState>; 2]>;
+//
+// `ItersBuf` is inline-**1** (not 2): the same buffer also backs every
+// *suspended* `GeneratorFrame`, which retains it for the generator's whole
+// lifetime (#2257).  `Option<IterState>` is 64 B, so inline-2 cost 144 B/frame
+// even for the common generator that holds 0 or 1 active for-loops; inline-1
+// halves the inline footprint to 80 B (`GeneratorFrame` 360 → 296 B) with no
+// per-resume conversion (the suspend/resume path `mem::take`s the buffer as-is).
+// A frame with 2+ simultaneously-active for-loops (nested loops) spills its
+// extra iterators to the heap, but that is a single push per outer iteration —
+// amortised to nothing against the per-element loop work (nested/triple-loop and
+// nested-comprehension benches measured neutral; the generator-drive path, which
+// copies the frame, measured *faster* from the smaller buffer).
+pub(crate) type ItersBuf = smallvec::SmallVec<[Option<IterState>; 1]>;
 pub(crate) type ExcHandlersBuf = smallvec::SmallVec<[usize; 2]>;
 pub(crate) type HandledExcBuf = smallvec::SmallVec<[Value; 2]>;
 pub(crate) type IterCacheBuf = smallvec::SmallVec<[Option<Value>; 4]>;
