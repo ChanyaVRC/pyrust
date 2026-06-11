@@ -626,7 +626,7 @@ pub(crate) fn bind_param_direct(
             if let Some(env) = local_env {
                 env.borrow_mut()
                     .values
-                    .insert(function.params[pi].name.clone(), val);
+                    .insert(&function.params[pi].name, val);
             }
         }
         pyrust_core::ParamBind::None => {}

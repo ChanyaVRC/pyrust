@@ -133,7 +133,7 @@ impl Interpreter {
         // Insert each dunder only if absent — do not overwrite an existing binding.
         macro_rules! seed_env {
             ($name:literal, $val:expr) => {
-                me.values.entry($name.to_string()).or_insert_with(|| $val)
+                me.values.get_or_insert_with($name, || $val)
             };
         }
         seed_env!("__name__", intern_string("__main__"));
@@ -160,7 +160,7 @@ impl Interpreter {
                 .dict_with(|d| d.contains_key(&StrKey(name)))
                 .unwrap_or(false);
             if !has_key
-                && let Some(v) = me.values.get(*name).cloned() {
+                && let Some(v) = me.values.get(name).cloned() {
                     let key = PyKey::str_from(*name);
                     let _ = self.module_globals_dict.dict_insert(key, v);
                 }
@@ -242,8 +242,9 @@ impl Interpreter {
             self.env
                 .borrow_mut()
                 .values
-                .entry("__annotations__".to_string())
-                .or_insert_with(|| crate::value::Value::dict(PyDict::default()));
+                .get_or_insert_with("__annotations__", || {
+                    crate::value::Value::dict(PyDict::default())
+                });
         }
         let vm_result = self.run_bytecode(&code, regs_slice);
         // Snapshot the traceback frame stack before the inner function frames
@@ -648,7 +649,7 @@ impl Interpreter {
         for (name, &idx) in local_index.iter() {
             if !regs[idx as usize].is_unset() {
                 let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                self.env.borrow_mut().values.insert(name.clone(), val);
+                self.env.borrow_mut().values.insert(name, val);
             }
         }
 
@@ -662,7 +663,7 @@ impl Interpreter {
             .borrow()
             .values
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.to_string(), v.clone()))
             .collect();
         for (k, v) in env_vals {
             // Only write back values that originated in the local (exec) scope:
@@ -814,7 +815,7 @@ impl Interpreter {
                 for (name, &idx) in local_index.iter() {
                     if !regs[idx as usize].is_unset() {
                         let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                        self.env.borrow_mut().values.insert(name.clone(), val);
+                        self.env.borrow_mut().values.insert(name, val);
                     }
                 }
                 let env_vals: Vec<(String, Value)> = self
@@ -822,7 +823,7 @@ impl Interpreter {
                     .borrow()
                     .values
                     .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect();
                 for (k, v) in env_vals {
                     if let Some(ldict) = &locals_dict {
@@ -877,7 +878,7 @@ impl Interpreter {
             for (k, v) in d {
                 if let PyKey::Str(sv) = k
                     && let Some(s) = sv.as_str() {
-                        exec_env.borrow_mut().values.insert(s.to_string(), v.clone());
+                        exec_env.borrow_mut().values.insert(s, v.clone());
                     }
             }
         });
@@ -890,7 +891,7 @@ impl Interpreter {
                 for (k, v) in d {
                     if let PyKey::Str(sv) = k
                         && let Some(s) = sv.as_str() {
-                            exec_env.borrow_mut().values.insert(s.to_string(), v.clone());
+                            exec_env.borrow_mut().values.insert(s, v.clone());
                         }
                 }
             });

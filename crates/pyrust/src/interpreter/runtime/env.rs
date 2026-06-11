@@ -2964,7 +2964,7 @@ impl Interpreter {
                     .iter()
                     .filter(|(k, _)| {
                         !matches!(
-                            k.as_str(),
+                            *k,
                             "Exception"
                                 | "RuntimeError"
                                 | "TypeError"
@@ -2972,7 +2972,7 @@ impl Interpreter {
                                 | "AssertionError"
                         )
                     })
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect();
                 let module = Value::py_module(Rc::new(RefCell::new(PyModule {
                     name: name.to_string(),
@@ -3007,7 +3007,7 @@ impl Interpreter {
         if is_global {
             // Write to the module env HashMap so LoadGlobal / post-run
             // inspection can find the new value.
-            module_env(&self.env).borrow_mut().values.insert(name.to_string(), value.clone());
+            module_env(&self.env).borrow_mut().values.insert(name, value.clone());
             // Invalidate the LoadGlobal inline cache: any function that cached
             // this global under the current version will re-fetch on its next call.
             bump_global_env_version(self);

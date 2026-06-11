@@ -2208,7 +2208,7 @@ pyrust_module! {
         }
         if args.is_empty() {
             let mut names: Vec<String> =
-                _interp.env.borrow().values.keys().cloned().collect();
+                _interp.env.borrow().values.keys().map(String::from).collect();
             names.sort();
             names.dedup();
             return Ok(Value::list(names.into_iter().map(Value::string).collect()));
