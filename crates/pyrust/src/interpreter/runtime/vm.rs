@@ -1775,130 +1775,183 @@ impl Interpreter {
         // call site is not inside a `try`, so an escaping raise propagates
         // straight out and the callee touches neither `iters` nor the exception
         // state.
+        // Call trampoline (#2234, method form #2344): gate + frame-entry tail
+        // shared by plain-call and bound-method trampolining via the internal
+        // `@enter` rule.  `@enter` introduces `f` / `base` / `nparams` /
+        // `num_regs` and then splices the caller-supplied binding statements
+        // ($bind) in the *same* macro expansion, so those locals are visible to
+        // the binding code (a separate `$bind:block` from another macro would be
+        // hygienically isolated from them).  The gate keeps trampolining correct
+        // without cross-frame unwinding: the callee is a plain, loop-free,
+        // handler-free, local-env-free regular function, and the caller's call
+        // site is not inside a `try`, so an escaping raise propagates straight
+        // out and the callee touches neither `iters` nor the exception state.
         macro_rules! tramp_try {
+            // Internal frame-entry rule.  `$dst` = result register; `$f` =
+            // callee `&Rc<UserFunction>`; `$nsupplied` = positional values that
+            // must exactly fill the params (receiver included for a method);
+            // `$bind` = statements that fill `tramp_arena[base + …]`.
+            (@enter $lt:lifetime, $dst:expr, $f:expr, $nsupplied:expr,
+                    $fb:ident, $base:ident, $np:ident, $bind:block) => {{
+                let $fb = $f;
+                let f = $fb;
+                if !matches!(f.kind, pyrust_core::UserFunctionKind::Regular)
+                    || !f.global_names.is_empty()
+                    || !f.nonlocal_names.is_empty()
+                {
+                    break $lt;
+                }
+                // Caller must not be inside a `try` at this call site (so an
+                // escaping raise propagates straight out).  Covers both the
+                // zero-cost `exc_table` model (optimized code) and the
+                // dynamic `SetupExcept`/`PopExcept` stack (`exc_handlers`,
+                // non-empty ⇒ a dynamic `try` is active).  Skipped entirely
+                // for handler-free callers (the common case).
+                if !exc_handlers.is_empty()
+                    || (code.has_exc_handlers
+                        && code
+                            .exc_table
+                            .get(pc - 1)
+                            .copied()
+                            .is_none_or(|t| t != crate::bytecode::EXC_NO_HANDLER))
+                {
+                    break $lt;
+                }
+                let $np = f.params.len();
+                if ($nsupplied as usize) != $np
+                    || f.params
+                        .iter()
+                        .any(|p| p.is_args || p.is_kwargs || p.is_keyword_only)
+                {
+                    break $lt;
+                }
+                let callee_code = match self.get_or_compile_bytecode(f) {
+                    Some(c) => c,
+                    None => break $lt,
+                };
+                if callee_code.is_generator
+                    || callee_code.is_coroutine
+                    || callee_code.num_iters != 0
+                    || callee_code.has_exc_handlers
+                    || !callee_code.cell_vars.is_empty()
+                {
+                    // A coroutine function (`async def`, issue #1039) must
+                    // build a coroutine object instead of executing inline,
+                    // even when its body has no `await` (so `is_generator`
+                    // is false).
+                    break $lt;
+                }
+                if call_depth() + tramp_stack.len() >= max_call_depth() {
+                    let exc = self.instantiate_named_exception(
+                        "RecursionError",
+                        "maximum recursion depth exceeded".to_string(),
+                    )?;
+                    tramp_unwind_err!(PyError::Raised(exc));
+                }
+                let num_regs = callee_code.num_regs as usize;
+                let $base = tramp_arena.len();
+                if tramp_arena.is_empty() {
+                    // Reserve once, while no slices are live, so later
+                    // `resize`s never reallocate (dangling the saved/active
+                    // `RegSlice`s).  Deeper than this falls back to native.
+                    tramp_arena.reserve(16 * 1024);
+                }
+                if $base + num_regs > tramp_arena.capacity() {
+                    break $lt;
+                }
+                tramp_arena.resize($base + num_regs, Value::unset());
+                $bind
+                let callee_num_locals = callee_code.num_locals;
+                let callee_fn_id = f.id;
+                let callee_env = Rc::clone(&f.env);
+                let callee_code_ptr: *const crate::bytecode::FnCode =
+                    Rc::as_ptr(&callee_code);
+                // SAFETY: base+num_regs <= capacity (checked) ⇒ no realloc;
+                // pointer valid until this frame's `truncate` on return.
+                let new_ptr = unsafe { tramp_arena.as_mut_ptr().add($base) };
+                tramp_stack.push(TrampFrame {
+                    saved_regs: regs,
+                    saved_pc: pc,
+                    dst: $dst,
+                    saved_base: tramp_active_base,
+                    saved_cur_line: cur_line,
+                    saved_code_ptr: code_ptr,
+                    saved_active_code_rc: active_code_rc.take(),
+                    saved_num_locals: num_locals,
+                    saved_fn_id: current_fn_id,
+                    saved_env: std::mem::replace(&mut self.env, callee_env),
+                });
+                // Publish a frame view so `locals()` / `sys._getframe()` /
+                // tracebacks observe this trampolined frame like a
+                // natively-called one.  Popped on its `Return`, or unwound by
+                // `tramp_unwind_err!` on an escaping error.
+                self.vm_frame_views.push(VmFrameView {
+                    kind: FrameKind::Function,
+                    // SAFETY: points into the arena slice just bound; stays
+                    // valid (no realloc) until this frame's view is popped.
+                    regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(new_ptr) },
+                    regs_len: num_regs,
+                    local_index: Rc::clone(&f.local_index),
+                    nonlocal_names: None,
+                    env: None,
+                    is_class_method: callee_code.is_class_method,
+                    function: Some(Rc::clone(f)),
+                });
+                tramp_active_base = $base;
+                active_code_rc = Some(callee_code);
+                code_ptr = callee_code_ptr;
+                num_locals = callee_num_locals;
+                current_fn_id = Some(callee_fn_id);
+                regs = unsafe { RegSlice::from_raw(new_ptr, num_regs) };
+                pc = 0;
+                continue 'vm;
+            }};
+            // Plain-call form: callee at register `$func_reg`, `$argc`
+            // positional args read from `$func_reg + 1 ..`.
             ($func_reg:expr, $argc:expr, $func_val:expr) => {
                 'trampoline: {
-                    let ValueKind::UserFunction(f) = $func_val.kind() else {
+                    let ValueKind::UserFunction(f0) = $func_val.kind() else {
                         break 'trampoline;
                     };
-                    if !matches!(f.kind, pyrust_core::UserFunctionKind::Regular)
-                        || !f.global_names.is_empty()
-                        || !f.nonlocal_names.is_empty()
-                    {
-                        break 'trampoline;
-                    }
-                    // Caller must not be inside a `try` at this call site (so an
-                    // escaping raise propagates straight out).  Covers both the
-                    // zero-cost `exc_table` model (optimized code) and the
-                    // dynamic `SetupExcept`/`PopExcept` stack (`exc_handlers`,
-                    // non-empty ⇒ a dynamic `try` is active).  Skipped entirely
-                    // for handler-free callers (the common case).
-                    if !exc_handlers.is_empty()
-                        || (code.has_exc_handlers
-                            && code
-                                .exc_table
-                                .get(pc - 1)
-                                .copied()
-                                .is_none_or(|t| t != crate::bytecode::EXC_NO_HANDLER))
-                    {
-                        break 'trampoline;
-                    }
-                    let nparams = f.params.len();
-                    if ($argc as usize) != nparams
-                        || f.params
-                            .iter()
-                            .any(|p| p.is_args || p.is_kwargs || p.is_keyword_only)
-                    {
-                        break 'trampoline;
-                    }
-                    let callee_code = match self.get_or_compile_bytecode(f) {
-                        Some(c) => c,
-                        None => break 'trampoline,
-                    };
-                    if callee_code.is_generator
-                        || callee_code.is_coroutine
-                        || callee_code.num_iters != 0
-                        || callee_code.has_exc_handlers
-                        || !callee_code.cell_vars.is_empty()
-                    {
-                        // A coroutine function (`async def`, issue #1039) must
-                        // build a coroutine object instead of executing inline,
-                        // even when its body has no `await` (so `is_generator`
-                        // is false).
-                        break 'trampoline;
-                    }
-                    if call_depth() + tramp_stack.len() >= max_call_depth() {
-                        let exc = self.instantiate_named_exception(
-                            "RecursionError",
-                            "maximum recursion depth exceeded".to_string(),
-                        )?;
-                        tramp_unwind_err!(PyError::Raised(exc));
-                    }
-                    let num_regs = callee_code.num_regs as usize;
-                    let base = tramp_arena.len();
-                    if tramp_arena.is_empty() {
-                        // Reserve once, while no slices are live, so later
-                        // `resize`s never reallocate (dangling the saved/active
-                        // `RegSlice`s).  Deeper than this falls back to native.
-                        tramp_arena.reserve(16 * 1024);
-                    }
-                    if base + num_regs > tramp_arena.capacity() {
-                        break 'trampoline;
-                    }
-                    tramp_arena.resize(base + num_regs, Value::unset());
-                    for i in 0..nparams {
-                        let v = vm_try!(vm_read(&regs, $func_reg + 1 + i as u32, num_locals));
-                        if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
-                            tramp_arena[base + r as usize] = v;
+                    tramp_try!(@enter 'trampoline, $func_reg, f0, $argc, f, base, nparams, {
+                        for i in 0..nparams {
+                            let v = vm_try!(vm_read(&regs, $func_reg + 1 + i as u32, num_locals));
+                            if let pyrust_core::ParamBind::Reg(r) = f.param_binds[i] {
+                                tramp_arena[base + r as usize] = v;
+                            }
                         }
-                    }
-                    if let Some(slot) = f.self_bind {
-                        tramp_arena[base + slot as usize] = $func_val.clone();
-                    }
-                    let callee_num_locals = callee_code.num_locals;
-                    let callee_fn_id = f.id;
-                    let callee_env = Rc::clone(&f.env);
-                    let callee_code_ptr: *const crate::bytecode::FnCode =
-                        Rc::as_ptr(&callee_code);
-                    // SAFETY: base+num_regs <= capacity (checked) ⇒ no realloc;
-                    // pointer valid until this frame's `truncate` on return.
-                    let new_ptr = unsafe { tramp_arena.as_mut_ptr().add(base) };
-                    tramp_stack.push(TrampFrame {
-                        saved_regs: regs,
-                        saved_pc: pc,
-                        dst: $func_reg,
-                        saved_base: tramp_active_base,
-                        saved_cur_line: cur_line,
-                        saved_code_ptr: code_ptr,
-                        saved_active_code_rc: active_code_rc.take(),
-                        saved_num_locals: num_locals,
-                        saved_fn_id: current_fn_id,
-                        saved_env: std::mem::replace(&mut self.env, callee_env),
+                        if let Some(slot) = f.self_bind {
+                            tramp_arena[base + slot as usize] = $func_val.clone();
+                        }
                     });
-                    // Publish a frame view so `locals()` / `sys._getframe()` /
-                    // tracebacks observe this trampolined frame like a
-                    // natively-called one.  Popped on its `Return`, or unwound by
-                    // `tramp_unwind_err!` on an escaping error.
-                    self.vm_frame_views.push(VmFrameView {
-                        kind: FrameKind::Function,
-                        // SAFETY: points into the arena slice just bound; stays
-                        // valid (no realloc) until this frame's view is popped.
-                        regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(new_ptr) },
-                        regs_len: num_regs,
-                        local_index: Rc::clone(&f.local_index),
-                        nonlocal_names: None,
-                        env: None,
-                        is_class_method: callee_code.is_class_method,
-                        function: Some(Rc::clone(f)),
+                }
+            };
+        }
+
+        // Bound-method trampoline (#2344): the unbound regular method `$f`
+        // (`&Rc<UserFunction>`), its already-resolved `$recv` receiver, and
+        // `$argc` positional args read from `$args_base ..`.  The receiver fills
+        // parameter 0 (`self`); the `$argc` args fill parameters `1 ..= argc`.
+        // Result is written to `$dst`.  A bound method is never a self-binding
+        // closure, so there is no `self_bind` slot to fill (the receiver *is*
+        // the first parameter).
+        macro_rules! tramp_try_method {
+            ($dst:expr, $f:expr, $recv:expr, $args_base:expr, $argc:expr) => {
+                'trampoline: {
+                    tramp_try!(@enter 'trampoline, $dst, $f, ($argc as usize) + 1, f, base, nparams, {
+                        let _ = nparams;
+                        if let pyrust_core::ParamBind::Reg(r) = f.param_binds[0] {
+                            tramp_arena[base + r as usize] = $recv;
+                        }
+                        for i in 0..$argc as u32 {
+                            let v = vm_try!(vm_read(&regs, $args_base + i, num_locals));
+                            if let pyrust_core::ParamBind::Reg(r) =
+                                f.param_binds[1 + i as usize]
+                            {
+                                tramp_arena[base + r as usize] = v;
+                            }
+                        }
                     });
-                    tramp_active_base = base;
-                    active_code_rc = Some(callee_code);
-                    code_ptr = callee_code_ptr;
-                    num_locals = callee_num_locals;
-                    current_fn_id = Some(callee_fn_id);
-                    regs = unsafe { RegSlice::from_raw(new_ptr, num_regs) };
-                    pc = 0;
-                    continue 'vm;
                 }
             };
         }
@@ -2899,6 +2952,17 @@ impl Interpreter {
                             }
                         }
                     tramp_try!(*func_reg, *argc, func_val);
+                    // Bound-method trampoline (#2344): `f = o.m; f()` calls a
+                    // BoundMethod through Insn::Call.  Trampoline the underlying
+                    // regular method with the receiver bound to `self`, matching
+                    // the speedup plain functions already get above.
+                    if let ValueKind::BoundMethod { function, receiver } = func_val.kind()
+                        && matches!(function.kind, pyrust_core::UserFunctionKind::Regular)
+                    {
+                        let f = Rc::clone(function);
+                        let recv = Value::py_instance(Rc::clone(receiver));
+                        tramp_try_method!(*func_reg, &f, recv, *func_reg + 1, *argc);
+                    }
                     // Heap-tuple args to a builtin: lend by move instead of
                     // clone.  `Value::clone` of a heap tuple deep-copies the
                     // backing `Vec<Value>` (O(N)), so cloning a 1000-element
@@ -3065,6 +3129,20 @@ impl Interpreter {
                 }
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
+                    // Method-call trampoline (#2344): on an inline-cache hit for
+                    // a plain Python method, bind the receiver to `self` and loop
+                    // into the callee here, instead of re-entering
+                    // `call_user_function_expanded` natively (the same win plain
+                    // `Insn::Call` gets from `tramp_try!`).  Falls back to
+                    // `exec_call_method` on a cache miss, a builtin/backing
+                    // method, or any trampoline-gate failure.
+                    if let Some(method) = code.names.get(*name_idx as usize)
+                        && let Some((f, recv_rc)) =
+                            self.resolve_method_cached(&regs, *obj, method, code, pc - 1)
+                    {
+                        let recv = Value::py_instance(recv_rc);
+                        tramp_try_method!(*dst, &f, recv, *args_base, *nargs);
+                    }
                     // pc was incremented before dispatch; the instruction position is pc - 1.
                     let r = self.exec_call_method(&mut regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code, pc - 1, cur_line);
                     regs[*dst as usize] = vm_try!(r);
