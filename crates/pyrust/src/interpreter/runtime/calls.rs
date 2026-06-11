@@ -1108,8 +1108,15 @@ impl Interpreter {
         // built-in data value.  Intercept here — the receiver is already bound,
         // so dispatch directly rather than threading these through every
         // per-type arm below.
+        //
+        // #2361: a `PyInstance` receiver (e.g. an exception) is *not* a built-in
+        // data value — its `__reduce__`/`__reduce_ex__` resolve through the real
+        // class MRO (BaseException installs exception-correct reducers).  Skip
+        // the generic `(type, ())` interception for instances so those run.
         if method.starts_with("__") {
-            if crate::interpreter::is_object_protocol_method(&receiver, method) {
+            if !matches!(receiver.kind(), ValueKind::PyInstance(_))
+                && crate::interpreter::is_object_protocol_method(&receiver, method)
+            {
                 return Ok(self.object_protocol_method_result(method, &receiver));
             }
             // #2191: `__format__` bound on a built-in data value

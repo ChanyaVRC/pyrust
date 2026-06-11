@@ -33,7 +33,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{invoke_class_method, key_to_value, lookup_class_attr, ExpandedCallArg};
+use crate::interpreter::{
+    invoke_class_method, is_exception_class, key_to_value, lookup_class_attr, ExpandedCallArg,
+};
 use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PySet, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -238,6 +240,65 @@ fn apply_state_dict(rc: &Rc<RefCell<PyInstance>>, state: &Value) {
     }
 }
 
+// ── exception copy protocol (#2360 / #2361) ───────────────────────────────────
+
+/// Reconstruct a copy of an exception instance the way CPython does: via the
+/// `BaseException.__reduce__` value `(type, args[, state])`.  The constructor is
+/// re-invoked as `type(*args)` (running any user `__init__`), then the non-slot
+/// `__dict__` state is re-applied.  The C-level slots — `__traceback__`,
+/// `__cause__`, `__context__`, `__suppress_context__` — are deliberately *not*
+/// carried over, so the copy starts with a fresh (None) traceback/cause/context,
+/// matching CPython 3.12.
+///
+/// `copy_val` produces the per-element copy (identity for shallow, recursive for
+/// deepcopy), so this single path serves both `copy` and `deepcopy`.
+///
+/// `on_constructed` runs after the new instance is built but *before* the state
+/// dict is (deep-)copied onto it — deepcopy uses this hook to insert the new
+/// instance into the memo, so a self-referential attribute (`e.x = e`) cycles
+/// back to the same copy instead of recursing forever.
+fn copy_exception(
+    rc: &Rc<RefCell<PyInstance>>,
+    interp: &mut crate::interpreter::Interpreter,
+    mut copy_val: impl FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
+    on_constructed: impl FnOnce(&Value),
+) -> Result<Value> {
+    let cls = crate::builtin_modules::builtins::value_class(&Value::py_instance(Rc::clone(rc)));
+    // `self.args` — the constructor arguments.  Copy each element so deepcopy
+    // recurses into args (CPython deep-copies args via the state machinery).
+    let args_tuple = rc
+        .borrow()
+        .attrs
+        .get("args")
+        .cloned()
+        .unwrap_or_else(|| Value::tuple(Vec::new()));
+    let arg_values: Vec<Value> = match args_tuple.kind() {
+        ValueKind::Tuple(items) => items.to_vec(),
+        _ => Vec::new(),
+    };
+    let mut ctor_args: Vec<ExpandedCallArg> = Vec::with_capacity(arg_values.len());
+    for v in arg_values {
+        ctor_args.push(ExpandedCallArg {
+            name: None,
+            value: copy_val(v, interp)?,
+        });
+    }
+    // Reconstruct via `type(*args)` — re-runs __new__/__init__ like CPython.
+    let new_val = interp.call_function_expanded(cls, &ctor_args)?;
+    on_constructed(&new_val);
+    // Re-apply the non-slot __dict__ state (custom attrs, __notes__, …).
+    let state = pyrust_builtins::instance_dict::exception_dict_state(rc);
+    if !state.is_empty()
+        && let ValueKind::PyInstance(new_rc) = new_val.kind()
+    {
+        for (k, v) in state {
+            let copied = copy_val(v, interp)?;
+            new_rc.borrow_mut().attrs.insert(&k, copied);
+        }
+    }
+    Ok(new_val)
+}
+
 // ── shallow_copy ──────────────────────────────────────────────────────────────
 
 /// Produce a shallow copy of `obj`.  Immutable types are returned as-is;
@@ -307,6 +368,11 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
                     Value::py_instance(Rc::clone(&rc)),
                     &[],
                 )
+            } else if is_exception_class(&rc.borrow().class) {
+                // #2360 / #2361: exceptions copy via their `__reduce__` value —
+                // reconstruct `type(*args)` and re-apply the non-slot state.
+                // Shallow: share the arg/state values (identity copy).
+                copy_exception(&rc, interp, |v, _| Ok(v), |_| {})
             } else {
                 // Default: copy protocol — capture state via __getstate__,
                 // build a bare instance, restore via __setstate__.  When the
@@ -531,6 +597,24 @@ fn deep_copy(
                     memo_insert(memo, id, result.clone());
                 }
                 Ok(result)
+            } else if is_exception_class(&rc.borrow().class) {
+                // #2360 / #2361: exceptions deep-copy via their `__reduce__`
+                // value — reconstruct `type(*args)` (recursing into args) and
+                // re-apply the deep-copied non-slot state.  __traceback__ /
+                // __cause__ / __context__ are excluded, matching CPython.
+                let obj_id = value_identity(&obj);
+                copy_exception(
+                    &rc,
+                    interp,
+                    |v, interp| deep_copy(v, memo, interp),
+                    |new_val| {
+                        // Memoise *before* the state recurses so a
+                        // self-referential attr (`e.x = e`) cycles back here.
+                        if let Some(id) = obj_id {
+                            memo_insert(memo, id, new_val.clone());
+                        }
+                    },
+                )
             } else {
                 deep_copy_via_protocol(&rc, &obj, memo, interp)
             }
