@@ -1945,6 +1945,15 @@ impl InstanceAttrs {
             .map(|(_, v)| v)
     }
 
+    /// Mutable lookup by attribute name.  Lets a caller test-and-replace an
+    /// existing value with a single key scan (the catch-site `__traceback__`
+    /// update does this on every caught exception).
+    #[inline]
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
+        let pos = self.position(name)?;
+        Some(&mut self.entries[pos].1)
+    }
+
     #[inline]
     pub fn contains_key(&self, name: &str) -> bool {
         if let Some(index) = &self.index {
@@ -5631,6 +5640,17 @@ pub fn take_captured_error_frames() -> Option<Vec<FrameInfo>> {
 #[inline]
 pub fn clone_captured_error_frames() -> Vec<FrameInfo> {
     CAPTURED_ERROR_FRAMES.with(|c| c.borrow().clone().unwrap_or_default())
+}
+
+/// Length of the captured error frame snapshot without cloning it.
+///
+/// The catch-site `__traceback__` reuse check (issue #2359) only needs the
+/// frame count to compare against an existing materialised chain; cloning the
+/// whole `Vec<FrameInfo>` for that would put an allocation on every caught
+/// exception.  Returns 0 when no frames have been captured.
+#[inline]
+pub fn captured_error_frames_len() -> usize {
+    CAPTURED_ERROR_FRAMES.with(|c| c.borrow().as_ref().map_or(0, |v| v.len()))
 }
 
 /// Clear the captured error frame snapshot (reset between script runs).

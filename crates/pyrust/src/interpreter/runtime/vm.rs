@@ -1442,17 +1442,24 @@ impl Interpreter {
             // exception has crossed a frame boundary the snapshot grew, so the
             // chain differs and we rebuild (matching CPython, which prepends the
             // new frame and yields a distinct head object).
-            let keep_existing = {
-                let stored = inst_rc.borrow().attrs.get("__traceback__").cloned();
-                stored.is_some_and(|tb| {
-                    pyrust_builtins::traceback::is_traceback(&tb)
-                        && pyrust_builtins::traceback::chain_len(&tb)
-                            == pyrust_core::clone_captured_error_frames().len() + 1
-                })
-            };
-            if !keep_existing {
+            // Single key scan: `__traceback__` is pre-initialised on every
+            // exception instance, so the common path (fresh exception, slot
+            // holds None) is one `get_mut` + an overwrite — the same cost as
+            // the unconditional insert this replaced.  The frame-count probe
+            // uses the non-cloning length accessor; only the keep case (an
+            // earlier read materialised the chain in this same frame) walks
+            // the chain.
+            let mut inst = inst_rc.borrow_mut();
+            if let Some(slot) = inst.attrs.get_mut("__traceback__") {
+                let keep_existing = pyrust_builtins::traceback::is_traceback(slot)
+                    && pyrust_builtins::traceback::chain_len(slot)
+                        == pyrust_core::captured_error_frames_len() + 1;
+                if !keep_existing {
+                    *slot = self.build_deferred_traceback(catch_lineno as i64);
+                }
+            } else {
                 let tb = self.build_deferred_traceback(catch_lineno as i64);
-                inst_rc.borrow_mut().attrs.insert("__traceback__", tb);
+                inst.attrs.insert("__traceback__", tb);
             }
         }
         // Save the current active_exception BEFORE the dedup-pop below.
