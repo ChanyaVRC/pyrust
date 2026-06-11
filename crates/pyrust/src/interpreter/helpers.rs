@@ -1608,6 +1608,70 @@ pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Va
         .cloned()
 }
 
+/// The single representation-substitutability boundary (issue #2386).
+///
+/// CPython gives builtin subclasses *structural* substitutability: a
+/// `class BA(bytearray)` instance physically embeds a `bytearray`, so every
+/// consumer (repr, iteration, operators, method dispatch, …) works on it via
+/// the inherited slot without ever asking "is this a subclass?".  pyrust
+/// instead stores the base value in a `__builtin_data__` attr on a
+/// `PyInstance`, a different `ValueKind` shape — so each consumer must unwrap
+/// to the backing.  This helper centralises that decision so consumers stop
+/// hand-rolling `instance_builtin_data` + per-type whitelists at 70+ sites.
+///
+/// Returns `Some(backing)` when `v` is a builtin-subclass instance whose
+/// backing value (any builtin type — scalars, containers, AND
+/// `BuiltinObject`-backed `bytearray`/`frozenset`) should act as the effective
+/// receiver for the operation, i.e. the subclass uses the *inherited* builtin
+/// behaviour for it.  Returns `None` for a plain value, a non-builtin
+/// instance, or a subclass that **overrides** one of `override_dunders`.
+///
+/// The override gate is the correctness landmine: if the subclass defines its
+/// own `__repr__`/`__iter__`/`__add__`/`__eq__`/… the *user* slot wins
+/// (CPython: a subclass slot overrides the inherited one), so the consumer
+/// must keep treating the instance as a `PyInstance` and dispatch the user
+/// method.  Pass the dunder(s) relevant to the consumer; pass `&[]` only when
+/// the operation is dunder-free (pure data extraction, e.g. `bytes(x)`'s
+/// buffer read).
+///
+/// `lookup_class_attr` only finds *user*-defined dunders — builtin slots are
+/// not exposed as class attrs except as `BuiltinFunction("<type>.<dunder>")`
+/// sentinels registered on the primitive/`object` singletons; those are the
+/// inherited behaviour we *want*, so they do not veto coercion.
+///
+/// Hot-path note: the only work for a non-`PyInstance` operand is the
+/// `as_py_instance_rc()` tag check, which returns `None` immediately.  Place
+/// the call at the HEAD of a consumer's slow/fallback arm (after the
+/// primitive fast paths) so plain `int`/`str`/`list` operands pay nothing.
+#[inline]
+pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -> Option<Value> {
+    let inst_rc = v.as_py_instance_rc()?;
+    let backing = instance_builtin_data(inst_rc)?;
+    if override_dunders.is_empty() {
+        return Some(backing);
+    }
+    let base_type_name = pyrust_core::builtin_type_name(&backing);
+    let class = Rc::clone(&inst_rc.borrow().class);
+    for dunder in override_dunders {
+        if let Some(method) = lookup_class_attr(&class, dunder) {
+            // An inherited builtin slot is a `BuiltinFunction("<type>.<dunder>")`
+            // sentinel for `object` or the backing's own base type — not an
+            // override.  Anything else (UserFunction, or a BuiltinFunction from
+            // a different builtin base) is a real override and vetoes coercion.
+            let is_inherited_sentinel = matches!(
+                method.kind(),
+                ValueKind::BuiltinFunction(name)
+                    if name.strip_suffix(dunder).and_then(|p| p.strip_suffix('.'))
+                        .is_some_and(|ty| ty == "object" || ty == base_type_name)
+            );
+            if !is_inherited_sentinel {
+                return None;
+            }
+        }
+    }
+    Some(backing)
+}
+
 /// Returns `true` if `v` is a `str` value or a `str` subclass instance.
 ///
 /// CPython's `__format__` protocol accepts `str` subclasses as valid return

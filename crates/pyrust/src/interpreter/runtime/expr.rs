@@ -3823,6 +3823,15 @@ impl Interpreter {
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {
+        // Representation-substitutability boundary (#2386): a builtin-subclass
+        // operand with no user `__add__`/`__radd__` override (already dispatched
+        // at `BinaryOp::Add` before reaching here) acts as its inherited base.
+        // Unwrap each side so `BA(b'a') + BA(b'b')`, `b'a' + BA(b'b')`, etc.
+        // reach the bytearray/bytes concat arms below instead of falling through
+        // to a TypeError.  `coerce_operand_backing` (called later) only handles
+        // scalar/container backings; this covers `BuiltinObject` bytearray too.
+        let left = effective_builtin_receiver(&left, &[]).unwrap_or(left);
+        let right = effective_builtin_receiver(&right, &[]).unwrap_or(right);
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
         }
@@ -6620,8 +6629,13 @@ fn coerce_container_backing_for_eq(v: &Value) -> Option<Value> {
     let backing = coerce_subclass_backing(v, &["__eq__"])?;
     let is_container = matches!(
         backing.kind(),
-        ValueKind::List(_) | ValueKind::Tuple(_) | ValueKind::Dict(_) | ValueKind::Set(_)
-    ) || pyrust_builtins::frozenset::as_items(&backing).is_some();
+        ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+            | ValueKind::Bytes(_)
+    ) || pyrust_builtins::frozenset::as_items(&backing).is_some()
+        || pyrust_builtins::bytearray::as_bytearray_snapshot(&backing).is_some();
     is_container.then_some(backing)
 }
 
@@ -6712,65 +6726,11 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
 /// `as_py_instance_rc()` tag check, which returns `None` immediately — the
 /// dunder lookups run only for actual subclass instances.
 pub(crate) fn coerce_subclass_backing(v: &Value, override_dunders: &[&str]) -> Option<Value> {
-    let inst_rc = v.as_py_instance_rc()?;
-    let backing = instance_builtin_data(inst_rc)?;
-    let is_primitive_backing = matches!(
-        backing.kind(),
-        ValueKind::Int(_)
-            | ValueKind::BigInt(_)
-            | ValueKind::Bool(_)
-            | ValueKind::Float(_)
-            | ValueKind::Str(_)
-            | ValueKind::Bytes(_)
-            | ValueKind::List(_)
-            | ValueKind::Tuple(_)
-            | ValueKind::Dict(_)
-            | ValueKind::Set(_)
-    );
-    if !is_primitive_backing {
-        // Frozenset backing lives inside a BuiltinObject.
-        let is_frozenset = pyrust_builtins::frozenset::as_items(&backing).is_some();
-        if !is_frozenset {
-            return None;
-        }
-    }
-    // Determine the backing's primitive type name so we can recognise the
-    // *inherited* builtin dunder sentinels (`int.__lt__`, `str.__add__`,
-    // `object.__hash__`, …) registered on the primitive/object class
-    // singletons (issue #1256).  Those are the inherited builtin behaviour we
-    // want to bypass — only a genuine *user* override (a Python `def` →
-    // `UserFunction`, or a `BuiltinFunction` from an intermediate user-derived
-    // builtin class) must veto the coercion.
-    let base_type_name = match backing.kind() {
-        ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Str(_) => "str",
-        ValueKind::Bytes(_) => "bytes",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Dict(_) => "dict",
-        ValueKind::Set(_) => "set",
-        _ => "frozenset",
-    };
-    let class = Rc::clone(&inst_rc.borrow().class);
-    for dunder in override_dunders {
-        if let Some(method) = lookup_class_attr(&class, dunder) {
-            // An inherited builtin slot is a `BuiltinFunction("<type>.<dunder>")`
-            // sentinel for `object` or the backing's own base type — not an
-            // override.  Anything else (UserFunction, or a BuiltinFunction from
-            // a different builtin base) is treated as a real override.
-            let is_inherited_sentinel = matches!(
-                method.kind(),
-                ValueKind::BuiltinFunction(name)
-                    if name.strip_suffix(dunder).and_then(|p| p.strip_suffix('.'))
-                        .is_some_and(|ty| ty == "object" || ty == base_type_name)
-            );
-            if !is_inherited_sentinel {
-                return None;
-            }
-        }
-    }
-    Some(backing)
+    // Thin alias for the unified representation-substitutability boundary
+    // (issue #2386).  `effective_builtin_receiver` covers every builtin backing
+    // — scalars, containers, AND `BuiltinObject`-backed `bytearray`/`frozenset`
+    // — with the same inherited-vs-overridden dunder gate this op-path needs.
+    effective_builtin_receiver(v, override_dunders)
 }
 
 pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
