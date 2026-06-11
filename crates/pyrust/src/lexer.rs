@@ -1590,24 +1590,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
             }
             // Quoted strings inside the expression (so we don't mis-interpret their contents)
             Some(q @ ('"' | '\'')) => {
-                src.push(q);
-                pos += 1;
-                while let Some(&sc) = chars.get(pos) {
-                    pos += 1;
-                    if sc == q {
-                        src.push(sc);
-                        break;
-                    }
-                    if sc == '\\' {
-                        if let Some(&esc) = chars.get(pos) {
-                            src.push('\\');
-                            src.push(esc);
-                            pos += 1;
-                        }
-                    } else {
-                        src.push(sc);
-                    }
-                }
+                consume_string_literal(chars, &mut pos, &mut src, q);
             }
             Some(other) => {
                 src.push(other);
@@ -1656,11 +1639,13 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                 *pos += 1;
                 // Collect expression source until matching `}` (no further
                 // *replacement-field* nesting permitted — matching CPython).
-                // We still respect paren / bracket depth so e.g. `{f(1)}`
-                // works, and we accept a trailing `!r`/`!s`/`!a` conversion
-                // flag on this nested expression below.
+                // We still respect paren / bracket / brace depth so e.g.
+                // `{f(1)}` and `{ {'a':3}['a'] }` (dict/set literals) work,
+                // and we accept a trailing `!r`/`!s`/`!a` conversion flag on
+                // this nested expression below.
                 let mut src = String::new();
                 let mut paren_depth = 0usize;
+                let mut brace_depth = 0usize; // dict/set literals in the nested expr
                 let mut conversion: Option<char> = None;
                 loop {
                     match chars.get(*pos).copied() {
@@ -1670,9 +1655,19 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                                     .to_string(),
                             ));
                         }
-                        Some('}') if paren_depth == 0 => {
+                        Some('}') if paren_depth == 0 && brace_depth == 0 => {
                             *pos += 1;
                             break;
+                        }
+                        Some('{') => {
+                            brace_depth += 1;
+                            src.push('{');
+                            *pos += 1;
+                        }
+                        Some('}') => {
+                            brace_depth = brace_depth.saturating_sub(1);
+                            src.push('}');
+                            *pos += 1;
                         }
                         Some('(') | Some('[') => {
                             paren_depth += 1;
@@ -1684,7 +1679,19 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                             src.push(chars[*pos]);
                             *pos += 1;
                         }
-                        Some('!') if paren_depth == 0 => {
+                        // Quoted strings inside the nested expression (including
+                        // nested f-strings) are consumed verbatim so their `{`,
+                        // `}`, `!` and `:` characters aren't mistaken for the end
+                        // of the nested field or a conversion flag. The contents
+                        // are re-lexed when `src` is later parsed as a sub-expr.
+                        Some(q @ ('"' | '\'')) => {
+                            consume_string_literal(chars, pos, &mut src, q);
+                        }
+                        Some('!')
+                            if paren_depth == 0
+                                && brace_depth == 0
+                                && chars.get(*pos + 1) != Some(&'=') =>
+                        {
                             *pos += 1;
                             let conv = chars.get(*pos).copied().ok_or_else(|| {
                                 PyError::Lex("expected conversion flag after '!'".to_string())
@@ -1724,6 +1731,65 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
         }
     }
     Ok(parts)
+}
+
+/// Consume a quoted string literal (single- or triple-quoted) that appears
+/// inside an f-string replacement field, appending it verbatim to `src`.
+///
+/// `*pos` must point at the opening quote `q`; on return it points just past
+/// the closing quote. The contents — including any `{`, `}`, `!`, `:` and even
+/// a nested f-string — are copied byte-for-byte so they aren't mistaken for
+/// field/spec delimiters; the slice is re-lexed when `src` is parsed as a
+/// sub-expression. Backslash escapes are preserved as two characters so a
+/// quote can be embedded without prematurely terminating the literal.
+fn consume_string_literal(chars: &[char], pos: &mut usize, src: &mut String, q: char) {
+    // Triple-quoted? (e.g. `'''...'''` inside the field.)
+    let triple = chars.get(*pos + 1) == Some(&q) && chars.get(*pos + 2) == Some(&q);
+    if triple {
+        src.push(q);
+        src.push(q);
+        src.push(q);
+        *pos += 3;
+        while let Some(&sc) = chars.get(*pos) {
+            if sc == q && chars.get(*pos + 1) == Some(&q) && chars.get(*pos + 2) == Some(&q) {
+                src.push(q);
+                src.push(q);
+                src.push(q);
+                *pos += 3;
+                return;
+            }
+            if sc == '\\' {
+                src.push('\\');
+                *pos += 1;
+                if let Some(&esc) = chars.get(*pos) {
+                    src.push(esc);
+                    *pos += 1;
+                }
+            } else {
+                src.push(sc);
+                *pos += 1;
+            }
+        }
+        return;
+    }
+    src.push(q);
+    *pos += 1;
+    while let Some(&sc) = chars.get(*pos) {
+        *pos += 1;
+        if sc == q {
+            src.push(sc);
+            return;
+        }
+        if sc == '\\' {
+            src.push('\\');
+            if let Some(&esc) = chars.get(*pos) {
+                src.push(esc);
+                *pos += 1;
+            }
+        } else {
+            src.push(sc);
+        }
+    }
 }
 
 /// Encode a Unicode codepoint into a `String` fragment for a string literal.
