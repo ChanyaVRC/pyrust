@@ -4871,6 +4871,54 @@ impl Interpreter {
         }
     }
 
+    /// `item in items` for a list/tuple element slice, dispatching user
+    /// `__eq__` only when an operand can fire it.
+    ///
+    /// Single-pass fast scan (mirrors `call_seq_remove`): when `item` itself
+    /// cannot fire user `__eq__`, walk the slice once.  While each element is a
+    /// scalar (`cannot_user_eq` — a tag-only check, no `ValueKind` build, no
+    /// pointer deref) compare with the primitive `Value::eq`.  On the first
+    /// non-scalar element (which might match `item` through its own `__eq__`),
+    /// or when `item` can dispatch, snapshot the slice (so a re-entrant user
+    /// `__eq__` cannot invalidate the backing store through an alias) and walk
+    /// with `values_user_eq`, whose identity short-circuit keeps the mixed
+    /// primitive+instance case allocation-light.
+    ///
+    /// Replaces the previous two-pass shape (a full `needs_dispatch` pre-scan
+    /// over every element followed by the membership scan), which was O(n) even
+    /// when the match was the first element (#2341).
+    fn seq_membership(&mut self, items: &[Value], item: &Value) -> Result<Value> {
+        if !Self::value_search_dispatches(item) {
+            for elem in items {
+                if !elem.cannot_user_eq() {
+                    // Non-scalar element: a dispatching element could match
+                    // `item` through its own `__eq__`.  Snapshot from the front
+                    // and restart on the dispatch path (preserving semantics).
+                    let snapshot: Vec<Value> = items.to_vec();
+                    for elem in &snapshot {
+                        if self.values_user_eq(elem, item)? {
+                            return Ok(Value::bool_(true));
+                        }
+                    }
+                    return Ok(Value::bool_(false));
+                }
+                if elem == item {
+                    return Ok(Value::bool_(true));
+                }
+            }
+            return Ok(Value::bool_(false));
+        }
+        // `item` can fire user `__eq__`: snapshot (re-entrancy safety) and walk
+        // with full dispatch.
+        let snapshot: Vec<Value> = items.to_vec();
+        for elem in &snapshot {
+            if self.values_user_eq(elem, item)? {
+                return Ok(Value::bool_(true));
+            }
+        }
+        Ok(Value::bool_(false))
+    }
+
     pub(crate) fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
         // Handle Dict/Set separately so the temporary `&IndexMap`/`&IndexSet`
         // from `container.kind()` doesn't outlive the call into
@@ -4900,90 +4948,14 @@ impl Interpreter {
             let key = self.value_to_pykey(&item)?;
             return Ok(Value::bool_(self.set_lookup_in(&rc, &key)?.is_some()));
         }
-        // List and Tuple: dispatch user `__eq__` when any element or the
-        // item itself is a `PyInstance` (Rust `Value::eq` would fall back to
-        // `Rc::ptr_eq` for distinct-but-equal instances).
-        //
-        // Fast path: if neither `item` nor any element requires user dispatch,
-        // iterate the raw slice directly — no allocation, no dunder call.
-        //
-        // Slow path: snapshot the elements first (so user `__eq__` cannot
-        // invalidate the raw backing `Vec` through aliased mutation), then
-        // walk with `values_user_eq`.  `values_user_eq` has an identity
-        // short-circuit (`if a == b { return Ok(true) }`) so the slow path
-        // is still allocation-free for lists that happen to contain primitives
-        // alongside one PyInstance.
+        // List and Tuple: `seq_membership` does a single-pass primitive scan
+        // and only snapshots + dispatches user `__eq__` when an operand can
+        // fire it (see its doc comment for the full contract).
         if let Some(items) = container.as_list() {
-            let needs_dispatch = matches!(
-                item.kind(),
-                ValueKind::PyInstance(_)
-                    | ValueKind::List(_)
-                    | ValueKind::Tuple(_)
-                    | ValueKind::Dict(_)
-                    | ValueKind::Set(_)
-                    | ValueKind::BuiltinObject { .. }
-            ) || items.iter().any(|e| {
-                matches!(
-                    e.kind(),
-                    ValueKind::PyInstance(_)
-                        | ValueKind::List(_)
-                        | ValueKind::Tuple(_)
-                        | ValueKind::Dict(_)
-                        | ValueKind::Set(_)
-                        | ValueKind::BuiltinObject { .. }
-                )
-            });
-            if needs_dispatch {
-                let items: Vec<Value> = items.to_vec();
-                for elem in &items {
-                    if self.values_user_eq(elem, &item)? {
-                        return Ok(Value::bool_(true));
-                    }
-                }
-            } else {
-                for elem in items {
-                    if *elem == item {
-                        return Ok(Value::bool_(true));
-                    }
-                }
-            }
-            return Ok(Value::bool_(false));
+            return self.seq_membership(items, &item);
         }
         if let Some(items) = container.as_tuple() {
-            let needs_dispatch = matches!(
-                item.kind(),
-                ValueKind::PyInstance(_)
-                    | ValueKind::List(_)
-                    | ValueKind::Tuple(_)
-                    | ValueKind::Dict(_)
-                    | ValueKind::Set(_)
-                    | ValueKind::BuiltinObject { .. }
-            ) || items.iter().any(|e| {
-                matches!(
-                    e.kind(),
-                    ValueKind::PyInstance(_)
-                        | ValueKind::List(_)
-                        | ValueKind::Tuple(_)
-                        | ValueKind::Dict(_)
-                        | ValueKind::Set(_)
-                        | ValueKind::BuiltinObject { .. }
-                )
-            });
-            if needs_dispatch {
-                let items: Vec<Value> = items.to_vec();
-                for elem in &items {
-                    if self.values_user_eq(elem, &item)? {
-                        return Ok(Value::bool_(true));
-                    }
-                }
-            } else {
-                for elem in items {
-                    if *elem == item {
-                        return Ok(Value::bool_(true));
-                    }
-                }
-            }
-            return Ok(Value::bool_(false));
+            return self.seq_membership(items, &item);
         }
         match container.kind() {
             ValueKind::List(_) | ValueKind::Tuple(_) => unreachable!("handled above"),
