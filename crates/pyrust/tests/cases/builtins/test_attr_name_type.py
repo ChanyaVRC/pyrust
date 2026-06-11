@@ -83,3 +83,18 @@ for label, fn in arity_cases:
         fn()
     except TypeError as e:
         print(label, "->", str(e))
+
+# ── deque.__setattr__ shares the same name-type wording (#2350) ────────────────
+from collections import deque
+
+dq = deque()
+for label, name in names:
+    try:
+        dq.__setattr__(name, 1)
+    except TypeError as e:
+        print("deque.__setattr__", label, type(e).__name__, str(e))
+# str subclass name reaches the writability check, not the type check
+try:
+    dq.__setattr__(StrName("maxlen"), 1)
+except Exception as e:
+    print("deque str-subclass maxlen ->", type(e).__name__, str(e))
