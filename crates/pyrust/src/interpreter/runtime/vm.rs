@@ -3472,6 +3472,43 @@ impl Interpreter {
                             // Set yield_dst = *sent_reg so resume_generator_with_exc
                             // writes the next sent value there.
                             regs[*sent_reg as usize] = Value::none();
+                            // ── Generator trampoline switch-back (#2338) ─────────
+                            // If THIS generator is itself being driven by a `ForIter`
+                            // consumer in this same dispatch loop (i.e. the `yield
+                            // from` delegator is the for-loop's own generator), hand
+                            // the value back to that consumer rather than returning
+                            // `FrameOutcome::Yielded` — which would unwind up through a
+                            // native `run_bytecode` that has no generator semantics and
+                            // panic (`run_bytecode called on a non-generator
+                            // function`).  Mirrors the `Insn::Yield` switch-back, but
+                            // suspends at this `YieldFrom` (pc - 1) with yield_dst =
+                            // *sent_reg so the next drive re-executes it and the sent
+                            // value lands in the sub-iterator's slot.
+                            if active_is_gen_drive!() {
+                                let mut gd = gen_drive_stack.pop().unwrap();
+                                gd.gframe.pc = pc - 1;
+                                gd.gframe.iters = std::mem::take(&mut iters);
+                                gd.gframe.exc_handlers = std::mem::take(&mut exc_handlers);
+                                gd.gframe.yield_dst = *sent_reg;
+                                self.vm_frame_views.pop();
+                                let dst_reg = gd.dst as usize;
+                                regs = gd.saved_regs;
+                                pc = gd.saved_pc;
+                                cur_line = gd.saved_cur_line;
+                                code_ptr = gd.saved_code_ptr;
+                                active_code_rc = gd.saved_active_code_rc;
+                                num_locals = gd.saved_num_locals;
+                                current_fn_id = gd.saved_fn_id;
+                                self.env = gd.saved_env;
+                                iters = gd.saved_iters;
+                                iter_next_cache = gd.saved_iter_cache;
+                                exc_handlers = gd.saved_exc_handlers;
+                                tramp_active_base = gd.saved_base;
+                                let boxed: Box<dyn std::any::Any> = gd.gframe;
+                                *gd.state_rc.borrow_mut() = boxed;
+                                regs[dst_reg] = yielded;
+                                continue 'vm;
+                            }
                             let saved_handled_slice: HandledExcBuf =
                                 self.handled_exc_stack.split_off(exc_ctx_frame_base).into();
                             let saved_exc_saved_active =
