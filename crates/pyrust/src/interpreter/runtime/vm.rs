@@ -2106,6 +2106,35 @@ impl Interpreter {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     self.assign_name(name, val);
                 }
+                Insn::LoadCell(dst, name_idx) => {
+                    // Function-scope cell / nonlocal read (issue #2339).  The
+                    // compiler proved this name resolves in the env chain, so we
+                    // skip the LoadGlobal inline-cache probe entirely and go
+                    // straight to `lookup_name`, which routes a `nonlocal` to the
+                    // enclosing owning env and a cell to this scope's env.  The
+                    // common case (a bound cell) returns `Some` and we are done.
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    if let Some(v) = vm_try!(self.lookup_name(name)) {
+                        regs[*dst as usize] = v;
+                    } else {
+                        // Env miss: a `del`-ed / never-bound cell.  Fall through
+                        // to the SAME resolution tail LoadGlobal uses (module
+                        // dict → restricted/builtins) so the raised error is
+                        // byte-identical to the pre-#2339 LoadGlobal path.  This
+                        // is rare and cold.
+                        let val = vm_try!(self.resolve_cell_miss(name));
+                        regs[*dst as usize] = val;
+                    }
+                }
+                Insn::StoreCell(name_idx, src) => {
+                    // Function-scope cell / nonlocal write (issue #2339).  Reuses
+                    // `assign_name`, whose nonlocal arm walks to the enclosing
+                    // owning env and whose cell arm writes the current env — the
+                    // shared mutable slot siblings and suspended frames observe.
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    self.assign_name(name, val);
+                }
                 Insn::LoadNone(dst) => {
                     regs[*dst as usize] = Value::none();
                 }
@@ -4293,6 +4322,47 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    /// Cold fallback for `Insn::LoadCell` when the env chain has no binding for
+    /// `name` (a `del`-ed or never-assigned cell var; issue #2339).  Reproduces
+    /// the exact tail of `Insn::LoadGlobal`'s slow path — module globals dict,
+    /// then the script-frame register mirror, then the restricted/builtin
+    /// resolver — so the error a `LoadCell` raises on a missing cell is
+    /// byte-identical to what the pre-#2339 `LoadGlobal` path produced.  No cache
+    /// is written: a cell value is never cached under `global_env_version`.
+    #[cold]
+    #[inline(never)]
+    fn resolve_cell_miss(&mut self, name: &str) -> Result<Value> {
+        if let Some(v) = self
+            .module_globals_dict
+            .dict_with(|d| d.get(&StrKey(name)).cloned())
+            .flatten()
+        {
+            return Ok(v);
+        }
+        if let Some(v) = self
+            .vm_frame_views
+            .iter()
+            .find(|v| v.kind == FrameKind::Script)
+            .and_then(|script_view| {
+                let slot = *script_view.local_index.get(name)? as usize;
+                if slot >= script_view.regs_len {
+                    return None;
+                }
+                // SAFETY: identical to the LoadGlobal script-frame fallback —
+                // `regs_ptr` points to the live script frame's register file,
+                // accessed via `RegSlice` (no `noalias`), and `slot < regs_len`
+                // is checked above.  We read a shared `&Value` for the clone only.
+                let v = unsafe { script_view.regs_ptr.add(slot).as_ref() };
+                if v.is_unset() { None } else { Some(v.clone()) }
+            })
+        {
+            return Ok(v);
+        }
+        let cur_ver = self.global_env_version.get();
+        let (v, _) = resolve_global_via_builtins(&self.module_globals_dict, name, cur_ver)?;
+        Ok(v)
     }
 
     /// Resolve an `await` target to the iterator that drives it (issue #1039).

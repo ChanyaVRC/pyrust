@@ -1484,6 +1484,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
     use Insn::*;
     match insn {
         LoadGlobal(r, _)
+        | LoadCell(r, _)
         | LoadNone(r)
         | DeleteLocal(r, _)
         | BinOp(r, _, _, _)
@@ -2378,6 +2379,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         // No register sources.
         LoadConst(..)
         | LoadGlobal(..)
+        | LoadCell(..)
         | LoadNone(..)
         | LoadNoneRange { .. }
         | LoadExc(..)
@@ -2401,6 +2403,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // One source register.
         StoreGlobal(_, s)
+        | StoreCell(_, s)
         | ImportStar(s)
         | Move(_, s)
         | CopyReg(_, s)
@@ -2528,6 +2531,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
     match insn {
         LoadConst(..)
         | LoadGlobal(..)
+        | LoadCell(..)
         | LoadNone(..)
         | LoadExc(..)
         | ImportModule(..)
@@ -2549,6 +2553,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | DeleteModuleGlobal(..) => {}
 
         StoreGlobal(_, s)
+        | StoreCell(_, s)
         | ImportStar(s)
         | Move(_, s)
         | CopyReg(_, s)
@@ -3466,6 +3471,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
     match insn {
         LoadConst(r, _)
         | LoadGlobal(r, _)
+        | LoadCell(r, _)
         | LoadNone(r)
         | LoadExc(r)
         | ImportModule(r, _)
@@ -3551,6 +3557,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         }
         // Instructions that don't write to any register.
         StoreGlobal(..)
+        | StoreCell(..)
         | ImportStar(..)
         | SetAttr(..)
         | SetTypeVarAttr(..)
@@ -3781,6 +3788,7 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
             return false;
         }
         if matches!(insn, Insn::LoadConst(dst, _) | Insn::LoadNone(dst) | Insn::LoadGlobal(dst, _)
+                         | Insn::LoadCell(dst, _)
                          | Insn::Move(dst, _) | Insn::CopyReg(dst, _) if *dst == r)
         {
             return false;
@@ -4237,7 +4245,10 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // must happen regardless of whether the instruction is later replaced
         // by a CopyReg, because the CopyReg itself still writes to `dst`.
         let written_reg: Option<u32> = match &insn {
-            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::LoadGlobal(r, _) => Some(*r),
+            Insn::LoadConst(r, _)
+            | Insn::LoadNone(r)
+            | Insn::LoadGlobal(r, _)
+            | Insn::LoadCell(r, _) => Some(*r),
             // Move writes its destination register; must evict stale CSE entries
             // that recorded `prev_dst == dst` from an earlier computation.
             Insn::Move(dst, _) => Some(*dst),
@@ -5246,6 +5257,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 Insn::ForCountReg(var, op, s(&copies, stop), step_idx, k)
             }
             Insn::StoreGlobal(n, src) => Insn::StoreGlobal(n, s(&copies, src)),
+            Insn::StoreCell(n, src) => Insn::StoreCell(n, s(&copies, src)),
             Insn::SyncModuleGlobal(reg, name_idx) => {
                 Insn::SyncModuleGlobal(s(&copies, reg), name_idx)
             }
@@ -7128,6 +7140,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
     match insn {
         LoadConst(..)
         | LoadGlobal(..)
+        | LoadCell(..)
         | LoadNone(..)
         | LoadNoneRange { .. }
         | LoadExc(..)
@@ -7156,6 +7169,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         BinOpImm(_, a, _, _, _) | SyncModuleGlobal(a, _) => f(*a),
 
         StoreGlobal(_, s)
+        | StoreCell(_, s)
         | ImportStar(s)
         | Move(_, s)
         | CopyReg(_, s)

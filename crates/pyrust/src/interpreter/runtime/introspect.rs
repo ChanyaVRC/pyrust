@@ -483,11 +483,20 @@ fn collect_loadglobal_names(
     out: &mut Vec<String>,
 ) {
     for insn in &fncode.insns {
-        if let crate::bytecode::Insn::LoadGlobal(_, name_idx) = insn
-            && let Some(name) = fncode.names.get(*name_idx as usize)
-                && seen.insert(name.clone()) {
-                    out.push(name.clone());
-                }
+        // A free-variable read is `LoadGlobal` for a true global / module-scope
+        // capture, or `LoadCell` for a function-scope cell / `nonlocal` (issue
+        // #2339).  Both must feed the candidate set so `__closure__` /
+        // `co_freevars` still see cell reads now routed through `LoadCell`.
+        let name_idx = match insn {
+            crate::bytecode::Insn::LoadGlobal(_, idx)
+            | crate::bytecode::Insn::LoadCell(_, idx) => *idx,
+            _ => continue,
+        };
+        if let Some(name) = fncode.names.get(name_idx as usize)
+            && seen.insert(name.clone())
+        {
+            out.push(name.clone());
+        }
     }
     for proto in &fncode.fn_protos {
         collect_loadglobal_names(&proto.code, seen, out);
