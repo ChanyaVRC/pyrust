@@ -474,12 +474,13 @@ impl Interpreter {
 
     /// Build a *deferred* traceback placeholder for an exception being caught.
     ///
-    /// Instead of eagerly materialising the (expensive) `traceback` object chain
-    /// — which builds a full `code` object for the catching frame plus a `frame`
-    /// + two dicts per node, none of which the overwhelming majority of
-    /// `try/except` blocks ever read — this captures only the cheap snapshot the
-    /// build needs (the `FrameInfo` list, the catching frame's `UserFunction`
-    /// `Rc`, and the catch line) and returns a lightweight placeholder value.
+    /// Instead of eagerly materialising the (expensive) `traceback` object
+    /// chain — which builds a full `code` object for the catching frame plus
+    /// a `frame` and two dicts per node, none of which the overwhelming
+    /// majority of `try/except` blocks ever read — this captures only the
+    /// cheap snapshot the build needs (the `FrameInfo` list, the catching
+    /// frame's `UserFunction` `Rc`, and the catch line) and returns a
+    /// lightweight placeholder value.
     ///
     /// The first read of `e.__traceback__` materialises the real chain via
     /// [`Self::materialize_deferred_traceback`] and replaces the placeholder, so
