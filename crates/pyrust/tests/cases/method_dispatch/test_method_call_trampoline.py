@@ -1,4 +1,4 @@
-# Method-call trampoline (#2344): o.m() and bound-method f() calls loop in the
+# Method-call trampoline (#2345): o.m() and bound-method f() calls loop in the
 # VM dispatch loop with the receiver bound to `self`, instead of re-entering the
 # native call machinery.  This fixture pins the observable semantics the
 # trampoline must preserve: receiver binding, argument shifting, method

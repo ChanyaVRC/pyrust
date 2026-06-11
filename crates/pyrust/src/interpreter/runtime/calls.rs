@@ -9243,7 +9243,7 @@ impl Interpreter {
         }
     }
 
-    /// Trampoline-resolution fast path for `o.m(...)` (#2344).  On an inline-cache
+    /// Trampoline-resolution fast path for `o.m(...)` (#2345).  On an inline-cache
     /// hit whose cached value is a *Regular* `UserFunction` (a plain Python
     /// method), returns the unbound method and the receiver so the VM dispatch
     /// loop can trampoline the call — binding the receiver to `self` and looping

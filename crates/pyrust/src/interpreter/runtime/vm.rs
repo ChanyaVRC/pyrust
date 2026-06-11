@@ -1775,7 +1775,7 @@ impl Interpreter {
         // call site is not inside a `try`, so an escaping raise propagates
         // straight out and the callee touches neither `iters` nor the exception
         // state.
-        // Call trampoline (#2234, method form #2344): gate + frame-entry tail
+        // Call trampoline (#2234, method form #2345): gate + frame-entry tail
         // shared by plain-call and bound-method trampolining via the internal
         // `@enter` rule.  `@enter` introduces `f` / `base` / `nparams` /
         // `num_regs` and then splices the caller-supplied binding statements
@@ -1928,7 +1928,7 @@ impl Interpreter {
             };
         }
 
-        // Bound-method trampoline (#2344): the unbound regular method `$f`
+        // Bound-method trampoline (#2345): the unbound regular method `$f`
         // (`&Rc<UserFunction>`), its already-resolved `$recv` receiver, and
         // `$argc` positional args read from `$args_base ..`.  The receiver fills
         // parameter 0 (`self`); the `$argc` args fill parameters `1 ..= argc`.
@@ -2952,7 +2952,7 @@ impl Interpreter {
                             }
                         }
                     tramp_try!(*func_reg, *argc, func_val);
-                    // Bound-method trampoline (#2344): `f = o.m; f()` calls a
+                    // Bound-method trampoline (#2345): `f = o.m; f()` calls a
                     // BoundMethod through Insn::Call.  Trampoline the underlying
                     // regular method with the receiver bound to `self`, matching
                     // the speedup plain functions already get above.
@@ -3129,7 +3129,7 @@ impl Interpreter {
                 }
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
-                    // Method-call trampoline (#2344): on an inline-cache hit for
+                    // Method-call trampoline (#2345): on an inline-cache hit for
                     // a plain Python method, bind the receiver to `self` and loop
                     // into the callee here, instead of re-entering
                     // `call_user_function_expanded` natively (the same win plain
