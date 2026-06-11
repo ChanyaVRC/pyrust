@@ -175,6 +175,10 @@ pyrust_module! {
     /// catch-all reproduces CPython's exact "'X' object cannot be
     /// interpreted as an integer" TypeError wording verbatim.
     /// Both small (`i64`) and BigInt arguments are handled (#1226).
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `bin() takes exactly one argument (N given)`.
+    #[arity_style(takes_exactly_one)]
     fn bin(#[positional_only] x: PyInt) -> Result<Value> {
         if let Some(v) = x.as_i64() {
             Ok(Value::string(format_bin_i64(v)))
@@ -183,11 +187,13 @@ pyrust_module! {
         }
     }
 
+    #[arity_style(takes_exactly_one)]
     fn bin(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `bin(True) == '0b1'`, `bin(False) == '0b0'`.
         Ok(Value::string(format_bin_i64(if x.0 { 1 } else { 0 })))
     }
 
+    #[arity_style(takes_exactly_one)]
     fn bin(#[positional_only] x: PyValue) -> Result<Value> {
         // Issue #1929 / #2022: resolve int/bool subclasses and `__index__`
         // objects uniformly via the shared index protocol, then format.
@@ -204,6 +210,10 @@ pyrust_module! {
     /// catch-all reproduces CPython's exact "'X' object cannot be
     /// interpreted as an integer" TypeError wording verbatim.
     /// Both small (`i64`) and BigInt arguments are handled (#1226).
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `oct() takes exactly one argument (N given)`.
+    #[arity_style(takes_exactly_one)]
     fn oct(#[positional_only] x: PyInt) -> Result<Value> {
         if let Some(v) = x.as_i64() {
             Ok(Value::string(format_oct_i64(v)))
@@ -212,11 +222,13 @@ pyrust_module! {
         }
     }
 
+    #[arity_style(takes_exactly_one)]
     fn oct(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `oct(True) == '0o1'`, `oct(False) == '0o0'`.
         Ok(Value::string(format_oct_i64(if x.0 { 1 } else { 0 })))
     }
 
+    #[arity_style(takes_exactly_one)]
     fn oct(#[positional_only] x: PyValue) -> Result<Value> {
         // Issue #1929 / #2022: resolve via the shared index protocol, format.
         let resolved = _interp.value_to_index(&x.0, not_an_integer_err)?;
@@ -236,6 +248,10 @@ pyrust_module! {
     /// "unsupported argument type(s)" fallback would drift from the
     /// canonical message — preserved verbatim from the legacy body).
     /// Both small (`i64`) and BigInt arguments are handled (#1226).
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `hex() takes exactly one argument (N given)`.
+    #[arity_style(takes_exactly_one)]
     fn hex(#[positional_only] x: PyInt) -> Result<Value> {
         if let Some(v) = x.as_i64() {
             Ok(Value::string(format_hex_i64(v)))
@@ -244,11 +260,13 @@ pyrust_module! {
         }
     }
 
+    #[arity_style(takes_exactly_one)]
     fn hex(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `hex(True) == '0x1'`, `hex(False) == '0x0'`.
         Ok(Value::string(format_hex_i64(if x.0 { 1 } else { 0 })))
     }
 
+    #[arity_style(takes_exactly_one)]
     fn hex(#[positional_only] x: PyValue) -> Result<Value> {
         // Issue #1929 / #2022: resolve via the shared index protocol, format.
         let resolved = _interp.value_to_index(&x.0, not_an_integer_err)?;
@@ -262,6 +280,10 @@ pyrust_module! {
     /// `ascii` accepts every Python object, so `PyValue` is the natural
     /// wrapper.  Not marked `#[pure]` because it dispatches user `__repr__`
     /// for `PyInstance` values, which may invoke arbitrary user code.
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `ascii() takes exactly one argument (N given)`.
+    #[arity_style(takes_exactly_one)]
     fn ascii(#[positional_only] obj: PyValue) -> Result<Value> {
         Ok(Value::string(ascii_repr_interp(_interp, &obj.0)?))
     }
@@ -272,7 +294,11 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400).  `PyValue` is the
     /// catch-all wrapper since `id` accepts every Python object; the
     /// existing per-kind dispatch becomes the body's only concern.
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `id() takes exactly one argument (N given)`.
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn id(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = &obj.0;
         let id_val: i64 = match value.kind() {
@@ -297,7 +323,11 @@ pyrust_module! {
     /// with `__abs__`, and the not-a-number error path.  The macro
     /// generates a dispatcher that tries each overload in declaration
     /// order.
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `abs() takes exactly one argument (N given)`.
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyInt) -> Result<Value> {
         // i64 fast path; fall back to BigInt for both genuine bignums
         // *and* the `i64::MIN` boundary case — `i64::MIN.checked_abs()`
@@ -320,17 +350,20 @@ pyrust_module! {
     }
 
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyFloat) -> Result<Value> {
         Ok(Value::float(x.0.abs()))
     }
 
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: abs(True) == 1, abs(False) == 0 — promoted to int.
         Ok(Value::int(if x.0 { 1 } else { 0 }))
     }
 
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn abs(#[positional_only] x: PyValue) -> Result<Value> {
         // Catch-all: complex magnitude, user-defined `__abs__`, and the
         // "not a number" error otherwise.  Reached when none of the
@@ -1819,6 +1852,12 @@ pyrust_module! {
 
     /// CPython: hasattr(obj, name) — true if `getattr(obj, name)` would succeed.
     /// <https://docs.python.org/3/library/functions.html#hasattr>
+    ///
+    /// Kept in the `(args)` dialect (#400/#2331): hasattr is a warm path,
+    /// and migrating to a typed `expected_got` signature regressed a tight
+    /// `hasattr(o, 'x')` hit/miss loop ~6–8% (the per-arg `PyValue` binding
+    /// clone) for zero wording benefit — its arity/kwarg messages already
+    /// match CPython.  Bench captured in the #400 batch-1 PR.
     fn hasattr(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -1844,6 +1883,15 @@ pyrust_module! {
 
     /// CPython: getattr(obj, name[, default]) — attribute access by name.
     /// <https://docs.python.org/3/library/functions.html#getattr>
+    ///
+    /// Must stay in the `(args)` dialect (#400/#2331): `getattr(o, n, None)`
+    /// must return Python `None` as the default rather than re-raising the
+    /// `AttributeError`, but an `Option<PyValue>` + `#[default(None)]`
+    /// trailing param collapses an explicit `None` default and an absent
+    /// default into the same Rust `None`, breaking the `default=None` case
+    /// (the exact blocker documented on `fn next`).  Its arity/kwarg
+    /// wording already matches CPython, so there is no wording gain from a
+    /// typed migration either.
     fn getattr(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() < 2 {
@@ -4610,7 +4658,11 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400).  Mirrors `ascii`
     /// / `id`: a single-body `PyValue` catch-all, since `callable`
     /// accepts every Python object and never raises `TypeError`.
+    ///
+    /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
+    /// METH_O wording `callable() takes exactly one argument (N given)`.
     #[pure]
+    #[arity_style(takes_exactly_one)]
     fn callable(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = &obj.0;
         let is_callable = match value.kind() {
