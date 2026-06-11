@@ -320,6 +320,15 @@ pub enum Insn {
     /// for `PyInstance` operands (handled in the VM by delegating to the real
     /// `format` builtin for that rare case).
     FormatValue(Reg, Reg),
+    /// R[dst] = format(R[src], R[spec]) — the f-string interpolation with a
+    /// format spec but no `!r/!s/!a` conversion (those are lowered to a `repr`/
+    /// `str`/`ascii` call before the spec is applied). `R[spec]` is the spec
+    /// string register produced by the nested-f-string lowering. Equivalent to
+    /// the `format` builtin called with that spec, but skips the `format` global
+    /// lookup, the two-register call window, and the call-arg expansion. Mirrors
+    /// CPython's FORMAT_VALUE with a spec. User `__format__` dispatch is
+    /// preserved for `PyInstance` operands via `dispatch_dunder_format`.
+    FormatValueSpec(Reg, Reg, Reg),
     /// R[dst] = slice(R[base], R[base+1], R[base+2])
     /// Emitted by the compiler for slice notation (a[lo:hi:step]).  Always
     /// reads exactly three registers (start, stop, step); `None` means absent.

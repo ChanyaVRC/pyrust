@@ -11037,27 +11037,21 @@ impl Compiler {
                     // Apply format spec if present.  The spec is itself a
                     // mini f-string (literals plus nested `{expr}` parts), so
                     // we compile it via the same fstring helper to obtain a
-                    // single string register, then call `format(val, spec)`.
+                    // single string register, then format the value with it via
+                    // the dedicated `FormatValueSpec` opcode.  This mirrors
+                    // CPython's `FORMAT_VALUE` (which calls `PyObject_Format`
+                    // directly): it skips the `format` global lookup, the
+                    // two-register call window, and the call-arg expansion that
+                    // the previous `Call(format, 2)` lowering paid on every
+                    // interpolation.  User `__format__` dispatch for PyInstance
+                    // values is preserved by the VM via `dispatch_dunder_format`.
                     if let Some(spec_parts) = format_spec {
                         let spec_r = self.compile_fstring(spec_parts);
-                        let frame = self.next_temp;
-                        if frame + 2 > self.max_reg {
-                            self.max_reg = frame + 2;
-                        }
-                        self.next_temp = frame + 3;
-                        let fmt_idx = self.intern_name("format");
-                        self.emit(Insn::LoadGlobal(frame, fmt_idx));
-                        if val_r != frame + 1 {
-                            self.emit(Insn::Move(frame + 1, val_r));
-                        }
+                        let dst = self.alloc_temp();
+                        self.emit(Insn::FormatValueSpec(dst, val_r, spec_r));
                         self.free_temp(val_r);
-                        if spec_r != frame + 2 {
-                            self.emit(Insn::Move(frame + 2, spec_r));
-                        }
                         self.free_temp(spec_r);
-                        self.emit(Insn::Call(frame, 2));
-                        self.next_temp = frame + 1;
-                        frame
+                        dst
                     } else {
                         // format(val, "") — dispatch __format__("") per Python
                         // semantics, but via the dedicated FormatValue opcode so
