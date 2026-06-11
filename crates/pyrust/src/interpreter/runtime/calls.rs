@@ -9243,8 +9243,61 @@ impl Interpreter {
         }
     }
 
-
-
+    /// Trampoline-resolution fast path for `o.m(...)` (#2345).  On an inline-cache
+    /// hit whose cached value is a *Regular* `UserFunction` (a plain Python
+    /// method), returns the unbound method and the receiver so the VM dispatch
+    /// loop can trampoline the call — binding the receiver to `self` and looping
+    /// instead of re-entering `call_user_function_expanded` natively, matching
+    /// the speedup plain function calls already enjoy.
+    ///
+    /// Returns `None` (caller falls back to `exec_call_method`) when: the cache
+    /// is not a `ClassAttr` hit, the receiver shadows the method, the class
+    /// version/epoch changed, the cached value is a `BuiltinFunction` or a
+    /// backing-primitive method, or the object is not a `PyInstance`.  Pure
+    /// resolution: it does not touch `attr_cache` (a populated cache means a
+    /// prior slow pass already filled it) or invoke anything.
+    #[inline]
+    fn resolve_method_cached(
+        &self,
+        regs: &RegSlice,
+        obj: crate::bytecode::Reg,
+        method: &str,
+        code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
+    ) -> Option<(Rc<UserFunction>, Rc<std::cell::RefCell<pyrust_core::PyInstance>>)> {
+        use crate::bytecode::AttrCacheEntry;
+        let cache = code.attr_cache.borrow();
+        let AttrCacheEntry::ClassAttr {
+            class_ptr,
+            class_version,
+            epoch,
+            value: unbound,
+        } = &cache[call_site_pc]
+        else {
+            return None;
+        };
+        // Only Regular user methods are trampolinable; BuiltinFunction methods
+        // (list.append / backing-primitive routes) need the native path.
+        let ValueKind::UserFunction(f) = unbound.kind() else {
+            return None;
+        };
+        if !matches!(f.kind, pyrust_core::UserFunctionKind::Regular) {
+            return None;
+        }
+        let inst_rc = regs[obj as usize].as_py_instance_rc()?;
+        let inst = inst_rc.borrow();
+        let same_class = Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+        let no_shadow = !inst.attrs.contains_key(method);
+        let version_ok = inst.class.borrow().mutation_version.get() == *class_version;
+        let epoch_ok = pyrust_core::class_epoch() == *epoch;
+        if !(same_class && no_shadow && version_ok && epoch_ok) {
+            return None;
+        }
+        let f = Rc::clone(f);
+        let recv = Rc::clone(inst_rc);
+        drop(inst);
+        Some((f, recv))
+    }
 
 
 
