@@ -9360,6 +9360,20 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                     }
                     return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
                 }
+                // bytearray subclass (#2386): CPython renders `ClassName(b'...')`
+                // — the subclass name wrapping the bytes-content repr — unlike a
+                // bytes subclass, which renders the bare base `b'...'` form.
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+                {
+                    if let Some(data) =
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(&backing)
+                    {
+                        let class_name = class.borrow().name.clone();
+                        let inner = Value::bytes(data).repr();
+                        return Ok(format!("{class_name}({inner})"));
+                    }
+                }
                 _ => {}
             }
         }

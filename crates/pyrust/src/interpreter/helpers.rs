@@ -2005,11 +2005,43 @@ pub(crate) fn invoke_class_method(
                     _ => interp.exception_group_subgroup_or_split(&combined, true),
                 };
             }
-            let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
-                PyError::Runtime(format!(
-                    "internal: builtin method '{name}' not in registry"
-                ))
-            })?;
+            // Representation-substitutability boundary (#2386): an inherited
+            // builtin method `"<type>.<method>"` that has no registry body and
+            // is resolved on a builtin-subclass instance dispatches on the
+            // instance's backing value.  Reaching here with a `BuiltinFunction`
+            // sentinel means the subclass did NOT override the method (a user
+            // override resolves to a `UserFunction` via `lookup_class_attr`), so
+            // unwrapping is unconditional once the type matches.
+            //
+            // This is what makes ops-table types work uniformly: `bytearray`'s
+            // methods (`upper`, `find`, `append`, `__iter__`, …) live on the
+            // BuiltinObject ops table, never in the string-keyed registry, so
+            // the registry probe below misses them (`internal: builtin method
+            // 'bytearray.upper' not in registry`, #2324).  Re-dispatch through a
+            // bound_method on the unwrapped backing — the same mechanism the
+            // `super().<method>()` path uses — so every builtin type routes
+            // through its own per-type `call`/ops with no per-type whitelist.
+            // Gated on the registry MISS so registry-backed methods and
+            // construction dunders (`__init__`/`__new__` resolved by
+            // `call_class_expanded`) keep their existing dispatch.
+            let dispatch = match crate::builtin_registry::lookup(name) {
+                Some(d) => d,
+                None => {
+                    if let ValueKind::PyInstance(inst) = instance.kind()
+                        && let Some((type_name, method)) = name.split_once('.')
+                        && let Some(backing) = instance_builtin_data(inst)
+                        && pyrust_core::builtin_type_name(&backing) == type_name
+                    {
+                        let bound = pyrust_builtins::bound_method::bound_method(
+                            method, backing,
+                        );
+                        return interp.call_function_expanded(bound, args);
+                    }
+                    return Err(PyError::Runtime(format!(
+                        "internal: builtin method '{name}' not in registry"
+                    )));
+                }
+            };
             // Reuse the interpreter-level buffer to eliminate a per-invocation
             // heap allocation on the hot dunder dispatch path.  `std::mem::take`
             // leaves an empty SmallVec in `interp.invoke_arg_buf`; on recursive
