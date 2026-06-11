@@ -1671,6 +1671,26 @@ pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -
     Some(backing)
 }
 
+/// True if `method_val` is the inherited `<type>.__iter__` sentinel installed
+/// on a primitive class by `build_primitive_classes` (issue #2324).
+///
+/// `bytes`/`bytearray` expose `__iter__` as a `BuiltinFunction("bytes.__iter__")`
+/// / `BuiltinFunction("bytearray.__iter__")` class attr (it is part of their
+/// `METHODS` slice, matching CPython's `hasattr(bytes, '__iter__') is True`).
+/// That sentinel has no registry body — iteration is driven by the backing
+/// primitive, not a registry call.  When a `bytes`/`bytearray` *subclass*
+/// instance is iterated and `lookup_class_attr` returns this sentinel (rather
+/// than a user-defined `__iter__`), the iteration sites must skip it and fall
+/// through to the backing-data path, exactly as `list`/`dict`/`set` subclasses
+/// already do (those types simply omit `__iter__` from their curated attr set).
+pub(crate) fn is_inherited_builtin_iter_sentinel(method_val: &Value) -> bool {
+    matches!(
+        method_val.kind(),
+        ValueKind::BuiltinFunction(name)
+            if name == "bytes.__iter__" || name == "bytearray.__iter__"
+    )
+}
+
 /// Returns `true` if `v` is a `str` value or a `str` subclass instance.
 ///
 /// CPython's `__format__` protocol accepts `str` subclasses as valid return

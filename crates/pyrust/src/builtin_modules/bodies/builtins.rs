@@ -1544,11 +1544,12 @@ pyrust_module! {
                         // Mirror the `for`-loop `GetIter` path (#2400): a
                         // *user-defined* `__iter__` (UserFunction) still wins, but an
                         // inherited built-in `__iter__` slot on a backed subclass
-                        // (`list`/`dict`/`OrderedDict` subclass with no Python-level
-                        // `__iter__`) is skipped so we iterate the backing primitive
-                        // directly and pick the container-specific mutation message —
-                        // rather than dispatching `dict.__iter__`, which always reports
-                        // plain dict's wording.
+                        // (`list`/`dict`/`OrderedDict`/`bytes`/`bytearray` subclass
+                        // with no Python-level `__iter__`) is skipped so we iterate the
+                        // backing primitive directly and pick the container-specific
+                        // mutation message — rather than dispatching `dict.__iter__`,
+                        // which always reports plain dict's wording.  Covers the
+                        // bytes/bytearray subclass case from #2324.
                         let user_iter =
                             crate::interpreter::effective_user_iter(&class, &inst_rc);
                         if let Some(method_val) = user_iter {
