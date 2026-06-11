@@ -2,6 +2,8 @@ include!("runtime/program.rs");
 
 include!("runtime/calls.rs");
 
+include!("runtime/format_template.rs");
+
 include!("runtime/expr.rs");
 
 include!("runtime/env.rs");
