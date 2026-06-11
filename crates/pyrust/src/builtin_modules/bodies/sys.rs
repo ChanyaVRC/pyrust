@@ -268,12 +268,24 @@ pyrust_module! {
                 // Issue #2170: the third element is the exception's traceback
                 // object (its `__traceback__`), not `None`.
                 let tb = match exc_val.kind() {
-                    ValueKind::PyInstance(inst) => inst
-                        .borrow()
-                        .attrs
-                        .get("__traceback__")
-                        .cloned()
-                        .unwrap_or_else(Value::none),
+                    ValueKind::PyInstance(inst) => {
+                        let raw = inst
+                            .borrow()
+                            .attrs
+                            .get("__traceback__")
+                            .cloned()
+                            .unwrap_or_else(Value::none);
+                        // Issue #2351: materialise a deferred placeholder and
+                        // write the real chain back so repeat reads share it.
+                        if let Some(real) = _interp.materialize_deferred_traceback(&raw) {
+                            inst.borrow_mut()
+                                .attrs
+                                .insert("__traceback__", real.clone());
+                            real
+                        } else {
+                            raw
+                        }
+                    }
                     _ => Value::none(),
                 };
                 Ok(Value::tuple(vec![exc_type, exc_val, tb]))

@@ -1424,8 +1424,14 @@ impl Interpreter {
         // attrs dict to write to.  The traceback object is a real walkable chain
         // built from the lazily-captured unwind frames (#2165) plus the catching
         // frame, so `e.__traceback__.tb_next…` walks every frame in order.
+        //
+        // Issue #2351: storing a *deferred* placeholder here (cheap snapshot
+        // only) instead of eagerly materialising the chain — the dominant cost
+        // of the raise/catch path — and materialising on first read of
+        // `__traceback__` keeps the hot path off `build_code_object` while
+        // preserving identical Python-visible behaviour.
         if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
-            let tb = self.build_traceback_object(catch_lineno as i64);
+            let tb = self.build_deferred_traceback(catch_lineno as i64);
             inst_rc
                 .borrow_mut()
                 .attrs
