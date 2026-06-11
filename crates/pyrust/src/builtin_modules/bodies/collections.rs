@@ -1291,14 +1291,21 @@ pyrust_module! {
                     format!("{FN_NAME}() takes exactly 2 arguments"),
                 ));
             }
-            let attr_name = match args[1].value.kind() {
-                ValueKind::Str(s) => s.to_string(),
-                _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "attribute name must be string".to_string(),
-                    ));
-                }
+            // CPython accepts any `str` subclass as an attribute name (an
+            // `isinstance` relationship) and otherwise raises
+            // `attribute name must be string, not '<type>'` — matching the
+            // shared `attr_name_arg` validator the getattr/setattr/hasattr/
+            // delattr builtins use (#2350).
+            let attr_name = if crate::interpreter::is_str_or_str_subclass(&args[1].value) {
+                crate::interpreter::extract_str_value(&args[1].value)
+            } else {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "attribute name must be string, not '{}'",
+                        crate::interpreter::value_type_name_str(&args[1].value)
+                    ),
+                ));
             };
             if attr_name == "maxlen" {
                 return Err(PyError::named(
