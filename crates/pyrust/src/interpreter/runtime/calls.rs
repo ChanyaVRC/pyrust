@@ -2154,6 +2154,16 @@ impl Interpreter {
                 return Ok(items);
             }
 
+            // ChainFromIterableIter path: drive chain.from_iterable() to
+            // exhaustion (#2362).
+            if tid == TypeId::of::<ChainFromIterableIter>() {
+                let mut items = Vec::new();
+                while let Some(v) = self.step_chain_from_iterable(&state_rc)? {
+                    items.push(v);
+                }
+                return Ok(items);
+            }
+
             // EnumerateIter path: drive enumerate() to exhaustion.
             if tid == TypeId::of::<EnumerateIter>() {
                 let mut items = Vec::new();
@@ -2958,6 +2968,12 @@ impl Interpreter {
             // FilterIter path: scan forward for next passing element.
             if tid == TypeId::of::<FilterIter>() {
                 return Self::step_or_stop(self.step_filter_iter(&state_rc)?, default);
+            }
+
+            // ChainFromIterableIter path: drain inner, pull next inner from
+            // outer on exhaustion (#2362).
+            if tid == TypeId::of::<ChainFromIterableIter>() {
+                return Self::step_or_stop(self.step_chain_from_iterable(&state_rc)?, default);
             }
 
             // BigRangeIter path: lazy arbitrary-precision range iteration (#2118).
