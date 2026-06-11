@@ -26,9 +26,9 @@ use crate::interpreter::{
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-    float_divmod, float_to_bigint, instance_builtin_data,
+    extract_str_value, float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
-    is_exception_class, iter_values, key_to_value, lookup_class_attr, mapping_pairs_via_protocol, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
+    is_exception_class, is_str_or_str_subclass, iter_values, key_to_value, lookup_class_attr, mapping_pairs_via_protocol, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
     bind_constructor_kwargs, reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
@@ -1673,18 +1673,27 @@ pyrust_module! {
     /// CPython: delattr(obj, name) — delete an attribute.
     /// <https://docs.python.org/3/library/functions.html#delattr>
     ///
-    /// Migrated to the typed-signature dialect (#400).  `PyStr` for
-    /// `name` enforces CPython's requirement that the attribute name be a
-    /// string; `PyValue` for `obj` accepts any Python object.
-    fn delattr(
-        #[positional_only] obj: PyValue,
-        #[positional_only] name: PyStr,
-    ) -> Result<Value> {
+    /// Kept in the `(args)` dialect (#2350): a non-`str` name must raise
+    /// CPython's `attribute name must be string, not '<type>'` (no
+    /// function prefix, names the offending type, accepts `str`
+    /// subclasses) — a `PyStr` typed binding instead emits the generic
+    /// `delattr() argument 'name' must be str, not int` and rejects str
+    /// subclasses.  The shared `attr_name_arg` validator matches
+    /// `getattr`/`hasattr`/`setattr` byte-for-byte.
+    fn delattr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
+            ));
+        }
+        let name = attr_name_arg(&args[1].value)?;
         // Delegate to the canonical delete_attr path so that every value
         // kind (BuiltinFunction, UserFunction, BoundMethod, PyClass, …)
         // raises the correct error type and message instead of the old
         // catch-all "delattr() object has no writable attributes".
-        _interp.delete_attr(obj.0, &name)?;
+        _interp.delete_attr(args[0].value.clone(), &name)?;
         Ok(Value::none())
     }
 
@@ -1866,13 +1875,7 @@ pyrust_module! {
                 format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
             ));
         }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}(): attribute name must be a string"),
-            )),
-        };
+        let name = attr_name_arg(&args[1].value)?;
         let result = match _interp.get_attr(&args[0].value, &name) {
             Ok(_) => true,
             Err(ref e) if e.class_name_is("AttributeError") => false,
@@ -1906,13 +1909,7 @@ pyrust_module! {
                 format!("{FN_NAME} expected at most 3 arguments, got {}", args.len()),
             ));
         }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}(): attribute name must be a string"),
-            )),
-        };
+        let name = attr_name_arg(&args[1].value)?;
         match _interp.get_attr(&args[0].value, &name) {
             Ok(v) => Ok(v),
             Err(ref e) if e.class_name_is("AttributeError") && args.len() == 3 => {
@@ -1925,15 +1922,23 @@ pyrust_module! {
     /// CPython: setattr(obj, name, value) — attribute assignment by name.
     /// <https://docs.python.org/3/library/functions.html#setattr>
     ///
-    /// Migrated to the typed-signature dialect (#400).  `PyStr` for
-    /// `name` enforces CPython's requirement that the attribute name be a
-    /// string; `PyValue` for `obj` and `value` accept any Python object.
-    fn setattr(
-        #[positional_only] obj: PyValue,
-        #[positional_only] name: PyStr,
-        #[positional_only] value: PyValue,
-    ) -> Result<Value> {
-        _interp.assign_attr(obj.0, &name, value.0)?;
+    /// Kept in the `(args)` dialect (#2350): a non-`str` name must raise
+    /// CPython's `attribute name must be string, not '<type>'` (no
+    /// function prefix, names the offending type, accepts `str`
+    /// subclasses) — a `PyStr` typed binding instead emits the generic
+    /// `setattr() argument 'name' must be str, not int` and rejects str
+    /// subclasses.  The shared `attr_name_arg` validator matches
+    /// `getattr`/`hasattr`/`delattr` byte-for-byte.
+    fn setattr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 3 arguments, got {}", args.len()),
+            ));
+        }
+        let name = attr_name_arg(&args[1].value)?;
+        _interp.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
         Ok(Value::none())
     }
 
@@ -8998,6 +9003,27 @@ fn format_bin_i64(v: i64) -> String {
         format!("-0b{:b}", -(v as i128))
     } else {
         format!("0b{:b}", v)
+    }
+}
+
+/// Validate and extract an attribute-name argument for the
+/// `getattr` / `setattr` / `hasattr` / `delattr` builtins (#2350).
+///
+/// CPython requires the name be a `str` (any `str` subclass is also
+/// accepted via the `isinstance` relationship) and otherwise raises
+/// `TypeError: attribute name must be string, not '<type>'` — note the
+/// wording has no function-name prefix, says "be string" (no article),
+/// and names the offending type.  This is the single shared validator
+/// so all four builtins emit byte-identical messages.
+fn attr_name_arg(name: &Value) -> Result<String> {
+    if is_str_or_str_subclass(name) {
+        Ok(extract_str_value(name))
+    } else {
+        let type_name = value_type_name_str(name);
+        Err(PyError::named(
+            "TypeError",
+            format!("attribute name must be string, not '{type_name}'"),
+        ))
     }
 }
 
