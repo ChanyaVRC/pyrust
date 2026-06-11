@@ -1,0 +1,5 @@
+error: overload #1 disagrees on `#[arity_style]` with the first overload — all overloads share one dispatcher and must agree on the arity-error wording
+  --> tests/compile_fail/overload_arity_style_disagree.rs:16:8
+   |
+16 |     fn bad(#[positional_only] x: PyStr) -> Result<Value> {
+   |        ^^^

@@ -1,0 +1,5 @@
+error: `#[arity_style(...)]` requires the typed-signature dialect; the legacy `(args)` form must build its own arity error
+  --> tests/compile_fail/arity_style_on_legacy.rs:12:8
+   |
+12 |     fn bad(args) -> Result<Value> {
+   |        ^^^
