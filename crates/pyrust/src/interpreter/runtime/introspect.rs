@@ -512,6 +512,9 @@ impl Interpreter {
         }
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<DeferredTracebackState>()?;
+        // Flip the catch-site fast path off: a materialised chain now exists,
+        // so later catches must probe before re-deferring (identity contract).
+        pyrust_core::note_tb_materialized();
         Some(self.build_traceback_from_snapshot(&s.frames, s.catch_func.as_deref(), s.catch_lineno))
     }
 }

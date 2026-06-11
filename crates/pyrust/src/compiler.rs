@@ -10185,7 +10185,9 @@ impl Compiler {
         ));
         self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
         self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
-        self.emit(Insn::LoadNone(exit_frame2 + 3)); // traceback: None (pyrust has no traceback objects)
+        // traceback: the real `__traceback__` of the in-flight exception (#2359),
+        // materialised from its deferred placeholder.
+        self.emit(Insn::LoadExcTraceback(exit_frame2 + 3, exc_tmp));
         self.emit(Insn::Call(exit_frame2, 3));
         let suppress_reg = exit_frame2;
         self.next_temp = exit_frame2 + 1;
@@ -10310,7 +10312,9 @@ impl Compiler {
         ));
         self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
         self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
-        self.emit(Insn::LoadNone(exit_frame2 + 3)); // traceback: None
+        // traceback: the real `__traceback__` of the in-flight exception (#2359),
+        // materialised from its deferred placeholder.
+        self.emit(Insn::LoadExcTraceback(exit_frame2 + 3, exc_tmp));
         self.emit(Insn::Call(exit_frame2, 3));
         // Drive the awaitable returned by __aexit__; its value decides
         // suppression.  The result goes to `suppress_reg` (the slot just above

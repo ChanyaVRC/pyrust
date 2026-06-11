@@ -1458,11 +1458,44 @@ impl Interpreter {
         // `__traceback__` keeps the hot path off `build_code_object` while
         // preserving identical Python-visible behaviour.
         if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
-            let tb = self.build_deferred_traceback(catch_lineno as i64);
-            inst_rc
-                .borrow_mut()
-                .attrs
-                .insert("__traceback__", tb);
+            // Issue #2359: if the exception already carries a *materialised* real
+            // traceback (because a `with`-statement's `__exit__` — or any earlier
+            // read — observed `__traceback__` while it was in flight) and the
+            // current catch is in the same frame that built it (same captured
+            // unwind-frame snapshot ⇒ identical chain), keep that object so the
+            // tb `__exit__` saw is identical to the one an outer `except` in the
+            // same frame reads.  Re-deferring here would mint a fresh, equal-but-
+            // not-identical chain and break that identity contract.  When the
+            // exception has crossed a frame boundary the snapshot grew, so the
+            // chain differs and we rebuild (matching CPython, which prepends the
+            // new frame and yields a distinct head object).
+            // Single key scan: `__traceback__` is pre-initialised on every
+            // exception instance, so the common path (fresh exception, slot
+            // holds None) is one `get_mut` + an overwrite — the same cost as
+            // the unconditional insert this replaced.  The frame-count probe
+            // uses the non-cloning length accessor; only the keep case (an
+            // earlier read materialised the chain in this same frame) walks
+            // the chain.
+            if !pyrust_core::any_tb_materialized() {
+                // No deferred placeholder has ever been materialised on this
+                // thread, so no exception can be carrying a real chain — skip
+                // the probe (it costs ~8% on a tight raise/catch loop).
+                let tb = self.build_deferred_traceback(catch_lineno as i64);
+                inst_rc.borrow_mut().attrs.insert("__traceback__", tb);
+            } else {
+                let mut inst = inst_rc.borrow_mut();
+                if let Some(slot) = inst.attrs.get_mut("__traceback__") {
+                    let keep_existing = pyrust_builtins::traceback::is_traceback(slot)
+                        && pyrust_builtins::traceback::chain_len(slot)
+                            == pyrust_core::captured_error_frames_len() + 1;
+                    if !keep_existing {
+                        *slot = self.build_deferred_traceback(catch_lineno as i64);
+                    }
+                } else {
+                    let tb = self.build_deferred_traceback(catch_lineno as i64);
+                    inst.attrs.insert("__traceback__", tb);
+                }
+            }
         }
         // Save the current active_exception BEFORE the dedup-pop below.
         // This is the value that was active when the new exception was raised,
@@ -2803,6 +2836,33 @@ impl Interpreter {
                         PyError::Runtime("no active exception".to_string())
                     }));
                     regs[*dst as usize] = exc;
+                }
+                Insn::LoadExcTraceback(dst, exc) => {
+                    // Resolve the exception's `__traceback__`, materialising the
+                    // deferred placeholder (#2351) so `__exit__` receives a real
+                    // `traceback` object (#2359).  Mirrors the get_attr read site
+                    // in env.rs: write the materialised chain back onto the
+                    // instance so the object passed to `__exit__` is identical to
+                    // a later `e.__traceback__` read.
+                    let exc_val = vm_try!(vm_read(&regs, *exc, num_locals));
+                    let tb = if let Some(inst) = exc_val.as_py_instance_rc() {
+                        let stored = inst.borrow().attrs.get("__traceback__").cloned();
+                        match stored {
+                            Some(v) => match self.materialize_deferred_traceback(&v) {
+                                Some(real) => {
+                                    inst.borrow_mut()
+                                        .attrs
+                                        .insert("__traceback__", real.clone());
+                                    real
+                                }
+                                None => v,
+                            },
+                            None => Value::none(),
+                        }
+                    } else {
+                        Value::none()
+                    };
+                    regs[*dst as usize] = tb;
                 }
                 Insn::MatchExcept(type_reg, offset) => {
                     let type_val = vm_try!(vm_read(&regs, *type_reg, num_locals));

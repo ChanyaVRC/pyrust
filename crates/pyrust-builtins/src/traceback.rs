@@ -74,3 +74,28 @@ pub fn traceback_node(frame: Value, next: Value, lineno: i64, lasti: i64) -> Val
 pub fn is_traceback(value: &Value) -> bool {
     matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME)
 }
+
+/// Count the number of nodes in a traceback chain by following `tb_next`.
+/// Returns `0` for a non-traceback value.
+pub fn chain_len(value: &Value) -> usize {
+    let mut len = 0usize;
+    let mut cur = value.clone();
+    loop {
+        let pyrust_core::ValueKind::BuiltinObject { ops, state } = cur.kind() else {
+            break;
+        };
+        if ops.type_name() != TYPE_NAME {
+            break;
+        }
+        let next = {
+            let borrow = state.borrow();
+            match borrow.downcast_ref::<TracebackState>() {
+                Some(s) => s.next.clone(),
+                None => break,
+            }
+        };
+        len += 1;
+        cur = next;
+    }
+    len
+}
