@@ -107,3 +107,15 @@ try:
     "{a}".format_map()
 except TypeError as e:
     print(e)
+
+# Grouping/type compatibility precedes the per-value unknown-code check
+# (pinned against python3.12): ',' allows only d/e/E/f/F/g/G/%; '_' adds
+# b/o/x/X; doubled or paired separators name themselves.
+for v, spec in [("s", ",,"), ("s", "_,"), ("s", ",_"), ("s", ",q"), ("s", "_q"),
+                ("s", ",d"), (1, ",,"), (1.5, ",,"), (1, ",c"), (1, ",b"),
+                (1, ",o"), (255, "_x"), (5, "_b"), (1, "_%"), (1, "_n"),
+                ("t", ",s"), (1.5, ",s"), (1.5, ",€")]:
+    try:
+        print(repr(spec), "OK", format(v, spec))
+    except ValueError as e:
+        print(repr(spec), "VE", e)

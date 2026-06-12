@@ -5334,6 +5334,28 @@ fn parse_format_spec(spec: &str, type_name: &str) -> Result<FormatSpec> {
         ));
     }
 
+    // CPython validates grouping/type compatibility at parse time, BEFORE any
+    // per-value "Unknown format code" check (issue #2373): ',' allows only
+    // d/e/E/f/F/g/G/% as the type code; '_' additionally allows b/o/x/X.  A
+    // second separator in type position reports the doubled separator or the
+    // pair ("both").  Pinned against python3.12 (",d" on a str value
+    // correctly falls through to the str path's unknown-code error; the
+    // incompatible type char is hex-escaped like unknown format codes).
+    if let (Some(g), Some(t)) = (grouping, type_char) {
+        if t == ',' || t == '_' {
+            if t == g {
+                return Err(pyrust_core::value_err!("Cannot specify '{g}' with '{g}'."));
+            }
+            return Err(pyrust_core::value_err!("Cannot specify both ',' and '_'."));
+        }
+        let grouping_ok = matches!(t, 'd' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%')
+            || (g == '_' && matches!(t, 'b' | 'o' | 'x' | 'X'));
+        if !grouping_ok {
+            let t_repr = format_code_repr(t);
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with '{t_repr}'."));
+        }
+    }
+
     Ok(FormatSpec {
         fill,
         align,
