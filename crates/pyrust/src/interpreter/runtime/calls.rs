@@ -759,10 +759,13 @@ impl Interpreter {
                     && is_protocol_dunder(type_name, method)
                 {
                     if !kw.is_empty() {
-                        return Err(pyrust_core::type_err!(
-                            "{}() takes no keyword arguments",
-                            method
-                        ));
+                        // Issue #2398: named method-wrapper vs anonymous slot
+                        // wrapper keyword-rejection wording (issue #2291).
+                        return Err(if is_named_protocol_wrapper(method, type_name) {
+                            pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                        } else {
+                            pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                        });
                     }
                     return self.dispatch_builtin_protocol_dunder(method, self_val, pos);
                 }
@@ -2482,17 +2485,21 @@ impl Interpreter {
             _ => 1,
         };
         if args.len() != want {
-            if is_named_protocol_wrapper(method, &type_name) {
-                return Err(pyrust_core::type_err!("{type_name}.{method}() takes exactly one argument ({} given)",
-                        args.len()));
-            }
             // `dict.__reversed__()` is a named no-arg method-wrapper in CPython
             // 3.12: `dict.__reversed__() takes no arguments (N given)` (#2093).
+            // Checked before the generic named-wrapper arm below because
+            // `__reversed__` is in `is_named_protocol_wrapper` (its kwarg
+            // rejection is named, #2398) but its *arity* wording is the no-arg
+            // form, not "takes exactly one argument".
             if method == "__reversed__" {
                 return Err(pyrust_core::type_err!(
                     "{type_name}.__reversed__() takes no arguments ({} given)",
                     args.len()
                 ));
+            }
+            if is_named_protocol_wrapper(method, &type_name) {
+                return Err(pyrust_core::type_err!("{type_name}.{method}() takes exactly one argument ({} given)",
+                        args.len()));
             }
             // `__mul__` (sq_repeat), `__imul__` (sq_inplace_repeat) and
             // `__setitem__` (sq_ass_item) print a leading space before
@@ -7108,16 +7115,22 @@ fn richcmp_operand_accepted(recv: &Value, operand: &Value, is_equality: bool) ->
     }
 }
 
-/// Issue #2291: whether a container protocol dunder is a *named* method-wrapper
-/// in CPython 3.12 (its error messages read `{type}.{method}()`) versus an
-/// anonymous slot wrapper (whose messages read `wrapper {method}()`).  The
-/// named set is `mp_subscript` (`list`/`dict` `__getitem__`) and `sq_contains`
-/// (`dict`/`set`/`frozenset` `__contains__`); every other protocol dunder is an
-/// anonymous slot wrapper.  Verified against `python3.12`.
+/// Issue #2291 / #2398: whether a container protocol dunder is a *named*
+/// method-wrapper in CPython 3.12 (its error messages read `{type}.{method}()`)
+/// versus an anonymous slot wrapper (whose messages read `wrapper {method}()`).
+/// The named set is exactly the slots CPython implements as `method_descriptor`
+/// rather than `wrapper_descriptor`: `mp_subscript` (`list`/`dict`
+/// `__getitem__`), `sq_contains` (`dict`/`set`/`frozenset` `__contains__`), and
+/// `__reversed__` (`list`/`dict`).  Every other protocol dunder is an anonymous
+/// slot wrapper.  This is the same partition that drives the unbound
+/// `wrapper_descriptor` vs `method_descriptor` `repr`/type-name in
+/// `pyrust_core::slot_wrapper_dunder`.  Verified against `python3.12`.
 pub(crate) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
     matches!(
         (method, type_name),
-        ("__getitem__", "list" | "dict") | ("__contains__", "dict" | "set" | "frozenset")
+        ("__getitem__", "list" | "dict")
+            | ("__contains__", "dict" | "set" | "frozenset")
+            | ("__reversed__", "list" | "dict")
     )
 }
 
@@ -9135,7 +9148,14 @@ impl Interpreter {
             let type_name = pyrust_core::builtin_type_name(&receiver);
             if is_protocol_dunder(&type_name, method) {
                 if !kw.is_empty() {
-                    return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
+                    // Issue #2398: CPython's keyword-rejection wording depends on
+                    // whether the slot is a named method-wrapper or an anonymous
+                    // slot wrapper (issue #2291).
+                    return Err(if is_named_protocol_wrapper(method, &type_name) {
+                        pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                    } else {
+                        pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                    });
                 }
                 return self.dispatch_builtin_protocol_dunder(method, receiver, pos);
             }
