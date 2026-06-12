@@ -999,6 +999,7 @@ impl Interpreter {
                 lineno: tb_lineno,
                 source_line: None,
                 funcname: frame.fn_name.clone(),
+                col_span: None,
             });
         }
         self.vm_frame_views.pop();
@@ -1274,6 +1275,7 @@ impl Interpreter {
                         lineno: if line == 0 { None } else { Some(line) },
                         source_line: None,
                         funcname: std::sync::Arc::from(&func.name[..]),
+                        col_span: None,
                     });
                 }
                 self.env = saved.saved_env;
@@ -1294,6 +1296,7 @@ impl Interpreter {
                     lineno: if line == 0 { None } else { Some(line) },
                     source_line: None,
                     funcname: gd.gframe.fn_name.clone(),
+                    col_span: None,
                 });
             }
             // Restore the consumer frame.

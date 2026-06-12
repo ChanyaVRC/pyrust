@@ -6308,6 +6308,7 @@ fn chained_exc_frames(
                 lineno,
                 source_line: resolve(lineno),
                 funcname: std::sync::Arc::from(&funcname[..]),
+                col_span: None,
             }
         })
         .collect();
