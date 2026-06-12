@@ -2482,6 +2482,34 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// Walk the class base chain and return `true` if any class in the chain has
 /// the given `name`.  Used to check subclass relationships by class name when
 /// the `Rc` singleton for the expected class is not in scope.
+/// The effective `__iter__` for a `PyInstance`: a USER-defined `__iter__`
+/// wins; an inherited builtin slot sentinel (`BuiltinFunction("dict.__iter__")`
+/// etc., exposed since #2387) on a BACKED instance returns `None`, so callers
+/// iterate the backing primitive directly and attach the container-specific
+/// mutation guard.  ONE decision shared by the `for`-loop `GetIter` arm and
+/// the `iter()` builtin (issue #2400 — the previous mirrored copies were the
+/// #2324 duplicate-decision drift pattern).
+pub(crate) fn effective_user_iter(
+    class: &Rc<RefCell<PyClass>>,
+    inst_rc: &Rc<RefCell<PyInstance>>,
+) -> Option<Value> {
+    lookup_class_attr(class, "__iter__").filter(|m| {
+        !(matches!(m.kind(), ValueKind::BuiltinFunction(_))
+            && instance_builtin_data(inst_rc).is_some())
+    })
+}
+
+/// Mutation-during-iteration wording for a dict-backed subclass instance:
+/// OrderedDict (by class-chain name) uses its own message; every other dict
+/// subclass matches plain dict.  Shared by both iteration entry points.
+pub(crate) fn dict_subclass_mutation_msg(class: &Rc<RefCell<PyClass>>) -> &'static str {
+    if class_is_named_ordered_dict(class) {
+        "OrderedDict mutated during iteration"
+    } else {
+        "dictionary changed size during iteration"
+    }
+}
+
 pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
     // Walk the base chain by reference — each node is a distinct `RefCell`, so
     // recursing while the current borrow is held never conflicts.  Avoids the

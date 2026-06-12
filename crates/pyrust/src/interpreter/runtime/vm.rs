@@ -4070,10 +4070,7 @@ impl Interpreter {
                                 // builtin class with its own `__iter__` sentinel
                                 // (e.g. `collections.deque`, whose body installs a
                                 // mutation guard) is left untouched.
-                                let user_iter = lookup_class_attr(&class, "__iter__").filter(|m| {
-                                    !(matches!(m.kind(), ValueKind::BuiltinFunction(_))
-                                        && instance_builtin_data(&inst_rc).is_some())
-                                });
+                                let user_iter = effective_user_iter(&class, &inst_rc);
                                 if let Some(method_val) = user_iter {
                                     let iter_obj = vm_try!(invoke_class_method(
                                         self,
@@ -4113,11 +4110,7 @@ impl Interpreter {
                                         // other dict subclass matches plain dict.
                                         let items = vm_try!(iter_values(&backing));
                                         let recorded_len = backing.as_dict().map(|d| d.len()).unwrap_or(0);
-                                        let msg = if class_is_named_ordered_dict(&class) {
-                                            "OrderedDict mutated during iteration"
-                                        } else {
-                                            "dictionary changed size during iteration"
-                                        };
+                                        let msg = dict_subclass_mutation_msg(&class);
                                         IterState::MaterializedGuarded {
                                             items,
                                             pos: 0,
