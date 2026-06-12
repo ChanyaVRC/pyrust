@@ -185,7 +185,8 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // same frame inherited the first raise's line).  Cross-jump has no line info
     // of its own, so compute the current per-instruction lines (mapped from the
     // original stream, exactly as the final `remap_linenos` does) and hand them in.
-    let pre_cj_linenos = remap_linenos(&original_insns, &original_linenos, &insns);
+    let (pre_cj_linenos, _) =
+        remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
     let insns = pass_cross_jump(insns, &pre_cj_linenos);
     let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_forcount_reg_upgrade(insns);

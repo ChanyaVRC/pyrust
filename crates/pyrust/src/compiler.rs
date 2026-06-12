@@ -12277,7 +12277,7 @@ impl Compiler {
         let kwnames_idx = self.intern_const(Value::tuple(kw_names));
 
         // Receiver / dst / args_base placement — identical to compile_method_call.
-        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name) = target {
+        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name, _) = target {
             if let Some(local) = self.local_reg(name) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
