@@ -296,7 +296,32 @@ impl Interpreter {
                     source_line: module_source_line,
                     funcname: std::sync::Arc::from("<module>"),
                 }];
-                frames.extend(inner_frames);
+                // Issue #2404: a re-raised exception's `__traceback__` chain is
+                // the authoritative, Python-visible frame list — after #2367 the
+                // captured-frame snapshot was reset at the re-raise site and so
+                // diverges (it drops the re-raising/prepended frames).  When the
+                // raised value carries such a chain, derive the inner frames from
+                // it; otherwise fall back to the captured snapshot (raw `PyError`
+                // variants and never-caught exceptions keep the snapshot path).
+                let tb_inner = if let PyError::Raised(exc_val) = e {
+                    // `reraise_is_bare` survives to here only when the last
+                    // re-raise was bare and no `except` consumed it (i.e. the
+                    // exception is genuinely uncaught) — it then tells the
+                    // formatter to drop the bare re-raise frame's own node.
+                    self.uncaught_inner_frames_from_tb(
+                        exc_val,
+                        filename,
+                        src,
+                        &inner_frames,
+                        self.reraise_is_bare,
+                    )
+                } else {
+                    None
+                };
+                match tb_inner {
+                    Some(tb_frames) => frames.extend(tb_frames),
+                    None => frames.extend(inner_frames),
+                }
                 let error_line = match e {
                     PyError::Lex(s) => format!("Lex error: {s}"),
                     PyError::Parse(s) => format!("Parse error: {s}"),
