@@ -269,6 +269,11 @@ impl Interpreter {
                 // Suppress traceback; let exec_program handle SystemExit normally.
                 None
             } else {
+                // `filename` borrows `self.script_filename`; clone it to an
+                // owned `Arc` up front so the chained-traceback formatter (which
+                // takes `&mut self`) can run without conflicting with that
+                // immutable borrow.  Cheap refcount bump on the cold print path.
+                let owned_filename = filename.clone();
                 // Build the full frame list: <module> at the bottom (outermost),
                 // then the function frames in innermost-last order.
                 //
@@ -414,7 +419,7 @@ impl Interpreter {
                 // banner ("The above exception was the direct cause of..."
                 // or "During handling of the above exception...").
                 let chain_prefix = if let PyError::Raised(exc_val) = e {
-                    format_exc_chain_prefix(self, exc_val)
+                    format_exc_chain_prefix(self, exc_val, &owned_filename, src)
                 } else {
                     String::new()
                 };

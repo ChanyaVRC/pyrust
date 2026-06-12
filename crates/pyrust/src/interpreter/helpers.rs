@@ -6109,17 +6109,25 @@ pub(crate) fn resolve_zero_arg_super(
 /// (closest to `exc_val`) to outermost.  The chain is then reversed and printed
 /// oldest-first, matching CPython's display order.
 ///
-/// Each chained exception is formatted as just its `"ClassName: msg"` line
-/// (no "Traceback (most recent call last):" header) because pyrust does not
-/// yet track per-exception frame captures — only the final propagating
-/// exception has frame info.  CPython does the same when the chained
-/// exception's `__traceback__` is `None`.
+/// Each chained exception is rendered as its own full traceback block — a
+/// `Traceback (most recent call last):` header, the `File ...` frames derived
+/// from that exception's `__traceback__` chain (issues #2408/#2412), and its
+/// `ClassName: msg` line — followed by the connecting banner.  When the chained
+/// exception has no `__traceback__` (constructed but never raised), CPython
+/// omits the traceback block and prints just the `ClassName: msg` line; we do
+/// the same.
 ///
 /// Returns an empty string when there is no visible chain (no `__cause__` /
 /// `__context__`, or the chain is suppressed via `raise X from None`).
+///
+/// `filename`/`src` feed the per-frame `File ...`/source-line rendering; they
+/// mirror the values the main traceback uses (a single-file program shares one
+/// filename, the tb nodes carry no per-frame filename).
 pub(crate) fn format_exc_chain_prefix(
     interp: &mut crate::Interpreter,
     exc_val: &Value,
+    filename: &std::sync::Arc<str>,
+    src: &str,
 ) -> String {
     // Collect (exc_value, is_cause) pairs from innermost to outermost.
     let mut chain: Vec<(Value, bool)> = Vec::new();
@@ -6188,7 +6196,7 @@ pub(crate) fn format_exc_chain_prefix(
 
     let mut out = String::new();
     for (exc, is_cause) in chain {
-        out.push_str(&format_single_exc_line(interp, &exc));
+        out.push_str(&format_chained_exc_block(interp, &exc, filename, src));
         out.push('\n');
         out.push('\n');
         if is_cause {
@@ -6203,6 +6211,88 @@ pub(crate) fn format_exc_chain_prefix(
         out.push('\n');
     }
     out
+}
+
+/// Render a chained exception as its own full traceback block: a
+/// `Traceback (most recent call last):` header, the `File ...` frames derived
+/// from the exception's `__traceback__` chain, and the closing `ClassName: msg`
+/// line.  When the exception carries no `__traceback__` (it was constructed but
+/// never raised), CPython prints just the `ClassName: msg` line with no
+/// traceback header — we do the same by delegating to `format_single_exc_line`.
+///
+/// Frames are derived through the same `walk_frames` / deferred-materialisation
+/// path as the main uncaught traceback (`uncaught_inner_frames_from_tb`); a
+/// chained exception's stored `__traceback__` is the authoritative, Python-
+/// visible frame list (verified to match CPython via `__context__`/`__cause__`
+/// introspection).  Unlike the main block, a chained block has no synthetic
+/// `<module>` frame prepended — its `<module>` node, when present, is already
+/// part of its own `__traceback__` chain.
+fn format_chained_exc_block(
+    interp: &mut crate::Interpreter,
+    exc: &Value,
+    filename: &std::sync::Arc<str>,
+    src: &str,
+) -> String {
+    let exc_line = format_single_exc_line(interp, exc);
+    let frames = chained_exc_frames(interp, exc, filename, src);
+    match frames {
+        Some(frames) if !frames.is_empty() => {
+            pyrust_core::format_traceback(&frames, &exc_line)
+        }
+        // No traceback: constructed-but-never-raised exception.  CPython omits
+        // the traceback header and prints only the `ClassName: msg` line.
+        _ => exc_line,
+    }
+}
+
+/// Derive a chained exception's frame list from its `__traceback__` chain,
+/// materialising the deferred placeholder (cold path) and walking the tb nodes.
+/// Returns `None` when the exception has no `__traceback__` (never raised) or
+/// the chain walks to an empty node list.
+fn chained_exc_frames(
+    interp: &mut crate::Interpreter,
+    exc: &Value,
+    filename: &std::sync::Arc<str>,
+    src: &str,
+) -> Option<Vec<pyrust_core::FrameInfo>> {
+    let ValueKind::PyInstance(inst) = exc.kind() else {
+        return None;
+    };
+    let stored = inst.borrow().attrs.get("__traceback__").cloned();
+    let stored = stored.filter(|tb| !tb.is_none())?;
+    // Materialise the deferred placeholder if needed (cold uncaught path).
+    let tb = interp
+        .materialize_deferred_traceback(&stored)
+        .unwrap_or(stored);
+    let nodes = pyrust_builtins::traceback::walk_frames(&tb);
+    if nodes.is_empty() {
+        return None;
+    }
+    // Source-line lookup matches the main traceback: CPython echoes the line
+    // stripped of leading indentation (`format_traceback` re-indents to four
+    // spaces), so store the fully-stripped text.
+    let resolve = |lineno: Option<u32>| -> Option<std::sync::Arc<str>> {
+        let n = lineno?;
+        if src.is_empty() {
+            return None;
+        }
+        src.lines()
+            .nth((n as usize).saturating_sub(1))
+            .map(|l| std::sync::Arc::from(l.trim()))
+    };
+    let frames = nodes
+        .into_iter()
+        .map(|(funcname, lineno)| {
+            let lineno = if lineno > 0 { Some(lineno as u32) } else { None };
+            pyrust_core::FrameInfo {
+                filename: filename.clone(),
+                lineno,
+                source_line: resolve(lineno),
+                funcname: std::sync::Arc::from(&funcname[..]),
+            }
+        })
+        .collect();
+    Some(frames)
 }
 
 /// Format a single exception value as `"ClassName: msg"` (or just `"ClassName"`
