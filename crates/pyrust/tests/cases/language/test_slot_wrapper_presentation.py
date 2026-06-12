@@ -10,9 +10,9 @@ CPython 3.12 models:
     `<method-wrapper '__len__' of list object at 0x...>`.
 A few container slots (`__getitem__` on list/dict, `__contains__` on
 dict/set/frozenset, `__reversed__` on list/dict) are `method_descriptor`s, not
-slot wrappers; pyrust still presents those (and plain methods like `append`)
-with the generic `builtin_function_or_method` form -- a separate descriptor
-class tracked as a follow-up, deliberately NOT asserted here.
+slot wrappers; those and plain builtin methods (`append`, `upper`) present as
+`method_descriptor` -> `<method '<m>' of '<type>' objects>` unbound and as
+`<built-in method <m> of <type> object at 0x...>` bound (#2422).
 
 Object identity addresses are normalized so the diff is deterministic.
 """
@@ -46,10 +46,12 @@ info("set.__or__", set.__or__)
 info("frozenset.__and__", frozenset.__and__)
 info("dict.__setitem__", dict.__setitem__)
 info("dict.__iter__", dict.__iter__)
-# NOTE: `bool.__and__` is deliberately omitted: CPython reports objclass
-# `'bool'` (bool defines its own bitwise slots) while pyrust resolves it to the
-# inherited `int.__and__` -> objclass `'int'`.  That is a builtin attr-inherit
-# detail orthogonal to slot-wrapper presentation; tracked as a follow-up.
+# #2424: `bool` defines its own bitwise slot wrappers -> objclass `'bool'`,
+# while inherited numeric slots (`bool.__add__`) stay objclass `'int'`.
+for d in ("__and__", "__or__", "__xor__", "__rand__", "__ror__", "__rxor__", "__invert__"):
+    info("bool." + d, getattr(bool, d))
+info("bool.__add__ (inherited)", bool.__add__)
+info("int.__and__ (owner int)", int.__and__)
 
 
 # --- bound method-wrappers ---------------------------------------------------
@@ -60,17 +62,41 @@ info("'x'.__mod__", "x".__mod__)
 info("(5).__add__", (5).__add__)
 info("(1,2).__getitem__", (1, 2).__getitem__)
 info("frozenset().__or__", frozenset().__or__)
+# #2424: bound bool slot wrappers are method-wrappers of `bool`, and calling
+# the unbound form dispatches through the shared numeric path.
+info("True.__and__", True.__and__)
+info("True.__invert__", True.__invert__)
+print("bool.__and__(True, False) =", bool.__and__(True, False))
+print("bool.__or__(False, True) =", bool.__or__(False, True))
+print("bool.__rand__(True, 3) =", bool.__rand__(True, 3))
 
 
-# --- method_descriptor / plain-method forms stay builtin_function_or_method --
-# (these are the deferred follow-up class; we only assert they did NOT flip to
-#  slot-wrapper)
-print(type(dict.__getitem__).__name__ != "wrapper_descriptor")
-print(type(set.__contains__).__name__ != "wrapper_descriptor")
-print(type(list.__reversed__).__name__ != "wrapper_descriptor")
-print(type(list.append).__name__ != "wrapper_descriptor")
-print(type([1].append).__name__ != "method-wrapper")
-print(type([1].__getitem__).__name__ != "method-wrapper")
+# --- #2422: method_descriptor (unbound) + bound builtin-method forms ---------
+# Empirical rule table from python3.12: the method_descriptor container dunders
+# and every plain builtin method present as `method_descriptor`.  Run each twice
+# so the cached attribute-resolution path is exercised too.
+for _ in range(2):
+    info("dict.__getitem__", dict.__getitem__)
+    info("dict.__contains__", dict.__contains__)
+    info("dict.__reversed__", dict.__reversed__)
+    info("list.__getitem__", list.__getitem__)
+    info("list.__reversed__", list.__reversed__)
+    info("set.__contains__", set.__contains__)
+    info("frozenset.__contains__", frozenset.__contains__)
+    info("list.append", list.append)
+    info("str.upper", str.upper)
+    info("dict.get", dict.get)
+    info("tuple.count", tuple.count)
+    info("bytes.hex", bytes.hex)
+    # bound forms carry the receiver identity address ("at 0x...").
+    info("[1].append", [1].append)
+    info("'x'.upper", "x".upper)
+    info("{}.get", {}.get)
+    info("[1].__getitem__", [1].__getitem__)
+    info("{1}.__contains__", {1}.__contains__)
+# free functions / module functions stay builtin_function_or_method.
+info("len", len)
+info("sorted", sorted)
 
 
 # --- hasattr / dir membership matrix (replicated from #2396 battery) ---------
@@ -105,10 +131,15 @@ kw("{1:2}.__getitem__(1, x=1)", lambda: {1: 2}.__getitem__(1, x=1))
 kw("{1}.__contains__(1, x=1)", lambda: {1}.__contains__(1, x=1))
 kw("[1].__reversed__(x=1)", lambda: [1].__reversed__(x=1))
 kw("{1:2}.__reversed__(x=1)", lambda: {1: 2}.__reversed__(x=1))
-# NOTE: `bytes`/`bytearray` `__getitem__`/`__contains__` and
-# `frozenset.__contains__` route through a separate per-type `call` path that
-# still emits the bare `__X__()` kwarg wording (pre-existing); tracked as a
-# follow-up, not asserted here.
+# #2423: bytes/bytearray `__getitem__`/`__contains__` are anonymous slot
+# wrappers -> "wrapper __X__()"; `frozenset.__contains__` is a named
+# method-wrapper -> "frozenset.__contains__()".  These reach a separate bound
+# method-call arm than the str/list/dict/set/tuple forms above.
+kw("b'a'.__getitem__(0, x=1)", lambda: b"a".__getitem__(0, x=1))
+kw("b'a'.__contains__(1, x=1)", lambda: b"a".__contains__(1, x=1))
+kw("bytearray(b'a').__getitem__(0, x=1)", lambda: bytearray(b"a").__getitem__(0, x=1))
+kw("bytearray(b'a').__contains__(1, x=1)", lambda: bytearray(b"a").__contains__(1, x=1))
+kw("frozenset().__contains__(1, x=1)", lambda: frozenset().__contains__(1, x=1))
 
 
 # --- wrong-receiver-type + arity wordings on unbound forms (must not regress)-

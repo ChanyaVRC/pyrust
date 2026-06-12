@@ -1312,7 +1312,20 @@ impl Interpreter {
         if method.starts_with("__")
             && is_protocol_dunder(&pyrust_core::builtin_type_name(&receiver), method)
         {
-            reject_kwargs!(kw, "{}", method);
+            // Issue #2423: bytes/bytearray `__getitem__`/`__contains__` and
+            // `frozenset.__contains__` reach this bound method-call arm (rather
+            // than `dispatch_builtin_container_method`), so route their
+            // keyword-rejection through the same named-method-wrapper vs
+            // anonymous-slot-wrapper decision (#2398) instead of the bare
+            // `{method}()` wording.
+            if !kw.is_empty() {
+                let type_name = pyrust_core::builtin_type_name(&receiver);
+                return Err(if is_named_protocol_wrapper(method, &type_name) {
+                    pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                } else {
+                    pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                });
+            }
             let args_vec: Vec<Value> = std::mem::take(pos);
             return self.dispatch_builtin_protocol_dunder(method, receiver, args_vec);
         }
