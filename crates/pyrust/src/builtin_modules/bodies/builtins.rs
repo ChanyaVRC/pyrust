@@ -9746,7 +9746,7 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
             .unwrap_or(false);
         if !has_user_str {
-            return Ok(value.to_py_str());
+            return crate::interpreter::exception_str_with_dispatch(interp, value, &inst_rc, &class);
         }
     }
     // Issue #1204 / #1564: if this instance subclasses a scalar primitive,

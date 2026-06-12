@@ -4374,6 +4374,13 @@ impl Value {
                 if is_exception_instance(instance) {
                     return exception_repr(instance);
                 }
+                // Builtin-subclass carrier with no repr-like override: render
+                // as the backing value, matching CPython's inherited tp_repr
+                // (issue #2389 — core-side renderers such as exception-arg
+                // formatting reach this without interpreter access).
+                if let Some(backing) = instance_backing_for_repr(instance) {
+                    return backing.repr();
+                }
                 let (qualname, module) = {
                     let inst = instance.borrow();
                     let class = inst.class.borrow();
@@ -5081,6 +5088,67 @@ pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
 /// Walk the class base chain and return `true` if any class in the chain has
 /// the given `name`.  Used by `PyError::class_name_is` to handle subclasses
 /// of `StopIteration` / `GeneratorExit` carried as `PyError::Raised`.
+/// If `instance` is a builtin-subclass carrier (holds a `__builtin_data__`
+/// backing) and no class between it and the builtin base defines `__repr__`
+/// or `__str__`, return the backing value for repr purposes (issue #2389).
+///
+/// Core-side renderers (exception-arg formatting: `KeyError: [2]`, OSError
+/// filenames, …) cannot invoke user dunders — that needs the interpreter —
+/// but the *inherited* case is pure data: CPython inherits the builtin
+/// `tp_repr` slot, so the subclass instance reprs as its base value.  A
+/// chain that overrides `__repr__`/`__str__` returns `None` and keeps the
+/// generic `<module.Class object at 0x…>` form (the override would need
+/// interpreter dispatch to honour).
+fn instance_backing_for_repr(instance: &Rc<RefCell<PyInstance>>) -> Option<Value> {
+    let backing = instance.borrow().attrs.get("__builtin_data__").cloned()?;
+    let base_name = builtin_type_name(&backing);
+    let mut cursor = Some(Rc::clone(&instance.borrow().class));
+    while let Some(class) = cursor {
+        let borrowed = class.borrow();
+        // Reached the builtin base (or object): its repr IS the backing repr.
+        if borrowed.name == base_name.as_ref() || borrowed.name == "object" {
+            break;
+        }
+        if borrowed.attrs.contains_key("__repr__") || borrowed.attrs.contains_key("__str__") {
+            return None;
+        }
+        // Multiple inheritance: any extra base defining the dunder also wins
+        // over the builtin slot (it precedes the builtin in the MRO when
+        // declared first; conservatively treat any definition as an override).
+        if borrowed
+            .extra_bases
+            .iter()
+            .any(|b| class_chain_defines_repr_like(b, base_name.as_ref()))
+        {
+            return None;
+        }
+        cursor = borrowed.base.clone();
+    }
+    Some(backing)
+}
+
+/// Walk `class` (stopping at `base_name`/`object`) looking for a
+/// `__repr__`/`__str__` definition.  Helper for the extra-bases arm of
+/// [`instance_backing_for_repr`].
+fn class_chain_defines_repr_like(class: &Rc<RefCell<PyClass>>, base_name: &str) -> bool {
+    let borrowed = class.borrow();
+    if borrowed.name == base_name || borrowed.name == "object" {
+        return false;
+    }
+    if borrowed.attrs.contains_key("__repr__") || borrowed.attrs.contains_key("__str__") {
+        return true;
+    }
+    let from_base = borrowed
+        .base
+        .as_ref()
+        .is_some_and(|b| class_chain_defines_repr_like(b, base_name));
+    from_base
+        || borrowed
+            .extra_bases
+            .iter()
+            .any(|b| class_chain_defines_repr_like(b, base_name))
+}
+
 fn class_chain_has_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
     let (class_name, base, extra_bases) = {
         let borrowed = class.borrow();

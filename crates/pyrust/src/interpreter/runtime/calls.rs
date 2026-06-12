@@ -6837,7 +6837,7 @@ impl Interpreter {
                 .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
                 .unwrap_or(false);
             if !has_user_str {
-                return Ok(value.to_py_str());
+                return exception_str_with_dispatch(self, value, &inst_rc, &class);
             }
         }
         // Try user-defined __str__ first.  Skip `object.__str__` when the
@@ -7312,6 +7312,34 @@ pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -
         },
         _ => false,
     }
+}
+
+/// `str()` of an exception instance that has no user-defined `__str__`.
+/// Mostly the data-only `Value::to_py_str()` fallback, with one
+/// interpreter-needing case split out: `KeyError.__str__` is
+/// `repr(args[0])`, and a `PyInstance` key may carry a user `__repr__`
+/// override that core cannot dispatch (issue #2389).  Shared by `str(x)` /
+/// `print` (`render_instance_str`) and the format `!s` path
+/// (`render_value_as_str`).
+pub(crate) fn exception_str_with_dispatch(
+    interp: &mut Interpreter,
+    value: &Value,
+    inst_rc: &Rc<RefCell<pyrust_core::PyInstance>>,
+    class: &Rc<RefCell<pyrust_core::PyClass>>,
+) -> Result<String> {
+    if crate::interpreter::class_chain_contains_name(class, "KeyError") {
+        let args = {
+            let borrowed = inst_rc.borrow();
+            match borrowed.attrs.get("args").map(|v| v.kind()) {
+                Some(ValueKind::Tuple(items)) => items.to_vec(),
+                _ => Vec::new(),
+            }
+        };
+        if args.len() == 1 && matches!(args[0].kind(), ValueKind::PyInstance(_)) {
+            return render_instance_repr(interp, &args[0]);
+        }
+    }
+    Ok(value.to_py_str())
 }
 
 /// Renders a value using its `__repr__` dunder for the `!r` conversion flag in
