@@ -6943,6 +6943,15 @@ impl Interpreter {
                     }
                     return Ok(format!("{class_name}({{{}}})", inner_elems.join(", ")));
                 }
+                // bytearray subclass (#2386): `str(BA(...))` == `repr(BA(...))`
+                // = `ClassName(b'...')`.  Delegate to `render_value_repr`, which
+                // handles the bytearray subclass; pass the *instance* so the
+                // subclass name is used.
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+                {
+                    return crate::builtin_modules::builtins::render_value_repr(self, value);
+                }
                 _ => {}
             }
         }
@@ -7036,6 +7045,18 @@ impl Interpreter {
         }
         // No user __format__ in MRO (or only the object builtin).
         if let Some(backing) = instance_builtin_data(&inst_rc) {
+            // `object.__format__(self, "")` is defined as `str(self)` (#2386).
+            // For subclasses whose `str()` differs from the backing's `str()`
+            // — set/frozenset/bytearray, which prefix the class name — the
+            // *instance* must be rendered, not the backing, so `f"{S({1})}"` ==
+            // `str(S({1}))` == "S({1})", and `f"{BA(b'ab')}"` == "BA(b'ab')".
+            // For scalar backings (int/str/float/bytes) `str(value)` already
+            // equals `str(backing)`, so routing empty specs here is a no-op for
+            // them.  A non-empty spec falls through to `apply_format_spec_named`
+            // (the format mini-language / unsupported-spec TypeError).
+            if spec.is_empty() {
+                return Ok(Value::string(self.render_value_as_str(value)?));
+            }
             // CPython names the *actual* subclass in an unsupported-spec
             // TypeError, not the backing primitive (`B.__format__`, not
             // `bytes.__format__`), so thread the receiver's own type name
@@ -7381,6 +7402,22 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
                         .push(crate::builtin_modules::builtins::render_key_repr(interp, k)?);
                 }
                 return Ok(format!("{class_name}({{{}}})", inner_elems.join(", ")));
+            }
+            // bytearray subclass (#2386): CPython renders `ClassName(b'...')`
+            // — the subclass name wrapping the bytes-content repr — unlike a
+            // bytes subclass, which renders the bare base `b'...'` form.
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+            {
+                if let Some(data) =
+                    pyrust_builtins::bytearray::as_bytearray_snapshot(&backing)
+                {
+                    let class_name = class.borrow().name.clone();
+                    // `Value::bytes(...).repr()` renders the `b'...'` content
+                    // form; wrap it in the subclass name.
+                    let inner = Value::bytes(data).repr();
+                    return Ok(format!("{class_name}({inner})"));
+                }
             }
             _ => {}
         }

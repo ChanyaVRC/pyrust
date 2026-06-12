@@ -9360,6 +9360,20 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                     }
                     return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
                 }
+                // bytearray subclass (#2386): CPython renders `ClassName(b'...')`
+                // — the subclass name wrapping the bytes-content repr — unlike a
+                // bytes subclass, which renders the bare base `b'...'` form.
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+                {
+                    if let Some(data) =
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(&backing)
+                    {
+                        let class_name = class.borrow().name.clone();
+                        let inner = Value::bytes(data).repr();
+                        return Ok(format!("{class_name}({inner})"));
+                    }
+                }
                 _ => {}
             }
         }
@@ -9836,6 +9850,15 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                     parts.push(render_key_repr(interp, k)?);
                 }
                 return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
+            }
+            // bytearray subclass (#2386): `str(BA(...))` == `repr(BA(...))` in
+            // CPython (bytearray has no `__str__`, so `object.__str__` calls
+            // `__repr__`), rendering `ClassName(b'...')`.  Delegate to
+            // `render_value_repr`, which now handles the bytearray subclass.
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+            {
+                return render_value_repr(interp, value);
             }
             _ => {}
         }
