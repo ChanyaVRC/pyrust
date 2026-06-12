@@ -12056,6 +12056,20 @@ impl Compiler {
             return self.compile_keyword_call(func, args);
         }
 
+        // Keyword method call `obj.m(<pos…>, k=v…)` with no splats (issue #2392).
+        // Lay the receiver and arguments out in registers and emit a
+        // `CallMethodKw`, which reuses the `CallMethod` inline cache + the
+        // `CallKw` keyword fast-bind (receiver → param 0) instead of the
+        // BuildList + BuildDict + `CallMethodExpanded` round-trip.  In-place
+        // mutation of a fast-local receiver register is preserved exactly as in
+        // `compile_method_call` (same `obj_reg`/`dst_reg` placement).
+        if has_kwargs
+            && !has_splat
+            && let Expr::Attr { target, name } = func
+        {
+            return self.compile_keyword_method_call(target, name, args);
+        }
+
         // Double-splat expansion `f(<pos…>, **d)` (issue #2393): exactly one
         // trailing `**d`, every preceding arg a plain positional (no `*a` splat,
         // no literal keyword), non-method callee.  Lower to `CallEx`, which binds
@@ -12186,6 +12200,135 @@ impl Compiler {
         });
         self.next_temp = func_reg + 1;
         func_reg
+    }
+
+    /// Compile a keyword-argument method call `obj.m(<pos…>, k=v…)` (no splats)
+    /// into a `CallMethodKw` instruction (issue #2392).  The receiver register
+    /// placement matches `compile_method_call` exactly (fast-local receivers use
+    /// their own register as `obj` so in-place mutation persists; the result goes
+    /// to a distinct `dst`).  Arguments are laid out contiguously in
+    /// `R[args_base .. args_base+total]` — positionals first, then keyword values
+    /// in source order — exactly as `compile_keyword_call` does; the keyword names
+    /// form a constant-pool tuple consumed by the runtime binder.
+    ///
+    /// Python's grammar guarantees every positional argument precedes every
+    /// keyword argument in a call, so source order already lays out positionals
+    /// before keyword values — no reordering of evaluation is needed.
+    fn compile_keyword_method_call(
+        &mut self,
+        target: &Expr,
+        method_name: &str,
+        args: &[crate::ast::CallArg],
+    ) -> Reg {
+        let total = args.len();
+        if total > u8::MAX as usize {
+            // Too many args to encode in a u8 — fall back to the generic path.
+            return self.compile_variadic_call(
+                &Expr::Attr {
+                    target: Box::new(target.clone()),
+                    name: method_name.to_string(),
+                },
+                args,
+            );
+        }
+        let nkw = args.iter().filter(|a| a.name.is_some()).count();
+        let total_reg = total as Reg;
+
+        // Build the keyword-names tuple constant (source order, matching the order
+        // the keyword values occupy in the register window).
+        let kw_names: Vec<Value> = args
+            .iter()
+            .filter_map(|a| a.name.as_ref())
+            .map(|n| Value::string(n.clone()))
+            .collect();
+        let kwnames_idx = self.intern_const(Value::tuple(kw_names));
+
+        // Receiver / dst / args_base placement — identical to compile_method_call.
+        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name) = target {
+            if let Some(local) = self.local_reg(name) {
+                let dst = self.next_temp;
+                let abase = dst.wrapping_add(1);
+                let frame_top = abase.wrapping_add(total_reg);
+                if frame_top < dst {
+                    self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("call frame register overflow".to_string());
+                    }
+                    return 0;
+                }
+                self.next_temp = frame_top;
+                if frame_top > 0 && frame_top - 1 > self.max_reg {
+                    self.max_reg = frame_top - 1;
+                }
+                (local, dst, abase, false)
+            } else {
+                let o = self.next_temp;
+                let abase = o.wrapping_add(1);
+                let frame_top = abase.wrapping_add(total_reg);
+                if frame_top < o {
+                    self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("call frame register overflow".to_string());
+                    }
+                    return 0;
+                }
+                self.next_temp = frame_top;
+                if frame_top > 0 && frame_top - 1 > self.max_reg {
+                    self.max_reg = frame_top - 1;
+                }
+                (o, o, abase, true)
+            }
+        } else {
+            let o = self.next_temp;
+            let abase = o.wrapping_add(1);
+            let frame_top = abase.wrapping_add(total_reg);
+            if frame_top < o {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("call frame register overflow".to_string());
+                }
+                return 0;
+            }
+            self.next_temp = frame_top;
+            if frame_top > 0 && frame_top - 1 > self.max_reg {
+                self.max_reg = frame_top - 1;
+            }
+            (o, o, abase, true)
+        };
+
+        if need_copy {
+            let saved = self.next_temp;
+            self.compile_expr_into(target, obj_reg);
+            self.next_temp = saved;
+        }
+
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            let arg_reg = args_base + i;
+            let saved = self.next_temp;
+            let insn_before = self.insns.len();
+            let r = self.compile_expr(&arg.value);
+            if r != arg_reg {
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, arg_reg) {
+                    // retargeted in place
+                } else {
+                    self.emit(Insn::Move(arg_reg, r));
+                }
+            }
+            self.next_temp = saved;
+        }
+        let name_idx = self.intern_name(method_name);
+        self.emit(Insn::CallMethodKw {
+            dst: dst_reg,
+            obj: obj_reg,
+            name_idx,
+            args_base,
+            total: total as u8,
+            nkw: nkw as u8,
+            kwnames_idx,
+        });
+        self.next_temp = dst_reg + 1;
+        dst_reg
     }
 
     fn compile_method_call(

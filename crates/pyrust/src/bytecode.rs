@@ -332,6 +332,32 @@ pub enum Insn {
     /// no literal keywords, non-method callee; every other variadic shape keeps
     /// the generic path.
     CallEx { func: Reg, npos: u8, kwargs: Reg },
+    /// Keyword-argument method call `R[obj].name(<pos…>, k=v…)` with no
+    /// `*args` / `**kwargs` splats (issue #2392).  The receiver lives in
+    /// `R[obj]`; the `total` argument values occupy `R[args_base ..
+    /// args_base+total]` contiguously, the trailing `nkw` of them being keyword
+    /// arguments whose names are the constant-pool tuple `consts[kwnames_idx]`
+    /// (in order).  The first `total - nkw` are positional.  Result is written
+    /// to `R[dst]` (which may equal `R[obj]` for non-fast-local receivers, as
+    /// with `CallMethod`).
+    ///
+    /// Combines the `CallMethod` inline-cache method resolution (#2345) with the
+    /// `CallKw` keyword fast-bind (#2382): on a monomorphic cache hit for a
+    /// plain Python method the receiver binds to parameter 0 and the keyword
+    /// values bind straight into their slots with no dict/list build and no name
+    /// scan.  Replaces the old `BuildList`+`BuildDict`+`CallMethodExpanded`
+    /// lowering for literal-keyword method calls.  Falls back to the general
+    /// method-expansion path (which owns CPython-parity diagnostics) on any
+    /// cache miss, a builtin/backing method, or a non-simple binding shape.
+    CallMethodKw {
+        dst: Reg,
+        obj: Reg,
+        name_idx: u16,
+        args_base: Reg,
+        total: u8,
+        nkw: u8,
+        kwnames_idx: u16,
+    },
     /// return R[src]
     Return(Reg),
     /// return None
