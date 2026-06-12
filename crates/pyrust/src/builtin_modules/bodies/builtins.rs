@@ -1541,7 +1541,19 @@ pyrust_module! {
                     IterKind::BigRange => make_iterator(_interp, &val),
                     IterKind::PyInstance(inst_rc) => {
                         let class = Rc::clone(&inst_rc.borrow().class);
-                        if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                        // Mirror the `for`-loop `GetIter` path (#2400): a
+                        // *user-defined* `__iter__` (UserFunction) still wins, but an
+                        // inherited built-in `__iter__` slot on a backed subclass
+                        // (`list`/`dict`/`OrderedDict` subclass with no Python-level
+                        // `__iter__`) is skipped so we iterate the backing primitive
+                        // directly and pick the container-specific mutation message —
+                        // rather than dispatching `dict.__iter__`, which always reports
+                        // plain dict's wording.
+                        let user_iter = lookup_class_attr(&class, "__iter__").filter(|m| {
+                            !(matches!(m.kind(), ValueKind::BuiltinFunction(_))
+                                && instance_builtin_data(&inst_rc).is_some())
+                        });
+                        if let Some(method_val) = user_iter {
                             let iter_obj = invoke_class_method(
                                 _interp,
                                 method_val,
@@ -1567,6 +1579,33 @@ pyrust_module! {
                                 ));
                             }
                             Ok(iter_obj)
+                        } else if let Some(backing) = instance_builtin_data(&inst_rc) {
+                            // list/tuple/dict subclass with no user-defined __iter__:
+                            // iterate the backing primitive directly, matching the
+                            // `for`-loop path (vm.rs `GetIter`) and CPython's
+                            // inherited tp_iter slot behaviour.  A dict subclass also
+                            // gets a size-mutation guard, OrderedDict-aware (#2400).
+                            let type_name = builtin_iter_type_name(&backing);
+                            let items = iter_values(&backing)?;
+                            let mut frame = NativeIterFrame::new(items, type_name);
+                            if backing.as_dict().is_some()
+                                && let Some(recorded_len) =
+                                    crate::interpreter::live_collection_len(&backing)
+                            {
+                                let msg =
+                                    if crate::interpreter::class_is_named_ordered_dict(&class) {
+                                        "OrderedDict mutated during iteration"
+                                    } else {
+                                        "dictionary changed size during iteration"
+                                    };
+                                frame.guard = Some(Box::new(NativeIterGuard {
+                                    container: backing.clone(),
+                                    version: recorded_len as i64,
+                                    kind: GuardVersion::Size,
+                                    msg,
+                                }));
+                            }
+                            Ok(Value::generator(Box::new(frame)))
                         } else if lookup_class_attr(&class, "__getitem__").is_some() {
                             _interp.make_getitem_iter(inst_rc)
                         } else {
