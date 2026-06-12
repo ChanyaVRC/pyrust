@@ -242,7 +242,7 @@ impl Interpreter {
         if let ValueKind::BuiltinFunction(name) = function.kind()
             && let Some((type_name, method)) = name.split_once('.')
             && method.starts_with("__")
-            && builtin_protocol_dunders(type_name).contains(&method)
+            && is_protocol_dunder(type_name, method)
             && let Some(self_arg) = args.first() {
                 let recv = self_arg.value.clone();
                 let recv_is_match = !matches!(recv.kind(), ValueKind::PyInstance(_))
@@ -749,7 +749,7 @@ impl Interpreter {
                 // `call` below has no body for several of these slots and would
                 // leak a RuntimeError).
                 if method.starts_with("__")
-                    && builtin_protocol_dunders(type_name).contains(&method)
+                    && is_protocol_dunder(type_name, method)
                 {
                     if !kw.is_empty() {
                         return Err(pyrust_core::type_err!(
@@ -1297,8 +1297,7 @@ impl Interpreter {
         // constructed by `get_attr` only for `builtin_protocol_dunders`
         // names), so dispatch straight through the operator machinery.
         if method.starts_with("__")
-            && builtin_protocol_dunders(&pyrust_core::builtin_type_name(&receiver))
-                .contains(&method)
+            && is_protocol_dunder(&pyrust_core::builtin_type_name(&receiver), method)
         {
             reject_kwargs!(kw, "{}", method);
             let args_vec: Vec<Value> = std::mem::take(pos);
@@ -1550,10 +1549,10 @@ impl Interpreter {
                             // plain-primitive form instead of leaking a
                             // `RuntimeError` from the per-type `call`.
                             if method.starts_with("__")
-                                && builtin_protocol_dunders(
+                                && is_protocol_dunder(
                                     &pyrust_core::builtin_type_name(&backing),
+                                    method,
                                 )
-                                .contains(&method)
                             {
                                 reject_kwargs!(kw, "{}", method);
                                 let args_vec: Vec<Value> = std::mem::take(pos);
@@ -6869,40 +6868,25 @@ pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
     }
 }
 
-/// Names with `SLOT_PROTOCOL`, as a slice (the historical interface — all
-/// existing consumers do membership checks or iterate for `dir()`).  Filtered
-/// once per type from [`slot_dunder_table`] into a static slice; the per-call
-/// cost is the same match + one atomic load as the old hand-written slices
-/// (this check sits on the plain builtin-method dispatch path, so a map
-/// lookup here measurably regressed `s.upper()` loops).
-pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
-    use std::sync::OnceLock;
-    macro_rules! cached {
-        ($t:literal) => {{
-            static S: OnceLock<Box<[&'static str]>> = OnceLock::new();
-            S.get_or_init(|| {
-                slot_dunder_table($t)
-                    .iter()
-                    .filter(|(_, f)| f & SLOT_PROTOCOL != 0)
-                    .map(|(n, _)| *n)
-                    .collect()
-            })
-        }};
-    }
-    match type_name {
-        "list" => cached!("list"),
-        "str" => cached!("str"),
-        "bytes" => cached!("bytes"),
-        "tuple" => cached!("tuple"),
-        "bytearray" => cached!("bytearray"),
-        "dict" => cached!("dict"),
-        "set" => cached!("set"),
-        "frozenset" => cached!("frozenset"),
-        "int" | "bool" => cached!("int"),
-        "float" => cached!("float"),
-        "complex" => cached!("complex"),
-        _ => &[],
-    }
+/// Membership test for `SLOT_PROTOCOL` names.  A direct scan of the static
+/// flagged table: same rodata locality as the historical hand-written
+/// slices — an OnceLock/Box variant of this check cost ~8% on `s.upper()`
+/// loops because it sits on the plain builtin-method dispatch path.
+#[inline]
+pub(crate) fn is_protocol_dunder(type_name: &str, method: &str) -> bool {
+    slot_dunder_table(type_name)
+        .iter()
+        .any(|&(n, f)| f & SLOT_PROTOCOL != 0 && n == method)
+}
+
+/// Iterate the `SLOT_PROTOCOL` names of a type (the `dir()` merge consumer).
+pub(crate) fn protocol_dunder_names(
+    type_name: &str,
+) -> impl Iterator<Item = &'static str> {
+    slot_dunder_table(type_name)
+        .iter()
+        .filter(|&&(_, f)| f & SLOT_PROTOCOL != 0)
+        .map(|&(n, _)| n)
 }
 
 /// Public method names per built-in type for `dir()`.
@@ -6928,7 +6912,7 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         _ => &[],
     };
     let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
-    for &d in builtin_protocol_dunders(type_name) {
+    for d in protocol_dunder_names(type_name) {
         out.push(d.to_string());
     }
     if type_name == "str" {
@@ -8680,7 +8664,7 @@ impl Interpreter {
         // callers before this point.
         if is_container_protocol_dunder_name(method) {
             let type_name = pyrust_core::builtin_type_name(&receiver);
-            if builtin_protocol_dunders(&type_name).contains(&method) {
+            if is_protocol_dunder(&type_name, method) {
                 if !kw.is_empty() {
                     return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
                 }
@@ -9023,7 +9007,7 @@ impl Interpreter {
         // plain-primitive form rather than leaking a `RuntimeError` from the
         // per-type `call`.
         if prim_method.starts_with("__")
-            && builtin_protocol_dunders(prim_type).contains(&prim_method)
+            && is_protocol_dunder(prim_type, prim_method)
         {
             return self.dispatch_builtin_protocol_dunder(prim_method, backing, args);
         }

@@ -834,7 +834,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // `__len__`) are also registered here so the unbound type-level form
     // (`list.__setitem__(l, 0, 9)`, `list.__add__([1], [2])`) resolves and
     // dispatches through `dispatch_builtin_protocol_dunder`.  The names per
-    // type mirror `calls.rs::builtin_protocol_dunders`.
+    // type derive from `calls.rs::slot_dunder_table` (issue #2406).
     // Issue #2406: the type-attr registrations derive from the single
     // slot-dunder table in calls.rs (`SLOT_ATTR` flag) — previously a second
     // hand-written per-type list "kept in sync" by comment, the same
@@ -1945,7 +1945,7 @@ pub(crate) fn invoke_class_method(
             // and `super().__contains__(...)` calls) before the registry probe.
             if let Some((type_name, method)) = name.split_once('.')
                 && method.starts_with("__")
-                    && builtin_protocol_dunders(type_name).contains(&method)
+                    && is_protocol_dunder(type_name, method)
                 {
                     // Resolve the receiver to its backing primitive when the
                     // instance is a builtin-subclass PyInstance; a plain
