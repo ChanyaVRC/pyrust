@@ -109,6 +109,60 @@ fn get_or_parse_template(template: &str) -> Rc<ParsedTemplate> {
     })
 }
 
+/// Classify an unterminated replacement field (a `{` whose matching `}` was
+/// never found) into CPython 3.12's exact `ValueError` message.  `field` is the
+/// text after the opening `{` to the end of the template.
+///
+/// Mirrors CPython's `MarkupIterator_next` state machine:
+///  * empty field (bare trailing `{`) → `Single '{' encountered in format string`
+///  * field name never closed (`{x`, `{a.b`, `{0[`) → `expected '}' before end of string`
+///  * `!` then end → `end of string while looking for conversion specifier`
+///  * `!c` then a stray char → `expected ':' after conversion specifier`
+///  * format spec (after `:`) never closed (`{x:`, `{x!r:`) → `unmatched '{' in format spec`
+fn classify_unterminated_field(field: &str) -> &'static str {
+    if field.is_empty() {
+        return "Single '{' encountered in format string";
+    }
+    // Field-name phase: scan until a ':' (spec) or '!' (conversion) that is *not*
+    // inside an accessor subscript.  CPython's field_name_split only recognises
+    // the spec/conversion delimiters at bracket depth 0, so `{a[b:c` stays a
+    // field name (→ "expected '}'") rather than entering a spec.
+    let fb = field.as_bytes();
+    let mut in_bracket = false;
+    let mut k = 0;
+    while k < fb.len() {
+        match fb[k] {
+            b'[' => {
+                in_bracket = true;
+                k += 1;
+            }
+            b']' => {
+                in_bracket = false;
+                k += 1;
+            }
+            b':' if in_bracket => k += 1,
+            b'!' if in_bracket => k += 1,
+            b':' => return "unmatched '{' in format spec",
+            b'!' => {
+                // Conversion phase.  The byte after '!' is the conversion char.
+                if fb.get(k + 1).is_none() {
+                    return "end of string while looking for conversion specifier";
+                }
+                // After the conversion char CPython expects ':' (→ spec) or '}'.
+                // A '}' here would have terminated the field, so an unterminated
+                // field can only continue into a spec or hit a stray char.
+                return match fb.get(k + 2) {
+                    None | Some(b':') => "unmatched '{' in format spec",
+                    Some(_) => "expected ':' after conversion specifier",
+                };
+            }
+            _ => k += 1,
+        }
+    }
+    // Reached end of string still inside the field name.
+    "expected '}' before end of string"
+}
+
 /// Parse `template` into [`TemplateSeg`]s, mirroring `format_str_template`'s
 /// scanner exactly.  Structural errors become a trailing [`TemplateSeg::Raise`]
 /// at the failure point rather than aborting the parse, so the renderer can
@@ -151,9 +205,13 @@ fn parse_template(template: &str) -> ParsedTemplate {
             }
             if depth != 0 {
                 flush_lit!();
-                segs.push(TemplateSeg::Raise(
-                    "Single '{' encountered in format string",
-                ));
+                // The field opened at `i` never reached its closing '}'.  Classify
+                // the unterminated field the way CPython's MarkupIterator does so the
+                // message distinguishes a bare '{', an unterminated field name, an
+                // unterminated conversion, and an unterminated format spec.
+                segs.push(TemplateSeg::Raise(classify_unterminated_field(
+                    &template[i + 1..],
+                )));
                 return ParsedTemplate { segs };
             }
             let field = &template[i + 1..j];
