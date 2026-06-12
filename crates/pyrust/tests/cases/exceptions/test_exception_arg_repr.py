@@ -23,3 +23,16 @@ class LRH(list):
     def __hash__(self): return 6
     def __repr__(self): return "OVR"
 t("ke-ovr", lambda: {LRH([1]): 1}[LRH([2])])
+
+# repr(e) / !r / multi-arg / non-KeyError str — all dispatch arg overrides.
+class LO2(list):
+    def __hash__(self): return 6
+    def __repr__(self): return "OVR"
+class LH3(list):
+    def __hash__(self): return 5
+try: {LO2([1]): 1}[LO2([2])]
+except KeyError as e:
+    print(repr(e), f"{e!r}", "{0!r}".format(e))
+print(repr(ValueError(LH3([7]))), repr(ValueError(LO2([7]))))
+print(str(ValueError(LO2([7]))), str(ValueError(LO2([1]), LH3([2]))))
+print(repr(KeyError(LO2([1]), LH3([2]))))

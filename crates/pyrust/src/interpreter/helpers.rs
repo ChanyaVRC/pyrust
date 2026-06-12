@@ -6137,7 +6137,10 @@ pub(crate) fn resolve_zero_arg_super(
 ///
 /// Returns an empty string when there is no visible chain (no `__cause__` /
 /// `__context__`, or the chain is suppressed via `raise X from None`).
-pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
+pub(crate) fn format_exc_chain_prefix(
+    interp: &mut crate::Interpreter,
+    exc_val: &Value,
+) -> String {
     // Collect (exc_value, is_cause) pairs from innermost to outermost.
     let mut chain: Vec<(Value, bool)> = Vec::new();
     let mut seen: HashSet<*const ()> = HashSet::new();
@@ -6205,7 +6208,7 @@ pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
 
     let mut out = String::new();
     for (exc, is_cause) in chain {
-        out.push_str(&format_single_exc_line(&exc));
+        out.push_str(&format_single_exc_line(interp, &exc));
         out.push('\n');
         out.push('\n');
         if is_cause {
@@ -6224,11 +6227,19 @@ pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
 
 /// Format a single exception value as `"ClassName: msg"` (or just `"ClassName"`
 /// when the message is empty).  Used by `format_exc_chain_prefix`.
-fn format_single_exc_line(value: &Value) -> String {
+fn format_single_exc_line(interp: &mut crate::Interpreter, value: &Value) -> String {
     match value.kind() {
         ValueKind::PyInstance(inst) => {
             let class_name = inst.borrow().class.borrow().name.clone();
-            let msg = value.to_py_str();
+            // Dispatch arg __repr__/__str__ overrides like CPython's
+            // traceback printer (issue #2390 review); a raising dunder
+            // falls back to the data-only renderer.
+            let inst_rc = Rc::clone(inst);
+            let cls = Rc::clone(&inst_rc.borrow().class);
+            let msg = crate::interpreter::exception_str_with_dispatch(
+                interp, value, &inst_rc, &cls,
+            )
+            .unwrap_or_else(|_| value.to_py_str());
             if msg.is_empty() {
                 class_name
             } else {
@@ -6317,7 +6328,7 @@ pub(crate) fn call_del_if_last_binding(
         // instance — matching CPython's `ValueError: oops` output.
         // For other PyError variants, Display already formats as "ClassName: msg".
         match &e {
-            PyError::Raised(v) => eprintln!("{}", format_single_exc_line(v)),
+            PyError::Raised(v) => eprintln!("{}", format_single_exc_line(interp, v)),
             _ => eprintln!("{}", e),
         }
     }

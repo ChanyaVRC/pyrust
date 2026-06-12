@@ -303,7 +303,20 @@ impl Interpreter {
                     PyError::Runtime(s) => format!("RuntimeError: {s}"),
                     PyError::Named(cls, s) => format!("{cls}: {s}"),
                     PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
-                    PyError::KeyError(key) => format!("KeyError: {}", key.repr()),
+                    PyError::KeyError(key) => {
+                        // The raw-key fast-path variant: dispatch the key's
+                        // __repr__ like CPython's traceback printer (issue
+                        // #2390 review); a raising dunder falls back to the
+                        // data-only repr.
+                        let key_repr = if matches!(key.kind(), ValueKind::PyInstance(_)) {
+                            let key_cloned = key.clone();
+                            render_instance_repr(self, &key_cloned)
+                                .unwrap_or_else(|_| key.repr())
+                        } else {
+                            key.repr()
+                        };
+                        format!("KeyError: {key_repr}")
+                    }
                     PyError::NameError { class_name, message, .. } => {
                         format!("{class_name}: {message}")
                     }
@@ -353,10 +366,15 @@ impl Interpreter {
                     PyError::Raised(value) => match value.kind() {
                         ValueKind::PyInstance(inst) => {
                             let class_name = inst.borrow().class.borrow().name.clone();
-                            // to_py_str() uses exception_to_string() which correctly
-                            // handles KeyError (repr of single arg) and multi-arg
-                            // exceptions (tuple notation), matching CPython __str__.
-                            let msg = value.to_py_str();
+                            // exception_str_with_dispatch handles KeyError (repr of
+                            // single arg) and multi-arg exceptions (tuple notation),
+                            // dispatching arg __repr__/__str__ overrides like CPython's
+                            // traceback printer; a raising dunder falls back to the
+                            // data-only core renderer.
+                            let inst_rc = Rc::clone(inst);
+                            let cls = Rc::clone(&inst_rc.borrow().class);
+                            let msg = exception_str_with_dispatch(self, value, &inst_rc, &cls)
+                                .unwrap_or_else(|_| value.to_py_str());
                             if msg.is_empty() {
                                 class_name
                             } else {
@@ -371,7 +389,7 @@ impl Interpreter {
                 // banner ("The above exception was the direct cause of..."
                 // or "During handling of the above exception...").
                 let chain_prefix = if let PyError::Raised(exc_val) = e {
-                    format_exc_chain_prefix(exc_val)
+                    format_exc_chain_prefix(self, exc_val)
                 } else {
                     String::new()
                 };
