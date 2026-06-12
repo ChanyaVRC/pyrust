@@ -1457,6 +1457,11 @@ impl Interpreter {
         // of the raise/catch path — and materialising on first read of
         // `__traceback__` keeps the hot path off `build_code_object` while
         // preserving identical Python-visible behaviour.
+        // Consume the bare-re-raise marker (issue #2367) unconditionally, so it
+        // never leaks past the catch that handles the re-raised exception even
+        // when the caught value is not a `PyInstance`.  A bare `raise` rebuilds
+        // the chain fresh instead of prepending onto the carried chain.
+        let is_bare_reraise = std::mem::take(&mut self.reraise_is_bare);
         if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
             // Issue #2359: if the exception already carries a *materialised* real
             // traceback (because a `with`-statement's `__exit__` — or any earlier
@@ -1469,32 +1474,29 @@ impl Interpreter {
             // exception has crossed a frame boundary the snapshot grew, so the
             // chain differs and we rebuild (matching CPython, which prepends the
             // new frame and yields a distinct head object).
-            // Single key scan: `__traceback__` is pre-initialised on every
-            // exception instance, so the common path (fresh exception, slot
-            // holds None) is one `get_mut` + an overwrite — the same cost as
-            // the unconditional insert this replaced.  The frame-count probe
-            // uses the non-cloning length accessor; only the keep case (an
-            // earlier read materialised the chain in this same frame) walks
-            // the chain.
-            if !pyrust_core::any_tb_materialized() {
-                // No deferred placeholder has ever been materialised on this
-                // thread, so no exception can be carrying a real chain — skip
-                // the probe (it costs ~8% on a tight raise/catch loop).
-                let tb = self.build_deferred_traceback(catch_lineno as i64);
-                inst_rc.borrow_mut().attrs.insert("__traceback__", tb);
-            } else {
-                let mut inst = inst_rc.borrow_mut();
-                if let Some(slot) = inst.attrs.get_mut("__traceback__") {
-                    let keep_existing = pyrust_builtins::traceback::is_traceback(slot)
-                        && pyrust_builtins::traceback::chain_len(slot)
-                            == pyrust_core::captured_error_frames_len() + 1;
-                    if !keep_existing {
-                        *slot = self.build_deferred_traceback(catch_lineno as i64);
-                    }
-                } else {
-                    let tb = self.build_deferred_traceback(catch_lineno as i64);
-                    inst.attrs.insert("__traceback__", tb);
+            // Issue #2367: when the slot already carries a chain (the exception
+            // is being re-raised / carried across a frame), CPython prepends the
+            // re-raising frame onto the existing chain rather than discarding it.
+            // `caught_traceback_value` decides between a plain build (fresh
+            // exception, slot is `None`), keeping the existing object (same-frame
+            // identity from #2359/#2366), and a prepend.
+            //
+            // Single key scan: `__traceback__` is pre-initialised to `None` on
+            // every exception instance, so the common path (fresh exception) is
+            // one `get_mut`, an `is_none()` check, then an overwrite — the same
+            // cost as the unconditional insert this replaced.  The frame-count
+            // probe and prepend only run once the slot holds a real/deferred
+            // chain, i.e. a genuine re-raise.
+            let mut inst = inst_rc.borrow_mut();
+            if let Some(slot) = inst.attrs.get_mut("__traceback__") {
+                if let Some(new_tb) =
+                    self.caught_traceback_value(slot, catch_lineno as i64, is_bare_reraise)
+                {
+                    *slot = new_tb;
                 }
+            } else {
+                let tb = self.build_deferred_traceback(catch_lineno as i64);
+                inst.attrs.insert("__traceback__", tb);
             }
         }
         // Save the current active_exception BEFORE the dedup-pop below.
@@ -2988,6 +2990,15 @@ impl Interpreter {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
                     self.attach_implicit_context(&exc);
+                    // Issue #2367: `raise e` / `raise e.with_traceback(tb)` on an
+                    // exception that already carries a traceback is a re-raise.
+                    // CPython keeps the carried chain and *prepends* the frames
+                    // this new raise unwinds through.  Reset the captured-frame
+                    // snapshot so the stale frames of the original raise are not
+                    // re-counted; the catch site links the carried chain on as
+                    // the tail (see `caught_traceback_value`).
+                    self.reraise_is_bare = false;
+                    self.reset_captured_frames_if_reraise(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseFrom(src, cause_reg) => {
@@ -3008,6 +3019,9 @@ impl Interpreter {
                             .attrs
                             .insert("__suppress_context__", Value::bool_(true));
                     }
+                    // Issue #2367: same re-raise prepend handling as RaiseValue.
+                    self.reraise_is_bare = false;
+                    self.reset_captured_frames_if_reraise(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseReRaise => {
@@ -3034,6 +3048,22 @@ impl Interpreter {
                     if self.exc_saved_active.len() > exc_saved_active_frame_base {
                         self.active_exception = self.exc_saved_active.pop().unwrap();
                     }
+                    // Issue #2367: a *bare* `raise` (and the implicit re-raise at
+                    // the end of a finally / unmatched-except chain) re-raises the
+                    // currently-handled exception without prepending a node for
+                    // the re-raising frame — CPython keeps the existing chain and
+                    // extends it only as the exception unwinds to outer frames.
+                    // pyrust does not yet model the bare form precisely (the
+                    // re-raising frame's node keeps the bare-`raise` line rather
+                    // than the original raise line — a pre-existing divergence out
+                    // of #2367's explicit `raise e` / `with_traceback` scope).
+                    // Mark the next catch so it rebuilds the chain from the
+                    // captured unwind frames (the pre-#2367 behaviour) instead of
+                    // prepending onto the carried chain, which would double-count
+                    // this frame.  The same-frame identity keep (issue #2359/#2366)
+                    // still wins inside `caught_traceback_value`, so a `with`
+                    // `__exit__` re-raise keeps the very object it observed.
+                    self.reraise_is_bare = true;
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
 

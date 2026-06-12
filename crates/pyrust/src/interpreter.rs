@@ -236,6 +236,14 @@ pub struct Interpreter {
     /// exception raised inside the finally block to get a `None` context
     /// instead of the correct value.
     pub(crate) push_exc_ctx_depth: u32,
+    /// Set by a bare `raise` / implicit re-raise (`RaiseReRaise`) and consumed
+    /// by the next catch site (issue #2367).  When set, the catch rebuilds the
+    /// traceback from the captured unwind frames rather than *prepending* onto
+    /// the exception's carried chain — bare re-raise keeps the original chain's
+    /// head line, which pyrust's prepend path would otherwise double-count.
+    /// An explicit `raise e` / `raise e.with_traceback(...)` clears it, so the
+    /// prepend path (issue #2367's actual scope) runs for those.
+    pub(crate) reraise_is_bare: bool,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -376,6 +384,7 @@ impl Default for Interpreter {
             globals_accessed: false,
             global_env_version: Cell::new(0),
             push_exc_ctx_depth: 0,
+            reraise_is_bare: false,
         }
     }
 }

@@ -435,6 +435,7 @@ impl Interpreter {
         captured: &[pyrust_core::FrameInfo],
         catch_func: Option<&UserFunction>,
         catch_lineno: i64,
+        tail: Value,
     ) -> Value {
         // Determine the catching frame's code object.
         let catch_code = match catch_func {
@@ -444,7 +445,14 @@ impl Interpreter {
 
         // Build the chain from innermost (tb_next == None) outward, so the
         // outermost node is returned last and links to the rest via tb_next.
-        let mut node = Value::none();
+        //
+        // `tail` is the already-materialised chain that this snapshot's frames
+        // are *prepended* onto (issue #2367): when an exception that already
+        // carries a traceback is re-raised, CPython prepends the re-raising
+        // frame(s) and links the new innermost node's `tb_next` to the old
+        // chain — which stays as the tail, same objects (identity contract).
+        // For a fresh catch the tail is `None`.
+        let mut node = tail;
 
         // Innermost-last: walk the captured frames from the END (innermost)
         // toward the front (outermost callee).
@@ -487,6 +495,20 @@ impl Interpreter {
     /// the Python-visible behaviour is identical to the eager build (issue
     /// #2351).
     pub(crate) fn build_deferred_traceback(&self, catch_lineno: i64) -> Value {
+        self.build_deferred_traceback_with_tail(catch_lineno, Value::none())
+    }
+
+    /// Like [`Self::build_deferred_traceback`] but the materialised chain will be
+    /// *prepended* onto `tail` (issue #2367).  `tail` is the existing traceback
+    /// carried by a re-raised exception — either a real `traceback` chain or a
+    /// still-deferred placeholder; it is materialised at read time so the new
+    /// innermost node's `tb_next` is a real node with stable identity, matching
+    /// CPython's prepend-and-reuse-tail behaviour.
+    pub(crate) fn build_deferred_traceback_with_tail(
+        &self,
+        catch_lineno: i64,
+        tail: Value,
+    ) -> Value {
         let captured = pyrust_core::clone_captured_error_frames();
         let catch_func = self
             .vm_frame_views
@@ -496,6 +518,7 @@ impl Interpreter {
             frames: captured,
             catch_func,
             catch_lineno,
+            tail,
         });
         Value::builtin_object(DEFERRED_TRACEBACK_OPS, state)
     }
@@ -510,12 +533,128 @@ impl Interpreter {
         if ops.type_name() != DEFERRED_TRACEBACK_NAME {
             return None;
         }
-        let borrow = state.borrow();
-        let s = borrow.downcast_ref::<DeferredTracebackState>()?;
+        // Clone out the snapshot fields, then drop the borrow before recursing
+        // into the tail (which may itself be a deferred placeholder sharing no
+        // lock, but keeping the borrow narrow is cleaner).
+        let (frames, catch_func, catch_lineno, tail) = {
+            let borrow = state.borrow();
+            let s = borrow.downcast_ref::<DeferredTracebackState>()?;
+            (
+                s.frames.clone(),
+                s.catch_func.clone(),
+                s.catch_lineno,
+                s.tail.clone(),
+            )
+        };
         // Flip the catch-site fast path off: a materialised chain now exists,
         // so later catches must probe before re-deferring (identity contract).
         pyrust_core::note_tb_materialized();
-        Some(self.build_traceback_from_snapshot(&s.frames, s.catch_func.as_deref(), s.catch_lineno))
+        // Materialise the carried tail first (issue #2367) so the prepended
+        // frames link to a real chain with stable identity.  A `None` tail (the
+        // common fresh-catch case) materialises to itself.
+        let tail = self.materialize_deferred_traceback(&tail).unwrap_or(tail);
+        Some(self.build_traceback_from_snapshot(
+            &frames,
+            catch_func.as_deref(),
+            catch_lineno,
+            tail,
+        ))
+    }
+
+    /// When `exc` is being re-raised by an explicit `raise e` /
+    /// `raise e.with_traceback(tb)` and already carries a traceback, reset the
+    /// captured unwind-frame snapshot (issue #2367).
+    ///
+    /// CPython keeps the carried traceback chain and *prepends* the frames the
+    /// re-raise newly unwinds through.  pyrust models that by treating the
+    /// carried chain as the tail at the next catch site and rebuilding the
+    /// prefix from frames captured *after* this point — so the stale frames of
+    /// the original raise must be cleared here, otherwise they would be counted
+    /// twice (once in the carried tail, once in the freshly-rebuilt prefix).
+    pub(crate) fn reset_captured_frames_if_reraise(&self, exc: &Value) {
+        let ValueKind::PyInstance(inst) = exc.kind() else {
+            return;
+        };
+        let has_tb = inst
+            .borrow()
+            .attrs
+            .get("__traceback__")
+            .is_some_and(|tb| !tb.is_none());
+        if has_tb {
+            pyrust_core::reset_captured_error_frames();
+        }
+    }
+
+    /// True when `value` is a deferred-traceback placeholder (not yet
+    /// materialised).
+    pub(crate) fn is_deferred_traceback(value: &Value) -> bool {
+        matches!(
+            value.kind(),
+            ValueKind::BuiltinObject { ops, .. } if ops.type_name() == DEFERRED_TRACEBACK_NAME
+        )
+    }
+
+    /// Compute the `__traceback__` value to store for an exception being caught
+    /// at `catch_lineno`, given whatever the exception's `__traceback__` slot
+    /// currently holds (`existing`).
+    ///
+    /// Three cases (issue #2367):
+    ///  * `existing` is `None` — a *fresh* exception; build a deferred chain
+    ///    from the captured unwind frames (the hot path).
+    ///  * `existing` already represents the chain *this same frame* built (the
+    ///    `with`/`__exit__` same-frame identity case from issue #2359/#2366):
+    ///    return `None` so the caller keeps the existing object unchanged.
+    ///  * `existing` holds a carried/re-raised chain from another frame: build a
+    ///    new deferred chain whose materialised frames are *prepended* onto the
+    ///    existing chain, so CPython's "prepend the re-raising frame, keep the
+    ///    old tail" behaviour is reproduced.
+    ///
+    /// `is_bare_reraise` is set when the in-flight exception reached this catch
+    /// via a *bare* `raise` (issue #2367): bare re-raise rebuilds the chain
+    /// fresh from the captured frames instead of prepending, matching the
+    /// pre-#2367 behaviour (the precise bare-form prepend is a separate
+    /// divergence — see the issue's out-of-scope note).
+    ///
+    /// Returns `Some(new_value)` to store, or `None` to leave the slot untouched.
+    pub(crate) fn caught_traceback_value(
+        &self,
+        existing: &Value,
+        catch_lineno: i64,
+        is_bare_reraise: bool,
+    ) -> Option<Value> {
+        // Fresh exception (slot still the pre-initialised `None`): plain build.
+        if existing.is_none() {
+            return Some(self.build_deferred_traceback(catch_lineno));
+        }
+        // Slot already carries a chain (real traceback or deferred placeholder).
+        let is_real = pyrust_builtins::traceback::is_traceback(existing);
+        let is_deferred = Self::is_deferred_traceback(existing);
+        if !is_real && !is_deferred {
+            // Some non-traceback value (shouldn't normally happen, but be safe):
+            // overwrite with a fresh build, matching the historical behaviour.
+            return Some(self.build_deferred_traceback(catch_lineno));
+        }
+        // Same-frame identity (issue #2359/#2366): a *materialised* chain whose
+        // length matches the frames captured for *this* catch was built in this
+        // very frame; keep it so the object an inner `with`/`except` saw is
+        // identical to the one this `except` reads.  Re-deferring or prepending
+        // would mint a distinct head and break that contract.  This wins even
+        // for a bare re-raise (a `with` `__exit__` re-raises via the bare form).
+        if is_real
+            && pyrust_builtins::traceback::chain_len(existing)
+                == pyrust_core::captured_error_frames_len() + 1
+        {
+            return None;
+        }
+        // Bare `raise` across a frame boundary: rebuild fresh from the captured
+        // frames (issue #2367 out-of-scope, preserves pre-#2367 behaviour).
+        if is_bare_reraise {
+            return Some(self.build_deferred_traceback(catch_lineno));
+        }
+        // Explicit `raise e` / `raise e.with_traceback(...)` carried / re-raised
+        // across a frame boundary: prepend the new frames onto the existing
+        // chain, keeping the old chain as the tail (issue #2367).
+        Some(self.build_deferred_traceback_with_tail(catch_lineno, existing.clone()))
     }
 }
 
@@ -532,6 +671,10 @@ pub(crate) struct DeferredTracebackState {
     frames: Vec<pyrust_core::FrameInfo>,
     catch_func: Option<Rc<UserFunction>>,
     catch_lineno: i64,
+    /// Existing traceback chain this snapshot's frames are prepended onto when
+    /// materialised (issue #2367).  `None` for a fresh catch; a real or deferred
+    /// traceback for a re-raised / carried exception.
+    tail: Value,
 }
 
 pub(crate) struct DeferredTracebackOps;
