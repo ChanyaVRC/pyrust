@@ -7343,7 +7343,7 @@ impl Interpreter {
                 .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
                 .unwrap_or(false);
             if !has_user_str {
-                return Ok(value.to_py_str());
+                return exception_str_with_dispatch(self, value, &inst_rc, &class);
             }
         }
         // Try user-defined __str__ first.  Skip `object.__str__` when the
@@ -7820,6 +7820,78 @@ pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -
     }
 }
 
+/// `str()` of an exception instance that has no user-defined `__str__`.
+/// Mostly the data-only `Value::to_py_str()` fallback, with one
+/// interpreter-needing case split out: `KeyError.__str__` is
+/// `repr(args[0])`, and a `PyInstance` key may carry a user `__repr__`
+/// override that core cannot dispatch (issue #2389).  Shared by `str(x)` /
+/// `print` (`render_instance_str`) and the format `!s` path
+/// (`render_value_as_str`).
+pub(crate) fn exception_str_with_dispatch(
+    interp: &mut Interpreter,
+    value: &Value,
+    inst_rc: &Rc<RefCell<pyrust_core::PyInstance>>,
+    class: &Rc<RefCell<pyrust_core::PyClass>>,
+) -> Result<String> {
+    let args = exception_instance_args(inst_rc);
+    // Only exceptions using the GENERIC BaseException.__str__ take the
+    // dispatch path: OSError / SyntaxError chains have dedicated __str__
+    // formats built from str/int attrs (no user dunders involved) — core's
+    // data-only renderer is exact for them.
+    if args.iter().any(|a| matches!(a.kind(), ValueKind::PyInstance(_)))
+        && !crate::interpreter::class_chain_contains_name(class, "OSError")
+        && !crate::interpreter::class_chain_contains_name(class, "SyntaxError")
+    {
+        // KeyError.__str__ = repr(args[0]); generic single-arg = str(args[0]);
+        // multi-arg = repr of the args tuple ("(r0, r1, ...)").
+        if crate::interpreter::class_chain_contains_name(class, "KeyError") {
+            if let [arg] = args.as_slice() {
+                return render_instance_repr(interp, arg);
+            }
+        } else if let [arg] = args.as_slice() {
+            return interp.render_value_as_str(arg);
+        }
+        if args.len() > 1 {
+            let mut parts = Vec::with_capacity(args.len());
+            for a in &args {
+                parts.push(render_instance_repr(interp, a)?);
+            }
+            return Ok(format!("({})", parts.join(", ")));
+        }
+    }
+    Ok(value.to_py_str())
+}
+
+/// `repr()` of an exception instance whose args contain `PyInstance` values:
+/// CPython's `BaseException.__repr__` is `Name(repr(a0), repr(a1), …)` with
+/// each arg's `__repr__` dispatched — core's data-only `exception_repr` can
+/// only handle the inherited-backing case (issue #2389/#2390 review).
+/// Returns `None` when the data-only renderer is exact (no instance args).
+pub(crate) fn exception_repr_with_dispatch(
+    interp: &mut Interpreter,
+    inst_rc: &Rc<RefCell<pyrust_core::PyInstance>>,
+) -> Result<Option<String>> {
+    let args = exception_instance_args(inst_rc);
+    if !args.iter().any(|a| matches!(a.kind(), ValueKind::PyInstance(_))) {
+        return Ok(None);
+    }
+    let class_name = inst_rc.borrow().class.borrow().name.clone();
+    let mut parts = Vec::with_capacity(args.len());
+    for a in &args {
+        parts.push(render_instance_repr(interp, a)?);
+    }
+    Ok(Some(format!("{class_name}({})", parts.join(", "))))
+}
+
+/// The exception instance's `args` tuple (empty when unset / not a tuple).
+fn exception_instance_args(inst_rc: &Rc<RefCell<pyrust_core::PyInstance>>) -> Vec<Value> {
+    let borrowed = inst_rc.borrow();
+    match borrowed.attrs.get("args").map(|v| v.kind()) {
+        Some(ValueKind::Tuple(items)) => items.to_vec(),
+        _ => Vec::new(),
+    }
+}
+
 /// Renders a value using its `__repr__` dunder for the `!r` conversion flag in
 /// `str.format`.  Mirrors the `repr()` builtin's dispatch: for `PyInstance`
 /// values, looks up `__repr__` via MRO, calls it, and validates the return is a
@@ -7845,6 +7917,18 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
         // CPython's `list.__repr__`, `dict.__repr__`, etc. behaviour.
         let is_object_repr =
             matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__repr__"));
+        // Builtin BaseException.__repr__ sentinel: render arg reprs with
+        // interpreter dispatch when any arg is a PyInstance — core's
+        // data-only exception_repr cannot honour a user __repr__ override
+        // on an arg (issue #2389/#2390 review).  A user-defined __repr__
+        // on the exception class itself is not a BuiltinFunction and takes
+        // the normal invoke below.
+        if matches!(method_val.kind(), ValueKind::BuiltinFunction(_))
+            && pyrust_core::is_exception_instance(&inst_rc)
+            && let Some(rendered) = exception_repr_with_dispatch(interp, &inst_rc)?
+        {
+            return Ok(rendered);
+        }
         if !is_object_repr || instance_builtin_data(&inst_rc).is_none() {
             let result = invoke_class_method(
                 interp,

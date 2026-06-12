@@ -9291,6 +9291,19 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             // `list.__repr__`, `dict.__repr__`, etc. behaviour.
             let is_object_repr =
                 matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__repr__"));
+            // Builtin BaseException.__repr__ sentinel: render arg reprs with
+            // interpreter dispatch when any arg is a PyInstance — core's
+            // data-only exception_repr cannot honour a user __repr__
+            // override on an arg (issue #2390 review).
+            if matches!(method_val.kind(), ValueKind::BuiltinFunction(_))
+                && pyrust_core::is_exception_instance(&instance_rc)
+                && let Some(rendered) = crate::interpreter::exception_repr_with_dispatch(
+                    interp,
+                    &instance_rc,
+                )?
+            {
+                return Ok(rendered);
+            }
             if !is_object_repr || instance_builtin_data(&instance_rc).is_none() {
                 let result = invoke_class_method(
                     interp,
@@ -9746,7 +9759,7 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
             .unwrap_or(false);
         if !has_user_str {
-            return Ok(value.to_py_str());
+            return crate::interpreter::exception_str_with_dispatch(interp, value, &inst_rc, &class);
         }
     }
     // Issue #1204 / #1564: if this instance subclasses a scalar primitive,
