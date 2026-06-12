@@ -1549,10 +1549,8 @@ pyrust_module! {
                         // directly and pick the container-specific mutation message —
                         // rather than dispatching `dict.__iter__`, which always reports
                         // plain dict's wording.
-                        let user_iter = lookup_class_attr(&class, "__iter__").filter(|m| {
-                            !(matches!(m.kind(), ValueKind::BuiltinFunction(_))
-                                && instance_builtin_data(&inst_rc).is_some())
-                        });
+                        let user_iter =
+                            crate::interpreter::effective_user_iter(&class, &inst_rc);
                         if let Some(method_val) = user_iter {
                             let iter_obj = invoke_class_method(
                                 _interp,
@@ -1592,12 +1590,7 @@ pyrust_module! {
                                 && let Some(recorded_len) =
                                     crate::interpreter::live_collection_len(&backing)
                             {
-                                let msg =
-                                    if crate::interpreter::class_is_named_ordered_dict(&class) {
-                                        "OrderedDict mutated during iteration"
-                                    } else {
-                                        "dictionary changed size during iteration"
-                                    };
+                                let msg = crate::interpreter::dict_subclass_mutation_msg(&class);
                                 frame.guard = Some(Box::new(NativeIterGuard {
                                     container: backing.clone(),
                                     version: recorded_len as i64,
