@@ -78,6 +78,40 @@ fn frame_list(stderr: &str) -> Vec<(String, u32)> {
     out
 }
 
+/// For each `File "...", line N, in NAME` frame header, return the *echoed
+/// source line* that follows it (trimmed), or `None` when no source line was
+/// emitted under that header.  Caret/tilde underline rows are skipped so the
+/// pairing lands on the source text.  Used by the #2428 tests to assert that
+/// every frame — not just the innermost — echoes its source line.
+fn frame_source_lines(stderr: &str) -> Vec<Option<String>> {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if !t.starts_with("File \"") {
+            continue;
+        }
+        // The source echo, when present, is the next line and is indented with
+        // four spaces (CPython's fixed source-echo indent — deeper than the
+        // two-space `File` header indent).  A frame with no echo is followed
+        // directly by the next `File` header or the column-0 exception class
+        // line, neither of which has that indent.
+        match lines.get(i + 1) {
+            Some(next) if next.starts_with("    ") => {
+                let nt = next.trim();
+                // Guard against an (unexpected) leading caret row.
+                if !nt.is_empty() && !nt.chars().all(|c| c == '^' || c == '~') {
+                    out.push(Some(nt.to_string()));
+                } else {
+                    out.push(None);
+                }
+            }
+            _ => out.push(None),
+        }
+    }
+    out
+}
+
 const CAUSE_BANNER: &str = "The above exception was the direct cause of the following exception:";
 const CONTEXT_BANNER: &str = "During handling of the above exception, another exception occurred:";
 
@@ -437,5 +471,111 @@ fn uncaught_carried_reraise_at_module_scope() {
             ("f".to_string(), 2),
         ],
         "uncaught module-scope re-raise of a carried exception must keep the carried chain",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #2428: every frame of an uncaught traceback echoes its (dedented)
+// source line, not just the innermost raise frame.  Previously the captured
+// frame snapshot recorded `source_line: None` for non-innermost frames, so the
+// formatter printed a `File` header with no source echo under it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn uncaught_every_frame_echoes_source_line() {
+    // <module> 3 -> f 2.  Both frames must echo their source line.
+    let src = "def f():\n    raise ValueError(\"x\")\nf()\n";
+    let stderr = run_pyrust_stderr(src);
+    assert_eq!(
+        frame_source_lines(&stderr),
+        vec![
+            Some("f()".to_string()),
+            Some("raise ValueError(\"x\")".to_string()),
+        ],
+        "every frame must echo its source line (issue #2428), got:\n{stderr}",
+    );
+}
+
+#[test]
+fn uncaught_deep_chain_each_frame_source() {
+    // Four frames: <module> 5 -> f 4 -> g 2.  Each echoes its own line.
+    let src = "def g():\n    raise RuntimeError(\"deep\")\ndef f():\n    g()\nf()\n";
+    let stderr = run_pyrust_stderr(src);
+    assert_eq!(
+        frame_source_lines(&stderr),
+        vec![
+            Some("f()".to_string()),
+            Some("g()".to_string()),
+            Some("raise RuntimeError(\"deep\")".to_string()),
+        ],
+        "deep call chain frames must each echo their source line, got:\n{stderr}",
+    );
+}
+
+#[test]
+fn uncaught_recursion_frames_echo_source() {
+    // Recursion: each repeated `rec` frame echoes `rec(n - 1)`, the deepest
+    // echoes the raise.  Frames: <module> 5 -> rec 4 (x3) -> rec 3.
+    let src = "def rec(n):\n    if n == 0:\n        raise ValueError(\"bottom\")\n    rec(n - 1)\nrec(2)\n";
+    let stderr = run_pyrust_stderr(src);
+    assert_eq!(
+        frame_source_lines(&stderr),
+        vec![
+            Some("rec(2)".to_string()),
+            Some("rec(n - 1)".to_string()),
+            Some("rec(n - 1)".to_string()),
+            Some("raise ValueError(\"bottom\")".to_string()),
+        ],
+        "recursive frames must each echo their source line, got:\n{stderr}",
+    );
+}
+
+#[test]
+fn uncaught_source_line_is_dedented() {
+    // A deeply-indented raise line is echoed dedented (leading whitespace
+    // stripped), matching CPython — the formatter re-indents to four spaces.
+    let src = "def f():\n    if True:\n        raise ValueError(\"nested\")\nf()\n";
+    let stderr = run_pyrust_stderr(src);
+    let sources = frame_source_lines(&stderr);
+    assert_eq!(
+        sources.last().cloned().flatten(),
+        Some("raise ValueError(\"nested\")".to_string()),
+        "the innermost frame's source must be dedented, got:\n{stderr}",
+    );
+    // The called frame (`f`) is also present and dedented.
+    assert!(
+        sources.contains(&Some("f()".to_string())),
+        "the module frame must echo `f()`, got:\n{stderr}",
+    );
+}
+
+#[test]
+fn uncaught_chained_blocks_each_frame_echoes_source() {
+    // `raise ... from e`: frames in BOTH the cause block and the main block
+    // echo their source lines (issue #2428 + #2416).
+    let src = "def inner():\n    raise ValueError(\"orig\")\ndef outer():\n    try:\n        inner()\n    except ValueError as e:\n        raise RuntimeError(\"wrapped\") from e\nouter()\n";
+    let stderr = run_pyrust_stderr(src);
+    let (blocks, banners) = split_chain_blocks(&stderr);
+    assert_eq!(banners, vec![CAUSE_BANNER.to_string()]);
+    assert_eq!(blocks.len(), 2);
+    // Cause block (ValueError): outer 5 -> inner 2.
+    assert_eq!(
+        frame_source_lines(&blocks[0]),
+        vec![
+            Some("inner()".to_string()),
+            Some("raise ValueError(\"orig\")".to_string()),
+        ],
+        "cause block frames must echo their source lines, got:\n{}",
+        blocks[0]
+    );
+    // Main block (RuntimeError): <module> 8 -> outer 7.
+    assert_eq!(
+        frame_source_lines(&blocks[1]),
+        vec![
+            Some("outer()".to_string()),
+            Some("raise RuntimeError(\"wrapped\") from e".to_string()),
+        ],
+        "main block frames must echo their source lines, got:\n{}",
+        blocks[1]
     );
 }

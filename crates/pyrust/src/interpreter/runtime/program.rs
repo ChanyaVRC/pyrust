@@ -325,7 +325,29 @@ impl Interpreter {
                 };
                 match tb_inner {
                     Some(tb_frames) => frames.extend(tb_frames),
-                    None => frames.extend(inner_frames),
+                    None => {
+                        // Issue #2428: the captured snapshot records each call
+                        // frame's `(filename, lineno)` but leaves `source_line`
+                        // as `None` — resolving the text at capture time would
+                        // put a per-frame line scan on the unwind path.  CPython
+                        // echoes the (dedented) source line under *every* frame,
+                        // so fill it in here on the cold print path before the
+                        // formatter runs.  Same-file frames resolve from the
+                        // script `src` we already hold; other files fall back to
+                        // a linecache-style disk read (skipped for `<…>` pseudo
+                        // filenames such as `<stdin>` / `<unknown>`).
+                        for mut fi in inner_frames {
+                            if fi.source_line.is_none() {
+                                fi.source_line = resolve_frame_source_line(
+                                    &fi.filename,
+                                    fi.lineno,
+                                    filename.as_ref(),
+                                    src,
+                                );
+                            }
+                            frames.push(fi);
+                        }
+                    }
                 }
                 let error_line = match e {
                     PyError::Lex(s) => format!("Lex error: {s}"),
@@ -974,6 +996,52 @@ fn lex_parse_to_exc(e: PyError) -> PyError {
 /// CPython reports as `IndentationError` rather than a bare `SyntaxError`.
 fn is_indentation_message(msg: &str) -> bool {
     msg == "too many levels of indentation"
+}
+
+/// Resolve the source-line text for a captured traceback frame (issue #2428).
+///
+/// CPython echoes the (dedented) source line under *every* `File` header in an
+/// uncaught traceback.  The captured-frame snapshot only carries `(filename,
+/// lineno)` — recording the text at unwind time would put a per-frame line scan
+/// on the hot path — so this runs on the cold print path instead.
+///
+/// - Frames in the running script (`frame_file == script_file`) resolve from the
+///   `script_src` we already hold in memory.
+/// - Frames in another file fall back to a `linecache`-style disk read, matching
+///   CPython's `traceback` module (which re-reads source from disk).
+/// - Pseudo filenames (`<stdin>`, `<string>`, `<unknown>`, …) and the no-line
+///   case yield `None`, so the formatter omits the source echo for them.
+///
+/// The returned text is fully dedented (leading whitespace stripped); the
+/// formatter re-indents it to a fixed four spaces, matching CPython.
+fn resolve_frame_source_line(
+    frame_file: &str,
+    lineno: Option<u32>,
+    script_file: &str,
+    script_src: &str,
+) -> Option<std::sync::Arc<str>> {
+    let n = lineno? as usize;
+    if n == 0 {
+        return None;
+    }
+    let pick = |text: &str| -> Option<std::sync::Arc<str>> {
+        text.lines()
+            .nth(n - 1)
+            .map(|l| std::sync::Arc::from(l.trim()))
+    };
+    if frame_file == script_file {
+        if script_src.is_empty() {
+            return None;
+        }
+        return pick(script_src);
+    }
+    // A different file: skip `<…>` pseudo filenames (no real file on disk) and
+    // read the line from disk as CPython's linecache would.
+    if frame_file.starts_with('<') {
+        return None;
+    }
+    let contents = std::fs::read_to_string(frame_file).ok()?;
+    pick(&contents)
 }
 
 /// Synthesize the `<string>` traceback frame for an exception raised inside
