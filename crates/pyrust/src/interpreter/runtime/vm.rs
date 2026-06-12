@@ -3351,6 +3351,16 @@ impl Interpreter {
                     regs[*func as usize] = vm_try!(res);
                 }
 
+                Insn::CallEx { func, npos, kwargs } => {
+                    // Double-splat expansion call `f(<pos…>, **d)` (issue #2393).
+                    // `R[func+1 .. func+1+npos]` are positionals; `R[kwargs]` is the
+                    // `**d` source mapping.  Result is written back to `R[func]`.
+                    // Full body (shape-cache lookup / fill + fast bind + slow-path
+                    // fallback) lives in fast_path.rs::exec_call_ex.
+                    let res = self.exec_call_ex(&regs, code, pc, *func, *npos, *kwargs, num_locals);
+                    regs[*func as usize] = vm_try!(res);
+                }
+
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
                     // Method-call trampoline (#2345): on an inline-cache hit for
                     // a plain Python method, bind the receiver to `self` and loop

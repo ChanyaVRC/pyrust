@@ -55,6 +55,32 @@
 /// Returns `None` for anything that is not a `set` / `frozenset` (or subclass
 /// thereof) — dict views, lists, etc. — leaving those to the materialising
 /// `coerce_set_operand` path.
+/// Shape guard for the `Insn::CallEx` (`f(**d)`) cache (issue #2393): does the
+/// `dict` `Value` `d`'s key set equal `keyset` (the cached `str` keys), in the
+/// same iteration order?  Returns `false` for a non-`dict`, a length mismatch,
+/// any non-`str` key, or any out-of-order / differing key.  Plain value mutation
+/// of `d` (same keys, new values) keeps the keys identical → still a hit.
+#[inline]
+fn dict_keys_match(d: &Value, keyset: &[Box<str>]) -> bool {
+    d.dict_with(|dict| {
+        if dict.len() != keyset.len() {
+            return false;
+        }
+        for (k, expected) in dict.keys().zip(keyset.iter()) {
+            match k {
+                pyrust_core::PyKey::Str(s) => {
+                    if s.as_str() != Some(expected.as_ref()) {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    })
+    .unwrap_or(false)
+}
+
 #[inline]
 fn set_direct_value(v: &Value) -> Option<(Value, bool)> {
     if matches!(v.kind(), ValueKind::Set(_)) {
@@ -1771,6 +1797,231 @@ impl Interpreter {
         let call_result = self.call_function_expanded(func_val, &buf);
         self.call_arg_buf = buf;
         call_result
+    }
+
+    /// Full body of `Insn::CallEx` — a double-splat expansion call `f(<pos…>,
+    /// **d)` (issue #2393).  Positionals occupy `R[func+1 .. func+1+npos]`;
+    /// `R[kwargs]` holds the `**d` source mapping.  Returns the call result.
+    ///
+    /// Fast path: a plain `Regular` `UserFunction` callee and a plain `dict`
+    /// splat.  A per-call-site shape cache ([`KwCallCacheEntry::ExSimple`]) keyed
+    /// on `(param_binds identity, npos, dict key-set)` records the key→slot
+    /// mapping; on a hit (same callee, same `npos`, same keys in order) the
+    /// positional and dict values bind straight into their parameter slots via
+    /// the #2382 `call_user_function_kw_cached`, with **no dict copy** and **no
+    /// name scan**.  On a key-set miss the site re-resolves (the dict shape may
+    /// have changed, e.g. value mutation never does but a different `**d` might);
+    /// a structurally non-simple callee (has `**kwargs`, posonly-as-keyword, a
+    /// duplicate, a missing required, etc.) pins the site to `Fallback`.
+    ///
+    /// Slow path: anything else — non-dict splat, dict subclass, non-`Regular`
+    /// callee, non-`str` key, or a `Fallback`-pinned site — builds an
+    /// `ExpandedCallArg` buffer and dispatches through `call_function_expanded`,
+    /// which owns every CPython-parity binding diagnostic.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_call_ex(
+        &mut self,
+        regs: &RegSlice,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        func: crate::bytecode::Reg,
+        npos: u8,
+        kwargs: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        use crate::bytecode::KwCallCacheEntry;
+        let npos = npos as usize;
+        let func_val = vm_read(regs, func, num_locals)?;
+        let kwargs_val = vm_read(regs, kwargs, num_locals)?;
+
+        // Fast path requires a plain user function (Regular kind) and a plain
+        // `dict` splat (not a subclass, whose iteration may be overridden).
+        let user_fn = match func_val.kind() {
+            ValueKind::UserFunction(f)
+                if matches!(f.kind, pyrust_core::UserFunctionKind::Regular) =>
+            {
+                Some(Rc::clone(f))
+            }
+            _ => None,
+        };
+        let is_plain_dict = matches!(kwargs_val.kind(), ValueKind::Dict(_));
+
+        if let (Some(f), true) = (user_fn, is_plain_dict) {
+            let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
+
+            // Cache state: a hit reuses `slots`; a key-set/identity miss re-resolves
+            // (unless pinned to `Fallback`).
+            enum Action {
+                Hit(smallvec::SmallVec<[u32; 4]>),
+                Resolve,
+                Fallback,
+            }
+            let action = {
+                let cache = code.kwcall_cache.borrow();
+                match &cache[pc - 1] {
+                    KwCallCacheEntry::ExSimple { param_binds_ptr, npos: cnpos, keyset, slots }
+                        if *param_binds_ptr == pbptr
+                            && *cnpos as usize == npos
+                            && dict_keys_match(&kwargs_val, keyset) =>
+                    {
+                        Action::Hit(slots.clone())
+                    }
+                    KwCallCacheEntry::Fallback => Action::Fallback,
+                    _ => Action::Resolve,
+                }
+            };
+
+            match action {
+                Action::Hit(slots) => {
+                    return self.call_ex_fast_bind(&f, regs, func, npos, &kwargs_val, &slots, num_locals);
+                }
+                Action::Resolve => {
+                    // Read the dict's keys (in iteration order) as a kwnames vec to
+                    // feed the shared resolver.  Bail to the slow path on any
+                    // non-`str` key (CPython: "keywords must be strings").
+                    let kwnames: Option<Vec<Value>> = kwargs_val.dict_with(|d| {
+                        let mut names: Vec<Value> = Vec::with_capacity(d.len());
+                        for k in d.keys() {
+                            match k {
+                                pyrust_core::PyKey::Str(s) => names.push(s.clone()),
+                                _ => return None,
+                            }
+                        }
+                        Some(names)
+                    }).flatten();
+
+                    if let Some(kwnames) = kwnames {
+                        if let Some(slots) = Self::kwcall_resolve_simple(&f, npos, &kwnames) {
+                            let keyset: smallvec::SmallVec<[Box<str>; 4]> = kwnames
+                                .iter()
+                                .map(|v| Box::<str>::from(v.as_str().unwrap_or("")))
+                                .collect();
+                            code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::ExSimple {
+                                param_binds_ptr: pbptr,
+                                npos: npos as u8,
+                                keyset,
+                                slots: slots.clone(),
+                            };
+                            return self.call_ex_fast_bind(
+                                &f, regs, func, npos, &kwargs_val, &slots, num_locals,
+                            );
+                        }
+                        // Structurally not simple for this callee: pin Fallback so we
+                        // don't rebuild kwnames every call (e.g. a `**kwargs` receiver,
+                        // or a binding error the general binder will diagnose).
+                        code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                    }
+                    // Non-str key (or could not borrow) → slow path; do NOT pin
+                    // Fallback, the general binder raises the right TypeError.
+                }
+                Action::Fallback => {}
+            }
+        }
+
+        // Slow path: materialise positionals + `**d` entries into an
+        // `ExpandedCallArg` buffer and dispatch through the general binder, which
+        // owns CPython-parity binding + diagnostics for every callee / splat.
+        let mut buf = std::mem::take(&mut self.call_arg_buf);
+        buf.clear();
+        for i in 0..npos as u32 {
+            buf.push(ExpandedCallArg { name: None, value: vm_read(regs, func + 1 + i, num_locals)? });
+        }
+        let extend_result = self.expand_kwargs_into(&kwargs_val, &mut buf);
+        let call_result = extend_result.and_then(|()| self.call_function_expanded(func_val, &buf));
+        self.call_arg_buf = buf;
+        call_result
+    }
+
+    /// Read the `npos` positional registers and the `**d` dict values (in
+    /// iteration order, aligned with the cached `slots`) and bind them straight
+    /// into the callee frame via the #2382 fast bind.  Caller guarantees the
+    /// cache entry was a validated `ExSimple` hit for this `(callee, npos,
+    /// key-set)`, so no per-call diagnostics are needed.
+    #[allow(clippy::too_many_arguments)]
+    fn call_ex_fast_bind(
+        &mut self,
+        f: &Rc<UserFunction>,
+        regs: &RegSlice,
+        func: crate::bytecode::Reg,
+        npos: usize,
+        kwargs_val: &Value,
+        slots: &[u32],
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let Some(callee_code) = self.get_or_compile_bytecode(f) else {
+            return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+        };
+        let mut pos_vals: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(npos);
+        for i in 0..npos as u32 {
+            pos_vals.push(vm_read(regs, func + 1 + i, num_locals)?);
+        }
+        // Dict values in iteration order (aligned with `slots` / the cached keyset).
+        let kw_vals: smallvec::SmallVec<[Value; 4]> = kwargs_val
+            .dict_with(|d| d.values().cloned().collect())
+            .unwrap_or_default();
+        self.call_user_function_kw_cached(
+            f,
+            &callee_code,
+            npos,
+            &mut pos_vals.into_iter(),
+            slots,
+            &mut kw_vals.into_iter(),
+        )
+    }
+
+    /// Append the `**d` mapping's entries to an `ExpandedCallArg` buffer for the
+    /// slow path.  Every key must be a `str` (else CPython's "keywords must be
+    /// strings" TypeError).  Mirrors `Insn::DictUpdate`'s mapping extraction so a
+    /// non-plain-`dict` `**d` (mappingproxy, instance-dict, `dict` subclass /
+    /// custom mapping via the `keys()` + `__getitem__` protocol) expands exactly
+    /// as the old `BuildDict`+`DictUpdate`+`__vcall__` lowering did.
+    fn expand_kwargs_into(&mut self, kwargs_val: &Value, buf: &mut Vec<ExpandedCallArg>) -> Result<()> {
+        let pairs: Vec<(PyKey, Value)> = match kwargs_val.kind() {
+            ValueKind::Dict(d) => d.clone().into_iter().collect(),
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME =>
+            {
+                pyrust_builtins::instance_dict::as_instance_dict_items(kwargs_val).ok_or_else(
+                    || PyError::Runtime("internal: bad instance_dict state in **kwargs".to_string()),
+                )?
+            }
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
+            {
+                let cls_rc = pyrust_builtins::mapping_proxy::as_class_rc(kwargs_val).ok_or_else(
+                    || PyError::Runtime("internal: bad mappingproxy state in **kwargs".to_string()),
+                )?;
+                cls_rc
+                    .borrow()
+                    .attrs
+                    .iter()
+                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                    .collect()
+            }
+            ValueKind::PyInstance(_) => mapping_pairs_via_protocol(self, kwargs_val)?
+                .ok_or_else(|| {
+                    pyrust_core::type_err!(
+                        "'{}' object is not a mapping",
+                        value_type_name_str(kwargs_val)
+                    )
+                })?,
+            _ => {
+                return Err(pyrust_core::type_err!(
+                    "'{}' object is not a mapping",
+                    value_type_name_str(kwargs_val)
+                ));
+            }
+        };
+        for (k, v) in pairs {
+            match k {
+                PyKey::Str(name) => buf.push(ExpandedCallArg {
+                    name: Some(name.as_str().unwrap_or("").to_owned()),
+                    value: v,
+                }),
+                _ => return Err(pyrust_core::type_err!("keywords must be strings")),
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
