@@ -4345,7 +4345,14 @@ impl Value {
                     format!("range({start}, {stop}, {step})")
                 }
             }
-            ValueKind::BuiltinFunction(name) => format!("<built-in function {name}>"),
+            ValueKind::BuiltinFunction(name) => match slot_wrapper_dunder(name) {
+                // Issue #2397: type-level slot dunder (`list.__len__`) presents
+                // as a CPython `wrapper_descriptor` (slot wrapper).
+                Some((type_name, dunder)) => {
+                    format!("<slot wrapper '{dunder}' of '{type_name}' objects>")
+                }
+                None => format!("<built-in function {name}>"),
+            },
             ValueKind::UserFunction(func) => match func.kind {
                 UserFunctionKind::ClassMethod => format!("<classmethod '{}'>", func.name),
                 UserFunctionKind::StaticMethod => format!("<staticmethod '{}'>", func.name),
@@ -4844,6 +4851,86 @@ impl fmt::Debug for Value {
 // a `&mut <storage>` across calls into the builtin, so no aliasing
 // window exists to pre-empt.
 
+/// Issue #2397: classify an unbound builtin-dunder `BuiltinFunction` name
+/// (`"list.__len__"`, `"int.__add__"`, …) as a CPython *slot wrapper*
+/// (`wrapper_descriptor`) and split it into `(type_name, dunder)`.
+///
+/// CPython exposes the type-level form of a slot dunder as a
+/// `wrapper_descriptor` whose `repr` reads `<slot wrapper '__X__' of 'TYPE'
+/// objects>` — but a handful of container slots are `method_descriptor`s
+/// instead (`mp_subscript`/`sq_contains`/`__reversed__`), and those keep the
+/// generic `builtin_function_or_method` presentation here.  This predicate is
+/// the single seam that drives both the `repr` (line ~4348) and the
+/// `type(...).__name__` (`builtins.rs::value_class`) for unbound slot dunders,
+/// so they stay in lockstep.  The method_descriptor exception set mirrors
+/// `calls.rs::is_named_protocol_wrapper`.  Verified against `python3.12`.
+///
+/// Returns `None` for non-dunder builtin names (`"list.append"`), bare names
+/// (`"len"`), and the method_descriptor container slots.
+pub fn slot_wrapper_dunder(name: &str) -> Option<(&str, &str)> {
+    let (type_name, dunder) = name.rsplit_once('.')?;
+    if !(dunder.starts_with("__") && dunder.ends_with("__") && dunder.len() > 4) {
+        return None;
+    }
+    // CPython models these container slots as `method_descriptor`, not
+    // `wrapper_descriptor` — keep the generic presentation for them.
+    if matches!(
+        (dunder, type_name),
+        ("__getitem__", "list" | "dict")
+            | ("__contains__", "dict" | "set" | "frozenset")
+            | ("__reversed__", "list" | "dict")
+    ) {
+        return None;
+    }
+    // The closed set of dunders pyrust exposes unbound as slot wrappers
+    // (`calls.rs::slot_dunder_table` SLOT_ATTR rows, minus the exceptions
+    // above).  Listed here rather than reaching into the interpreter so the
+    // predicate stays in `pyrust-core`; any divergence is caught by the
+    // parity fixture's full hasattr/type matrix.
+    const SLOT_WRAPPER_DUNDERS: &[&str] = &[
+        "__len__",
+        "__getitem__",
+        "__setitem__",
+        "__delitem__",
+        "__contains__",
+        "__add__",
+        "__sub__",
+        "__mul__",
+        "__truediv__",
+        "__floordiv__",
+        "__mod__",
+        "__rmod__",
+        "__pow__",
+        "__and__",
+        "__rand__",
+        "__or__",
+        "__ror__",
+        "__xor__",
+        "__rxor__",
+        "__rsub__",
+        "__lshift__",
+        "__rshift__",
+        "__iadd__",
+        "__imul__",
+        "__ior__",
+        "__iand__",
+        "__isub__",
+        "__ixor__",
+        "__iter__",
+        "__eq__",
+        "__ne__",
+        "__lt__",
+        "__le__",
+        "__gt__",
+        "__ge__",
+    ];
+    if SLOT_WRAPPER_DUNDERS.contains(&dunder) {
+        Some((type_name, dunder))
+    } else {
+        None
+    }
+}
+
 /// Returns the Python built-in type name (e.g. `"list"`, `"str"`) for a
 /// `Value`.  Used by error messages (`'X' object is not iterable`, attribute
 /// errors), built-in method repr strings (`<built-in method append of list
@@ -4853,6 +4940,7 @@ impl fmt::Debug for Value {
 /// routes type-name lookup through this function so naming stays consistent.
 /// The match is exhaustive over [`ValueKind`]; new variants must be added
 /// here, not in per-crate copies.
+///
 /// Python-visible type name for a value, used in error messages and `type(x).__name__`.
 ///
 /// Returns `Cow<'static, str>` so the common builtin arms stay zero-allocation
@@ -4872,7 +4960,16 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::Range { .. } | ValueKind::BigRange { .. } => Cow::Borrowed("range"),
         ValueKind::Bytes(_) => Cow::Borrowed("bytes"),
         ValueKind::Complex(_, _) => Cow::Borrowed("complex"),
-        ValueKind::BuiltinFunction(_) => Cow::Borrowed("builtin_function_or_method"),
+        ValueKind::BuiltinFunction(name) => {
+            // Issue #2397: an unbound slot dunder (`list.__len__`) reports its
+            // CPython descriptor type `wrapper_descriptor`, not the generic
+            // `builtin_function_or_method`.
+            if slot_wrapper_dunder(name).is_some() {
+                Cow::Borrowed("wrapper_descriptor")
+            } else {
+                Cow::Borrowed("builtin_function_or_method")
+            }
+        }
         ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
             Cow::Borrowed("method")
         }

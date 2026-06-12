@@ -48,11 +48,19 @@ impl BuiltinTypeOps for BoundMethodOps {
         let s = borrow
             .downcast_ref::<BoundMethodState>()
             .expect("bound method state");
-        format!(
-            "<built-in method {} of {} object>",
-            s.name,
-            pyrust_core::builtin_type_name(&s.receiver),
-        )
+        let recv_type = pyrust_core::builtin_type_name(&s.receiver);
+        // Issue #2397: a bound slot dunder (`[1].__len__`) presents as a CPython
+        // `method-wrapper`, including its receiver's identity address.
+        if pyrust_core::slot_wrapper_dunder(&format!("{recv_type}.{}", s.name)).is_some() {
+            format!(
+                "<method-wrapper '{}' of {} object at 0x{:x}>",
+                s.name,
+                recv_type,
+                s.receiver.value_id().unwrap_or(0),
+            )
+        } else {
+            format!("<built-in method {} of {} object>", s.name, recv_type)
+        }
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
@@ -118,4 +126,15 @@ pub fn as_bound_method(value: &Value) -> Option<(Rc<String>, Value)> {
 /// CPython exposes as `isinstance(x, builtin_function_or_method)`.
 pub fn is_bound_method(value: &Value) -> bool {
     matches!(value.kind(), ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME)
+}
+
+/// Issue #2397: returns `true` if `value` is a bound builtin slot dunder
+/// (`[1].__len__`), which CPython presents as a `method-wrapper` rather than
+/// the generic `builtin_function_or_method`.  Drives `type(...).__name__`.
+pub fn is_method_wrapper(value: &Value) -> bool {
+    let Some((name, receiver)) = as_bound_method(value) else {
+        return false;
+    };
+    let recv_type = pyrust_core::builtin_type_name(&receiver);
+    pyrust_core::slot_wrapper_dunder(&format!("{recv_type}.{name}")).is_some()
 }

@@ -7356,7 +7356,15 @@ pub(crate) fn value_class(obj: &Value) -> Value {
         ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
             Value::py_class(method_type_singleton())
         }
-        ValueKind::BuiltinFunction(_) => Value::builtin_function("builtin_function_or_method"),
+        ValueKind::BuiltinFunction(name) => {
+            // Issue #2397: `type(list.__len__)` is the slot-wrapper descriptor
+            // class `wrapper_descriptor`, not `builtin_function_or_method`.
+            if pyrust_core::slot_wrapper_dunder(name).is_some() {
+                Value::builtin_function("wrapper_descriptor")
+            } else {
+                Value::builtin_function("builtin_function_or_method")
+            }
+        }
         ValueKind::PyModule(_) => Value::builtin_function("module"),
         ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => {
             Value::builtin_function("super")
@@ -7411,6 +7419,11 @@ pub(crate) fn value_class(obj: &Value) -> Value {
                 && let Some(dict_class) = crate::interpreter::primitive_class_by_name("dict") {
                     return Value::py_class(dict_class);
                 }
+            // Issue #2397: a bound builtin slot dunder (`[1].__len__`) is a
+            // CPython `method-wrapper`, not `builtin_function_or_method`.
+            if pyrust_builtins::bound_method::is_method_wrapper(obj) {
+                return Value::builtin_function("method-wrapper");
+            }
             Value::builtin_function(ops.type_name())
         }
         // Migrated primitives are handled above via
