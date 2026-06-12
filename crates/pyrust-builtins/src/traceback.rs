@@ -75,6 +75,52 @@ pub fn is_traceback(value: &Value) -> bool {
     matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME)
 }
 
+/// Read attribute `name` from any built-in object value (`frame`, `code`, …)
+/// by dispatching to its `BuiltinTypeOps::getattr`.  Returns `None` when the
+/// value is not a built-in object or has no such attribute.
+fn builtin_getattr(value: &Value, name: &str) -> Option<Value> {
+    match value.kind() {
+        pyrust_core::ValueKind::BuiltinObject { ops, state } => ops.getattr(&state, name),
+        _ => None,
+    }
+}
+
+/// Walk a traceback chain and return `(co_name, tb_lineno)` for each node,
+/// outermost-first (the chain's natural `tb_next` order).  Returns an empty
+/// `Vec` for a non-traceback value.
+///
+/// Used by the uncaught-exception stderr formatter (issue #2404) to derive its
+/// frame list from the exception's prepended `__traceback__` chain instead of
+/// the captured-frame snapshot, so a re-raised exception's printed traceback
+/// matches the Python-visible `__traceback__` walk.
+pub fn walk_frames(value: &Value) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    let mut cur = value.clone();
+    loop {
+        let pyrust_core::ValueKind::BuiltinObject { ops, state } = cur.kind() else {
+            break;
+        };
+        if ops.type_name() != TYPE_NAME {
+            break;
+        }
+        let (frame, lineno, next) = {
+            let borrow = state.borrow();
+            match borrow.downcast_ref::<TracebackState>() {
+                Some(s) => (s.frame.clone(), s.lineno, s.next.clone()),
+                None => break,
+            }
+        };
+        // co_name via tb_frame.f_code.co_name.
+        let name = builtin_getattr(&frame, "f_code")
+            .and_then(|code| builtin_getattr(&code, "co_name"))
+            .and_then(|n| n.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        out.push((name, lineno));
+        cur = next;
+    }
+    out
+}
+
 /// Count the number of nodes in a traceback chain by following `tb_next`.
 /// Returns `0` for a non-traceback value.
 pub fn chain_len(value: &Value) -> usize {

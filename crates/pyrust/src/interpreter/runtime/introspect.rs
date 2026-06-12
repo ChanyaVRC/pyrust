@@ -700,6 +700,97 @@ impl Interpreter {
         // chain, keeping the old chain as the tail (issue #2367).
         Some(self.build_deferred_traceback_with_tail(catch_lineno, existing.clone()))
     }
+
+    /// Derive the uncaught-exception traceback's *inner* frame list (everything
+    /// below the `<module>` frame) from `exc`'s prepended `__traceback__` chain
+    /// (issue #2404).
+    ///
+    /// The stderr formatter normally rebuilds its frame list from the captured
+    /// unwind-frame snapshot, but after #2367/#2403 a re-raised exception's
+    /// `__traceback__` chain is the authoritative, Python-visible carried frame
+    /// list — the snapshot was reset at the re-raise site and so diverges.  When
+    /// `exc` carries a `__traceback__` chain, the printed list is:
+    ///
+    ///   `snapshot_prefix` (the frames the exception unwound through *after* the
+    ///   re-raise, captured fresh) ++ the carried `__traceback__` chain.
+    ///
+    /// This replays at the top level the prepend a hypothetical module-scope
+    /// `except` would have done — the re-raise's finalising catch never runs for
+    /// an uncaught exception, so the chain itself lacks the re-raise frame's
+    /// node; the snapshot supplies it.  `is_bare` drops the innermost snapshot
+    /// frame (the bare re-raise's own line gets no node — #2405), mirroring
+    /// `caught_traceback_value`.
+    ///
+    /// Returns `None` for a raw `PyError` variant or a never-caught exception
+    /// (`__traceback__` still `None`), so those keep the snapshot path unchanged.
+    ///
+    /// `filename` is the script path (the tb nodes carry no per-frame filename —
+    /// a single-file program shares one); `src` is the script source for
+    /// source-line lookup; `snapshot` is the freshly-captured unwind frames
+    /// (outermost-first).  The chain is already ordered outermost-first.
+    pub(crate) fn uncaught_inner_frames_from_tb(
+        &self,
+        exc: &Value,
+        filename: &std::sync::Arc<str>,
+        src: &str,
+        snapshot: &[pyrust_core::FrameInfo],
+        is_bare: bool,
+    ) -> Option<Vec<pyrust_core::FrameInfo>> {
+        let ValueKind::PyInstance(inst) = exc.kind() else {
+            return None;
+        };
+        let stored = inst.borrow().attrs.get("__traceback__").cloned();
+        let stored = stored.filter(|tb| !tb.is_none())?;
+        // Materialise the deferred placeholder if needed (cold uncaught path).
+        let tb = self
+            .materialize_deferred_traceback(&stored)
+            .unwrap_or(stored);
+        let nodes = pyrust_builtins::traceback::walk_frames(&tb);
+        if nodes.is_empty() {
+            return None;
+        }
+        // Source-line lookup: CPython echoes the line stripped of leading
+        // indentation and re-indented to a fixed four spaces (the prefix is
+        // added by `format_traceback`), so store the fully-stripped text.
+        let resolve = |lineno: Option<u32>| -> Option<std::sync::Arc<str>> {
+            let n = lineno?;
+            if src.is_empty() {
+                return None;
+            }
+            src.lines()
+                .nth((n as usize).saturating_sub(1))
+                .map(|l| std::sync::Arc::from(l.trim()))
+        };
+        let mut frames: Vec<pyrust_core::FrameInfo> = Vec::with_capacity(snapshot.len() + nodes.len());
+        // Prefix: the frames the exception unwound through after the re-raise.
+        // For a bare re-raise the innermost (the re-raise's own frame) gets no
+        // node, mirroring the catch-site `drop_innermost`.
+        let prefix_end = if is_bare && !snapshot.is_empty() {
+            snapshot.len() - 1
+        } else {
+            snapshot.len()
+        };
+        for fi in &snapshot[..prefix_end] {
+            // The snapshot lacks per-frame source text; resolve it from `src`.
+            frames.push(pyrust_core::FrameInfo {
+                filename: filename.clone(),
+                lineno: fi.lineno,
+                source_line: resolve(fi.lineno),
+                funcname: fi.funcname.clone(),
+            });
+        }
+        // The carried chain (outermost-first).
+        for (funcname, lineno) in nodes {
+            let lineno = if lineno > 0 { Some(lineno as u32) } else { None };
+            frames.push(pyrust_core::FrameInfo {
+                filename: filename.clone(),
+                lineno,
+                source_line: resolve(lineno),
+                funcname: std::sync::Arc::from(&funcname[..]),
+            });
+        }
+        Some(frames)
+    }
 }
 
 /// Internal type name for the deferred-traceback placeholder.  Not user-visible
