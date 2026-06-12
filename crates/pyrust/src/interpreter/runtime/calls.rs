@@ -9911,6 +9911,25 @@ impl Interpreter {
             return Err(pyrust_core::type_err!("keywords must be strings"));
         }
 
+        self.dispatch_method_with_args(regs, num_locals, obj, method, pos_items, kw_map)
+    }
+
+    /// Shared dispatch tail for a method call whose positional args and keyword
+    /// args have already been materialised (`Insn::CallMethodExpanded`'s `*pos`/
+    /// `**kw` build, and `Insn::CallMethodKw`'s slow-path fallback, #2392).
+    /// `pos_items` are the positional argument values in order; `kw_map` is the
+    /// keyword arguments (its keys are guaranteed `str` by the caller).  Routes
+    /// through the tagged-container fast dispatch, generator-method dispatch, and
+    /// finally the generic `get_attr` + `call_function_expanded` path.
+    fn dispatch_method_with_args(
+        &mut self,
+        regs: &mut RegSlice,
+        num_locals: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
+        method: &str,
+        pos_items: Vec<Value>,
+        kw_map: PyDict,
+    ) -> Result<Value> {
         let obj_kind_tag = Self::builtin_container_tag(regs[obj as usize].as_some());
 
         // No upfront unalias needed (#448): each builtin scopes its

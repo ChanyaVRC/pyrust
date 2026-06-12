@@ -1446,6 +1446,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::CallKw { .. }
             | Insn::CallEx { .. }
             | Insn::CallMethod { .. }
+            | Insn::CallMethodKw { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::MakeClass(..)
             | Insn::MakeClassMeta(..)) => {
@@ -1536,6 +1537,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | MakeTypeAlias(r, _, _, _)
         | MakeTypeVar(r, _) => Some(*r),
         CallMethod { dst, .. }
+        | CallMethodKw { dst, .. }
         | CallMethodExpanded { dst, .. }
         | Concat { dst, .. }
         // Yield writes the caller's sent value into `dst` on resume; aliases
@@ -2502,6 +2504,12 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             nargs,
             ..
         } => *obj == r || (r >= *args_base && r < *args_base + *nargs as u32),
+        CallMethodKw {
+            obj,
+            args_base,
+            total,
+            ..
+        } => *obj == r || (r >= *args_base && r < *args_base + *total as u32),
         CallMethodExpanded {
             obj,
             pos_list,
@@ -2701,6 +2709,17 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         } => {
             reads.insert(*obj);
             for r in *args_base..*args_base + *nargs as u32 {
+                reads.insert(r);
+            }
+        }
+        CallMethodKw {
+            obj,
+            args_base,
+            total,
+            ..
+        } => {
+            reads.insert(*obj);
+            for r in *args_base..*args_base + *total as u32 {
                 reads.insert(r);
             }
         }
@@ -3182,6 +3201,7 @@ fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
             | Insn::CallKw { .. }
             | Insn::CallEx { .. }
             | Insn::CallMethod { .. }
+            | Insn::CallMethodKw { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::MakeClass(..)
             | Insn::MakeClassMeta(..) => {
@@ -3557,7 +3577,10 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
                 written.insert(start + i);
             }
         }
-        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Yield { dst, .. } => {
+        CallMethod { dst, .. }
+        | CallMethodKw { dst, .. }
+        | CallMethodExpanded { dst, .. }
+        | Yield { dst, .. } => {
             written.insert(*dst);
         }
         YieldFrom {
@@ -4364,6 +4387,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallKw { .. }
                 | Insn::CallEx { .. }
                 | Insn::CallMethod { .. }
+                | Insn::CallMethodKw { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
                 | Insn::MakeClassMeta(..)
@@ -4942,6 +4966,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                     | Insn::CallKw { .. }
                     | Insn::CallEx { .. }
                     | Insn::CallMethod { .. }
+                    | Insn::CallMethodKw { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::ForIter(_, _, _)
             )
@@ -4962,6 +4987,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                     | Insn::CallKw { .. }
                     | Insn::CallEx { .. }
                     | Insn::CallMethod { .. }
+                    | Insn::CallMethodKw { .. }
                     | Insn::CallMethodExpanded { .. }
             )
         });
@@ -5346,6 +5372,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallKw { .. }
                 | Insn::CallEx { .. }
                 | Insn::CallMethod { .. }
+                | Insn::CallMethodKw { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
                 | Insn::MakeClassMeta(..)
@@ -6635,6 +6662,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             Insn::MakeTypeAlias(_, name_idx, _, _) => mark(&mut used, *name_idx),
             Insn::MakeTypeVar(_, name_idx) => mark(&mut used, *name_idx),
             Insn::CallKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
+            Insn::CallMethodKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
             _ => {}
         }
     }
@@ -6680,6 +6708,23 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
                 kwnames_idx,
             } => Insn::CallKw {
                 func,
+                total,
+                nkw,
+                kwnames_idx: remap(kwnames_idx),
+            },
+            Insn::CallMethodKw {
+                dst,
+                obj,
+                name_idx,
+                args_base,
+                total,
+                nkw,
+                kwnames_idx,
+            } => Insn::CallMethodKw {
+                dst,
+                obj,
+                name_idx,
+                args_base,
                 total,
                 nkw,
                 kwnames_idx: remap(kwnames_idx),
@@ -7348,6 +7393,17 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         } => {
             f(*obj);
             for r in *args_base..*args_base + *nargs as u32 {
+                f(r);
+            }
+        }
+        CallMethodKw {
+            obj,
+            args_base,
+            total,
+            ..
+        } => {
+            f(*obj);
+            for r in *args_base..*args_base + *total as u32 {
                 f(r);
             }
         }
@@ -10418,6 +10474,7 @@ mod tests {
                     | Insn::CallKw { .. }
                     | Insn::CallEx { .. }
                     | Insn::CallMethod { .. }
+                    | Insn::CallMethodKw { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::MakeClass(..)
                     | Insn::MakeClassMeta(..)

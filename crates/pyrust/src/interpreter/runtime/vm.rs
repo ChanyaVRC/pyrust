@@ -3385,6 +3385,31 @@ impl Interpreter {
                     let r = self.exec_call_method_expanded(&mut regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
                     regs[*dst as usize] = vm_try!(r);
                 }
+                Insn::CallMethodKw { dst, obj, name_idx, args_base, total, nkw, kwnames_idx } => {
+                    // Keyword method call (#2392).  The receiver is in `R[obj]`;
+                    // the `total` argument values live in `R[args_base ..
+                    // args_base+total]` (trailing `nkw` are keyword args named by
+                    // `consts[kwnames_idx]`).  On a monomorphic inline-cache hit
+                    // for a plain Python method the receiver binds to param 0 and
+                    // the keyword values fast-bind into their cached slots; on a
+                    // miss it falls back to the general method-expansion path.
+                    // Full body lives in fast_path.rs::exec_call_method_kw.
+                    let r = self.exec_call_method_kw(
+                        &mut regs,
+                        num_locals,
+                        *dst,
+                        *obj,
+                        *name_idx,
+                        *args_base,
+                        *total,
+                        *nkw,
+                        *kwnames_idx,
+                        code,
+                        pc - 1,
+                        cur_line,
+                    );
+                    regs[*dst as usize] = vm_try!(r);
+                }
 
                 // ── Returns ──────────────────────────────────────────────
                 Insn::Return(src) => {
