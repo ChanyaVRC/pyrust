@@ -3297,6 +3297,26 @@ impl Interpreter {
                     regs[*func_reg as usize] = vm_try!(call_result);
                 }
 
+                Insn::CallKw { func, total, nkw, kwnames_idx } => {
+                    // Keyword call with no splats (issue #2382).  The args live in
+                    // `R[func+1 .. func+1+total]`; the last `nkw` are keyword args
+                    // whose names are the const-pool tuple `consts[kwnames_idx]`.
+                    // The result is written back to `R[func]`.  Full body (cache
+                    // lookup / fill + fast bind + slow-path fallback) lives in
+                    // fast_path.rs::exec_call_kw.
+                    let res = self.exec_call_kw(
+                        &regs,
+                        code,
+                        pc,
+                        *func,
+                        *total,
+                        *nkw,
+                        *kwnames_idx,
+                        num_locals,
+                    );
+                    regs[*func as usize] = vm_try!(res);
+                }
+
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
                     // Method-call trampoline (#2345): on an inline-cache hit for
                     // a plain Python method, bind the receiver to `self` and loop
@@ -5601,7 +5621,7 @@ mod vm_tests {
     use crate::interpreter::Interpreter;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry};
+        use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry, KwCallCacheEntry};
         let n = insns.len();
         FnCode {
             insns,
@@ -5620,6 +5640,7 @@ mod vm_tests {
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(Vec::new()),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
+            kwcall_cache: std::cell::RefCell::new(vec![KwCallCacheEntry::Empty; n]),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),

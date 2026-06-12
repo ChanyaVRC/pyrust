@@ -3125,6 +3125,292 @@ impl Interpreter {
         Ok(PrintOptions { values, sep, end, file, flush })
     }
 
+    /// Decide whether a keyword call to `function` with `npos` positional
+    /// arguments and the keyword names `kwnames` (in call order) binds *simply*
+    /// — i.e. can be served by the `CallKw` fast bind without any CPython-parity
+    /// diagnostic.  Returns `Some(slots)` (one parameter index per keyword name)
+    /// when simple, or `None` when the call must take the general binder (which
+    /// raises the correct TypeError, or absorbs leftovers into `**kwargs`).
+    ///
+    /// "Simple" requires, matching the general binder's success conditions:
+    /// - the callee has no `*args` / `**kwargs` parameter (a `**kwargs` could
+    ///   absorb an otherwise-unexpected keyword, so leave it to the slow path);
+    /// - every keyword names a real, non-positional-only parameter;
+    /// - no parameter is bound twice (a keyword duplicating a positional, or two
+    ///   keywords naming the same param — the latter can't happen from distinct
+    ///   names but is checked defensively);
+    /// - the `npos` positionals fill leading non-keyword-only params and don't
+    ///   overflow the positional capacity;
+    /// - every still-unbound parameter has a default (no missing required arg).
+    ///
+    /// Any deviation returns `None`, so the general binder owns all error wording.
+    fn kwcall_resolve_simple(
+        function: &Rc<UserFunction>,
+        npos: usize,
+        kwnames: &[Value],
+    ) -> Option<smallvec::SmallVec<[u32; 4]>> {
+        let params = &function.params;
+        let nparams = params.len();
+        // Reject variadic callees outright — the slow path handles *args/**kwargs
+        // absorption and the diagnostics that depend on them.
+        if params.iter().any(|p| p.is_args || p.is_kwargs) {
+            return None;
+        }
+        // Positionals must fill leading params that can accept positional args.
+        // A keyword-only param at/within 0..npos means a positional overflowed.
+        if npos > nparams {
+            return None;
+        }
+        for p in params.iter().take(npos) {
+            if p.is_keyword_only {
+                return None;
+            }
+        }
+        // Per-param bound flags: positionals fill 0..npos.
+        let mut bound: smallvec::SmallVec<[bool; 16]> = smallvec![false; nparams];
+        for b in bound.iter_mut().take(npos) {
+            *b = true;
+        }
+        let mut slots: smallvec::SmallVec<[u32; 4]> = smallvec::SmallVec::with_capacity(kwnames.len());
+        for name_val in kwnames {
+            let name = name_val.as_str()?;
+            let pi = params.iter().position(|p| p.name == name)?;
+            // Positional-only param named by keyword → general path raises the
+            // "positional-only ... passed as keyword" TypeError.
+            if params[pi].is_positional_only {
+                return None;
+            }
+            // Already bound (by a positional or an earlier keyword) → general
+            // path raises "multiple values for argument".
+            if bound[pi] {
+                return None;
+            }
+            bound[pi] = true;
+            slots.push(pi as u32);
+        }
+        // Every unbound param must have a default, else a required arg is missing.
+        for (pi, b) in bound.iter().enumerate() {
+            if !*b && params[pi].default.is_none() {
+                return None;
+            }
+        }
+        Some(slots)
+    }
+
+    /// Execute a user function whose arguments are already bound directly into
+    /// `regs` / `local_env` (the no-variadic fast path's frame-execution tail,
+    /// #2123).  Swaps in the callee env, handles the generator/coroutine branch,
+    /// publishes the `vm_frame_view`, runs the bytecode, records a traceback
+    /// frame on error, and restores the env.
+    ///
+    /// A copy of `call_user_function_expanded`'s frame-execution tail, used by
+    /// the keyword-call fast bind (#2382) after binding arguments by cached slot.
+    /// Kept as a separate method (rather than having the positional path call it)
+    /// because extracting the positional path's tail regressed it ~3.5% — the
+    /// frame-setup landmine in CLAUDE.md.  Maintains the same `vm_frame_views`
+    /// push/pop invariant as the inline copy.
+    fn run_bound_user_frame(
+        &mut self,
+        function: &Rc<UserFunction>,
+        code: &Rc<crate::bytecode::FnCode>,
+        mut regs: RegsBuf,
+        local_env: Option<EnvRef>,
+        needs_local_env: bool,
+    ) -> Result<Value> {
+        let num_regs = code.num_regs as usize;
+        let _depth_guard = CallDepthGuard::enter();
+        if call_depth() > max_call_depth() {
+            let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
+                instantiate_exception(cls, vec![Value::string("maximum recursion depth exceeded")])
+            } else {
+                self.instantiate_named_exception(
+                    "RecursionError",
+                    "maximum recursion depth exceeded".to_string(),
+                )?
+            };
+            return Err(PyError::Raised(exc));
+        }
+
+        // Swap in the callee's env (the local env built above, or the
+        // function's captured env when no local env is needed).
+        let previous_env = match local_env {
+            Some(env) => std::mem::replace(&mut self.env, env),
+            None => std::mem::replace(&mut self.env, Rc::clone(&function.env)),
+        };
+
+        // Self-reference for recursive calls (only if not a cell var) —
+        // bind slot precomputed at compile time (#1918).
+        if let Some(slot) = function.self_bind {
+            if slot as usize >= num_regs {
+                return Err(pyrust_core::py_err!("SystemError", "self-reference register index {} out of range (num_regs={})",
+                        slot, num_regs));
+            }
+            regs[slot as usize] = Value::user_function(Rc::clone(function));
+        }
+
+        // Generator or coroutine function: create a frame rather than
+        // executing.  An `async def` body (issue #1039) is always a
+        // suspendable frame — even with no `await` — so it returns a
+        // coroutine object instead of running synchronously.
+        if code.is_generator || code.is_coroutine {
+            // Restore env before capturing it into the frame.
+            // (When `needs_local_env` is false, `gen_env` ==
+            // `function.env` — the GeneratorFrame keeps it alive.)
+            let gen_env = std::mem::replace(&mut self.env, previous_env);
+            let gen_qualname = std::sync::Arc::from(function.effective_qualname().as_str());
+            return Ok(Self::build_generator_value(
+                code,
+                regs,
+                gen_env,
+                Rc::clone(&function.local_index),
+                std::sync::Arc::from(&function.name[..]),
+                gen_qualname,
+            ));
+        }
+
+        // Issue #389: publish a view of this function frame so
+        // `locals()` can surface its fastlocal registers
+        // mid-call.  Popped immediately after `run_bytecode`
+        // returns so the raw pointer never outlives `regs`.
+        // Issue #486: also capture nonlocal_names and the
+        // current env so `snapshot_current_locals` can resolve
+        // nonlocal bindings that live in enclosing envs.
+        let nonlocal_names_opt = if function.nonlocal_names.is_empty() {
+            None
+        } else {
+            Some(Rc::clone(&function.nonlocal_names))
+        };
+        let env_opt = if function.nonlocal_names.is_empty() {
+            None
+        } else {
+            Some(Rc::clone(&self.env))
+        };
+        // Capture the raw pointer and length BEFORE constructing RegSlice
+        // so both the VmFrameView and the dispatch loop share the same raw
+        // pointer with no &mut [Value] in scope (issue #547 / PR #646).
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+        let regs_len = regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Function,
+            // SAFETY: SmallVec / Vec allocation is always non-null.
+            // Popped before `regs` is dropped (see above).
+            regs_ptr,
+            regs_len,
+            local_index: Rc::clone(&function.local_index),
+            nonlocal_names: nonlocal_names_opt,
+            env: env_opt,
+            is_class_method: code.is_class_method,
+            function: Some(Rc::clone(function)),
+        });
+        // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
+        // of `regs` (a local RegsBuf that outlives this call).  No
+        // &mut [Value] referencing `regs` is held while the dispatch loop
+        // runs; RegSlice (raw pointer + len) is used instead, removing
+        // the LLVM noalias constraint (issue #547).
+        let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        let vm_result = self.run_bytecode_for_fn(code, regs_slice, function.id);
+        // Lazy traceback: only build + record this frame's `FrameInfo`
+        // when the body actually errored.  The no-exception common path
+        // does no allocation and touches no traceback thread-local.
+        if vm_result.is_err() {
+            let tb_filename = self
+                .script_filename
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+            // Capture the source line in this callee where execution
+            // stopped (the callee published it via `set_current_vm_line`
+            // on the way out).  Surfaced to Python as `tb_lineno` /
+            // `f_lineno`; 0 means "no line table" (kept as `None`).
+            let tb_lineno = match pyrust_core::get_current_vm_line() {
+                0 => None,
+                n => Some(n),
+            };
+            pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                filename: tb_filename,
+                lineno: tb_lineno,
+                source_line: None,
+                funcname: std::sync::Arc::from(&function.name[..]),
+            });
+        }
+        self.vm_frame_views.pop();
+
+        let used_env = std::mem::replace(&mut self.env, previous_env);
+        if needs_local_env {
+            self.free_env(used_env);
+        }
+        let value = vm_result?;
+        Ok(value)
+    }
+
+    /// Keyword-call fast bind (#2382).  Binds `npos` positional values
+    /// (`pos[0..npos]`) into the leading parameters and each keyword value
+    /// (`kw[i]`) into the parameter slot `slots[i]`, fills defaults for any
+    /// still-unbound parameter, then runs the frame.  The caller (`Insn::CallKw`)
+    /// only takes this path on a *validated cache hit* — the slot mapping was
+    /// already proven to bind every parameter exactly once with no missing
+    /// required argument (see `KwCallCacheEntry::Simple`), so no per-call
+    /// diagnostics are needed here.  `function` has no `*args` / `**kwargs` and
+    /// no positional-only/keyword-only conflicts (the cache fill rejects those).
+    ///
+    /// `slots[i]` is the parameter index for keyword `i`.  `pos` and `kw` are the
+    /// argument values in call order; `pos.len() == npos` and `kw.len() ==
+    /// slots.len()`.
+    #[allow(clippy::too_many_arguments)]
+    fn call_user_function_kw_cached(
+        &mut self,
+        function: &Rc<UserFunction>,
+        code: &Rc<crate::bytecode::FnCode>,
+        npos: usize,
+        pos: &mut dyn Iterator<Item = Value>,
+        slots: &[u32],
+        kw: &mut dyn Iterator<Item = Value>,
+    ) -> Result<Value> {
+        let num_regs = code.num_regs as usize;
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+
+        let needs_local_env = !function.global_names.is_empty()
+            || !function.nonlocal_names.is_empty()
+            || !code.cell_vars.is_empty();
+        let local_env = if needs_local_env {
+            let env = self.alloc_env(Some(Rc::clone(&function.env)));
+            {
+                let mut e = env.borrow_mut();
+                e.local_names = Rc::clone(&function.local_names);
+                e.global_names = Rc::clone(&function.global_names);
+                e.nonlocal_names = Rc::clone(&function.nonlocal_names);
+            }
+            Some(env)
+        } else {
+            None
+        };
+
+        // Positionals fill params 0..npos in order.
+        for (pi, val) in pos.enumerate().take(npos) {
+            bind_param_direct(function, num_regs, &mut regs, &local_env, pi, val)?;
+        }
+        // Keywords bind to their cached slots.
+        for (i, val) in kw.enumerate() {
+            bind_param_direct(function, num_regs, &mut regs, &local_env, slots[i] as usize, val)?;
+        }
+        // Defaults for any parameter not filled by a positional or keyword.  The
+        // cache only fills `Simple` when every still-unbound param has a default
+        // (no missing required arg), so this never leaves a required param unset.
+        let nparams = function.params.len();
+        let nkw = slots.len();
+        for pi in 0..nparams {
+            let filled_positionally = pi < npos;
+            let filled_by_kw = slots[..nkw].contains(&(pi as u32));
+            if !filled_positionally
+                && !filled_by_kw
+                && let Some(default) = function.params[pi].default.clone()
+            {
+                bind_param_direct(function, num_regs, &mut regs, &local_env, pi, default)?;
+            }
+        }
+
+        self.run_bound_user_frame(function, code, regs, local_env, needs_local_env)
+    }
+
     pub(crate) fn call_user_function_expanded(
         &mut self,
         function: Rc<UserFunction>,
@@ -3351,6 +3637,13 @@ impl Interpreter {
 
             // Arguments are already bound directly into `regs` / `local_env`
             // above (#2123).  Run the register-VM path.
+            //
+            // NOTE: this body is kept inline (not routed through
+            // `run_bound_user_frame`) — extracting it regressed the positional
+            // fast path ~3.5% (the hot user-function call path; see CLAUDE.md's
+            // frame-setup landmine and the #2382 PR bench table).  The kw
+            // fast-bind path (`call_user_function_kw_cached`) uses the extracted
+            // copy instead, where the regression doesn't apply.
             {
                 let _depth_guard = CallDepthGuard::enter();
                 if call_depth() > max_call_depth() {

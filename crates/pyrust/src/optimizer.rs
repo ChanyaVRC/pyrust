@@ -7,7 +7,9 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry, FnCode, FnProto, GLOBAL_CACHE_EMPTY, Insn};
+use crate::bytecode::{
+    AttrCacheEntry, BinOpCacheEntry, FnCode, FnProto, GLOBAL_CACHE_EMPTY, Insn, KwCallCacheEntry,
+};
 use crate::value::{Value, ValueKind};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
@@ -207,6 +209,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
         binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
+        kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
         exc_table,
         has_exc_handlers,
     }
@@ -1440,6 +1443,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             // single-use scratch registers that no external callee can reach.
             insn @ (Insn::Call(..)
             | Insn::CallMemo(..)
+            | Insn::CallKw { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::MakeClass(..)
@@ -1515,6 +1519,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | GetAwaitable(r, _)
         | Call(r, _)
         | CallMemo(r, _)
+        | CallKw { func: r, .. }
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
@@ -2467,6 +2472,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
+        // CallKw reads the callee and `total` consecutive arg registers — the
+        // same footprint as `Call(func, total)`.
+        CallKw { func, total, .. } => r >= *func && r <= *func + *total as u32,
         // args_base is always >= 1 (compiler sets it to func_reg + 1, func_reg >= 0),
         // so args_base - 1 is the callee register and the subtraction never underflows.
         TailCall { args_base, nargs } => {
@@ -2634,6 +2642,11 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
 
         Call(base, argc) | CallMemo(base, argc) => {
             for r in *base..=(*base + *argc as u32) {
+                reads.insert(r);
+            }
+        }
+        CallKw { func, total, .. } => {
+            for r in *func..=(*func + *total as u32) {
                 reads.insert(r);
             }
         }
@@ -3155,6 +3168,7 @@ fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
             | Insn::ImportStar(_)
             | Insn::Call(..)
             | Insn::CallMemo(..)
+            | Insn::CallKw { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::MakeClass(..)
@@ -3515,6 +3529,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | GetAwaitable(r, _)
         | Call(r, _)
         | CallMemo(r, _)
+        | CallKw { func: r, .. }
         | Move(r, _)
         | CopyReg(r, _)
         | DeleteLocal(r, _) => {
@@ -4333,6 +4348,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             insn,
             Insn::Call(..)
                 | Insn::CallMemo(..)
+                | Insn::CallKw { .. }
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
@@ -4909,6 +4925,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                     | Insn::PopExcept
                     | Insn::Call(_, _)
                     | Insn::CallMemo(_, _)
+                    | Insn::CallKw { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::ForIter(_, _, _)
@@ -4927,6 +4944,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                 i,
                 Insn::Call(_, _)
                     | Insn::CallMemo(_, _)
+                    | Insn::CallKw { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
             )
@@ -5309,6 +5327,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             insn,
             Insn::Call(..)
                 | Insn::CallMemo(..)
+                | Insn::CallKw { .. }
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
@@ -6598,6 +6617,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             Insn::ForCountReg(_, _, _, step, _) => mark(&mut used, *step),
             Insn::MakeTypeAlias(_, name_idx, _, _) => mark(&mut used, *name_idx),
             Insn::MakeTypeVar(_, name_idx) => mark(&mut used, *name_idx),
+            Insn::CallKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
             _ => {}
         }
     }
@@ -6636,6 +6656,17 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
                 Insn::MakeTypeAlias(dst, remap(name_idx), value_reg, params_reg)
             }
             Insn::MakeTypeVar(dst, name_idx) => Insn::MakeTypeVar(dst, remap(name_idx)),
+            Insn::CallKw {
+                func,
+                total,
+                nkw,
+                kwnames_idx,
+            } => Insn::CallKw {
+                func,
+                total,
+                nkw,
+                kwnames_idx: remap(kwnames_idx),
+            },
             other => other,
         })
         .collect();
@@ -7246,6 +7277,11 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
 
         Call(base, argc) | CallMemo(base, argc) => {
             for r in *base..=(*base + *argc as u32) {
+                f(r);
+            }
+        }
+        CallKw { func, total, .. } => {
+            for r in *func..=(*func + *total as u32) {
                 f(r);
             }
         }
@@ -10356,6 +10392,7 @@ mod tests {
                 insn,
                 Insn::Call(..)
                     | Insn::CallMemo(..)
+                    | Insn::CallKw { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::MakeClass(..)
