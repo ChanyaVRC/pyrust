@@ -546,9 +546,6 @@ impl Interpreter {
                 s.tail.clone(),
             )
         };
-        // Flip the catch-site fast path off: a materialised chain now exists,
-        // so later catches must probe before re-deferring (identity contract).
-        pyrust_core::note_tb_materialized();
         // Materialise the carried tail first (issue #2367) so the prepended
         // frames link to a real chain with stable identity.  A `None` tail (the
         // common fresh-catch case) materialises to itself.
