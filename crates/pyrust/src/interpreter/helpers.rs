@@ -835,59 +835,27 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // (`list.__setitem__(l, 0, 9)`, `list.__add__([1], [2])`) resolves and
     // dispatches through `dispatch_builtin_protocol_dunder`.  The names per
     // type mirror `calls.rs::builtin_protocol_dunders`.
-    for (cls, type_name, dunders) in [
-        (&int_class, "int", &[
-            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
-            "__mod__", "__pow__", "__and__", "__or__", "__xor__",
-            "__lshift__", "__rshift__",
-            "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
-        ][..]),
-        // Issue #2387: `__iter__` (every iterable type), `__reversed__` (list,
-        // alongside dict's), and `__mod__`/`__rmod__` (the `%` slots on
-        // str/bytes/bytearray) are exposed as type-level slot-wrappers here so
-        // `list.__iter__`, `hasattr(bytes, '__mod__')`, `LI([1]).__iter__()`
-        // resolve.  They dispatch through `dispatch_builtin_protocol_dunder`
-        // (no registry body); keep this set in sync with
-        // `calls.rs::builtin_protocol_dunders`.
-        (&str_class, "str", &[
-            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
-            "__mod__", "__rmod__", "__iter__",
-            "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
-        ][..]),
-        (&list_class, "list", &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__",
-            "__contains__", "__add__", "__mul__", "__iadd__", "__imul__",
-            "__iter__", "__reversed__",
-        ][..]),
-        (&tuple_class, "tuple", &[
-            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
-            "__iter__",
-        ][..]),
-        (&dict_class, "dict", &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__or__", "__ror__", "__ior__", "__iter__", "__reversed__",
-        ][..]),
-        (&set_class, "set", &[
-            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
-            "__isub__", "__ixor__", "__iter__",
-        ][..]),
-        (&frozenset_class, "frozenset", &[
-            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__", "__iter__",
-        ][..]),
-        (&bytes_class, "bytes", &[
-            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
-            "__mod__", "__rmod__", "__iter__",
-        ][..]),
-        (&bytearray_class, "bytearray", &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__",
-            "__contains__", "__add__", "__mul__", "__iadd__", "__imul__",
-            "__mod__", "__rmod__", "__iter__",
-        ][..]),
-        (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
+    // Issue #2406: the type-attr registrations derive from the single
+    // slot-dunder table in calls.rs (`SLOT_ATTR` flag) — previously a second
+    // hand-written per-type list "kept in sync" by comment, the same
+    // duplicate-table pattern that caused the #2324 drift.  Adding a slot is
+    // now one table row.
+    for (cls, type_name) in [
+        (&int_class, "int"),
+        (&str_class, "str"),
+        (&list_class, "list"),
+        (&tuple_class, "tuple"),
+        (&dict_class, "dict"),
+        (&set_class, "set"),
+        (&frozenset_class, "frozenset"),
+        (&bytes_class, "bytes"),
+        (&bytearray_class, "bytearray"),
+        (&float_class, "float"),
     ] {
-        for &dunder in dunders {
+        for (dunder, flags) in slot_dunder_table(type_name) {
+            if flags & SLOT_ATTR == 0 {
+                continue;
+            }
             let qualified: &'static str =
                 Box::leak(format!("{type_name}.{dunder}").into_boxed_str());
             cls.borrow_mut()

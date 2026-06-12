@@ -6737,101 +6737,170 @@ pub(crate) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
     )
 }
 
-pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
-    // Rich-comparison / `__hash__` / `__str__` / `__repr__` are exposed as
-    // bound method-wrappers on every primitive type (issue #2070); the
-    // per-type slices below interleave them with the container/numeric slots.
+pub(crate) const SLOT_ATTR: u8 = 1;
+pub(crate) const SLOT_PROTOCOL: u8 = 2;
+
+/// Per-type slot-dunder table — the SINGLE source for both the protocol
+/// dispatch check (`builtin_protocol_dunders`) and the primitive-singleton
+/// type-attr registration in helpers.rs (issue #2406: the previous pair of
+/// comment-synced hand lists is the same drift pattern that caused #2324).
+///
+/// Flags: `SLOT_PROTOCOL` = dispatchable through
+/// `dispatch_builtin_protocol_dunder` (rich comparisons / `__hash__` /
+/// `__str__` / `__repr__` are exposed as bound method-wrappers per #2070, the
+/// container/numeric slots per #1909/#2215/#2387).  `SLOT_ATTR` = registered
+/// as a type-level attribute on the primitive class singleton (drives
+/// `list.__iter__`, `hasattr`, `dir`, and subclass MRO resolution of the
+/// unbound form; names without it resolve through other paths).  A few
+/// entries are attr-only (`float.__trunc__`/`__floor__`/`__ceil__` have
+/// registry bodies, not protocol dispatch).
+///
+/// list / dict / set / bytearray are unhashable, so `__hash__` is *not*
+/// listed (CPython sets `list.__hash__ = None`; the None-attr path handles
+/// `[1].__hash__()`).
+pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)] {
+    const PA: u8 = SLOT_ATTR | SLOT_PROTOCOL;
+    const P: u8 = SLOT_PROTOCOL;
+    const A: u8 = SLOT_ATTR;
     match type_name {
-        // list / dict / set / bytearray are unhashable, so `__hash__` is *not*
-        // exposed (CPython sets `list.__hash__ = None`; `[1].__hash__()` raises
-        // `'NoneType' object is not callable`, handled by the None-attr path).
-        // Issue #2387: `__iter__` (and `__reversed__` on list) are exposed as
-        // slot-wrappers on the type and as inherited copies on subclass
-        // instances.  The bound *instance* form is intercepted earlier (it is in
-        // each type's `METHODS` slice); membership here drives the type-level /
-        // subclass / hasattr / dir resolution and the
-        // `dispatch_builtin_protocol_dunder` routing for the unbound forms.
         "list" => &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__add__", "__mul__", "__iadd__", "__imul__",
-            "__iter__", "__reversed__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
+            ("__delitem__", PA), ("__contains__", PA), ("__add__", PA),
+            ("__mul__", PA), ("__iadd__", PA), ("__imul__", PA),
+            ("__iter__", PA), ("__reversed__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
-        // Issue #2387: `__mod__`/`__rmod__` are the `%` string-formatting slots
-        // (`'%s'.__mod__('x')`, `hasattr(bytes, '__mod__')`); `__iter__` as above.
-        "str" | "bytes" => &[
-            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
-            "__mod__", "__rmod__", "__iter__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__",
+        "str" => &[
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__add__", PA), ("__mul__", PA), ("__mod__", PA), ("__rmod__", PA),
+            ("__iter__", PA),
+            ("__eq__", PA), ("__ne__", PA), ("__lt__", PA), ("__le__", PA),
+            ("__gt__", PA), ("__ge__", PA),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
+        ],
+        "bytes" => &[
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__add__", PA), ("__mul__", PA), ("__mod__", PA), ("__rmod__", PA),
+            ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
         ],
         "tuple" => &[
-            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
-            "__iter__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__add__", PA), ("__mul__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
         ],
         "bytearray" => &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__add__", "__mul__", "__iadd__", "__imul__",
-            "__mod__", "__rmod__", "__iter__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
+            ("__delitem__", PA), ("__contains__", PA), ("__add__", PA),
+            ("__mul__", PA), ("__iadd__", PA), ("__imul__", PA),
+            ("__mod__", PA), ("__rmod__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
         "dict" => &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__or__", "__ror__", "__ior__", "__reversed__", "__iter__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
+            ("__delitem__", PA), ("__contains__", PA), ("__or__", PA),
+            ("__ror__", PA), ("__ior__", PA), ("__iter__", PA),
+            ("__reversed__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
         "set" => &[
-            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
-            "__isub__", "__ixor__", "__iter__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__contains__", PA), ("__or__", PA),
+            ("__ror__", PA), ("__and__", PA), ("__rand__", PA),
+            ("__sub__", PA), ("__rsub__", PA), ("__xor__", PA),
+            ("__rxor__", PA), ("__ior__", PA), ("__iand__", PA),
+            ("__isub__", PA), ("__ixor__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
         "frozenset" => &[
-            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__", "__iter__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__",
+            ("__len__", PA), ("__contains__", PA), ("__or__", PA),
+            ("__ror__", PA), ("__and__", PA), ("__rand__", PA),
+            ("__sub__", PA), ("__rsub__", PA), ("__xor__", PA),
+            ("__rxor__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
         ],
-        // Issue #2070: scalar numeric types expose rich-comparison, numeric,
-        // and (for int/bool) bitwise dunders as bound method-wrappers, plus
-        // `__hash__`/`__str__`/`__repr__`/`__bool__`.  The arithmetic dunders
-        // return `NotImplemented` for operand types the forward slot does not
-        // accept (e.g. `(5).__add__(5.0)`), matching CPython exactly.
-        // Issue #2215: the *reflected* numeric/bitwise dunders mirror each
-        // type's forward set exactly (swapped-operand semantics, same
-        // tower-rank `NotImplemented` gating), exposed as bound
-        // method-wrappers alongside the forward slots.
         "int" | "bool" => &[
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__", "__bool__",
-            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
-            "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
-            "__and__", "__or__", "__xor__", "__lshift__", "__rshift__", "__invert__",
-            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
-            "__rmod__", "__rpow__", "__rdivmod__",
-            "__rand__", "__ror__", "__rxor__", "__rlshift__", "__rrshift__",
+            ("__add__", PA), ("__sub__", PA), ("__mul__", PA),
+            ("__truediv__", PA), ("__floordiv__", PA), ("__mod__", PA),
+            ("__pow__", PA), ("__and__", PA), ("__or__", PA), ("__xor__", PA),
+            ("__lshift__", PA), ("__rshift__", PA),
+            ("__eq__", PA), ("__ne__", PA), ("__lt__", PA), ("__le__", PA),
+            ("__gt__", PA), ("__ge__", PA),
+            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__divmod__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
+            ("__invert__", P),
+            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
+            ("__rtruediv__", P), ("__rfloordiv__", P), ("__rmod__", P),
+            ("__rpow__", P), ("__rdivmod__", P),
+            ("__rand__", P), ("__ror__", P), ("__rxor__", P),
+            ("__rlshift__", P), ("__rrshift__", P),
         ],
         "float" => &[
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__", "__bool__",
-            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
-            "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
-            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
-            "__rmod__", "__rpow__", "__rdivmod__",
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__add__", P), ("__sub__", P), ("__mul__", P), ("__truediv__", P),
+            ("__floordiv__", P), ("__mod__", P), ("__pow__", P),
+            ("__divmod__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
+            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
+            ("__rtruediv__", P), ("__rfloordiv__", P), ("__rmod__", P),
+            ("__rpow__", P), ("__rdivmod__", P),
+            ("__trunc__", A), ("__floor__", A), ("__ceil__", A),
         ],
         "complex" => &[
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__", "__bool__",
-            "__add__", "__sub__", "__mul__", "__truediv__", "__pow__",
-            "__neg__", "__pos__", "__abs__",
-            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rpow__",
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__add__", P), ("__sub__", P), ("__mul__", P), ("__truediv__", P),
+            ("__pow__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
+            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
+            ("__rtruediv__", P), ("__rpow__", P),
         ],
+        _ => &[],
+    }
+}
+
+/// Names with `SLOT_PROTOCOL`, as a slice (the historical interface — all
+/// existing consumers do membership checks or iterate for `dir()`).  Filtered
+/// once per type from [`slot_dunder_table`] into a static slice; the per-call
+/// cost is the same match + one atomic load as the old hand-written slices
+/// (this check sits on the plain builtin-method dispatch path, so a map
+/// lookup here measurably regressed `s.upper()` loops).
+pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
+    use std::sync::OnceLock;
+    macro_rules! cached {
+        ($t:literal) => {{
+            static S: OnceLock<Box<[&'static str]>> = OnceLock::new();
+            S.get_or_init(|| {
+                slot_dunder_table($t)
+                    .iter()
+                    .filter(|(_, f)| f & SLOT_PROTOCOL != 0)
+                    .map(|(n, _)| *n)
+                    .collect()
+            })
+        }};
+    }
+    match type_name {
+        "list" => cached!("list"),
+        "str" => cached!("str"),
+        "bytes" => cached!("bytes"),
+        "tuple" => cached!("tuple"),
+        "bytearray" => cached!("bytearray"),
+        "dict" => cached!("dict"),
+        "set" => cached!("set"),
+        "frozenset" => cached!("frozenset"),
+        "int" | "bool" => cached!("int"),
+        "float" => cached!("float"),
+        "complex" => cached!("complex"),
         _ => &[],
     }
 }
