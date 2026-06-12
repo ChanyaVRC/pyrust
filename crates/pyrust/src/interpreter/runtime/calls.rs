@@ -662,7 +662,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "int" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
+                    .is_some_and(|(t, _)| matches!(t, "int" | "bool" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 // CPython exposes most dunders (`str.__getitem__`, `list.__add__`,
@@ -728,6 +728,9 @@ impl Interpreter {
                 // CPython raises.  See Copilot review on #463.
                 let kind_ok = match (type_name, self_val.kind()) {
                     ("int", ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)) => true,
+                    // Issue #2424: `bool.__and__(True, False)` — the bool-owned
+                    // slot wrappers only accept a `bool` receiver in CPython.
+                    ("bool", ValueKind::Bool(_)) => true,
                     ("bytes", ValueKind::Bytes(_)) => true,
                     ("str", ValueKind::Str(_)) => true,
                     ("list", ValueKind::List(_)) => true,

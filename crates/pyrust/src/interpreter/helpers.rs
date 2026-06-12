@@ -683,6 +683,10 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // base), so the fast-path constructor dispatch is unaffected.
     let obj = object_class_singleton();
     let int_class = make("int", Some(Rc::clone(&obj)));
+    // `bool` inherits from `int` (CPython: `bool.__bases__ == (int,)`).  Created
+    // here (rather than inline in the returned struct) so its bool-owned slot
+    // wrappers can be registered below (issue #2424).
+    let bool_class = make("bool", Some(Rc::clone(&int_class)));
     let str_class = make("str", Some(Rc::clone(&obj)));
     let list_class = make("list", Some(Rc::clone(&obj)));
     let tuple_class = make("tuple", Some(Rc::clone(&obj)));
@@ -863,6 +867,22 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
                 .insert(dunder.to_string(), Value::builtin_function(qualified));
         }
     }
+    // Issue #2424: `bool` defines its own bitwise slot wrappers in CPython
+    // (`bool.__dict__` carries `__and__`/`__or__`/`__xor__`/`__rand__`/`__ror__`/
+    // `__rxor__`/`__invert__`), so their `__objclass__` / repr owner is `'bool'`,
+    // not the inherited `int`.  Register bool-owned `BuiltinFunction("bool.__X__")`
+    // sentinels so the unbound form resolves to a `'bool'` slot wrapper and
+    // `bool.__and__(True, False)` dispatches through the shared numeric path
+    // (the `"bool"` prefix is accepted by the `<type>.<dunder>` call arm).
+    for dunder in [
+        "__and__", "__or__", "__xor__", "__rand__", "__ror__", "__rxor__", "__invert__",
+    ] {
+        let qualified: &'static str = Box::leak(format!("bool.{dunder}").into_boxed_str());
+        bool_class
+            .borrow_mut()
+            .attrs
+            .insert(dunder.to_string(), Value::builtin_function(qualified));
+    }
     PrimitiveClasses {
         bytearray_class,
         bytes_class,
@@ -892,8 +912,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         set_class,
         str_class,
         tuple_class,
-        // `bool` inherits from `int` (CPython: `bool.__bases__ == (int,)`).
-        bool_class: make("bool", Some(Rc::clone(&int_class))),
+        bool_class,
         int_class,
     }
 }
