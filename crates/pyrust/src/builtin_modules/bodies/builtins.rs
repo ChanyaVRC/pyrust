@@ -7361,6 +7361,9 @@ pub(crate) fn value_class(obj: &Value) -> Value {
             // class `wrapper_descriptor`, not `builtin_function_or_method`.
             if pyrust_core::slot_wrapper_dunder(name).is_some() {
                 Value::builtin_function("wrapper_descriptor")
+            } else if pyrust_core::method_descriptor_name(name).is_some() {
+                // Issue #2422: `type(list.append)` is `method_descriptor`.
+                Value::builtin_function("method_descriptor")
             } else {
                 Value::builtin_function("builtin_function_or_method")
             }

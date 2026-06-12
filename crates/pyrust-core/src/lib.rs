@@ -4351,7 +4351,14 @@ impl Value {
                 Some((type_name, dunder)) => {
                     format!("<slot wrapper '{dunder}' of '{type_name}' objects>")
                 }
-                None => format!("<built-in function {name}>"),
+                // Issue #2422: an unbound builtin method (`list.append`,
+                // `dict.__getitem__`) presents as a CPython `method_descriptor`.
+                None => match method_descriptor_name(name) {
+                    Some((type_name, method)) => {
+                        format!("<method '{method}' of '{type_name}' objects>")
+                    }
+                    None => format!("<built-in function {name}>"),
+                },
             },
             ValueKind::UserFunction(func) => match func.kind {
                 UserFunctionKind::ClassMethod => format!("<classmethod '{}'>", func.name),
@@ -4907,6 +4914,10 @@ pub fn slot_wrapper_dunder(name: &str) -> Option<(&str, &str)> {
         "__ror__",
         "__xor__",
         "__rxor__",
+        // Issue #2424: `bool.__invert__` is a bool-owned slot wrapper.  Only
+        // ever resolved for `bool` here (`int.__invert__` isn't exposed), so
+        // adding it doesn't broaden any other type's surface.
+        "__invert__",
         "__rsub__",
         "__lshift__",
         "__rshift__",
@@ -4929,6 +4940,76 @@ pub fn slot_wrapper_dunder(name: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
+}
+
+/// The twelve built-in primitive types whose unbound C-level methods CPython
+/// 3.12 exposes as `method_descriptor` / slot-wrapper descriptors.  Used to
+/// distinguish a type-method `BuiltinFunction` name (`"list.append"`) from a
+/// module function (`"math.sqrt"`, which stays `builtin_function_or_method`).
+const PRIMITIVE_TYPE_NAMES: &[&str] = &[
+    "list",
+    "str",
+    "bytes",
+    "tuple",
+    "bytearray",
+    "dict",
+    "set",
+    "frozenset",
+    "int",
+    "bool",
+    "float",
+    "complex",
+];
+
+/// Issue #2422: classify an unbound builtin method `BuiltinFunction` name
+/// (`"list.append"`, `"dict.__getitem__"`, …) as a CPython *method_descriptor*
+/// and split it into `(type_name, method)`.
+///
+/// CPython exposes the unbound C-level methods of a built-in type as
+/// `method_descriptor`s whose `repr` reads `<method '<m>' of '<type>'
+/// objects>`.  This is distinct from the slot-wrapper dunders handled by
+/// [`slot_wrapper_dunder`] (`wrapper_descriptor`, `<slot wrapper …>`), which
+/// take precedence here.  The single seam that drives the unbound `repr`
+/// (line ~4354) and `type(...).__name__` (`builtins.rs::value_class`).
+///
+/// Scope (matches issue #2422): plain (non-dunder) methods of the twelve
+/// primitive types (`append`, `upper`, `get`, …), plus the method_descriptor
+/// container dunders `__getitem__` (list/dict), `__contains__`
+/// (dict/set/frozenset), `__reversed__` (list/dict) — empirically the same
+/// partition as [`slot_wrapper_dunder`]'s exception set, verified against
+/// `python3.12`.  Object-inherited dunders (`object.__reduce__`,
+/// `str.__format__`, `__init__`/`__new__`/`__repr__`/`__hash__`, …) form a
+/// larger separate CPython classification matrix and are deliberately out of
+/// scope (still `builtin_function_or_method` here); see the #2422 follow-up.
+///
+/// Returns `None` for module functions (`"math.sqrt"`), bare names (`"len"`),
+/// `object.*`-inherited names, slot-wrapper dunders, and the deferred dunders.
+pub fn method_descriptor_name(name: &str) -> Option<(&str, &str)> {
+    let (type_name, method) = name.rsplit_once('.')?;
+    if !PRIMITIVE_TYPE_NAMES.contains(&type_name) {
+        return None;
+    }
+    // Slot-wrapper dunders are `wrapper_descriptor`, not method_descriptor.
+    if slot_wrapper_dunder(name).is_some() {
+        return None;
+    }
+    let is_dunder = method.starts_with("__") && method.ends_with("__") && method.len() > 4;
+    if is_dunder {
+        // Only the method_descriptor container dunders are in scope.  The
+        // `__trunc__`/`__floor__`/`__ceil__` int/float attrs aren't exposed
+        // unbound here (no SLOT_ATTR row), so they never reach this path.
+        if matches!(
+            (method, type_name),
+            ("__getitem__", "list" | "dict")
+                | ("__contains__", "dict" | "set" | "frozenset")
+                | ("__reversed__", "list" | "dict")
+        ) {
+            return Some((type_name, method));
+        }
+        return None;
+    }
+    // Plain (non-dunder) builtin method: `list.append`, `str.upper`, …
+    Some((type_name, method))
 }
 
 /// Returns the Python built-in type name (e.g. `"list"`, `"str"`) for a
@@ -4966,6 +5047,10 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
             // `builtin_function_or_method`.
             if slot_wrapper_dunder(name).is_some() {
                 Cow::Borrowed("wrapper_descriptor")
+            } else if method_descriptor_name(name).is_some() {
+                // Issue #2422: an unbound builtin method (`list.append`) is a
+                // CPython `method_descriptor`.
+                Cow::Borrowed("method_descriptor")
             } else {
                 Cow::Borrowed("builtin_function_or_method")
             }
