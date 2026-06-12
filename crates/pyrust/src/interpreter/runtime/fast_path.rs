@@ -1613,6 +1613,166 @@ impl Interpreter {
     // operands (obj/name_idx/val + regs/code/pc/num_locals) feeding the inline
     // attribute cache; do not bundle into a struct on this dispatch-loop path.
     #[allow(clippy::too_many_arguments)]
+    /// Full body of `Insn::CallKw` (issue #2382).  The args occupy
+    /// `R[func+1 .. func+1+total]`; the trailing `nkw` of them are keyword args
+    /// whose names are the const-pool tuple `consts[kwnames_idx]`.  Returns the
+    /// call result (the dispatch arm writes it back to `R[func]`).
+    ///
+    /// A per-call-site cache ([`KwCallCacheEntry`]) records the keyword→param
+    /// slot mapping for a monomorphic, plain-`UserFunction` callee.  On a hit
+    /// (same `param_binds` identity) the keyword values bind straight into their
+    /// slots with no name scan — `call_user_function_kw_cached`.  On a miss the
+    /// general binder (`call_function_expanded`) runs, which owns every
+    /// CPython-parity diagnostic; if that call's shape is *simple* the cache is
+    /// filled, otherwise it is set to `Fallback` (permanent slow path).
+    #[allow(clippy::too_many_arguments)]
+    fn exec_call_kw(
+        &mut self,
+        regs: &RegSlice,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        func: crate::bytecode::Reg,
+        total: u8,
+        nkw: u8,
+        kwnames_idx: u16,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        use crate::bytecode::KwCallCacheEntry;
+        let total = total as u32;
+        let nkw = nkw as usize;
+        let npos = total as usize - nkw;
+        let func_val = vm_read(regs, func, num_locals)?;
+
+        // The fast bind only applies to a plain user function (Regular kind).
+        // Bound methods, classes, builtins, class/static methods, etc. take the
+        // general `call_function_expanded` path below, which handles them all.
+        let user_fn = match func_val.kind() {
+            ValueKind::UserFunction(f)
+                if matches!(f.kind, pyrust_core::UserFunctionKind::Regular) =>
+            {
+                Some(Rc::clone(f))
+            }
+            _ => None,
+        };
+
+        if let Some(f) = user_fn {
+            let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
+            // Cache hit?
+            let cached: Option<(u8, smallvec::SmallVec<[u32; 4]>)> = {
+                let cache = code.kwcall_cache.borrow();
+                match &cache[pc - 1] {
+                    KwCallCacheEntry::Simple { param_binds_ptr, npos: cnpos, slots }
+                        if *param_binds_ptr == pbptr && *cnpos as usize == npos =>
+                    {
+                        Some((*cnpos, slots.clone()))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some((_, slots)) = cached {
+                let Some(callee_code) = self.get_or_compile_bytecode(&f) else {
+                    return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+                };
+                // Read the positional and keyword values from their registers.
+                let mut pos_vals: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(npos);
+                for i in 0..npos as u32 {
+                    pos_vals.push(vm_read(regs, func + 1 + i, num_locals)?);
+                }
+                let mut kw_vals: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(nkw);
+                for i in 0..nkw as u32 {
+                    kw_vals.push(vm_read(regs, func + 1 + npos as u32 + i, num_locals)?);
+                }
+                return self.call_user_function_kw_cached(
+                    &f,
+                    &callee_code,
+                    npos,
+                    &mut pos_vals.into_iter(),
+                    &slots,
+                    &mut kw_vals.into_iter(),
+                );
+            }
+
+            // Cache empty (or shape changed): try to resolve this call as simple.
+            // Only fill on an `Empty` slot — a `Fallback` slot stays permanent.
+            let is_empty = matches!(code.kwcall_cache.borrow()[pc - 1], KwCallCacheEntry::Empty);
+            if is_empty {
+                let kwnames = match code.consts.get(kwnames_idx as usize).and_then(|c| c.as_tuple())
+                {
+                    Some(t) => t.to_vec(),
+                    None => {
+                        return Err(PyError::Runtime(
+                            "bytecode error: CallKw kwnames is not a tuple".to_string(),
+                        ));
+                    }
+                };
+                match Self::kwcall_resolve_simple(&f, npos, &kwnames) {
+                    Some(slots) => {
+                        let mut cache = code.kwcall_cache.borrow_mut();
+                        cache[pc - 1] = KwCallCacheEntry::Simple {
+                            param_binds_ptr: pbptr,
+                            npos: npos as u8,
+                            slots: slots.clone(),
+                        };
+                        drop(cache);
+                        let Some(callee_code) = self.get_or_compile_bytecode(&f) else {
+                            return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+                        };
+                        let mut pos_vals: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(npos);
+                        for i in 0..npos as u32 {
+                            pos_vals.push(vm_read(regs, func + 1 + i, num_locals)?);
+                        }
+                        let mut kw_vals: smallvec::SmallVec<[Value; 4]> = smallvec::SmallVec::with_capacity(nkw);
+                        for i in 0..nkw as u32 {
+                            kw_vals.push(vm_read(regs, func + 1 + npos as u32 + i, num_locals)?);
+                        }
+                        return self.call_user_function_kw_cached(
+                            &f,
+                            &callee_code,
+                            npos,
+                            &mut pos_vals.into_iter(),
+                            &slots,
+                            &mut kw_vals.into_iter(),
+                        );
+                    }
+                    None => {
+                        // Not simple — permanent fallback to the general binder.
+                        code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                    }
+                }
+            }
+        }
+
+        // Slow path: build an `ExpandedCallArg` buffer (positionals, then named
+        // keyword args) and dispatch through the general call machinery, which
+        // owns CPython-parity argument binding + diagnostics for every callee.
+        let kwnames = match code.consts.get(kwnames_idx as usize).and_then(|c| c.as_tuple()) {
+            Some(t) => t.to_vec(),
+            None => {
+                return Err(PyError::Runtime(
+                    "bytecode error: CallKw kwnames is not a tuple".to_string(),
+                ));
+            }
+        };
+        let mut buf = std::mem::take(&mut self.call_arg_buf);
+        buf.clear();
+        for i in 0..npos as u32 {
+            buf.push(ExpandedCallArg { name: None, value: vm_read(regs, func + 1 + i, num_locals)? });
+        }
+        for (i, name_val) in kwnames.iter().enumerate() {
+            let name = name_val
+                .as_str()
+                .ok_or_else(|| {
+                    PyError::Runtime("bytecode error: CallKw kwname is not a str".to_string())
+                })?
+                .to_string();
+            let value = vm_read(regs, func + 1 + npos as u32 + i as u32, num_locals)?;
+            buf.push(ExpandedCallArg { name: Some(name), value });
+        }
+        let call_result = self.call_function_expanded(func_val, &buf);
+        self.call_arg_buf = buf;
+        call_result
+    }
+
     fn exec_set_attr(
         &mut self,
         regs: &mut RegSlice,

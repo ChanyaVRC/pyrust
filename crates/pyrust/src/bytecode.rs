@@ -298,6 +298,22 @@ pub enum Insn {
         pos_list: Reg,
         kw_dict: Reg,
     },
+    /// Keyword-argument call with no `*args` / `**kwargs` splats (issue #2382).
+    /// Mirrors CPython's `KW_NAMES` + `CALL`: arguments are laid out
+    /// contiguously in registers — `total` values in `R[func+1 .. func+1+total]`
+    /// — and the *last* `nkw` of them are keyword arguments whose names are the
+    /// strings in the constant-pool tuple `consts[kwnames_idx]` (in order).  The
+    /// first `total - nkw` are positional.  Result is written back to `R[func]`.
+    ///
+    /// This replaces the old `BuildList`+`BuildDict`+`SetItem`+`__vcall__`
+    /// lowering for plain keyword calls, which allocated a dict and a list and
+    /// round-tripped through the `__vcall__` builtin on every invocation.
+    CallKw {
+        func: Reg,
+        total: u8,
+        nkw: u8,
+        kwnames_idx: u16,
+    },
     /// return R[src]
     Return(Reg),
     /// return None
@@ -676,6 +692,72 @@ pub enum AttrCacheEntry {
     Megamorphic,
 }
 
+/// Per-call-site inline cache for `Insn::CallKw` (issue #2382).
+///
+/// A keyword call `f(a=1, b=2, c=3)` binds each keyword argument to a parameter
+/// by name.  The slow path linearly scans `function.params` for every keyword
+/// on every call — O(nkw × nparams) string comparisons.  This cache records,
+/// once per call site, the parameter index each keyword name maps to, so the
+/// binder can write each keyword value straight into its slot with no string
+/// comparison and no defaults/missing scan when the cached shape matches.
+///
+/// Identity guard: `param_binds_ptr` is `Rc::as_ptr(&function.param_binds)`.
+/// `param_binds` is shared (via `Rc`) across every closure produced by the same
+/// `def`, and is immutable, so this pointer is a stable, correct identity for
+/// "this exact function prototype".  Two closures from one `def` share the
+/// pointer → hit (correct: same params); a different function → different
+/// pointer → miss.  No version/epoch is needed because `param_binds` never
+/// mutates after construction.
+///
+/// `slots[i]` is the parameter index that the `i`-th keyword name (in the call
+/// site's `kwnames` tuple order) binds to.  Filled only when the cached call is
+/// *simple*: every keyword maps to a distinct, non-positional-only,
+/// non-keyword-collecting parameter, the positionals exactly fill the leading
+/// params, and no parameter is bound twice.  Any deviation (unexpected keyword,
+/// duplicate, positional-only-as-keyword, missing required, **kwargs param,
+/// arity mismatch) marks the site `Fallback` so it permanently takes the
+/// general binder, which owns the CPython-parity diagnostics.
+///
+/// # Safety
+/// `param_binds_ptr` is used only for identity comparison, never dereferenced.
+/// The interpreter is single-threaded and the `Rc` outlives any `FnCode`
+/// referencing it.
+#[derive(Clone)]
+pub enum KwCallCacheEntry {
+    /// No observation yet.
+    Empty,
+    /// Monomorphic: one function prototype seen, and its binding is simple.
+    /// `slots[i]` = param index for keyword `i`; `npos` positional args fill
+    /// params `0..npos`.  Validated by `param_binds_ptr` identity.
+    Simple {
+        param_binds_ptr: *const (),
+        npos: u8,
+        /// One param index per keyword name, in `kwnames` tuple order.
+        slots: SmallVec<[u32; 4]>,
+    },
+    /// This site is not simple (or went polymorphic) — always use the general
+    /// binder.  Set permanently; never re-filled.
+    Fallback,
+}
+
+// SAFETY: pyrust's interpreter is single-threaded.  `KwCallCacheEntry` is only
+// read/written inside `run_bytecode_inner` on one thread; the raw pointer is
+// never sent across threads.
+unsafe impl Send for KwCallCacheEntry {}
+unsafe impl Sync for KwCallCacheEntry {}
+
+impl std::fmt::Debug for KwCallCacheEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KwCallCacheEntry::Empty => write!(f, "Empty"),
+            KwCallCacheEntry::Simple { npos, slots, .. } => {
+                write!(f, "Simple {{ npos: {npos}, slots: {slots:?} }}")
+            }
+            KwCallCacheEntry::Fallback => write!(f, "Fallback"),
+        }
+    }
+}
+
 /// Operand-type tag for the BinOp inline cache.
 ///
 /// Classifies a `(lhs, rhs)` pair at a BinOp call site into one of four
@@ -846,6 +928,13 @@ pub struct FnCode {
     ///   `Specialized(tag)` + same tag → try fast path; mismatch → `Megamorphic`.
     ///   `Megamorphic` → permanently bypass cache, call `eval_binary` directly.
     pub(crate) binop_cache: RefCell<Vec<BinOpCacheEntry>>,
+    /// Per-call-site inline cache for `Insn::CallKw` (issue #2382).
+    ///
+    /// Indexed by instruction position (`pc`) — same length as `insns`.  Only
+    /// entries at `CallKw` positions are ever advanced past `Empty`.  Records
+    /// the keyword-name → parameter-slot mapping for a monomorphic call site so
+    /// the binder skips the per-call linear name scan; see [`KwCallCacheEntry`].
+    pub(crate) kwcall_cache: RefCell<Vec<KwCallCacheEntry>>,
     /// Zero-cost exception table (CPython 3.11 model).  Parallel to `insns`:
     /// `exc_table[pc]` is the absolute target PC of the innermost `try` handler
     /// active when an exception is raised at `pc`, or [`EXC_NO_HANDLER`] for

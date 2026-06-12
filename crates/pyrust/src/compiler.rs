@@ -10,7 +10,7 @@ use crate::ast::{
 };
 use crate::bytecode::{
     AttrCacheEntry, BinOpCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY,
-    Insn, Reg,
+    Insn, KwCallCacheEntry, Reg,
 };
 use crate::error::PyError;
 use crate::interpreter::dispatch_numeric_binop;
@@ -5550,6 +5550,7 @@ impl Compiler {
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
             binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
+            kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
             // Empty until the optimizer's `build_exc_table` pass runs; while
             // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
@@ -12023,6 +12024,16 @@ impl Compiler {
         let has_splat = args.iter().any(|a| a.splat || a.double_splat);
         let has_kwargs = args.iter().any(|a| a.name.is_some());
 
+        // Keyword call with no `*args` / `**kwargs` splats and a non-method
+        // callee: lay the arguments out contiguously in registers and emit a
+        // `CallKw` (issue #2382), skipping the BuildDict + BuildList + __vcall__
+        // round-trip the generic variadic path uses.  Method keyword calls
+        // (`obj.m(a=1)`) still take the variadic path so in-place mutation of
+        // the receiver register is preserved.
+        if has_kwargs && !has_splat && !matches!(func, Expr::Attr { .. }) {
+            return self.compile_keyword_call(func, args);
+        }
+
         if has_splat || has_kwargs {
             // Variadic call: build separate positional and keyword lists, then
             // use the ExpandedCall instruction.
@@ -12072,6 +12083,73 @@ impl Compiler {
         } else {
             self.emit(Insn::Call(func_reg, argc));
         }
+        self.next_temp = func_reg + 1;
+        func_reg
+    }
+
+    /// Compile a keyword-argument call (no splats, non-method callee) into a
+    /// `CallKw` instruction (issue #2382).  Arguments are evaluated left-to-right
+    /// (Python order) into contiguous registers `func_reg+1 .. func_reg+1+total`,
+    /// positionals first then keyword values; the keyword names form a
+    /// constant-pool tuple consumed by the runtime binder.
+    ///
+    /// Python's grammar guarantees every positional argument precedes every
+    /// keyword argument in a call, so source order already lays out positionals
+    /// before keyword values — no reordering of evaluation is needed.
+    fn compile_keyword_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
+        let total = args.len();
+        if total > u8::MAX as usize {
+            // Too many args to encode in a u8 — fall back to the generic path.
+            return self.compile_variadic_call(func, args);
+        }
+        let nkw = args.iter().filter(|a| a.name.is_some()).count();
+
+        // Build the keyword-names tuple constant (in source order, matching the
+        // order the keyword values occupy in the register window).
+        let kw_names: Vec<Value> = args
+            .iter()
+            .filter_map(|a| a.name.as_ref())
+            .map(|n| Value::string(n.clone()))
+            .collect();
+        let kwnames_idx = self.intern_const(Value::tuple(kw_names));
+
+        let func_reg = self.next_temp;
+        let frame_top = func_reg.wrapping_add(1).wrapping_add(total as Reg);
+        if frame_top < func_reg {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("call frame register overflow".to_string());
+            }
+            return 0;
+        }
+        self.next_temp = frame_top;
+        if frame_top > 0 && frame_top - 1 > self.max_reg {
+            self.max_reg = frame_top - 1;
+        }
+        let saved = self.next_temp;
+        self.compile_expr_into(func, func_reg);
+        self.next_temp = saved;
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            let arg_reg = func_reg + 1 + i;
+            let saved = self.next_temp;
+            let insn_before = self.insns.len();
+            let r = self.compile_expr(&arg.value);
+            if r != arg_reg {
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, arg_reg) {
+                    // retargeted in place — no Move needed
+                } else {
+                    self.emit(Insn::Move(arg_reg, r));
+                }
+            }
+            self.next_temp = saved;
+        }
+        self.emit(Insn::CallKw {
+            func: func_reg,
+            total: total as u8,
+            nkw: nkw as u8,
+            kwnames_idx,
+        });
         self.next_temp = func_reg + 1;
         func_reg
     }
