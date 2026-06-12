@@ -5860,9 +5860,38 @@ pub fn reset_current_vm_line() {
 /// ```
 ///
 /// When `lineno` is `None` the `line N` part is omitted.  When `source_line`
-/// is `None` the source echo and underline are omitted.  The underline is a
-/// full-width `^` row (one caret per non-space character in the stripped line)
-/// — a simplified approximation of CPython's PEP 657 fine-grained underlines.
+/// is `None` the source echo is omitted.
+///
+/// ## Source-line indentation (issue #2418)
+///
+/// CPython strips the displayed source line's own leading whitespace and emits
+/// it under a fixed 4-space traceback indent, so an indented statement is not
+/// over-indented.  We `trim_start()` the line before applying our indent to
+/// match.
+///
+/// ## Caret (`^^^`) underlines (issue #2411)
+///
+/// CPython 3.12's PEP 657 underlines are *fine-grained*: they point at the
+/// precise sub-expression (anchor) that raised, using its column span — e.g.
+/// `x = undefined` underlines only `undefined`, and `1 + "s"` underlines
+/// `~~^~~~~`.  Crucially, when the anchor covers the **entire stripped source
+/// line**, CPython **omits the caret row entirely** (a bare `name`, `f()`,
+/// `raise X(...)`, `obj.attr`, etc. print no carets at all).
+///
+/// pyrust's line tables carry **no column information** (`FnCode::lineno_table`
+/// is line-only; see `bytecode.rs`), so we cannot reproduce the fine-grained
+/// span.  The previous implementation emitted a full-width `^` row over the
+/// whole stripped line on every frame — which is wrong in *every* case CPython
+/// produces: either CPython omits the carets (whole-line anchor) or it
+/// underlines a strictly narrower span (often with `~` context marks).  There
+/// is no real-world statement for which CPython prints a plain full-width `^`
+/// row over the whole line.
+///
+/// We therefore omit the caret row.  This is byte-exact with CPython for the
+/// whole-line-anchor class (the common uncaught case) and strictly closer for
+/// the rest (no spurious over-wide carets).  Restoring the narrow span + `~`
+/// context marks requires PEP 657 column tracking in the compiler — deferred,
+/// tracked separately.
 pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::from("Traceback (most recent call last):\n");
@@ -5879,25 +5908,12 @@ pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
                 let _ = writeln!(out, "  File \"{}\", in {}", frame.filename, frame.funcname);
             }
         }
-        // Emit source line + underline when available.
+        // Emit the source line, dedented to a fixed 4-space indent (#2418).
+        // Carets are intentionally omitted; see the doc comment above (#2411).
         if let Some(src) = &frame.source_line {
-            // CPython indents the source line with four spaces.
-            let _ = writeln!(out, "    {src}");
-            // Build the underline: leading spaces matching the source line's
-            // own indentation, then `^` for each non-whitespace character.
-            // Use char counts so the alignment is correct for non-ASCII source.
-            // This matches CPython's minimum underline (no `~` context marks
-            // since we don't track sub-expression column offsets yet).
             let stripped = src.trim_start();
-            let leading = src.chars().count() - stripped.chars().count();
-            let carets = stripped.trim_end().chars().count();
-            if carets > 0 {
-                let underline = format!(
-                    "    {spaces}{carets}\n",
-                    spaces = " ".repeat(leading),
-                    carets = "^".repeat(carets),
-                );
-                out.push_str(&underline);
+            if !stripped.is_empty() {
+                let _ = writeln!(out, "    {stripped}");
             }
         }
     }
