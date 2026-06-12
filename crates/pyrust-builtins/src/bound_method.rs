@@ -59,7 +59,16 @@ impl BuiltinTypeOps for BoundMethodOps {
                 s.receiver.value_id().unwrap_or(0),
             )
         } else {
-            format!("<built-in method {} of {} object>", s.name, recv_type)
+            // Issue #2422: a bound builtin method (`[1].append`) reports its
+            // receiver's identity address, matching CPython's
+            // `<built-in method append of list object at 0x...>` (the bound
+            // method's `__self__` is the receiver, so `id(__self__)`).
+            format!(
+                "<built-in method {} of {} object at 0x{:x}>",
+                s.name,
+                recv_type,
+                s.receiver.value_id().unwrap_or(0),
+            )
         }
     }
 

@@ -662,7 +662,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "int" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
+                    .is_some_and(|(t, _)| matches!(t, "int" | "bool" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 // CPython exposes most dunders (`str.__getitem__`, `list.__add__`,
@@ -728,6 +728,9 @@ impl Interpreter {
                 // CPython raises.  See Copilot review on #463.
                 let kind_ok = match (type_name, self_val.kind()) {
                     ("int", ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)) => true,
+                    // Issue #2424: `bool.__and__(True, False)` — the bool-owned
+                    // slot wrappers only accept a `bool` receiver in CPython.
+                    ("bool", ValueKind::Bool(_)) => true,
                     ("bytes", ValueKind::Bytes(_)) => true,
                     ("str", ValueKind::Str(_)) => true,
                     ("list", ValueKind::List(_)) => true,
@@ -1309,7 +1312,20 @@ impl Interpreter {
         if method.starts_with("__")
             && is_protocol_dunder(&pyrust_core::builtin_type_name(&receiver), method)
         {
-            reject_kwargs!(kw, "{}", method);
+            // Issue #2423: bytes/bytearray `__getitem__`/`__contains__` and
+            // `frozenset.__contains__` reach this bound method-call arm (rather
+            // than `dispatch_builtin_container_method`), so route their
+            // keyword-rejection through the same named-method-wrapper vs
+            // anonymous-slot-wrapper decision (#2398) instead of the bare
+            // `{method}()` wording.
+            if !kw.is_empty() {
+                let type_name = pyrust_core::builtin_type_name(&receiver);
+                return Err(if is_named_protocol_wrapper(method, &type_name) {
+                    pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                } else {
+                    pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                });
+            }
             let args_vec: Vec<Value> = std::mem::take(pos);
             return self.dispatch_builtin_protocol_dunder(method, receiver, args_vec);
         }
