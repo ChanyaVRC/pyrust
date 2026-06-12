@@ -4946,6 +4946,28 @@ fn or_leading_is_wildcard(pat: &Pattern) -> bool {
     }
 }
 
+/// Recognise the `f(<pos…>, **d)` shape eligible for the `CallEx` fast lowering
+/// (issue #2393): exactly one `**d` double-splat, which must be the final arg,
+/// preceded only by plain positional args (no `*a` splat, no literal `name=`
+/// keyword).  Returns the number of leading positionals on a match, else `None`.
+fn double_splat_fast_shape(args: &[crate::ast::CallArg]) -> Option<usize> {
+    let n = args.len();
+    if n == 0 {
+        return None;
+    }
+    let last = &args[n - 1];
+    if !last.double_splat {
+        return None;
+    }
+    // Every preceding arg must be a plain positional.
+    for a in &args[..n - 1] {
+        if a.splat || a.double_splat || a.name.is_some() {
+            return None;
+        }
+    }
+    Some(n - 1)
+}
+
 impl Compiler {
     fn new(
         local_index: Rc<HashMap<String, Reg>>,
@@ -12034,6 +12056,18 @@ impl Compiler {
             return self.compile_keyword_call(func, args);
         }
 
+        // Double-splat expansion `f(<pos…>, **d)` (issue #2393): exactly one
+        // trailing `**d`, every preceding arg a plain positional (no `*a` splat,
+        // no literal keyword), non-method callee.  Lower to `CallEx`, which binds
+        // straight from the splat dict via a monomorphic shape cache instead of
+        // copying the dict and round-tripping through `__vcall__`.
+        if let Some(npos) = double_splat_fast_shape(args)
+            && npos <= u8::MAX as usize
+            && !matches!(func, Expr::Attr { .. })
+        {
+            return self.compile_double_splat_call(func, args, npos);
+        }
+
         if has_splat || has_kwargs {
             // Variadic call: build separate positional and keyword lists, then
             // use the ExpandedCall instruction.
@@ -12456,6 +12490,79 @@ impl Compiler {
         self.next_temp = vcall_reg + 1;
         // Return value is in vcall_reg
         vcall_reg
+    }
+
+    /// Compile a double-splat call `f(<pos…>, **d)` (issue #2393, shape vetted by
+    /// [`double_splat_fast_shape`]) into a `CallEx` instruction.  Positionals fill
+    /// `R[func+1 .. func+1+npos]` contiguously (as for `CallKw`); the single `**d`
+    /// source dict is evaluated into a separate `kwargs` register above the
+    /// positional window.  The runtime binder reads the dict directly — no
+    /// BuildDict/DictUpdate copy and no `__vcall__` round-trip.
+    fn compile_double_splat_call(
+        &mut self,
+        func: &Expr,
+        args: &[crate::ast::CallArg],
+        npos: usize,
+    ) -> Reg {
+        let func_reg = self.next_temp;
+        // Reserve func + npos positional registers contiguously, then one more
+        // for the `**d` dict.
+        let frame_top = func_reg
+            .wrapping_add(1)
+            .wrapping_add(npos as Reg)
+            .wrapping_add(1);
+        if frame_top < func_reg {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("call frame register overflow".to_string());
+            }
+            return 0;
+        }
+        self.next_temp = frame_top;
+        if frame_top > 0 && frame_top - 1 > self.max_reg {
+            self.max_reg = frame_top - 1;
+        }
+        let saved = self.next_temp;
+        self.compile_expr_into(func, func_reg);
+        self.next_temp = saved;
+        // Positionals into the contiguous window (source order; every arg but the
+        // trailing `**d` is a plain positional — guaranteed by the shape check).
+        for (i, arg) in (0u32..).zip(args[..npos].iter()) {
+            let arg_reg = func_reg + 1 + i;
+            let saved = self.next_temp;
+            let insn_before = self.insns.len();
+            let r = self.compile_expr(&arg.value);
+            if r != arg_reg {
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, arg_reg) {
+                    // retargeted in place — no Move needed
+                } else {
+                    self.emit(Insn::Move(arg_reg, r));
+                }
+            }
+            self.next_temp = saved;
+        }
+        // The `**d` source mapping into the dedicated kwargs register.
+        let kwargs_reg = func_reg + 1 + npos as Reg;
+        let saved = self.next_temp;
+        let insn_before = self.insns.len();
+        let r = self.compile_expr(&args[npos].value);
+        if r != kwargs_reg {
+            let single = self.insns.len() == insn_before + 1;
+            if single && r >= self.base_temp && self.retarget_last(r, kwargs_reg) {
+                // retargeted in place — no Move needed
+            } else {
+                self.emit(Insn::Move(kwargs_reg, r));
+            }
+        }
+        self.next_temp = saved;
+        self.emit(Insn::CallEx {
+            func: func_reg,
+            npos: npos as u8,
+            kwargs: kwargs_reg,
+        });
+        self.next_temp = func_reg + 1;
+        func_reg
     }
 
     fn compile_lambda(&mut self, params: &[FunctionParam], body: &Expr) -> Reg {

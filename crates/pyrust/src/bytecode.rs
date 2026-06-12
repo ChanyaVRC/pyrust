@@ -314,6 +314,24 @@ pub enum Insn {
         nkw: u8,
         kwnames_idx: u16,
     },
+    /// Double-splat keyword-expansion call `f(<pos…>, **d)` (issue #2393).
+    /// `npos` plain positional arguments occupy `R[func+1 .. func+1+npos]`, and
+    /// `R[kwargs]` holds the single `**d` source mapping.  Result is written back
+    /// to `R[func]`.
+    ///
+    /// This replaces the old `BuildList`+`BuildDict`+`DictUpdate`+`__vcall__`
+    /// lowering for the common `f(**d)` / `f(a, **d)` shapes, which copied the
+    /// whole dict, round-tripped through the `__vcall__` builtin, and then
+    /// linearly name-scanned the parameter list on every call.  A per-call-site
+    /// cache ([`KwCallCacheEntry::ExSimple`]) records the dict key-set →
+    /// parameter-slot mapping for a monomorphic plain-`UserFunction` callee whose
+    /// `**d` keys are stable across calls, so the keyword values bind straight
+    /// into their slots (reusing the #2382 `kwcall_resolve_simple` /
+    /// `call_user_function_kw_cached` machinery) with no dict copy and no name
+    /// scan.  Only emitted for a single trailing `**d` with no `*args` splat and
+    /// no literal keywords, non-method callee; every other variadic shape keeps
+    /// the generic path.
+    CallEx { func: Reg, npos: u8, kwargs: Reg },
     /// return R[src]
     Return(Reg),
     /// return None
@@ -738,6 +756,24 @@ pub enum KwCallCacheEntry {
     /// This site is not simple (or went polymorphic) — always use the general
     /// binder.  Set permanently; never re-filled.
     Fallback,
+    /// `Insn::CallEx` (`f(**d)`) monomorphic shape cache (issue #2393).  The
+    /// `**d` keys are dynamic, so in addition to the `param_binds_ptr` callee
+    /// identity this records the exact `keyset` last observed for the splat dict
+    /// (its `str` keys in iteration order).  On a hit — same callee prototype,
+    /// same `npos`, and the dict's keys equal `keyset` in order — the keyword
+    /// values bind straight into `slots` (the parameter index for each key, in
+    /// `keyset` order), reusing the #2382 fast bind with no dict copy and no name
+    /// scan.  Any key-set change re-resolves (re-fills) rather than pinning to
+    /// `Fallback`, so a call site cycling over a small number of stable shapes
+    /// still gets the fast bind on the shape it most recently saw.
+    ExSimple {
+        param_binds_ptr: *const (),
+        npos: u8,
+        /// The `**d` dict's `str` keys, in iteration order, for the shape guard.
+        keyset: SmallVec<[Box<str>; 4]>,
+        /// One param index per key in `keyset` order.
+        slots: SmallVec<[u32; 4]>,
+    },
 }
 
 // SAFETY: pyrust's interpreter is single-threaded.  `KwCallCacheEntry` is only
@@ -754,6 +790,17 @@ impl std::fmt::Debug for KwCallCacheEntry {
                 write!(f, "Simple {{ npos: {npos}, slots: {slots:?} }}")
             }
             KwCallCacheEntry::Fallback => write!(f, "Fallback"),
+            KwCallCacheEntry::ExSimple {
+                npos,
+                keyset,
+                slots,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ExSimple {{ npos: {npos}, keyset: {keyset:?}, slots: {slots:?} }}"
+                )
+            }
         }
     }
 }

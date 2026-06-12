@@ -1444,6 +1444,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             insn @ (Insn::Call(..)
             | Insn::CallMemo(..)
             | Insn::CallKw { .. }
+            | Insn::CallEx { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::MakeClass(..)
@@ -1520,6 +1521,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | Call(r, _)
         | CallMemo(r, _)
         | CallKw { func: r, .. }
+        | CallEx { func: r, .. }
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
@@ -2475,6 +2477,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         // CallKw reads the callee and `total` consecutive arg registers — the
         // same footprint as `Call(func, total)`.
         CallKw { func, total, .. } => r >= *func && r <= *func + *total as u32,
+        // CallEx reads the callee + `npos` positional registers (contiguous) and
+        // the separate `kwargs` (`**d`) register.
+        CallEx { func, npos, kwargs } => (r >= *func && r <= *func + *npos as u32) || r == *kwargs,
         // args_base is always >= 1 (compiler sets it to func_reg + 1, func_reg >= 0),
         // so args_base - 1 is the callee register and the subtraction never underflows.
         TailCall { args_base, nargs } => {
@@ -2649,6 +2654,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             for r in *func..=(*func + *total as u32) {
                 reads.insert(r);
             }
+        }
+        CallEx { func, npos, kwargs } => {
+            for r in *func..=(*func + *npos as u32) {
+                reads.insert(r);
+            }
+            reads.insert(*kwargs);
         }
         TailCall { args_base, nargs } => {
             reads.insert(*args_base - 1);
@@ -3169,6 +3180,7 @@ fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
             | Insn::Call(..)
             | Insn::CallMemo(..)
             | Insn::CallKw { .. }
+            | Insn::CallEx { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::MakeClass(..)
@@ -3530,6 +3542,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | Call(r, _)
         | CallMemo(r, _)
         | CallKw { func: r, .. }
+        | CallEx { func: r, .. }
         | Move(r, _)
         | CopyReg(r, _)
         | DeleteLocal(r, _) => {
@@ -4349,6 +4362,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::Call(..)
                 | Insn::CallMemo(..)
                 | Insn::CallKw { .. }
+                | Insn::CallEx { .. }
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
@@ -4926,6 +4940,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                     | Insn::Call(_, _)
                     | Insn::CallMemo(_, _)
                     | Insn::CallKw { .. }
+                    | Insn::CallEx { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::ForIter(_, _, _)
@@ -4945,6 +4960,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                 Insn::Call(_, _)
                     | Insn::CallMemo(_, _)
                     | Insn::CallKw { .. }
+                    | Insn::CallEx { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
             )
@@ -5328,6 +5344,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::Call(..)
                 | Insn::CallMemo(..)
                 | Insn::CallKw { .. }
+                | Insn::CallEx { .. }
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodExpanded { .. }
                 | Insn::MakeClass(..)
@@ -7284,6 +7301,12 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             for r in *func..=(*func + *total as u32) {
                 f(r);
             }
+        }
+        CallEx { func, npos, kwargs } => {
+            for r in *func..=(*func + *npos as u32) {
+                f(r);
+            }
+            f(*kwargs);
         }
         TailCall { args_base, nargs } => {
             f(args_base - 1);
@@ -10393,6 +10416,7 @@ mod tests {
                 Insn::Call(..)
                     | Insn::CallMemo(..)
                     | Insn::CallKw { .. }
+                    | Insn::CallEx { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodExpanded { .. }
                     | Insn::MakeClass(..)
