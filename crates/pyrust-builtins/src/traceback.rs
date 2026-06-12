@@ -80,7 +80,7 @@ pub fn is_traceback(value: &Value) -> bool {
 /// value is not a built-in object or has no such attribute.
 fn builtin_getattr(value: &Value, name: &str) -> Option<Value> {
     match value.kind() {
-        pyrust_core::ValueKind::BuiltinObject { ops, state } => ops.getattr(&state, name),
+        pyrust_core::ValueKind::BuiltinObject { ops, state } => ops.getattr(state, name),
         _ => None,
     }
 }
