@@ -842,36 +842,48 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             "__lshift__", "__rshift__",
             "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
         ][..]),
+        // Issue #2387: `__iter__` (every iterable type), `__reversed__` (list,
+        // alongside dict's), and `__mod__`/`__rmod__` (the `%` slots on
+        // str/bytes/bytearray) are exposed as type-level slot-wrappers here so
+        // `list.__iter__`, `hasattr(bytes, '__mod__')`, `LI([1]).__iter__()`
+        // resolve.  They dispatch through `dispatch_builtin_protocol_dunder`
+        // (no registry body); keep this set in sync with
+        // `calls.rs::builtin_protocol_dunders`.
         (&str_class, "str", &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+            "__mod__", "__rmod__", "__iter__",
             "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
         ][..]),
         (&list_class, "list", &[
             "__len__", "__getitem__", "__setitem__", "__delitem__",
             "__contains__", "__add__", "__mul__", "__iadd__", "__imul__",
+            "__iter__", "__reversed__",
         ][..]),
         (&tuple_class, "tuple", &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+            "__iter__",
         ][..]),
         (&dict_class, "dict", &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__or__", "__ror__", "__ior__",
+            "__or__", "__ror__", "__ior__", "__iter__", "__reversed__",
         ][..]),
         (&set_class, "set", &[
             "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
             "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
-            "__isub__", "__ixor__",
+            "__isub__", "__ixor__", "__iter__",
         ][..]),
         (&frozenset_class, "frozenset", &[
             "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__",
+            "__sub__", "__rsub__", "__xor__", "__rxor__", "__iter__",
         ][..]),
         (&bytes_class, "bytes", &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+            "__mod__", "__rmod__", "__iter__",
         ][..]),
         (&bytearray_class, "bytearray", &[
             "__len__", "__getitem__", "__setitem__", "__delitem__",
             "__contains__", "__add__", "__mul__", "__iadd__", "__imul__",
+            "__mod__", "__rmod__", "__iter__",
         ][..]),
         (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
     ] {

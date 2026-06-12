@@ -740,6 +740,25 @@ impl Interpreter {
                         pyrust_core::descriptor_requires!(method, type_name, actual, method)
                     });
                 }
+                // Issue #2387 / #1909: protocol dunders (`__iter__`, `__add__`,
+                // `__mod__`, `__getitem__`, …) called type-level with a
+                // builtin-*subclass* receiver (`list.__iter__(LI([1]))`,
+                // `list.__add__(LI([1]), [2])`) reach this arm because the
+                // non-subclass form was already intercepted upstream.  Route the
+                // unwrapped backing through the shared dispatcher (the per-type
+                // `call` below has no body for several of these slots and would
+                // leak a RuntimeError).
+                if method.starts_with("__")
+                    && builtin_protocol_dunders(type_name).contains(&method)
+                {
+                    if !kw.is_empty() {
+                        return Err(pyrust_core::type_err!(
+                            "{}() takes no keyword arguments",
+                            method
+                        ));
+                    }
+                    return self.dispatch_builtin_protocol_dunder(method, self_val, pos);
+                }
                 match type_name {
                     "int" => {
                         self.resolve_to_bytes_length(method, &mut pos, &mut kw)?;
@@ -2442,7 +2461,7 @@ impl Interpreter {
         //     and `sq_ass_item` (`__setitem__`) carry a leading space.
         let want: usize = match method {
             "__len__" | "__neg__" | "__pos__" | "__abs__" | "__invert__" | "__hash__"
-            | "__str__" | "__repr__" | "__bool__" | "__reversed__" => 0,
+            | "__str__" | "__repr__" | "__bool__" | "__reversed__" | "__iter__" => 0,
             "__setitem__" => 2,
             _ => 1,
         };
@@ -2498,6 +2517,17 @@ impl Interpreter {
                 let arg = ExpandedCallArg { name: None, value: receiver };
                 let dispatch = crate::builtin_registry::lookup("reversed")
                     .expect("reversed must be in the registry");
+                return dispatch(self, &[arg]);
+            }
+            // Issue #2387: `__iter__` reached here via the type-level unbound
+            // (`list.__iter__([1])`) or builtin-subclass (`LI([1]).__iter__()`)
+            // paths — the bound primitive-instance form is intercepted earlier.
+            // Wrap the (already-unwrapped) backing in the same `NativeIterFrame`
+            // generator the `iter()` builtin produces.
+            "__iter__" => {
+                let arg = ExpandedCallArg { name: None, value: receiver };
+                let dispatch = crate::builtin_registry::lookup("iter")
+                    .expect("iter must be in the registry");
                 return dispatch(self, &[arg]);
             }
             // Rich-comparison dunders (issue #2070): exposed on every primitive
@@ -2700,6 +2730,19 @@ impl Interpreter {
                     Some(v) => Ok(v),
                     None => Ok(receiver),
                 }
+            }
+            // Issue #2387: str/bytes/bytearray `%` formatting slots, exposed as
+            // method-wrappers (`'%s'.__mod__('x')`, `hasattr(bytes, '__mod__')`).
+            // `a.__rmod__(b)` computes `b % a` (swapped operands).  Both delegate
+            // to the same `eval_binary` Mod path the `%` operator uses, so the
+            // format-machinery TypeErrors match CPython byte-for-byte.
+            "__mod__" if matches!(&*type_name, "str" | "bytes" | "bytearray") => {
+                let other = args.pop().unwrap();
+                self.eval_binary(receiver, crate::ast::BinaryOp::Mod, other)
+            }
+            "__rmod__" if matches!(&*type_name, "str" | "bytes" | "bytearray") => {
+                let other = args.pop().unwrap();
+                self.eval_binary(other, crate::ast::BinaryOp::Mod, receiver)
             }
             other => Err(PyError::Runtime(format!(
                 "internal: unhandled builtin protocol dunder '{other}'"
@@ -6595,8 +6638,16 @@ fn is_container_protocol_dunder_name(name: &str) -> bool {
             | "__str__"
             | "__repr__"
             // `dict.__reversed__()` — reversible by insertion order (#2093);
-            // the per-receiver membership check restricts it to `dict`.
+            // the per-receiver membership check restricts it to `dict`/`list`.
             | "__reversed__"
+            // Issue #2387: `__iter__` (every iterable) and `__mod__`/`__rmod__`
+            // (the `%` slots on str/bytes/bytearray), routed through the protocol
+            // dispatcher when called via the method-call opcode.  The
+            // per-receiver `builtin_protocol_dunders` membership check restricts
+            // each to the types that actually expose it.
+            | "__iter__"
+            | "__mod__"
+            | "__rmod__"
     )
 }
 
@@ -6694,39 +6745,56 @@ pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static st
         // list / dict / set / bytearray are unhashable, so `__hash__` is *not*
         // exposed (CPython sets `list.__hash__ = None`; `[1].__hash__()` raises
         // `'NoneType' object is not callable`, handled by the None-attr path).
+        // Issue #2387: `__iter__` (and `__reversed__` on list) are exposed as
+        // slot-wrappers on the type and as inherited copies on subclass
+        // instances.  The bound *instance* form is intercepted earlier (it is in
+        // each type's `METHODS` slice); membership here drives the type-level /
+        // subclass / hasattr / dir resolution and the
+        // `dispatch_builtin_protocol_dunder` routing for the unbound forms.
         "list" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
             "__add__", "__mul__", "__iadd__", "__imul__",
+            "__iter__", "__reversed__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__str__", "__repr__",
         ],
-        "tuple" | "str" | "bytes" => &[
+        // Issue #2387: `__mod__`/`__rmod__` are the `%` string-formatting slots
+        // (`'%s'.__mod__('x')`, `hasattr(bytes, '__mod__')`); `__iter__` as above.
+        "str" | "bytes" => &[
             "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+            "__mod__", "__rmod__", "__iter__",
+            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+            "__hash__", "__str__", "__repr__",
+        ],
+        "tuple" => &[
+            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
+            "__iter__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__hash__", "__str__", "__repr__",
         ],
         "bytearray" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
             "__add__", "__mul__", "__iadd__", "__imul__",
+            "__mod__", "__rmod__", "__iter__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__str__", "__repr__",
         ],
         "dict" => &[
             "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__or__", "__ror__", "__ior__", "__reversed__",
+            "__or__", "__ror__", "__ior__", "__reversed__", "__iter__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__str__", "__repr__",
         ],
         "set" => &[
             "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
             "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
-            "__isub__", "__ixor__",
+            "__isub__", "__ixor__", "__iter__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__str__", "__repr__",
         ],
         "frozenset" => &[
             "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__",
+            "__sub__", "__rsub__", "__xor__", "__rxor__", "__iter__",
             "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
             "__hash__", "__str__", "__repr__",
         ],
