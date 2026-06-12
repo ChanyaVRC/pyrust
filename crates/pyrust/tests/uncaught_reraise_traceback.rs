@@ -152,6 +152,48 @@ fn uncaught_cause_chain_prints_chained_traceback() {
 }
 
 #[test]
+fn uncaught_fresh_raise_in_handler_main_block_has_no_stale_frame() {
+    // Issue #2407: a *fresh* `raise` inside an `except` must not inherit the
+    // stale captured-frame snapshot of the exception being handled.  Here f()
+    // raises IndexError, g() handles it and raises a brand-new ValueError.  The
+    // MAIN (ValueError) block must list ONLY the ValueError's own unwind frame
+    // (g 7) plus the module call site — never f (the IndexError's frame).
+    let src = "def f():\n    raise IndexError(\"idx\")\ndef g():\n    try:\n        f()\n    except IndexError:\n        raise ValueError(\"v\")\ng()\n";
+    let stderr = run_pyrust_stderr(src);
+    let (blocks, banners) = split_chain_blocks(&stderr);
+    assert_eq!(blocks.len(), 2, "one chained block + main block");
+    assert_eq!(banners, vec![CONTEXT_BANNER.to_string()]);
+    // Chained IndexError block keeps its own frames (g 5 -> f 2).
+    assert_eq!(
+        frame_list(&blocks[0]),
+        vec![("g".to_string(), 5), ("f".to_string(), 2)],
+        "chained IndexError block frames",
+    );
+    // Main ValueError block must NOT carry the spurious `f` frame.
+    assert_eq!(
+        frame_list(&blocks[1]),
+        vec![("<module>".to_string(), 8), ("g".to_string(), 7)],
+        "main ValueError block must not inherit the handled exception's frame, got:\n{}",
+        blocks[1]
+    );
+}
+
+#[test]
+fn uncaught_fresh_raise_in_finally_main_block_has_no_stale_frame() {
+    // Issue #2407: same guarantee for a fresh raise in a `finally` block during
+    // unwind.  f() raises KeyError; g()'s finally raises a fresh ValueError.
+    // The main block must list only g 7 + the module call site (8), not f.
+    let src = "def f():\n    raise KeyError(\"k\")\ndef g():\n    try:\n        f()\n    finally:\n        raise ValueError(\"v\")\ng()\n";
+    let stderr = run_pyrust_stderr(src);
+    let main = split_chain_blocks(&stderr).0.pop().unwrap();
+    assert_eq!(
+        frame_list(&main),
+        vec![("<module>".to_string(), 8), ("g".to_string(), 7)],
+        "finally fresh-raise main block must not inherit the handled frame, got:\n{main}",
+    );
+}
+
+#[test]
 fn uncaught_from_none_suppresses_chain() {
     // `raise X from None` sets __suppress_context__: NO chained block, NO
     // banner — just the ValueError's own traceback.

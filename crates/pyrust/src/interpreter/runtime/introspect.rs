@@ -609,6 +609,21 @@ impl Interpreter {
             .is_some_and(|tb| !tb.is_none());
         if has_tb {
             pyrust_core::reset_captured_error_frames();
+            return;
+        }
+        // Issue #2407: a *fresh* exception (no carried `__traceback__`) raised
+        // while another exception is being handled (`handled_exc_stack` is
+        // non-empty — the same condition that drives implicit-context chaining
+        // in `attach_implicit_context`) must start from an empty unwind-frame
+        // snapshot.  Otherwise the stale frames captured while the *handled*
+        // exception unwound to this catch site would prepend onto the new
+        // exception's traceback, producing a spurious trailing frame (the
+        // `f`-frame of the in-flight exception) in both the Python-visible
+        // `__traceback__` chain and the uncaught stderr formatter.  The new
+        // exception's own unwind frames are recorded *after* this point as it
+        // propagates out, so resetting here loses nothing.
+        if !self.handled_exc_stack.is_empty() {
+            pyrust_core::reset_captured_error_frames();
         }
     }
 

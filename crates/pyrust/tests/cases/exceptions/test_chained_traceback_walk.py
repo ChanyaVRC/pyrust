@@ -110,6 +110,9 @@ except ValueError as e:
     mid = e.__context__
     print("3-deep mid class:", type(mid).__name__)
     print("3-deep oldest class:", type(mid.__context__).__name__)
-    # Only the leading frame is compared: the full walk of the mid link's
-    # traceback currently carries a spurious inner frame (#2407, out of scope).
-    print("3-deep mid first frame:", walk(mid.__traceback__)[0])
+    # Issue #2407 (fixed): a fresh raise inside a handler resets the stale
+    # captured-frame snapshot, so each link's traceback walk carries ONLY its
+    # own unwind frames — no spurious inner frame from the link it was handling.
+    print("3-deep outer own walk:", walk(e.__traceback__))
+    print("3-deep mid walk:", walk(mid.__traceback__))
+    print("3-deep oldest walk:", walk(mid.__context__.__traceback__))
