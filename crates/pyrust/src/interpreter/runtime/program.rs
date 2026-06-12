@@ -311,7 +311,7 @@ impl Interpreter {
                     self.uncaught_inner_frames_from_tb(
                         exc_val,
                         filename,
-                        &src,
+                        src,
                         &inner_frames,
                         self.reraise_is_bare,
                     )
