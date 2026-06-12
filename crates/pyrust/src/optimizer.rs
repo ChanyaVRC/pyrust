@@ -151,7 +151,14 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_builtin_dce(insns, num_locals, &names);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_syncmod_sink(insns);
-    let insns = pass_cross_jump(insns);
+    // Tail-merging must not collapse two raise/return sites that carry different
+    // source lines into one survivor copy — doing so loses the duplicate site's
+    // line for traceback attribution (issue #2420: a second fresh `raise` in the
+    // same frame inherited the first raise's line).  Cross-jump has no line info
+    // of its own, so compute the current per-instruction lines (mapped from the
+    // original stream, exactly as the final `remap_linenos` does) and hand them in.
+    let pre_cj_linenos = remap_linenos(&original_insns, &original_linenos, &insns);
+    let insns = pass_cross_jump(insns, &pre_cj_linenos);
     let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_forcount_reg_upgrade(insns);
     let insns = pass_switch_hoist(insns, num_locals, &consts);
@@ -7585,10 +7592,21 @@ fn pass_self_tail_call(insns: Vec<Insn>) -> Vec<Insn> {
 /// - Tails of length 1 (`return` alone is not worth a Jump overhead).
 /// - Any tail containing an instruction with a jump-offset field.
 /// - Any tail where a duplicate-side instruction is itself a jump target.
-fn pass_cross_jump(mut insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_cross_jump(mut insns: Vec<Insn>, linenos: &[u32]) -> Vec<Insn> {
+    // `linenos[i]` is the source line of `insns[i]` (0 = inherit previous).  The
+    // pass refuses to merge two tails whose terminators carry different lines, so
+    // each `raise`/`return` site keeps its own line for traceback attribution.
+    // The slice is compacted alongside `insns` on every merge so the lines stay
+    // aligned across the fixed-point iterations.
+    // Pad/truncate to match `insns` so callers may pass an empty slice (tests
+    // that don't care about line attribution) — a 0 line is "inherit previous",
+    // which keeps every tail mergeable exactly as before line tracking existed.
+    let mut linenos = linenos.to_vec();
+    linenos.resize(insns.len(), 0);
     loop {
-        let (next, changed) = pass_cross_jump_once(insns);
+        let (next, next_linenos, changed) = pass_cross_jump_once(insns, linenos);
         insns = next;
+        linenos = next_linenos;
         if !changed {
             return insns;
         }
@@ -7598,13 +7616,28 @@ fn pass_cross_jump(mut insns: Vec<Insn>) -> Vec<Insn> {
 /// Single-pass helper for [`pass_cross_jump`].  Finds the first mergeable tail
 /// pair, applies the merge, and returns `(new_insns, true)`.  Returns
 /// `(insns, false)` when no merge candidate exists (fixed-point reached).
-fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
+fn pass_cross_jump_once(insns: Vec<Insn>, linenos: Vec<u32>) -> (Vec<Insn>, Vec<u32>, bool) {
     const MIN_TAIL: usize = 2;
 
     let n = insns.len();
     if n < MIN_TAIL * 2 {
-        return (insns, false);
+        return (insns, linenos, false);
     }
+    // Effective source line of each instruction: a 0 entry inherits the last
+    // non-zero line above it (matching the VM's `cur_line` tracking).  Used to
+    // compare the two terminators' lines before merging.
+    let eff_line: Vec<u32> = {
+        let mut running = 0u32;
+        linenos
+            .iter()
+            .map(|&ln| {
+                if ln != 0 {
+                    running = ln;
+                }
+                running
+            })
+            .collect()
+    };
 
     // Step 1: collect jump-target indices.
     let mut jump_targets: HashSet<usize> = HashSet::new();
@@ -7745,6 +7778,16 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
                 continue;
             }
 
+            // Issue #2420: refuse the merge when any instruction in the two
+            // tails carries a different source line.  The survivor copy can only
+            // hold one line, so collapsing two raise/return sites that live on
+            // different lines would attribute the duplicate site's exception to
+            // the survivor's line (a stale traceback `File …, line N`).  Tails
+            // that agree on every line are safe to merge.
+            if (0..tail_len).any(|step| eff_line[t_keep - step] != eff_line[t_dup - step]) {
+                continue;
+            }
+
             // Apply the merge.
             //
             // Mark [dup_start .. t_dup) as removed; replace the terminator at
@@ -7761,11 +7804,19 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
             }
             let mut transformed = insns;
             transformed[t_dup] = Insn::Jump(raw_offset as i32);
-            return (compact(transformed, &keep), true);
+            // Compact the parallel lineno slice with the same `keep` mask so the
+            // lines stay 1:1 with the instructions across the fixed-point loop.
+            // `compact` only removes entries here (no jump offsets to rewrite).
+            let new_linenos: Vec<u32> = linenos
+                .iter()
+                .zip(keep.iter())
+                .filter_map(|(&ln, &k)| k.then_some(ln))
+                .collect();
+            return (compact(transformed, &keep), new_linenos, true);
         }
     }
 
-    (insns, false)
+    (insns, linenos, false)
 }
 
 #[cfg(test)]
@@ -11833,7 +11884,7 @@ elif x == 2:
             Insn::Return(6),                                  // [6] duplicate end
         ];
 
-        let out = pass_cross_jump(insns);
+        let out = pass_cross_jump(insns, &[]);
 
         // After merging: [5] and [6] are collapsed to Jump([4]→[2]).
         // The output should be shorter by 1 instruction (one BinOpConst removed,
@@ -11863,7 +11914,7 @@ elif x == 2:
             Insn::Return(2),         // [4] ← same Return discriminant but different reg
         ];
         let n = insns.len();
-        let out = pass_cross_jump(insns);
+        let out = pass_cross_jump(insns, &[]);
         // Return(1) vs Return(2) differ → no merge.
         assert_eq!(out.len(), n, "no merge for length-1 or differing tails");
     }
@@ -11887,7 +11938,7 @@ elif x == 2:
             Insn::Return(1),         // [4] duplicate tail
         ];
         let n = insns.len();
-        let out = pass_cross_jump(insns);
+        let out = pass_cross_jump(insns, &[]);
         assert_eq!(
             out.len(),
             n,
@@ -11913,7 +11964,7 @@ elif x == 2:
             Insn::Return(0),                                  // [4]
         ];
         let n = insns.len();
-        let out = pass_cross_jump(insns);
+        let out = pass_cross_jump(insns, &[]);
         // The CmpJumpIfFalseConst has a jump-offset field; merge must not fire.
         assert_eq!(
             out.len(),
@@ -12013,7 +12064,7 @@ elif x == 2:
             Insn::Return(7),                                  // [13] /
         ];
         let before_count = insns.len();
-        let out = pass_cross_jump(insns);
+        let out = pass_cross_jump(insns, &[]);
 
         // Two merges must fire -> instruction count drops by at least 2.
         assert!(
