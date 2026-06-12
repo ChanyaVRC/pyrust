@@ -392,7 +392,15 @@ fn uncaught_raise_param_from_within_except() {
     // context block — tracked separately — so we assert only the escaping
     // exception's own frame list, which is what issue #2409 governs.)
     let src = "def h(e):\n    try:\n        raise RuntimeError(\"inner\")\n    except RuntimeError:\n        raise e\nh(ValueError(\"outer\"))\n";
-    let frames = frame_list(&run_pyrust_stderr(src));
+    // Since #2416 the handled RuntimeError's own traceback block (its `h` 3
+    // frame) prints above the context banner, exactly like CPython — scope the
+    // assertion to the ESCAPING exception's block (after the last header).
+    let stderr = run_pyrust_stderr(src);
+    let last_block = stderr
+        .rsplit("Traceback (most recent call last):")
+        .next()
+        .unwrap_or(&stderr);
+    let frames = frame_list(last_block);
     assert_eq!(
         frames,
         vec![("<module>".to_string(), 6), ("h".to_string(), 5)],
