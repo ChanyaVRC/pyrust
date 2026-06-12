@@ -3048,22 +3048,26 @@ impl Interpreter {
                     if self.exc_saved_active.len() > exc_saved_active_frame_base {
                         self.active_exception = self.exc_saved_active.pop().unwrap();
                     }
-                    // Issue #2367: a *bare* `raise` (and the implicit re-raise at
+                    // Issue #2405: a *bare* `raise` (and the implicit re-raise at
                     // the end of a finally / unmatched-except chain) re-raises the
-                    // currently-handled exception without prepending a node for
-                    // the re-raising frame — CPython keeps the existing chain and
-                    // extends it only as the exception unwinds to outer frames.
-                    // pyrust does not yet model the bare form precisely (the
-                    // re-raising frame's node keeps the bare-`raise` line rather
-                    // than the original raise line — a pre-existing divergence out
-                    // of #2367's explicit `raise e` / `with_traceback` scope).
-                    // Mark the next catch so it rebuilds the chain from the
-                    // captured unwind frames (the pre-#2367 behaviour) instead of
-                    // prepending onto the carried chain, which would double-count
-                    // this frame.  The same-frame identity keep (issue #2359/#2366)
-                    // still wins inside `caught_traceback_value`, so a `with`
-                    // `__exit__` re-raise keeps the very object it observed.
+                    // currently-handled exception without adding a traceback node
+                    // for the re-raising frame — CPython keeps the carried chain
+                    // unchanged and only prepends the genuinely-outer frames the
+                    // exception unwinds through *after* the re-raise.
+                    //
+                    // Reset the captured-frame snapshot (when the exception carries
+                    // a chain) for the same reason as the explicit re-raise: the
+                    // carried chain already accounts for the original raise's
+                    // frames, so they must not be re-counted in the freshly-built
+                    // prefix.  After the reset the snapshot rebuilds from this
+                    // point — and the catch site drops its innermost (this
+                    // re-raising frame) so the re-raise line never appears as a
+                    // node (`caught_traceback_value`).  When the re-raise is caught
+                    // in this same frame the snapshot stays empty and the carried
+                    // chain — including the `with`/`__exit__` same-frame identity
+                    // object (#2359/#2366) — is kept verbatim.
                     self.reraise_is_bare = true;
+                    self.reset_captured_frames_if_reraise(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
 

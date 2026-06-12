@@ -509,7 +509,37 @@ impl Interpreter {
         catch_lineno: i64,
         tail: Value,
     ) -> Value {
-        let captured = pyrust_core::clone_captured_error_frames();
+        self.build_deferred_traceback_with_tail_impl(catch_lineno, tail, false)
+    }
+
+    /// Like [`Self::build_deferred_traceback_with_tail`] but for a **bare**
+    /// `raise` (issue #2405).  A bare re-raise re-raises the active exception
+    /// *without* adding a traceback node for the re-raising frame itself —
+    /// CPython keeps the carried chain and only prepends the genuinely-outer
+    /// frames the exception unwinds through *after* the re-raise.  The
+    /// re-raising frame is the innermost of the freshly-captured unwind frames
+    /// (`captured.last()`, recorded first as the error propagated out), so it
+    /// is dropped here; the remaining outer frames prepend onto `tail`.
+    pub(crate) fn build_deferred_traceback_with_tail_drop_innermost(
+        &self,
+        catch_lineno: i64,
+        tail: Value,
+    ) -> Value {
+        self.build_deferred_traceback_with_tail_impl(catch_lineno, tail, true)
+    }
+
+    fn build_deferred_traceback_with_tail_impl(
+        &self,
+        catch_lineno: i64,
+        tail: Value,
+        drop_innermost: bool,
+    ) -> Value {
+        let mut captured = pyrust_core::clone_captured_error_frames();
+        // Bare re-raise (#2405): the innermost captured frame is the re-raising
+        // frame itself, which CPython does not give its own traceback node.
+        if drop_innermost && !captured.is_empty() {
+            captured.pop();
+        }
         let catch_func = self
             .vm_frame_views
             .last()
@@ -607,10 +637,10 @@ impl Interpreter {
     ///    old tail" behaviour is reproduced.
     ///
     /// `is_bare_reraise` is set when the in-flight exception reached this catch
-    /// via a *bare* `raise` (issue #2367): bare re-raise rebuilds the chain
-    /// fresh from the captured frames instead of prepending, matching the
-    /// pre-#2367 behaviour (the precise bare-form prepend is a separate
-    /// divergence — see the issue's out-of-scope note).
+    /// via a *bare* `raise` (issue #2405): bare re-raise keeps the carried chain
+    /// and prepends only the genuinely-outer frames the exception unwound
+    /// through after the re-raise, never adding a node for the re-raising frame
+    /// itself (CPython's `raise` semantics).
     ///
     /// Returns `Some(new_value)` to store, or `None` to leave the slot untouched.
     pub(crate) fn caught_traceback_value(
@@ -631,22 +661,39 @@ impl Interpreter {
             // overwrite with a fresh build, matching the historical behaviour.
             return Some(self.build_deferred_traceback(catch_lineno));
         }
+        // Bare `raise` carrying a chain (issue #2405).  The bare re-raise reset
+        // the captured-frame snapshot at the raise site (`reset_captured_frames`
+        // in `RaiseReRaise`), so the captured frames now hold *only* the frames
+        // the exception unwound through *after* the re-raise.  CPython keeps the
+        // carried chain unchanged and prepends those outer frames — never adding
+        // a node for the re-raising frame itself.
+        //  * Caught in the *same* frame (no unwind): nothing was captured — keep
+        //    the carried chain exactly (this also preserves the `with`/`__exit__`
+        //    same-frame identity contract from #2359/#2366, which re-raises via
+        //    the bare form).
+        //  * Propagated to an outer frame: prepend the captured frames minus the
+        //    innermost (the re-raising frame's own node) onto the carried chain.
+        if is_bare_reraise {
+            if pyrust_core::captured_error_frames_len() == 0 {
+                return None;
+            }
+            return Some(
+                self.build_deferred_traceback_with_tail_drop_innermost(
+                    catch_lineno,
+                    existing.clone(),
+                ),
+            );
+        }
         // Same-frame identity (issue #2359/#2366): a *materialised* chain whose
         // length matches the frames captured for *this* catch was built in this
         // very frame; keep it so the object an inner `with`/`except` saw is
         // identical to the one this `except` reads.  Re-deferring or prepending
-        // would mint a distinct head and break that contract.  This wins even
-        // for a bare re-raise (a `with` `__exit__` re-raises via the bare form).
+        // would mint a distinct head and break that contract.
         if is_real
             && pyrust_builtins::traceback::chain_len(existing)
                 == pyrust_core::captured_error_frames_len() + 1
         {
             return None;
-        }
-        // Bare `raise` across a frame boundary: rebuild fresh from the captured
-        // frames (issue #2367 out-of-scope, preserves pre-#2367 behaviour).
-        if is_bare_reraise {
-            return Some(self.build_deferred_traceback(catch_lineno));
         }
         // Explicit `raise e` / `raise e.with_traceback(...)` carried / re-raised
         // across a frame boundary: prepend the new frames onto the existing
