@@ -3400,10 +3400,11 @@ impl Interpreter {
         for pi in 0..nparams {
             let filled_positionally = pi < npos;
             let filled_by_kw = slots[..nkw].contains(&(pi as u32));
-            if !filled_positionally && !filled_by_kw {
-                if let Some(default) = function.params[pi].default.clone() {
-                    bind_param_direct(function, num_regs, &mut regs, &local_env, pi, default)?;
-                }
+            if !filled_positionally
+                && !filled_by_kw
+                && let Some(default) = function.params[pi].default.clone()
+            {
+                bind_param_direct(function, num_regs, &mut regs, &local_env, pi, default)?;
             }
         }
 

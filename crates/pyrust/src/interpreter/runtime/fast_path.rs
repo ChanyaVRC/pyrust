@@ -1773,6 +1773,7 @@ impl Interpreter {
         call_result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn exec_set_attr(
         &mut self,
         regs: &mut RegSlice,
