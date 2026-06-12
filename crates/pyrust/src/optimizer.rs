@@ -18,27 +18,48 @@ pub fn optimize(code: FnCode) -> FnCode {
     optimize_fn_code(code)
 }
 
-/// Remap a `lineno_table` from an old instruction sequence to a new one.
-///
-/// Uses a greedy forward scan: for each instruction in `new_insns`, finds
-/// the first matching instruction in `old_insns` (by opcode equality) that
-/// hasn't been consumed yet and inherits its line number.  When no match is
-/// found, the entry defaults to 0 (= inherit from the previous instruction in
-/// the VM's line tracker).
-///
-/// This works well for typical optimizations (dead-code removal, instruction
-/// fusion) that preserve relative order while possibly removing some entries.
-/// It is deliberately approximate — the important property is that error-raising
-/// instructions (BinOp, Call, GetAttr, etc.) are never removed by the optimizer
-/// because they have side effects, so their line numbers are preserved.
+/// Lineno-only wrapper over [`remap_lineno_and_col_tables`].  Retained for the
+/// unit tests that pin the greedy forward-scan contract (issue #1962/#2002);
+/// the production path calls the combined remapper directly.
+#[cfg(test)]
 fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) -> Vec<u32> {
+    remap_lineno_and_col_tables(old_insns, old_linenos, &[], new_insns).0
+}
+
+/// Remap both the `lineno_table` and the PEP 657 `col_table` (issue #2426) from
+/// an old instruction sequence to a new one in a **single shared scan**.
+///
+/// The lineno half is byte-identical to the historical `remap_linenos`: a
+/// greedy forward scan that, for each `new_insn`, finds the first matching
+/// not-yet-consumed `old_insn` (by opcode equality) and inherits its line —
+/// falling back to the running prefix line for optimizer-created instructions.
+/// This is deliberately approximate, but error-raising instructions (BinOp,
+/// Call, GetAttr, …) are never removed by the optimizer (they have side
+/// effects), so their line numbers — and now their anchors — are preserved.
+///
+/// The col half reuses the very same match: a matched new instruction inherits
+/// `old_cols[i]`.  Two safety rules uphold "a wrong caret is worse than no
+/// caret": optimizer-created (unmatched) instructions get no anchor, and an
+/// instruction whose anchored occurrences disagree — e.g. a
+/// `pass_cross_jump`-merged tail of two identical `LoadGlobal`s with different
+/// columns (the #2431 concern) — also gets none.
+///
+/// Pass an empty `old_cols` (the `remap_linenos` wrapper does) to skip all col
+/// work; the returned col vector is then all-`(0, 0)` at zero extra cost.
+fn remap_lineno_and_col_tables(
+    old_insns: &[Insn],
+    old_linenos: &[u32],
+    old_cols: &[(u32, u32)],
+    new_insns: &[Insn],
+) -> (Vec<u32>, Vec<(u32, u32)>) {
     if old_linenos.is_empty() {
-        return vec![0u32; new_insns.len()];
+        return (vec![0u32; new_insns.len()], vec![(0, 0); new_insns.len()]);
     }
+    // Only do col work when at least one anchor was recorded.
+    let want_cols = !old_cols.is_empty() && old_cols.iter().any(|&c| c != (0, 0));
+
     // Build a "current best lineno" prefix from old_linenos: for each position
     // in old_insns, the last non-zero lineno seen up to and including that position.
-    // This lets us approximate the lineno of any new instruction that can't be
-    // matched by using the lineno at the corresponding position in the old stream.
     let mut running: u32 = 0;
     let old_prefix: Vec<u32> = old_linenos
         .iter()
@@ -50,47 +71,53 @@ fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) ->
         })
         .collect();
 
-    // Index every old instruction by structural identity → ascending positions.
-    // The greedy scan below needs, for each `new_insn`, the first old position
-    // `>= old_pos` whose instruction equals it.  A naive forward re-scan is
-    // O(old) per new instruction and degenerates to O(n²) when the optimized
-    // stream is full of optimizer-created instructions that never match (e.g. a
-    // long const-folded accumulator chain — issue #2002).  With this index each
-    // lookup is a binary search over that instruction's position list, keeping
-    // the whole remap linear-ish (O((old + new) log old)) while producing
-    // byte-identical output to the original forward scan.
+    // Index every old instruction by structural identity → ascending positions
+    // (see the original `remap_linenos` rationale: keeps the scan linear-ish and
+    // byte-identical to a naive forward re-scan).
     let mut positions: HashMap<&Insn, Vec<usize>> = HashMap::new();
     for (i, insn) in old_insns.iter().enumerate() {
         positions.entry(insn).or_default().push(i);
     }
 
+    // Instructions whose anchored occurrences disagree get no anchor (ambiguous).
+    let mut ambiguous: HashSet<&Insn> = HashSet::new();
+    if want_cols {
+        for (insn, locs) in &positions {
+            let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0));
+            if locs
+                .iter()
+                .any(|&p| old_cols.get(p).copied().unwrap_or((0, 0)) != first)
+            {
+                ambiguous.insert(*insn);
+            }
+        }
+    }
+
     let mut old_pos: usize = 0;
-    let mut result = Vec::with_capacity(new_insns.len());
-    for new_insn in new_insns {
+    let mut linenos = Vec::with_capacity(new_insns.len());
+    let mut cols = vec![(0, 0); new_insns.len()];
+    for (out_col, new_insn) in cols.iter_mut().zip(new_insns) {
         // First old position `>= old_pos` matching `new_insn`, via the index.
         let matched = positions.get(new_insn).and_then(|locs| {
-            // `locs` is ascending; find the first entry `>= old_pos`.
             let k = locs.partition_point(|&p| p < old_pos);
             locs.get(k).copied()
         });
         match matched {
             Some(i) => {
-                let ln = old_linenos.get(i).copied().unwrap_or(0);
-                result.push(ln);
+                linenos.push(old_linenos.get(i).copied().unwrap_or(0));
+                if want_cols && !ambiguous.contains(new_insn) {
+                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0));
+                }
                 old_pos = i + 1;
             }
             None => {
-                // No match found (instruction was created by the optimizer, e.g.
-                // a fused BinOpConst from a BinOp that existed after a LoadConst).
-                // Use the "running" lineno at old_pos — the lineno of the next
-                // unmatched instruction in the original stream, the best
-                // approximation for the source location of this derived insn.
-                let approx = old_prefix.get(old_pos).copied().unwrap_or(0);
-                result.push(approx);
+                // Optimizer-created instruction: approximate the line from the
+                // running prefix; leave the anchor cleared (no faithful span).
+                linenos.push(old_prefix.get(old_pos).copied().unwrap_or(0));
             }
         }
     }
-    result
+    (linenos, cols)
 }
 
 fn optimize_fn_code(code: FnCode) -> FnCode {
@@ -111,6 +138,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let names = code.names;
     let original_insns = code.insns.clone();
     let original_linenos = code.lineno_table.clone();
+    let original_cols = code.col_table.clone();
     // Inter-procedural inlining of small pure leaf functions (issue #349).
     // Runs first so that const-fold / LICM / forcount machinery can subsequently
     // optimise the spliced body in the caller's scope.
@@ -157,7 +185,8 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // same frame inherited the first raise's line).  Cross-jump has no line info
     // of its own, so compute the current per-instruction lines (mapped from the
     // original stream, exactly as the final `remap_linenos` does) and hand them in.
-    let pre_cj_linenos = remap_linenos(&original_insns, &original_linenos, &insns);
+    let (pre_cj_linenos, _) =
+        remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
     let insns = pass_cross_jump(insns, &pre_cj_linenos);
     let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_forcount_reg_upgrade(insns);
@@ -194,7 +223,11 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let (insns, exc_table) = build_exc_table(insns);
     let has_exc_handlers = exc_table.iter().any(|&t| t != EXC_NO_HANDLER);
 
-    let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
+    // Remap line numbers and PEP 657 caret anchors (#2426) in one shared scan.
+    // `pass_compact_consts` below is 1:1 order-preserving, so both tables
+    // computed against the pre-compaction stream apply unchanged after it.
+    let (lineno_table, col_table) =
+        remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     let insns_len = insns.len();
@@ -202,6 +235,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     FnCode {
         insns,
         lineno_table,
+        col_table,
         first_lineno: code.first_lineno,
         consts,
         names,

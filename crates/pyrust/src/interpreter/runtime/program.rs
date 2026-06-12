@@ -295,11 +295,21 @@ impl Interpreter {
                     } else {
                         None
                     };
+                // PEP 657 caret anchor (#2426): the VM published the raising
+                // instruction's column span on the error path.  Only meaningful
+                // when we have a source line to underline; cleared otherwise so a
+                // stale span never paints a caret onto an unrelated line.
+                let module_col_span = if module_source_line.is_some() {
+                    pyrust_core::get_current_vm_col_span()
+                } else {
+                    None
+                };
                 let mut frames = vec![pyrust_core::FrameInfo {
                     filename: filename.clone(),
                     lineno: module_lineno,
                     source_line: module_source_line,
                     funcname: std::sync::Arc::from("<module>"),
+                    col_span: module_col_span,
                 }];
                 // Issue #2404: a re-raised exception's `__traceback__` chain is
                 // the authoritative, Python-visible frame list — after #2367 the
@@ -484,10 +494,10 @@ impl Interpreter {
     pub(crate) fn parse_source_to_stmts_with_linenos(
         source: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
-        let (tokens, line_nos) = crate::lexer::Lexer::new(source)
+        let (tokens, line_nos, cols) = crate::lexer::Lexer::new(source)
             .map_err(lex_parse_to_exc)?
-            .into_tokens_with_linenos();
-        let mut parser = crate::parser::Parser::new_with_lines(tokens, line_nos);
+            .into_tokens_with_pos();
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols);
         parser.parse_program_with_linenos().map_err(lex_parse_to_exc)
     }
 
@@ -1065,6 +1075,7 @@ fn record_exec_string_frame(vm_result: &Result<Value>) {
             lineno,
             source_line: None,
             funcname: std::sync::Arc::from("<module>"),
+            col_span: None,
         });
     }
 }

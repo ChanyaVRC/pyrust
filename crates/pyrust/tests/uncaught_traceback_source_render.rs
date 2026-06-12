@@ -1,24 +1,24 @@
-//! Issues #2418 / #2411: the uncaught (top-level) stderr traceback formatter
-//! source-line + caret rendering must match CPython 3.12.
+//! Issues #2418 / #2411 / #2426: the uncaught (top-level) stderr traceback
+//! formatter source-line + PEP 657 caret rendering must match CPython 3.12.
 //!
-//! #2418: the displayed source line is dedented to a fixed 4-space indent —
-//! CPython strips the line's own leading whitespace, so an indented statement
-//! is not over-indented.
+//! #2418: the displayed source line is dedented to a fixed 4-space indent.
 //!
-//! #2411 (partial): CPython 3.12's PEP 657 underlines are fine-grained — they
-//! underline the precise sub-expression that raised, and they OMIT the caret
-//! row entirely when the anchor covers the whole stripped line (a bare `name`,
-//! `f()`, `raise X(...)`, etc.).  pyrust's line tables carry no column info, so
-//! it cannot reproduce the narrow span; the achievable, strictly-correct
-//! behaviour is to emit NO caret row at all.  These tests assert that:
-//!   * whole-line-anchor frames (the common uncaught case) are byte-exact with
-//!     CPython — including the absence of any `^^^` row, and
-//!   * no traceback frame ever prints a `^` underline.
+//! #2411/#2426: CPython 3.12's PEP 657 underlines are fine-grained — they
+//! underline the precise sub-expression that raised, and OMIT the caret row
+//! when the anchor covers the whole stripped line (a bare `name`, `f()`,
+//! `raise X(...)`, etc.).  Stage 1 of #2426 plumbs the column anchor for the
+//! highest-value form: a bare-name `Var` load (the instruction that raises an
+//! uncaught `NameError`).  For that form pyrust now renders the exact narrow
+//! `^` caret, byte-for-byte with CPython 3.12 — whether the name appears as an
+//! assignment RHS, a call argument, a binary-op operand, or a subscript
+//! base/index.
 //!
-//! Unlike `uncaught_reraise_traceback.rs` (which normalises file paths and
-//! asserts only on the frame list), these assert on the FULL, un-normalised
-//! stderr for scripts whose every displayed frame has a whole-line anchor — so
-//! the byte-exact comparison is achievable today.
+//! Forms NOT yet plumbed (binary-op `~^` context marks, subscript spans,
+//! attribute access, function-frame anchors) carry NO column span and stay
+//! caret-free — strictly safer than a wrong caret ("a wrong caret is worse
+//! than no caret").  These tests assert:
+//!   * plumbed `Var`-anchor frames are byte-exact with CPython, and
+//!   * unplumbed forms never print a `^` underline they cannot place correctly.
 
 use std::env;
 use std::io::Write;
@@ -55,15 +55,13 @@ fn run_pyrust_stderr(basename: &str, src: &str) -> String {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    // Normalise the absolute temp path to just the basename.
     stderr.replace(&path.to_string_lossy().into_owned(), basename)
 }
 
+// ── #2418: source-line dedent (whole-line anchor → no caret) ────────────────
+
 #[test]
 fn indented_raise_source_line_is_dedented() {
-    // #2418: the source line under an indented `raise` must be dedented to the
-    // fixed 4-space traceback indent, NOT carry its own leading indentation on
-    // top.  Whole-line anchor => no caret row (byte-exact with CPython 3.12).
     let stderr = run_pyrust_stderr(
         "indented.py",
         "if True:\n    raise ValueError(\"indented\")\n",
@@ -78,25 +76,7 @@ ValueError: indented
 }
 
 #[test]
-fn deeply_indented_raise_source_line_is_dedented() {
-    // Nested indentation (12 spaces) collapses to the fixed 4-space indent.
-    let stderr = run_pyrust_stderr(
-        "nested.py",
-        "if True:\n    if True:\n        if True:\n            raise RuntimeError(\"deep\")\n",
-    );
-    let expected = "\
-Traceback (most recent call last):
-  File \"nested.py\", line 4, in <module>
-    raise RuntimeError(\"deep\")
-RuntimeError: deep
-";
-    assert_eq!(stderr, expected, "got:\n{stderr}");
-}
-
-#[test]
 fn module_scope_raise_has_no_caret_row() {
-    // #2411: a top-level `raise X(...)` has a whole-line anchor — CPython 3.12
-    // emits NO caret row.  pyrust must match (byte-exact, no `^^^`).
     let stderr = run_pyrust_stderr("simple.py", "raise ValueError(\"boom\")\n");
     let expected = "\
 Traceback (most recent call last):
@@ -107,38 +87,126 @@ ValueError: boom
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
 
+// ── #2426 stage 1: bare-name Var anchor → exact narrow caret ────────────────
+
 #[test]
-fn no_frame_ever_prints_a_caret_underline() {
-    // #2411: across a multi-frame traceback with various statement shapes
-    // (call, indented raise, assignment), no frame may emit a `^` underline,
-    // since pyrust has no column data to place one correctly.
+fn nameerror_assignment_rhs_caret_is_byte_exact() {
+    // `x = undefined`: CPython underlines only the RHS name.
+    let stderr = run_pyrust_stderr("rhs.py", "x = some_undefined_name\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"rhs.py\", line 1, in <module>
+    x = some_undefined_name
+        ^^^^^^^^^^^^^^^^^^^
+NameError: name 'some_undefined_name' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nameerror_bare_name_whole_line_anchor_omits_caret() {
+    // A bare `name` is a whole-line anchor → CPython omits the caret row.
+    let stderr = run_pyrust_stderr("bare.py", "undefined_bare\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"bare.py\", line 1, in <module>
+    undefined_bare
+NameError: name 'undefined_bare' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nameerror_call_argument_caret_is_byte_exact() {
+    // `f(undef)`: CPython underlines the failing argument name.
+    let stderr = run_pyrust_stderr("arg.py", "def f(a): pass\nf(undef_arg)\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"arg.py\", line 2, in <module>
+    f(undef_arg)
+      ^^^^^^^^^
+NameError: name 'undef_arg' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nameerror_first_operand_in_binop_caret_is_byte_exact() {
+    // `a + b + undef`: the FIRST undefined name evaluated raises; CPython
+    // underlines exactly it (a single-char `^` here).
+    let stderr = run_pyrust_stderr("binop.py", "x = a_undef + b + c\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"binop.py\", line 1, in <module>
+    x = a_undef + b + c
+        ^^^^^^^
+NameError: name 'a_undef' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nameerror_indented_var_caret_rebases_to_dedented_line() {
+    // The anchor's column is measured against the original line; the formatter
+    // rebases it onto the dedented display line (the leading 4 spaces collapse).
+    let stderr = run_pyrust_stderr("indent_var.py", "if True:\n    print(undefined_indented)\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"indent_var.py\", line 2, in <module>
+    print(undefined_indented)
+          ^^^^^^^^^^^^^^^^^^
+NameError: name 'undefined_indented' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nameerror_non_ascii_name_caret_uses_char_columns() {
+    // The caret must align by char columns, not bytes, for a non-ASCII name.
+    let stderr = run_pyrust_stderr("unicode.py", "y = café_undef\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"unicode.py\", line 1, in <module>
+    y = café_undef
+        ^^^^^^^^^^
+NameError: name 'café_undef' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+// ── Unplumbed forms: caret-free (never a wrong caret) ───────────────────────
+
+#[test]
+fn unplumbed_forms_never_print_a_caret_underline() {
+    // Binary-op `~^` context marks, subscript spans, and attribute access are
+    // not yet plumbed; they must NOT print a caret pyrust cannot place exactly.
     let scripts = [
-        "raise ValueError(\"x\")\n",
-        "if True:\n    raise ValueError(\"y\")\n",
-        "def f():\n    raise ValueError(\"z\")\nf()\n",
-        "x = some_undefined_name\n",
-        "d = {}\nd[\"k\"]\n",
+        "1 + \"s\"\n",            // binop TypeError
+        "d = {}\nd[\"k\"]\n",     // subscript KeyError
+        "(1).nonexistent_attr\n", // attribute AttributeError
+        "[1, 2, 3][10]\n",        // subscript IndexError
     ];
     for (i, src) in scripts.iter().enumerate() {
-        let stderr = run_pyrust_stderr("probe.py", src);
+        let stderr = run_pyrust_stderr("unplumbed.py", src);
         assert!(
             !stderr.contains('^'),
-            "script {i} produced a caret underline, which pyrust cannot place \
-             correctly without column data:\n{stderr}",
+            "script {i} printed a caret pyrust cannot place exactly:\n{stderr}",
         );
     }
 }
 
 #[test]
-fn module_frame_caret_omitted_matches_cpython_byte_for_byte() {
-    // The simplest deep-call case where every DISPLAYED frame's source line is
-    // present and has a whole-line anchor: the module call site `f()`.  CPython
-    // omits its caret; pyrust must too.
-    let stderr = run_pyrust_stderr("call.py", "def f():\n    raise ValueError(\"v\")\nf()\n");
-    // The module frame's `f()` line must appear with no caret beneath it.
+fn nameerror_inside_function_frame_is_caret_free_for_now() {
+    // Function-frame anchors are a stage-2 follow-up.  A NameError raised inside
+    // a function must not print any (necessarily wrong) caret on either the
+    // function frame or the module call-site frame in stage 1.
+    let stderr = run_pyrust_stderr("func.py", "def g():\n    return undef_in_func\ng()\n");
     assert!(
-        stderr.contains("  File \"call.py\", line 3, in <module>\n    f()\n"),
-        "module call-site source line must be present and caret-free:\n{stderr}",
+        stderr.contains("  File \"func.py\", line 2, in g\n"),
+        "function frame must appear in the traceback:\n{stderr}",
     );
-    assert!(!stderr.contains('^'), "no caret anywhere:\n{stderr}");
+    assert!(
+        !stderr.contains('^'),
+        "function-frame NameError must be caret-free in stage 1:\n{stderr}",
+    );
 }

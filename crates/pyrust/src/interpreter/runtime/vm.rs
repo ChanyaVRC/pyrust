@@ -999,6 +999,7 @@ impl Interpreter {
                 lineno: tb_lineno,
                 source_line: None,
                 funcname: frame.fn_name.clone(),
+                col_span: None,
             });
         }
         self.vm_frame_views.pop();
@@ -1274,6 +1275,7 @@ impl Interpreter {
                         lineno: if line == 0 { None } else { Some(line) },
                         source_line: None,
                         funcname: std::sync::Arc::from(&func.name[..]),
+                        col_span: None,
                     });
                 }
                 self.env = saved.saved_env;
@@ -1294,6 +1296,7 @@ impl Interpreter {
                     lineno: if line == 0 { None } else { Some(line) },
                     source_line: None,
                     funcname: gd.gframe.fn_name.clone(),
+                    col_span: None,
                 });
             }
             // Restore the consumer frame.
@@ -1767,10 +1770,21 @@ impl Interpreter {
                             continue 'vm;
                         }
                         Err(e) => {
-                            // Error escapes this frame: unwind any active
-                            // trampolined frames (record their traceback, pop
-                            // their views, restore each caller's env) and publish
-                            // the line tracker (issues #348, #2234).
+                            // Error escapes this frame: publish the raising
+                            // instruction's PEP 657 caret anchor (#2426) for the
+                            // traceback formatter.  Read only here on the cold
+                            // escape path — never on the per-instruction hot path.
+                            // Last writer wins, so the outermost (module) frame's
+                            // anchor is what `get_current_vm_col_span` returns.
+                            pyrust_core::set_current_vm_col_span(
+                                code.col_table.get(pc.wrapping_sub(1)).copied().and_then(
+                                    |s| if s == (0, 0) { None } else { Some(s) },
+                                ),
+                            );
+                            // Unwind any active trampolined frames (record their
+                            // traceback, pop their views, restore each caller's
+                            // env) and publish the line tracker (issues #348,
+                            // #2234).
                             tramp_unwind_err!(e);
                         }
                     },
@@ -5712,6 +5726,7 @@ mod vm_tests {
         FnCode {
             insns,
             lineno_table: vec![0u32; n],
+            col_table: vec![(0, 0); n],
             first_lineno: 0,
             consts: vec![],
             names: vec![],
@@ -5743,6 +5758,7 @@ mod vm_tests {
         code.insns.push(Insn::MatchExcept(0, 1));     // no active_exception → error
         code.insns.push(Insn::ReturnNone);
         code.lineno_table.extend([0u32, 0, 0]);
+        code.col_table.extend([(0u32, 0u32); 3]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![Value::unset(); 1];
         // SAFETY (test): regs is alive for the duration of run_bytecode;

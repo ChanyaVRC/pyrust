@@ -5826,6 +5826,18 @@ pub struct FrameInfo {
     /// Function or method name.  `"<module>"` for module-scope code.
     /// `Arc<str>` so cloning a frame is a reference-count bump, not a heap alloc.
     pub funcname: Arc<str>,
+    /// PEP 657 fine-grained caret anchor: the `(col_offset, end_col_offset)`
+    /// (0-based **char** offsets into the *un-dedented* source line) of the
+    /// sub-expression that raised, when the compiler tracked a column span for
+    /// the raising instruction.  `None` when no column information is available
+    /// — the formatter then omits the caret row (issue #2426 stage 1 plumbs
+    /// this only for the highest-value statement forms; everything else stays
+    /// `None` and caret-free, never wrong).
+    ///
+    /// The offsets are measured against the source line *before* its own
+    /// leading whitespace is stripped for display; the formatter re-bases them
+    /// against the dedented line when rendering (rules 1/2 of #2426).
+    pub col_span: Option<(u32, u32)>,
 }
 
 thread_local! {
@@ -5851,6 +5863,18 @@ thread_local! {
     ///
     /// Reset to 0 at the start of each top-level script execution.
     static CURRENT_VM_LINE: RefCell<u32> = const { RefCell::new(0) };
+
+    /// The PEP 657 caret anchor `(col_offset, end_col_offset)` of the
+    /// instruction at which the unwinding error was raised in the innermost
+    /// VM dispatch loop (issue #2426).  Unlike `CURRENT_VM_LINE`, this is NOT
+    /// updated per-instruction — the VM publishes it **only on the error path**
+    /// (when an exception escapes the frame), from the raising instruction's
+    /// `col_table` entry, so the per-instruction hot path stays untouched.
+    ///
+    /// `None` when the raising instruction carried no column span (the common
+    /// case for statement forms not yet plumbed in stage 1).  Reset to `None`
+    /// at the start of each top-level script execution.
+    static CURRENT_VM_COL_SPAN: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
 }
 
 /// Record a traceback frame for an error unwinding out of a user-function body.
@@ -5928,6 +5952,68 @@ pub fn get_current_vm_line() -> u32 {
 #[inline]
 pub fn reset_current_vm_line() {
     CURRENT_VM_LINE.with(|c| *c.borrow_mut() = 0);
+    CURRENT_VM_COL_SPAN.with(|c| *c.borrow_mut() = None);
+}
+
+/// Publish the PEP 657 caret anchor of the raising instruction (issue #2426).
+///
+/// Called by the VM **only on the error-escape path**, with the `col_table`
+/// entry of the instruction that raised.  `None` clears any stale span so a
+/// later raise on an unplumbed instruction does not inherit a previous anchor.
+#[inline]
+pub fn set_current_vm_col_span(span: Option<(u32, u32)>) {
+    CURRENT_VM_COL_SPAN.with(|c| *c.borrow_mut() = span);
+}
+
+/// Read the current VM caret anchor.  Called by `try_exec_vm_script_with_index`
+/// after `run_bytecode` returns an error, to fill in the `<module>` frame's
+/// `col_span` (issue #2426).
+#[inline]
+pub fn get_current_vm_col_span() -> Option<(u32, u32)> {
+    CURRENT_VM_COL_SPAN.with(|c| *c.borrow())
+}
+
+/// Build the PEP 657 caret underline row for one frame (issue #2426), or
+/// `None` when no caret row should be printed.
+///
+/// `stripped` is the dedented display line (its own leading whitespace already
+/// removed).  `leading` is the count of leading-whitespace *chars* that were
+/// stripped — i.e. the offset to rebase the anchor's column from the original
+/// line onto the dedented line.  `col_span` is the `(col_offset,
+/// end_col_offset)` 0-based char anchor measured against the *original* line.
+///
+/// Returns `None` (omit the row) when:
+///  * there is no `col_span` (form not plumbed), or
+///  * the anchor covers the whole stripped line (rule 1), or
+///  * the anchor is degenerate / out of range after rebasing.
+fn caret_row(stripped: &str, leading: usize, col_span: Option<(u32, u32)>) -> Option<String> {
+    let (col_start, col_end) = col_span?;
+    let (col_start, col_end) = (col_start as usize, col_end as usize);
+    // Rebase the anchor onto the dedented line.  Anchors inside the stripped
+    // leading whitespace (col_start < leading) are not expected for the plumbed
+    // forms; guard against underflow defensively and omit.
+    if col_end <= col_start || col_start < leading {
+        return None;
+    }
+    let start = col_start - leading;
+    let end = col_end - leading;
+    let line_len = stripped.chars().count();
+    if end > line_len {
+        return None;
+    }
+    // Rule 1: anchor spans the whole stripped line → omit the caret row.
+    if start == 0 && end == line_len {
+        return None;
+    }
+    let mut row = String::from("    ");
+    for _ in 0..start {
+        row.push(' ');
+    }
+    for _ in start..end {
+        row.push('^');
+    }
+    row.push('\n');
+    Some(row)
 }
 
 /// Format a traceback chain as CPython does, returning it as a `String`.
@@ -5951,32 +6037,30 @@ pub fn reset_current_vm_line() {
 ///
 /// CPython strips the displayed source line's own leading whitespace and emits
 /// it under a fixed 4-space traceback indent, so an indented statement is not
-/// over-indented.  We `trim_start()` the line before applying our indent to
-/// match.
+/// over-indented.  We `trim_start()` the line before applying our indent.
 ///
-/// ## Caret (`^^^`) underlines (issue #2411)
+/// ## PEP 657 caret (`^^^`) underlines (issue #2426)
 ///
-/// CPython 3.12's PEP 657 underlines are *fine-grained*: they point at the
-/// precise sub-expression (anchor) that raised, using its column span — e.g.
-/// `x = undefined` underlines only `undefined`, and `1 + "s"` underlines
-/// `~~^~~~~`.  Crucially, when the anchor covers the **entire stripped source
-/// line**, CPython **omits the caret row entirely** (a bare `name`, `f()`,
-/// `raise X(...)`, `obj.attr`, etc. print no carets at all).
+/// CPython 3.12's underlines are *fine-grained*: they point at the precise
+/// sub-expression (anchor) that raised, using its column span — e.g.
+/// `x = undefined` underlines only `undefined`.  When the anchor covers the
+/// **entire stripped source line**, CPython **omits the caret row entirely**
+/// (a bare `name`, `f()`, `raise X(...)`, etc. print no carets).
 ///
-/// pyrust's line tables carry **no column information** (`FnCode::lineno_table`
-/// is line-only; see `bytecode.rs`), so we cannot reproduce the fine-grained
-/// span.  The previous implementation emitted a full-width `^` row over the
-/// whole stripped line on every frame — which is wrong in *every* case CPython
-/// produces: either CPython omits the carets (whole-line anchor) or it
-/// underlines a strictly narrower span (often with `~` context marks).  There
-/// is no real-world statement for which CPython prints a plain full-width `^`
-/// row over the whole line.
+/// We render the caret row only when the frame carries a `col_span` (the
+/// compiler tracked a column anchor for the raising instruction — stage 1
+/// plumbs the highest-value forms).  Frames without a span omit the row — which
+/// is byte-exact with CPython for the whole-line-anchor class and strictly
+/// safer than a wrong/over-wide caret for the rest (#2426 "a wrong caret is
+/// worse than no caret").
 ///
-/// We therefore omit the caret row.  This is byte-exact with CPython for the
-/// whole-line-anchor class (the common uncaught case) and strictly closer for
-/// the rest (no spurious over-wide carets).  Restoring the narrow span + `~`
-/// context marks requires PEP 657 column tracking in the compiler — deferred,
-/// tracked separately.
+/// Rules applied (against the *dedented* display line):
+///  1. **Omission:** if the anchor spans the whole stripped line, no caret row.
+///  2. **Carets:** `^` under `[col_offset, end_col_offset)` of the dedented line.
+///
+/// `~` context marks (rule 3: binary ops / subscripts) and multi-line clamping
+/// (rule 4) are deferred to later stages; until then those forms carry no span
+/// and stay caret-free.
 pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::from("Traceback (most recent call last):\n");
@@ -5993,12 +6077,18 @@ pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
                 let _ = writeln!(out, "  File \"{}\", in {}", frame.filename, frame.funcname);
             }
         }
-        // Emit the source line, dedented to a fixed 4-space indent (#2418).
-        // Carets are intentionally omitted; see the doc comment above (#2411).
+        // Emit the source line, dedented to a fixed 4-space indent (#2418),
+        // then a PEP 657 caret row when this frame carries a column anchor
+        // (#2426).  Carets are placed against the dedented line.
         if let Some(src) = &frame.source_line {
             let stripped = src.trim_start();
-            if !stripped.is_empty() {
-                let _ = writeln!(out, "    {stripped}");
+            if stripped.is_empty() {
+                continue;
+            }
+            let leading = src.chars().count() - stripped.chars().count();
+            let _ = writeln!(out, "    {stripped}");
+            if let Some(caret) = caret_row(stripped, leading, frame.col_span) {
+                out.push_str(&caret);
             }
         }
     }

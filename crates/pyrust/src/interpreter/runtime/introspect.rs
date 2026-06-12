@@ -792,6 +792,7 @@ impl Interpreter {
                 lineno: fi.lineno,
                 source_line: resolve(fi.lineno),
                 funcname: fi.funcname.clone(),
+                col_span: None,
             });
         }
         // The carried chain (outermost-first).
@@ -802,6 +803,7 @@ impl Interpreter {
                 lineno,
                 source_line: resolve(lineno),
                 funcname: std::sync::Arc::from(&funcname[..]),
+                col_span: None,
             });
         }
         Some(frames)

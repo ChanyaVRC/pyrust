@@ -1264,7 +1264,7 @@ fn lambda_captures_in_expr(
                 lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             });
         }
-        Expr::Var(_)
+        Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -1726,7 +1726,7 @@ fn collect_class_lambda_outer_refs_in_expr(
                 collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
             });
         }
-        Expr::Var(_)
+        Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -1919,7 +1919,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
 
 fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
     match expr {
-        Expr::Var(n) => {
+        Expr::Var(n, _) => {
             uses.insert(n.clone());
         }
         Expr::Binary { left, right, .. } => {
@@ -2455,7 +2455,7 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 collect_transitive_free_vars_in_expr(e, uses)
             });
         }
-        Expr::Var(_)
+        Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -2801,7 +2801,7 @@ fn expr_is_side_effect_free(expr: &Expr) -> bool {
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis
-        | Expr::Var(_) => true,
+        | Expr::Var(_, _) => true,
         Expr::Unary { expr, .. } => expr_is_side_effect_free(expr),
         Expr::Binary { left, right, op: _ } => {
             expr_is_side_effect_free(left) && expr_is_side_effect_free(right)
@@ -2979,7 +2979,7 @@ fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => true,
-        Expr::Var(name) => !written.contains(name.as_str()),
+        Expr::Var(name, _) => !written.contains(name.as_str()),
         Expr::Binary { left, right, .. } => {
             expr_is_invariant(left, written) && expr_is_invariant(right, written)
         }
@@ -3131,7 +3131,7 @@ fn expr_may_mutate_object(expr: &Expr) -> bool {
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis
-        | Expr::Var(_) => false,
+        | Expr::Var(_, _) => false,
         Expr::Unary { expr, .. } => expr_may_mutate_object(expr),
         Expr::Binary { left, right, .. } => {
             expr_may_mutate_object(left) || expr_may_mutate_object(right)
@@ -3245,12 +3245,12 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
             right,
         } => {
             let i = match left.as_ref() {
-                Expr::Var(n) => n.clone(),
+                Expr::Var(n, _) => n.clone(),
                 _ => return None,
             };
             let c = match right.as_ref() {
                 Expr::Call { func, args } => {
-                    if !matches!(func.as_ref(), Expr::Var(f) if f == "len") {
+                    if !matches!(func.as_ref(), Expr::Var(f, _) if f == "len") {
                         return None;
                     }
                     if args.len() != 1 {
@@ -3261,7 +3261,7 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
                         return None;
                     }
                     match &a.value {
-                        Expr::Var(n) => n.clone(),
+                        Expr::Var(n, _) => n.clone(),
                         _ => return None,
                     }
                 }
@@ -3293,7 +3293,7 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
             },
         ) => {
             t == &i_name
-                && matches!(left.as_ref(), Expr::Var(n) if n == &i_name)
+                && matches!(left.as_ref(), Expr::Var(n, _) if n == &i_name)
                 && matches!(right.as_ref(), Expr::Int(1))
         }
         _ => false,
@@ -3331,7 +3331,7 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
 
     Some(Stmt::For {
         target: AssignTarget::Name(i_name),
-        iter: Expr::Var(c_name),
+        iter: Expr::Var(c_name, None),
         body: new_body,
         else_branch: None,
         body_linenos: vec![],
@@ -3392,7 +3392,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
             expr,
         } => {
             // Slice-assigning into `c` could change its length, breaking iter.
-            if matches!(target.as_ref(), Expr::Var(n) if n == c_name) {
+            if matches!(target.as_ref(), Expr::Var(n, _) if n == c_name) {
                 return false;
             }
             expr_safe(target, i_name, c_name)
@@ -3484,7 +3484,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
                     return false;
                 }
                 // `del i` and `del c` would change semantics.
-                if let Expr::Var(n) = e
+                if let Expr::Var(n, _) = e
                     && (n == i_name || n == c_name)
                 {
                     return false;
@@ -3544,7 +3544,7 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis => true,
-        Expr::Var(n) => {
+        Expr::Var(n, _) => {
             // A bare reference to `i` outside of `c[i]` would still need to
             // see the index, not the value — bail.  Bare `c` reads are fine.
             n != i_name
@@ -3613,7 +3613,8 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
 }
 
 fn is_c_at_i_expr(target: &Expr, index: &Expr, c_name: &str, i_name: &str) -> bool {
-    matches!(target, Expr::Var(n) if n == c_name) && matches!(index, Expr::Var(n) if n == i_name)
+    matches!(target, Expr::Var(n, _) if n == c_name)
+        && matches!(index, Expr::Var(n, _) if n == i_name)
 }
 
 fn target_assigns(target: &AssignTarget, name: &str) -> bool {
@@ -3790,7 +3791,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
 
 fn expr_reads_var(expr: &Expr, name: &str) -> bool {
     match expr {
-        Expr::Var(n) => n == name,
+        Expr::Var(n, _) => n == name,
         Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -3994,7 +3995,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
     if let Expr::Index { target, index } = expr
         && is_c_at_i_expr(target, index, c_name, i_name)
     {
-        *expr = Expr::Var(i_name.to_string());
+        *expr = Expr::Var(i_name.to_string(), None);
         return;
     }
     match expr {
@@ -4007,7 +4008,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
         | Expr::Bool(_)
         | Expr::None
         | Expr::Ellipsis
-        | Expr::Var(_) => {}
+        | Expr::Var(_, _) => {}
         Expr::FString(parts) => {
             for_each_fstring_expr_mut(parts, &mut |e| rewrite_c_at_i_in_expr(e, c_name, i_name));
         }
@@ -4099,7 +4100,7 @@ fn detect_while_range<'a>(
             ) =>
         {
             match left.as_ref() {
-                Expr::Var(name) => (name.as_str(), op, right.as_ref()),
+                Expr::Var(name, _) => (name.as_str(), op, right.as_ref()),
                 _ => return None,
             }
         }
@@ -4203,10 +4204,18 @@ struct Compiler {
     /// Per-instruction 1-based source line numbers, parallel to `insns`.
     /// Filled by `emit()` from `current_lineno`.  0 = unknown.
     lineno_table: Vec<u32>,
+    /// Per-instruction PEP 657 caret anchor, parallel to `insns` (issue #2426).
+    /// Filled by `emit()` from `current_col_span`.  `(0, 0)` = no anchor.
+    col_table: Vec<(u32, u32)>,
     /// 1-based line number of the statement currently being compiled.
     /// Set by `set_lineno()` before each `compile_stmt` call when line
     /// information is available.  0 when no line info is known.
     current_lineno: u32,
+    /// PEP 657 caret anchor stamped onto the next emitted instruction(s)
+    /// (issue #2426).  Set transiently by `compile_expr` around the
+    /// instruction that loads a plumbed sub-expression (a bare-name `Var`), then
+    /// cleared back to `(0, 0)`.  `(0, 0)` means "no anchor".
+    current_col_span: (u32, u32),
     /// 1-based source line of the `def`/`lambda` this compiler is the body of
     /// — emitted into `FnCode::first_lineno` (the function's `co_firstlineno`).
     /// 0 for the module-level compiler (issue #2185).
@@ -4497,7 +4506,7 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         | Expr::DictComp { .. }
         | Expr::GenExp { .. } => false,
         // Leaf nodes — cannot contain yield.
-        Expr::Var(_)
+        Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -4584,7 +4593,7 @@ fn expr_contains_await(expr: &Expr) -> bool {
         | Expr::DictComp { .. }
         | Expr::GenExp { .. } => false,
         // Leaf nodes — cannot contain await.
-        Expr::Var(_)
+        Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -4735,7 +4744,7 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         // Lambda bodies are a separate scope and cannot make an enclosing
         // comprehension async; leaf nodes carry nothing.
         Expr::Lambda { .. }
-        | Expr::Var(_)
+        | Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -4807,7 +4816,7 @@ fn py_repr_str(s: &str) -> String {
 /// (e.g. `x: 'Foo'` → `"'Foo'"`), consistent with CPython 3.12 behaviour.
 fn stringify_annotation(expr: &Expr) -> String {
     match expr {
-        Expr::Var(name) => name.clone(),
+        Expr::Var(name, _) => name.clone(),
         Expr::None => "None".to_string(),
         Expr::Ellipsis => "...".to_string(),
         Expr::Bool(b) => if *b { "True" } else { "False" }.to_string(),
@@ -4986,7 +4995,9 @@ impl Compiler {
             nonlocal_names: HashSet::new(),
             insns: Vec::new(),
             lineno_table: Vec::new(),
+            col_table: Vec::new(),
             current_lineno: 0,
+            current_col_span: (0, 0),
             first_lineno: 0,
             consts: Vec::new(),
             const_index: HashMap::new(),
@@ -5196,7 +5207,18 @@ impl Compiler {
         let idx = self.insns.len();
         self.insns.push(insn);
         self.lineno_table.push(self.current_lineno);
+        // The armed PEP 657 anchor applies to exactly this instruction (#2426);
+        // consume and clear it so it never leaks onto the next emit.
+        self.col_table.push(self.current_col_span);
+        self.current_col_span = (0, 0);
         idx
+    }
+
+    /// Arm a PEP 657 caret anchor (issue #2426) for the **next** emitted
+    /// instruction.  `None` (a span-less name) clears the anchor — the formatter
+    /// then omits the caret row.  Consumed and reset by `emit`.
+    fn set_col_span_for_next(&mut self, span: Option<(u32, u32)>) {
+        self.current_col_span = span.unwrap_or((0, 0));
     }
 
     /// Set the source line number for all subsequently emitted instructions.
@@ -5558,6 +5580,7 @@ impl Compiler {
         Ok(FnCode {
             insns,
             lineno_table: self.lineno_table,
+            col_table: self.col_table,
             first_lineno: self.first_lineno,
             consts: self.consts,
             names: self.names,
@@ -5611,7 +5634,7 @@ impl Compiler {
     /// to the env.  Called after SetItem/SetSlice on a container that was loaded
     /// via LoadGlobal (which creates a copy, so the mutation must be committed).
     fn writeback_container_if_global(&mut self, container_expr: &Expr, obj_reg: Reg) {
-        if let Expr::Var(name) = container_expr
+        if let Expr::Var(name, _) = container_expr
             && self.local_reg(name).is_none()
         {
             let name_idx = self.intern_name(name);
@@ -7925,7 +7948,7 @@ impl Compiler {
             Expr::Call { func, args } => (func.as_ref(), args.as_slice()),
             _ => return false,
         };
-        if !matches!(func, Expr::Var(n) if n == "range") {
+        if !matches!(func, Expr::Var(n, _) if n == "range") {
             return false;
         }
         if args
@@ -8392,7 +8415,7 @@ impl Compiler {
 
     fn compile_delete(&mut self, expr: &Expr) {
         match expr {
-            Expr::Var(name) => {
+            Expr::Var(name, _) => {
                 if let Some(reg) = self.local_reg(name) {
                     // Pass the name index so the VM can raise NameError /
                     // UnboundLocalError when the register was never assigned.
@@ -10394,7 +10417,7 @@ impl Compiler {
 
         // Pre-load the StopAsyncIteration type once, in a register that lives for
         // the whole loop (used by MatchExcept on every iteration's exit check).
-        let stop_async_reg = self.compile_expr(&Expr::Var("StopAsyncIteration".to_string()));
+        let stop_async_reg = self.compile_expr(&Expr::Var("StopAsyncIteration".to_string(), None));
 
         let loop_start = self.pc();
         // Each iteration runs `await it.__anext__()` inside a SetupExcept so a
@@ -10620,7 +10643,13 @@ impl Compiler {
             Expr::Bytes(b) => self.compile_literal(Value::bytes(b.clone())),
             Expr::Complex(re, im) => self.compile_literal(Value::complex(*re, *im)),
             Expr::Bool(b) => self.compile_literal(Value::bool_(*b)),
-            Expr::Var(name) => {
+            Expr::Var(name, span) => {
+                // PEP 657 caret anchor (#2426): `set_col_span_for_next` arms the
+                // name's column span so the very next `emit` stamps it onto the
+                // load instruction that may raise NameError; `emit` then clears
+                // it.  We arm *immediately before* each load emit (not for the
+                // definitely-bound-local path, which emits nothing) so a stale
+                // span never leaks onto an unrelated instruction.
                 if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
@@ -10635,10 +10664,12 @@ impl Compiler {
                         if self.is_module_scope {
                             let name_idx = self.intern_name(name);
                             let dst = self.alloc_temp();
+                            self.set_col_span_for_next(*span);
                             self.emit(Insn::LoadGlobal(dst, name_idx));
                             return dst;
                         }
                         let name_idx = self.intern_name(name);
+                        self.set_col_span_for_next(*span);
                         self.emit(Insn::CheckLocal(reg, name_idx));
                     }
                     reg
@@ -10650,6 +10681,7 @@ impl Compiler {
                     // emit LoadCell to skip the LoadGlobal inline-cache + module
                     // -dict path (issue #2339).  Everything else (true globals,
                     // builtins, module/class-scope free vars) keeps LoadGlobal.
+                    self.set_col_span_for_next(*span);
                     if self.is_function_cell(name) {
                         self.emit(Insn::LoadCell(dst, name_idx));
                     } else {
@@ -11209,7 +11241,7 @@ impl Compiler {
         }
         body = vec![Stmt::For {
             target: clauses[0].target.clone(),
-            iter: Expr::Var(IT_PARAM.to_string()),
+            iter: Expr::Var(IT_PARAM.to_string(), None),
             body,
             else_branch: None,
             body_linenos: vec![],
@@ -11640,7 +11672,7 @@ impl Compiler {
         // Build the innermost statement: .acc.append(elt)
         let innermost = Stmt::Expr(Expr::Call {
             func: Box::new(Expr::Attr {
-                target: Box::new(Expr::Var(ACC_NAME.to_string())),
+                target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "append".to_string(),
             }),
             args: vec![CallArg {
@@ -11657,7 +11689,7 @@ impl Compiler {
             Expr::List(vec![]),
         )];
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
-        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
+        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
         self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp", is_async)
     }
@@ -11689,7 +11721,7 @@ impl Compiler {
 
         // Build the innermost statement: .acc[key] = val
         let innermost = Stmt::IndexAssign {
-            target: Box::new(Expr::Var(ACC_NAME.to_string())),
+            target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
             index: Box::new(key.clone()),
             expr: val.clone(),
         };
@@ -11699,7 +11731,7 @@ impl Compiler {
             Expr::Dict(vec![]),
         )];
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
-        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
+        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
         self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async)
     }
@@ -11723,7 +11755,7 @@ impl Compiler {
         let Expr::Attr { target, name } = func.as_ref() else {
             return false;
         };
-        if name != "add" || !matches!(target.as_ref(), Expr::Var(v) if v == ".acc") {
+        if name != "add" || !matches!(target.as_ref(), Expr::Var(v, _) if v == ".acc") {
             return false;
         }
         if args.len() != 1 {
@@ -11761,7 +11793,7 @@ impl Compiler {
         let Expr::Attr { target, name } = func.as_ref() else {
             return false;
         };
-        if name != "append" || !matches!(target.as_ref(), Expr::Var(v) if v == ".acc") {
+        if name != "append" || !matches!(target.as_ref(), Expr::Var(v, _) if v == ".acc") {
             return false;
         }
         if args.len() != 1 {
@@ -11806,7 +11838,7 @@ impl Compiler {
         // Build the innermost statement: .acc.add(elt)
         let innermost = Stmt::Expr(Expr::Call {
             func: Box::new(Expr::Attr {
-                target: Box::new(Expr::Var(ACC_NAME.to_string())),
+                target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "add".to_string(),
             }),
             args: vec![CallArg {
@@ -11819,7 +11851,7 @@ impl Compiler {
 
         // Build the accumulator: .acc = set()
         let acc_init = Expr::Call {
-            func: Box::new(Expr::Var("set".to_string())),
+            func: Box::new(Expr::Var("set".to_string(), None)),
             args: vec![],
         };
         let mut fn_body = vec![Stmt::Assign(
@@ -11827,7 +11859,7 @@ impl Compiler {
             acc_init,
         )];
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
-        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
+        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
         self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async)
     }
@@ -12125,7 +12157,8 @@ impl Compiler {
             }
             self.next_temp = saved;
         }
-        let is_pure_callee = matches!(func, Expr::Var(n) if self.pure_locals.contains(n.as_str()));
+        let is_pure_callee =
+            matches!(func, Expr::Var(n, _) if self.pure_locals.contains(n.as_str()));
         if is_pure_callee {
             self.emit(Insn::CallMemo(func_reg, argc));
         } else {
@@ -12244,7 +12277,7 @@ impl Compiler {
         let kwnames_idx = self.intern_const(Value::tuple(kw_names));
 
         // Receiver / dst / args_base placement — identical to compile_method_call.
-        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name) = target {
+        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name, _) = target {
             if let Some(local) = self.local_reg(name) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
@@ -12344,7 +12377,7 @@ impl Compiler {
         // variable.  The return value goes into a fresh temp `dst_reg ≠ obj_reg`.
         // For all other receivers we fall back to copying the value into a temp and
         // using the same register for both obj and dst.
-        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name) = target {
+        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name, _) = target {
             if let Some(local) = self.local_reg(name) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
@@ -12478,7 +12511,7 @@ impl Compiler {
         if let Expr::Attr { target, name } = func {
             // Same fast-local optimisation as compile_method_call: use the
             // variable's own register as `obj` so mutations persist.
-            let (obj_reg, dst_reg) = if let Expr::Var(tname) = target.as_ref() {
+            let (obj_reg, dst_reg) = if let Expr::Var(tname, _) = target.as_ref() {
                 if let Some(local) = self.local_reg(tname) {
                     let dst = self.alloc_temp();
                     (local, dst)

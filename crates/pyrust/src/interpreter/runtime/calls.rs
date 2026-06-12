@@ -3412,6 +3412,7 @@ impl Interpreter {
                 lineno: tb_lineno,
                 source_line: None,
                 funcname: std::sync::Arc::from(&function.name[..]),
+                col_span: None,
             });
         }
         self.vm_frame_views.pop();
@@ -3845,6 +3846,7 @@ impl Interpreter {
                         lineno: tb_lineno,
                         source_line: None,
                         funcname: std::sync::Arc::from(&function.name[..]),
+                        col_span: None,
                     });
                 }
                 self.vm_frame_views.pop();
@@ -4147,6 +4149,7 @@ impl Interpreter {
                     lineno: tb_lineno,
                     source_line: None,
                     funcname: std::sync::Arc::from(&function.name[..]),
+                    col_span: None,
                 });
             }
             self.vm_frame_views.pop();
