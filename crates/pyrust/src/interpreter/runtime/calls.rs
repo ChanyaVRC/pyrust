@@ -502,13 +502,20 @@ impl Interpreter {
                     ValueKind::Str(s) => s.to_string(),
                     _ => return Err(pyrust_core::descriptor_requires!("format_map", "str")),
                 };
-                // format_map takes exactly one positional argument (the mapping).
+                // format_map takes exactly one positional argument (the mapping)
+                // and no keyword arguments.  CPython rejects any keyword argument
+                // with a distinct message *before* counting positionals.
                 let rest = &args[1..];
-                let kw_count = rest.iter().filter(|a| a.name.is_some()).count();
-                let pos_count = rest.iter().filter(|a| a.name.is_none()).count();
-                if pos_count != 1 || kw_count != 0 {
-                    return Err(pyrust_core::type_err!("str.format_map() takes exactly one argument ({} given)",
-                            pos_count + kw_count));
+                if rest.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "str.format_map() takes no keyword arguments"
+                    ));
+                }
+                if rest.len() != 1 {
+                    return Err(pyrust_core::type_err!(
+                        "str.format_map() takes exactly one argument ({} given)",
+                        rest.len()
+                    ));
                 }
                 let mapping = rest[0].value.clone();
                 self.format_str_template_map(&template, mapping)
@@ -1769,6 +1776,16 @@ impl Interpreter {
                                         self.format_str_template(
                                             &template, &args_vec, &keyword,
                                         )
+                                    } else if method == "format_map"
+                                        && !kw.is_empty()
+                                    {
+                                        // `format_map` accepts no keyword
+                                        // arguments; `call_str_method` only sees
+                                        // positionals and would silently drop the
+                                        // kwarg on a subclass receiver (#2379).
+                                        Err(pyrust_core::type_err!(
+                                            "str.format_map() takes no keyword arguments"
+                                        ))
                                     } else {
                                         self.call_str_method(method, backing, args_vec)
                                     }
@@ -5416,9 +5433,33 @@ pub(crate) fn apply_format_spec_named(
         ));
     }
 
-    let parsed = parse_format_spec(spec)?;
-    let formatted = render_format_spec(value, &parsed)?;
+    // The type name CPython reports in format-spec ValueErrors ("Invalid
+    // format specifier '…' for object of type '<type>'", "Unknown format code
+    // '…' for object of type '<type>'", …) is the *actual* type the spec was
+    // passed to: the subclass for a built-in subclass instance (`owner`), the
+    // value's own builtin name otherwise.  Compute it once and thread it through
+    // the parse + render so every spec error names the same type.
+    let type_name = owner
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| pyrust_core::builtin_type_name(value));
+    let parsed = parse_format_spec(spec, &type_name)?;
+    let formatted = render_format_spec(value, &parsed, &type_name)?;
     Ok(Value::string(formatted))
+}
+
+/// Render a format-spec character (a presentation-type code) the way CPython
+/// embeds it in an "Unknown format code" error message.  CPython emits the
+/// code point literally for the ASCII range `0x20..=0x7f` (note: DEL, 0x7f, is
+/// kept raw); a control character (`< 0x20`) or any non-ASCII / astral code
+/// point (`>= 0x80`) is escaped as `\xHEX` with lowercase, non-zero-padded hex
+/// (e.g. U+1D11E -> `\x1d11e`, U+00E9 -> `\xe9`).
+fn format_code_repr(c: char) -> String {
+    let cp = c as u32;
+    if (0x20..=0x7f).contains(&cp) {
+        c.to_string()
+    } else {
+        format!("\\x{cp:x}")
+    }
 }
 
 /// True when `value`'s type provides a real `__format__` that honours a format
@@ -5507,7 +5548,7 @@ struct FormatSpec {
     type_char: Option<char>,
 }
 
-fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
+fn parse_format_spec(spec: &str, type_name: &str) -> Result<FormatSpec> {
     // Walk the borrowed `&str` in place with a `Peekable<CharIndices>` rather
     // than collecting into a throwaway `Vec<char>`.  An f-string interpolation
     // re-parses its (usually constant) spec on every iteration of a hot loop,
@@ -5623,7 +5664,31 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
     let type_char = chars.next().map(|(_, c)| c);
 
     if chars.next().is_some() {
-        return Err(pyrust_core::value_err!("Invalid format specifier"));
+        return Err(pyrust_core::value_err!(
+            "Invalid format specifier '{spec}' for object of type '{type_name}'"
+        ));
+    }
+
+    // CPython validates grouping/type compatibility at parse time, BEFORE any
+    // per-value "Unknown format code" check (issue #2373): ',' allows only
+    // d/e/E/f/F/g/G/% as the type code; '_' additionally allows b/o/x/X.  A
+    // second separator in type position reports the doubled separator or the
+    // pair ("both").  Pinned against python3.12 (",d" on a str value
+    // correctly falls through to the str path's unknown-code error; the
+    // incompatible type char is hex-escaped like unknown format codes).
+    if let (Some(g), Some(t)) = (grouping, type_char) {
+        if t == ',' || t == '_' {
+            if t == g {
+                return Err(pyrust_core::value_err!("Cannot specify '{g}' with '{g}'."));
+            }
+            return Err(pyrust_core::value_err!("Cannot specify both ',' and '_'."));
+        }
+        let grouping_ok = matches!(t, 'd' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%')
+            || (g == '_' && matches!(t, 'b' | 'o' | 'x' | 'X'));
+        if !grouping_ok {
+            let t_repr = format_code_repr(t);
+            return Err(pyrust_core::value_err!("Cannot specify '{g}' with '{t_repr}'."));
+        }
     }
 
     Ok(FormatSpec {
@@ -5642,7 +5707,7 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
 
 /// Apply the parsed spec to the value.  Splits into a string-typed branch
 /// and a numeric branch so type-specific validation stays close to formatting.
-fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
+fn render_format_spec(value: &Value, fs: &FormatSpec, type_name: &str) -> Result<String> {
     // Treat the value as a string when the type code is 's' (or absent and
     // the value is a string).  For non-string values with no type code, fall
     // back to numeric handling so width / zero-pad / sign still apply.
@@ -5650,16 +5715,16 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
         || (fs.type_char.is_none() && matches!(value.kind(), ValueKind::Str(_)));
 
     if is_string_target {
-        return format_as_string(value, fs);
+        return format_as_string(value, fs, type_name);
     }
 
     // No type code and a non-string value: route by value kind.
     if fs.type_char.is_none() {
         match value.kind() {
             ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {
-                return format_int_value(value, fs, None)
+                return format_int_value(value, fs, None, type_name)
             }
-            ValueKind::Float(_) => return format_float_value(value, fs, None),
+            ValueKind::Float(_) => return format_float_value(value, fs, None, type_name),
             // Complex with no explicit type code: render via complex_repr
             // (matching CPython's `format(1+2j)` -> "(1+2j)") and then apply
             // width / align / fill to the resulting string.  The float
@@ -5668,7 +5733,7 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
             ValueKind::Complex(_, _) => return format_complex_value(value, fs),
             _ => {
                 // Anything else: fall back to str() then pad like a string.
-                return format_as_string(value, fs);
+                return format_as_string(value, fs, type_name);
             }
         }
     }
@@ -5681,7 +5746,10 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
         if matches!(t, 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 'n') {
             return format_complex_value(value, fs);
         }
-        return Err(pyrust_core::value_err!("Unknown format code '{t}' for object of type 'complex'"));
+        return Err(pyrust_core::value_err!(
+            "Unknown format code '{}' for object of type '{type_name}'",
+            format_code_repr(t)
+        ));
     }
     match t {
         // 'n' is locale-aware and supported on both integer and float values.
@@ -5689,21 +5757,26 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
         // float to the float formatter (which treats 'n' as 'g' since pyrust
         // has no locale, matching CPython's C-locale behavior where n == g).
         'n' if matches!(value.kind(), ValueKind::Float(_)) => {
-            format_float_value(value, fs, Some('n'))
+            format_float_value(value, fs, Some('n'), type_name)
         }
-        'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t)),
-        'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => format_float_value(value, fs, Some(t)),
-        's' => format_as_string(value, fs),
-        _ => Err(pyrust_core::value_err!("Unknown format code '{t}' for object of type '{}'",
-                value_type_name_str(value))),
+        'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t), type_name),
+        'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => {
+            format_float_value(value, fs, Some(t), type_name)
+        }
+        's' => format_as_string(value, fs, type_name),
+        _ => Err(pyrust_core::value_err!(
+            "Unknown format code '{}' for object of type '{type_name}'",
+            format_code_repr(t)
+        )),
     }
 }
 
-fn format_as_string(value: &Value, fs: &FormatSpec) -> Result<String> {
+fn format_as_string(value: &Value, fs: &FormatSpec, type_name: &str) -> Result<String> {
     // Reject numeric-only options on strings, matching CPython.
     if matches!(fs.type_char, Some('s')) && !matches!(value.kind(), ValueKind::Str(_)) {
-        return Err(pyrust_core::value_err!("Unknown format code 's' for object of type '{}'",
-                value_type_name_str(value)));
+        return Err(pyrust_core::value_err!(
+            "Unknown format code 's' for object of type '{type_name}'"
+        ));
     }
     if fs.sign.is_some() {
         return Err(pyrust_core::value_err!("Sign not allowed in string format specifier"));
@@ -5711,8 +5784,10 @@ fn format_as_string(value: &Value, fs: &FormatSpec) -> Result<String> {
     if fs.alt {
         return Err(pyrust_core::value_err!("Alternate form (#) not allowed in string format specifier"));
     }
-    if fs.grouping.is_some() {
-        return Err(pyrust_core::value_err!("Cannot specify ',' or '_' with 's'."));
+    if let Some(g) = fs.grouping {
+        // CPython names the *actual* separator that was supplied, e.g.
+        // "Cannot specify ',' with 's'." / "Cannot specify '_' with 's'."
+        return Err(pyrust_core::value_err!("Cannot specify '{g}' with 's'."));
     }
     if matches!(fs.align, Some('=')) {
         return Err(pyrust_core::value_err!("'=' alignment not allowed in string format specifier"));
@@ -5779,7 +5854,12 @@ fn prefix_for(type_char: char, alt: bool) -> &'static str {
     }
 }
 
-fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
+fn format_int_value(
+    value: &Value,
+    fs: &FormatSpec,
+    type_char: Option<char>,
+    type_name: &str,
+) -> Result<String> {
     // BigInt is handled via a separate path that avoids the i128 narrowing.
     if let ValueKind::BigInt(b) = value.kind() {
         return format_bigint_value(b, fs, type_char);
@@ -5796,8 +5876,10 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         }
         _ => {
             let code = type_char.unwrap_or('d');
-            return Err(pyrust_core::value_err!("Unknown format code '{code}' for object of type '{}'",
-                    value_type_name_str(value)));
+            return Err(pyrust_core::value_err!(
+                "Unknown format code '{}' for object of type '{type_name}'",
+                format_code_repr(code)
+            ));
         }
     };
 
@@ -5958,14 +6040,22 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
     ))
 }
 
-fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
+fn format_float_value(
+    value: &Value,
+    fs: &FormatSpec,
+    type_char: Option<char>,
+    type_name: &str,
+) -> Result<String> {
     // Complex numbers don't yet support the explicit float / int type codes
     // here.  The bare-spec (no type char) path routes Complex through
     // `format_complex_value` before reaching this function, so a Complex
     // value here means the user supplied an unsupported type code.
     if matches!(value.kind(), ValueKind::Complex(_, _)) {
         let code = type_char.unwrap_or('\0');
-        return Err(pyrust_core::value_err!("Unknown format code '{code}' for object of type 'complex'"));
+        return Err(pyrust_core::value_err!(
+            "Unknown format code '{}' for object of type '{type_name}'",
+            format_code_repr(code)
+        ));
     }
 
     // str.__format__ rejects float format codes with ValueError (matching
@@ -5974,8 +6064,10 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
     // intercept str values here before the conversion attempt.
     if matches!(value.kind(), ValueKind::Str(_)) {
         let code = type_char.unwrap_or('\0');
-        return Err(pyrust_core::value_err!("Unknown format code '{code}' for object of type '{}'",
-                value_type_name_str(value)));
+        return Err(pyrust_core::value_err!(
+            "Unknown format code '{}' for object of type '{type_name}'",
+            format_code_repr(code)
+        ));
     }
 
     let f = fmt_value_to_float(value)?;
@@ -6159,7 +6251,7 @@ fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
             precision: fs.precision,
             type_char: component_type,
         };
-        let mut s = format_float_value(&Value::float(part), &sub, component_type)?;
+        let mut s = format_float_value(&Value::float(part), &sub, component_type, "complex")?;
         // Repr-style (no type, no precision): drop the trailing `.0` that the
         // float formatter emits for integer-valued floats.  With the alternate
         // form the decimal point is retained (`3.` not `3.0`); CPython keeps
@@ -7541,7 +7633,7 @@ fn apply_field_accessors(
             let end = bytes
                 .iter()
                 .position(|&b| b == b']')
-                .ok_or_else(|| pyrust_core::value_err!("Missing ']' in format field accessor"))?;
+                .ok_or_else(|| pyrust_core::value_err!("expected '}}' before end of string"))?;
             let key_str = &rest[1..end];
             rest = &rest[end + 1..];
             // Per CPython 3.12: a subscript that parses as a non-negative
@@ -9263,9 +9355,18 @@ impl Interpreter {
                 self.format_str_template(template, &pos, &keyword)
             }
             "format_map" => {
-                if pos.len() != 1 || !kw.is_empty() {
-                    return Err(pyrust_core::type_err!("str.format_map() takes exactly one argument ({} given)",
-                            pos.len() + kw.len()));
+                // No keyword arguments are accepted; CPython rejects them with a
+                // distinct message before counting positionals.
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "str.format_map() takes no keyword arguments"
+                    ));
+                }
+                if pos.len() != 1 {
+                    return Err(pyrust_core::type_err!(
+                        "str.format_map() takes exactly one argument ({} given)",
+                        pos.len()
+                    ));
                 }
                 let mapping = pos.into_iter().next().unwrap();
                 let template = receiver
