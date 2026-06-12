@@ -334,7 +334,12 @@ pub enum Expr {
     Ellipsis,
     /// An f-string: `f"Hello, {name}!"`
     FString(Vec<FStringPart>),
-    Var(String),
+    /// A bare name reference.  The optional `(col_offset, end_col_offset)`
+    /// (0-based char columns within the name's source line) is the PEP 657
+    /// caret anchor (issue #2426), recorded by the parser when token column
+    /// information is available.  `None` for names synthesised by the parser
+    /// (desugaring temporaries) or built without column info.
+    Var(String, Option<(u32, u32)>),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
     Dict(Vec<DictItem>),

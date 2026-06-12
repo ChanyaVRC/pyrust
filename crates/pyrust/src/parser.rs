@@ -11,6 +11,11 @@ pub struct Parser {
     /// Optional 1-based line numbers, one per token.  Empty when the parser was
     /// constructed without line tracking (via `Parser::new`).
     line_nos: Vec<u32>,
+    /// Optional 0-based start columns (char offset within the token's physical
+    /// line), one per token, for PEP 657 caret anchors (issue #2426).  Empty
+    /// when the parser was constructed without column tracking; `Var` anchors
+    /// are then recorded as `None`.
+    cols: Vec<u32>,
     /// Current expression-nesting depth.  Incremented on every `parse_expr`
     /// entry; since each bracketed construct (`(`, `[`, `{`, call args,
     /// subscripts) re-enters `parse_expr` for its contents, this tracks the
@@ -39,17 +44,36 @@ impl Parser {
             tokens,
             pos: 0,
             line_nos: Vec::new(),
+            cols: Vec::new(),
             expr_depth: 0,
         }
     }
 
     /// Construct a parser with per-token line numbers produced by
     /// `Lexer::into_tokens_with_linenos`.
+    ///
+    /// Superseded for the script path by [`Parser::new_with_pos`] (which also
+    /// carries columns for #2426); retained as the line-only constructor.
+    #[allow(dead_code)]
     pub fn new_with_lines(tokens: Vec<Token>, line_nos: Vec<u32>) -> Self {
         Self {
             tokens,
             pos: 0,
             line_nos,
+            cols: Vec::new(),
+            expr_depth: 0,
+        }
+    }
+
+    /// Construct a parser with per-token line numbers **and** start columns
+    /// produced by `Lexer::into_tokens_with_pos` (issue #2426).  Enables PEP 657
+    /// caret anchors on the expression forms stage 1 plumbs.
+    pub fn new_with_pos(tokens: Vec<Token>, line_nos: Vec<u32>, cols: Vec<u32>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            line_nos,
+            cols,
             expr_depth: 0,
         }
     }
@@ -58,6 +82,12 @@ impl Parser {
     /// no line number information is available.
     fn current_lineno(&self) -> u32 {
         self.line_nos.get(self.pos).copied().unwrap_or(0)
+    }
+
+    /// Return the 0-based start column of the current token, or `None` when no
+    /// column information is available (issue #2426).
+    fn current_col(&self) -> Option<u32> {
+        self.cols.get(self.pos).copied()
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>> {
@@ -529,7 +559,7 @@ impl Parser {
                     // Dotted name → value pattern.  Consume `.attr` chains to
                     // build an `Expr::Attr` chain, then check for a trailing `(`
                     // to decide class-pattern vs value-pattern.
-                    let mut expr = Expr::Var(name);
+                    let mut expr = Expr::Var(name, None);
                     while self.is(&Token::Dot) {
                         self.bump();
                         let attr = match self.current().cloned() {
@@ -589,7 +619,7 @@ impl Parser {
                 } else if self.is(&Token::LParen) {
                     // Class pattern: Name(pos, ..., kwarg=pat, ...)
                     self.bump();
-                    let cls = Expr::Var(name);
+                    let cls = Expr::Var(name, None);
                     let mut positional: Vec<Pattern> = Vec::new();
                     let mut kwargs: Vec<(String, Pattern)> = Vec::new();
                     while !self.is(&Token::RParen) && !self.is(&Token::Eof) {
@@ -809,7 +839,7 @@ impl Parser {
             && !starred_flags[0]
             && matches!(
                 &targets[0],
-                Expr::Var(_) | Expr::Attr { .. } | Expr::Index { .. }
+                Expr::Var(_, _) | Expr::Attr { .. } | Expr::Index { .. }
             )
         {
             self.bump(); // consume :
@@ -819,7 +849,7 @@ impl Parser {
                 let rhs = self.parse_expr()?;
                 // For a simple name target, emit AnnAssign so the compiler can
                 // detect conflicts with global/nonlocal (CPython SyntaxError).
-                if let Expr::Var(name) = &targets[0] {
+                if let Expr::Var(name, _) = &targets[0] {
                     if name == "__debug__" {
                         return Err(PyError::Parse("cannot assign to __debug__".to_string()));
                     }
@@ -838,7 +868,7 @@ impl Parser {
             // with global/nonlocal declarations (CPython SyntaxError).
             // For attribute/index targets (e.g. `self.x: int`) there is no local
             // slot to declare, so this remains a no-op.
-            if let Expr::Var(name) = &targets[0] {
+            if let Expr::Var(name, _) = &targets[0] {
                 if name == "__debug__" {
                     return Err(PyError::Parse("cannot assign to __debug__".to_string()));
                 }
@@ -1929,7 +1959,7 @@ impl Parser {
         let expr = self.parse_or()?;
         // Walrus operator: NAME := expr
         if self.is(&Token::Walrus) {
-            if let Expr::Var(name) = expr {
+            if let Expr::Var(name, _) = expr {
                 if name == "__debug__" {
                     return Err(PyError::Parse("cannot assign to __debug__".to_string()));
                 }
@@ -2728,8 +2758,15 @@ impl Parser {
                 Ok(Expr::Ellipsis)
             }
             Some(Token::Ident(name)) => {
+                // PEP 657 caret anchor (#2426): the name's column span is
+                // `[col, col + len)` where `col` is the Ident token's start
+                // column and `len` its char length.  `self.pos` still points at
+                // the Ident here (before `bump`).
+                let span = self
+                    .current_col()
+                    .map(|col| (col, col + name.chars().count() as u32));
                 self.bump();
-                Ok(Expr::Var(name))
+                Ok(Expr::Var(name, span))
             }
             Some(Token::LParen) => {
                 self.bump();
@@ -3104,10 +3141,10 @@ fn parse_expr_str(src: &str) -> Result<Expr> {
 /// Used by annotation assignment, where exactly one bare target appears.
 fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
     match target {
-        Expr::Var(name) if name == "__debug__" => {
+        Expr::Var(name, _) if name == "__debug__" => {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
-        Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
+        Expr::Var(name, _) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
         Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
             target: *target.clone(),
             name: name.clone(),
@@ -3206,7 +3243,7 @@ fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> R
             items,
             flags,
             had_comma,
-            Expr::Var(tmp_name.clone()),
+            Expr::Var(tmp_name.clone(), None),
         )?);
     }
     Ok(out)
@@ -3214,10 +3251,10 @@ fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> R
 
 fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
     match expr {
-        Expr::Var(name) if name == "__debug__" => {
+        Expr::Var(name, _) if name == "__debug__" => {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
-        Expr::Var(name) => Ok(AssignTarget::Name(name.clone())),
+        Expr::Var(name, _) => Ok(AssignTarget::Name(name.clone())),
         Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
         Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Slice {
@@ -3536,10 +3573,12 @@ impl MapKey {
 /// attributes, subscripts, slices, and tuples/lists of these — are accepted.
 fn validate_del_target(expr: &Expr) -> Result<()> {
     let reason = match expr {
-        Expr::Var(name) if name == "__debug__" => {
+        Expr::Var(name, _) if name == "__debug__" => {
             return Err(PyError::Parse("cannot delete __debug__".to_string()));
         }
-        Expr::Var(_) | Expr::Attr { .. } | Expr::Index { .. } | Expr::Slice { .. } => return Ok(()),
+        Expr::Var(_, _) | Expr::Attr { .. } | Expr::Index { .. } | Expr::Slice { .. } => {
+            return Ok(());
+        }
         Expr::Tuple(items) | Expr::List(items) => {
             for item in items {
                 validate_del_target(item)?;

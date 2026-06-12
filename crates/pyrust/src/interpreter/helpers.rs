@@ -4824,7 +4824,7 @@ fn collect_var_refs_in_expr(
     assigned: &mut HashSet<String>,
 ) {
     match expr {
-        Expr::Var(name) => {
+        Expr::Var(name, _) => {
             used.insert(name.clone());
         }
         Expr::Named { target, value } => {
@@ -5380,7 +5380,7 @@ fn is_pure_expr(
         // function like `def f(): return counter` would be mis-classified as pure
         // and its first result permanently cached, hiding subsequent mutations of
         // `counter` (issue #346 correctness requirement).
-        Expr::Var(n) => local_names.contains_key(n.as_str()),
+        Expr::Var(n, _) => local_names.contains_key(n.as_str()),
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             items.iter().all(|e| is_pure_expr(e, pure_fns, local_names))
         }
@@ -5419,7 +5419,7 @@ fn is_pure_expr(
             //      (`a.b.c(…)`, computed callees, method calls on values)
             //      stays conservatively impure.
             let callee_is_pure = match func.as_ref() {
-                Expr::Var(name) => {
+                Expr::Var(name, _) => {
                     // Local fns already confirmed pure (`pure_fns`) take
                     // precedence so user-defined names shadowing a builtin
                     // don't accidentally hit the registry — a stray builtin
@@ -5438,7 +5438,7 @@ fn is_pure_expr(
                     // joined `module.name` is registered `#[pure]`.  Method
                     // calls on user instances are always impure because we
                     // can't see through the receiver here.
-                    if let Expr::Var(module) = target.as_ref() {
+                    if let Expr::Var(module, _) = target.as_ref() {
                         // Local shadowing of the module name disables the
                         // registry lookup, mirroring the bare-`Var` arm.
                         if pure_fns.contains(module.as_str()) {

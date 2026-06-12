@@ -21,10 +21,25 @@ pub struct Lexer {
     /// continuation, where no `Newline` token is emitted) or *inside* a
     /// multi-line string literal carry their true line number (issue #2227).
     line_nos: Vec<u32>,
+    /// 0-based **char** column at which each token starts within its physical
+    /// line, parallel to `tokens` (issue #2426).  Recorded as the token is
+    /// emitted, from `cur_col`.  Used by the parser to derive PEP 657 caret
+    /// anchors for the highest-value expression forms.  Structural tokens
+    /// (Newline / Indent / Dedent / Eof) carry whatever `cur_col` held; their
+    /// column is never consulted.
+    cols: Vec<u32>,
     /// Current 1-based physical line.  Advanced on every physical `\n` consumed
     /// anywhere — including newlines suppressed inside brackets and newlines
     /// spanned by a single multi-line string/f-string token.
     line: u32,
+    /// `chars` index at which the current physical line begins (issue #2426).
+    /// Maintained alongside `line` so a token's start column is
+    /// `token_start - line_start_pos`.  Updated whenever a physical `\n` is
+    /// consumed (the new line starts just after it).
+    line_start_pos: usize,
+    /// Start column of the token about to be emitted (issue #2426).  Set at the
+    /// single per-token dispatch point in `lex_line_tokens`; read by `emit`.
+    cur_col: u32,
 }
 
 impl Lexer {
@@ -32,7 +47,10 @@ impl Lexer {
         let mut lexer = Self {
             tokens: Vec::new(),
             line_nos: Vec::new(),
+            cols: Vec::new(),
             line: 1,
+            line_start_pos: 0,
+            cur_col: 0,
         };
         lexer.lex_source(src)?;
         Ok(lexer)
@@ -46,6 +64,7 @@ impl Lexer {
     #[inline]
     fn emit(&mut self, tok: Token) {
         self.line_nos.push(self.line);
+        self.cols.push(self.cur_col);
         self.tokens.push(tok);
     }
 
@@ -54,9 +73,11 @@ impl Lexer {
     /// crossing physical lines (multi-line strings / f-strings).
     #[inline]
     fn advance_line_over(&mut self, chars: &[char], from: usize, to: usize) {
-        for &c in &chars[from..to] {
+        for (i, &c) in chars[from..to].iter().enumerate() {
             if c == '\n' {
                 self.line += 1;
+                // The next physical line starts just after this '\n' (#2426).
+                self.line_start_pos = from + i + 1;
             }
         }
     }
@@ -66,9 +87,23 @@ impl Lexer {
     /// during lexing by [`Lexer::emit`].  A token that begins on a continuation
     /// line inside brackets, or after a multi-line string, carries its true
     /// physical line number.
+    ///
+    /// Superseded for the script path by [`Lexer::into_tokens_with_pos`] (which
+    /// also returns columns for #2426); retained as the line-only accessor.
+    #[allow(dead_code)]
     pub fn into_tokens_with_linenos(self) -> (Vec<Token>, Vec<u32>) {
         debug_assert_eq!(self.tokens.len(), self.line_nos.len());
         (self.tokens, self.line_nos)
+    }
+
+    /// Like [`Lexer::into_tokens_with_linenos`] but also returns the parallel
+    /// per-token start-column vector (0-based char offset within the token's
+    /// physical line) recorded during lexing for PEP 657 caret anchors
+    /// (issue #2426).
+    pub fn into_tokens_with_pos(self) -> (Vec<Token>, Vec<u32>, Vec<u32>) {
+        debug_assert_eq!(self.tokens.len(), self.line_nos.len());
+        debug_assert_eq!(self.tokens.len(), self.cols.len());
+        (self.tokens, self.line_nos, self.cols)
     }
 
     fn lex_source(&mut self, src: &str) -> Result<()> {
@@ -85,6 +120,9 @@ impl Lexer {
             // We do this at the start of each physical line (pos points just
             // after the preceding '\n', or at 0 for the first line).
             let line_start = pos;
+            // Track where this physical line begins so emitted tokens can record
+            // their start column as `token_start - line_start_pos` (#2426).
+            self.line_start_pos = line_start;
 
             // Count leading spaces (tabs are rejected by count_indent_chars).
             let indent = count_indent_chars(&chars, pos)?;
@@ -212,6 +250,11 @@ impl Lexer {
             // their own line tracking and `return`/`continue` before reaching
             // the post-match advance, so they are never double-counted.
             let tok_start = pos;
+            // Record the start column of the token about to be emitted (#2426):
+            // its char offset within the current physical line.  `saturating_sub`
+            // guards the (not expected) case where a continuation re-entry leaves
+            // `pos` before the tracked line start.
+            self.cur_col = tok_start.saturating_sub(self.line_start_pos) as u32;
             match chars.get(pos).copied() {
                 None => {
                     // End of source.
@@ -226,6 +269,7 @@ impl Lexer {
                         // on the next physical line (do NOT emit Newline).
                         pos += 1;
                         self.line += 1; // physical newline consumed
+                        self.line_start_pos = pos; // new physical line begins here (#2426)
                         // Skip leading whitespace on the continuation line.
                         while matches!(chars.get(pos), Some(&' ') | Some(&'\t')) {
                             pos += 1;

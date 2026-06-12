@@ -93,6 +93,68 @@ fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) ->
     result
 }
 
+/// Remap a `col_table` (PEP 657 caret anchors, issue #2426) from an old
+/// instruction sequence to a new one, parallel to [`remap_linenos`].
+///
+/// Same greedy forward scan: each `new_insn` inherits the anchor of the first
+/// matching, not-yet-consumed `old_insn`.  Two differences from the lineno
+/// remap, both upholding "a wrong caret is worse than no caret":
+///
+///  * **Unmatched** (optimizer-created) instructions get `(0, 0)` — no anchor —
+///    rather than approximating from a neighbour. A derived instruction is not
+///    a faithful source span.
+///  * **Ambiguous** instructions get `(0, 0)`: if the same `Insn` appears at
+///    multiple old positions whose anchors differ (e.g. `pass_cross_jump`
+///    merged two identical `LoadGlobal` tails that had different source
+///    columns — the #2431 concern), we cannot know which path reached the
+///    merged instruction, so we drop the anchor instead of risking a wrong
+///    caret.
+fn remap_col_table(
+    old_insns: &[Insn],
+    old_cols: &[(u32, u32)],
+    new_insns: &[Insn],
+) -> Vec<(u32, u32)> {
+    if old_cols.is_empty() || old_cols.iter().all(|&c| c == (0, 0)) {
+        return vec![(0, 0); new_insns.len()];
+    }
+    // Index every old instruction by structural identity → ascending positions,
+    // and flag which distinct instructions have inconsistent anchors across
+    // their occurrences (those must never contribute an anchor — ambiguous).
+    let mut positions: HashMap<&Insn, Vec<usize>> = HashMap::new();
+    for (i, insn) in old_insns.iter().enumerate() {
+        positions.entry(insn).or_default().push(i);
+    }
+    let mut ambiguous: HashMap<&Insn, bool> = HashMap::new();
+    for (insn, locs) in &positions {
+        let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0));
+        let consistent = locs
+            .iter()
+            .all(|&p| old_cols.get(p).copied().unwrap_or((0, 0)) == first);
+        ambiguous.insert(*insn, !consistent);
+    }
+
+    let mut old_pos: usize = 0;
+    let mut result = Vec::with_capacity(new_insns.len());
+    for new_insn in new_insns {
+        let matched = positions.get(new_insn).and_then(|locs| {
+            let k = locs.partition_point(|&p| p < old_pos);
+            locs.get(k).copied()
+        });
+        match matched {
+            Some(i) => {
+                old_pos = i + 1;
+                if *ambiguous.get(new_insn).unwrap_or(&false) {
+                    result.push((0, 0));
+                } else {
+                    result.push(old_cols.get(i).copied().unwrap_or((0, 0)));
+                }
+            }
+            None => result.push((0, 0)),
+        }
+    }
+    result
+}
+
 fn optimize_fn_code(code: FnCode) -> FnCode {
     // Recursively optimize nested function / class bodies first.
     let fn_protos: Vec<FnProto> = code
@@ -111,6 +173,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let names = code.names;
     let original_insns = code.insns.clone();
     let original_linenos = code.lineno_table.clone();
+    let original_cols = code.col_table.clone();
     // Inter-procedural inlining of small pure leaf functions (issue #349).
     // Runs first so that const-fold / LICM / forcount machinery can subsequently
     // optimise the spliced body in the caller's scope.
@@ -195,6 +258,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let has_exc_handlers = exc_table.iter().any(|&t| t != EXC_NO_HANDLER);
 
     let lineno_table = remap_linenos(&original_insns, &original_linenos, &insns);
+    // PEP 657 caret anchors (#2426) remap the same way: `pass_compact_consts`
+    // below is 1:1 order-preserving, so anchors computed against the
+    // pre-compaction stream apply unchanged after it.
+    let col_table = remap_col_table(&original_insns, &original_cols, &insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     let insns_len = insns.len();
@@ -202,6 +269,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     FnCode {
         insns,
         lineno_table,
+        col_table,
         first_lineno: code.first_lineno,
         consts,
         names,

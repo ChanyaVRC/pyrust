@@ -494,10 +494,10 @@ impl Interpreter {
     pub(crate) fn parse_source_to_stmts_with_linenos(
         source: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
-        let (tokens, line_nos) = crate::lexer::Lexer::new(source)
+        let (tokens, line_nos, cols) = crate::lexer::Lexer::new(source)
             .map_err(lex_parse_to_exc)?
-            .into_tokens_with_linenos();
-        let mut parser = crate::parser::Parser::new_with_lines(tokens, line_nos);
+            .into_tokens_with_pos();
+        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols);
         parser.parse_program_with_linenos().map_err(lex_parse_to_exc)
     }
 

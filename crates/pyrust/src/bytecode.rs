@@ -925,6 +925,16 @@ pub struct FnCode {
     /// the script was compiled with line tracking enabled).  Used by the VM to
     /// update the current-line counter when building tracebacks.
     pub(crate) lineno_table: Vec<u32>,
+    /// PEP 657 caret anchor for each instruction, parallel to `insns`
+    /// (issue #2426).  `(0, 0)` means "no anchor" — the formatter then omits the
+    /// caret row.  Populated by the compiler only for the highest-value
+    /// expression forms (stage 1: bare-name `Var` loads); all other entries are
+    /// `(0, 0)`.  Read **only on the error path** (when an exception escapes a
+    /// frame), so it never touches the per-instruction hot path.
+    ///
+    /// Offsets are 0-based char columns within the raising instruction's source
+    /// line (the `lineno_table` line), measured against the original line text.
+    pub(crate) col_table: Vec<(u32, u32)>,
     /// 1-based source line of the `def`/`lambda` that produced this code object
     /// — the function's `co_firstlineno`.  `0` for the module-level `<module>`
     /// code or when no line information is available.  Set by the compiler from
