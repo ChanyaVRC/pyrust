@@ -5523,14 +5523,14 @@ fn is_pure_stmt(
         Stmt::AugAssign { expr, .. } => is_pure_expr(expr, pure_fns, local_names),
         Stmt::Return(Some(expr)) => is_pure_expr(expr, pure_fns, local_names),
         Stmt::Return(None) => true,
-        Stmt::Assert { test, msg } => {
-            is_pure_expr(test, pure_fns, local_names)
-                && msg.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-        }
-        Stmt::Raise { expr, cause } => {
-            expr.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-                && cause.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-        }
+        // `raise` and a failing `assert` propagate an exception — an observable
+        // effect, not a local write.  A function whose body can raise is NOT
+        // pure: dropping its (dead-result) call or memoizing it away would
+        // silently swallow the exception (issue #2409: `def h(e): raise e`
+        // called from module scope exited 0 with no traceback because the
+        // CallMemo was dead-store-eliminated).  Mark both impure unconditionally.
+        Stmt::Assert { .. } => false,
+        Stmt::Raise { .. } => false,
 
         // Control flow: recurse into sub-blocks.
         Stmt::If { branches, else_branch, .. } => {

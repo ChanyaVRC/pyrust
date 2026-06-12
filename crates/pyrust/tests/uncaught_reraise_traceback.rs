@@ -118,6 +118,99 @@ fn uncaught_with_traceback_transplant() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Issue #2409: an uncaught `raise <param>` / failing `assert` inside a function
+// called from module scope was silently swallowed (process exited 0, no
+// traceback) because the body was mis-classified as *pure* and its dead-result
+// `CallMemo` was dead-store-eliminated.  The exception never propagated.  These
+// assert the exception now escapes with the correct frame list.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn uncaught_raise_param_from_function() {
+    // `def h(e): raise e`, called from module scope with a fresh exception, then
+    // uncaught.  CPython 3.12: <module> 3 -> h 2.  Pre-fix: exit 0, no frames.
+    let src = "def h(e):\n    raise e\nh(IndexError(\"idx\"))\n";
+    let frames = frame_list(&run_pyrust_stderr(src));
+    assert_eq!(
+        frames,
+        vec![("<module>".to_string(), 3), ("h".to_string(), 2)],
+        "uncaught `raise <param>` must propagate, not be swallowed (issue #2409)",
+    );
+}
+
+#[test]
+fn uncaught_raise_param_two_levels() {
+    // Two function levels deep.  CPython 3.12: <module> 5 -> b 4 -> a 2.
+    let src = "def a(e):\n    raise e\ndef b(e):\n    a(e)\nb(IndexError(\"deep\"))\n";
+    let frames = frame_list(&run_pyrust_stderr(src));
+    assert_eq!(
+        frames,
+        vec![
+            ("<module>".to_string(), 5),
+            ("b".to_string(), 4),
+            ("a".to_string(), 2),
+        ],
+        "uncaught `raise <param>` two levels deep must propagate (issue #2409)",
+    );
+}
+
+#[test]
+fn uncaught_raise_param_in_method() {
+    // Carried re-raise inside a method.  CPython 3.12: <module> 4 -> m 3.
+    let src = "class C:\n    def m(self, e):\n        raise e\nC().m(ValueError(\"boom\"))\n";
+    let frames = frame_list(&run_pyrust_stderr(src));
+    assert_eq!(
+        frames,
+        vec![("<module>".to_string(), 4), ("m".to_string(), 3)],
+        "uncaught `raise <param>` in a method must propagate (issue #2409)",
+    );
+}
+
+#[test]
+fn uncaught_raise_param_in_generator() {
+    // Carried re-raise inside a generator body, surfaced via `next`.
+    // CPython 3.12: <module> 6 -> gen 3.
+    let src = "def gen(e):\n    yield 1\n    raise e\ng = gen(KeyError(\"k\"))\nnext(g)\nnext(g)\n";
+    let frames = frame_list(&run_pyrust_stderr(src));
+    assert_eq!(
+        frames,
+        vec![("<module>".to_string(), 6), ("gen".to_string(), 3)],
+        "uncaught `raise <param>` in a generator must propagate (issue #2409)",
+    );
+}
+
+#[test]
+fn uncaught_raise_param_from_within_except() {
+    // `raise e` of a carried exception from within an `except` block in a
+    // function.  The final (escaping) exception's frames are <module> 6 -> h 5.
+    // (CPython additionally prints the handled inner RuntimeError as a
+    // `__context__` chain; pyrust's uncaught formatter does not yet render the
+    // context block — tracked separately — so we assert only the escaping
+    // exception's own frame list, which is what issue #2409 governs.)
+    let src = "def h(e):\n    try:\n        raise RuntimeError(\"inner\")\n    except RuntimeError:\n        raise e\nh(ValueError(\"outer\"))\n";
+    let frames = frame_list(&run_pyrust_stderr(src));
+    assert_eq!(
+        frames,
+        vec![("<module>".to_string(), 6), ("h".to_string(), 5)],
+        "uncaught `raise <param>` from within except must propagate (issue #2409)",
+    );
+}
+
+#[test]
+fn uncaught_failing_assert_from_function() {
+    // A failing `assert` inside a function called from module scope.  Same
+    // pure-misclassification root cause as the `raise` case.
+    // CPython 3.12: <module> 3 -> check 2.
+    let src = "def check(x):\n    assert x\ncheck(0)\n";
+    let frames = frame_list(&run_pyrust_stderr(src));
+    assert_eq!(
+        frames,
+        vec![("<module>".to_string(), 3), ("check".to_string(), 2)],
+        "a failing `assert` in a dead-result call must propagate (issue #2409)",
+    );
+}
+
 #[test]
 fn uncaught_carried_reraise_at_module_scope() {
     // A variable carried out of a frame and re-raised at module scope, then
