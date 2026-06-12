@@ -242,7 +242,7 @@ impl Interpreter {
         if let ValueKind::BuiltinFunction(name) = function.kind()
             && let Some((type_name, method)) = name.split_once('.')
             && method.starts_with("__")
-            && builtin_protocol_dunders(type_name).contains(&method)
+            && is_protocol_dunder(type_name, method)
             && let Some(self_arg) = args.first() {
                 let recv = self_arg.value.clone();
                 let recv_is_match = !matches!(recv.kind(), ValueKind::PyInstance(_))
@@ -739,6 +739,25 @@ impl Interpreter {
                     } else {
                         pyrust_core::descriptor_requires!(method, type_name, actual, method)
                     });
+                }
+                // Issue #2387 / #1909: protocol dunders (`__iter__`, `__add__`,
+                // `__mod__`, `__getitem__`, …) called type-level with a
+                // builtin-*subclass* receiver (`list.__iter__(LI([1]))`,
+                // `list.__add__(LI([1]), [2])`) reach this arm because the
+                // non-subclass form was already intercepted upstream.  Route the
+                // unwrapped backing through the shared dispatcher (the per-type
+                // `call` below has no body for several of these slots and would
+                // leak a RuntimeError).
+                if method.starts_with("__")
+                    && is_protocol_dunder(type_name, method)
+                {
+                    if !kw.is_empty() {
+                        return Err(pyrust_core::type_err!(
+                            "{}() takes no keyword arguments",
+                            method
+                        ));
+                    }
+                    return self.dispatch_builtin_protocol_dunder(method, self_val, pos);
                 }
                 match type_name {
                     "int" => {
@@ -1278,8 +1297,7 @@ impl Interpreter {
         // constructed by `get_attr` only for `builtin_protocol_dunders`
         // names), so dispatch straight through the operator machinery.
         if method.starts_with("__")
-            && builtin_protocol_dunders(&pyrust_core::builtin_type_name(&receiver))
-                .contains(&method)
+            && is_protocol_dunder(&pyrust_core::builtin_type_name(&receiver), method)
         {
             reject_kwargs!(kw, "{}", method);
             let args_vec: Vec<Value> = std::mem::take(pos);
@@ -1531,10 +1549,10 @@ impl Interpreter {
                             // plain-primitive form instead of leaking a
                             // `RuntimeError` from the per-type `call`.
                             if method.starts_with("__")
-                                && builtin_protocol_dunders(
+                                && is_protocol_dunder(
                                     &pyrust_core::builtin_type_name(&backing),
+                                    method,
                                 )
-                                .contains(&method)
                             {
                                 reject_kwargs!(kw, "{}", method);
                                 let args_vec: Vec<Value> = std::mem::take(pos);
@@ -2442,7 +2460,7 @@ impl Interpreter {
         //     and `sq_ass_item` (`__setitem__`) carry a leading space.
         let want: usize = match method {
             "__len__" | "__neg__" | "__pos__" | "__abs__" | "__invert__" | "__hash__"
-            | "__str__" | "__repr__" | "__bool__" | "__reversed__" => 0,
+            | "__str__" | "__repr__" | "__bool__" | "__reversed__" | "__iter__" => 0,
             "__setitem__" => 2,
             _ => 1,
         };
@@ -2498,6 +2516,17 @@ impl Interpreter {
                 let arg = ExpandedCallArg { name: None, value: receiver };
                 let dispatch = crate::builtin_registry::lookup("reversed")
                     .expect("reversed must be in the registry");
+                return dispatch(self, &[arg]);
+            }
+            // Issue #2387: `__iter__` reached here via the type-level unbound
+            // (`list.__iter__([1])`) or builtin-subclass (`LI([1]).__iter__()`)
+            // paths — the bound primitive-instance form is intercepted earlier.
+            // Wrap the (already-unwrapped) backing in the same `NativeIterFrame`
+            // generator the `iter()` builtin produces.
+            "__iter__" => {
+                let arg = ExpandedCallArg { name: None, value: receiver };
+                let dispatch = crate::builtin_registry::lookup("iter")
+                    .expect("iter must be in the registry");
                 return dispatch(self, &[arg]);
             }
             // Rich-comparison dunders (issue #2070): exposed on every primitive
@@ -2700,6 +2729,19 @@ impl Interpreter {
                     Some(v) => Ok(v),
                     None => Ok(receiver),
                 }
+            }
+            // Issue #2387: str/bytes/bytearray `%` formatting slots, exposed as
+            // method-wrappers (`'%s'.__mod__('x')`, `hasattr(bytes, '__mod__')`).
+            // `a.__rmod__(b)` computes `b % a` (swapped operands).  Both delegate
+            // to the same `eval_binary` Mod path the `%` operator uses, so the
+            // format-machinery TypeErrors match CPython byte-for-byte.
+            "__mod__" if matches!(&*type_name, "str" | "bytes" | "bytearray") => {
+                let other = args.pop().unwrap();
+                self.eval_binary(receiver, crate::ast::BinaryOp::Mod, other)
+            }
+            "__rmod__" if matches!(&*type_name, "str" | "bytes" | "bytearray") => {
+                let other = args.pop().unwrap();
+                self.eval_binary(other, crate::ast::BinaryOp::Mod, receiver)
             }
             other => Err(PyError::Runtime(format!(
                 "internal: unhandled builtin protocol dunder '{other}'"
@@ -6888,8 +6930,16 @@ fn is_container_protocol_dunder_name(name: &str) -> bool {
             | "__str__"
             | "__repr__"
             // `dict.__reversed__()` — reversible by insertion order (#2093);
-            // the per-receiver membership check restricts it to `dict`.
+            // the per-receiver membership check restricts it to `dict`/`list`.
             | "__reversed__"
+            // Issue #2387: `__iter__` (every iterable) and `__mod__`/`__rmod__`
+            // (the `%` slots on str/bytes/bytearray), routed through the protocol
+            // dispatcher when called via the method-call opcode.  The
+            // per-receiver `builtin_protocol_dunders` membership check restricts
+            // each to the types that actually expose it.
+            | "__iter__"
+            | "__mod__"
+            | "__rmod__"
     )
 }
 
@@ -6979,86 +7029,157 @@ pub(crate) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
     )
 }
 
-pub(crate) fn builtin_protocol_dunders(type_name: &str) -> &'static [&'static str] {
-    // Rich-comparison / `__hash__` / `__str__` / `__repr__` are exposed as
-    // bound method-wrappers on every primitive type (issue #2070); the
-    // per-type slices below interleave them with the container/numeric slots.
+pub(crate) const SLOT_ATTR: u8 = 1;
+pub(crate) const SLOT_PROTOCOL: u8 = 2;
+
+/// Per-type slot-dunder table — the SINGLE source for both the protocol
+/// dispatch check (`builtin_protocol_dunders`) and the primitive-singleton
+/// type-attr registration in helpers.rs (issue #2406: the previous pair of
+/// comment-synced hand lists is the same drift pattern that caused #2324).
+///
+/// Flags: `SLOT_PROTOCOL` = dispatchable through
+/// `dispatch_builtin_protocol_dunder` (rich comparisons / `__hash__` /
+/// `__str__` / `__repr__` are exposed as bound method-wrappers per #2070, the
+/// container/numeric slots per #1909/#2215/#2387).  `SLOT_ATTR` = registered
+/// as a type-level attribute on the primitive class singleton (drives
+/// `list.__iter__`, `hasattr`, `dir`, and subclass MRO resolution of the
+/// unbound form; names without it resolve through other paths).  A few
+/// entries are attr-only (`float.__trunc__`/`__floor__`/`__ceil__` have
+/// registry bodies, not protocol dispatch).
+///
+/// list / dict / set / bytearray are unhashable, so `__hash__` is *not*
+/// listed (CPython sets `list.__hash__ = None`; the None-attr path handles
+/// `[1].__hash__()`).
+pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)] {
+    const PA: u8 = SLOT_ATTR | SLOT_PROTOCOL;
+    const P: u8 = SLOT_PROTOCOL;
+    const A: u8 = SLOT_ATTR;
     match type_name {
-        // list / dict / set / bytearray are unhashable, so `__hash__` is *not*
-        // exposed (CPython sets `list.__hash__ = None`; `[1].__hash__()` raises
-        // `'NoneType' object is not callable`, handled by the None-attr path).
         "list" => &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__add__", "__mul__", "__iadd__", "__imul__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
+            ("__delitem__", PA), ("__contains__", PA), ("__add__", PA),
+            ("__mul__", PA), ("__iadd__", PA), ("__imul__", PA),
+            ("__iter__", PA), ("__reversed__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
-        "tuple" | "str" | "bytes" => &[
-            "__len__", "__getitem__", "__contains__", "__add__", "__mul__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__",
+        "str" => &[
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__add__", PA), ("__mul__", PA), ("__mod__", PA), ("__rmod__", PA),
+            ("__iter__", PA),
+            ("__eq__", PA), ("__ne__", PA), ("__lt__", PA), ("__le__", PA),
+            ("__gt__", PA), ("__ge__", PA),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
+        ],
+        "bytes" => &[
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__add__", PA), ("__mul__", PA), ("__mod__", PA), ("__rmod__", PA),
+            ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
+        ],
+        "tuple" => &[
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__add__", PA), ("__mul__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
         ],
         "bytearray" => &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__add__", "__mul__", "__iadd__", "__imul__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
+            ("__delitem__", PA), ("__contains__", PA), ("__add__", PA),
+            ("__mul__", PA), ("__iadd__", PA), ("__imul__", PA),
+            ("__mod__", PA), ("__rmod__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
         "dict" => &[
-            "__len__", "__getitem__", "__setitem__", "__delitem__", "__contains__",
-            "__or__", "__ror__", "__ior__", "__reversed__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
+            ("__delitem__", PA), ("__contains__", PA), ("__or__", PA),
+            ("__ror__", PA), ("__ior__", PA), ("__iter__", PA),
+            ("__reversed__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
         "set" => &[
-            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__", "__ior__", "__iand__",
-            "__isub__", "__ixor__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__str__", "__repr__",
+            ("__len__", PA), ("__contains__", PA), ("__or__", PA),
+            ("__ror__", PA), ("__and__", PA), ("__rand__", PA),
+            ("__sub__", PA), ("__rsub__", PA), ("__xor__", PA),
+            ("__rxor__", PA), ("__ior__", PA), ("__iand__", PA),
+            ("__isub__", PA), ("__ixor__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P), ("__str__", P), ("__repr__", P),
         ],
         "frozenset" => &[
-            "__len__", "__contains__", "__or__", "__ror__", "__and__", "__rand__",
-            "__sub__", "__rsub__", "__xor__", "__rxor__",
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__",
+            ("__len__", PA), ("__contains__", PA), ("__or__", PA),
+            ("__ror__", PA), ("__and__", PA), ("__rand__", PA),
+            ("__sub__", PA), ("__rsub__", PA), ("__xor__", PA),
+            ("__rxor__", PA), ("__iter__", PA),
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
         ],
-        // Issue #2070: scalar numeric types expose rich-comparison, numeric,
-        // and (for int/bool) bitwise dunders as bound method-wrappers, plus
-        // `__hash__`/`__str__`/`__repr__`/`__bool__`.  The arithmetic dunders
-        // return `NotImplemented` for operand types the forward slot does not
-        // accept (e.g. `(5).__add__(5.0)`), matching CPython exactly.
-        // Issue #2215: the *reflected* numeric/bitwise dunders mirror each
-        // type's forward set exactly (swapped-operand semantics, same
-        // tower-rank `NotImplemented` gating), exposed as bound
-        // method-wrappers alongside the forward slots.
         "int" | "bool" => &[
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__", "__bool__",
-            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
-            "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
-            "__and__", "__or__", "__xor__", "__lshift__", "__rshift__", "__invert__",
-            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
-            "__rmod__", "__rpow__", "__rdivmod__",
-            "__rand__", "__ror__", "__rxor__", "__rlshift__", "__rrshift__",
+            ("__add__", PA), ("__sub__", PA), ("__mul__", PA),
+            ("__truediv__", PA), ("__floordiv__", PA), ("__mod__", PA),
+            ("__pow__", PA), ("__and__", PA), ("__or__", PA), ("__xor__", PA),
+            ("__lshift__", PA), ("__rshift__", PA),
+            ("__eq__", PA), ("__ne__", PA), ("__lt__", PA), ("__le__", PA),
+            ("__gt__", PA), ("__ge__", PA),
+            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__divmod__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
+            ("__invert__", P),
+            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
+            ("__rtruediv__", P), ("__rfloordiv__", P), ("__rmod__", P),
+            ("__rpow__", P), ("__rdivmod__", P),
+            ("__rand__", P), ("__ror__", P), ("__rxor__", P),
+            ("__rlshift__", P), ("__rrshift__", P),
         ],
         "float" => &[
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__", "__bool__",
-            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
-            "__mod__", "__pow__", "__divmod__", "__neg__", "__pos__", "__abs__",
-            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rfloordiv__",
-            "__rmod__", "__rpow__", "__rdivmod__",
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__add__", P), ("__sub__", P), ("__mul__", P), ("__truediv__", P),
+            ("__floordiv__", P), ("__mod__", P), ("__pow__", P),
+            ("__divmod__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
+            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
+            ("__rtruediv__", P), ("__rfloordiv__", P), ("__rmod__", P),
+            ("__rpow__", P), ("__rdivmod__", P),
+            ("__trunc__", A), ("__floor__", A), ("__ceil__", A),
         ],
         "complex" => &[
-            "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
-            "__hash__", "__str__", "__repr__", "__bool__",
-            "__add__", "__sub__", "__mul__", "__truediv__", "__pow__",
-            "__neg__", "__pos__", "__abs__",
-            "__radd__", "__rsub__", "__rmul__", "__rtruediv__", "__rpow__",
+            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
+            ("__gt__", P), ("__ge__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__add__", P), ("__sub__", P), ("__mul__", P), ("__truediv__", P),
+            ("__pow__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
+            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
+            ("__rtruediv__", P), ("__rpow__", P),
         ],
         _ => &[],
     }
+}
+
+/// Membership test for `SLOT_PROTOCOL` names.  A direct scan of the static
+/// flagged table: same rodata locality as the historical hand-written
+/// slices — an OnceLock/Box variant of this check cost ~8% on `s.upper()`
+/// loops because it sits on the plain builtin-method dispatch path.
+#[inline]
+pub(crate) fn is_protocol_dunder(type_name: &str, method: &str) -> bool {
+    slot_dunder_table(type_name)
+        .iter()
+        .any(|&(n, f)| f & SLOT_PROTOCOL != 0 && n == method)
+}
+
+/// Iterate the `SLOT_PROTOCOL` names of a type (the `dir()` merge consumer).
+pub(crate) fn protocol_dunder_names(
+    type_name: &str,
+) -> impl Iterator<Item = &'static str> {
+    slot_dunder_table(type_name)
+        .iter()
+        .filter(|&&(_, f)| f & SLOT_PROTOCOL != 0)
+        .map(|&(n, _)| n)
 }
 
 /// Public method names per built-in type for `dir()`.
@@ -7084,7 +7205,7 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         _ => &[],
     };
     let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
-    for &d in builtin_protocol_dunders(type_name) {
+    for d in protocol_dunder_names(type_name) {
         out.push(d.to_string());
     }
     if type_name == "str" {
@@ -8836,7 +8957,7 @@ impl Interpreter {
         // callers before this point.
         if is_container_protocol_dunder_name(method) {
             let type_name = pyrust_core::builtin_type_name(&receiver);
-            if builtin_protocol_dunders(&type_name).contains(&method) {
+            if is_protocol_dunder(&type_name, method) {
                 if !kw.is_empty() {
                     return Err(pyrust_core::type_err!("{}() takes no keyword arguments", method));
                 }
@@ -9179,7 +9300,7 @@ impl Interpreter {
         // plain-primitive form rather than leaking a `RuntimeError` from the
         // per-type `call`.
         if prim_method.starts_with("__")
-            && builtin_protocol_dunders(prim_type).contains(&prim_method)
+            && is_protocol_dunder(prim_type, prim_method)
         {
             return self.dispatch_builtin_protocol_dunder(prim_method, backing, args);
         }

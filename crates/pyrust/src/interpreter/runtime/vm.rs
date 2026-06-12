@@ -3974,7 +3974,24 @@ impl Interpreter {
                             }
                             IterTag::PyInstance(inst_rc) => {
                                 let class = Rc::clone(&inst_rc.borrow().class);
-                                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                                // Issue #2387: a builtin subclass now resolves
+                                // `__iter__` via its inherited primitive slot
+                                // (`BuiltinFunction("dict.__iter__")`, …).  For an
+                                // instance with a `__builtin_data__` backing that
+                                // is *not* a user override — iterate the backing
+                                // primitive (preserving the dict/set size-mutation
+                                // guard and the OrderedDict message) exactly as a
+                                // subclass with no `__iter__` did before the slot
+                                // was exposed.  A genuine Python `def __iter__`
+                                // (UserFunction) still wins, and a non-backed
+                                // builtin class with its own `__iter__` sentinel
+                                // (e.g. `collections.deque`, whose body installs a
+                                // mutation guard) is left untouched.
+                                let user_iter = lookup_class_attr(&class, "__iter__").filter(|m| {
+                                    !(matches!(m.kind(), ValueKind::BuiltinFunction(_))
+                                        && instance_builtin_data(&inst_rc).is_some())
+                                });
+                                if let Some(method_val) = user_iter {
                                     let iter_obj = vm_try!(invoke_class_method(
                                         self,
                                         method_val,

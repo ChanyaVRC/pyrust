@@ -3991,7 +3991,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
     // pays only a cheap byte comparison before the per-type table below.
     if name.starts_with("__") {
         let type_name = pyrust_core::builtin_type_name(target);
-        if builtin_protocol_dunders(&type_name).contains(&name) {
+        if is_protocol_dunder(&type_name, name) {
             return true;
         }
         // Issue #2151: object-protocol methods every built-in data value
