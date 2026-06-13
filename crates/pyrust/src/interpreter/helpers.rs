@@ -2502,11 +2502,18 @@ pub(crate) fn effective_user_iter(
 /// Mutation-during-iteration wording for a dict-backed subclass instance:
 /// OrderedDict (by class-chain name) uses its own message; every other dict
 /// subclass matches plain dict.  Shared by both iteration entry points.
-pub(crate) fn dict_subclass_mutation_msg(class: &Rc<RefCell<PyClass>>) -> &'static str {
+/// Wording AND check ordering for a dict-backed subclass's mutation guard.
+/// CPython's plain-dict iterators check the size BEFORE the exhaustion test
+/// (mutating on the final step still raises), but OrderedDict's odict
+/// iterators check exhaustion FIRST — a mutation on the last step completes
+/// silently (pinned against python3.12, direct and view forms alike).
+pub(crate) fn dict_subclass_iter_semantics(
+    class: &Rc<RefCell<PyClass>>,
+) -> (&'static str, bool) {
     if class_is_named_ordered_dict(class) {
-        "OrderedDict mutated during iteration"
+        ("OrderedDict mutated during iteration", true)
     } else {
-        "dictionary changed size during iteration"
+        ("dictionary changed size during iteration", false)
     }
 }
 

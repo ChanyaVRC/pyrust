@@ -15,6 +15,13 @@ pub type DictRc = Rc<RefCell<PyDict>>;
 
 pub struct DictView {
     pub items: DictRc,
+    /// `true` when the view was produced from a `collections.OrderedDict`
+    /// (or a subclass of it).  Only consumed by the size-mutation guard
+    /// (issue #2436) to pick CPython's `"OrderedDict mutated during
+    /// iteration"` wording instead of plain dict's `"dictionary changed
+    /// size during iteration"`.  Plain-dict and other dict-subclass views
+    /// leave it `false`.
+    pub ordered: bool,
 }
 
 // ── keys ─────────────────────────────────────────────────────────────────────
@@ -65,7 +72,13 @@ impl BuiltinTypeOps for DictKeysOps {
 }
 
 pub fn dict_keys(rc: DictRc) -> Value {
-    let state: Box<dyn Any> = Box::new(DictView { items: rc });
+    dict_keys_tagged(rc, false)
+}
+
+/// Like [`dict_keys`] but records whether the source is an OrderedDict so the
+/// mutation guard can pick the OrderedDict wording (issue #2436).
+pub fn dict_keys_tagged(rc: DictRc, ordered: bool) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
     Value::builtin_object(DICT_KEYS_OPS, state)
 }
 
@@ -112,7 +125,12 @@ impl BuiltinTypeOps for DictValuesOps {
 }
 
 pub fn dict_values(rc: DictRc) -> Value {
-    let state: Box<dyn Any> = Box::new(DictView { items: rc });
+    dict_values_tagged(rc, false)
+}
+
+/// OrderedDict-aware counterpart of [`dict_values`] (issue #2436).
+pub fn dict_values_tagged(rc: DictRc, ordered: bool) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
     Value::builtin_object(DICT_VALUES_OPS, state)
 }
 
@@ -172,7 +190,12 @@ impl BuiltinTypeOps for DictItemsOps {
 }
 
 pub fn dict_items(rc: DictRc) -> Value {
-    let state: Box<dyn Any> = Box::new(DictView { items: rc });
+    dict_items_tagged(rc, false)
+}
+
+/// OrderedDict-aware counterpart of [`dict_items`] (issue #2436).
+pub fn dict_items_tagged(rc: DictRc, ordered: bool) -> Value {
+    let state: Box<dyn Any> = Box::new(DictView { items: rc, ordered });
     Value::builtin_object(DICT_ITEMS_OPS, state)
 }
 
@@ -188,6 +211,25 @@ pub fn as_dict_rc(value: &Value) -> Option<DictRc> {
         return None;
     }
     borrow_view(state)
+}
+
+/// `true` if `value` is a dict view tagged as backed by a `collections.
+/// OrderedDict` (or subclass).  Drives the OrderedDict-specific mutation-
+/// during-iteration message (issue #2436); non-views and plain-dict views
+/// return `false`.
+pub fn is_ordered_view(value: &Value) -> bool {
+    let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return false;
+    };
+    let n = ops.type_name();
+    if n != DICT_KEYS_TYPE_NAME && n != DICT_VALUES_TYPE_NAME && n != DICT_ITEMS_TYPE_NAME {
+        return false;
+    }
+    state
+        .borrow()
+        .downcast_ref::<DictView>()
+        .map(|v| v.ordered)
+        .unwrap_or(false)
 }
 
 /// Returns the view kind: 0=keys, 1=values, 2=items, or None if not a view.

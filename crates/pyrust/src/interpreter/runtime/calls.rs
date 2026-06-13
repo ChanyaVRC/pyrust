@@ -704,6 +704,11 @@ impl Interpreter {
                 // backing value as the effective receiver so the kind_ok
                 // check and dispatch below see the expected primitive type.
                 // Issue #1204: same for str/int/float/bytes subclasses.
+                // Whether the ORIGINAL receiver was an OrderedDict (or
+                // subclass) instance — the view-constructing dict methods
+                // need this AFTER backing normalisation erases it (#2436:
+                // the bound `dict.keys` route lost the odict tag).
+                let mut receiver_ordered = false;
                 let self_val =
                     if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple"
                         | "str" | "int" | "float" | "bytes") {
@@ -714,6 +719,9 @@ impl Interpreter {
                             None
                         };
                         if let Some(inst) = maybe_inst {
+                            receiver_ordered = class_is_named_ordered_dict(
+                                &Rc::clone(&inst.borrow().class),
+                            );
                             instance_builtin_data(&inst).unwrap_or(self_val)
                         } else {
                             self_val
@@ -860,6 +868,12 @@ impl Interpreter {
                                 _ => unreachable!("kind_ok guard above"),
                             }
                         }
+                    }
+                    "dict" if pyrust_builtins::dict::needs_rc(method)
+                        && pos.is_empty()
+                        && kw.is_empty() =>
+                    {
+                        Self::dict_view_for_backing(&self_val, method, receiver_ordered)
                     }
                     "dict" => self.call_dict_method(method, self_val, pos, &kw),
                     "set" => self.call_set_method(method, self_val, pos),
@@ -1644,6 +1658,32 @@ impl Interpreter {
                                         }
                                         return self.call_function_expanded(
                                             bound, &expanded,
+                                        );
+                                    }
+                                    // Issue #2436: `keys`/`values`/`items` on a
+                                    // dict-subclass instance (OrderedDict, plain
+                                    // `class D(dict)`, Counter, defaultdict) must
+                                    // build a live `dict_views` view backed by the
+                                    // *same* IndexMap `Rc` as the backing dict —
+                                    // exactly as the plain-dict path does
+                                    // (`dict::needs_rc`).  The fall-through to
+                                    // `call_dict_method` materialised a `list`
+                                    // snapshot instead, so the resulting object was
+                                    // the wrong type, not live, and (because plain
+                                    // lists are unguarded) iteration silently
+                                    // ignored size mutation where CPython raises
+                                    // `RuntimeError`.  Sharing the `Rc` puts the
+                                    // view back on the `IterTag::Other` size-
+                                    // mutation guard with the container-specific
+                                    // wording.
+                                    if pyrust_builtins::dict::needs_rc(method) {
+                                        // OrderedDict (or a subclass) tags the view
+                                        // so its size-mutation guard reports
+                                        // "OrderedDict mutated during iteration".
+                                        let ordered =
+                                            class_is_named_ordered_dict(&class);
+                                        return Self::dict_view_for_backing(
+                                            &backing, method, ordered,
                                         );
                                     }
                                     self.call_dict_method(method, backing, args_vec, &kw)
@@ -9516,6 +9556,7 @@ impl Interpreter {
         prim_type: &str,
         prim_method: &str,
         backing: Value,
+        ordered: bool,
         args: Vec<Value>,
     ) -> Result<Value> {
         // Issue #1909: container protocol dunders on a `list`/`dict`/`set`
@@ -9565,6 +9606,12 @@ impl Interpreter {
                 }
             }
             "dict" => {
+                // Issue #2436: `keys`/`values`/`items` must build a live,
+                // `Rc`-shared view (guarded against size mutation) — not the
+                // `list` snapshot `call_dict_method` falls through to.
+                if pyrust_builtins::dict::needs_rc(prim_method) {
+                    return Self::dict_view_for_backing(&backing, prim_method, ordered);
+                }
                 let empty_kw = PyDict::default();
                 self.call_dict_method(prim_method, backing, args, &empty_kw)
             }
@@ -9572,6 +9619,33 @@ impl Interpreter {
             _ => unreachable!("dispatch_backing_primitive_method: bad prim_type {prim_type}"),
         }
     }
+
+    /// Build a live, `Rc`-shared `dict_views` view (`keys`/`values`/`items`)
+    /// from a dict-subclass instance's backing dict (issue #2436).  Sharing the
+    /// backing `IndexMap` `Rc` — instead of the snapshot `list` that
+    /// `dict::call` materialises when it cannot see the `Rc` — keeps the view
+    /// live and routes its iteration through the size-mutation guard.  `ordered`
+    /// tags OrderedDict-backed views so the guard reports the OrderedDict
+    /// wording.  ONE decision shared by the slow `BkKind::Dict` dispatch and the
+    /// `dispatch_backing_primitive_method` inline-cache fast path (the two were
+    /// the #2324 duplicate-decision drift that left cached subclass views
+    /// unguarded).
+    pub(crate) fn dict_view_for_backing(
+        backing: &Value,
+        method: &str,
+        ordered: bool,
+    ) -> Result<Value> {
+        let rc = backing
+            .get_dict_rc()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict backing".to_string()))?
+            .clone();
+        Ok(match method {
+            "keys" => pyrust_builtins::dict_views::dict_keys_tagged(rc, ordered),
+            "values" => pyrust_builtins::dict_views::dict_values_tagged(rc, ordered),
+            _ => pyrust_builtins::dict_views::dict_items_tagged(rc, ordered),
+        })
+    }
+
     /// Fill or update the `CallMethod` inline cache after a slow-path dispatch.
     /// Mirrors the `GetAttr` cache policy: a different class at this site goes
     /// `Megamorphic`; a stale `ClassAttr` resets to `Empty` for a refill; an
@@ -9699,11 +9773,19 @@ impl Interpreter {
                                         fn_name.split_once('.')
                                         .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
                                         && let Some(backing) = instance_builtin_data(&inst_rc_clone) {
+                                            // Issue #2436: tag OrderedDict-backed
+                                            // views so the cached `keys`/`values`/
+                                            // `items` path picks the OrderedDict
+                                            // mutation-guard wording.
+                                            let ordered = class_is_named_ordered_dict(
+                                                &inst_rc_clone.borrow().class,
+                                            );
                                             return self
                                                 .dispatch_backing_primitive_method(
                                                     prim_type,
                                                     prim_method,
                                                     backing,
+                                                    ordered,
                                                     args.to_vec(),
                                                 )
                                                 .map(Some);
