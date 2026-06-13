@@ -1230,6 +1230,7 @@ pyrust_module! {
                 version,
                 kind: GuardVersion::DequeState { counter },
                 msg: "deque mutated during iteration",
+                exhaust_first: false,
             }));
             Ok(Value::generator(Box::new(frame)))
         }
@@ -1535,6 +1536,7 @@ fn make_guarded_dict_subclass_iter(inst: Rc<RefCell<PyInstance>>, keys: Vec<Valu
         version: recorded_len,
         kind: GuardVersion::Size,
         msg: "dictionary changed size during iteration",
+                    exhaust_first: false,
     }));
     Value::generator(Box::new(frame))
 }

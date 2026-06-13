@@ -67,6 +67,9 @@ pub(crate) struct NativeIterGuard {
     pub(crate) version: i64,
     pub(crate) kind: GuardVersion,
     pub(crate) msg: &'static str,
+    /// OrderedDict semantics (#2436 review): skip the guard once the iterator
+    /// is exhausted — CPython's odict iterators test exhaustion first.
+    pub(crate) exhaust_first: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +127,11 @@ impl NativeIterFrame {
     /// boundary (`call_next`, `yield_from_advance`); the VM's `ForIter` hot loop
     /// inlines the equivalent steps directly to keep iteration fast.
     pub(crate) fn advance(&mut self) -> Result<Option<Value>> {
+        if self.pos >= self.items.len()
+            && self.guard.as_ref().is_some_and(|g| g.exhaust_first)
+        {
+            return Ok(None);
+        }
         self.guard_check()?;
         if self.pos >= self.items.len() {
             return Ok(None);
@@ -626,6 +634,10 @@ pub(crate) enum IterState {
         container: Value,
         recorded_len: usize,
         msg: &'static str,
+        /// OrderedDict semantics: exhaustion is tested BEFORE the size guard,
+        /// so mutating on the final step completes silently (CPython's odict
+        /// iterators; plain dict checks the guard first).
+        exhaust_first: bool,
     },
 }
 
@@ -4110,13 +4122,15 @@ impl Interpreter {
                                         // other dict subclass matches plain dict.
                                         let items = vm_try!(iter_values(&backing));
                                         let recorded_len = backing.as_dict().map(|d| d.len()).unwrap_or(0);
-                                        let msg = dict_subclass_mutation_msg(&class);
+                                        let (msg, exhaust_first) =
+                                            dict_subclass_iter_semantics(&class);
                                         IterState::MaterializedGuarded {
                                             items,
                                             pos: 0,
                                             container: src_val.clone(),
                                             recorded_len,
                                             msg,
+                                            exhaust_first,
                                         }
                                     } else {
                                         IterState::Materialized(vm_try!(iter_values(&backing)), 0)
@@ -4147,23 +4161,24 @@ impl Interpreter {
                                 let items = vm_try!(iter_values(&src_val));
                                 if let Some(recorded_len) = live_collection_len(&src_val) {
                                     let msg = if src_val.set_len().is_some() {
-                                        "Set changed size during iteration"
+                                        ("Set changed size during iteration", false)
                                     } else if pyrust_builtins::dict_views::is_ordered_view(
                                         &src_val,
                                     ) {
                                         // OrderedDict-backed view (issue #2436):
                                         // CPython's odict views report their own
                                         // wording on size mutation.
-                                        "OrderedDict mutated during iteration"
+                                        ("OrderedDict mutated during iteration", true)
                                     } else {
-                                        "dictionary changed size during iteration"
+                                        ("dictionary changed size during iteration", false)
                                     };
                                     IterState::MaterializedGuarded {
                                         items,
                                         pos: 0,
                                         container: src_val,
                                         recorded_len,
-                                        msg,
+                                        msg: msg.0,
+                                        exhaust_first: msg.1,
                                     }
                                 } else {
                                     IterState::Materialized(items, 0)
@@ -4240,13 +4255,18 @@ impl Interpreter {
                             container,
                             recorded_len,
                             msg,
+                            exhaust_first,
                         }) => {
                             // Size-mutation guard (#1988): one usize compare per
-                            // step.  CPython raises whenever the container's size
-                            // differs from the value recorded at iterator
-                            // creation — including the step that would otherwise
-                            // exhaust the snapshot — so check before the bounds
-                            // test, not only while items remain.
+                            // step.  Plain dict raises whenever the size differs
+                            // — including the step that would otherwise exhaust
+                            // the snapshot.  OrderedDict (#2436 review) tests
+                            // exhaustion FIRST, matching CPython's odict
+                            // iterators: a mutation on the final step completes.
+                            if *exhaust_first && *pos >= items.len() {
+                                pc = jump_pc!(*offset);
+                                continue;
+                            }
                             if live_collection_len(container) != Some(*recorded_len) {
                                 vm_try!(Err(PyError::Runtime((*msg).to_string())));
                             }
@@ -4444,7 +4464,14 @@ impl Interpreter {
                                             // `guard_check` no-op branch, keeping
                                             // the per-step cost identical to the
                                             // pre-guard code.
-                                            Some(match native.guard_check() {
+                                            Some(if native.pos >= native.items.len()
+                                                && native
+                                                    .guard
+                                                    .as_ref()
+                                                    .is_some_and(|g| g.exhaust_first)
+                                            {
+                                                Err(pyrust_core::py_err!("StopIteration", String::new()))
+                                            } else { match native.guard_check() {
                                                 Err(e) => Err(e),
                                                 Ok(()) if native.pos >= native.items.len() => {
                                                     Err(pyrust_core::py_err!("StopIteration", String::new()))
@@ -4454,7 +4481,7 @@ impl Interpreter {
                                                     native.pos += 1;
                                                     Ok(item)
                                                 }
-                                            })
+                                            } })
                                         } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                                             // Resume the generator.
                                             if frame.done {

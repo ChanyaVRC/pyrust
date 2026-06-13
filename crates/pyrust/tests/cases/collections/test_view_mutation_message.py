@@ -109,3 +109,21 @@ print("items:", list(od.items()))
 print("membership:", "a" in od.keys())
 od["d"] = 4
 print("live after insert:", len(od.keys()), list(od.keys()))
+
+# CPython's odict iterators test exhaustion BEFORE the mutation guard — a
+# mutation on the final step completes silently; plain dict raises even then.
+# Full size boundary matrix, plus the getattr-bound view path (which used to
+# materialise an unguarded list snapshot).
+from collections import OrderedDict as _OD2
+class _DS2(dict): pass
+class _ODS2(_OD2): pass
+for mk, nm in [(dict, "d"), (_OD2, "od"), (_DS2, "ds"), (_ODS2, "ods")]:
+    for n in (1, 2):
+        for view in ("direct", "keys", "values", "items"):
+            o = mk((str(i), i) for i in range(n))
+            it = o if view == "direct" else getattr(o, view)()
+            try:
+                for x in it: o["q"] = 9
+                print(nm, n, view, "SILENT")
+            except RuntimeError as e: print(nm, n, view, str(e)[:25])
+print(type(getattr({"a": 1}, "keys")()).__name__, type(getattr(_OD2(a=1), "keys")()).__name__)

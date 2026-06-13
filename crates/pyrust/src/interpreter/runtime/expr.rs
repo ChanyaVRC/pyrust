@@ -2930,6 +2930,14 @@ impl Interpreter {
                     .collect();
                 dispatch(self, &expanded)
             }
+            // keys/values/items must build a LIVE guarded view — dict::call
+            // without the backing Rc materialises a list snapshot (wrong type,
+            // unguarded).  The #2436 review found this THIRD copy of the view
+            // decision via getattr-bound calls; route through the shared
+            // constructor like the slow-path and inline-cache sites.
+            "keys" | "values" | "items" if args.is_empty() && kwargs.is_empty() => {
+                Self::dict_view_for_backing(&receiver, method, false)
+            }
             _ => pyrust_builtins::dict::call(method, &receiver, args, kwargs),
         }
     }

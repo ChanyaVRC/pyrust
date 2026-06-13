@@ -1590,12 +1590,14 @@ pyrust_module! {
                                 && let Some(recorded_len) =
                                     crate::interpreter::live_collection_len(&backing)
                             {
-                                let msg = crate::interpreter::dict_subclass_mutation_msg(&class);
+                                let (msg, exhaust_first) =
+                                    crate::interpreter::dict_subclass_iter_semantics(&class);
                                 frame.guard = Some(Box::new(NativeIterGuard {
                                     container: backing.clone(),
                                     version: recorded_len as i64,
                                     kind: GuardVersion::Size,
                                     msg,
+                                    exhaust_first,
                                 }));
                             }
                             Ok(Value::generator(Box::new(frame)))
@@ -1636,6 +1638,7 @@ pyrust_module! {
                                 version: recorded_len as i64,
                                 kind: GuardVersion::Size,
                                 msg,
+                    exhaust_first: false,
                             }));
                         }
                         Ok(Value::generator(Box::new(frame)))
@@ -7971,6 +7974,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     version: recorded_len as i64,
                     kind: GuardVersion::Size,
                     msg,
+                    exhaust_first: false,
                 }));
             }
             Ok(Value::generator(Box::new(frame)))
