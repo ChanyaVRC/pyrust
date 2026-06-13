@@ -1624,6 +1624,10 @@ pyrust_module! {
                         if let Some(recorded_len) = crate::interpreter::live_collection_len(&val) {
                             let msg = if val.set_len().is_some() {
                                 "Set changed size during iteration"
+                            } else if pyrust_builtins::dict_views::is_ordered_view(&val) {
+                                // OrderedDict-backed view (issue #2436): match
+                                // CPython's odict-view wording on size mutation.
+                                "OrderedDict mutated during iteration"
                             } else {
                                 "dictionary changed size during iteration"
                             };

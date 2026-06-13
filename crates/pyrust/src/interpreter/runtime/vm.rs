@@ -4148,6 +4148,13 @@ impl Interpreter {
                                 if let Some(recorded_len) = live_collection_len(&src_val) {
                                     let msg = if src_val.set_len().is_some() {
                                         "Set changed size during iteration"
+                                    } else if pyrust_builtins::dict_views::is_ordered_view(
+                                        &src_val,
+                                    ) {
+                                        // OrderedDict-backed view (issue #2436):
+                                        // CPython's odict views report their own
+                                        // wording on size mutation.
+                                        "OrderedDict mutated during iteration"
                                     } else {
                                         "dictionary changed size during iteration"
                                     };
