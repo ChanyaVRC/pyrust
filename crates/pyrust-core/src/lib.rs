@@ -1498,6 +1498,31 @@ pub struct FnNameOverrides {
     pub qualname: Option<String>,
 }
 
+/// Lazily-boxed per-object overrides for `f.__defaults__` / `f.__kwdefaults__`
+/// (#2395).  Each slot uses three states encoded in a single `Value`:
+/// - `unset()` — not overridden; the binder/getter falls back to the
+///   compile-time `params[].default` values.
+/// - `none()`  — explicitly cleared (`f.__defaults__ = None` or `del`).
+/// - tuple/dict — the reassigned value, observed verbatim by `__defaults__` /
+///   `__kwdefaults__` reads and applied by the call binder.
+///
+/// `unset()` is never a user-visible value, so it is unambiguous as the
+/// "not overridden" marker.
+#[derive(Debug, Clone)]
+pub struct DefaultsOverride {
+    pub defaults: Value,
+    pub kwdefaults: Value,
+}
+
+impl Default for DefaultsOverride {
+    fn default() -> Self {
+        DefaultsOverride {
+            defaults: Value::unset(),
+            kwdefaults: Value::unset(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UserFunction {
     /// Globally unique identity for fn_cache keying — stable across Rc drops/reallocations.
@@ -1566,6 +1591,16 @@ pub struct UserFunction {
     /// attribute reads return the *same* dict object (Rc identity), matching
     /// CPython: `f.__annotations__ is f.__annotations__` is `True`.
     pub annotations: RefCell<Value>,
+    /// Lazily-boxed per-object overrides for `f.__defaults__` /
+    /// `f.__kwdefaults__` (#2395).  `None` (the common case — virtually every
+    /// function/closure) costs a single null pointer and leaves the binder
+    /// reading the compile-time `params[].default` values, so the hot call path
+    /// is unaffected (an inline form regressed plain calls via the larger
+    /// `UserFunction`, the #2256 size landmine).  The box is allocated only when
+    /// user code reassigns/deletes one of these slots.  Access through
+    /// `defaults_value` / `kwdefaults_value` / `positional_default` /
+    /// `kwonly_default` / `set_defaults_override` / `set_kwdefaults_override`.
+    pub defaults_override: RefCell<Option<Box<DefaultsOverride>>>,
     pub params: Vec<UserFunctionParam>,
     /// Precomputed bind target for each parameter (parallel to `params`),
     /// resolved once at compile time so the call path binds positional args by
@@ -1663,6 +1698,143 @@ impl UserFunction {
         let dict = Value::dict(PyDict::default());
         *self.annotations.borrow_mut() = dict.clone();
         dict
+    }
+
+    /// Indices into `params` of the positional-or-keyword parameters (i.e. the
+    /// ones `f.__defaults__` aligns to): not `*args` / `**kwargs` and not
+    /// keyword-only.  Positional-only params are included (their defaults are
+    /// part of `__defaults__`), matching CPython.
+    fn positional_param_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.is_args && !p.is_kwargs && !p.is_keyword_only)
+            .map(|(i, _)| i)
+    }
+
+    /// The `f.__defaults__` override slot, or `unset()` when not overridden
+    /// (#2395).  Reads the lazily-boxed `DefaultsOverride` without allocating.
+    #[inline]
+    fn defaults_override_slot(&self) -> Value {
+        match self.defaults_override.borrow().as_deref() {
+            Some(d) => d.defaults.clone(),
+            None => Value::unset(),
+        }
+    }
+
+    /// The `f.__kwdefaults__` override slot, or `unset()` when not overridden.
+    #[inline]
+    fn kwdefaults_override_slot(&self) -> Value {
+        match self.defaults_override.borrow().as_deref() {
+            Some(d) => d.kwdefaults.clone(),
+            None => Value::unset(),
+        }
+    }
+
+    /// Assign the `f.__defaults__` override (#2395).  `value` is a tuple (the
+    /// reassigned defaults) or `None` (cleared); both observed by later calls and
+    /// reads.  Allocates the box on first use.
+    pub fn set_defaults_override(&self, value: Value) {
+        self.defaults_override
+            .borrow_mut()
+            .get_or_insert_with(Box::<DefaultsOverride>::default)
+            .defaults = value;
+    }
+
+    /// Assign the `f.__kwdefaults__` override (#2395).  `value` is a dict or
+    /// `None`.  Allocates the box on first use.
+    pub fn set_kwdefaults_override(&self, value: Value) {
+        self.defaults_override
+            .borrow_mut()
+            .get_or_insert_with(Box::<DefaultsOverride>::default)
+            .kwdefaults = value;
+    }
+
+    /// `f.__defaults__` — the tuple of positional defaults, or `None`.  Honours a
+    /// per-object override (`f.__defaults__ = …`) when present (#2395); otherwise
+    /// collects the compile-time `params[].default` values in declaration order.
+    pub fn defaults_value(&self) -> Value {
+        let ov = self.defaults_override_slot();
+        if !ov.is_unset() {
+            // An override of `None` (or `del`) reports `None`; a tuple reports
+            // itself verbatim (round-trips exactly what was assigned).
+            return ov;
+        }
+        let defs: Vec<Value> = self
+            .positional_param_indices()
+            .filter_map(|i| self.params[i].default.clone())
+            .collect();
+        if defs.is_empty() {
+            Value::none()
+        } else {
+            Value::tuple(defs)
+        }
+    }
+
+    /// `f.__kwdefaults__` — the dict of keyword-only defaults, or `None`.
+    /// Honours a per-object override when present (#2395).
+    pub fn kwdefaults_value(&self) -> Value {
+        let ov = self.kwdefaults_override_slot();
+        if !ov.is_unset() {
+            return ov;
+        }
+        let mut d: PyDict = PyDict::default();
+        for p in &self.params {
+            if p.is_keyword_only
+                && let Some(def) = &p.default
+            {
+                d.insert(PyKey::str_from(&p.name), def.clone());
+            }
+        }
+        if d.is_empty() {
+            Value::none()
+        } else {
+            Value::dict(d)
+        }
+    }
+
+    /// Resolve the default value bound to positional-or-keyword parameter
+    /// `params[pi]` at call time, honouring an `f.__defaults__` override (#2395).
+    ///
+    /// With no override this is just `params[pi].default` (one borrow + null
+    /// check — the common case stays off the allocation path).  With an override
+    /// tuple of length `n`, CPython aligns it to the *last n* positional params,
+    /// so `params[pi]` receives a default only when its position among the
+    /// positional params falls inside that trailing window.  An override of
+    /// `None` removes all positional defaults.
+    pub fn positional_default(&self, pi: usize) -> Option<Value> {
+        let ov = self.defaults_override_slot();
+        if ov.is_unset() {
+            return self.params.get(pi).and_then(|p| p.default.clone());
+        }
+        let slice = ov.as_tuple()?; // override is `None` → no positional defaults
+        // Position of `pi` among the positional params.
+        let positions: smallvec::SmallVec<[usize; 8]> = self.positional_param_indices().collect();
+        let j = positions.iter().position(|&idx| idx == pi)?;
+        let npos = positions.len();
+        // CPython aligns the override tuple to the *trailing* positional params:
+        // param at positional index `j` maps to tuple index `len - npos + j`.
+        // When `len <= npos` this is the leading params getting no default
+        // (negative index → `None`); when `len > npos` it skips the *front* of
+        // the tuple, so every positional param gets the value from the tail.
+        let idx = slice.len() as isize - npos as isize + j as isize;
+        if idx >= 0 {
+            slice.get(idx as usize).cloned()
+        } else {
+            None
+        }
+    }
+
+    /// Resolve the default bound to keyword-only parameter `params[pi]` at call
+    /// time, honouring an `f.__kwdefaults__` override (#2395).
+    pub fn kwonly_default(&self, pi: usize) -> Option<Value> {
+        let param = self.params.get(pi)?;
+        let ov = self.kwdefaults_override_slot();
+        if ov.is_unset() {
+            return param.default.clone();
+        }
+        ov.as_dict()
+            .and_then(|d| d.get(&StrKey(&param.name)).cloned())
     }
 }
 
@@ -3248,6 +3420,7 @@ impl Value {
                 doc: RefCell::new(Value::none()),
                 attrs: RefCell::new(None),
                 annotations: RefCell::new(Value::unset()),
+                defaults_override: RefCell::new(None),
                 params: Vec::new(),
                 param_binds: Rc::new(Vec::new()),
                 self_bind: None,
@@ -3344,6 +3517,10 @@ impl Value {
             doc: RefCell::new(f.doc.borrow().clone()),
             attrs: RefCell::new(f.attrs.borrow().as_ref().map(Rc::clone)),
             annotations: RefCell::new(f.annotations.borrow().clone()),
+            // Carry over any per-object defaults override (#2395) so a
+            // staticmethod/classmethod wrapper observes the same `__defaults__`
+            // / `__kwdefaults__` state as the wrapped function.
+            defaults_override: RefCell::new(f.defaults_override.borrow().clone()),
             params: f.params.clone(),
             param_binds: Rc::clone(&f.param_binds),
             self_bind: f.self_bind,
@@ -6877,6 +7054,7 @@ mod tests {
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
             annotations: RefCell::new(Value::unset()),
+            defaults_override: RefCell::new(None),
             params: Vec::new(),
             param_binds: Rc::new(Vec::new()),
             self_bind: None,

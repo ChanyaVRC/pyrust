@@ -1681,7 +1681,9 @@ impl Interpreter {
             _ => None,
         };
 
-        if let Some(f) = user_fn {
+        // #2395: bypass kw-call cache when __defaults__ has been overridden; the
+        // cache was built against compile-time defaults and would serve stale values.
+        if let Some(f) = user_fn.filter(|f| f.defaults_override.borrow().is_none()) {
             let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
             // Cache hit?
             let cached: Option<(u8, smallvec::SmallVec<[u32; 4]>)> = {
@@ -1863,7 +1865,10 @@ impl Interpreter {
                 }
             };
 
-            let resolved: Option<smallvec::SmallVec<[u32; 4]>> = if let Some(slots) = cached {
+            // #2395: bypass kw-call cache when __defaults__ has been overridden.
+            let resolved: Option<smallvec::SmallVec<[u32; 4]>> = if f.defaults_override.borrow().is_some() {
+                None
+            } else if let Some(slots) = cached {
                 Some(slots)
             } else if matches!(code.kwcall_cache.borrow()[call_site_pc], KwCallCacheEntry::Empty) {
                 // Fill the shape cache once.  The keyword names map to parameters
@@ -2017,7 +2022,8 @@ impl Interpreter {
         };
         let is_plain_dict = matches!(kwargs_val.kind(), ValueKind::Dict(_));
 
-        if let (Some(f), true) = (user_fn, is_plain_dict) {
+        // #2395: bypass kw-call cache when __defaults__ has been overridden.
+        if let (Some(f), true) = (user_fn.filter(|f| f.defaults_override.borrow().is_none()), is_plain_dict) {
             let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
 
             // Cache state: a hit reuses `slots`; a key-set/identity miss re-resolves

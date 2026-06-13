@@ -3310,10 +3310,17 @@ impl Interpreter {
             bound[pi] = true;
             slots.push(pi as u32);
         }
-        // Every unbound param must have a default, else a required arg is missing.
+        // Every unbound param must have a default (override-aware), else missing.
         for (pi, b) in bound.iter().enumerate() {
-            if !*b && params[pi].default.is_none() {
-                return None;
+            if !*b {
+                let has_default = if params[pi].is_keyword_only {
+                    function.kwonly_default(pi).is_some()
+                } else {
+                    function.positional_default(pi).is_some()
+                };
+                if !has_default {
+                    return None;
+                }
             }
         }
         Some(slots)
@@ -3515,19 +3522,23 @@ impl Interpreter {
         for (i, val) in kw.enumerate() {
             bind_param_direct(function, num_regs, &mut regs, &local_env, slots[i] as usize, val)?;
         }
-        // Defaults for any parameter not filled by a positional or keyword.  The
-        // cache only fills `Simple` when every still-unbound param has a default
-        // (no missing required arg), so this never leaves a required param unset.
+        // Defaults for any parameter not filled by a positional or keyword.  Use
+        // override-aware accessors so a reassigned `__defaults__`/`__kwdefaults__`
+        // is observed even when the kw-call cache was built before the override.
         let nparams = function.params.len();
         let nkw = slots.len();
         for pi in 0..nparams {
             let filled_positionally = pi < npos;
             let filled_by_kw = slots[..nkw].contains(&(pi as u32));
-            if !filled_positionally
-                && !filled_by_kw
-                && let Some(default) = function.params[pi].default.clone()
-            {
-                bind_param_direct(function, num_regs, &mut regs, &local_env, pi, default)?;
+            if !filled_positionally && !filled_by_kw {
+                let default = if function.params[pi].is_keyword_only {
+                    function.kwonly_default(pi)
+                } else {
+                    function.positional_default(pi)
+                };
+                if let Some(d) = default {
+                    bind_param_direct(function, num_regs, &mut regs, &local_env, pi, d)?;
+                }
             }
         }
 
@@ -3619,10 +3630,14 @@ impl Interpreter {
                 // (excludes keyword-only).
                 let positional_param_count =
                     function.params.iter().filter(|p| !p.is_keyword_only).count();
+                // #2395: count required positionals through the override-aware
+                // accessor so a reassigned `f.__defaults__` changes the arity
+                // reported in "takes N positional arguments" errors.
                 let required_positional_count = function
                     .params
                     .iter()
-                    .filter(|p| !p.is_keyword_only && p.default.is_none())
+                    .enumerate()
+                    .filter(|(i, p)| !p.is_keyword_only && function.positional_default(*i).is_none())
                     .count();
                 let total_positional_given = positional_count + bound_prefix.len();
                 if total_positional_given > positional_param_count {
@@ -3743,7 +3758,14 @@ impl Interpreter {
                 let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
                 for index in 0..nparams {
                     if !bound[index] {
-                        if let Some(default) = function.params[index].default.clone() {
+                        // #2395: resolve through the override-aware accessors so a
+                        // reassigned `f.__defaults__` / `f.__kwdefaults__` is observed.
+                        let default = if function.params[index].is_keyword_only {
+                            function.kwonly_default(index)
+                        } else {
+                            function.positional_default(index)
+                        };
+                        if let Some(default) = default {
                             bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, index, default)?;
                         } else if function.params[index].is_keyword_only {
                             missing_kwonly.push(&function.params[index].name);
@@ -3936,10 +3958,17 @@ impl Interpreter {
                 .iter()
                 .filter(|p| !p.is_keyword_only && !p.is_args && !p.is_kwargs)
                 .count();
+            // #2395: override-aware required-positional count (see fast path).
             let required_positional_count = function
                 .params
                 .iter()
-                .filter(|p| !p.is_keyword_only && !p.is_args && !p.is_kwargs && p.default.is_none())
+                .enumerate()
+                .filter(|(i, p)| {
+                    !p.is_keyword_only
+                        && !p.is_args
+                        && !p.is_kwargs
+                        && function.positional_default(*i).is_none()
+                })
                 .count();
             if positional_vals.len() > positional_param_count {
                 let given_word = if positional_vals.len() == 1 { "was" } else { "were" };
@@ -3967,7 +3996,7 @@ impl Interpreter {
         let mut missing_positional: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
         let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
 
-        for param in function.params.iter() {
+        for (param_index, param) in function.params.iter().enumerate() {
             let value = if param.is_args {
                 let rest = positional_vals[pos_idx..].to_vec();
                 pos_idx = positional_vals.len();
@@ -3994,8 +4023,13 @@ impl Interpreter {
                     let v = positional_vals[pos_idx].clone();
                     pos_idx += 1;
                     v
-                } else if let Some(d) = &param.default {
-                    d.clone()
+                } else if let Some(d) = if param.is_keyword_only {
+                    // #2395: observe a reassigned `f.__kwdefaults__` / `f.__defaults__`.
+                    function.kwonly_default(param_index)
+                } else {
+                    function.positional_default(param_index)
+                } {
+                    d
                 } else if param.is_keyword_only {
                     missing_kwonly.push(&param.name);
                     Value::unset()
@@ -8411,6 +8445,10 @@ impl Interpreter {
             doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
             attrs: std::cell::RefCell::new(None),
             annotations: std::cell::RefCell::new(annotations),
+            // #2395: no per-object `__defaults__` / `__kwdefaults__` override
+            // until user code reassigns one; the binder falls back to the
+            // compile-time `params[].default` values.
+            defaults_override: std::cell::RefCell::new(None),
             params,
             param_binds: proto_param_binds,
             self_bind: proto_self_bind,

@@ -422,39 +422,16 @@ impl Interpreter {
                         return Ok(func.annotations_value());
                     }
                     "__defaults__" => {
-                        // Tuple of defaults for the positional (non-keyword-only)
-                        // parameters, in declaration order.  `None` when no
-                        // positional parameter has a default (CPython semantics).
-                        let defs: Vec<Value> = func
-                            .params
-                            .iter()
-                            .filter(|p| {
-                                !p.is_args && !p.is_kwargs && !p.is_keyword_only
-                            })
-                            .filter_map(|p| p.default.clone())
-                            .collect();
-                        return Ok(if defs.is_empty() {
-                            Value::none()
-                        } else {
-                            Value::tuple(defs)
-                        });
+                        // #2395: tuple of positional defaults, or the per-object
+                        // override set via `f.__defaults__ = …`.  `None` when no
+                        // positional default exists (CPython semantics).
+                        return Ok(func.defaults_value());
                     }
                     "__kwdefaults__" => {
-                        // Dict of defaults for keyword-only parameters.  `None`
-                        // when there are no keyword-only defaults (CPython
-                        // returns `None`, not an empty dict).
-                        let mut d: PyDict = PyDict::default();
-                        for p in &func.params {
-                            if p.is_keyword_only
-                                && let Some(def) = &p.default {
-                                    d.insert(PyKey::str_from(&p.name), def.clone());
-                                }
-                        }
-                        return Ok(if d.is_empty() {
-                            Value::none()
-                        } else {
-                            Value::dict(d)
-                        });
+                        // #2395: dict of keyword-only defaults, or the per-object
+                        // override set via `f.__kwdefaults__ = …`.  `None` when
+                        // none exist (CPython returns `None`, not an empty dict).
+                        return Ok(func.kwdefaults_value());
                     }
                     "__globals__" => {
                         // The module global namespace dict.  pyrust keeps a single
@@ -2372,16 +2349,25 @@ impl Interpreter {
                 // in after the assignment).
                 "__code__" => Err(pyrust_core::type_err!("__code__ must be set to a code object")),
                 "__defaults__" => {
-                    // CPython accepts None or a tuple; anything else → TypeError.
+                    // #2395: CPython accepts None or a tuple; anything else →
+                    // TypeError.  Store the per-object override so subsequent calls
+                    // and `f.__defaults__` reads observe the reassignment.  A tuple
+                    // (even `()`) overrides the compile-time defaults; `None` clears
+                    // them.  CPython does not require the tuple length to match the
+                    // parameter count — it is aligned to the last n params at call
+                    // time (see `UserFunction::positional_default`).
                     if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
+                        func.set_defaults_override(value);
                         Ok(())
                     } else {
                         Err(pyrust_core::type_err!("__defaults__ must be set to a tuple object"))
                     }
                 }
                 "__kwdefaults__" => {
-                    // CPython accepts None or a dict; anything else → TypeError.
+                    // #2395: CPython accepts None or a dict; anything else →
+                    // TypeError.  Store the per-object override (see `__defaults__`).
                     if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
+                        func.set_kwdefaults_override(value);
                         Ok(())
                     } else {
                         Err(pyrust_core::type_err!("__kwdefaults__ must be set to a dict object"))
@@ -2454,11 +2440,18 @@ impl Interpreter {
                     {
                         Err(pyrust_core::py_err!("AttributeError", "readonly attribute"))
                     }
-                    // CPython allows `del f.__defaults__` / `del f.__kwdefaults__`
-                    // (they reset to None).  Since pyrust doesn't implement these slots
-                    // yet, silently succeed — the state the caller intended (unset)
-                    // already matches pyrust's state.
-                    "__defaults__" | "__kwdefaults__" => Ok(()),
+                    // #2395: CPython allows `del f.__defaults__` /
+                    // `del f.__kwdefaults__`; both reset the slot to `None`, which
+                    // also clears any compile-time defaults the params carried.
+                    // Model this with an explicit `None` override.
+                    "__defaults__" => {
+                        func.set_defaults_override(Value::none());
+                        Ok(())
+                    }
+                    "__kwdefaults__" => {
+                        func.set_kwdefaults_override(Value::none());
+                        Ok(())
+                    }
                     _ => {
                         // Short-circuit: if attrs were never initialised, there
                         // is nothing to delete — raise AttributeError immediately.
@@ -3284,39 +3277,14 @@ fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate
         }
         "__annotations__" => Some(Ok(function.annotations_value())),
         "__defaults__" => {
-            // Collect defaults for positional-or-keyword params (not *args,
-            // **kwargs, or keyword-only).  Returns None if no defaults exist,
-            // matching CPython's `f.__defaults__` semantics.
-            let defaults: Vec<Value> = function
-                .params
-                .iter()
-                .filter(|p| !p.is_args && !p.is_kwargs && !p.is_keyword_only)
-                .filter_map(|p| p.default.clone())
-                .collect();
-            if defaults.is_empty() {
-                Some(Ok(Value::none()))
-            } else {
-                Some(Ok(Value::tuple(defaults)))
-            }
+            // #2395: positional defaults tuple (or per-object override), `None`
+            // when none exist — CPython's `f.__defaults__` semantics.
+            Some(Ok(function.defaults_value()))
         }
         "__kwdefaults__" => {
-            // Collect defaults for keyword-only params.  Returns None if none
-            // exist, matching CPython's `f.__kwdefaults__` semantics.
-            let kwdefaults: PyDict = function
-                .params
-                .iter()
-                .filter(|p| p.is_keyword_only)
-                .filter_map(|p| {
-                    p.default
-                        .as_ref()
-                        .map(|v| (PyKey::str_from(&p.name), v.clone()))
-                })
-                .collect();
-            if kwdefaults.is_empty() {
-                Some(Ok(Value::none()))
-            } else {
-                Some(Ok(Value::dict(kwdefaults)))
-            }
+            // #2395: keyword-only defaults dict (or per-object override), `None`
+            // when none exist — CPython's `f.__kwdefaults__` semantics.
+            Some(Ok(function.kwdefaults_value()))
         }
         _ => {
             // Arbitrary dynamic attrs delegate to the underlying function.
