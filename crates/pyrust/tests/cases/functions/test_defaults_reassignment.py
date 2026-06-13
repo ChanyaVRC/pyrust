@@ -29,6 +29,17 @@ f.__defaults__ = (99,)
 print(f(1, 2))  # (1, 2, 99) — only the last param gets the override
 
 
+# --- a tuple LONGER than the positional-param count aligns to its own tail ---
+def ff(a, b, c):
+    return (a, b, c)
+
+
+ff.__defaults__ = (1, 2, 3, 4, 5)  # 5 defaults, 3 params → uses the last 3
+print(ff())  # (3, 4, 5)
+print(ff(100))  # (100, 4, 5)
+print(ff(100, 101))  # (100, 101, 5)
+
+
 # --- empty tuple removes a default (getter returns (), not None) ---
 def ee(a, b=5):
     return (a, b)

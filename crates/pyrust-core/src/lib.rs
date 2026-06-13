@@ -1812,9 +1812,14 @@ impl UserFunction {
         let positions: smallvec::SmallVec<[usize; 8]> = self.positional_param_indices().collect();
         let j = positions.iter().position(|&idx| idx == pi)?;
         let npos = positions.len();
-        let start = npos.saturating_sub(slice.len());
-        if j >= start {
-            slice.get(j - start).cloned()
+        // CPython aligns the override tuple to the *trailing* positional params:
+        // param at positional index `j` maps to tuple index `len - npos + j`.
+        // When `len <= npos` this is the leading params getting no default
+        // (negative index → `None`); when `len > npos` it skips the *front* of
+        // the tuple, so every positional param gets the value from the tail.
+        let idx = slice.len() as isize - npos as isize + j as isize;
+        if idx >= 0 {
+            slice.get(idx as usize).cloned()
         } else {
             None
         }
