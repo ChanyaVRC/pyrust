@@ -1807,10 +1807,7 @@ impl UserFunction {
         if ov.is_unset() {
             return self.params.get(pi).and_then(|p| p.default.clone());
         }
-        let slice = match ov.as_tuple() {
-            Some(s) => s,
-            None => return None, // override is `None` → no positional defaults
-        };
+        let slice = ov.as_tuple()?; // override is `None` → no positional defaults
         // Position of `pi` among the positional params.
         let positions: smallvec::SmallVec<[usize; 8]> = self.positional_param_indices().collect();
         let j = positions.iter().position(|&idx| idx == pi)?;
