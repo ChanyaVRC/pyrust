@@ -126,4 +126,7 @@ for mk, nm in [(dict, "d"), (_OD2, "od"), (_DS2, "ds"), (_ODS2, "ods")]:
                 for x in it: o["q"] = 9
                 print(nm, n, view, "SILENT")
             except RuntimeError as e: print(nm, n, view, str(e)[:25])
-print(type(getattr({"a": 1}, "keys")()).__name__, type(getattr(_OD2(a=1), "keys")()).__name__)
+# Plain-dict getattr-bound views carry the right type (was a list snapshot).
+# (OrderedDict views' odict_keys TYPE NAME is the #2448 scope-out — guard
+# wording above is what this PR pins.)
+print(type(getattr({"a": 1}, "keys")()).__name__)

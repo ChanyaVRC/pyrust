@@ -704,6 +704,11 @@ impl Interpreter {
                 // backing value as the effective receiver so the kind_ok
                 // check and dispatch below see the expected primitive type.
                 // Issue #1204: same for str/int/float/bytes subclasses.
+                // Whether the ORIGINAL receiver was an OrderedDict (or
+                // subclass) instance — the view-constructing dict methods
+                // need this AFTER backing normalisation erases it (#2436:
+                // the bound `dict.keys` route lost the odict tag).
+                let mut receiver_ordered = false;
                 let self_val =
                     if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple"
                         | "str" | "int" | "float" | "bytes") {
@@ -714,6 +719,9 @@ impl Interpreter {
                             None
                         };
                         if let Some(inst) = maybe_inst {
+                            receiver_ordered = class_is_named_ordered_dict(
+                                &Rc::clone(&inst.borrow().class),
+                            );
                             instance_builtin_data(&inst).unwrap_or(self_val)
                         } else {
                             self_val
@@ -860,6 +868,12 @@ impl Interpreter {
                                 _ => unreachable!("kind_ok guard above"),
                             }
                         }
+                    }
+                    "dict" if pyrust_builtins::dict::needs_rc(method)
+                        && pos.is_empty()
+                        && kw.is_empty() =>
+                    {
+                        Self::dict_view_for_backing(&self_val, method, receiver_ordered)
                     }
                     "dict" => self.call_dict_method(method, self_val, pos, &kw),
                     "set" => self.call_set_method(method, self_val, pos),

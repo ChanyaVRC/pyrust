@@ -626,29 +626,27 @@ pyrust_module! {
             })
         }
 
+        // keys/values/items return LIVE odict-tagged views sharing the
+        // backing Rc (issue #2436): the registry bodies were a FOURTH copy of
+        // the view decision (after the slow path, the inline cache, and the
+        // plain-dict expr dispatch), still returning unguarded list snapshots
+        // via the getattr-bound route.
         fn keys(args) -> Result<Value> {
-            let items = read_items(args, FN_NAME)?;
             require_no_args(args, "keys")?;
-            Ok(Value::list(
-                items.keys().cloned().map(key_to_value).collect(),
-            ))
+            let backing = live_backing(args, FN_NAME)?;
+            crate::Interpreter::dict_view_for_backing(&backing, "keys", true)
         }
 
         fn values(args) -> Result<Value> {
-            let items = read_items(args, FN_NAME)?;
             require_no_args(args, "values")?;
-            Ok(Value::list(items.values().cloned().collect()))
+            let backing = live_backing(args, FN_NAME)?;
+            crate::Interpreter::dict_view_for_backing(&backing, "values", true)
         }
 
         fn items(args) -> Result<Value> {
-            let items = read_items(args, FN_NAME)?;
             require_no_args(args, "items")?;
-            Ok(Value::list(
-                items
-                    .iter()
-                    .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
-                    .collect(),
-            ))
+            let backing = live_backing(args, FN_NAME)?;
+            crate::Interpreter::dict_view_for_backing(&backing, "items", true)
         }
 
         fn copy(args) -> Result<Value> {
@@ -1491,6 +1489,22 @@ fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: PyDict) {
 /// backing dict (`__builtin_data__`) holds the user's data, separate from
 /// `self.default_factory`.  TypeError on external corruption, empty-map
 /// fallback when `__init__` hasn't run.
+/// The live `__builtin_data__` backing `Value` (Rc-shared dict) of an
+/// OrderedDict/defaultdict instance — for view construction, which must NOT
+/// clone the map (issue #2436).
+fn live_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    let inst = expect_self(args, fn_name)?;
+    let borrow = inst.borrow();
+    match borrow.attrs.get(COUNTER_BACKING) {
+        Some(v) if matches!(v.kind(), ValueKind::Dict(_)) => Ok(v.clone()),
+        Some(_) => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}: backing store has been overwritten with a non-dict"),
+        )),
+        None => Ok(Value::dict(PyDict::default())),
+    }
+}
+
 fn read_items(
     args: &[ExpandedCallArg],
     fn_name: &str,
