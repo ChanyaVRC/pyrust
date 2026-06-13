@@ -367,32 +367,30 @@ pyrust_module! {
             }
         }
 
-        /// `c.keys()` — list of keys (eager — see module docs).
+        // keys/values/items return LIVE dict views sharing the backing Rc
+        // (issue #2447).  Counter is a plain `dict` subclass in CPython, so the
+        // views are PLAIN `dict_keys` / `dict_values` / `dict_items` (NOT
+        // odict-tagged) with the plain "dictionary changed size during
+        // iteration" guard wording.  The eager `list` snapshots they replaced
+        // were the wrong type, not live across `update`/`subtract`, and — being
+        // plain lists — silently completed when the Counter changed size
+        // mid-iteration.
         fn keys(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
             require_no_args(args, "keys")?;
-            Ok(Value::list(
-                counts.keys().cloned().map(key_to_value).collect(),
-            ))
+            let backing = live_backing(args, FN_NAME)?;
+            crate::Interpreter::dict_view_for_backing(&backing, "keys", false)
         }
 
-        /// `c.values()` — list of counts.
         fn values(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
             require_no_args(args, "values")?;
-            Ok(Value::list(counts.values().cloned().collect()))
+            let backing = live_backing(args, FN_NAME)?;
+            crate::Interpreter::dict_view_for_backing(&backing, "values", false)
         }
 
-        /// `c.items()` — list of (key, count) pairs.
         fn items(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
             require_no_args(args, "items")?;
-            Ok(Value::list(
-                counts
-                    .iter()
-                    .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
-                    .collect(),
-            ))
+            let backing = live_backing(args, FN_NAME)?;
+            crate::Interpreter::dict_view_for_backing(&backing, "items", false)
         }
 
         /// `c + d` — add counts element-wise over the union of keys,
@@ -626,27 +624,29 @@ pyrust_module! {
             })
         }
 
-        // keys/values/items return LIVE odict-tagged views sharing the
-        // backing Rc (issue #2436): the registry bodies were a FOURTH copy of
-        // the view decision (after the slow path, the inline cache, and the
-        // plain-dict expr dispatch), still returning unguarded list snapshots
-        // via the getattr-bound route.
+        // keys/values/items return LIVE dict views sharing the backing Rc.
+        // #2436 made these live but tagged them `ordered=true`; that wording
+        // ("OrderedDict mutated during iteration") never surfaced because the
+        // stale-Rc replace in `store_items` detached the view before any guard
+        // could fire.  defaultdict is a PLAIN `dict` subclass in CPython, so the
+        // guard wording is the plain "dictionary changed size during iteration"
+        // — `ordered=false` (issue #2447).
         fn keys(args) -> Result<Value> {
             require_no_args(args, "keys")?;
             let backing = live_backing(args, FN_NAME)?;
-            crate::Interpreter::dict_view_for_backing(&backing, "keys", true)
+            crate::Interpreter::dict_view_for_backing(&backing, "keys", false)
         }
 
         fn values(args) -> Result<Value> {
             require_no_args(args, "values")?;
             let backing = live_backing(args, FN_NAME)?;
-            crate::Interpreter::dict_view_for_backing(&backing, "values", true)
+            crate::Interpreter::dict_view_for_backing(&backing, "values", false)
         }
 
         fn items(args) -> Result<Value> {
             require_no_args(args, "items")?;
             let backing = live_backing(args, FN_NAME)?;
-            crate::Interpreter::dict_view_for_backing(&backing, "items", true)
+            crate::Interpreter::dict_view_for_backing(&backing, "items", false)
         }
 
         fn copy(args) -> Result<Value> {
@@ -1477,12 +1477,38 @@ fn read_counts(
     }
 }
 
+/// Write `new_map` back to `self`'s `__builtin_data__` backing dict, mutating
+/// the **existing** `Rc<RefCell<PyDict>>` in place when one is present rather
+/// than wrapping a fresh `Rc` (issue #2447).
+///
+/// Live `keys()` / `values()` / `items()` views share the backing `Rc`.  The
+/// old `Value::dict(new_map)` replace detached every such view on the next
+/// mutation, so iteration over a view never observed the size change and the
+/// `RuntimeError("dictionary changed size during iteration")` guard never
+/// fired (CPython keeps the views live through `update` / `subtract` / `clear`
+/// / `__setitem__`).  Overwriting the existing map in place keeps every live
+/// view — and the size guard keyed on it — attached.
+///
+/// The fall-through arm only triggers before `__init__` has installed the
+/// backing (or after a user overwrote it with a non-dict); both insert a fresh
+/// dict, matching the previous behaviour.
+fn store_backing(inst: &Rc<RefCell<PyInstance>>, new_map: PyDict) {
+    let mut borrow = inst.borrow_mut();
+    let mut new_map = Some(new_map);
+    if let Some(v) = borrow.attrs.get(COUNTER_BACKING) {
+        if v.dict_with_mut(|m| *m = new_map.take().unwrap()).is_some() {
+            return;
+        }
+    }
+    borrow
+        .attrs
+        .insert(COUNTER_BACKING, Value::dict(new_map.unwrap()));
+}
+
 /// Write `counts` back to `self`'s backing dict.  Used by any method that
 /// mutates the underlying tally (the `__init__` path inserts directly).
 fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: PyDict) {
-    inst.borrow_mut()
-        .attrs
-        .insert(COUNTER_BACKING, Value::dict(counts));
+    store_backing(inst, counts);
 }
 
 /// `defaultdict`'s storage accessor.  Same shape as `read_counts` — the
@@ -1494,14 +1520,21 @@ fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: PyDict) {
 /// clone the map (issue #2436).
 fn live_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
-    let borrow = inst.borrow();
+    let mut borrow = inst.borrow_mut();
     match borrow.attrs.get(COUNTER_BACKING) {
         Some(v) if matches!(v.kind(), ValueKind::Dict(_)) => Ok(v.clone()),
         Some(_) => Err(PyError::named(
             "TypeError",
             format!("{fn_name}: backing store has been overwritten with a non-dict"),
         )),
-        None => Ok(Value::dict(PyDict::default())),
+        // No backing yet (e.g. raw PyInstance, `__init__` not run): install one
+        // so the view shares the same `Rc` a later `store_backing` mutates in
+        // place (issue #2447) rather than dangling on a throwaway dict.
+        None => {
+            let backing = Value::dict(PyDict::default());
+            borrow.attrs.insert(COUNTER_BACKING, backing.clone());
+            Ok(backing)
+        }
     }
 }
 
@@ -1527,9 +1560,7 @@ fn read_items(
 }
 
 fn store_items(inst: &Rc<RefCell<PyInstance>>, items: PyDict) {
-    inst.borrow_mut()
-        .attrs
-        .insert(COUNTER_BACKING, Value::dict(items));
+    store_backing(inst, items);
 }
 
 /// Build a key iterator over `keys` for a `Counter` / `defaultdict` instance,
@@ -1537,11 +1568,10 @@ fn store_items(inst: &Rc<RefCell<PyInstance>>, items: PyDict) {
 /// `RuntimeError("dictionary changed size during iteration")` when the dict
 /// changes size mid-loop; value-only mutations (which preserve the key count)
 /// are allowed.  The guard's `container` is the *instance* (not the backing
-/// dict `Value`): `Counter`/`defaultdict` `store_items` replaces the backing
-/// `Value` with a fresh `Rc` on every mutation, so a captured-backing snapshot
-/// would go stale — `live_collection_len` re-resolves `__builtin_data__` from
-/// the instance each step instead.  `keys.len()` is the backing dict's size at
-/// iterator creation (the keys are its live key set).
+/// dict `Value`) so it re-resolves `__builtin_data__` via `live_collection_len`
+/// each step.  This stays correct regardless of whether the backing `Rc` is
+/// mutated in place (`store_backing`, #2447) or replaced.  `keys.len()` is the
+/// backing dict's size at iterator creation (the keys are its live key set).
 fn make_guarded_dict_subclass_iter(inst: Rc<RefCell<PyInstance>>, keys: Vec<Value>) -> Value {
     let recorded_len = keys.len() as i64;
     let mut frame = NativeIterFrame::new(keys, "generator");
@@ -1550,7 +1580,7 @@ fn make_guarded_dict_subclass_iter(inst: Rc<RefCell<PyInstance>>, keys: Vec<Valu
         version: recorded_len,
         kind: GuardVersion::Size,
         msg: "dictionary changed size during iteration",
-                    exhaust_first: false,
+        exhaust_first: false,
     }));
     Value::generator(Box::new(frame))
 }
