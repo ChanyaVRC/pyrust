@@ -26,6 +26,45 @@ fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) ->
     remap_lineno_and_col_tables(old_insns, old_linenos, &[], new_insns).0
 }
 
+/// Opcodes eligible for the discriminant-only line fallback in
+/// [`remap_lineno_and_col_tables`].  These are the side-effecting / error-raising
+/// instructions whose source line surfaces in tracebacks, and which the optimizer
+/// **never synthesizes from scratch** — it only ever rewrites their register
+/// operands (`pass_copy_prop`, `pass_const_reg_prop`) or moves them.  So when one
+/// fails the exact-structural match (because its operands were renumbered), there
+/// is guaranteed to be a 1:1 origin of the same opcode still present in the old
+/// stream; anchoring to it recovers the true line (issue #2439).
+///
+/// Conversely, opcodes the optimizer *can* create out of thin air (`LoadConst`
+/// from const-folding, `Move`/`Jump`/`LoadNone` from peepholes, fused
+/// `BinOpConst`/`CmpJump*`, …) are deliberately excluded: a synthesized one has no
+/// origin, and matching it to an unrelated same-opcode occurrence would attribute
+/// a misleading line.  Those keep the conservative running-prefix fallback, which
+/// preserves the #1962/#2002 greedy-scan contract.
+fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
+    matches!(
+        insn,
+        Insn::GetAttr(..)
+            | Insn::GetAttrForWith(..)
+            | Insn::SetAttr(..)
+            | Insn::DeleteAttr(..)
+            | Insn::GetItem(..)
+            | Insn::GetSlice(..)
+            | Insn::SetItem(..)
+            | Insn::DeleteItem(..)
+            | Insn::BinOp(..)
+            | Insn::BinOpInPlace(..)
+            | Insn::UnaryOp(..)
+            | Insn::Call(..)
+            | Insn::CallMethod { .. }
+            | Insn::CallMethodExpanded { .. }
+            | Insn::CallMethodKw { .. }
+            | Insn::RaiseValue(_)
+            | Insn::RaiseFrom(..)
+            | Insn::RaiseAssert(_)
+    )
+}
+
 /// Remap both the `lineno_table` and the PEP 657 `col_table` (issue #2426) from
 /// an old instruction sequence to a new one in a **single shared scan**.
 ///
@@ -79,6 +118,22 @@ fn remap_lineno_and_col_tables(
         positions.entry(insn).or_default().push(i);
     }
 
+    // Secondary index keyed by **opcode discriminant only** (registers/operands
+    // erased), so an instruction whose register operands were rewritten by a
+    // renumbering pass (`pass_copy_prop`, `pass_const_reg_prop`, …) can still be
+    // anchored to its origin line when full structural equality no longer holds
+    // (issue #2439: a bare `x.foo` whose `GetAttr` operand was renumbered fell
+    // through to the previous statement's line).  Used only as a fallback when the
+    // exact-match lookup fails, so the #1962/#2002 exact-match contract is
+    // unchanged for instructions the optimizer left byte-identical.
+    let mut disc_positions: HashMap<std::mem::Discriminant<Insn>, Vec<usize>> = HashMap::new();
+    for (i, insn) in old_insns.iter().enumerate() {
+        disc_positions
+            .entry(std::mem::discriminant(insn))
+            .or_default()
+            .push(i);
+    }
+
     // Instructions whose anchored occurrences disagree get no anchor (ambiguous).
     let mut ambiguous: HashSet<&Insn> = HashSet::new();
     if want_cols {
@@ -111,9 +166,43 @@ fn remap_lineno_and_col_tables(
                 old_pos = i + 1;
             }
             None => {
-                // Optimizer-created instruction: approximate the line from the
-                // running prefix; leave the anchor cleared (no faithful span).
-                linenos.push(old_prefix.get(old_pos).copied().unwrap_or(0));
+                // No byte-identical old instruction at-or-after the cursor.  Before
+                // falling back to the running prefix line, try to anchor by opcode
+                // discriminant alone — but ONLY for the line-critical side-effecting
+                // opcodes the optimizer never synthesizes (`GetAttr`, `GetItem`,
+                // `Call`, `BinOp`, `RaiseValue`, …).  A renumbering pass
+                // (`pass_copy_prop`, `pass_const_reg_prop`) may have rewritten such an
+                // instruction's register operands so it no longer matches its origin
+                // structurally, yet the opcode is never deleted and still sits at the
+                // same relative position; matching it here recovers its true source
+                // line (issue #2439: a bare `x.foo` whose `GetAttr` was renumbered
+                // reported the previous statement's line).  Restricting to opcodes the
+                // optimizer cannot create keeps a genuinely synthesized instruction
+                // (a const-folded `LoadConst`, a peephole `Move`/`Jump`) on the
+                // running-prefix line — preserving the #1962/#2002 contract for those.
+                // The col anchor is left cleared: a discriminant-only match does not
+                // prove the span is the same, and a wrong caret is worse than none.
+                let disc_matched = if insn_anchor_by_discriminant(new_insn) {
+                    disc_positions
+                        .get(&std::mem::discriminant(new_insn))
+                        .and_then(|locs| {
+                            let k = locs.partition_point(|&p| p < old_pos);
+                            locs.get(k).copied()
+                        })
+                } else {
+                    None
+                };
+                match disc_matched {
+                    Some(i) => {
+                        linenos.push(old_linenos.get(i).copied().unwrap_or(0));
+                        old_pos = i + 1;
+                    }
+                    None => {
+                        // Optimizer-created instruction with no eligible opcode match:
+                        // approximate the line from the running prefix; anchor cleared.
+                        linenos.push(old_prefix.get(old_pos).copied().unwrap_or(0));
+                    }
+                }
             }
         }
     }
