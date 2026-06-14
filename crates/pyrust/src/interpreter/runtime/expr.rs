@@ -1744,7 +1744,14 @@ impl Interpreter {
                     return self.value_to_pykey(&backing);
                 }
             }
-            let class = Rc::clone(&inst.borrow().class);
+            let (class, has_builtin_data) = {
+                let b = inst.borrow();
+                (
+                    Rc::clone(&b.class),
+                    b.attrs
+                        .contains_key(crate::interpreter::BUILTIN_DATA_ATTR),
+                )
+            };
             // Issue #2324: an instance of a subclass of an unhashable builtin
             // (`list`/`dict`/`set`/`bytearray`) with no `__hash__`-re-enabling
             // override is unhashable as a dict/set key — exactly like
@@ -1757,7 +1764,15 @@ impl Interpreter {
             // rejected them).  A class that re-enables hashing
             // (`__hash__ = object.__hash__`) defines `__hash__` in its own dict,
             // so the helper returns `false` and that case stays hashable.
-            if crate::interpreter::class_hash_inherits_builtin_none(&class) {
+            //
+            // Gate on `__builtin_data__`: only a builtin-subclass instance can
+            // inherit the implicit `__hash__ = None`, and such instances always
+            // carry the backing-data attr.  A plain user-class instance (the hot
+            // dict/set-key case) never does, so it skips the MRO-walking helper
+            // entirely (avoids a ~7% regression on user-instance keys).
+            if has_builtin_data
+                && crate::interpreter::class_hash_inherits_builtin_none(&class)
+            {
                 let class_name = class.borrow().name.clone();
                 return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
             }
