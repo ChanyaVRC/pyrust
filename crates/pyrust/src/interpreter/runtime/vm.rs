@@ -51,6 +51,17 @@ pub(crate) struct NativeIterFrame {
     /// hot iteration path — identical to the pre-guard layout.  The box is
     /// allocated once at iterator creation (cold), never per step.
     pub(crate) guard: Option<Box<NativeIterGuard>>,
+    /// Latches once the iterator has cleanly signalled StopIteration
+    /// (`pos` reached `items.len()` with no guard violation).  CPython's
+    /// iterators are permanently exhausted after their first StopIteration:
+    /// a size mutation made *after* clean exhaustion must NOT resurrect the
+    /// guard (`next()` keeps returning StopIteration, never RuntimeError).
+    /// Tested only on the end-of-iteration path (after `pos` reaches the end),
+    /// so an already-exhausted guarded iterator skips the size compare; the
+    /// per-element fast path never reads it.  Defaults to `false`; only guarded
+    /// iterators can ever observe the difference (unguarded ones never raise
+    /// regardless).
+    pub(crate) exhausted: bool,
 }
 
 /// Mutation guard for [`NativeIterFrame`].  Holds the live `container` `Value`
@@ -88,7 +99,7 @@ pub(crate) enum GuardVersion {
 impl NativeIterFrame {
     /// Construct an unguarded native iterator (the common case).
     pub(crate) fn new(items: Vec<Value>, type_name: &'static str) -> Self {
-        NativeIterFrame { items, pos: 0, type_name, guard: None }
+        NativeIterFrame { items, pos: 0, type_name, guard: None, exhausted: false }
     }
 
     /// Mutation-guard check, run once per `__next__` *only when a guard is
@@ -127,18 +138,27 @@ impl NativeIterFrame {
     /// boundary (`call_next`, `yield_from_advance`); the VM's `ForIter` hot loop
     /// inlines the equivalent steps directly to keep iteration fast.
     pub(crate) fn advance(&mut self) -> Result<Option<Value>> {
-        if self.pos >= self.items.len()
-            && self.guard.as_ref().is_some_and(|g| g.exhaust_first)
-        {
+        // Common path: still have elements.  `guard_check` is a no-op branch
+        // for unguarded iterators.  The `exhausted` latch can only be set once
+        // `pos` reaches the end, so it need not be tested on the element path.
+        if self.pos < self.items.len() {
+            self.guard_check()?;
+            let item = self.items[self.pos].clone();
+            self.pos += 1;
+            return Ok(Some(item));
+        }
+        // At the end.  Once the iterator has cleanly signalled StopIteration it
+        // stays exhausted regardless of any later size mutation (CPython parity).
+        if self.exhausted {
             return Ok(None);
         }
-        self.guard_check()?;
-        if self.pos >= self.items.len() {
-            return Ok(None);
+        self.exhausted = true;
+        // OrderedDict iterators test exhaustion before the size guard; plain
+        // dicts check the guard first (a final-step mutation still raises).
+        if !self.guard.as_ref().is_some_and(|g| g.exhaust_first) {
+            self.guard_check()?;
         }
-        let item = self.items[self.pos].clone();
-        self.pos += 1;
-        Ok(Some(item))
+        Ok(None)
     }
 }
 
@@ -4465,24 +4485,42 @@ impl Interpreter {
                                             // `guard_check` no-op branch, keeping
                                             // the per-step cost identical to the
                                             // pre-guard code.
-                                            Some(if native.pos >= native.items.len()
-                                                && native
-                                                    .guard
-                                                    .as_ref()
-                                                    .is_some_and(|g| g.exhaust_first)
-                                            {
+                                            Some(if native.pos < native.items.len() {
+                                                // Common path: still have elements.
+                                                // The per-step cost is exactly the
+                                                // pre-latch code — a single bounds
+                                                // check then `guard_check` (a no-op
+                                                // branch for unguarded iterators).
+                                                // The `exhausted` latch can only be
+                                                // set once `pos` reaches the end, so
+                                                // it need not be tested here.
+                                                match native.guard_check() {
+                                                    Err(e) => Err(e),
+                                                    Ok(()) => {
+                                                        let item = native.items[native.pos].clone();
+                                                        native.pos += 1;
+                                                        Ok(item)
+                                                    }
+                                                }
+                                            } else if native.exhausted {
+                                                // Latched after a clean StopIteration:
+                                                // a later size mutation must not raise.
                                                 Err(pyrust_core::py_err!("StopIteration", String::new()))
-                                            } else { match native.guard_check() {
-                                                Err(e) => Err(e),
-                                                Ok(()) if native.pos >= native.items.len() => {
+                                            } else {
+                                                // First time at the end: OrderedDict
+                                                // iterators test exhaustion before the
+                                                // size guard; plain dicts check the
+                                                // guard first (it may still raise).
+                                                native.exhausted = true;
+                                                if native.guard.as_ref().is_some_and(|g| g.exhaust_first) {
                                                     Err(pyrust_core::py_err!("StopIteration", String::new()))
+                                                } else {
+                                                    match native.guard_check() {
+                                                        Err(e) => Err(e),
+                                                        Ok(()) => Err(pyrust_core::py_err!("StopIteration", String::new())),
+                                                    }
                                                 }
-                                                Ok(()) => {
-                                                    let item = native.items[native.pos].clone();
-                                                    native.pos += 1;
-                                                    Ok(item)
-                                                }
-                                            } })
+                                            })
                                         } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                                             // Resume the generator.
                                             if frame.done {
