@@ -3685,55 +3685,7 @@ impl Interpreter {
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(&regs, *src_reg, num_locals));
-                    let pairs: Vec<(PyKey, Value)> = match src_val.kind() {
-                        ValueKind::Dict(d) => d.clone().into_iter().collect(),
-                        // instance_dict proxy: extract visible attrs as (PyKey, Value) pairs.
-                        ValueKind::BuiltinObject { ops, .. }
-                            if ops.type_name()
-                                == pyrust_builtins::instance_dict::TYPE_NAME =>
-                        {
-                            match pyrust_builtins::instance_dict::as_instance_dict_items(&src_val) {
-                                Some(pairs) => pairs,
-                                None => vm_try!(Err(PyError::Runtime(
-                                    "internal: bad instance_dict state in DictUpdate".to_string(),
-                                ))),
-                            }
-                        }
-                        // mappingproxy (**cls.__dict__ or similar): extract via keys.
-                        ValueKind::BuiltinObject { ops, .. }
-                            if ops.type_name()
-                                == pyrust_builtins::mapping_proxy::TYPE_NAME =>
-                        {
-                            if let Some(cls_rc) =
-                                pyrust_builtins::mapping_proxy::as_class_rc(&src_val)
-                            {
-                                cls_rc
-                                    .borrow()
-                                    .attrs
-                                    .iter()
-                                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
-                                    .collect()
-                            } else {
-                                vm_try!(Err(PyError::Runtime(
-                                    "internal: bad mappingproxy state in DictUpdate".to_string(),
-                                )))
-                            }
-                        }
-                        // Any non-dict mapping following the duck-typed protocol
-                        // (`keys()` + `__getitem__`): `ChainMap`, `UserDict`,
-                        // custom mappings (issue #2190).
-                        ValueKind::PyInstance(_) => {
-                            match vm_try!(mapping_pairs_via_protocol(self, &src_val)) {
-                                Some(pairs) => pairs,
-                                None => vm_try!(Err(pyrust_core::type_err!(
-                                    "'{}' object is not a mapping",
-                                    value_type_name_str(&src_val)
-                                ))),
-                            }
-                        }
-                        _ => vm_try!(Err(pyrust_core::type_err!("'{}' object is not a mapping",
-                                value_type_name_str(&src_val)))),
-                    };
+                    let pairs = vm_try!(self.mapping_splat_pairs(&src_val));
                     // #1914: route through `dict_extend_value_dedup` so user
                     // `__eq__` deduplicates `PyKey::Object` keys (`dict.update`,
                     // `|=`).  Clone the dict Value (cheap Rc bump) so the helper
@@ -3744,6 +3696,40 @@ impl Interpreter {
                         .cloned()
                         .unwrap_or(Value::none());
                     vm_try!(self.dict_extend_value_dedup(&dict_val, pairs));
+                }
+
+                // `**d` keyword splat in a call: like `DictUpdate` but raises
+                // `TypeError` on a duplicate key (CPython `DICT_MERGE`, #2413).
+                Insn::DictMergeKwCall { dict, src, name } => {
+                    let src_val = vm_try!(vm_read(&regs, *src, num_locals));
+                    let pairs = vm_try!(self.mapping_splat_pairs(&src_val));
+                    let dict_val = regs[*dict as usize]
+                        .as_some()
+                        .cloned()
+                        .unwrap_or(Value::none());
+                    if let Some(kw) = vm_try!(self.dict_merge_kwcall(&dict_val, pairs)) {
+                        let fname = self.kwcall_func_name(&regs, num_locals, name, code);
+                        vm_try!(Err(multiple_values_kw_error(fname.as_deref(), &kw)));
+                    }
+                }
+
+                // Named (`kw=v`) argument in a call that also has a `**d` splat:
+                // `SetItem` that raises the same duplicate-key `TypeError`.
+                Insn::SetItemKwCall { dict, key, val, name } => {
+                    let key_val = vm_try!(vm_read(&regs, *key, num_locals));
+                    let val_val = vm_try!(vm_read(&regs, *val, num_locals));
+                    // Named-argument keys are always interned strings.
+                    let key = vm_try!(key_val.to_key().ok_or_else(|| PyError::Runtime(
+                        "internal: non-hashable keyword argument key".to_string()
+                    )));
+                    let dict_val = regs[*dict as usize]
+                        .as_some()
+                        .cloned()
+                        .unwrap_or(Value::none());
+                    if let Some(kw) = vm_try!(self.dict_setitem_kwcall(&dict_val, key, val_val)) {
+                        let fname = self.kwcall_func_name(&regs, num_locals, name, code);
+                        vm_try!(Err(multiple_values_kw_error(fname.as_deref(), &kw)));
+                    }
                 }
 
                 // ── Generator yield ──────────────────────────────────────

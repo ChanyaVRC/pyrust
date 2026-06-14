@@ -1225,19 +1225,38 @@ result = fact(10)
 
     #[test]
     fn dict_update_via_double_splat_call() {
-        // DictUpdate instruction is emitted when calling f(**a, **b).
-        // Verifies that the merged kwargs dict has the correct values.
+        // DictMergeKwCall instruction is emitted when calling f(**a, **b).
+        // Verifies that non-overlapping splats merge correctly.
         let interpreter = run_program(
-            "def merge(**kw): return kw\na = {'x': 1, 'y': 2}\nb = {'y': 99, 'z': 3}\nresult = merge(**a, **b)\n",
+            "def merge(**kw): return kw\na = {'x': 1, 'y': 2}\nb = {'z': 3}\nresult = merge(**a, **b)\n",
         );
         use crate::value::PyKey;
         let mut expected = pyrust_core::PyDict::default();
         expected.insert(PyKey::str_from("x"), Value::int(1));
-        expected.insert(PyKey::str_from("y"), Value::int(99));
+        expected.insert(PyKey::str_from("y"), Value::int(2));
         expected.insert(PyKey::str_from("z"), Value::int(3));
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
             Some(Value::dict(expected))
+        );
+    }
+
+    #[test]
+    fn double_splat_call_duplicate_key_raises() {
+        // A key present in two `**` splats of a call is a TypeError (CPython
+        // DICT_MERGE), not a silent overwrite (issue #2413).
+        let tokens = Lexer::new(
+            "def merge(**kw): return kw\na = {'x': 1, 'y': 2}\nb = {'y': 99, 'z': 3}\nresult = merge(**a, **b)\n",
+        )
+        .unwrap()
+        .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        let err = interpreter.exec_program(&program, false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "TypeError: __main__.merge() got multiple values for keyword argument 'y'"
         );
     }
 

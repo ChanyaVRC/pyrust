@@ -2407,6 +2407,129 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Extract `(PyKey, Value)` pairs from a `**mapping` source value, matching
+    /// the duck-typed mapping protocol the `DictUpdate` instruction accepts
+    /// (dict / `instance_dict` proxy / `mappingproxy` / any `PyInstance` with
+    /// `keys()` + `__getitem__`).  Shared by the `DictUpdate` and
+    /// `DictMergeKwCall` VM arms.
+    pub(crate) fn mapping_splat_pairs(
+        &mut self,
+        src_val: &Value,
+    ) -> Result<Vec<(PyKey, Value)>> {
+        match src_val.kind() {
+            ValueKind::Dict(d) => Ok(d.clone().into_iter().collect()),
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME =>
+            {
+                match pyrust_builtins::instance_dict::as_instance_dict_items(src_val) {
+                    Some(pairs) => Ok(pairs),
+                    None => Err(PyError::Runtime(
+                        "internal: bad instance_dict state in DictUpdate".to_string(),
+                    )),
+                }
+            }
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
+            {
+                if let Some(cls_rc) = pyrust_builtins::mapping_proxy::as_class_rc(src_val) {
+                    Ok(cls_rc
+                        .borrow()
+                        .attrs
+                        .iter()
+                        .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                        .collect())
+                } else {
+                    Err(PyError::Runtime(
+                        "internal: bad mappingproxy state in DictUpdate".to_string(),
+                    ))
+                }
+            }
+            ValueKind::PyInstance(_) => {
+                match mapping_pairs_via_protocol(self, src_val)? {
+                    Some(pairs) => Ok(pairs),
+                    None => Err(pyrust_core::type_err!(
+                        "'{}' object is not a mapping",
+                        value_type_name_str(src_val)
+                    )),
+                }
+            }
+            _ => Err(pyrust_core::type_err!(
+                "'{}' object is not a mapping",
+                value_type_name_str(src_val)
+            )),
+        }
+    }
+
+    /// In-place merge of a `**d` keyword-splat `pairs` into a call's kwargs
+    /// `receiver` (CPython `DICT_MERGE`).  On the first duplicate key, inserts
+    /// nothing further and returns `Ok(Some(kw))` naming the colliding keyword
+    /// so the caller can raise `… got multiple values for keyword argument …`
+    /// with a lazily-resolved function name (no allocation on the happy path).
+    pub(crate) fn dict_merge_kwcall(
+        &mut self,
+        receiver: &Value,
+        pairs: Vec<(PyKey, Value)>,
+    ) -> Result<Option<String>> {
+        for (key, value) in pairs {
+            if self.dict_lookup(receiver, &key)?.is_some() {
+                return Ok(Some(kwkey_name(&key)));
+            }
+            receiver
+                .dict_with_mut(|dict| dict.insert(key, value))
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        }
+        Ok(None)
+    }
+
+    /// `R[dict][key] = val` for a named call argument when a `**d` splat is also
+    /// present.  Returns `Ok(Some(kw))` (without inserting) if `key` already
+    /// exists, mirroring [`Self::dict_merge_kwcall`].
+    pub(crate) fn dict_setitem_kwcall(
+        &mut self,
+        receiver: &Value,
+        key: PyKey,
+        value: Value,
+    ) -> Result<Option<String>> {
+        if self.dict_lookup(receiver, &key)?.is_some() {
+            return Ok(Some(kwkey_name(&key)));
+        }
+        receiver
+            .dict_with_mut(|dict| dict.insert(key, value))
+            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        Ok(None)
+    }
+
+    /// Resolve the callee's `<module>.<qualname>` for a `DictMergeKwCall` /
+    /// `SetItemKwCall` duplicate-key error.  Returns `None` when the name can't
+    /// be cheaply recovered, in which case the error omits the function prefix.
+    /// Best-effort and side-effect-free: the method branch reads the method off
+    /// the receiver's class via `lookup_class_attr` (no descriptor dispatch).
+    pub(crate) fn kwcall_func_name(
+        &self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        name: &crate::bytecode::KwCallName,
+        code: &crate::bytecode::FnCode,
+    ) -> Option<String> {
+        match name {
+            crate::bytecode::KwCallName::Callee(reg) => {
+                let cv = vm_read(regs, *reg, num_locals).ok()?;
+                callee_function_str(&cv)
+            }
+            crate::bytecode::KwCallName::Method { obj, name_idx } => {
+                let recv = vm_read(regs, *obj, num_locals).ok()?;
+                let method = code.names.get(*name_idx as usize)?.as_str();
+                let class = match recv.kind() {
+                    ValueKind::PyInstance(inst) => Rc::clone(&inst.borrow().class),
+                    ValueKind::PyClass(cls) => Rc::clone(cls),
+                    _ => return None,
+                };
+                let unbound = lookup_class_attr(&class, method)?;
+                callee_function_str(&unbound)
+            }
+        }
+    }
+
     /// Insert `key` into a set, dispatching user `__eq__` for dedup.
     /// Handles both `Object` keys and `None` keys for cross-variant dedup
     /// (issue #906): inserting None into a set that already holds an Object
@@ -7062,6 +7185,49 @@ enum SetOp {
 /// Extract key-value pairs from a plain `dict` or a `PyInstance` dict
 /// subclass backed by a dict.  Returns `None` for any other type.
 /// Used by the PEP 584 `dict | dict` merge path in `eval_binary`.
+/// CPython's `_PyObject_FunctionStr` for the duplicate-keyword-splat error:
+/// `<module>.<qualname>` for a user function (the module prefix is dropped when
+/// it is missing or `"builtins"`), else `None` for callees whose qualified name
+/// pyrust can't recover here (the error then omits the leading name).
+fn callee_function_str(callee: &Value) -> Option<String> {
+    let f = match callee.kind() {
+        ValueKind::UserFunction(f) => f.clone(),
+        ValueKind::BoundMethod { function, .. } | ValueKind::ClassBoundMethod { function, .. } => {
+            function.clone()
+        }
+        _ => return None,
+    };
+    let qual = f.effective_qualname();
+    let module = f.module_value();
+    match module.as_str() {
+        Some(m) if !m.is_empty() && m != "builtins" => Some(format!("{m}.{qual}")),
+        _ => Some(qual),
+    }
+}
+
+/// Render a kwargs key as the keyword name for the duplicate-key error.  Call
+/// keyword keys are always `str`; the fallback is defensive.
+fn kwkey_name(key: &PyKey) -> String {
+    match key {
+        PyKey::Str(s) => s.as_str().unwrap_or_default().to_owned(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Build `TypeError: <name>() got multiple values for keyword argument '<kw>'`,
+/// matching CPython's `DICT_MERGE` wording.  When `func_name` is `None` (no
+/// recoverable callee name) the function-name prefix is omitted.
+fn multiple_values_kw_error(func_name: Option<&str>, kw: &str) -> PyError {
+    match func_name {
+        Some(name) => pyrust_core::type_err!(
+            "{}() got multiple values for keyword argument '{}'",
+            name,
+            kw
+        ),
+        None => pyrust_core::type_err!("got multiple values for keyword argument '{}'", kw),
+    }
+}
+
 fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
     if let Some(entries) = v.dict_with(|d| {
         d.iter().map(|(k, val)| (k.clone(), val.clone())).collect::<Vec<_>>()
