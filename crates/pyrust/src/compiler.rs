@@ -4323,6 +4323,14 @@ struct Compiler {
     /// instead of a full attribute-lookup + method-call dispatch, mirroring
     /// CPython's dedicated `LIST_APPEND` opcode (issue #1862).
     is_list_comp: bool,
+    /// True when this Compiler is producing the implicit function body of a
+    /// list / set / dict comprehension — the forms CPython 3.12 *inlines* into
+    /// the enclosing frame (PEP 709).  pyrust still runs them as a separate
+    /// frame, but for error parity an unbound read of an enclosing local must
+    /// surface as `UnboundLocalError` (as if local to the enclosing frame), not
+    /// the free-variable `NameError` a real closure / generator expression gets
+    /// (issue #2340).
+    is_inlined_comp: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -5037,6 +5045,7 @@ impl Compiler {
             has_dead_yield: false,
             is_set_comp: false,
             is_list_comp: false,
+            is_inlined_comp: false,
         }
     }
 
@@ -5592,6 +5601,7 @@ impl Compiler {
             is_generator,
             is_coroutine: self.is_async_function,
             is_class_method: self.is_class_method,
+            is_inlined_comp: self.is_inlined_comp,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
             binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
@@ -11552,6 +11562,11 @@ impl Compiler {
         sub.is_set_comp = comp_name == "setcomp";
         // List comprehensions lower `.acc.append(elt)` to `Insn::ListAppend` (issue #1862).
         sub.is_list_comp = comp_name == "listcomp";
+        // list / set / dict comprehensions are CPython-3.12-inlined scopes; an
+        // unbound enclosing-local read inside them is `UnboundLocalError`, not the
+        // free-variable `NameError` (issue #2340).  Generator expressions
+        // (`compile_gen_exp`) are a real separate frame and stay free.
+        sub.is_inlined_comp = true;
         sub.compile_block(&fn_body);
         let inner_code = match sub.finish() {
             Ok(c) => c,

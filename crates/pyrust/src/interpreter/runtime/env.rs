@@ -3080,7 +3080,26 @@ impl Interpreter {
         env_assign_local(&self.env, name, value);
     }
 
+    /// Resolve `name` against the active scope, reporting an unbound binding as a
+    /// plain local (`UnboundLocalError`).  Used by the interpreter unit tests'
+    /// `lookup_name` assertions; the VM read opcodes call
+    /// [`lookup_name_inner`](Self::lookup_name_inner) directly so they can flag a
+    /// captured free variable (issue #2340).
+    #[cfg_attr(not(test), allow(dead_code))]
     fn lookup_name(&self, name: &str) -> Result<Option<Value>> {
+        self.lookup_name_inner(name, false)
+    }
+
+    /// Name resolution for `Insn::LoadGlobal` / `Insn::LoadCell`.
+    ///
+    /// `is_free` selects the CPython 3.12 error class for an unbound binding
+    /// found via the plain env walk (issue #2340): when set, the name is a
+    /// captured **free** variable of the currently-executing function (not one
+    /// of its own locals / cell vars), so an unbound binding is reported as a
+    /// `NameError` ("cannot access free variable ... in enclosing scope")
+    /// rather than an `UnboundLocalError`.  A `nonlocal` read always binds to an
+    /// enclosing scope and so is treated as free regardless of `is_free`.
+    pub(crate) fn lookup_name_inner(&self, name: &str, is_free: bool) -> Result<Option<Value>> {
         let (is_global, is_nonlocal) = {
             let env = self.env.borrow();
             (env.global_names.contains(name), env.nonlocal_names.contains(name))
@@ -3090,6 +3109,9 @@ impl Interpreter {
         }
         if is_nonlocal {
             return lookup_name_in_enclosing_local_env(&self.env, name);
+        }
+        if is_free {
+            return lookup_name_in_env_as_free(&self.env, name);
         }
         lookup_name_in_env(&self.env, name)
     }

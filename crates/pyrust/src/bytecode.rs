@@ -975,6 +975,13 @@ pub struct FnCode {
     /// functions or in functions nested inside methods.  Used by
     /// `resolve_zero_arg_super` to identify the correct enclosing frame.
     pub(crate) is_class_method: bool,
+    /// True when this code object is the implicit body of a list / set / dict
+    /// comprehension — a scope CPython 3.12 inlines into the enclosing frame
+    /// (PEP 709).  pyrust runs it as a separate frame, but for error parity an
+    /// unbound read of an enclosing local must raise `UnboundLocalError` (as a
+    /// local of the enclosing frame) rather than the free-variable `NameError`
+    /// a real closure / generator expression produces (issue #2340).
+    pub(crate) is_inlined_comp: bool,
     /// Per-instruction inline cache for `GetAttr` and `CallMethod`.
     ///
     /// Indexed by instruction position (`pc`) — same length as `insns`.

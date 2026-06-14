@@ -4165,7 +4165,12 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
             name
         )));
     };
-    lookup_name_in_env(&target_env, name)
+    // `target_env` is an *enclosing* function scope (the `nonlocal` binding
+    // site), never the reading function's own env — so an unbound binding here
+    // is a captured free variable, not a local.  CPython 3.12 raises `NameError`
+    // ("cannot access free variable ... in enclosing scope") for this case
+    // (issue #2340).
+    lookup_name_in_env_as_free(&target_env, name)
 }
 
 
@@ -4176,6 +4181,29 @@ fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
 }
 
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
+    lookup_name_in_env_impl(env, name, false)
+}
+
+/// Like [`lookup_name_in_env`] but reports an unbound binding as a captured
+/// **free variable** (`NameError`) rather than a local (`UnboundLocalError`).
+/// Used for the `nonlocal` read path, where the resolved env is always an
+/// enclosing scope.
+fn lookup_name_in_env_as_free(env: &EnvRef, name: &str) -> Result<Option<Value>> {
+    lookup_name_in_env_impl(env, name, true)
+}
+
+/// Resolve `name` against the `env` chain.
+///
+/// `as_free` selects the CPython 3.12 error class for an unbound binding
+/// (issue #2340):
+///   * `false` → `UnboundLocalError` ("cannot access local variable '<name>'
+///     where it is not associated with a value") — a plain local referenced
+///     before assignment.
+///   * `true`  → `NameError` ("cannot access free variable '<name>' where it is
+///     not associated with a value in enclosing scope") — a captured free
+///     variable whose cell was never bound (or was `del`-eted) in the enclosing
+///     scope.
+fn lookup_name_in_env_impl(env: &EnvRef, name: &str, as_free: bool) -> Result<Option<Value>> {
     let borrowed = env.borrow();
     let value = borrowed.values.get(name).cloned();
     let is_local_name = borrowed.local_names.contains(name);
@@ -4185,17 +4213,33 @@ fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
         return Ok(value);
     }
     if is_local_name {
-        return Err(PyError::named(
+        return Err(unbound_binding_error(name, as_free));
+    }
+    match parent {
+        Some(parent) => lookup_name_in_env_impl(&parent, name, as_free),
+        None => Ok(None),
+    }
+}
+
+/// Build the CPython 3.12 unbound-binding exception: `NameError` for a captured
+/// free variable, `UnboundLocalError` for a plain local (issue #2340).
+fn unbound_binding_error(name: &str, as_free: bool) -> PyError {
+    if as_free {
+        PyError::named(
+            "NameError",
+            format!(
+                "cannot access free variable '{}' where it is not associated with a value in enclosing scope",
+                name
+            ),
+        )
+    } else {
+        PyError::named(
             "UnboundLocalError",
             format!(
                 "cannot access local variable '{}' where it is not associated with a value",
                 name
             ),
-        ));
-    }
-    match parent {
-        Some(parent) => lookup_name_in_env(&parent, name),
-        None => Ok(None),
+        )
     }
 }
 
