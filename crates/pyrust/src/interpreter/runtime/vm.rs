@@ -4081,7 +4081,8 @@ impl Interpreter {
                                 // (UserFunction) still wins, and a non-backed
                                 // builtin class with its own `__iter__` sentinel
                                 // (e.g. `collections.deque`, whose body installs a
-                                // mutation guard) is left untouched.
+                                // mutation guard) is left untouched.  Covers the
+                                // bytes/bytearray subclass case from #2324.
                                 let user_iter = effective_user_iter(&class, &inst_rc);
                                 if let Some(method_val) = user_iter {
                                     let iter_obj = vm_try!(invoke_class_method(

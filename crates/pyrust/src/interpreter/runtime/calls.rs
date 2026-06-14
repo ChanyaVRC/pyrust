@@ -1579,7 +1579,7 @@ impl Interpreter {
                 if let ValueKind::BuiltinFunction(fn_name) = method_val.kind()
                     && fn_name.split_once('.').is_some_and(|(t, _)| {
                         matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
-                            | "str" | "int" | "float" | "bytes")
+                            | "str" | "int" | "float" | "bytes" | "bytearray")
                     })
                         && let Some(backing) = instance_builtin_data(inst) {
                             // Issue #1909: container protocol dunders
@@ -1602,7 +1602,7 @@ impl Interpreter {
                             }
                             enum BkKind {
                                 Dict, List, Set, Frozenset, Tuple,
-                                Str, Int, Float, Bytes, Other,
+                                Str, Int, Float, Bytes, Bytearray, Other,
                             }
                             let bk_kind = match backing.kind() {
                                 ValueKind::Dict(_) => BkKind::Dict,
@@ -1612,6 +1612,16 @@ impl Interpreter {
                                     if ops.type_name() == "frozenset" =>
                                 {
                                     BkKind::Frozenset
+                                }
+                                // Issue #2324: bytearray backing is a
+                                // `BuiltinObject`; route its methods (append,
+                                // upper, …) through the ops table like a plain
+                                // bytearray receiver.
+                                ValueKind::BuiltinObject { ops, .. }
+                                    if ops.type_name()
+                                        == pyrust_builtins::bytearray::TYPE_NAME =>
+                                {
+                                    BkKind::Bytearray
                                 }
                                 ValueKind::Tuple(_) => BkKind::Tuple,
                                 ValueKind::Str(_) => BkKind::Str,
@@ -1882,6 +1892,44 @@ impl Interpreter {
                                         &args_vec,
                                         &kw,
                                     )
+                                }
+                                BkKind::Bytearray => {
+                                    // Issue #2324: dispatch through the bytearray
+                                    // ops table, mirroring a plain bytearray
+                                    // receiver (the `BuiltinObject` arm of
+                                    // `bound_method_dispatch_inner`).  Coerce
+                                    // bytes-subclass / bytearray args first
+                                    // (#1928); `join`'s single iterable arg holds
+                                    // the items to join, so coerce its elements.
+                                    let args_vec = if method == "join" {
+                                        args_vec
+                                            .into_iter()
+                                            .map(coerce_bytes_subclass_join_iterable)
+                                            .collect()
+                                    } else {
+                                        coerce_bytes_subclass_method_args(
+                                            method, args_vec,
+                                        )
+                                    };
+                                    let kw_str: indexmap::IndexMap<String, Value> =
+                                        kw.iter()
+                                            .map(|(k, v)| {
+                                                let key = match k {
+                                                    PyKey::Str(s) => s
+                                                        .as_str()
+                                                        .unwrap_or("")
+                                                        .to_owned(),
+                                                    _ => String::new(),
+                                                };
+                                                (key, v.clone())
+                                            })
+                                            .collect();
+                                    let ValueKind::BuiltinObject { ops, state } =
+                                        backing.kind()
+                                    else {
+                                        unreachable!("BkKind::Bytearray guard above");
+                                    };
+                                    ops.call_method(state, method, args_vec, &kw_str)
                                 }
                                 BkKind::Other => Err(PyError::Runtime(format!(
                                     "internal: unexpected builtin_data kind for method '{method}'"
@@ -2350,13 +2398,19 @@ impl Interpreter {
             // review).
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
-            // Check __builtin_data__ before __getitem__: list/dict/set subclasses
-            // with no user-defined __iter__ should iterate the backing primitive.
-            if lookup_class_attr(&class, "__iter__").is_none()
+            // Resolve a *user-defined* `__iter__`, ignoring the inherited
+            // `bytes`/`bytearray` sentinel (issue #2324) which has no registry
+            // body and must drive iteration through the backing primitive.
+            let user_iter = lookup_class_attr(&class, "__iter__")
+                .filter(|m| !is_inherited_builtin_iter_sentinel(m));
+            // Check __builtin_data__ before __getitem__: list/dict/set/bytes/
+            // bytearray subclasses with no user-defined __iter__ should iterate
+            // the backing primitive.
+            if user_iter.is_none()
                 && let Some(backing) = instance_builtin_data(&inst_rc) {
                     return self.collect_iterable(&backing);
                 }
-            let iterator = if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+            let iterator = if let Some(method_val) = user_iter {
                 invoke_class_method(
                     self,
                     method_val,
