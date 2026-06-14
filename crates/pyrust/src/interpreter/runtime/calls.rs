@@ -3707,7 +3707,7 @@ impl Interpreter {
                         )
                     };
                     return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                            function.name,
+                            function.effective_qualname(),
                             total_positional_given,));
                 }
                 // Per-param "already bound" flags (stack-allocated for typical
@@ -3756,7 +3756,7 @@ impl Interpreter {
                         }
                         if bound[param_index] {
                             return Err(pyrust_core::type_err!("{}() got multiple values for argument '{}'",
-                                    function.name, name));
+                                    function.effective_qualname(), name));
                         }
                         bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, param_index, value)?;
                     } else {
@@ -3789,7 +3789,7 @@ impl Interpreter {
                                     )
                                 };
                             return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                                    function.name,
+                                    function.effective_qualname(),
                                     total_positional_given,));
                         }
                         bind_param(&mut bound, &function, num_regs, &mut regs, &local_env, positional_index, value)?;
@@ -3798,11 +3798,11 @@ impl Interpreter {
                 }
                 if !posonly_violations.is_empty() {
                     return Err(pyrust_core::type_err!("{}() got some positional-only arguments passed as keyword arguments: '{}'",
-                            function.name,
+                            function.effective_qualname(),
                             posonly_violations.join(", ")));
                 }
                 if let Some(name) = first_unknown_keyword {
-                    return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'", function.name, name));
+                    return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'", function.effective_qualname(), name));
                 }
                 // Resolve defaults: bind any still-unbound params straight into their
                 // destination register/cell.
@@ -3830,8 +3830,10 @@ impl Interpreter {
                 }
                 // Use the qualified name (e.g. "Foo.__new__") so the error message
                 // matches CPython 3.12: "Foo.__new__() missing 1 required positional
-                // argument: 'x'" rather than the bare "__new__()".
-                check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
+                // argument: 'x'" rather than the bare "__new__()".  `effective_qualname`
+                // honours a user-reassigned `f.__qualname__`, which CPython 3.12 also
+                // reflects in these messages.
+                check_missing_args(&function.effective_qualname(), &missing_positional, &missing_kwonly)?;
             }
 
             // Arguments are already bound directly into `regs` / `local_env`
@@ -4037,7 +4039,7 @@ impl Interpreter {
                     )
                 };
                 return Err(pyrust_core::type_err!("{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                        function.name, positional_vals.len(),));
+                        function.effective_qualname(), positional_vals.len(),));
             }
         }
 
@@ -4097,7 +4099,7 @@ impl Interpreter {
 
         // Report positional missing args first; only report kwonly if all
         // positional params were satisfied (matching CPython 3.12 behaviour).
-        check_missing_args(&function.qualname, &missing_positional, &missing_kwonly)?;
+        check_missing_args(&function.effective_qualname(), &missing_positional, &missing_kwonly)?;
 
         if !has_kwargs {
             // First pass: collect all positional-only violations so the error
@@ -4115,14 +4117,14 @@ impl Interpreter {
                 .collect();
             if !posonly_violations.is_empty() {
                 return Err(pyrust_core::type_err!("{}() got some positional-only arguments passed as keyword arguments: '{}'",
-                        function.name,
+                        function.effective_qualname(),
                         posonly_violations.join(", ")));
             }
             // Second pass: check for entirely unexpected keyword arguments.
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
                     return Err(pyrust_core::type_err!("{}() got an unexpected keyword argument '{}'",
-                            function.name, name));
+                            function.effective_qualname(), name));
                 }
             }
         }
