@@ -2258,6 +2258,11 @@ impl Interpreter {
             if let Some(native) = probe.downcast_mut::<NativeIterFrame>() {
                 let remaining: Vec<Value> = native.items[native.pos..].to_vec();
                 native.pos = native.items.len();
+                // Bulk-drain reaches end-of-iteration in one shot; latch the
+                // exhausted flag so a later size mutation + `next()` returns
+                // StopIteration (not RuntimeError), matching `advance()`'s
+                // clean-exhaustion path and CPython (#2448).
+                native.exhausted = true;
                 return Ok(remaining);
             }
 

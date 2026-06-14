@@ -6908,6 +6908,11 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
             if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                 let remaining = native.items[native.pos..].to_vec();
                 native.pos = native.items.len();
+                // Bulk-drain reaches end-of-iteration in one shot; latch the
+                // exhausted flag so a later size mutation + `next()` returns
+                // StopIteration (not RuntimeError), matching `advance()`'s
+                // clean-exhaustion path and CPython (#2448).
+                native.exhausted = true;
                 Ok(remaining)
             } else {
                 Err(pyrust_core::type_err!("object is not iterable"))
