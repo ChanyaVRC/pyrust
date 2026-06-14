@@ -655,13 +655,13 @@ pub(crate) fn live_collection_len(container: &Value) -> Option<usize> {
         return Some(s.len());
     }
     // dict-subclass instances (Counter / defaultdict / OrderedDict, #2201):
-    // re-resolve the `__builtin_data__` backing dict each step.  Counter and
-    // defaultdict *replace* the backing `Value` (a fresh `Rc`) on every
-    // mutation via `store_items`, so a captured-`Rc` snapshot goes stale and
-    // never trips the guard — re-reading the instance attr each step sees the
-    // current backing and detects the size change.  Only reached on the cold
-    // guarded path (these three subclasses); the common dict/set/deque guard
-    // above is untouched.
+    // re-resolve the `__builtin_data__` backing dict each step.  Re-reading the
+    // instance attr each step (rather than capturing the backing `Rc` at
+    // iterator creation) keeps the guard correct regardless of whether a
+    // mutation rewrites the backing map in place (`store_backing`, #2447) or
+    // replaces the whole `Value`: either way this sees the current backing and
+    // detects the size change.  Only reached on the cold guarded path (these
+    // three subclasses); the common dict/set/deque guard above is untouched.
     if let ValueKind::PyInstance(inst) = container.kind()
         && let Some(backing) = instance_builtin_data(inst)
     {
