@@ -1495,10 +1495,10 @@ fn read_counts(
 fn store_backing(inst: &Rc<RefCell<PyInstance>>, new_map: PyDict) {
     let mut borrow = inst.borrow_mut();
     let mut new_map = Some(new_map);
-    if let Some(v) = borrow.attrs.get(COUNTER_BACKING) {
-        if v.dict_with_mut(|m| *m = new_map.take().unwrap()).is_some() {
-            return;
-        }
+    if let Some(v) = borrow.attrs.get(COUNTER_BACKING)
+        && v.dict_with_mut(|m| *m = new_map.take().unwrap()).is_some()
+    {
+        return;
     }
     borrow
         .attrs
