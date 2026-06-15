@@ -237,12 +237,17 @@ fn parse_template(template: &str) -> ParsedTemplate {
             let field = &template[i + 1..j];
             i = j + 1;
 
-            let (field_name_full, spec) = split_field_and_spec(field);
-            let (field_name, conversion) = match field_name_full.rsplit_once('!') {
-                Some((name, conv)) if conv.len() == 1 => {
-                    (name, Some(conv.chars().next().unwrap()))
+            let (field_name, conversion, spec) = match split_field_conv_spec(field) {
+                Ok(parts) => parts,
+                Err(msg) => {
+                    // Malformed conversion flag (`{x!}`, `{x!ab}`, `{x!r!s}`).
+                    // CPython raises this `ValueError` in field order, after any
+                    // earlier complete fields render, so defer it as a `Raise`
+                    // segment at this point rather than aborting earlier output.
+                    flush_lit!();
+                    segs.push(TemplateSeg::Raise(msg));
+                    return ParsedTemplate { segs };
                 }
-                _ => (field_name_full, None),
             };
 
             let (head_str, rest) = split_head_and_accessors(field_name);
