@@ -3422,7 +3422,7 @@ fn ordered_dict_owner(class: &Rc<RefCell<PyClass>>) -> Option<Rc<RefCell<PyClass
         borrowed.name == "OrderedDict"
             && matches!(
                 borrowed.attrs.get("__module__").map(|m| m.kind()),
-                Some(ValueKind::Str(s)) if &*s == "collections"
+                Some(ValueKind::Str(s)) if s == "collections"
             )
     }
     fn find(class: &Rc<RefCell<PyClass>>) -> Option<Rc<RefCell<PyClass>>> {
