@@ -2660,6 +2660,23 @@ impl Interpreter {
                     args.len()
                 ));
             }
+            // Issue #2481: `float.__round__([ndigits])` returns an `int` when
+            // `ndigits` is omitted (`(1.5).__round__()` → `2`, banker's
+            // rounding) and a `float` when given (`(1.5).__round__(0)` →
+            // `2.0`).  Unlike `int.__round__`, the float slot treats an explicit
+            // `ndigits=None` as omitted (`(1.7).__round__(None)` → `2`), exactly
+            // as the `round()` builtin does — so route straight through it
+            // rather than the int-only `int_round_dunder` (which rejects None).
+            if type_name == "float" {
+                let dispatch = crate::builtin_registry::lookup("round")
+                    .expect("round must be in the registry");
+                let mut call_args =
+                    vec![ExpandedCallArg { name: None, value: receiver.clone() }];
+                if let Some(n) = args.pop() {
+                    call_args.push(ExpandedCallArg { name: None, value: n });
+                }
+                return dispatch(self, &call_args);
+            }
             return self.int_round_dunder(&receiver, args.pop());
         }
         // Arity check up front so the error matches CPython 3.12's slot-wrapper
@@ -2694,15 +2711,16 @@ impl Interpreter {
                     args.len()
                 ));
             }
-            // Issue #2297: `int.__trunc__`/`__floor__`/`__ceil__` are named
-            // no-arg method-wrappers in CPython 3.12 — the wording uses the
-            // owning type `int` even for a `bool` receiver
-            // (`int.__trunc__() takes no arguments (N given)`).  `__index__`
-            // (just below, anonymous slot) keeps the "expected 0 arguments,
-            // got N" form instead.
+            // Issue #2297/#2481: `int`/`float`.`__trunc__`/`__floor__`/`__ceil__`
+            // are named no-arg method-wrappers in CPython 3.12.  The int slots
+            // report the owning type `int` even for a `bool` receiver
+            // (`int.__trunc__() takes no arguments (N given)`); the float slots
+            // report `float`.  `__index__` (just below, anonymous int slot)
+            // keeps the "expected 0 arguments, got N" form instead.
             if matches!(method, "__trunc__" | "__floor__" | "__ceil__") {
+                let owner = if type_name == "float" { "float" } else { "int" };
                 return Err(pyrust_core::type_err!(
-                    "int.{method}() takes no arguments ({} given)",
+                    "{owner}.{method}() takes no arguments ({} given)",
                     args.len()
                 ));
             }
@@ -2752,6 +2770,19 @@ impl Interpreter {
                 let arg = ExpandedCallArg { name: None, value: receiver };
                 let dispatch = crate::builtin_registry::lookup(ctor)
                     .unwrap_or_else(|| panic!("{ctor} must be in the registry"));
+                return dispatch(self, &[arg]);
+            }
+            // Issue #2481: `float.__trunc__`/`__floor__`/`__ceil__` round the
+            // float to an `int` toward zero / -inf / +inf respectively
+            // (`(-1.7).__floor__()` → `-2`, `(-1.7).__ceil__()` → `-1`) — they
+            // are *not* identity like the int slots, so route through the
+            // dedicated `float.__X__` registry bodies (which already handle
+            // NaN/inf → ValueError/OverflowError, BigInt promotion and the
+            // float-subclass receiver).
+            "__trunc__" | "__floor__" | "__ceil__" if type_name == "float" => {
+                let arg = ExpandedCallArg { name: None, value: receiver };
+                let dispatch = crate::builtin_registry::lookup(&format!("float.{method}"))
+                    .expect("float.__trunc__/__floor__/__ceil__ must be in the registry");
                 return dispatch(self, &[arg]);
             }
             // Issue #2297: `int.__index__`/`__trunc__`/`__floor__`/`__ceil__`
@@ -7461,10 +7492,10 @@ pub(crate) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
         ("__getitem__", "list" | "dict")
             | ("__contains__", "dict" | "set" | "frozenset")
             | ("__reversed__", "list" | "dict")
-            // Issue #2297: `int.__round__`/`__trunc__`/`__floor__`/`__ceil__` are
-            // `method_descriptor`s (named keyword-rejection wording).
-            // `int.__index__` stays an anonymous slot wrapper.
-            | ("__round__" | "__trunc__" | "__floor__" | "__ceil__", "int" | "bool")
+            // Issue #2297/#2481: `int`/`float`.`__round__`/`__trunc__`/`__floor__`/
+            // `__ceil__` are `method_descriptor`s (named keyword-rejection
+            // wording).  `int.__index__` stays an anonymous slot wrapper.
+            | ("__round__" | "__trunc__" | "__floor__" | "__ceil__", "int" | "bool" | "float")
     )
 }
 
@@ -7492,7 +7523,6 @@ pub(crate) const SLOT_PROTOCOL: u8 = 2;
 pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)] {
     const PA: u8 = SLOT_ATTR | SLOT_PROTOCOL;
     const P: u8 = SLOT_PROTOCOL;
-    const A: u8 = SLOT_ATTR;
     match type_name {
         "list" => &[
             ("__len__", PA), ("__getitem__", PA), ("__setitem__", PA),
@@ -7596,7 +7626,11 @@ pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
             ("__rtruediv__", P), ("__rfloordiv__", P), ("__rmod__", P),
             ("__rpow__", P), ("__rdivmod__", P),
-            ("__trunc__", A), ("__floor__", A), ("__ceil__", A),
+            // Issue #2481: `float.__round__`/`__trunc__`/`__floor__`/`__ceil__`
+            // are float-owned method_descriptors — exposed unbound so
+            // `float.__trunc__` resolves, and dispatchable bound so
+            // `(1.7).__trunc__()`/`(1.7).__round__()` compute.
+            ("__round__", PA), ("__trunc__", PA), ("__floor__", PA), ("__ceil__", PA),
         ],
         "complex" => &[
             ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
