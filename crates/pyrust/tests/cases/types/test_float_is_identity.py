@@ -32,6 +32,13 @@ n = -0.0
 print(p is n)        # False
 print(p == n)        # True (0.0 == -0.0 numerically)
 
+# Aliased complex shares the same situation as float (bit-copied on clone,
+# no stable value_id): `d = c; d is c` must be True (#2527).
+c = 1 + 2j
+d = c
+print(d is c)        # True
+print(d is not c)    # False
+
 # Caveat (value-boxing tradeoff): two separately-constructed NaN objects are
 # bit-identical here, so we intentionally do NOT assert the CPython
 # distinct-NaN-objects case (CPython: False) — it cannot be matched in a value

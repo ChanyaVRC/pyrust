@@ -5178,6 +5178,15 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         // identities in CPython) are bit-identical here, so they compare
         // identical — a deliberate value-boxing tradeoff (#2527).
         (ValueKind::Float(x), ValueKind::Float(y)) => x.to_bits() == y.to_bits(),
+        // Complex shares Float's situation: it is bit-copied verbatim on clone
+        // (`Opaque::Complex(*re, *im)`) and `value_id()` returns None for it, so
+        // an aliased complex (`d = c; d is c`) must be identified by raw bit
+        // equality of both components — otherwise it falls through to `_ => false`
+        // and diverges from CPython (`d is c` is True).  Same value-boxing
+        // tradeoff as the Float arm above (#2527).
+        (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => {
+            ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits()
+        }
         (ValueKind::PyInstance(x), ValueKind::PyInstance(y)) => Rc::ptr_eq(x, y),
         (ValueKind::PyClass(x), ValueKind::PyClass(y)) => Rc::ptr_eq(x, y),
         (ValueKind::UserFunction(x), ValueKind::UserFunction(y)) => Rc::ptr_eq(x, y),
