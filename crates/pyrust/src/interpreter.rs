@@ -331,12 +331,31 @@ pub(crate) struct VmFrameView {
     /// the VM dispatch signatures.
     pub(crate) function: Option<Rc<UserFunction>>,
     /// For generator frames (which carry no `UserFunction`, so `function` is
-    /// `None`), the generator code object's `(funcname, filename)`.  Used so a
-    /// traceback built when an exception is *caught inside* the generator body
-    /// (e.g. via `generator.throw()`) attributes the catching frame to the
-    /// generator rather than falling back to the `<module>` frame (issue #2445).
-    /// `None` for every non-generator frame.
-    pub(crate) gen_code_info: Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
+    /// `None`), a raw pointer to the active `GeneratorFrame` from which the
+    /// generator's `(funcname, filename)` is recovered *lazily* on the cold
+    /// traceback path (issue #2471).  Used so a traceback built when an
+    /// exception is *caught inside* the generator body (e.g. via
+    /// `generator.throw()`) attributes the catching frame to the generator
+    /// rather than falling back to the `<module>` frame (issue #2445).  `None`
+    /// for every non-generator frame.
+    ///
+    /// Storing one pointer rather than two eagerly-cloned `Arc<str>`s keeps
+    /// `VmFrameView` narrow and the hot `vm_enter_gen_drive` setup free of the
+    /// two per-resume atomic refcount bumps that PR #2469 introduced: the
+    /// name/filename are read only when a traceback snapshot is actually built
+    /// (always the cold path).
+    ///
+    /// # Soundness
+    ///
+    /// The `GeneratorFrame` is heap-stable for the lifetime of this view.  At
+    /// both push sites it lives behind a stable address — the trampoline's
+    /// `Box<GeneratorFrame>` (held in `GenDriveFrame::gframe`) or a
+    /// `&mut GeneratorFrame` borrowed for the whole duration of
+    /// `resume_generator_with_exc` — and the view is popped before that box /
+    /// borrow ends.  Read only on the cold traceback path while the generator
+    /// frame is suspended inside the dispatch loop, so no `&mut GeneratorFrame`
+    /// to the same allocation is live concurrently.
+    pub(crate) gen_frame: Option<std::ptr::NonNull<GeneratorFrame>>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`

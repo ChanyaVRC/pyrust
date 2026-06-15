@@ -594,11 +594,23 @@ impl Interpreter {
         }
         let last_view = self.vm_frame_views.last();
         let catch_func = last_view.and_then(|view| view.function.clone());
-        // Issue #2445: a generator body has no `UserFunction`; fall back to the
-        // generator's recorded `(funcname, filename)` so the catching frame is
-        // attributed to the generator instead of `<module>`.
+        // Issue #2445: a generator body has no `UserFunction`; recover the
+        // generator's `(funcname, filename)` so the catching frame is attributed
+        // to the generator instead of `<module>`.  Issue #2471: the view stores
+        // only a pointer to the live `GeneratorFrame`; read the name/filename
+        // lazily here on the cold traceback-build path.
+        //
+        // SAFETY: `gen_frame` is non-null only while the generator frame is on
+        // the call stack (pushed/popped in lock-step with the view in
+        // `resume_generator_with_exc` / `vm_enter_gen_drive`).  This builder runs
+        // synchronously on that same stack while the frame is suspended, so the
+        // pointee is alive and no `&mut GeneratorFrame` to it is live.
         let catch_gen_info = if catch_func.is_none() {
-            last_view.and_then(|view| view.gen_code_info.clone())
+            last_view.and_then(|view| {
+                view.gen_frame
+                    .map(|p| unsafe { p.as_ref() })
+                    .map(|gframe| (gframe.fn_name.clone(), gframe.code.filename.clone()))
+            })
         } else {
             None
         };

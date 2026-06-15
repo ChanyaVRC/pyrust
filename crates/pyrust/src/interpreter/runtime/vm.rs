@@ -1126,11 +1126,15 @@ impl Interpreter {
             // traceback `tb_frame` for a generator-raised exception is built
             // from the lazily-captured `FrameInfo` (which carries `fn_name`).
             function: None,
-            // Issue #2445: carry the generator's name + filename so a traceback
-            // built when an exception is *caught inside* the body (e.g.
-            // `generator.throw()`) attributes the catching frame to the
-            // generator instead of falling back to the `<module>` frame.
-            gen_code_info: Some((frame.fn_name.clone(), frame.code.filename.clone())),
+            // Issue #2445/#2471: store a pointer to this generator frame so a
+            // traceback built when an exception is *caught inside* the body
+            // (e.g. `generator.throw()`) can recover the generator's name +
+            // filename lazily on the cold path and attribute the catching frame
+            // to the generator instead of falling back to `<module>`.  `frame`
+            // is borrowed for the entire `run_bytecode_inner` call below, and
+            // the view is popped before that borrow ends, so the pointer stays
+            // valid for the view's lifetime.
+            gen_frame: Some(std::ptr::NonNull::from(&*frame)),
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
@@ -1370,8 +1374,12 @@ impl Interpreter {
             env: gen_env_opt,
             is_class_method: gframe.code.is_class_method,
             function: None,
-            // Issue #2445: see the matching site in `resume_generator_with_exc`.
-            gen_code_info: Some((gframe.fn_name.clone(), gframe.code.filename.clone())),
+            // Issue #2445/#2471: see the matching site in
+            // `resume_generator_with_exc`.  `gframe` is a `Box<GeneratorFrame>`
+            // whose heap allocation is stable across the move into
+            // `GenDriveFrame::gframe` below (only the box pointer moves), so the
+            // pointer remains valid while this view is on the stack.
+            gen_frame: Some(std::ptr::NonNull::from(&*gframe)),
         });
         let gen_code_rc = Rc::clone(&gframe.code);
         let gen_code_ptr: *const crate::bytecode::FnCode = Rc::as_ptr(&gen_code_rc);
@@ -2164,7 +2172,7 @@ impl Interpreter {
                     env: None,
                     is_class_method: callee_code.is_class_method,
                     function: Some(Rc::clone(f)),
-                    gen_code_info: None,
+                    gen_frame: None,
                 });
                 tramp_active_base = $base;
                 active_code_rc = Some(callee_code);
