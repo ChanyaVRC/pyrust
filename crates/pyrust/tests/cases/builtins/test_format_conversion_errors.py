@@ -28,6 +28,13 @@ show("map {x!}", lambda: "{x!}".format_map({"x": 1}))
 show("map {x!ab}", lambda: "{x!ab}".format_map({"x": 1}))
 show("map {x!z}", lambda: "{x!z}".format_map({"x": 1}))
 
+# --- unknown conversion char renders CPython-style: printable ASCII literal,
+#     everything else as '\\x' + minimal lowercase hex (matches %c) ---
+show("{x! }", lambda: "{x! }".format(x=1))  # space -> \x20
+show("{x!\xf1}", lambda: "{x!\xf1}".format(x=1))  # ñ -> \xf1
+show("{x!€}", lambda: "{x!€}".format(x=1))  # € -> \x20ac
+show("{x!\U0001f600}", lambda: "{x!\U0001f600}".format(x=1))  # 😀 -> \x1f600
+
 # --- error ordering: an earlier complete field renders/raises first ---
 show("{a} {x!}", lambda: "{a} {x!}".format(a=1, x=2))
 show("{missing} {x!}", lambda: "{missing} {x!}".format(x=2))

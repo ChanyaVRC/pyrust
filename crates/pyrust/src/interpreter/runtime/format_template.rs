@@ -139,6 +139,20 @@ fn get_or_parse_template(template: &str) -> Rc<ParsedTemplate> {
 ///  * `!` then end → `end of string while looking for conversion specifier`
 ///  * `!c` then a stray char → `expected ':' after conversion specifier`
 ///  * format spec (after `:`) never closed (`{x:`, `{x!r:`) → `unmatched '{' in format spec`
+/// Render a conversion char for the "Unknown conversion specifier" message the
+/// way CPython does. CPython builds the message with `PyUnicode_FromFormat`'s
+/// `%c`, which prints printable ASCII (`0x21..=0x7e`) literally and every other
+/// code point as `\x` + minimal lowercase hex (e.g. `ñ` → `\xf1`, space → `\x20`,
+/// `€` → `\x20ac`).
+fn fmt_conversion_char(c: char) -> String {
+    let cp = c as u32;
+    if (0x21..=0x7e).contains(&cp) {
+        c.to_string()
+    } else {
+        format!("\\x{cp:x}")
+    }
+}
+
 fn classify_unterminated_field(field: &str) -> &'static str {
     if field.is_empty() {
         return "Single '{' encountered in format string";
@@ -470,7 +484,10 @@ impl Interpreter {
             Some('s') => Value::string(self.render_value_as_str(&value)?),
             Some('a') => Value::string(ascii_repr_interp(self, &value)?),
             Some(c) => {
-                return Err(pyrust_core::value_err!("Unknown conversion specifier {c}"));
+                return Err(pyrust_core::value_err!(
+                    "Unknown conversion specifier {}",
+                    fmt_conversion_char(c)
+                ));
             }
             None => value,
         })
