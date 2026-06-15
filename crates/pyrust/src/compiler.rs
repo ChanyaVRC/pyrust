@@ -784,6 +784,7 @@ fn lambda_captures_in_stmt(
         Stmt::Raise {
             expr: Some(e),
             cause,
+            ..
         } => {
             lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             if let Some(c) = cause {
@@ -918,7 +919,7 @@ fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
                 collect_walrus_writes_in_expr(e, out);
             }
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             collect_walrus_writes_in_expr(func, out);
             for a in args {
                 collect_walrus_writes_in_expr(&a.value, out);
@@ -945,7 +946,7 @@ fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             collect_walrus_writes_in_expr(target, out);
             collect_walrus_writes_in_expr(index, out);
         }
@@ -1110,7 +1111,7 @@ fn lambda_captures_in_expr(
                 lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             lambda_captures_in_expr(func, local_index, is_class_scope, cells);
             for a in args {
                 lambda_captures_in_expr(&a.value, local_index, is_class_scope, cells);
@@ -1119,7 +1120,7 @@ fn lambda_captures_in_expr(
         Expr::Attr { target, .. } => {
             lambda_captures_in_expr(target, local_index, is_class_scope, cells)
         }
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             lambda_captures_in_expr(target, local_index, is_class_scope, cells);
             lambda_captures_in_expr(index, local_index, is_class_scope, cells);
         }
@@ -1636,7 +1637,7 @@ fn collect_class_lambda_outer_refs_in_expr(
                 collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
             }
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             collect_class_lambda_outer_refs_in_expr(func, local_index, class_locals, cells);
             for a in args {
                 collect_class_lambda_outer_refs_in_expr(&a.value, local_index, class_locals, cells);
@@ -1645,7 +1646,7 @@ fn collect_class_lambda_outer_refs_in_expr(
         Expr::Attr { target, .. } => {
             collect_class_lambda_outer_refs_in_expr(target, local_index, class_locals, cells)
         }
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             collect_class_lambda_outer_refs_in_expr(target, local_index, class_locals, cells);
             collect_class_lambda_outer_refs_in_expr(index, local_index, class_locals, cells);
         }
@@ -1876,6 +1877,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         Stmt::Raise {
             expr: Some(e),
             cause,
+            ..
         } => {
             collect_free_var_reads_in_expr(e, uses);
             if let Some(c) = cause {
@@ -1940,14 +1942,14 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(e, uses);
             }
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             collect_free_var_reads_in_expr(func, uses);
             for a in args {
                 collect_free_var_reads_in_expr(&a.value, uses);
             }
         }
         Expr::Attr { target, .. } => collect_free_var_reads_in_expr(target, uses),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             collect_free_var_reads_in_expr(target, uses);
             collect_free_var_reads_in_expr(index, uses);
         }
@@ -2257,6 +2259,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
         Stmt::Raise {
             expr: Some(e),
             cause,
+            ..
         } => {
             collect_transitive_free_vars_in_expr(e, uses);
             if let Some(c) = cause {
@@ -2337,14 +2340,14 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 collect_transitive_free_vars_in_expr(e, uses);
             }
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             collect_transitive_free_vars_in_expr(func, uses);
             for a in args {
                 collect_transitive_free_vars_in_expr(&a.value, uses);
             }
         }
         Expr::Attr { target, .. } => collect_transitive_free_vars_in_expr(target, uses),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             collect_transitive_free_vars_in_expr(target, uses);
             collect_transitive_free_vars_in_expr(index, uses);
         }
@@ -2536,7 +2539,9 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
                 _ => None,
             }
         }
-        Expr::Binary { left, op, right } => {
+        Expr::Binary {
+            left, op, right, ..
+        } => {
             let l = fold_constant(left)?;
             let r = fold_constant(right)?;
             fold_binop(&l, *op, &r)
@@ -2810,9 +2815,9 @@ fn expr_is_side_effect_free(expr: &Expr) -> bool {
         | Expr::Ellipsis
         | Expr::Var(_, _) => true,
         Expr::Unary { expr, .. } => expr_is_side_effect_free(expr),
-        Expr::Binary { left, right, op: _ } => {
-            expr_is_side_effect_free(left) && expr_is_side_effect_free(right)
-        }
+        Expr::Binary {
+            left, right, op: _, ..
+        } => expr_is_side_effect_free(left) && expr_is_side_effect_free(right),
         Expr::Compare { left, ops } => {
             expr_is_side_effect_free(left) && ops.iter().all(|(_, e)| expr_is_side_effect_free(e))
         }
@@ -2872,7 +2877,9 @@ fn rewrite_break_top(body: Vec<Stmt>) -> Option<(Expr, Vec<Stmt>)> {
 /// Falls back to `Expr::Unary { Not, expr }` for non-comparison guards.
 fn negate_expr(expr: Expr) -> Expr {
     match expr {
-        Expr::Binary { left, op, right } => {
+        Expr::Binary {
+            left, op, right, ..
+        } => {
             let inverted = match op {
                 BinaryOp::Lt => Some(BinaryOp::Ge),
                 BinaryOp::Le => Some(BinaryOp::Gt),
@@ -2887,10 +2894,16 @@ fn negate_expr(expr: Expr) -> Expr {
                     left,
                     op: inv,
                     right,
+                    span: None,
                 },
                 None => Expr::Unary {
                     op: UnaryOp::Not,
-                    expr: Box::new(Expr::Binary { left, op, right }),
+                    expr: Box::new(Expr::Binary {
+                        left,
+                        op,
+                        right,
+                        span: None,
+                    }),
                 },
             }
         }
@@ -3087,7 +3100,7 @@ fn stmt_may_mutate_object(stmt: &Stmt) -> bool {
                         || stmts_may_mutate_object(&a.body)
                 })
         }
-        Stmt::Raise { expr, cause } => {
+        Stmt::Raise { expr, cause, .. } => {
             expr.as_ref().is_some_and(expr_may_mutate_object)
                 || cause.as_ref().is_some_and(expr_may_mutate_object)
         }
@@ -3152,7 +3165,7 @@ fn expr_may_mutate_object(expr: &Expr) -> bool {
                 || expr_may_mutate_object(else_)
         }
         Expr::Attr { target, .. } => expr_may_mutate_object(target),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             expr_may_mutate_object(target) || expr_may_mutate_object(index)
         }
         Expr::Slice {
@@ -3250,13 +3263,14 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
             op: BinaryOp::Lt,
             left,
             right,
+            ..
         } => {
             let i = match left.as_ref() {
                 Expr::Var(n, _) => n.clone(),
                 _ => return None,
             };
             let c = match right.as_ref() {
-                Expr::Call { func, args } => {
+                Expr::Call { func, args, .. } => {
                     if !matches!(func.as_ref(), Expr::Var(f, _) if f == "len") {
                         return None;
                     }
@@ -3297,6 +3311,7 @@ fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
                 op: BinaryOp::Add,
                 left,
                 right,
+                ..
             },
         ) => {
             t == &i_name
@@ -3485,7 +3500,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
             // `del c[i]` is unsafe; any other delete is OK as long as it
             // doesn't reference i in a bare way.
             for e in exprs {
-                if let Expr::Index { target, index } = e
+                if let Expr::Index { target, index, .. } = e
                     && is_c_at_i_expr(target, index, c_name, i_name)
                 {
                     return false;
@@ -3506,7 +3521,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
             expr_safe(test, i_name, c_name)
                 && msg.as_ref().is_none_or(|m| expr_safe(m, i_name, c_name))
         }
-        Stmt::Raise { expr, cause } => {
+        Stmt::Raise { expr, cause, .. } => {
             expr.as_ref().is_none_or(|e| expr_safe(e, i_name, c_name))
                 && cause.as_ref().is_none_or(|e| expr_safe(e, i_name, c_name))
         }
@@ -3556,7 +3571,7 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
             // see the index, not the value — bail.  Bare `c` reads are fine.
             n != i_name
         }
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             // `c[i]` is the canonical safe shape: rewritten to a bare `i`.
             if is_c_at_i_expr(target, index, c_name, i_name) {
                 return true;
@@ -3591,7 +3606,7 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
                 && expr_safe(then, i_name, c_name)
                 && expr_safe(else_, i_name, c_name)
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             expr_safe(func, i_name, c_name)
                 && args.iter().all(|a| expr_safe(&a.value, i_name, c_name))
         }
@@ -3770,7 +3785,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         Stmt::Assert { test, msg } => {
             expr_reads_var(test, name) || msg.as_ref().is_some_and(|e| expr_reads_var(e, name))
         }
-        Stmt::Raise { expr, cause } => {
+        Stmt::Raise { expr, cause, .. } => {
             expr.as_ref().is_some_and(|e| expr_reads_var(e, name))
                 || cause.as_ref().is_some_and(|e| expr_reads_var(e, name))
         }
@@ -3819,11 +3834,11 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
         Expr::Ternary { cond, then, else_ } => {
             expr_reads_var(cond, name) || expr_reads_var(then, name) || expr_reads_var(else_, name)
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             expr_reads_var(func, name) || args.iter().any(|a| expr_reads_var(&a.value, name))
         }
         Expr::Attr { target, .. } => expr_reads_var(target, name),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             expr_reads_var(target, name) || expr_reads_var(index, name)
         }
         Expr::Slice {
@@ -3982,7 +3997,7 @@ fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
                 rewrite_c_at_i_in_expr(m, c_name, i_name);
             }
         }
-        Stmt::Raise { expr, cause } => {
+        Stmt::Raise { expr, cause, .. } => {
             if let Some(e) = expr.as_mut() {
                 rewrite_c_at_i_in_expr(e, c_name, i_name);
             }
@@ -3999,7 +4014,7 @@ fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
 
 fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
     // `c[i]` → `i` (the rewritten loop variable now holds the element value).
-    if let Expr::Index { target, index } = expr
+    if let Expr::Index { target, index, .. } = expr
         && is_c_at_i_expr(target, index, c_name, i_name)
     {
         *expr = Expr::Var(i_name.to_string(), None);
@@ -4035,14 +4050,14 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
             rewrite_c_at_i_in_expr(then, c_name, i_name);
             rewrite_c_at_i_in_expr(else_, c_name, i_name);
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             rewrite_c_at_i_in_expr(func, c_name, i_name);
             for a in args.iter_mut() {
                 rewrite_c_at_i_in_expr(&mut a.value, c_name, i_name);
             }
         }
         Expr::Attr { target, .. } => rewrite_c_at_i_in_expr(target, c_name, i_name),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             rewrite_c_at_i_in_expr(target, c_name, i_name);
             rewrite_c_at_i_in_expr(index, c_name, i_name);
         }
@@ -4100,11 +4115,12 @@ fn detect_while_range<'a>(
     body: &'a [Stmt],
 ) -> Option<(&'a str, &'a Expr, i64, bool)> {
     let (var_name, cmp_op, stop_expr) = match cond {
-        Expr::Binary { op, left, right }
-            if matches!(
-                op,
-                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
-            ) =>
+        Expr::Binary {
+            op, left, right, ..
+        } if matches!(
+            op,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        ) =>
         {
             match left.as_ref() {
                 Expr::Var(name, _) => (name.as_str(), op, right.as_ref()),
@@ -4211,18 +4227,21 @@ struct Compiler {
     /// Per-instruction 1-based source line numbers, parallel to `insns`.
     /// Filled by `emit()` from `current_lineno`.  0 = unknown.
     lineno_table: Vec<u32>,
-    /// Per-instruction PEP 657 caret anchor, parallel to `insns` (issue #2426).
-    /// Filled by `emit()` from `current_col_span`.  `(0, 0)` = no anchor.
-    col_table: Vec<(u32, u32)>,
+    /// Per-instruction PEP 657 caret anchor, parallel to `insns` (issues #2426 /
+    /// #2411).  Filled by `emit()` from `current_col_span`.  Each entry is
+    /// `(full_start, prim_start, prim_end, full_end)` (see [`crate::ast::CaretSpan`]);
+    /// `(0, 0, 0, 0)` = no anchor.
+    col_table: Vec<crate::ast::CaretSpan>,
     /// 1-based line number of the statement currently being compiled.
     /// Set by `set_lineno()` before each `compile_stmt` call when line
     /// information is available.  0 when no line info is known.
     current_lineno: u32,
     /// PEP 657 caret anchor stamped onto the next emitted instruction(s)
-    /// (issue #2426).  Set transiently by `compile_expr` around the
-    /// instruction that loads a plumbed sub-expression (a bare-name `Var`), then
-    /// cleared back to `(0, 0)`.  `(0, 0)` means "no anchor".
-    current_col_span: (u32, u32),
+    /// (issues #2426 / #2411).  Set transiently by `compile_expr` around the
+    /// instruction that loads a plumbed sub-expression (bare-name `Var`, call,
+    /// binary op, subscript), then cleared back to `(0, 0, 0, 0)`.
+    /// `(0, 0, 0, 0)` means "no anchor".
+    current_col_span: crate::ast::CaretSpan,
     /// 1-based source line of the `def`/`lambda` this compiler is the body of
     /// — emitted into `FnCode::first_lineno` (the function's `co_firstlineno`).
     /// 0 for the module-level compiler (issue #2185).
@@ -4462,7 +4481,7 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
                 || step.as_deref().is_some_and(expr_contains_yield)
                 || expr_contains_yield(expr)
         }
-        Stmt::Raise { expr, cause } => {
+        Stmt::Raise { expr, cause, .. } => {
             expr.as_ref().is_some_and(expr_contains_yield)
                 || cause.as_ref().is_some_and(expr_contains_yield)
         }
@@ -4495,11 +4514,13 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         Expr::Ternary { cond, then, else_ } => {
             expr_contains_yield(cond) || expr_contains_yield(then) || expr_contains_yield(else_)
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             expr_contains_yield(func) || args.iter().any(|a| expr_contains_yield(&a.value))
         }
         Expr::Attr { target, .. } => expr_contains_yield(target),
-        Expr::Index { target, index } => expr_contains_yield(target) || expr_contains_yield(index),
+        Expr::Index { target, index, .. } => {
+            expr_contains_yield(target) || expr_contains_yield(index)
+        }
         Expr::Slice {
             target,
             lower,
@@ -4585,11 +4606,13 @@ fn expr_contains_await(expr: &Expr) -> bool {
         Expr::Ternary { cond, then, else_ } => {
             expr_contains_await(cond) || expr_contains_await(then) || expr_contains_await(else_)
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             expr_contains_await(func) || args.iter().any(|a| expr_contains_await(&a.value))
         }
         Expr::Attr { target, .. } => expr_contains_await(target),
-        Expr::Index { target, index } => expr_contains_await(target) || expr_contains_await(index),
+        Expr::Index { target, index, .. } => {
+            expr_contains_await(target) || expr_contains_await(index)
+        }
         Expr::Slice {
             target,
             lower,
@@ -4718,14 +4741,14 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
                 || expr_has_async_collection_comp(then)
                 || expr_has_async_collection_comp(else_)
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             expr_has_async_collection_comp(func)
                 || args
                     .iter()
                     .any(|a| expr_has_async_collection_comp(&a.value))
         }
         Expr::Attr { target, .. } => expr_has_async_collection_comp(target),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             expr_has_async_collection_comp(target) || expr_has_async_collection_comp(index)
         }
         Expr::Slice {
@@ -4854,7 +4877,7 @@ fn stringify_annotation(expr: &Expr) -> String {
         Expr::Attr { target, name } => {
             format!("{}.{}", stringify_annotation(target), name)
         }
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             // In subscript position, a tuple is rendered without outer parens:
             // `dict[str, int]` not `dict[(str, int)]`.
             let index_str = match index.as_ref() {
@@ -4874,7 +4897,9 @@ fn stringify_annotation(expr: &Expr) -> String {
             let parts: Vec<String> = elts.iter().map(stringify_annotation).collect();
             format!("({})", parts.join(", "))
         }
-        Expr::Binary { left, op, right } => {
+        Expr::Binary {
+            left, op, right, ..
+        } => {
             let op_str = match op {
                 BinaryOp::BitOr => " | ",
                 BinaryOp::Add => " + ",
@@ -5024,8 +5049,9 @@ impl Compiler {
             insns: Vec::new(),
             lineno_table: Vec::new(),
             col_table: Vec::new(),
+            // (0, 0, 0, 0) sentinel = no anchor (#2411).
             current_lineno: 0,
-            current_col_span: (0, 0),
+            current_col_span: (0, 0, 0, 0),
             first_lineno: 0,
             filename: std::sync::Arc::from("<unknown>"),
             consts: Vec::new(),
@@ -5241,15 +5267,15 @@ impl Compiler {
         // The armed PEP 657 anchor applies to exactly this instruction (#2426);
         // consume and clear it so it never leaks onto the next emit.
         self.col_table.push(self.current_col_span);
-        self.current_col_span = (0, 0);
+        self.current_col_span = (0, 0, 0, 0);
         idx
     }
 
-    /// Arm a PEP 657 caret anchor (issue #2426) for the **next** emitted
-    /// instruction.  `None` (a span-less name) clears the anchor — the formatter
-    /// then omits the caret row.  Consumed and reset by `emit`.
-    fn set_col_span_for_next(&mut self, span: Option<(u32, u32)>) {
-        self.current_col_span = span.unwrap_or((0, 0));
+    /// Arm a PEP 657 caret anchor (issues #2426 / #2411) for the **next**
+    /// emitted instruction.  `None` (a span-less form) clears the anchor — the
+    /// formatter then omits the caret row.  Consumed and reset by `emit`.
+    fn set_col_span_for_next(&mut self, span: Option<crate::ast::CaretSpan>) {
+        self.current_col_span = span.unwrap_or((0, 0, 0, 0));
     }
 
     /// Set the source line number for all subsequently emitted instructions.
@@ -5939,8 +5965,8 @@ impl Compiler {
                     self.set_syntax_error("nonlocal declaration not allowed at module level");
                 }
             }
-            Stmt::Raise { expr, cause } => {
-                self.compile_raise(expr.as_ref(), cause.as_ref());
+            Stmt::Raise { expr, cause, span } => {
+                self.compile_raise(expr.as_ref(), cause.as_ref(), *span);
             }
             Stmt::Delete(exprs) => {
                 for expr in exprs {
@@ -7031,7 +7057,7 @@ impl Compiler {
                     self.check_dead_expr(else_);
                 }
             }
-            Expr::Call { func, args } => {
+            Expr::Call { func, args, .. } => {
                 self.check_dead_expr(func);
                 for a in args {
                     if self.failed {
@@ -7979,7 +8005,7 @@ impl Compiler {
 
         // iter_expr must be a plain `range(...)` call with no splats/kwargs.
         let (func, args) = match iter_expr {
-            Expr::Call { func, args } => (func.as_ref(), args.as_slice()),
+            Expr::Call { func, args, .. } => (func.as_ref(), args.as_slice()),
             _ => return false,
         };
         if !matches!(func, Expr::Var(n, _) if n == "range") {
@@ -8264,7 +8290,13 @@ impl Compiler {
 
     // ── Raise / Delete / Import ───────────────────────────────────────────────
 
-    fn compile_raise(&mut self, expr: Option<&Expr>, cause: Option<&Expr>) {
+    fn compile_raise(
+        &mut self,
+        expr: Option<&Expr>,
+        cause: Option<&Expr>,
+        // PEP 657 whole-statement caret anchor for `raise <expr>` (#2411).
+        raise_span: Option<crate::ast::CaretSpan>,
+    ) {
         // If we are inside an except handler body and that handler's enclosing
         // try/except/finally has a finally clause, the compiler already popped the
         // outer SetupExcept from the VM's exc_handlers stack (to avoid double-running
@@ -8357,6 +8389,11 @@ impl Compiler {
             }
             return;
         }
+        // PEP 657 caret anchor (#2411): `raise <expr>` underlines the whole
+        // raise statement (CPython behaviour).  The RaiseValue/RaiseFrom
+        // instruction is what raises, so arm the statement span onto it; the
+        // formatter omits it when it covers the whole dedented line (a bare
+        // `raise name` at statement scope).
         match (compiled, bare_reraise_tmp) {
             // Bare `raise` inside an except handler body with a finally: use the
             // saved exception value so the re-raise is independent of
@@ -8371,11 +8408,13 @@ impl Compiler {
                 self.emit(Insn::RaiseReRaise);
             }
             (Some((r, Some(c))), _) => {
+                self.set_col_span_for_next(raise_span);
                 self.emit(Insn::RaiseFrom(r, c));
                 self.free_temp(c);
                 self.free_temp(r);
             }
             (Some((r, None)), _) => {
+                self.set_col_span_for_next(raise_span);
                 self.emit(Insn::RaiseValue(r));
                 self.free_temp(r);
             }
@@ -8481,7 +8520,7 @@ impl Compiler {
                 self.emit(Insn::DeleteAttr(obj, name_idx));
                 self.free_temp(obj);
             }
-            Expr::Index { target, index } => {
+            Expr::Index { target, index, .. } => {
                 let obj = self.compile_expr(target);
                 let idx = self.compile_expr(index);
                 self.emit(Insn::DeleteItem(obj, idx));
@@ -10708,7 +10747,10 @@ impl Compiler {
                 // load instruction that may raise NameError; `emit` then clears
                 // it.  We arm *immediately before* each load emit (not for the
                 // definitely-bound-local path, which emits nothing) so a stale
-                // span never leaks onto an unrelated instruction.
+                // span never leaks onto an unrelated instruction.  A bare name's
+                // anchor is whole-span (`^`), so widen the `(start, end)` form to
+                // the `(full, prim) = (start, start, end, end)` shape (#2411).
+                let span: Option<crate::ast::CaretSpan> = span.map(|(s, e)| (s, s, e, e));
                 if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
@@ -10723,12 +10765,12 @@ impl Compiler {
                         if self.is_module_scope {
                             let name_idx = self.intern_name(name);
                             let dst = self.alloc_temp();
-                            self.set_col_span_for_next(*span);
+                            self.set_col_span_for_next(span);
                             self.emit(Insn::LoadGlobal(dst, name_idx));
                             return dst;
                         }
                         let name_idx = self.intern_name(name);
-                        self.set_col_span_for_next(*span);
+                        self.set_col_span_for_next(span);
                         self.emit(Insn::CheckLocal(reg, name_idx));
                     }
                     reg
@@ -10740,7 +10782,7 @@ impl Compiler {
                     // emit LoadCell to skip the LoadGlobal inline-cache + module
                     // -dict path (issue #2339).  Everything else (true globals,
                     // builtins, module/class-scope free vars) keeps LoadGlobal.
-                    self.set_col_span_for_next(*span);
+                    self.set_col_span_for_next(span);
                     if self.is_function_cell(name) {
                         self.emit(Insn::LoadCell(dst, name_idx));
                     } else {
@@ -10755,13 +10797,22 @@ impl Compiler {
                 self.emit(Insn::UnaryOp(dst, *op, src));
                 dst
             }
-            Expr::Binary { left, op, right } => match op {
+            Expr::Binary {
+                left,
+                op,
+                right,
+                span,
+            } => match op {
                 BinaryOp::And => self.compile_short_circuit(left, right, false),
                 BinaryOp::Or => self.compile_short_circuit(left, right, true),
                 _ => {
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);
                     let rhs = self.compile_expr(right);
+                    // PEP 657 caret anchor (#2411): the operator underlines `^`,
+                    // operands `~`.  Arm immediately before the BinOp that may
+                    // raise (e.g. ZeroDivisionError / TypeError); `emit` clears it.
+                    self.set_col_span_for_next(*span);
                     self.emit(Insn::BinOp(dst, lhs, *op, rhs));
                     self.free_temp(rhs);
                     dst
@@ -10811,7 +10862,7 @@ impl Compiler {
                     result_dst
                 }
             }
-            Expr::Call { func, args } => self.compile_call(func, args),
+            Expr::Call { func, args, span } => self.compile_call(func, args, *span),
             Expr::Attr { target, name } => {
                 let obj = self.compile_expr(target);
                 let name_idx = self.intern_name(name);
@@ -10819,10 +10870,18 @@ impl Compiler {
                 self.emit(Insn::GetAttr(dst, obj, name_idx));
                 dst
             }
-            Expr::Index { target, index } => {
+            Expr::Index {
+                target,
+                index,
+                span,
+            } => {
                 let obj = self.compile_expr(target);
                 let idx = self.compile_expr(index);
                 let dst = self.ensure_dst(obj);
+                // PEP 657 caret anchor (#2411): object underlined `~`, `[...]`
+                // underlined `^`.  Arm before the GetItem that may raise
+                // KeyError / IndexError / TypeError; `emit` clears it.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::GetItem(dst, obj, idx));
                 self.free_temp(idx);
                 dst
@@ -11330,7 +11389,7 @@ impl Compiler {
                     Self::collect_walrus_targets_in_expr(e, out);
                 }
             }
-            Expr::Call { func, args } => {
+            Expr::Call { func, args, .. } => {
                 Self::collect_walrus_targets_in_expr(func, out);
                 for a in args {
                     Self::collect_walrus_targets_in_expr(&a.value, out);
@@ -11359,7 +11418,7 @@ impl Compiler {
                     }
                 }
             }
-            Expr::Index { target, index } => {
+            Expr::Index { target, index, .. } => {
                 Self::collect_walrus_targets_in_expr(target, out);
                 Self::collect_walrus_targets_in_expr(index, out);
             }
@@ -11465,7 +11524,7 @@ impl Compiler {
                 Stmt::IndexAssign { expr: e, .. } | Stmt::SliceAssign { expr: e, .. } => {
                     Self::collect_walrus_targets_in_expr(e, out);
                 }
-                Stmt::Raise { expr, cause } => {
+                Stmt::Raise { expr, cause, .. } => {
                     if let Some(e) = expr {
                         Self::collect_walrus_targets_in_expr(e, out);
                     }
@@ -11750,6 +11809,7 @@ impl Compiler {
 
         // Build the innermost statement: .acc.append(elt)
         let innermost = Stmt::Expr(Expr::Call {
+            span: None,
             func: Box::new(Expr::Attr {
                 target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "append".to_string(),
@@ -11828,7 +11888,7 @@ impl Compiler {
         if !self.is_set_comp {
             return false;
         }
-        let Expr::Call { func, args } = expr else {
+        let Expr::Call { func, args, .. } = expr else {
             return false;
         };
         let Expr::Attr { target, name } = func.as_ref() else {
@@ -11866,7 +11926,7 @@ impl Compiler {
         if !self.is_list_comp {
             return false;
         }
-        let Expr::Call { func, args } = expr else {
+        let Expr::Call { func, args, .. } = expr else {
             return false;
         };
         let Expr::Attr { target, name } = func.as_ref() else {
@@ -11916,6 +11976,7 @@ impl Compiler {
 
         // Build the innermost statement: .acc.add(elt)
         let innermost = Stmt::Expr(Expr::Call {
+            span: None,
             func: Box::new(Expr::Attr {
                 target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "add".to_string(),
@@ -11930,6 +11991,7 @@ impl Compiler {
 
         // Build the accumulator: .acc = set()
         let acc_init = Expr::Call {
+            span: None,
             func: Box::new(Expr::Var("set".to_string(), None)),
             args: vec![],
         };
@@ -12154,7 +12216,16 @@ impl Compiler {
         fn_reg
     }
 
-    fn compile_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
+    fn compile_call(
+        &mut self,
+        func: &Expr,
+        args: &[crate::ast::CallArg],
+        // PEP 657 caret anchor (#2411) for the whole `callee(...)` span.  Armed
+        // immediately before the terminal call instruction on the simple
+        // positional-call path; complex paths (keyword / method / splat) stay
+        // caret-free (safe — a missing caret beats a wrong one).
+        span: Option<crate::ast::CaretSpan>,
+    ) -> Reg {
         // Check for any splat args — these require a variadic call path.
         let has_splat = args.iter().any(|a| a.splat || a.double_splat);
         let has_kwargs = args.iter().any(|a| a.name.is_some());
@@ -12240,6 +12311,9 @@ impl Compiler {
         }
         let is_pure_callee =
             matches!(func, Expr::Var(n, _) if self.pure_locals.contains(n.as_str()));
+        // Arm the `callee(...)` caret anchor on the terminal call instruction
+        // (#2411); `emit` consumes and clears it.
+        self.set_col_span_for_next(span);
         if is_pure_callee {
             self.emit(Insn::CallMemo(func_reg, argc));
         } else {

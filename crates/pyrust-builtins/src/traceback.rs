@@ -29,6 +29,13 @@ pub struct TracebackState {
     pub lineno: i64,
     /// `tb_lasti` — last bytecode offset (best-effort `-1`).
     pub lasti: i64,
+    /// PEP 657 caret anchor `(full_start, prim_start, prim_end, full_end)` for
+    /// the sub-expression that raised at this frame (issue #2411), or `None`.
+    /// Carried so a re-raised / chained exception's printed traceback can render
+    /// the same fine-grained carets the original uncaught traceback would.  Not
+    /// exposed as a Python attribute (CPython keeps PEP 657 columns in the code
+    /// object, not the traceback node); used only by the stderr formatter.
+    pub col_span: Option<(u32, u32, u32, u32)>,
 }
 
 pub struct TracebackOps;
@@ -61,11 +68,23 @@ impl BuiltinTypeOps for TracebackOps {
 
 /// Construct a traceback node value.
 pub fn traceback_node(frame: Value, next: Value, lineno: i64, lasti: i64) -> Value {
+    traceback_node_with_col(frame, next, lineno, lasti, None)
+}
+
+/// Construct a traceback node value carrying a PEP 657 caret anchor (#2411).
+pub fn traceback_node_with_col(
+    frame: Value,
+    next: Value,
+    lineno: i64,
+    lasti: i64,
+    col_span: Option<(u32, u32, u32, u32)>,
+) -> Value {
     let state: Box<dyn Any> = Box::new(TracebackState {
         frame,
         next,
         lineno,
         lasti,
+        col_span,
     });
     Value::builtin_object(TRACEBACK_OPS, state)
 }
@@ -94,6 +113,17 @@ fn builtin_getattr(value: &Value, name: &str) -> Option<Value> {
 /// the captured-frame snapshot, so a re-raised exception's printed traceback
 /// matches the Python-visible `__traceback__` walk.
 pub fn walk_frames(value: &Value) -> Vec<(String, i64)> {
+    walk_frames_with_col(value)
+        .into_iter()
+        .map(|(name, lineno, _)| (name, lineno))
+        .collect()
+}
+
+/// Like [`walk_frames`] but also returns each node's PEP 657 caret anchor
+/// (`(full_start, prim_start, prim_end, full_end)`), for the stderr formatter to
+/// render fine-grained carets on a re-raised / chained exception (issue #2411).
+#[allow(clippy::type_complexity)]
+pub fn walk_frames_with_col(value: &Value) -> Vec<(String, i64, Option<(u32, u32, u32, u32)>)> {
     let mut out = Vec::new();
     let mut cur = value.clone();
     loop {
@@ -103,10 +133,10 @@ pub fn walk_frames(value: &Value) -> Vec<(String, i64)> {
         if ops.type_name() != TYPE_NAME {
             break;
         }
-        let (frame, lineno, next) = {
+        let (frame, lineno, col_span, next) = {
             let borrow = state.borrow();
             match borrow.downcast_ref::<TracebackState>() {
-                Some(s) => (s.frame.clone(), s.lineno, s.next.clone()),
+                Some(s) => (s.frame.clone(), s.lineno, s.col_span, s.next.clone()),
                 None => break,
             }
         };
@@ -115,7 +145,7 @@ pub fn walk_frames(value: &Value) -> Vec<(String, i64)> {
             .and_then(|code| builtin_getattr(&code, "co_name"))
             .and_then(|n| n.as_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "<unknown>".to_string());
-        out.push((name, lineno));
+        out.push((name, lineno, col_span));
         cur = next;
     }
     out

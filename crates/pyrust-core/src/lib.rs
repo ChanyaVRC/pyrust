@@ -6130,18 +6130,22 @@ pub struct FrameInfo {
     /// Function or method name.  `"<module>"` for module-scope code.
     /// `Arc<str>` so cloning a frame is a reference-count bump, not a heap alloc.
     pub funcname: Arc<str>,
-    /// PEP 657 fine-grained caret anchor: the `(col_offset, end_col_offset)`
-    /// (0-based **char** offsets into the *un-dedented* source line) of the
-    /// sub-expression that raised, when the compiler tracked a column span for
-    /// the raising instruction.  `None` when no column information is available
-    /// — the formatter then omits the caret row (issue #2426 stage 1 plumbs
-    /// this only for the highest-value statement forms; everything else stays
-    /// `None` and caret-free, never wrong).
+    /// PEP 657 fine-grained caret anchor:
+    /// `(full_start, prim_start, prim_end, full_end)` (0-based **char** offsets
+    /// into the *un-dedented* source line) of the sub-expression that raised,
+    /// when the compiler tracked a column span for the raising instruction.
+    /// `[full_start, full_end)` is underlined; the "primary" sub-range
+    /// `[prim_start, prim_end)` gets `^`, the rest `~` (binary operands /
+    /// subscript object).  When `full == prim` the whole span is `^` (bare name,
+    /// call).  `None` when no column information is available — the formatter
+    /// then omits the caret row (issues #2426 / #2411 plumb only the
+    /// highest-value forms; everything else stays `None` and caret-free, never
+    /// wrong).
     ///
     /// The offsets are measured against the source line *before* its own
     /// leading whitespace is stripped for display; the formatter re-bases them
-    /// against the dedented line when rendering (rules 1/2 of #2426).
-    pub col_span: Option<(u32, u32)>,
+    /// against the dedented line when rendering.
+    pub col_span: Option<(u32, u32, u32, u32)>,
 }
 
 thread_local! {
@@ -6178,7 +6182,7 @@ thread_local! {
     /// `None` when the raising instruction carried no column span (the common
     /// case for statement forms not yet plumbed in stage 1).  Reset to `None`
     /// at the start of each top-level script execution.
-    static CURRENT_VM_COL_SPAN: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
+    static CURRENT_VM_COL_SPAN: RefCell<Option<(u32, u32, u32, u32)>> = const { RefCell::new(None) };
 }
 
 /// Record a traceback frame for an error unwinding out of a user-function body.
@@ -6265,7 +6269,7 @@ pub fn reset_current_vm_line() {
 /// entry of the instruction that raised.  `None` clears any stale span so a
 /// later raise on an unplumbed instruction does not inherit a previous anchor.
 #[inline]
-pub fn set_current_vm_col_span(span: Option<(u32, u32)>) {
+pub fn set_current_vm_col_span(span: Option<(u32, u32, u32, u32)>) {
     CURRENT_VM_COL_SPAN.with(|c| *c.borrow_mut() = span);
 }
 
@@ -6273,7 +6277,7 @@ pub fn set_current_vm_col_span(span: Option<(u32, u32)>) {
 /// after `run_bytecode` returns an error, to fill in the `<module>` frame's
 /// `col_span` (issue #2426).
 #[inline]
-pub fn get_current_vm_col_span() -> Option<(u32, u32)> {
+pub fn get_current_vm_col_span() -> Option<(u32, u32, u32, u32)> {
     CURRENT_VM_COL_SPAN.with(|c| *c.borrow())
 }
 
@@ -6283,38 +6287,64 @@ pub fn get_current_vm_col_span() -> Option<(u32, u32)> {
 /// `stripped` is the dedented display line (its own leading whitespace already
 /// removed).  `leading` is the count of leading-whitespace *chars* that were
 /// stripped — i.e. the offset to rebase the anchor's column from the original
-/// line onto the dedented line.  `col_span` is the `(col_offset,
-/// end_col_offset)` 0-based char anchor measured against the *original* line.
+/// line onto the dedented line.  `col_span` is the
+/// `(full_start, prim_start, prim_end, full_end)` 0-based char anchor measured
+/// against the *original* line (see [`FrameInfo::col_span`]).
+///
+/// The whole `[full_start, full_end)` range is underlined: the primary
+/// sub-range `[prim_start, prim_end)` with `^`, the rest with `~`.  When
+/// `full == prim` the whole span is `^` (bare name / call).
 ///
 /// Returns `None` (omit the row) when:
 ///  * there is no `col_span` (form not plumbed), or
-///  * the anchor covers the whole stripped line (rule 1), or
+///  * the anchor (a `full == prim` whole-`^` span) covers the whole stripped
+///    line — CPython omits the caret row for a bare name / call / `raise X(...)`
+///    that spans the line, or
 ///  * the anchor is degenerate / out of range after rebasing.
-fn caret_row(stripped: &str, leading: usize, col_span: Option<(u32, u32)>) -> Option<String> {
-    let (col_start, col_end) = col_span?;
-    let (col_start, col_end) = (col_start as usize, col_end as usize);
-    // Rebase the anchor onto the dedented line.  Anchors inside the stripped
-    // leading whitespace (col_start < leading) are not expected for the plumbed
-    // forms; guard against underflow defensively and omit.
-    if col_end <= col_start || col_start < leading {
+fn caret_row(
+    stripped: &str,
+    leading: usize,
+    col_span: Option<(u32, u32, u32, u32)>,
+) -> Option<String> {
+    let (full_start, prim_start, prim_end, full_end) = col_span?;
+    let (full_start, prim_start, prim_end, full_end) = (
+        full_start as usize,
+        prim_start as usize,
+        prim_end as usize,
+        full_end as usize,
+    );
+    // Sanity-check the nesting + non-degeneracy of the anchor.  Anchors inside
+    // the stripped leading whitespace (full_start < leading) are not expected
+    // for the plumbed forms; guard against underflow defensively and omit.
+    if !(full_start <= prim_start && prim_start < prim_end && prim_end <= full_end)
+        || full_start < leading
+    {
         return None;
     }
-    let start = col_start - leading;
-    let end = col_end - leading;
+    // Rebase onto the dedented line.
+    let f_start = full_start - leading;
+    let f_end = full_end - leading;
+    let p_start = prim_start - leading;
+    let p_end = prim_end - leading;
     let line_len = stripped.chars().count();
-    if end > line_len {
+    if f_end > line_len {
         return None;
     }
-    // Rule 1: anchor spans the whole stripped line → omit the caret row.
-    if start == 0 && end == line_len {
+    // Whole-line `^` anchor (full == prim, no `~` context): CPython omits it.
+    let whole_line_caret = f_start == p_start && f_end == p_end;
+    if whole_line_caret && f_start == 0 && f_end == line_len {
         return None;
     }
     let mut row = String::from("    ");
-    for _ in 0..start {
+    for _ in 0..f_start {
         row.push(' ');
     }
-    for _ in start..end {
-        row.push('^');
+    for col in f_start..f_end {
+        if col >= p_start && col < p_end {
+            row.push('^');
+        } else {
+            row.push('~');
+        }
     }
     row.push('\n');
     Some(row)

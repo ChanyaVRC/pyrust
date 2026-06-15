@@ -41,6 +41,20 @@ fn remap_linenos(old_insns: &[Insn], old_linenos: &[u32], new_insns: &[Insn]) ->
 /// origin, and matching it to an unrelated same-opcode occurrence would attribute
 /// a misleading line.  Those keep the conservative running-prefix fallback, which
 /// preserves the #1962/#2002 greedy-scan contract.
+/// True for opcodes the optimizer fuses **from a generic `BinOp`** (issue
+/// #2411): `BinOpConst` / `BinOpImm` (one constant operand) and the
+/// `CmpJump*Const` comparison-jump fusions.  Their PEP 657 caret anchor must be
+/// recovered from the originating `BinOp`'s column span, since the fused opcode
+/// has no counterpart in the pre-optimization stream.  Aug-assign variants
+/// (`is_aug`) come from `BinOpInPlace`, not a raising rvalue `BinOp`, and carry
+/// no rvalue caret — excluded.
+fn insn_is_fused_binop(insn: &Insn) -> bool {
+    matches!(
+        insn,
+        Insn::BinOpConst(_, _, _, _, false) | Insn::BinOpImm(_, _, _, _, false)
+    )
+}
+
 fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
     matches!(
         insn,
@@ -186,14 +200,17 @@ fn lcs_align(
 fn remap_lineno_and_col_tables(
     old_insns: &[Insn],
     old_linenos: &[u32],
-    old_cols: &[(u32, u32)],
+    old_cols: &[crate::ast::CaretSpan],
     new_insns: &[Insn],
-) -> (Vec<u32>, Vec<(u32, u32)>) {
+) -> (Vec<u32>, Vec<crate::ast::CaretSpan>) {
     if old_linenos.is_empty() {
-        return (vec![0u32; new_insns.len()], vec![(0, 0); new_insns.len()]);
+        return (
+            vec![0u32; new_insns.len()],
+            vec![(0, 0, 0, 0); new_insns.len()],
+        );
     }
     // Only do col work when at least one anchor was recorded.
-    let want_cols = !old_cols.is_empty() && old_cols.iter().any(|&c| c != (0, 0));
+    let want_cols = !old_cols.is_empty() && old_cols.iter().any(|&c| c != (0, 0, 0, 0));
 
     // Build a "current best lineno" prefix from old_linenos: for each position
     // in old_insns, the last non-zero lineno seen up to and including that position.
@@ -232,16 +249,61 @@ fn remap_lineno_and_col_tables(
             .push(i);
     }
 
+    // Ascending old positions of the generic `BinOp` opcode (issue #2411): a
+    // binary expression that raises is emitted as `BinOp` by the compiler, but
+    // the optimizer routinely fuses it into `BinOpConst` / `BinOpImm` / a
+    // `CmpJump*` when an operand is a constant.  Those fused opcodes don't exist
+    // in the old stream, so they get no structural / discriminant match and
+    // would lose their caret anchor.  Fusion is a 1:1 replacement of the `BinOp`
+    // (it only also consumes a preceding `LoadConst`), so the surviving fused
+    // op descends, in order, from the old `BinOp` at-or-after the cursor — a
+    // monotone scan over these positions recovers its origin column.
+    let old_binop_positions: Vec<usize> = old_insns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, insn)| matches!(insn, Insn::BinOp(..)).then_some(i))
+        .collect();
+    // The diagonal recovery is only sound when every old `BinOp` survives (as a
+    // plain `BinOp` or a fused `BinOpConst`/`BinOpImm`) in order — i.e. nothing
+    // was *folded away*.  Const-folding (`(10+2)*3` → `36`) collapses nested
+    // binops, breaking the 1:1 origin mapping and risking a caret on the wrong
+    // sub-expression.  Count the binop-origin ops surviving in the new stream;
+    // if fewer than the old count, a fold happened — disable the fused-binop col
+    // recovery so a fused op stays caret-free (a missing caret beats a wrong
+    // one, per #2426).  Plain renumbered `BinOp`s still recover via the exact /
+    // discriminant match paths above, unaffected by this guard.
+    let new_binop_origin_count = new_insns
+        .iter()
+        .filter(|i| matches!(i, Insn::BinOp(..)) || insn_is_fused_binop(i))
+        .count();
+    let binop_recovery_sound = new_binop_origin_count >= old_binop_positions.len();
+    // Cursor into `old_binop_positions`, advanced monotonically as fused ops are
+    // matched (mirrors the `old_pos` discipline of the main scan).
+    let mut binop_col_cursor: usize = 0;
+
     // Instructions whose anchored occurrences disagree get no anchor (ambiguous).
     let mut ambiguous: HashSet<&Insn> = HashSet::new();
+    // Discriminants (opcode-only) whose anchored occurrences disagree: used by the
+    // discriminant-match fallback below to refuse a col anchor when the same
+    // opcode carries different spans across the old stream (#2411).
+    let mut disc_ambiguous: HashSet<std::mem::Discriminant<Insn>> = HashSet::new();
     if want_cols {
         for (insn, locs) in &positions {
-            let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0));
+            let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0, 0, 0));
             if locs
                 .iter()
-                .any(|&p| old_cols.get(p).copied().unwrap_or((0, 0)) != first)
+                .any(|&p| old_cols.get(p).copied().unwrap_or((0, 0, 0, 0)) != first)
             {
                 ambiguous.insert(*insn);
+            }
+        }
+        for (disc, locs) in &disc_positions {
+            let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0, 0, 0));
+            if locs
+                .iter()
+                .any(|&p| old_cols.get(p).copied().unwrap_or((0, 0, 0, 0)) != first)
+            {
+                disc_ambiguous.insert(*disc);
             }
         }
     }
@@ -268,7 +330,7 @@ fn remap_lineno_and_col_tables(
 
     let mut old_pos: usize = 0;
     let mut linenos = Vec::with_capacity(new_insns.len());
-    let mut cols = vec![(0, 0); new_insns.len()];
+    let mut cols = vec![(0, 0, 0, 0); new_insns.len()];
     for ((out_col, new_insn), aligned_pos) in cols.iter_mut().zip(new_insns).zip(&aligned) {
         // Use the LCS-aligned old position when this new instruction was matched;
         // it is guaranteed `>= old_pos`, preserving the monotonic-cursor invariant
@@ -278,7 +340,7 @@ fn remap_lineno_and_col_tables(
             Some(i) => {
                 linenos.push(old_linenos.get(i).copied().unwrap_or(0));
                 if want_cols && !ambiguous.contains(new_insn) {
-                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0));
+                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                 }
                 old_pos = i + 1;
             }
@@ -297,8 +359,16 @@ fn remap_lineno_and_col_tables(
                 // optimizer cannot create keeps a genuinely synthesized instruction
                 // (a const-folded `LoadConst`, a peephole `Move`/`Jump`) on the
                 // running-prefix line — preserving the #1962/#2002 contract for those.
-                // The col anchor is left cleared: a discriminant-only match does not
-                // prove the span is the same, and a wrong caret is worse than none.
+                //
+                // The col anchor (#2411) is carried from the *same* matched position
+                // `i`: a side-effecting opcode is renumbered, never duplicated or
+                // deleted, so the diagonally-aligned `i` is the instruction's true
+                // origin — the very position whose line we trust here.  Trusting it
+                // for the line but not the column would leave nearly every binary
+                // op / subscript / call caret-free (their registers are routinely
+                // renumbered), defeating the feature.  Only carry it when the
+                // discriminant's anchored occurrences are unambiguous, mirroring the
+                // exact-match `ambiguous` guard above.
                 let disc_matched = if insn_anchor_by_discriminant(new_insn) {
                     disc_positions
                         .get(&std::mem::discriminant(new_insn))
@@ -312,12 +382,32 @@ fn remap_lineno_and_col_tables(
                 match disc_matched {
                     Some(i) => {
                         linenos.push(old_linenos.get(i).copied().unwrap_or(0));
+                        if want_cols && !disc_ambiguous.contains(&std::mem::discriminant(new_insn))
+                        {
+                            *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                        }
                         old_pos = i + 1;
                     }
                     None => {
                         // Optimizer-created instruction with no eligible opcode match:
-                        // approximate the line from the running prefix; anchor cleared.
+                        // approximate the line from the running prefix; line anchor
+                        // stays on the running prefix.  For a fused binary op
+                        // (`BinOpConst`/`BinOpImm`), recover the PEP 657 caret
+                        // anchor from the originating `BinOp` via a monotone scan
+                        // over `old_binop_positions` (issue #2411); col-only, so
+                        // the #1962/#2002 line contract is untouched.
                         linenos.push(old_prefix.get(old_pos).copied().unwrap_or(0));
+                        if want_cols && binop_recovery_sound && insn_is_fused_binop(new_insn) {
+                            while binop_col_cursor < old_binop_positions.len()
+                                && old_binop_positions[binop_col_cursor] < old_pos
+                            {
+                                binop_col_cursor += 1;
+                            }
+                            if let Some(&i) = old_binop_positions.get(binop_col_cursor) {
+                                *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                                binop_col_cursor += 1;
+                            }
+                        }
                     }
                 }
             }

@@ -4398,7 +4398,7 @@ fn collect_local_names_from_block(
                 // function's scope (PEP 572).
                 collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
             }
-            Stmt::Raise { expr, cause } => {
+            Stmt::Raise { expr, cause, .. } => {
                 // Walrus targets inside a comprehension in the raise expression or
                 // cause escape to this function's scope (PEP 572).
                 if let Some(e) = expr {
@@ -4937,7 +4937,7 @@ fn check_global_nonlocal_order_block(
                     collect_var_refs_in_expr(m, used, assigned);
                 }
             }
-            Stmt::Raise { expr, cause } => {
+            Stmt::Raise { expr, cause, .. } => {
                 if let Some(e) = expr {
                     collect_var_refs_in_expr(e, used, assigned);
                 }
@@ -5040,14 +5040,14 @@ fn collect_var_refs_in_expr(
             collect_var_refs_in_expr(then, used, assigned);
             collect_var_refs_in_expr(else_, used, assigned);
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             collect_var_refs_in_expr(func, used, assigned);
             for arg in args {
                 collect_var_refs_in_expr(&arg.value, used, assigned);
             }
         }
         Expr::Attr { target, .. } => collect_var_refs_in_expr(target, used, assigned),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             collect_var_refs_in_expr(target, used, assigned);
             collect_var_refs_in_expr(index, used, assigned);
         }
@@ -5278,7 +5278,7 @@ fn collect_walrus_targets_in_expr(
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
             }
         }
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             collect_walrus_targets_in_expr(func, names, global_names, nonlocal_names);
             for a in args {
                 collect_walrus_targets_in_expr(&a.value, names, global_names, nonlocal_names);
@@ -5310,7 +5310,7 @@ fn collect_walrus_targets_in_expr(
                 }
             }
         }
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
             collect_walrus_targets_in_expr(index, names, global_names, nonlocal_names);
         }
@@ -5573,7 +5573,7 @@ fn is_pure_expr(
         // A lambda expression allocates a fresh Rc<UserFunction> on every evaluation,
         // so any enclosing function that returns one is not pure in the identity sense.
         Expr::Lambda { .. } => false,
-        Expr::Call { func, args } => {
+        Expr::Call { func, args, .. } => {
             // Only direct calls to named callees can be pure.  Two shapes
             // qualify:
             //   1. `name(…)`         — `Expr::Var(name)` callee.
@@ -5629,7 +5629,7 @@ fn is_pure_expr(
             args.iter().all(|a| is_pure_expr(&a.value, pure_fns, local_names))
         }
         Expr::Attr { target, .. } => is_pure_expr(target, pure_fns, local_names),
-        Expr::Index { target, index } => {
+        Expr::Index { target, index, .. } => {
             is_pure_expr(target, pure_fns, local_names) && is_pure_expr(index, pure_fns, local_names)
         }
         Expr::Slice { target, lower, upper, step } => {
@@ -6449,13 +6449,15 @@ fn chained_exc_frames(
     let tb = interp
         .materialize_deferred_traceback(&stored)
         .unwrap_or(stored);
-    let nodes = pyrust_builtins::traceback::walk_frames(&tb);
+    let nodes = pyrust_builtins::traceback::walk_frames_with_col(&tb);
     if nodes.is_empty() {
         return None;
     }
-    // Source-line lookup matches the main traceback: CPython echoes the line
-    // stripped of leading indentation (`format_traceback` re-indents to four
-    // spaces), so store the fully-stripped text.
+    // Source-line lookup matches the main traceback: store the line with its
+    // own leading indentation *preserved* (only trailing whitespace stripped).
+    // `format_traceback` dedents it for display and uses the leading-whitespace
+    // count to rebase the PEP 657 caret anchor (#2411) — pre-trimming the start
+    // here would drop that offset and drop/misplace the caret.
     let resolve = |lineno: Option<u32>| -> Option<std::sync::Arc<str>> {
         let n = lineno?;
         if src.is_empty() {
@@ -6463,18 +6465,20 @@ fn chained_exc_frames(
         }
         src.lines()
             .nth((n as usize).saturating_sub(1))
-            .map(|l| std::sync::Arc::from(l.trim()))
+            .map(|l| std::sync::Arc::from(l.trim_end()))
     };
     let frames = nodes
         .into_iter()
-        .map(|(funcname, lineno)| {
+        .map(|(funcname, lineno, col_span)| {
             let lineno = if lineno > 0 { Some(lineno as u32) } else { None };
             pyrust_core::FrameInfo {
                 filename: filename.clone(),
                 lineno,
                 source_line: resolve(lineno),
                 funcname: std::sync::Arc::from(&funcname[..]),
-                col_span: None,
+                // PEP 657 caret anchor recovered from the chained exception's
+                // traceback chain (#2411).
+                col_span,
             }
         })
         .collect();

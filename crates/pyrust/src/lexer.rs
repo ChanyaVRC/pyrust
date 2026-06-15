@@ -28,6 +28,16 @@ pub struct Lexer {
     /// (Newline / Indent / Dedent / Eof) carry whatever `cur_col` held; their
     /// column is never consulted.
     cols: Vec<u32>,
+    /// 0-based **char** column one past the last char of each token, parallel to
+    /// `tokens` (issue #2411).  Recorded at the bottom of the lex loop from the
+    /// `pos` reached after the token's arm ran.  Lets the parser derive the
+    /// *end* column of a sub-expression (its last token's end col) so PEP 657
+    /// caret anchors can span multi-token forms (calls, binary ops, subscripts).
+    /// A token whose lexing crossed a physical newline (multi-line string) has a
+    /// meaningless end col on the original line, so it is recorded as 0; the
+    /// parser treats 0 as "no end col" and omits the caret rather than emit a
+    /// wrong one.
+    cols_end: Vec<u32>,
     /// Current 1-based physical line.  Advanced on every physical `\n` consumed
     /// anywhere — including newlines suppressed inside brackets and newlines
     /// spanned by a single multi-line string/f-string token.
@@ -48,6 +58,7 @@ impl Lexer {
             tokens: Vec::new(),
             line_nos: Vec::new(),
             cols: Vec::new(),
+            cols_end: Vec::new(),
             line: 1,
             line_start_pos: 0,
             cur_col: 0,
@@ -65,6 +76,10 @@ impl Lexer {
     fn emit(&mut self, tok: Token) {
         self.line_nos.push(self.line);
         self.cols.push(self.cur_col);
+        // End col is filled in at the bottom of the lex loop once `pos` has
+        // advanced past the token (issue #2411); push a placeholder 0 to keep
+        // the vector parallel.
+        self.cols_end.push(0);
         self.tokens.push(tok);
     }
 
@@ -100,10 +115,11 @@ impl Lexer {
     /// per-token start-column vector (0-based char offset within the token's
     /// physical line) recorded during lexing for PEP 657 caret anchors
     /// (issue #2426).
-    pub fn into_tokens_with_pos(self) -> (Vec<Token>, Vec<u32>, Vec<u32>) {
+    pub fn into_tokens_with_pos(self) -> (Vec<Token>, Vec<u32>, Vec<u32>, Vec<u32>) {
         debug_assert_eq!(self.tokens.len(), self.line_nos.len());
         debug_assert_eq!(self.tokens.len(), self.cols.len());
-        (self.tokens, self.line_nos, self.cols)
+        debug_assert_eq!(self.tokens.len(), self.cols_end.len());
+        (self.tokens, self.line_nos, self.cols, self.cols_end)
     }
 
     fn lex_source(&mut self, src: &str) -> Result<()> {
@@ -255,6 +271,10 @@ impl Lexer {
             // guards the (not expected) case where a continuation re-entry leaves
             // `pos` before the tracked line start.
             self.cur_col = tok_start.saturating_sub(self.line_start_pos) as u32;
+            // Token count and line before the match: used to fill in the end
+            // column of a token that was emitted this iteration (issue #2411).
+            let tokens_before = self.tokens.len();
+            let line_before = self.line;
             match chars.get(pos).copied() {
                 None => {
                     // End of source.
@@ -613,6 +633,20 @@ impl Lexer {
                     pos = next;
                 }
                 Some(_) => return Err(PyError::Lex("invalid syntax".to_string())),
+            }
+            // Fill in the end column of the token emitted this iteration
+            // (issue #2411).  `pos` now sits one past the token's last char, so
+            // its end col is `pos - line_start_pos`.  Skip tokens whose lexing
+            // crossed a physical newline (`line_before != self.line` would hold
+            // after the fold below, but we test the source span directly): their
+            // end col on the original line is meaningless, so leave the
+            // placeholder 0 and let the parser treat it as "no end col".
+            if self.tokens.len() > tokens_before
+                && line_before == self.line
+                && !chars[tok_start..pos].contains(&'\n')
+            {
+                let last = self.cols_end.len() - 1;
+                self.cols_end[last] = pos.saturating_sub(self.line_start_pos) as u32;
             }
             // Fold any physical newlines crossed by the token just lexed into
             // the line counter (multi-line string / f-string / bytes literals).

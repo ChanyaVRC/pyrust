@@ -503,10 +503,11 @@ impl Interpreter {
     pub(crate) fn parse_source_to_stmts_with_linenos(
         source: &str,
     ) -> Result<(Vec<crate::ast::Stmt>, Vec<u32>)> {
-        let (tokens, line_nos, cols) = crate::lexer::Lexer::new(source)
+        let (tokens, line_nos, cols, cols_end) = crate::lexer::Lexer::new(source)
             .map_err(lex_parse_to_exc)?
             .into_tokens_with_pos();
-        let mut parser = crate::parser::Parser::new_with_pos(tokens, line_nos, cols);
+        let mut parser =
+            crate::parser::Parser::new_with_pos(tokens, line_nos, cols, cols_end);
         parser.parse_program_with_linenos().map_err(lex_parse_to_exc)
     }
 
@@ -1052,10 +1053,14 @@ fn resolve_frame_source_line(
     if n == 0 {
         return None;
     }
+    // Preserve the line's own leading indentation (strip only trailing ws):
+    // `format_traceback` dedents for display and uses the leading-whitespace
+    // count to rebase the PEP 657 caret anchor (#2411).  Pre-trimming the start
+    // would drop that offset and drop/misplace the caret.
     let pick = |text: &str| -> Option<std::sync::Arc<str>> {
         text.lines()
             .nth(n - 1)
-            .map(|l| std::sync::Arc::from(l.trim()))
+            .map(|l| std::sync::Arc::from(l.trim_end()))
     };
     if frame_file == script_file {
         if script_src.is_empty() {
