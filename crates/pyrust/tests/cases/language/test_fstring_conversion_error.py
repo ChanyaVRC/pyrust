@@ -26,6 +26,23 @@ print(msg('f"{x:{y!z}}"'))  # nested replacement field inside a format spec
 print(msg('f"{x=!z}"'))  # debug (`=`) form
 print(msg('f"{x!ñ}"'))  # non-ASCII char printed literally
 
+# --- multi-char NAME conversion segment (issue #2496): the whole segment is
+# lexed as a NAME and quoted in the message ---
+print(msg('f"{x!sr}"'))  # starts with a valid char then more
+print(msg('f"{x!ra}"'))
+print(msg('f"{x!sa}"'))  # two valid chars, still invalid as a segment
+print(msg('f"{x!zzz}"'))
+print(msg('f"{x=!sr}"'))  # debug form, multi-char
+print(msg('f"{x:{y!sr}}"'))  # nested field, multi-char
+print(msg('f"{x!_}"'))  # `_` is a NAME-start char, so it is quoted
+
+# --- non-name-start conversion segment (issue #2496): nothing is captured as a
+# NAME, so the message carries no quoted char ---
+print(msg('f"{x!5}"'))
+print(msg('f"{x!.}"'))
+print(msg('f"{x=!5}"'))  # debug form
+print(msg('f"{x:{y!5}}"'))  # nested field
+
 # --- missing conversion character ---
 print(msg('f"{x!}"'))  # `!` immediately closed
 print(msg('f"{x!:>5}"'))  # `!` followed by a format spec
