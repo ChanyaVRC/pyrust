@@ -3019,10 +3019,23 @@ impl Interpreter {
 
     /// Issue #2297: `int.__round__([ndigits])`.  CPython's `int.__round__`
     /// always returns an `int` (`(125).__round__(-1)` → `120`, banker's
-    /// rounding); `ndigits=None`/omitted returns the value unchanged.  Routes
+    /// rounding); omitted `ndigits` returns the value unchanged.  Routes
     /// through the `round` registry builtin, which already implements the int +
     /// `ndigits` semantics (negative `ndigits` rounding, `BigInt` results).
+    ///
+    /// Unlike the `round()` builtin, the `int.__round__` *slot* index-coerces
+    /// `ndigits` with no `None` special-case: `(5).__round__(None)` raises
+    /// `TypeError: 'NoneType' object cannot be interpreted as an integer`,
+    /// whereas `round(5, None)` returns `5`.  `round` swallows an explicit
+    /// `None` (treats it as "omitted"), so reject it here before delegating.
     fn int_round_dunder(&mut self, recv: &Value, ndigits: Option<Value>) -> Result<Value> {
+        if let Some(n) = &ndigits {
+            if matches!(n.kind(), ValueKind::None) {
+                return Err(pyrust_core::type_err!(
+                    "'NoneType' object cannot be interpreted as an integer"
+                ));
+            }
+        }
         let dispatch =
             crate::builtin_registry::lookup("round").expect("round must be in the registry");
         let mut call_args = vec![ExpandedCallArg { name: None, value: recv.clone() }];

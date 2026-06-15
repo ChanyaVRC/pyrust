@@ -72,6 +72,15 @@ show("(5).__floor__(1)", lambda: (5).__floor__(1))
 show("(5).__ceil__(1)", lambda: (5).__ceil__(1))
 show("True.__trunc__(1)", lambda: True.__trunc__(1))
 
+# --- ndigits index-coercion (slot is stricter than round()) ----------------
+# `int.__round__` index-coerces ndigits with NO None special-case, unlike the
+# `round()` builtin: `round(5, None)` is 5 but `(5).__round__(None)` raises.
+show("(5).__round__(None)", lambda: (5).__round__(None))
+show("(125).__round__(None)", lambda: (125).__round__(None))
+show("(125).__round__(1.5)", lambda: (125).__round__(1.5))
+show("(125).__round__('x')", lambda: (125).__round__("x"))
+print((125).__round__(True))
+
 # --- keyword-argument rejection --------------------------------------------
 show("(5).__round__(ndigits=1)", lambda: (5).__round__(ndigits=1))
 show("True.__round__(ndigits=1)", lambda: True.__round__(ndigits=1))
