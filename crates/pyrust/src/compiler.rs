@@ -6046,29 +6046,35 @@ impl Compiler {
 
     fn compile_type_alias(&mut self, name: &str, type_params: &[TypeParam], value: &Expr) {
         // ── Step 1: create TypeVar objects for each type parameter ───────────
-        // Each TypeVar is stored to the current namespace so that the RHS
-        // expression can reference it by name.  After evaluating the RHS we
-        // delete them again so they do not leak into the enclosing scope.
+        // Each TypeVar is bound (via StoreGlobal) in a dedicated type-parameter
+        // env so the RHS expression and any bound/constraint can reference it by
+        // name.  Binding into a child env (rather than the enclosing namespace)
+        // keeps the parameter names from leaking after the statement, while the
+        // env stays alive for the lazy bound/constraint thunks created below —
+        // PEP 695 evaluates those on first `__bound__` / `__constraints__`
+        // access (#2290), by which time the captured env must still resolve
+        // every type parameter (e.g. `type X[T, U: T] = ...`).
+        if !type_params.is_empty() {
+            self.emit(Insn::PushTypeParamEnv);
+        }
         // Phase 1: create every TypeVar (unbounded) and bind its name, so the RHS
         // and any bound/constraint can reference every parameter by name.
         let mut typevar_regs: Vec<Reg> = Vec::with_capacity(type_params.len());
         for param in type_params {
             let tv_reg = self.alloc_temp();
             self.emit_make_typevar(tv_reg, &param.name);
-            // Bind the TypeVar to the param name so the RHS expression can
-            // load it via LoadGlobal.  We use StoreGlobal unconditionally
-            // (even if `param` happens to be in local_index) because DeleteName
-            // removes from env.values, and StoreGlobal is the only instruction
-            // that writes there.  compile_store_name would use Move+SyncModuleGlobal
-            // for names in local_index, which writes only to a register and
-            // module_globals_dict — neither of which DeleteName removes from.
+            // Bind the TypeVar to the param name so the RHS expression — and the
+            // lazily-evaluated bound/constraint thunks — can load it via
+            // LoadGlobal.  StoreGlobal writes into the active (type-param) env's
+            // `values`, exactly where a free-variable LoadGlobal looks.
             let param_name_idx = self.intern_name(&param.name);
             self.emit(Insn::StoreGlobal(param_name_idx, tv_reg));
             typevar_regs.push(tv_reg);
         }
-        // Phase 2: with every name bound, evaluate each bound/constraint and store
-        // it onto the corresponding TypeVar.  Doing this after binding all names
-        // lets a self/forward-referential bound (`type X[T, U: T] = ...`) resolve.
+        // Phase 2: with every name bound, attach each bound/constraint thunk to
+        // the corresponding TypeVar.  Doing this after binding all names lets a
+        // self/forward-referential bound (`type X[T, U: T] = ...`) resolve when
+        // the thunk runs.
         for (param, &tv_reg) in type_params.iter().zip(typevar_regs.iter()) {
             self.emit_typevar_bound(tv_reg, param);
         }
@@ -6121,16 +6127,18 @@ impl Compiler {
         }
 
         // ── Step 3: evaluate the RHS ─────────────────────────────────────────
-        // TypeVar names are now bound in the current namespace, so LoadGlobal
-        // for e.g. `T` will find the TypeVar object.
+        // TypeVar names are bound in the active type-param env, so LoadGlobal
+        // for e.g. `T` resolves to the TypeVar object.
         let val_reg = self.compile_expr(value);
 
-        // ── Step 4: remove TypeVar bindings from the namespace ───────────────
+        // ── Step 4: leave the type-parameter env ─────────────────────────────
         // Mirrors CPython's hidden annotation scope: type params must NOT be
-        // visible in the enclosing scope after the type alias statement.
-        for param in type_params {
-            let name_idx = self.intern_name(&param.name);
-            self.emit(Insn::DeleteName(name_idx));
+        // visible in the enclosing scope after the type alias statement.  The
+        // popped env stays alive via the Rc captured by each lazy bound thunk
+        // (reachable from `__type_params__`), so a later `__bound__` access can
+        // still resolve a forward/self reference.
+        if !type_params.is_empty() {
+            self.emit(Insn::PopTypeParamEnv);
         }
 
         // ── Step 5: intern the alias name and emit MakeTypeAlias ────────────
@@ -6233,48 +6241,38 @@ impl Compiler {
         self.emit(Insn::MakeTypeVar(tv_reg, name_const));
     }
 
-    /// Populate the `__bound__` / `__constraints__` of an already-created TypeVar
-    /// in `tv_reg` from `param`'s bound/constraint clause.  The bound expression
-    /// is evaluated in the current scope, where every type parameter of the
-    /// enclosing def/class/alias is already bound, so self- and
-    /// forward-referential bounds (`T: T`, `U: T`) resolve.  A bare parameter
-    /// (no clause) leaves the TypeVar's `__bound__`/`__constraints__` untouched.
+    /// Attach a PEP 695 lazy bound/constraint *thunk* to an already-created
+    /// TypeVar in `tv_reg`.  CPython evaluates a type parameter's bound or
+    /// constraints lazily — not at def/class/alias time, but on first access of
+    /// `__bound__` / `__constraints__` — in a deferred annotation scope where
+    /// every type parameter (and the enclosing names) is visible.
+    ///
+    /// We mirror this by compiling the clause expression into a zero-argument
+    /// closure (`lambda: <expr>`) that captures the active type-parameter env,
+    /// and storing it on the TypeVar's internal `__evaluate_bound__` /
+    /// `__evaluate_constraints__` slot.  The thunk is invoked once, on first
+    /// read of `__bound__` / `__constraints__`, and its result cached (see
+    /// `get_attr_instance_raw`).  Self- and forward-referential bounds
+    /// (`T: T`, `U: T`) still resolve because the captured env binds every
+    /// parameter name.  A bare parameter (no clause) leaves the eager defaults
+    /// (`__bound__ == None`, `__constraints__ == ()`) untouched.
     fn emit_typevar_bound(&mut self, tv_reg: Reg, param: &TypeParam) {
         match &param.bound {
             None => {}
             Some(TypeParamBound::Bound(expr)) => {
-                let bound_reg = self.compile_expr(expr);
-                let attr_idx = self.intern_name("__bound__");
-                self.emit(Insn::SetTypeVarAttr(tv_reg, attr_idx, bound_reg));
-                self.free_temp(bound_reg);
+                let thunk_reg = self.compile_lambda(&[], expr);
+                let attr_idx = self.intern_name("__evaluate_bound__");
+                self.emit(Insn::SetTypeVarAttr(tv_reg, attr_idx, thunk_reg));
+                self.free_temp(thunk_reg);
             }
             Some(TypeParamBound::Constraints(elems)) => {
-                let tuple_reg = self.compile_constraint_tuple(elems);
-                let attr_idx = self.intern_name("__constraints__");
-                self.emit(Insn::SetTypeVarAttr(tv_reg, attr_idx, tuple_reg));
-                self.free_temp(tuple_reg);
+                let tuple_expr = Expr::Tuple(elems.to_vec());
+                let thunk_reg = self.compile_lambda(&[], &tuple_expr);
+                let attr_idx = self.intern_name("__evaluate_constraints__");
+                self.emit(Insn::SetTypeVarAttr(tv_reg, attr_idx, thunk_reg));
+                self.free_temp(thunk_reg);
             }
         }
-    }
-
-    /// Evaluate the constraint expressions of a `T: (a, b, ...)` parameter into a
-    /// fresh contiguous register block and pack them into a tuple, returning the
-    /// register holding the tuple.  Caller is responsible for freeing it.
-    fn compile_constraint_tuple(&mut self, elems: &[Expr]) -> Reg {
-        let n = elems.len() as Reg;
-        let base = self.alloc_temp();
-        for _ in 1..n as usize {
-            self.alloc_temp();
-        }
-        for (i, elem) in elems.iter().enumerate() {
-            self.compile_expr_into(elem, base + i as Reg);
-        }
-        let tuple_reg = self.alloc_temp();
-        self.emit(Insn::BuildTuple(tuple_reg, base, n));
-        for i in 0..n as usize {
-            self.free_temp(base + i as Reg);
-        }
-        tuple_reg
     }
 
     /// Build the `__type_params__` tuple from an already-bound contiguous block

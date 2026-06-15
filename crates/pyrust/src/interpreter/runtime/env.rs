@@ -1504,6 +1504,46 @@ impl Interpreter {
             ));
         }
 
+        // PEP 695 lazy bound/constraints (#2290): a generic type parameter's
+        // bound (`T: int`) and constraints (`T: (int, str)`) are evaluated
+        // lazily — on first access of `__bound__` / `__constraints__`, not at
+        // def/class/alias time — matching CPython's deferred annotation scope.
+        // The compiler stores the clause as a zero-arg thunk on the internal
+        // `__evaluate_bound__` / `__evaluate_constraints__` slot; here we invoke
+        // it once, cache the result onto `__bound__` / `__constraints__`, drop
+        // the thunk, and return.  Any exception from the thunk (e.g. a NameError
+        // for a name defined later or never) propagates from this access.
+        if (name == "__bound__" || name == "__constraints__")
+            && is_typevar_class(&instance.borrow().class)
+        {
+            let thunk_name = if name == "__bound__" {
+                "__evaluate_bound__"
+            } else {
+                "__evaluate_constraints__"
+            };
+            let thunk = instance.borrow().attrs.get(thunk_name).cloned();
+            if let Some(thunk) = thunk {
+                let value = self.call_function_expanded(thunk, &[])?;
+                let mut inst = instance.borrow_mut();
+                inst.attrs.insert(name, value.clone());
+                inst.attrs.shift_remove(thunk_name);
+                return Ok(value);
+            }
+        }
+        // The lazy-evaluation thunk slots are CPython-internal: `hasattr(T,
+        // '__evaluate_bound__')` is False there.  Keep them invisible to direct
+        // attribute reads so the only observable surface is `__bound__` /
+        // `__constraints__`.
+        if (name == "__evaluate_bound__" || name == "__evaluate_constraints__")
+            && is_typevar_class(&instance.borrow().class)
+        {
+            let class_name = instance.borrow().class.borrow().name.clone();
+            return Err(pyrust_core::py_err!(
+                "AttributeError",
+                "'{class_name}' object has no attribute '{name}'"
+            ));
+        }
+
         // General descriptor protocol (CPython Data Model §3.3.2):
         //
         // Step 1: Walk the class MRO for a data descriptor (has
