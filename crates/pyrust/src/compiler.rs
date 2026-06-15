@@ -8637,7 +8637,7 @@ impl Compiler {
         def_lineno: u32,
         return_annotation: Option<&Expr>,
         is_async: bool,
-    ) -> Option<(u8, bool, bool)> {
+    ) -> Option<(u16, bool, bool)> {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
         let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
@@ -8831,15 +8831,14 @@ impl Compiler {
             }
         };
 
-        if self.fn_protos.len() >= 256 {
+        if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg =
-                    Some("too many nested functions in one scope (max 256)".to_string());
+                self.error_msg = Some("too many functions in one scope (max 65535)".to_string());
             }
             return None;
         }
-        let proto_idx = self.fn_protos.len() as u8;
+        let proto_idx = self.fn_protos.len() as u16;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         // Collect annotation keys: annotated param names (in declaration order) then
         // "return" if there is a return annotation.  These are parallel to the
@@ -9168,7 +9167,7 @@ impl Compiler {
         name: &str,
         keywords: &[(String, Expr)],
         body: &[Stmt],
-    ) -> Option<u8> {
+    ) -> Option<u16> {
         // Class body: zero-param function that returns its locals as class dict.
         // Collect names explicitly declared `global` in the class body so they
         // are excluded from `body_local` and routed to `Insn::StoreGlobal`
@@ -9326,15 +9325,15 @@ impl Compiler {
                 return None;
             }
         };
-        if self.fn_protos.len() >= 256 {
+        if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
             if self.error_msg.is_none() {
                 self.error_msg =
-                    Some("too many nested classes/functions in one scope (max 256)".to_string());
+                    Some("too many classes/functions in one scope (max 65535)".to_string());
             }
             return None;
         }
-        let proto_idx = self.fn_protos.len() as u8;
+        let proto_idx = self.fn_protos.len() as u16;
         let local_names = Rc::new(body_index_rc.keys().cloned().collect::<HashSet<_>>());
         // Extract docstring: if the first statement in the class body is a bare
         // string literal, capture it as the class's __doc__ (CPython parity).
@@ -11585,15 +11584,14 @@ impl Compiler {
             }
         };
 
-        if self.fn_protos.len() >= 256 {
+        if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg =
-                    Some("too many nested functions in one scope (max 256)".to_string());
+                self.error_msg = Some("too many functions in one scope (max 65535)".to_string());
             }
             return 0;
         }
-        let proto_idx = self.fn_protos.len() as u8;
+        let proto_idx = self.fn_protos.len() as u16;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         let display = format!("<{}>", comp_name);
         let param_spec = Rc::new(FnParamSpec {
@@ -12023,15 +12021,14 @@ impl Compiler {
             }
         };
 
-        if self.fn_protos.len() >= 256 {
+        if self.fn_protos.len() >= u16::MAX as usize {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg =
-                    Some("too many nested functions in one scope (max 256)".to_string());
+                self.error_msg = Some("too many functions in one scope (max 65535)".to_string());
             }
             return 0;
         }
-        let proto_idx = self.fn_protos.len() as u8;
+        let proto_idx = self.fn_protos.len() as u16;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         let param_spec = Rc::new(FnParamSpec {
             names: params.iter().map(|p| p.name.clone()).collect(),
