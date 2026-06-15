@@ -2989,16 +2989,27 @@ impl Interpreter {
                 let src = std::fs::read_to_string(&full_path).map_err(|e| {
                     PyError::Runtime(format!("failed to read '{}': {e}", full_path.display()))
                 })?;
-                let tokens = Lexer::new(&src)?;
-                let program = Parser::new(tokens.into_tokens()).parse_program()?;
+                // The module's own path: tags its code objects' `co_filename` and
+                // the traceback `File "..."` line for frames raised inside it,
+                // instead of inheriting the importing script's path (#2438).
+                let module_filename = full_path.to_string_lossy().into_owned();
+                // Parse with per-statement line numbers and per-token positions so
+                // frames raised inside the imported module carry the correct
+                // `tb_lineno` and PEP 657 caret anchors (#2438); the import path
+                // previously parsed without line info, so module frames printed no
+                // line number / source line.
+                let (tokens, line_nos, cols) = Lexer::new(&src)?.into_tokens_with_pos();
+                let (program, linenos) = Parser::new_with_pos(tokens, line_nos, cols)
+                    .parse_program_with_linenos()?;
                 // Subinterpreter shares the same module_cache so results are visible to parent
                 let mut sub = Interpreter {
                     script_dir: self.script_dir.clone(),
+                    script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
                     module_cache: Rc::clone(&self.module_cache),
                     ..Default::default()
                 };
                 // call_depth is thread_local — sub-interpreter automatically shares the same counter
-                sub.exec_program(&program, false)?;
+                sub.exec_program_with_linenos(&program, &linenos, &src, false)?;
                 // Harvest all top-level bindings as module attrs
                 let attrs: HashMap<String, Value> = sub
                     .env

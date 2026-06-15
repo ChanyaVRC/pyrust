@@ -1018,10 +1018,9 @@ impl Interpreter {
         // exception propagated out of the body (issue #908).  On yield
         // (Ok(Yielded)) the body suspended successfully — nothing to record.
         if result.is_err() {
-            let tb_filename = self
-                .script_filename
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+            // Generator's own code-object filename (#2438): a generator defined
+            // in an imported module reports its module's source file.
+            let tb_filename = frame.code.filename.clone();
             let tb_lineno = match pyrust_core::get_current_vm_line() {
                 0 => None,
                 n => Some(n),
@@ -1298,9 +1297,18 @@ impl Interpreter {
                 if let Some(view) = self.vm_frame_views.pop()
                     && let Some(func) = view.function
                 {
-                    let file = self
-                        .script_filename
-                        .clone()
+                    // Callee's own code-object filename (#2438): a trampolined
+                    // call into an imported module's function reports that
+                    // module's source file, not the running script's path.
+                    let file = func
+                        .precompiled_code
+                        .as_ref()
+                        .and_then(|rc| {
+                            Rc::clone(rc)
+                                .downcast::<crate::bytecode::FnCode>()
+                                .ok()
+                        })
+                        .map(|c| c.filename.clone())
                         .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
                     pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                         filename: file,
@@ -1319,10 +1327,9 @@ impl Interpreter {
             // The error escaped the generator body: finalize it.
             gd.gframe.done = true;
             if self.vm_frame_views.pop().is_some() {
-                let file = self
-                    .script_filename
-                    .clone()
-                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                // Generator's own code-object filename (#2438): a generator from
+                // an imported module reports that module's source file.
+                let file = gd.gframe.code.filename.clone();
                 pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
                     filename: file,
                     lineno: if line == 0 { None } else { Some(line) },
@@ -5800,6 +5807,7 @@ mod vm_tests {
         let n = insns.len();
         FnCode {
             insns,
+            filename: std::sync::Arc::from("<unknown>"),
             lineno_table: vec![0u32; n],
             col_table: vec![(0, 0); n],
             first_lineno: 0,

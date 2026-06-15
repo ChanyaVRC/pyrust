@@ -2234,8 +2234,15 @@ pyrust_module! {
                 ),
             )
         })?;
-        // filename (arg 2) — used for error messages; we store it but don't
-        // deeply integrate it for now.
+        // filename (arg 2) — CPython tags the resulting code object's
+        // `co_filename` with it, so an exception raised inside the compiled code
+        // reports this name in its traceback (#2438).  Non-string filenames
+        // (CPython also accepts bytes / path-like) fall back to `<unknown>`.
+        let compile_filename = args[1]
+            .value
+            .as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
         let mode_val = &args[2].value;
         let mode = mode_val.as_str().ok_or_else(|| {
             PyError::named(
@@ -2268,7 +2275,11 @@ pyrust_module! {
                         Rc::new(std::collections::HashMap::new())
                     };
                 let code = crate::compiler::compile_script_with_linenos(
-                    &program, Rc::clone(&local_index), false, &linenos,
+                    &program,
+                    Rc::clone(&local_index),
+                    false,
+                    &linenos,
+                    &compile_filename,
                 )
                 .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
                 Ok(crate::interpreter::value_code_object(
@@ -2284,7 +2295,10 @@ pyrust_module! {
                 let local_index: Rc<std::collections::HashMap<String, crate::bytecode::Reg>> =
                     Rc::new(std::collections::HashMap::new());
                 let code = crate::compiler::compile_eval_expr_with_linenos(
-                    &program, Rc::clone(&local_index), &linenos,
+                    &program,
+                    Rc::clone(&local_index),
+                    &linenos,
+                    &compile_filename,
                 )
                 .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
                 Ok(crate::interpreter::value_code_object(

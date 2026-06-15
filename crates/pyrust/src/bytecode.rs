@@ -951,6 +951,12 @@ impl std::fmt::Debug for AttrCacheEntry {
 #[derive(Debug, Clone)]
 pub struct FnCode {
     pub(crate) insns: Vec<Insn>,
+    /// Source-file path this code object was compiled from — the code object's
+    /// `co_filename`.  Threaded from the compile entry point through every nested
+    /// `def`/`class`/`lambda`, so an imported module's functions report their own
+    /// file (not the running script's) in tracebacks and `__code__.co_filename`
+    /// (issue #2438).  `<unknown>` when no path was supplied (e.g. REPL / eval).
+    pub(crate) filename: std::sync::Arc<str>,
     /// 1-based source line number for each instruction, parallel to `insns`.
     /// A value of 0 means "unknown / same as the previous instruction".  Set by
     /// the compiler when per-statement line information is available (i.e. when

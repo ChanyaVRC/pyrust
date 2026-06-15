@@ -3511,10 +3511,11 @@ impl Interpreter {
         // when the body actually errored.  The no-exception common path
         // does no allocation and touches no traceback thread-local.
         if vm_result.is_err() {
-            let tb_filename = self
-                .script_filename
-                .clone()
-                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+            // Use the callee's own code-object filename (#2438): an imported
+            // module's function reports the module's source file, not the running
+            // script's path.  `code.filename` is `<unknown>` only for code with
+            // no source path (REPL / synthetic), matching the old fallback.
+            let tb_filename = code.filename.clone();
             // Capture the source line in this callee where execution
             // stopped (the callee published it via `set_current_vm_line`
             // on the way out).  Surfaced to Python as `tb_lineno` /
@@ -3962,10 +3963,9 @@ impl Interpreter {
                 // when the body actually errored.  The no-exception common path
                 // does no allocation and touches no traceback thread-local.
                 if vm_result.is_err() {
-                    let tb_filename = self
-                        .script_filename
-                        .clone()
-                        .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                    // Callee's own code-object filename (#2438): an imported
+                    // module's function reports its module's source file.
+                    let tb_filename = code.filename.clone();
                     // Capture the source line in this callee where execution
                     // stopped (the callee published it via `set_current_vm_line`
                     // on the way out).  Surfaced to Python as `tb_lineno` /
@@ -4281,10 +4281,9 @@ impl Interpreter {
             // Lazy traceback: only build + record this frame's `FrameInfo`
             // when the body actually errored (see the simple-call path above).
             if vm_result.is_err() {
-                let tb_filename = self
-                    .script_filename
-                    .clone()
-                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                // Callee's own code-object filename (#2438): an imported module's
+                // function reports its module's source file.
+                let tb_filename = code.filename.clone();
                 let tb_lineno = match pyrust_core::get_current_vm_line() {
                     0 => None,
                     n => Some(n),

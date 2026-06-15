@@ -323,6 +323,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let names_len = names.len();
     FnCode {
         insns,
+        filename: code.filename,
         lineno_table,
         col_table,
         first_lineno: code.first_lineno,
@@ -8067,7 +8068,8 @@ mod tests {
                 .map(|(i, n)| (n.clone(), i))
                 .collect(),
         );
-        crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[]).unwrap()
+        crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[], "<test>")
+            .unwrap()
     }
 
     /// Like `compile_fn`, but supplies a per-top-level-statement line-number
@@ -8087,8 +8089,14 @@ mod tests {
                 .map(|(i, n)| (n.clone(), i))
                 .collect(),
         );
-        crate::compiler::compile_script_with_linenos(&stmts, local_index, false, stmt_linenos)
-            .unwrap()
+        crate::compiler::compile_script_with_linenos(
+            &stmts,
+            local_index,
+            false,
+            stmt_linenos,
+            "<test>",
+        )
+        .unwrap()
     }
 
     // ── pass_binop_const_fusion ───────────────────────────────────────────────
