@@ -74,6 +74,42 @@ except TypeError:
     print("j_slice_type: TypeError")
 
 
+# --- interpolated f-string with a bad format spec, dead result ----------------
+# Sibling of the attr/index cases: an f-string with an interpolated expression
+# invokes the formatting protocol, and a bad spec on a built-in raises
+# ValueError.  All operands here are literals (pure), so the function used to be
+# classified pure and the dead-result f-string was eliminated, swallowing the
+# error.  Must still raise.
+def f_fstring_spec():
+    x = f"{(1):foo}"  # noqa: result unused but MUST raise ValueError
+
+
+try:
+    f_fstring_spec()
+    print("f_fstring_spec: no error (WRONG)")
+except ValueError:
+    print("f_fstring_spec: ValueError")
+
+
+# --- user __format__ with a side effect via f-string, dead result -------------
+fmt_log = []
+
+
+class Formatted:
+    def __format__(self, spec):
+        fmt_log.append(("format", spec))
+        return ""
+
+
+def f_fstring_user():
+    obj = Formatted()
+    x = f"{obj:zz}"
+
+
+f_fstring_user()
+print("f_fstring_user log:", fmt_log)
+
+
 # --- user-defined __getattr__ with a side effect, dead result -----------------
 # The call must not be eliminated: the dunder has an observable side effect.
 log = []
