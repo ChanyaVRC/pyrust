@@ -5638,16 +5638,21 @@ fn is_pure_expr(
             }
             args.iter().all(|a| is_pure_expr(&a.value, pure_fns, local_names))
         }
-        Expr::Attr { target, .. } => is_pure_expr(target, pure_fns, local_names),
-        Expr::Index { target, index, .. } => {
-            is_pure_expr(target, pure_fns, local_names) && is_pure_expr(index, pure_fns, local_names)
-        }
-        Expr::Slice { target, lower, upper, step } => {
-            is_pure_expr(target, pure_fns, local_names)
-                && lower.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-                && upper.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-                && step.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-        }
+        // Attribute access, subscription and slicing are never pure: each can
+        // raise on otherwise-pure operands and can invoke user protocol methods
+        // (`__getattr__`/`__getattribute__`, `__getitem__`).  Examples:
+        //   (1).foo   -> AttributeError
+        //   {}["x"]   -> KeyError
+        //   (1)[0]    -> TypeError ('int' object is not subscriptable)
+        //   (1)[0:1]  -> TypeError
+        // Classifying such a function as pure lets a dead-result `CallMemo` be
+        // dead-store-eliminated, silently swallowing the exception (issue #2517 —
+        // sibling of #2409's `raise` and #2487's div/mod cases).  Recursing into
+        // the operands is unsound because the *operation itself* is the side
+        // effect, so mark these impure unconditionally.
+        Expr::Attr { .. } => false,
+        Expr::Index { .. } => false,
+        Expr::Slice { .. } => false,
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
         Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } | Expr::GenExp { .. } => false,
