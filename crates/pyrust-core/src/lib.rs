@@ -3666,6 +3666,24 @@ impl Value {
         ) || matches!(top16(self.0), TAG_NONE | TAG_BOOL | TAG_INT | TAG_STR)
     }
 
+    /// Identity short-circuit for sequence searches (`x in [x]`, `.index`,
+    /// `.count`, list/tuple `==`).  CPython's `PyObject_RichCompareBool` treats
+    /// `a is b` as equal *before* calling `__eq__`, which is observable only for
+    /// `NaN` — the one primitive where `x == x` is `False`.
+    ///
+    /// pyrust's floats are NaN-boxed values, not heap objects, so true object
+    /// identity doesn't exist for them.  The achievable approximation is raw
+    /// bit-pattern equality: two floats holding the same NaN payload are
+    /// bit-identical and are reported as "the same object" here.  This is
+    /// slightly *looser* than CPython for two distinct-but-bitwise-equal NaN
+    /// objects (CPython reports `False`; we report `True`), but it fixes the
+    /// common `n in [n]` case and the container invariant that an element you
+    /// just inserted is findable.  Restricted to floats so no other type's
+    /// equality semantics change.
+    pub fn is_identical_nan(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.is_float() && f64::from_bits(self.0).is_nan()
+    }
+
     /// Returns a stable identity value for pool-allocated and Rc-shared types:
     /// - tuple: reads `obj_id` from the shared [`TupleInner`]; aliased clones
     ///   (Rc-shared) all surface the same id, matching `b = a` aliasing (#2268)

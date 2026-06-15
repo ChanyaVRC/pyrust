@@ -36,7 +36,9 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
     // to the ValueError below.
     let stop = stop.max(start);
     for (i, item) in items[start..stop].iter().enumerate() {
-        if item == target {
+        // Identity short-circuit (CPython `PyObject_RichCompareBool`): a NaN
+        // searching for itself matches even though `==` is False.
+        if item == target || item.is_identical_nan(target) {
             return Ok(Value::int((start + i) as i64));
         }
     }
@@ -58,7 +60,12 @@ pub fn seq_count(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
             format!("{type_name}.count() takes exactly one argument (0 given)"),
         )
     })?;
-    let n = items.iter().filter(|v| *v == target).count();
+    // Identity short-circuit (CPython `PyObject_RichCompareBool`): a NaN
+    // counting itself matches even though `==` is False.
+    let n = items
+        .iter()
+        .filter(|v| **v == *target || v.is_identical_nan(target))
+        .count();
     Ok(Value::int(n as i64))
 }
 
