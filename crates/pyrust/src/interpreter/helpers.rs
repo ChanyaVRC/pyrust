@@ -5630,7 +5630,7 @@ fn is_pure_expr(
                     pure_fns.contains(name.as_str())
                         || crate::builtin_registry::is_pure(name)
                 }
-                Expr::Attr { target, name } => {
+                Expr::Attr { target, name, .. } => {
                     // Module-attribute call.  Only treat as pure when the
                     // target is a bare module-name `Var` (so `math.sqrt`
                     // qualifies but `obj.method` / `a.b.c` do not) AND the

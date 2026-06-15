@@ -4874,7 +4874,7 @@ fn stringify_annotation(expr: &Expr) -> String {
         Expr::Int(n) => n.to_string(),
         Expr::Float(f) => format!("{f}"),
         Expr::Str(s) => py_repr_str(s),
-        Expr::Attr { target, name } => {
+        Expr::Attr { target, name, .. } => {
             format!("{}.{}", stringify_annotation(target), name)
         }
         Expr::Index { target, index, .. } => {
@@ -8516,7 +8516,7 @@ impl Compiler {
                     self.emit(Insn::DeleteName(name_idx));
                 }
             }
-            Expr::Attr { target, name } => {
+            Expr::Attr { target, name, .. } => {
                 let obj = self.compile_expr(target);
                 let name_idx = self.intern_name(name);
                 self.emit(Insn::DeleteAttr(obj, name_idx));
@@ -10865,10 +10865,14 @@ impl Compiler {
                 }
             }
             Expr::Call { func, args, span } => self.compile_call(func, args, *span),
-            Expr::Attr { target, name } => {
+            Expr::Attr { target, name, span } => {
                 let obj = self.compile_expr(target);
                 let name_idx = self.intern_name(name);
                 let dst = self.ensure_dst(obj);
+                // PEP 657 caret anchor (#2442): underline the whole `obj.attr`
+                // span.  Arm immediately before the GetAttr that may raise
+                // AttributeError; `emit` clears it.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::GetAttr(dst, obj, name_idx));
                 dst
             }
@@ -11815,6 +11819,7 @@ impl Compiler {
             func: Box::new(Expr::Attr {
                 target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "append".to_string(),
+                span: None,
             }),
             args: vec![CallArg {
                 name: None,
@@ -11893,7 +11898,7 @@ impl Compiler {
         let Expr::Call { func, args, .. } = expr else {
             return false;
         };
-        let Expr::Attr { target, name } = func.as_ref() else {
+        let Expr::Attr { target, name, .. } = func.as_ref() else {
             return false;
         };
         if name != "add" || !matches!(target.as_ref(), Expr::Var(v, _) if v == ".acc") {
@@ -11931,7 +11936,7 @@ impl Compiler {
         let Expr::Call { func, args, .. } = expr else {
             return false;
         };
-        let Expr::Attr { target, name } = func.as_ref() else {
+        let Expr::Attr { target, name, .. } = func.as_ref() else {
             return false;
         };
         if name != "append" || !matches!(target.as_ref(), Expr::Var(v, _) if v == ".acc") {
@@ -11982,6 +11987,7 @@ impl Compiler {
             func: Box::new(Expr::Attr {
                 target: Box::new(Expr::Var(ACC_NAME.to_string(), None)),
                 name: "add".to_string(),
+                span: None,
             }),
             args: vec![CallArg {
                 name: None,
@@ -12253,7 +12259,7 @@ impl Compiler {
         // `compile_method_call` (same `obj_reg`/`dst_reg` placement).
         if has_kwargs
             && !has_splat
-            && let Expr::Attr { target, name } = func
+            && let Expr::Attr { target, name, .. } = func
         {
             return self.compile_keyword_method_call(target, name, args, span);
         }
@@ -12277,7 +12283,7 @@ impl Compiler {
         }
 
         // Detect obj.method(args) — emit CallMethod to allow in-place mutation.
-        if let Expr::Attr { target, name } = func {
+        if let Expr::Attr { target, name, .. } = func {
             return self.compile_method_call(target, name, args, span);
         }
 
@@ -12428,6 +12434,7 @@ impl Compiler {
                 &Expr::Attr {
                     target: Box::new(target.clone()),
                     name: method_name.to_string(),
+                    span: None,
                 },
                 args,
             );
@@ -12683,7 +12690,7 @@ impl Compiler {
         // For **kwargs: dict from kwargs
 
         // Detect obj.method(*args, **kwargs) — emit CallMethodExpanded.
-        if let Expr::Attr { target, name } = func {
+        if let Expr::Attr { target, name, .. } = func {
             // Same fast-local optimisation as compile_method_call: use the
             // variable's own register as `obj` so mutations persist.
             let (obj_reg, dst_reg) = if let Expr::Var(tname, _) = target.as_ref() {
