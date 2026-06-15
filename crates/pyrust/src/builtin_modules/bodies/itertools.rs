@@ -126,22 +126,22 @@ pyrust_module! {
             //
             // Class access returns this BuiltinFunction *unbound* — `args` is
             // exactly the user-supplied positionals.  Instance access binds the
-            // chain instance as a receiver, prepending it as `args[0]`.  The two
-            // are told apart by count, not by type (a count test stays correct
-            // even when the user passes a chain instance *as* the iterable,
-            // e.g. `chain.from_iterable(chain([[1]]))`): from_iterable always
-            // takes exactly one user argument, so `len() == 2` is the bound
-            // form (strip the receiver) and `len() == 1` is the unbound form.
-            let user: &[ExpandedCallArg] = match args.len() {
-                2 if matches!(
-                    args[0].value.kind(),
-                    ValueKind::PyInstance(_) | ValueKind::PyClass(_)
-                ) =>
-                {
-                    &args[1..]
-                }
-                _ => args,
-            };
+            // chain instance as a receiver, prepending it as `args[0]`.  We strip
+            // a leading receiver only when `args[0]` is itself a `chain` instance
+            // (the only thing the dispatcher ever prepends here).  Counting alone
+            // would misclassify a 2-arg *unbound* error call whose first arg
+            // happens to be e.g. a user iterator — `chain.from_iterable(it, it)`
+            // — silently dropping `it` instead of raising the arity TypeError;
+            // and it would inflate the bound form's error count (the prepended
+            // receiver would leak into "(N given)").  Identity-checking the
+            // receiver keeps the valid `chain.from_iterable(chain([[1]]))`
+            // (unbound, len == 1) correct while raising for the error spellings.
+            let strip_receiver = args.len() >= 2
+                && matches!(args[0].value.kind(), ValueKind::PyInstance(inst)
+                    if crate::interpreter::itertools_chain_class().is_some_and(|c| {
+                        crate::interpreter::class_is_subclass_of(&inst.borrow().class, &c)
+                    }));
+            let user: &[ExpandedCallArg] = if strip_receiver { &args[1..] } else { args };
             reject_keyword_args_expanded("chain.from_iterable", user)?;
             if user.len() != 1 {
                 return Err(PyError::named(

@@ -78,3 +78,19 @@ try:
     chain.from_iterable([1], [2])
 except TypeError as e:
     print("fi2:", e)
+# A 2-arg *unbound* call whose first arg is a user iterator is still an
+# arity error — the receiver-strip must not swallow it (the count-based
+# discriminator alone would have).
+class _It:
+    def __iter__(self):
+        return iter([[1], [2]])
+try:
+    chain.from_iterable(_It(), _It())
+except TypeError as e:
+    print("fi-unbound2:", e)
+# The bound-form arity error reports the user-visible arg count (2), not
+# the count inflated by the silently-prepended receiver.
+try:
+    chain([]).from_iterable([[1]], [[2]])
+except TypeError as e:
+    print("fi-bound2:", e)
