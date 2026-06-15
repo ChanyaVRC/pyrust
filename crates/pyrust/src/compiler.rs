@@ -4345,6 +4345,12 @@ struct Compiler {
     /// the free-variable `NameError` a real closure / generator expression gets
     /// (issue #2340).
     is_inlined_comp: bool,
+    /// For an inlined comprehension, the local-variable names of the
+    /// immediately-enclosing real function (the PEP 709 inlining target).  Used
+    /// at runtime to decide whether an unbound read is a local of that frame
+    /// (`UnboundLocalError`) or a free variable owned by a grandparent scope
+    /// (`NameError`) — see issue #2457.  `None` outside an inlined comp.
+    comp_enclosing_locals: Option<Rc<HashSet<String>>>,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -5061,6 +5067,7 @@ impl Compiler {
             is_set_comp: false,
             is_list_comp: false,
             is_inlined_comp: false,
+            comp_enclosing_locals: None,
         }
     }
 
@@ -5618,6 +5625,7 @@ impl Compiler {
             is_coroutine: self.is_async_function,
             is_class_method: self.is_class_method,
             is_inlined_comp: self.is_inlined_comp,
+            comp_enclosing_locals: self.comp_enclosing_locals.clone(),
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
             binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
@@ -11611,6 +11619,19 @@ impl Compiler {
         // free-variable `NameError` (issue #2340).  Generator expressions
         // (`compile_gen_exp`) are a real separate frame and stay free.
         sub.is_inlined_comp = true;
+        // Record the locals of the comp's immediately-enclosing *real* function
+        // (the PEP 709 inlining target) so the VM can tell an unbound read of one
+        // of that frame's locals (`UnboundLocalError`) apart from a free variable
+        // owned by a grandparent scope (`NameError`) — issue #2457.  When this
+        // compiler is itself an inlined comp, the inlining target is the real
+        // function further up, whose locals we already captured; inherit it.
+        sub.comp_enclosing_locals = if self.is_inlined_comp {
+            self.comp_enclosing_locals.clone()
+        } else if self.is_function_scope {
+            Some(Rc::new(self.local_index.keys().cloned().collect()))
+        } else {
+            None
+        };
         sub.compile_block(&fn_body);
         let inner_code = match sub.finish() {
             Ok(c) => c,

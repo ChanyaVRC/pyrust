@@ -1020,6 +1020,17 @@ pub struct FnCode {
     /// local of the enclosing frame) rather than the free-variable `NameError`
     /// a real closure / generator expression produces (issue #2340).
     pub(crate) is_inlined_comp: bool,
+    /// For an inlined list/set/dict comprehension (`is_inlined_comp`), the set of
+    /// *local* variable names of the comprehension's immediately-enclosing real
+    /// function — the frame CPython 3.12 inlines the comp into (PEP 709).
+    ///
+    /// An unbound read inside the comp surfaces as `UnboundLocalError` only when
+    /// the name is a local of that inlining-target frame; a name that is a *free*
+    /// variable of the enclosing function (owned by a grandparent scope) must
+    /// surface as the free-variable `NameError` instead (issue #2457).  `None`
+    /// for every non-comp code object (and for a comp not directly enclosed by a
+    /// function, where there are no enclosing locals to distinguish).
+    pub(crate) comp_enclosing_locals: Option<Rc<HashSet<String>>>,
     /// Per-instruction inline cache for `GetAttr` and `CallMethod`.
     ///
     /// Indexed by instruction position (`pc`) — same length as `insns`.
