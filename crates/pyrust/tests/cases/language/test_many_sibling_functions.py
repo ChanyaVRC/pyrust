@@ -1,0 +1,1823 @@
+# 256+ sibling (parallel) function definitions in one scope must compile and
+# run.  CPython has no limit on the count of sibling functions in a scope;
+# pyrust previously capped fn_protos at 256 per scope (issue #2444), which
+# wrongly conflated per-scope function count with nesting depth.
+# Covers module scope, function-body scope, and class-body scope.
+
+
+def f0():
+    return 0
+def f1():
+    return 1
+def f2():
+    return 2
+def f3():
+    return 3
+def f4():
+    return 4
+def f5():
+    return 5
+def f6():
+    return 6
+def f7():
+    return 7
+def f8():
+    return 8
+def f9():
+    return 9
+def f10():
+    return 10
+def f11():
+    return 11
+def f12():
+    return 12
+def f13():
+    return 13
+def f14():
+    return 14
+def f15():
+    return 15
+def f16():
+    return 16
+def f17():
+    return 17
+def f18():
+    return 18
+def f19():
+    return 19
+def f20():
+    return 20
+def f21():
+    return 21
+def f22():
+    return 22
+def f23():
+    return 23
+def f24():
+    return 24
+def f25():
+    return 25
+def f26():
+    return 26
+def f27():
+    return 27
+def f28():
+    return 28
+def f29():
+    return 29
+def f30():
+    return 30
+def f31():
+    return 31
+def f32():
+    return 32
+def f33():
+    return 33
+def f34():
+    return 34
+def f35():
+    return 35
+def f36():
+    return 36
+def f37():
+    return 37
+def f38():
+    return 38
+def f39():
+    return 39
+def f40():
+    return 40
+def f41():
+    return 41
+def f42():
+    return 42
+def f43():
+    return 43
+def f44():
+    return 44
+def f45():
+    return 45
+def f46():
+    return 46
+def f47():
+    return 47
+def f48():
+    return 48
+def f49():
+    return 49
+def f50():
+    return 50
+def f51():
+    return 51
+def f52():
+    return 52
+def f53():
+    return 53
+def f54():
+    return 54
+def f55():
+    return 55
+def f56():
+    return 56
+def f57():
+    return 57
+def f58():
+    return 58
+def f59():
+    return 59
+def f60():
+    return 60
+def f61():
+    return 61
+def f62():
+    return 62
+def f63():
+    return 63
+def f64():
+    return 64
+def f65():
+    return 65
+def f66():
+    return 66
+def f67():
+    return 67
+def f68():
+    return 68
+def f69():
+    return 69
+def f70():
+    return 70
+def f71():
+    return 71
+def f72():
+    return 72
+def f73():
+    return 73
+def f74():
+    return 74
+def f75():
+    return 75
+def f76():
+    return 76
+def f77():
+    return 77
+def f78():
+    return 78
+def f79():
+    return 79
+def f80():
+    return 80
+def f81():
+    return 81
+def f82():
+    return 82
+def f83():
+    return 83
+def f84():
+    return 84
+def f85():
+    return 85
+def f86():
+    return 86
+def f87():
+    return 87
+def f88():
+    return 88
+def f89():
+    return 89
+def f90():
+    return 90
+def f91():
+    return 91
+def f92():
+    return 92
+def f93():
+    return 93
+def f94():
+    return 94
+def f95():
+    return 95
+def f96():
+    return 96
+def f97():
+    return 97
+def f98():
+    return 98
+def f99():
+    return 99
+def f100():
+    return 100
+def f101():
+    return 101
+def f102():
+    return 102
+def f103():
+    return 103
+def f104():
+    return 104
+def f105():
+    return 105
+def f106():
+    return 106
+def f107():
+    return 107
+def f108():
+    return 108
+def f109():
+    return 109
+def f110():
+    return 110
+def f111():
+    return 111
+def f112():
+    return 112
+def f113():
+    return 113
+def f114():
+    return 114
+def f115():
+    return 115
+def f116():
+    return 116
+def f117():
+    return 117
+def f118():
+    return 118
+def f119():
+    return 119
+def f120():
+    return 120
+def f121():
+    return 121
+def f122():
+    return 122
+def f123():
+    return 123
+def f124():
+    return 124
+def f125():
+    return 125
+def f126():
+    return 126
+def f127():
+    return 127
+def f128():
+    return 128
+def f129():
+    return 129
+def f130():
+    return 130
+def f131():
+    return 131
+def f132():
+    return 132
+def f133():
+    return 133
+def f134():
+    return 134
+def f135():
+    return 135
+def f136():
+    return 136
+def f137():
+    return 137
+def f138():
+    return 138
+def f139():
+    return 139
+def f140():
+    return 140
+def f141():
+    return 141
+def f142():
+    return 142
+def f143():
+    return 143
+def f144():
+    return 144
+def f145():
+    return 145
+def f146():
+    return 146
+def f147():
+    return 147
+def f148():
+    return 148
+def f149():
+    return 149
+def f150():
+    return 150
+def f151():
+    return 151
+def f152():
+    return 152
+def f153():
+    return 153
+def f154():
+    return 154
+def f155():
+    return 155
+def f156():
+    return 156
+def f157():
+    return 157
+def f158():
+    return 158
+def f159():
+    return 159
+def f160():
+    return 160
+def f161():
+    return 161
+def f162():
+    return 162
+def f163():
+    return 163
+def f164():
+    return 164
+def f165():
+    return 165
+def f166():
+    return 166
+def f167():
+    return 167
+def f168():
+    return 168
+def f169():
+    return 169
+def f170():
+    return 170
+def f171():
+    return 171
+def f172():
+    return 172
+def f173():
+    return 173
+def f174():
+    return 174
+def f175():
+    return 175
+def f176():
+    return 176
+def f177():
+    return 177
+def f178():
+    return 178
+def f179():
+    return 179
+def f180():
+    return 180
+def f181():
+    return 181
+def f182():
+    return 182
+def f183():
+    return 183
+def f184():
+    return 184
+def f185():
+    return 185
+def f186():
+    return 186
+def f187():
+    return 187
+def f188():
+    return 188
+def f189():
+    return 189
+def f190():
+    return 190
+def f191():
+    return 191
+def f192():
+    return 192
+def f193():
+    return 193
+def f194():
+    return 194
+def f195():
+    return 195
+def f196():
+    return 196
+def f197():
+    return 197
+def f198():
+    return 198
+def f199():
+    return 199
+def f200():
+    return 200
+def f201():
+    return 201
+def f202():
+    return 202
+def f203():
+    return 203
+def f204():
+    return 204
+def f205():
+    return 205
+def f206():
+    return 206
+def f207():
+    return 207
+def f208():
+    return 208
+def f209():
+    return 209
+def f210():
+    return 210
+def f211():
+    return 211
+def f212():
+    return 212
+def f213():
+    return 213
+def f214():
+    return 214
+def f215():
+    return 215
+def f216():
+    return 216
+def f217():
+    return 217
+def f218():
+    return 218
+def f219():
+    return 219
+def f220():
+    return 220
+def f221():
+    return 221
+def f222():
+    return 222
+def f223():
+    return 223
+def f224():
+    return 224
+def f225():
+    return 225
+def f226():
+    return 226
+def f227():
+    return 227
+def f228():
+    return 228
+def f229():
+    return 229
+def f230():
+    return 230
+def f231():
+    return 231
+def f232():
+    return 232
+def f233():
+    return 233
+def f234():
+    return 234
+def f235():
+    return 235
+def f236():
+    return 236
+def f237():
+    return 237
+def f238():
+    return 238
+def f239():
+    return 239
+def f240():
+    return 240
+def f241():
+    return 241
+def f242():
+    return 242
+def f243():
+    return 243
+def f244():
+    return 244
+def f245():
+    return 245
+def f246():
+    return 246
+def f247():
+    return 247
+def f248():
+    return 248
+def f249():
+    return 249
+def f250():
+    return 250
+def f251():
+    return 251
+def f252():
+    return 252
+def f253():
+    return 253
+def f254():
+    return 254
+def f255():
+    return 255
+def f256():
+    return 256
+def f257():
+    return 257
+def f258():
+    return 258
+def f259():
+    return 259
+def f260():
+    return 260
+def f261():
+    return 261
+def f262():
+    return 262
+def f263():
+    return 263
+def f264():
+    return 264
+def f265():
+    return 265
+def f266():
+    return 266
+def f267():
+    return 267
+def f268():
+    return 268
+def f269():
+    return 269
+def f270():
+    return 270
+def f271():
+    return 271
+def f272():
+    return 272
+def f273():
+    return 273
+def f274():
+    return 274
+def f275():
+    return 275
+def f276():
+    return 276
+def f277():
+    return 277
+def f278():
+    return 278
+def f279():
+    return 279
+def f280():
+    return 280
+def f281():
+    return 281
+def f282():
+    return 282
+def f283():
+    return 283
+def f284():
+    return 284
+def f285():
+    return 285
+def f286():
+    return 286
+def f287():
+    return 287
+def f288():
+    return 288
+def f289():
+    return 289
+def f290():
+    return 290
+def f291():
+    return 291
+def f292():
+    return 292
+def f293():
+    return 293
+def f294():
+    return 294
+def f295():
+    return 295
+def f296():
+    return 296
+def f297():
+    return 297
+def f298():
+    return 298
+def f299():
+    return 299
+
+print(sum(f() for f in [f0, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31, f32, f33, f34, f35, f36, f37, f38, f39, f40, f41, f42, f43, f44, f45, f46, f47, f48, f49, f50, f51, f52, f53, f54, f55, f56, f57, f58, f59, f60, f61, f62, f63, f64, f65, f66, f67, f68, f69, f70, f71, f72, f73, f74, f75, f76, f77, f78, f79, f80, f81, f82, f83, f84, f85, f86, f87, f88, f89, f90, f91, f92, f93, f94, f95, f96, f97, f98, f99, f100, f101, f102, f103, f104, f105, f106, f107, f108, f109, f110, f111, f112, f113, f114, f115, f116, f117, f118, f119, f120, f121, f122, f123, f124, f125, f126, f127, f128, f129, f130, f131, f132, f133, f134, f135, f136, f137, f138, f139, f140, f141, f142, f143, f144, f145, f146, f147, f148, f149, f150, f151, f152, f153, f154, f155, f156, f157, f158, f159, f160, f161, f162, f163, f164, f165, f166, f167, f168, f169, f170, f171, f172, f173, f174, f175, f176, f177, f178, f179, f180, f181, f182, f183, f184, f185, f186, f187, f188, f189, f190, f191, f192, f193, f194, f195, f196, f197, f198, f199, f200, f201, f202, f203, f204, f205, f206, f207, f208, f209, f210, f211, f212, f213, f214, f215, f216, f217, f218, f219, f220, f221, f222, f223, f224, f225, f226, f227, f228, f229, f230, f231, f232, f233, f234, f235, f236, f237, f238, f239, f240, f241, f242, f243, f244, f245, f246, f247, f248, f249, f250, f251, f252, f253, f254, f255, f256, f257, f258, f259, f260, f261, f262, f263, f264, f265, f266, f267, f268, f269, f270, f271, f272, f273, f274, f275, f276, f277, f278, f279, f280, f281, f282, f283, f284, f285, f286, f287, f288, f289, f290, f291, f292, f293, f294, f295, f296, f297, f298, f299]))
+
+
+def many_inner():
+    def g0():
+        return 0
+    def g1():
+        return 1
+    def g2():
+        return 2
+    def g3():
+        return 3
+    def g4():
+        return 4
+    def g5():
+        return 5
+    def g6():
+        return 6
+    def g7():
+        return 7
+    def g8():
+        return 8
+    def g9():
+        return 9
+    def g10():
+        return 10
+    def g11():
+        return 11
+    def g12():
+        return 12
+    def g13():
+        return 13
+    def g14():
+        return 14
+    def g15():
+        return 15
+    def g16():
+        return 16
+    def g17():
+        return 17
+    def g18():
+        return 18
+    def g19():
+        return 19
+    def g20():
+        return 20
+    def g21():
+        return 21
+    def g22():
+        return 22
+    def g23():
+        return 23
+    def g24():
+        return 24
+    def g25():
+        return 25
+    def g26():
+        return 26
+    def g27():
+        return 27
+    def g28():
+        return 28
+    def g29():
+        return 29
+    def g30():
+        return 30
+    def g31():
+        return 31
+    def g32():
+        return 32
+    def g33():
+        return 33
+    def g34():
+        return 34
+    def g35():
+        return 35
+    def g36():
+        return 36
+    def g37():
+        return 37
+    def g38():
+        return 38
+    def g39():
+        return 39
+    def g40():
+        return 40
+    def g41():
+        return 41
+    def g42():
+        return 42
+    def g43():
+        return 43
+    def g44():
+        return 44
+    def g45():
+        return 45
+    def g46():
+        return 46
+    def g47():
+        return 47
+    def g48():
+        return 48
+    def g49():
+        return 49
+    def g50():
+        return 50
+    def g51():
+        return 51
+    def g52():
+        return 52
+    def g53():
+        return 53
+    def g54():
+        return 54
+    def g55():
+        return 55
+    def g56():
+        return 56
+    def g57():
+        return 57
+    def g58():
+        return 58
+    def g59():
+        return 59
+    def g60():
+        return 60
+    def g61():
+        return 61
+    def g62():
+        return 62
+    def g63():
+        return 63
+    def g64():
+        return 64
+    def g65():
+        return 65
+    def g66():
+        return 66
+    def g67():
+        return 67
+    def g68():
+        return 68
+    def g69():
+        return 69
+    def g70():
+        return 70
+    def g71():
+        return 71
+    def g72():
+        return 72
+    def g73():
+        return 73
+    def g74():
+        return 74
+    def g75():
+        return 75
+    def g76():
+        return 76
+    def g77():
+        return 77
+    def g78():
+        return 78
+    def g79():
+        return 79
+    def g80():
+        return 80
+    def g81():
+        return 81
+    def g82():
+        return 82
+    def g83():
+        return 83
+    def g84():
+        return 84
+    def g85():
+        return 85
+    def g86():
+        return 86
+    def g87():
+        return 87
+    def g88():
+        return 88
+    def g89():
+        return 89
+    def g90():
+        return 90
+    def g91():
+        return 91
+    def g92():
+        return 92
+    def g93():
+        return 93
+    def g94():
+        return 94
+    def g95():
+        return 95
+    def g96():
+        return 96
+    def g97():
+        return 97
+    def g98():
+        return 98
+    def g99():
+        return 99
+    def g100():
+        return 100
+    def g101():
+        return 101
+    def g102():
+        return 102
+    def g103():
+        return 103
+    def g104():
+        return 104
+    def g105():
+        return 105
+    def g106():
+        return 106
+    def g107():
+        return 107
+    def g108():
+        return 108
+    def g109():
+        return 109
+    def g110():
+        return 110
+    def g111():
+        return 111
+    def g112():
+        return 112
+    def g113():
+        return 113
+    def g114():
+        return 114
+    def g115():
+        return 115
+    def g116():
+        return 116
+    def g117():
+        return 117
+    def g118():
+        return 118
+    def g119():
+        return 119
+    def g120():
+        return 120
+    def g121():
+        return 121
+    def g122():
+        return 122
+    def g123():
+        return 123
+    def g124():
+        return 124
+    def g125():
+        return 125
+    def g126():
+        return 126
+    def g127():
+        return 127
+    def g128():
+        return 128
+    def g129():
+        return 129
+    def g130():
+        return 130
+    def g131():
+        return 131
+    def g132():
+        return 132
+    def g133():
+        return 133
+    def g134():
+        return 134
+    def g135():
+        return 135
+    def g136():
+        return 136
+    def g137():
+        return 137
+    def g138():
+        return 138
+    def g139():
+        return 139
+    def g140():
+        return 140
+    def g141():
+        return 141
+    def g142():
+        return 142
+    def g143():
+        return 143
+    def g144():
+        return 144
+    def g145():
+        return 145
+    def g146():
+        return 146
+    def g147():
+        return 147
+    def g148():
+        return 148
+    def g149():
+        return 149
+    def g150():
+        return 150
+    def g151():
+        return 151
+    def g152():
+        return 152
+    def g153():
+        return 153
+    def g154():
+        return 154
+    def g155():
+        return 155
+    def g156():
+        return 156
+    def g157():
+        return 157
+    def g158():
+        return 158
+    def g159():
+        return 159
+    def g160():
+        return 160
+    def g161():
+        return 161
+    def g162():
+        return 162
+    def g163():
+        return 163
+    def g164():
+        return 164
+    def g165():
+        return 165
+    def g166():
+        return 166
+    def g167():
+        return 167
+    def g168():
+        return 168
+    def g169():
+        return 169
+    def g170():
+        return 170
+    def g171():
+        return 171
+    def g172():
+        return 172
+    def g173():
+        return 173
+    def g174():
+        return 174
+    def g175():
+        return 175
+    def g176():
+        return 176
+    def g177():
+        return 177
+    def g178():
+        return 178
+    def g179():
+        return 179
+    def g180():
+        return 180
+    def g181():
+        return 181
+    def g182():
+        return 182
+    def g183():
+        return 183
+    def g184():
+        return 184
+    def g185():
+        return 185
+    def g186():
+        return 186
+    def g187():
+        return 187
+    def g188():
+        return 188
+    def g189():
+        return 189
+    def g190():
+        return 190
+    def g191():
+        return 191
+    def g192():
+        return 192
+    def g193():
+        return 193
+    def g194():
+        return 194
+    def g195():
+        return 195
+    def g196():
+        return 196
+    def g197():
+        return 197
+    def g198():
+        return 198
+    def g199():
+        return 199
+    def g200():
+        return 200
+    def g201():
+        return 201
+    def g202():
+        return 202
+    def g203():
+        return 203
+    def g204():
+        return 204
+    def g205():
+        return 205
+    def g206():
+        return 206
+    def g207():
+        return 207
+    def g208():
+        return 208
+    def g209():
+        return 209
+    def g210():
+        return 210
+    def g211():
+        return 211
+    def g212():
+        return 212
+    def g213():
+        return 213
+    def g214():
+        return 214
+    def g215():
+        return 215
+    def g216():
+        return 216
+    def g217():
+        return 217
+    def g218():
+        return 218
+    def g219():
+        return 219
+    def g220():
+        return 220
+    def g221():
+        return 221
+    def g222():
+        return 222
+    def g223():
+        return 223
+    def g224():
+        return 224
+    def g225():
+        return 225
+    def g226():
+        return 226
+    def g227():
+        return 227
+    def g228():
+        return 228
+    def g229():
+        return 229
+    def g230():
+        return 230
+    def g231():
+        return 231
+    def g232():
+        return 232
+    def g233():
+        return 233
+    def g234():
+        return 234
+    def g235():
+        return 235
+    def g236():
+        return 236
+    def g237():
+        return 237
+    def g238():
+        return 238
+    def g239():
+        return 239
+    def g240():
+        return 240
+    def g241():
+        return 241
+    def g242():
+        return 242
+    def g243():
+        return 243
+    def g244():
+        return 244
+    def g245():
+        return 245
+    def g246():
+        return 246
+    def g247():
+        return 247
+    def g248():
+        return 248
+    def g249():
+        return 249
+    def g250():
+        return 250
+    def g251():
+        return 251
+    def g252():
+        return 252
+    def g253():
+        return 253
+    def g254():
+        return 254
+    def g255():
+        return 255
+    def g256():
+        return 256
+    def g257():
+        return 257
+    def g258():
+        return 258
+    def g259():
+        return 259
+    def g260():
+        return 260
+    def g261():
+        return 261
+    def g262():
+        return 262
+    def g263():
+        return 263
+    def g264():
+        return 264
+    def g265():
+        return 265
+    def g266():
+        return 266
+    def g267():
+        return 267
+    def g268():
+        return 268
+    def g269():
+        return 269
+    def g270():
+        return 270
+    def g271():
+        return 271
+    def g272():
+        return 272
+    def g273():
+        return 273
+    def g274():
+        return 274
+    def g275():
+        return 275
+    def g276():
+        return 276
+    def g277():
+        return 277
+    def g278():
+        return 278
+    def g279():
+        return 279
+    def g280():
+        return 280
+    def g281():
+        return 281
+    def g282():
+        return 282
+    def g283():
+        return 283
+    def g284():
+        return 284
+    def g285():
+        return 285
+    def g286():
+        return 286
+    def g287():
+        return 287
+    def g288():
+        return 288
+    def g289():
+        return 289
+    def g290():
+        return 290
+    def g291():
+        return 291
+    def g292():
+        return 292
+    def g293():
+        return 293
+    def g294():
+        return 294
+    def g295():
+        return 295
+    def g296():
+        return 296
+    def g297():
+        return 297
+    def g298():
+        return 298
+    def g299():
+        return 299
+    return sum(f() for f in [g0, g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19, g20, g21, g22, g23, g24, g25, g26, g27, g28, g29, g30, g31, g32, g33, g34, g35, g36, g37, g38, g39, g40, g41, g42, g43, g44, g45, g46, g47, g48, g49, g50, g51, g52, g53, g54, g55, g56, g57, g58, g59, g60, g61, g62, g63, g64, g65, g66, g67, g68, g69, g70, g71, g72, g73, g74, g75, g76, g77, g78, g79, g80, g81, g82, g83, g84, g85, g86, g87, g88, g89, g90, g91, g92, g93, g94, g95, g96, g97, g98, g99, g100, g101, g102, g103, g104, g105, g106, g107, g108, g109, g110, g111, g112, g113, g114, g115, g116, g117, g118, g119, g120, g121, g122, g123, g124, g125, g126, g127, g128, g129, g130, g131, g132, g133, g134, g135, g136, g137, g138, g139, g140, g141, g142, g143, g144, g145, g146, g147, g148, g149, g150, g151, g152, g153, g154, g155, g156, g157, g158, g159, g160, g161, g162, g163, g164, g165, g166, g167, g168, g169, g170, g171, g172, g173, g174, g175, g176, g177, g178, g179, g180, g181, g182, g183, g184, g185, g186, g187, g188, g189, g190, g191, g192, g193, g194, g195, g196, g197, g198, g199, g200, g201, g202, g203, g204, g205, g206, g207, g208, g209, g210, g211, g212, g213, g214, g215, g216, g217, g218, g219, g220, g221, g222, g223, g224, g225, g226, g227, g228, g229, g230, g231, g232, g233, g234, g235, g236, g237, g238, g239, g240, g241, g242, g243, g244, g245, g246, g247, g248, g249, g250, g251, g252, g253, g254, g255, g256, g257, g258, g259, g260, g261, g262, g263, g264, g265, g266, g267, g268, g269, g270, g271, g272, g273, g274, g275, g276, g277, g278, g279, g280, g281, g282, g283, g284, g285, g286, g287, g288, g289, g290, g291, g292, g293, g294, g295, g296, g297, g298, g299])
+
+
+print(many_inner())
+
+
+class Many:
+    def m0(self):
+        return 0
+    def m1(self):
+        return 1
+    def m2(self):
+        return 2
+    def m3(self):
+        return 3
+    def m4(self):
+        return 4
+    def m5(self):
+        return 5
+    def m6(self):
+        return 6
+    def m7(self):
+        return 7
+    def m8(self):
+        return 8
+    def m9(self):
+        return 9
+    def m10(self):
+        return 10
+    def m11(self):
+        return 11
+    def m12(self):
+        return 12
+    def m13(self):
+        return 13
+    def m14(self):
+        return 14
+    def m15(self):
+        return 15
+    def m16(self):
+        return 16
+    def m17(self):
+        return 17
+    def m18(self):
+        return 18
+    def m19(self):
+        return 19
+    def m20(self):
+        return 20
+    def m21(self):
+        return 21
+    def m22(self):
+        return 22
+    def m23(self):
+        return 23
+    def m24(self):
+        return 24
+    def m25(self):
+        return 25
+    def m26(self):
+        return 26
+    def m27(self):
+        return 27
+    def m28(self):
+        return 28
+    def m29(self):
+        return 29
+    def m30(self):
+        return 30
+    def m31(self):
+        return 31
+    def m32(self):
+        return 32
+    def m33(self):
+        return 33
+    def m34(self):
+        return 34
+    def m35(self):
+        return 35
+    def m36(self):
+        return 36
+    def m37(self):
+        return 37
+    def m38(self):
+        return 38
+    def m39(self):
+        return 39
+    def m40(self):
+        return 40
+    def m41(self):
+        return 41
+    def m42(self):
+        return 42
+    def m43(self):
+        return 43
+    def m44(self):
+        return 44
+    def m45(self):
+        return 45
+    def m46(self):
+        return 46
+    def m47(self):
+        return 47
+    def m48(self):
+        return 48
+    def m49(self):
+        return 49
+    def m50(self):
+        return 50
+    def m51(self):
+        return 51
+    def m52(self):
+        return 52
+    def m53(self):
+        return 53
+    def m54(self):
+        return 54
+    def m55(self):
+        return 55
+    def m56(self):
+        return 56
+    def m57(self):
+        return 57
+    def m58(self):
+        return 58
+    def m59(self):
+        return 59
+    def m60(self):
+        return 60
+    def m61(self):
+        return 61
+    def m62(self):
+        return 62
+    def m63(self):
+        return 63
+    def m64(self):
+        return 64
+    def m65(self):
+        return 65
+    def m66(self):
+        return 66
+    def m67(self):
+        return 67
+    def m68(self):
+        return 68
+    def m69(self):
+        return 69
+    def m70(self):
+        return 70
+    def m71(self):
+        return 71
+    def m72(self):
+        return 72
+    def m73(self):
+        return 73
+    def m74(self):
+        return 74
+    def m75(self):
+        return 75
+    def m76(self):
+        return 76
+    def m77(self):
+        return 77
+    def m78(self):
+        return 78
+    def m79(self):
+        return 79
+    def m80(self):
+        return 80
+    def m81(self):
+        return 81
+    def m82(self):
+        return 82
+    def m83(self):
+        return 83
+    def m84(self):
+        return 84
+    def m85(self):
+        return 85
+    def m86(self):
+        return 86
+    def m87(self):
+        return 87
+    def m88(self):
+        return 88
+    def m89(self):
+        return 89
+    def m90(self):
+        return 90
+    def m91(self):
+        return 91
+    def m92(self):
+        return 92
+    def m93(self):
+        return 93
+    def m94(self):
+        return 94
+    def m95(self):
+        return 95
+    def m96(self):
+        return 96
+    def m97(self):
+        return 97
+    def m98(self):
+        return 98
+    def m99(self):
+        return 99
+    def m100(self):
+        return 100
+    def m101(self):
+        return 101
+    def m102(self):
+        return 102
+    def m103(self):
+        return 103
+    def m104(self):
+        return 104
+    def m105(self):
+        return 105
+    def m106(self):
+        return 106
+    def m107(self):
+        return 107
+    def m108(self):
+        return 108
+    def m109(self):
+        return 109
+    def m110(self):
+        return 110
+    def m111(self):
+        return 111
+    def m112(self):
+        return 112
+    def m113(self):
+        return 113
+    def m114(self):
+        return 114
+    def m115(self):
+        return 115
+    def m116(self):
+        return 116
+    def m117(self):
+        return 117
+    def m118(self):
+        return 118
+    def m119(self):
+        return 119
+    def m120(self):
+        return 120
+    def m121(self):
+        return 121
+    def m122(self):
+        return 122
+    def m123(self):
+        return 123
+    def m124(self):
+        return 124
+    def m125(self):
+        return 125
+    def m126(self):
+        return 126
+    def m127(self):
+        return 127
+    def m128(self):
+        return 128
+    def m129(self):
+        return 129
+    def m130(self):
+        return 130
+    def m131(self):
+        return 131
+    def m132(self):
+        return 132
+    def m133(self):
+        return 133
+    def m134(self):
+        return 134
+    def m135(self):
+        return 135
+    def m136(self):
+        return 136
+    def m137(self):
+        return 137
+    def m138(self):
+        return 138
+    def m139(self):
+        return 139
+    def m140(self):
+        return 140
+    def m141(self):
+        return 141
+    def m142(self):
+        return 142
+    def m143(self):
+        return 143
+    def m144(self):
+        return 144
+    def m145(self):
+        return 145
+    def m146(self):
+        return 146
+    def m147(self):
+        return 147
+    def m148(self):
+        return 148
+    def m149(self):
+        return 149
+    def m150(self):
+        return 150
+    def m151(self):
+        return 151
+    def m152(self):
+        return 152
+    def m153(self):
+        return 153
+    def m154(self):
+        return 154
+    def m155(self):
+        return 155
+    def m156(self):
+        return 156
+    def m157(self):
+        return 157
+    def m158(self):
+        return 158
+    def m159(self):
+        return 159
+    def m160(self):
+        return 160
+    def m161(self):
+        return 161
+    def m162(self):
+        return 162
+    def m163(self):
+        return 163
+    def m164(self):
+        return 164
+    def m165(self):
+        return 165
+    def m166(self):
+        return 166
+    def m167(self):
+        return 167
+    def m168(self):
+        return 168
+    def m169(self):
+        return 169
+    def m170(self):
+        return 170
+    def m171(self):
+        return 171
+    def m172(self):
+        return 172
+    def m173(self):
+        return 173
+    def m174(self):
+        return 174
+    def m175(self):
+        return 175
+    def m176(self):
+        return 176
+    def m177(self):
+        return 177
+    def m178(self):
+        return 178
+    def m179(self):
+        return 179
+    def m180(self):
+        return 180
+    def m181(self):
+        return 181
+    def m182(self):
+        return 182
+    def m183(self):
+        return 183
+    def m184(self):
+        return 184
+    def m185(self):
+        return 185
+    def m186(self):
+        return 186
+    def m187(self):
+        return 187
+    def m188(self):
+        return 188
+    def m189(self):
+        return 189
+    def m190(self):
+        return 190
+    def m191(self):
+        return 191
+    def m192(self):
+        return 192
+    def m193(self):
+        return 193
+    def m194(self):
+        return 194
+    def m195(self):
+        return 195
+    def m196(self):
+        return 196
+    def m197(self):
+        return 197
+    def m198(self):
+        return 198
+    def m199(self):
+        return 199
+    def m200(self):
+        return 200
+    def m201(self):
+        return 201
+    def m202(self):
+        return 202
+    def m203(self):
+        return 203
+    def m204(self):
+        return 204
+    def m205(self):
+        return 205
+    def m206(self):
+        return 206
+    def m207(self):
+        return 207
+    def m208(self):
+        return 208
+    def m209(self):
+        return 209
+    def m210(self):
+        return 210
+    def m211(self):
+        return 211
+    def m212(self):
+        return 212
+    def m213(self):
+        return 213
+    def m214(self):
+        return 214
+    def m215(self):
+        return 215
+    def m216(self):
+        return 216
+    def m217(self):
+        return 217
+    def m218(self):
+        return 218
+    def m219(self):
+        return 219
+    def m220(self):
+        return 220
+    def m221(self):
+        return 221
+    def m222(self):
+        return 222
+    def m223(self):
+        return 223
+    def m224(self):
+        return 224
+    def m225(self):
+        return 225
+    def m226(self):
+        return 226
+    def m227(self):
+        return 227
+    def m228(self):
+        return 228
+    def m229(self):
+        return 229
+    def m230(self):
+        return 230
+    def m231(self):
+        return 231
+    def m232(self):
+        return 232
+    def m233(self):
+        return 233
+    def m234(self):
+        return 234
+    def m235(self):
+        return 235
+    def m236(self):
+        return 236
+    def m237(self):
+        return 237
+    def m238(self):
+        return 238
+    def m239(self):
+        return 239
+    def m240(self):
+        return 240
+    def m241(self):
+        return 241
+    def m242(self):
+        return 242
+    def m243(self):
+        return 243
+    def m244(self):
+        return 244
+    def m245(self):
+        return 245
+    def m246(self):
+        return 246
+    def m247(self):
+        return 247
+    def m248(self):
+        return 248
+    def m249(self):
+        return 249
+    def m250(self):
+        return 250
+    def m251(self):
+        return 251
+    def m252(self):
+        return 252
+    def m253(self):
+        return 253
+    def m254(self):
+        return 254
+    def m255(self):
+        return 255
+    def m256(self):
+        return 256
+    def m257(self):
+        return 257
+    def m258(self):
+        return 258
+    def m259(self):
+        return 259
+    def m260(self):
+        return 260
+    def m261(self):
+        return 261
+    def m262(self):
+        return 262
+    def m263(self):
+        return 263
+    def m264(self):
+        return 264
+    def m265(self):
+        return 265
+    def m266(self):
+        return 266
+    def m267(self):
+        return 267
+    def m268(self):
+        return 268
+    def m269(self):
+        return 269
+    def m270(self):
+        return 270
+    def m271(self):
+        return 271
+    def m272(self):
+        return 272
+    def m273(self):
+        return 273
+    def m274(self):
+        return 274
+    def m275(self):
+        return 275
+    def m276(self):
+        return 276
+    def m277(self):
+        return 277
+    def m278(self):
+        return 278
+    def m279(self):
+        return 279
+    def m280(self):
+        return 280
+    def m281(self):
+        return 281
+    def m282(self):
+        return 282
+    def m283(self):
+        return 283
+    def m284(self):
+        return 284
+    def m285(self):
+        return 285
+    def m286(self):
+        return 286
+    def m287(self):
+        return 287
+    def m288(self):
+        return 288
+    def m289(self):
+        return 289
+    def m290(self):
+        return 290
+    def m291(self):
+        return 291
+    def m292(self):
+        return 292
+    def m293(self):
+        return 293
+    def m294(self):
+        return 294
+    def m295(self):
+        return 295
+    def m296(self):
+        return 296
+    def m297(self):
+        return 297
+    def m298(self):
+        return 298
+    def m299(self):
+        return 299
+
+
+inst = Many()
+print(sum(getattr(inst, "m" + str(i))() for i in range(300)))

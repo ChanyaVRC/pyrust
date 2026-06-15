@@ -639,7 +639,7 @@ fn pass_inline(
     // provided `r` is not rewritten between that point and `before_pc`.  Used to
     // identify the proto a temporary held at the moment it was copied into a
     // stable holder.
-    let make_fn_idx = |reg: u32, before_pc: usize| -> Option<u8> {
+    let make_fn_idx = |reg: u32, before_pc: usize| -> Option<u32> {
         let mut latest: Option<usize> = None;
         for (pc, insn) in insns.iter().enumerate().take(before_pc) {
             let mut w: HashSet<u32> = HashSet::new();
@@ -663,7 +663,7 @@ fn pass_inline(
     // exactly once across the whole scope (so its value is immutable for every
     // call), and that single write must either *be* a `MakeFunction` or copy in
     // a register that held one at that point.
-    let resolve_fn_reg = |reg: u32| -> Option<u8> {
+    let resolve_fn_reg = |reg: u32| -> Option<u32> {
         if write_count.get(&reg).copied() != Some(1) {
             return None;
         }
@@ -681,7 +681,7 @@ fn pass_inline(
 
     // Pre-build an inlining plan for every proto that resolves to a call target.
     // (Computed lazily / cached as we encounter call sites.)
-    let mut plans: HashMap<u8, Option<InlinePlan>> = HashMap::new();
+    let mut plans: HashMap<u32, Option<InlinePlan>> = HashMap::new();
     let mut next_window = *num_regs;
 
     // First splice pass.  `out` accumulates `(old_i, insn)` pairs where `old_i`
@@ -766,8 +766,8 @@ fn resolve_call_target(
     insns: &[Insn],
     call_pc: usize,
     fn_reg: u32,
-    resolve_fn_reg: &impl Fn(u32) -> Option<u8>,
-) -> Option<u8> {
+    resolve_fn_reg: &impl Fn(u32) -> Option<u32>,
+) -> Option<u32> {
     // Walk backwards from the call; stop at a basic-block boundary (any control
     // flow) — the call-site `Move(fn_reg, src)` is always in the same block.
     let mut i = call_pc;
