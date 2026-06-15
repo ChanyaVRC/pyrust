@@ -2263,6 +2263,11 @@ impl Interpreter {
                 cls.attrs.insert(name.to_string(), value);
                 let v = cls.mutation_version.get().wrapping_add(1);
                 cls.mutation_version.set(v);
+                // Issue #2335: assigning `__new__` at runtime installs CPython's
+                // sticky `slot_tp_new` wrapper (it never reverts), so record it.
+                if name == "__new__" {
+                    cls.new_slot_wrapped.set(true);
+                }
             }
             // Bump the global epoch so that caches keyed on subclasses of
             // this class (which only check their own mutation_version) also
@@ -2698,6 +2703,13 @@ impl Interpreter {
                 }
                 let v = cls.mutation_version.get().wrapping_add(1);
                 cls.mutation_version.set(v);
+                // Issue #2335: deleting `__new__` leaves CPython's sticky
+                // `slot_tp_new` wrapper in place — record it so `object.__new__`
+                // keeps rejecting excess args even though the attribute now
+                // resolves back to `object.__new__` via the MRO.
+                if name == "__new__" {
+                    cls.new_slot_wrapped.set(true);
+                }
             }
             // Bump the global epoch so that caches keyed on subclasses of
             // this class also invalidate after a base-class deletion.
