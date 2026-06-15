@@ -10162,6 +10162,13 @@ impl Compiler {
         let (expr, alias) = &items[0];
         let rest = &items[1..];
 
+        // Capture the `with` header line so the exception-unwind path below can
+        // attribute the enclosing frame's traceback node to it.  When `__exit__`
+        // raises (or re-raises) while an exception is in flight, CPython points
+        // the enclosing frame at the `with` statement line, not at whatever line
+        // inside the body originally raised (issue #2419).
+        let with_header_lineno = self.current_lineno;
+
         // ctx = expr
         let ctx_reg = self.compile_expr(expr);
 
@@ -10238,6 +10245,11 @@ impl Compiler {
 
         // Exception path
         self.patch_jump(setup_patch);
+        // Attribute the enclosing frame to the `with` header line (not the body
+        // line that raised) for the duration of the unwind-path `__exit__` call
+        // and any re-raise it triggers (issue #2419).  The body was compiled
+        // above, leaving `current_lineno` pointing at its last statement.
+        self.set_lineno(with_header_lineno);
         let exc_tmp = self.alloc_temp();
         self.emit(Insn::LoadExc(exc_tmp));
         // ctx.__exit__(type, exc, None)
@@ -10309,6 +10321,10 @@ impl Compiler {
         let (expr, alias) = &items[0];
         let rest = &items[1..];
 
+        // Capture the `async with` header line for the exception-unwind path
+        // below, mirroring the sync `with` fix (issue #2419).
+        let with_header_lineno = self.current_lineno;
+
         // mgr = expr
         let ctx_reg = self.compile_expr(expr);
 
@@ -10366,6 +10382,9 @@ impl Compiler {
 
         // Exception path: res = await mgr.__aexit__(type, exc, None).
         self.patch_jump(setup_patch);
+        // Attribute the enclosing frame to the `async with` header line during
+        // the unwind-path `__aexit__` call / re-raise (issue #2419).
+        self.set_lineno(with_header_lineno);
         let exc_tmp = self.alloc_temp();
         self.emit(Insn::LoadExc(exc_tmp));
         let exit_frame2 = self.next_temp;
