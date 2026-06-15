@@ -2556,6 +2556,29 @@ pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str
         .any(|b| class_chain_contains_name(b, name))
 }
 
+/// Issue #2335: does any class in `class`'s MRO carry the sticky
+/// `new_slot_wrapped` flag — i.e. has `__new__` ever been assigned to or
+/// deleted from this class (or an ancestor) at runtime?  CPython installs the
+/// generic `slot_tp_new` wrapper on the first such mutation and never reverts
+/// it; the wrapped state is inherited by subclasses.  When set, `object.__new__`
+/// rejects excess constructor args ("takes exactly one argument") even though
+/// the attribute now resolves back to `object.__new__` through the MRO.
+pub(crate) fn class_chain_new_slot_wrapped(class: &Rc<RefCell<PyClass>>) -> bool {
+    let borrowed = class.borrow();
+    if borrowed.new_slot_wrapped.get() {
+        return true;
+    }
+    if let Some(base) = &borrowed.base
+        && class_chain_new_slot_wrapped(base)
+    {
+        return true;
+    }
+    borrowed
+        .extra_bases
+        .iter()
+        .any(class_chain_new_slot_wrapped)
+}
+
 /// Issue #2299: does `class`'s `__hash__` resolve to the implicit
 /// `__hash__ = None` that the unhashable built-in types (`list`/`dict`/`set`/
 /// `bytearray`) carry on their *type*?  Returns `true` only when an unhashable

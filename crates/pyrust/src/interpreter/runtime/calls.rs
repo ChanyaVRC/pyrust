@@ -4932,18 +4932,28 @@ impl Interpreter {
             None => lookup_class_attr(&class, "__init__"),
         };
 
+        // Issue #2335: CPython's `object_new` (Objects/typeobject.c) checks
+        // `type->tp_new != object_new` *first*.  When this class (or an ancestor)
+        // ever had its `__new__` slot wrapped — i.e. `__new__` was assigned or
+        // `del`'d at runtime (`del Cls.__new__`, `Cls.__new__ = object.__new__`)
+        // — that wrapper is sticky and inherited, so even though the attribute
+        // now resolves back to `object.__new__` through the MRO, excess args are
+        // rejected with the `object.__new__()` wording regardless of whether a
+        // custom `__init__` is present.  This branch must precede the bare-class
+        // check below to match CPython's message-precedence.  Primitive bases are
+        // exempt (handled above / by their backing constructors).
+        if prim == PrimitiveBase::None
+            && !args.is_empty()
+            && class_chain_new_slot_wrapped(&class)
+        {
+            return Err(pyrust_core::type_err!(
+                "object.__new__() takes exactly one argument (the type to instantiate)"
+            ));
+        }
         // CPython parity (issue #2323): for a plain (non-primitive) class that
         // overrides neither `__new__` nor `__init__`, excess construction
-        // arguments are rejected by `object.__new__` *before* `object.__init__`
-        // runs, with the wording `<Cls>() takes no arguments` — not the
-        // `__init__`-arity wording.  We are past the `has_user_new` early return
-        // above, so reaching here means `__new__` is `object.__new__`; if the
-        // resolved `__init__` is also the `object.__init__` sentinel (or absent),
-        // neither slot is user-defined and the bare-class message applies.
-        // Primitive bases (`prim != None`) legitimately consume args via their
-        // backing constructor and must not be caught here.  The check reads the
-        // already-resolved `init` (from the cached construction plan) and adds no
-        // work to the steady-state path with a user `__init__`.
+        // arguments are rejected by `object.__new__` with `<Cls>() takes no
+        // arguments`.
         let init_is_object = matches!(
             init.as_ref().map(|v| v.kind()),
             None | Some(ValueKind::BuiltinFunction("object.__init__"))

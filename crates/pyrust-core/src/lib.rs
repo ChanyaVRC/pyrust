@@ -1924,6 +1924,15 @@ pub struct PyClass {
     /// is not `Copy` (it holds `Option<Value>`); the borrow is short-lived and
     /// never re-entrant.
     pub construction_cache: RefCell<Option<Box<CachedConstructionPlan>>>,
+    /// Issue #2335: mirrors CPython's sticky `tp_new == slot_tp_new` state.
+    /// Set to `true` the first time `__new__` is assigned to or deleted from
+    /// this class at runtime (via `cls.__new__ = ...` / `del cls.__new__`).
+    /// CPython installs the generic `slot_tp_new` wrapper on the first such
+    /// mutation and never reverts it, so even after the attribute resolves back
+    /// to `object.__new__` through the MRO, `object.__new__` still rejects
+    /// excess constructor args with "takes exactly one argument".  The flag is
+    /// inherited by subclasses through the MRO walk in the excess-args check.
+    pub new_slot_wrapped: Cell<bool>,
 }
 
 impl Default for PyClass {
@@ -1944,6 +1953,7 @@ impl Default for PyClass {
             metatype: None,
             slots: None,
             construction_cache: RefCell::new(None),
+            new_slot_wrapped: Cell::new(false),
         }
     }
 }
