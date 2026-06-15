@@ -110,7 +110,19 @@ def _build_namedtuple_class(typename, fields, defaults, namespace):
     names, `defaults` maps a subset of them to default values, and `namespace`
     holds any extra members defined in the class body (methods, docstring).
     """
-    defs = [defaults[name] for name in fields if name in defaults]
+    # Defaults must occupy a trailing run of fields, matching CPython's
+    # NamedTupleMeta (a non-default field may not follow a default one).
+    seen_default = None
+    defs = []
+    for name in fields:
+        if name in defaults:
+            seen_default = name
+            defs.append(defaults[name])
+        elif seen_default is not None:
+            raise TypeError(
+                "Non-default namedtuple field " + name +
+                " cannot follow default field " + seen_default
+            )
     cls = _collections.namedtuple(typename, fields, defaults=defs)
     # Class-body bookkeeping attrs that namedtuple already manages or that are
     # read-only on a type object; never copy these over.
@@ -147,7 +159,7 @@ def no_type_check(arg):
 
 def reveal_type(obj):
     """Stub for static checkers: prints the runtime type and returns `obj`."""
-    print("Runtime type is", type(obj).__name__, file=_sys.stderr)
+    print(f"Runtime type is {type(obj).__name__!r}", file=_sys.stderr)
     return obj
 
 
