@@ -5558,8 +5558,18 @@ fn is_pure_expr(
             crate::ast::DictItem::DoubleSplat(e) => is_pure_expr(e, pure_fns, local_names),
         }),
         Expr::Unary { expr, .. } => is_pure_expr(expr, pure_fns, local_names),
-        Expr::Binary { left, right, .. } => {
-            is_pure_expr(left, pure_fns, local_names) && is_pure_expr(right, pure_fns, local_names)
+        Expr::Binary { op, left, right, .. } => {
+            // A binary op is pure only when the *operator itself* cannot raise.
+            // Division/modulo can raise `ZeroDivisionError` (`1/0`, `1%0`),
+            // shifts raise `ValueError` on a negative count, `@` (MatMul) raises
+            // `TypeError` on non-matmul operands, and `in`/`not in` invoke
+            // `__contains__`/iteration.  Classifying such a function as pure lets
+            // a dead-result `CallMemo` be dead-store-eliminated, silently
+            // swallowing the exception (issue #2487 — sibling of #2409's `raise`
+            // case).  Operands must also be pure.
+            !binop_may_raise(*op)
+                && is_pure_expr(left, pure_fns, local_names)
+                && is_pure_expr(right, pure_fns, local_names)
         }
         Expr::Compare { left, ops } => {
             is_pure_expr(left, pure_fns, local_names)
@@ -5665,6 +5675,28 @@ fn is_pure_expr(
         // yield/yield from/await always have side effects (suspension).
         Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) => false,
     }
+}
+
+/// True when a binary operator can raise an exception (or invoke a protocol
+/// method) even on otherwise-pure operands, so an expression using it must NOT
+/// be treated as pure by [`is_pure_expr`].
+///
+/// - `Div` / `FloorDiv` / `Mod` / `Pow`: `ZeroDivisionError` (`1/0`, `1%0`,
+///   `0 ** -1`).
+/// - `LShift` / `RShift`: `ValueError("negative shift count")`.
+/// - `MatMul`: `TypeError` for operands without `__matmul__`.
+/// - `In` / `NotIn`: invoke `__contains__` / iteration.
+///
+/// The remaining arithmetic, bitwise, boolean, comparison and identity
+/// operators do not raise for the literal/local operands that pass
+/// `is_pure_expr`, so they stay foldable/memoizable (a dead `1 + 2` is still
+/// eliminable).
+fn binop_may_raise(op: crate::ast::BinaryOp) -> bool {
+    use crate::ast::BinaryOp::*;
+    matches!(
+        op,
+        Div | FloorDiv | Mod | Pow | LShift | RShift | MatMul | In | NotIn
+    )
 }
 
 /// Returns true if every statement in `body` is free of observable side effects.
