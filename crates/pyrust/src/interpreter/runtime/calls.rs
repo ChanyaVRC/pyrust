@@ -887,7 +887,23 @@ impl Interpreter {
                     {
                         Self::dict_view_for_backing(&self_val, method, receiver_ordered)
                     }
-                    "dict" => self.call_dict_method(method, self_val, pos, &kw),
+                    "dict" => {
+                        // issue #2475: the unbound `OrderedDict.clear(od)` /
+                        // `dict.clear(od)` form lands here (resolved as
+                        // `BuiltinFunction("dict.clear")`), so it needs the
+                        // same clear-tick hook the bound-method paths got in
+                        // #2474.  `receiver_ordered` reflects the *actual*
+                        // receiver instance's class, so `dict.clear(od)` on an
+                        // OrderedDict also upgrades to "changed size".
+                        if method == "clear"
+                            && receiver_ordered
+                            && let Some(id) = self_val.value_id()
+                        {
+                            let prelen = self_val.dict_with(|d| d.len()).unwrap_or(0);
+                            crate::interpreter::note_ordered_dict_clear(id, prelen);
+                        }
+                        self.call_dict_method(method, self_val, pos, &kw)
+                    }
                     "set" => self.call_set_method(method, self_val, pos),
                     "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
                     "frozenset" => self.call_frozenset_method(method, self_val, pos),
