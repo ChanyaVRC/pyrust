@@ -3029,6 +3029,15 @@ impl Interpreter {
             {
                 crate::builtin_modules::string::inject_python_members(self, m)?;
             }
+            // `operator` Python-source members (issue #2514): the whole module
+            // is defined in `operator_py.py` (itemgetter / attrgetter /
+            // methodcaller plus the operator-wrapper functions), exec'd here
+            // since the native body is empty.
+            if name == "operator"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::operator::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*

@@ -138,6 +138,10 @@ pyrust_builtin_modules! {
     // reference in `os`'s `constants` block resolves cleanly.
     os,
     functools,
+    // `operator` is a pure-Python module (issue #2514): an empty native
+    // `pyrust_module!` plus `operator_py.py` injected by the post-load hook
+    // in `env.rs::load_module`.
+    operator,
     itertools,
     collections,
     "collections.abc" as collections_abc,
