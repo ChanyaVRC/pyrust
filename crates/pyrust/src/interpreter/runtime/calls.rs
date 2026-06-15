@@ -7445,6 +7445,33 @@ pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
             ("__rtruediv__", P), ("__rpow__", P),
         ],
+        // Issue #2399: `range` is a `ValueKind::Range`/`BigRange`, not a
+        // primitive `PyClass` populated by `build_primitive_classes`, so its
+        // slot dunders were neither dispatchable as method-wrappers nor exposed
+        // as attributes.  The protocol dunders route through the shared
+        // dispatcher exactly as the other sequences do (`__iter__`/`__reversed__`
+        // → the `iter`/`reversed` builtins; `__len__`/`__getitem__`/`__contains__`
+        // → `len`/`eval_index`/`eval_in`; `__eq__`/`__ne__`/`__hash__`/`__bool__`/
+        // `__repr__` → the shared scalar/object arms).  The SLOT_ATTR entries are
+        // registered onto the `range` class singleton in helpers.rs's RANGE_CLASS
+        // initialiser (not the `build_primitive_classes` loop, which range is not
+        // part of).  The SLOT_ATTR (`PA`) names are exactly the slots `range`
+        // *owns* in CPython (`[c for c in range.__mro__ if '<dunder>' in
+        // c.__dict__][0] is range`): range overrides
+        // `__eq__`/`__ne__`/`__hash__`/`__repr__`.  `__str__` is `P`
+        // (protocol-only, like list/tuple): range inherits `object.__str__`, so
+        // it must stay *dispatchable* (`range(3).__str__()` → `range(0, 3)`) but
+        // must NOT register a range-owned type attr (so `range.__str__` resolves
+        // to the inherited `<slot wrapper '__str__' of 'object' objects>`).
+        // range is hashable and defines equality but NOT ordering (`<`/`<=`/…
+        // inherit object's identity slots), so the ordering dunders are omitted.
+        "range" => &[
+            ("__iter__", PA), ("__reversed__", PA),
+            ("__len__", PA), ("__getitem__", PA), ("__contains__", PA),
+            ("__eq__", PA), ("__ne__", PA),
+            ("__hash__", PA), ("__bool__", PA), ("__repr__", PA),
+            ("__str__", P),
+        ],
         _ => &[],
     }
 }

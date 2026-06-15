@@ -1013,6 +1013,14 @@ impl Interpreter {
                     | ValueKind::Str(_)
                     | ValueKind::Bytes(_)
                     | ValueKind::PyInstance(_)
+                    // Issue #2399: `range(5).__getitem__(slice(1, None))` reaches
+                    // `eval_index` with a slice *object* (not a slice expression),
+                    // so it must redirect to `eval_slice` — which already handles
+                    // `Range`/`BigRange` arithmetically — exactly as `range(5)[1:]`
+                    // does.  Without this, the slot-dunder form raised "range
+                    // indices must be integers or slices, not slice".
+                    | ValueKind::Range { .. }
+                    | ValueKind::BigRange { .. }
             ) || matches!(
                 target.kind(),
                 ValueKind::BuiltinObject { ops, .. }
