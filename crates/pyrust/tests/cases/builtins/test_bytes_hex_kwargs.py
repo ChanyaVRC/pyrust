@@ -45,3 +45,15 @@ try:
     b"hi".hex("-", 1, bytes_per_sep=2)
 except TypeError as e:
     print(e)  # hex() takes at most 2 arguments (3 given)
+
+# Too many arguments (all positional)
+try:
+    b"hi".hex("-", 1, 2)
+except TypeError as e:
+    print(e)  # hex() takes at most 2 arguments (3 given)
+
+# Too many arguments (all positional, bytearray)
+try:
+    bytearray(b"hi").hex("-", 1, 2)
+except TypeError as e:
+    print(e)  # hex() takes at most 2 arguments (3 given)

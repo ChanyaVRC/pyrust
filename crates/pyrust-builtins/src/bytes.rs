@@ -345,10 +345,10 @@ fn bytes_hex(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
 ///   3. a keyword duplicating a positional → "argument for hex() given by name
 ///      ('K') and position (P)".
 fn merge_hex_kwargs(args: &[Value], kwargs: &PyDict) -> Result<Vec<Value>> {
-    if kwargs.is_empty() {
-        return Ok(args.to_vec());
-    }
-
+    // The total-count overflow check runs even for the all-positional form:
+    // `hex("-", 1, 2)` is a TypeError in CPython, not a silent drop of the
+    // third positional. The noun is "keyword arguments" only when every excess
+    // argument came in by keyword (i.e. no positionals at all).
     let total = args.len() + kwargs.len();
     if total > 2 {
         let noun = if args.is_empty() {
@@ -360,6 +360,10 @@ fn merge_hex_kwargs(args: &[Value], kwargs: &PyDict) -> Result<Vec<Value>> {
             "TypeError",
             format!("hex() takes at most 2 {noun} ({total} given)"),
         ));
+    }
+
+    if kwargs.is_empty() {
+        return Ok(args.to_vec());
     }
 
     // Reject unknown keyword arguments.
