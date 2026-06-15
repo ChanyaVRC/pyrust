@@ -3817,8 +3817,23 @@ impl Interpreter {
                     // #1926's spec-less `FormatValue`).
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     let spec_val = vm_try!(vm_read(&regs, *spec_r, num_locals));
-                    let spec = spec_val.as_str().unwrap_or("");
-                    let s = vm_try!(self.dispatch_dunder_format(&val, spec));
+                    // Fast path for non-`PyInstance` values (str/int/float/…):
+                    // route through the per-pc constant-spec parse cache so a
+                    // constant spec (`f"{v:.2f}"`) is parsed only once across a
+                    // hot loop (issues #2357 / #2372).  `PyInstance` values may
+                    // carry a user `__format__`, so they keep going through the
+                    // full `dispatch_dunder_format` path unchanged.
+                    let s = if matches!(val.kind(), ValueKind::PyInstance(_)) {
+                        let spec = spec_val.as_str().unwrap_or("");
+                        vm_try!(self.dispatch_dunder_format(&val, spec))
+                    } else {
+                        vm_try!(apply_format_spec_cached(
+                            &val,
+                            &spec_val,
+                            &code.fmt_spec_cache,
+                            pc - 1
+                        ))
+                    };
                     regs[*dst as usize] = s;
                 }
                 Insn::BuildSlice(dst, base) => {
@@ -6055,6 +6070,10 @@ mod vm_tests {
             global_cache: std::cell::RefCell::new(Vec::new()),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
             kwcall_cache: std::cell::RefCell::new(vec![KwCallCacheEntry::Empty; n]),
+            fmt_spec_cache: std::cell::RefCell::new(vec![
+                crate::interpreter::FmtSpecCacheEntry::Empty;
+                n
+            ]),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
             // uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
