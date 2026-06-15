@@ -2277,8 +2277,8 @@ impl Interpreter {
                         value.kind(),
                         ValueKind::BuiltinFunction("object.__new__")
                     )
-                    && !class_chain_new_slot_wrapped(&class)
-                    && lookup_class_attr(&class, "__new__").is_none_or(|cur| {
+                    && !class_chain_new_slot_wrapped(class)
+                    && lookup_class_attr(class, "__new__").is_none_or(|cur| {
                         matches!(
                             cur.kind(),
                             ValueKind::BuiltinFunction("object.__new__")
