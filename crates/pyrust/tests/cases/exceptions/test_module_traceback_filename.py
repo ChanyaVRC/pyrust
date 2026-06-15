@@ -74,3 +74,22 @@ except KeyError as e:
         node = node.tb_next
     code = last.tb_frame.f_code
     print("gen frame:", code.co_filename, last.tb_lineno, code.co_name)
+
+# The outermost `<module>` catch frame's walkable `f_code.co_filename` must be a
+# real path (this running script), not `<unknown>`.  The absolute path is
+# machine-dependent, so assert it is NOT the sentinel rather than printing it.
+import sys
+
+print("module frame co_filename is real:", sys._getframe().f_code.co_filename != "<unknown>")
+try:
+    raise RuntimeError("top-level")
+except RuntimeError as e:
+    node = e.__traceback__
+    while node.tb_next is not None:
+        node = node.tb_next
+    mod_co = node.tb_frame.f_code
+    print(
+        "module catch-frame co_filename is real:",
+        mod_co.co_filename != "<unknown>",
+        mod_co.co_name,
+    )

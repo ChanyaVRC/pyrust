@@ -278,8 +278,16 @@ impl Interpreter {
             Some(func) => self.build_code_object(func),
             None => {
                 // Script / Class frame: synthesise a minimal code object whose
-                // co_name matches CPython (`<module>` for module scope).
-                code_obj::code("<module>".to_string(), 0, Vec::new())
+                // co_name matches CPython (`<module>` for module scope).  Carry
+                // the running script's path into `co_filename` (#2438) so
+                // `sys._getframe().f_code.co_filename` reports the source file
+                // rather than `<unknown>`.
+                let filename = self
+                    .script_filename
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0)
             }
         };
 
@@ -444,7 +452,20 @@ impl Interpreter {
         // Determine the catching frame's code object.
         let catch_code = match catch_func {
             Some(func) => self.build_code_object(func),
-            None => code_obj::code("<module>".to_string(), 0, Vec::new()),
+            // Module-scope catching frame: carry the running script's path into
+            // `f_code.co_filename` (#2438) so `tb.tb_frame.f_code.co_filename`
+            // for the outermost `<module>` frame reports the script file rather
+            // than `<unknown>`, matching CPython and the printed `File "..."`
+            // line.  The inner captured frames already carry their own filename
+            // via `code_with_loc` below.
+            None => {
+                let filename = self
+                    .script_filename
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0)
+            }
         };
 
         // Build the chain from innermost (tb_next == None) outward, so the
