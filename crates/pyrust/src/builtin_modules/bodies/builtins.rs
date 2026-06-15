@@ -1602,12 +1602,22 @@ pyrust_module! {
                             {
                                 let (msg, exhaust_first) =
                                     crate::interpreter::dict_subclass_iter_semantics(&class);
+                                // issue #2465: OrderedDict iterators snapshot the
+                                // clear tick to distinguish `clear()` wording.
+                                let od_seq = if crate::interpreter::class_is_named_ordered_dict(
+                                    &class,
+                                ) {
+                                    crate::interpreter::od_clear_seq_now()
+                                } else {
+                                    0
+                                };
                                 frame.guard = Some(Box::new(NativeIterGuard {
                                     container: backing.clone(),
                                     version: recorded_len as i64,
                                     kind: GuardVersion::Size,
                                     msg,
                                     exhaust_first,
+                                    od_seq,
                                 }));
                             }
                             Ok(Value::generator(Box::new(frame)))
@@ -1634,21 +1644,30 @@ pyrust_module! {
                         // iterator against size mutation (#1988), mirroring the
                         // `for`-loop guard.
                         if let Some(recorded_len) = crate::interpreter::live_collection_len(&val) {
+                            let ordered_view =
+                                pyrust_builtins::dict_views::is_ordered_view(&val);
                             let msg = if val.set_len().is_some() {
                                 "Set changed size during iteration"
-                            } else if pyrust_builtins::dict_views::is_ordered_view(&val) {
+                            } else if ordered_view {
                                 // OrderedDict-backed view (issue #2436): match
                                 // CPython's odict-view wording on size mutation.
                                 "OrderedDict mutated during iteration"
                             } else {
                                 "dictionary changed size during iteration"
                             };
+                            // issue #2465: ordered views snapshot the clear tick.
+                            let od_seq = if ordered_view {
+                                crate::interpreter::od_clear_seq_now()
+                            } else {
+                                0
+                            };
                             frame.guard = Some(Box::new(NativeIterGuard {
                                 container: val.clone(),
                                 version: recorded_len as i64,
                                 kind: GuardVersion::Size,
                                 msg,
-                    exhaust_first: false,
+                                exhaust_first: false,
+                                od_seq,
                             }));
                         }
                         Ok(Value::generator(Box::new(frame)))
@@ -8007,6 +8026,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     kind: GuardVersion::Size,
                     msg,
                     exhaust_first: false,
+                    od_seq: 0,
                 }));
             }
             Ok(Value::generator(Box::new(frame)))
@@ -8030,17 +8050,22 @@ fn make_reversed_dict_iter(items: Vec<Value>, container: Value) -> NativeIterFra
     // reports the generic `list_reverseiterator` for all reversed iterators
     // (a pre-existing type-name divergence, out of scope for #2448).
     let mut frame = NativeIterFrame::new(items, "list_reverseiterator");
-    let (msg, exhaust_first) = if pyrust_builtins::dict_views::is_ordered_view(&container) {
+    let ordered = pyrust_builtins::dict_views::is_ordered_view(&container);
+    let (msg, exhaust_first) = if ordered {
         ("OrderedDict mutated during iteration", true)
     } else {
         ("dictionary changed size during iteration", false)
     };
+    // issue #2465: ordered reversed-views snapshot the clear tick so a `clear()`
+    // mid-`reversed(od)` reports "changed size".
+    let od_seq = if ordered { crate::interpreter::od_clear_seq_now() } else { 0 };
     frame.guard = Some(Box::new(NativeIterGuard {
         container,
         version: recorded_len as i64,
         kind: GuardVersion::Size,
         msg,
         exhaust_first,
+        od_seq,
     }));
     frame
 }

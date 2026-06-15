@@ -81,6 +81,11 @@ pub(crate) struct NativeIterGuard {
     /// OrderedDict semantics (#2436 review): skip the guard once the iterator
     /// is exhausted — CPython's odict iterators test exhaustion first.
     pub(crate) exhaust_first: bool,
+    /// Clear-registry tick snapshotted at iterator creation (issue #2465);
+    /// non-zero only for OrderedDict iterators, where a guard hit upgrades the
+    /// wording to "changed size" if the mutation was a `clear()` during this
+    /// iteration.  Zero for plain dict / set / deque (keep `msg` as-is).
+    pub(crate) od_seq: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -125,7 +130,15 @@ impl NativeIterFrame {
             GuardVersion::DequeState { counter } => unsafe { (*counter).as_int() },
         };
         if live != Some(guard.version) {
-            return Err(PyError::Runtime(guard.msg.to_string()));
+            // issue #2465: OrderedDict iterators (`od_seq != 0`) distinguish a
+            // `clear()` ("changed size") from any other structural mutation
+            // ("mutated"); every other guarded iterator keeps its static `msg`.
+            let fire_msg = if guard.od_seq != 0 {
+                ordered_dict_guard_msg(&guard.container, guard.version as usize, guard.od_seq)
+            } else {
+                guard.msg
+            };
+            return Err(PyError::Runtime(fire_msg.to_string()));
         }
         Ok(())
     }
@@ -667,6 +680,11 @@ pub(crate) enum IterState {
         /// so mutating on the final step completes silently (CPython's odict
         /// iterators; plain dict checks the guard first).
         exhaust_first: bool,
+        /// Clear-registry tick snapshotted at iterator creation (issue #2465):
+        /// non-zero only for OrderedDict iterators, where it lets the size guard
+        /// upgrade its wording to "changed size" when the mutation was a
+        /// `clear()` during *this* iteration.  Zero for plain dict / set.
+        od_seq: u64,
     },
 }
 
@@ -697,6 +715,110 @@ pub(crate) fn live_collection_len(container: &Value) -> Option<usize> {
         return backing.as_dict().map(|d| d.len());
     }
     pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| rc.borrow().len())
+}
+
+// ── OrderedDict `clear()` mutation-wording registry (issue #2465) ────────────
+//
+// CPython's odict iterators raise *two* different `RuntimeError` messages
+// depending on *how* the dict was mutated during iteration:
+//   - `OrderedDict.clear()`            → "OrderedDict changed size during iteration"
+//   - insert / `del` / `pop` / popitem → "OrderedDict mutated during iteration"
+//
+// In CPython the discriminator is `od_state` (bumped by setitem/delitem but NOT
+// by clear): on a guard hit, an unchanged `od_state` with a changed size means
+// the list was freed by `clear()` ("changed size"); a bumped `od_state` means an
+// ordinary structural mutation ("mutated").  pyrust has no `od_state`, so we
+// record just the discriminating event — a `clear()` — keyed by the backing
+// dict's identity, and consult it when the size guard fires.
+//
+// `seq` is a monotonic global tick so a `clear()` from a *previous* loop over
+// the same OrderedDict is not mistaken for one during the current iteration;
+// `prelen` is the size immediately before the clear, so an `insert`-then-`clear`
+// (size grew first) is correctly reported as "mutated" rather than "changed
+// size".  Only the cold OrderedDict-clear and guarded-iteration paths touch this
+// table; plain dict / set iteration never reaches it.
+
+#[derive(Clone, Copy)]
+struct OdClearMark {
+    seq: u64,
+    prelen: usize,
+}
+
+thread_local! {
+    static OD_CLEAR_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static OD_CLEAR_REGISTRY: RefCell<HashMap<i64, OdClearMark>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The current global clear tick — snapshotted into a guard at iterator creation
+/// so a later guard hit can tell a `clear()` that happened *during* iteration
+/// from one recorded by an earlier loop.
+pub(crate) fn od_clear_seq_now() -> u64 {
+    OD_CLEAR_SEQ.with(|c| c.get())
+}
+
+/// Record that the OrderedDict backed by `backing_id` was just emptied by
+/// `clear()`, with `prelen` elements immediately beforehand.  Called from the
+/// OrderedDict-specific `clear` dispatch only (issue #2465).
+pub(crate) fn note_ordered_dict_clear(backing_id: i64, prelen: usize) {
+    let seq = OD_CLEAR_SEQ.with(|c| {
+        let n = c.get();
+        c.set(n.wrapping_add(1));
+        n
+    });
+    OD_CLEAR_REGISTRY.with(|r| {
+        let mut map = r.borrow_mut();
+        // A backing dict's Rc address can be reused after it is freed, so stale
+        // marks accumulate.  They never cause a *false* "changed size" (a guard
+        // only trusts a mark whose `seq` is at least the iterator's creation
+        // tick, and a reused address's stale mark is necessarily older), but the
+        // map would grow unbounded under clear-heavy code.  Drop everything when
+        // it gets large — only marks newer than every live iterator matter, and
+        // any iterator created after this prune re-reads a fresh tick.
+        if map.len() >= 1024 {
+            map.clear();
+        }
+        map.insert(backing_id, OdClearMark { seq, prelen });
+    });
+}
+
+/// Backing-dict identity for the container an OrderedDict guard watches, in the
+/// three shapes the guard can hold: the backing dict `Value` itself, an
+/// OrderedDict instance (re-resolve `__builtin_data__`), or a live dict view.
+fn ordered_backing_id(container: &Value) -> Option<i64> {
+    if container.as_dict().is_some() {
+        return container.value_id();
+    }
+    if let ValueKind::PyInstance(inst) = container.kind()
+        && let Some(backing) = instance_builtin_data(inst)
+    {
+        return backing.value_id();
+    }
+    pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| Rc::as_ptr(&rc) as i64)
+}
+
+/// Decide an OrderedDict guard's `RuntimeError` wording at fire time
+/// (issue #2465).  Returns "OrderedDict changed size during iteration" when the
+/// size change was caused by a `clear()` during this iteration (recorded since
+/// `iter_seq`, with no net size growth before the clear and an empty dict now);
+/// otherwise the default "OrderedDict mutated during iteration".
+pub(crate) fn ordered_dict_guard_msg(
+    container: &Value,
+    recorded_len: usize,
+    iter_seq: u64,
+) -> &'static str {
+    let cleared = ordered_backing_id(container)
+        .and_then(|id| OD_CLEAR_REGISTRY.with(|r| r.borrow().get(&id).copied()))
+        .is_some_and(|mark| {
+            mark.seq >= iter_seq
+                && mark.prelen == recorded_len
+                && live_collection_len(container) == Some(0)
+        });
+    if cleared {
+        "OrderedDict changed size during iteration"
+    } else {
+        "OrderedDict mutated during iteration"
+    }
 }
 
 /// `true` if `class` is `collections.OrderedDict` or a subclass of it (#2201).
@@ -4200,6 +4322,14 @@ impl Interpreter {
                                         let recorded_len = backing.as_dict().map(|d| d.len()).unwrap_or(0);
                                         let (msg, exhaust_first) =
                                             dict_subclass_iter_semantics(&class);
+                                        // issue #2465: OrderedDict iterators
+                                        // snapshot the clear tick so a `clear()`
+                                        // during this loop upgrades the wording.
+                                        let od_seq = if class_is_named_ordered_dict(&class) {
+                                            od_clear_seq_now()
+                                        } else {
+                                            0
+                                        };
                                         IterState::MaterializedGuarded {
                                             items,
                                             pos: 0,
@@ -4207,6 +4337,7 @@ impl Interpreter {
                                             recorded_len,
                                             msg,
                                             exhaust_first,
+                                            od_seq,
                                         }
                                     } else {
                                         IterState::Materialized(vm_try!(iter_values(&backing)), 0)
@@ -4236,11 +4367,11 @@ impl Interpreter {
                                 // on the plain Materialized path.
                                 let items = vm_try!(iter_values(&src_val));
                                 if let Some(recorded_len) = live_collection_len(&src_val) {
+                                    let is_ordered_view =
+                                        pyrust_builtins::dict_views::is_ordered_view(&src_val);
                                     let msg = if src_val.set_len().is_some() {
                                         ("Set changed size during iteration", false)
-                                    } else if pyrust_builtins::dict_views::is_ordered_view(
-                                        &src_val,
-                                    ) {
+                                    } else if is_ordered_view {
                                         // OrderedDict-backed view (issue #2436):
                                         // CPython's odict views report their own
                                         // wording on size mutation.
@@ -4248,6 +4379,10 @@ impl Interpreter {
                                     } else {
                                         ("dictionary changed size during iteration", false)
                                     };
+                                    // issue #2465: ordered views snapshot the
+                                    // clear tick like the direct-iter path.
+                                    let od_seq =
+                                        if is_ordered_view { od_clear_seq_now() } else { 0 };
                                     IterState::MaterializedGuarded {
                                         items,
                                         pos: 0,
@@ -4255,6 +4390,7 @@ impl Interpreter {
                                         recorded_len,
                                         msg: msg.0,
                                         exhaust_first: msg.1,
+                                        od_seq,
                                     }
                                 } else {
                                     IterState::Materialized(items, 0)
@@ -4332,6 +4468,7 @@ impl Interpreter {
                             recorded_len,
                             msg,
                             exhaust_first,
+                            od_seq,
                         }) => {
                             // Size-mutation guard (#1988): one usize compare per
                             // step.  Plain dict raises whenever the size differs
@@ -4344,7 +4481,16 @@ impl Interpreter {
                                 continue;
                             }
                             if live_collection_len(container) != Some(*recorded_len) {
-                                vm_try!(Err(PyError::Runtime((*msg).to_string())));
+                                // issue #2465: OrderedDict distinguishes a
+                                // `clear()` ("changed size") from any other
+                                // structural mutation ("mutated"); `od_seq != 0`
+                                // marks the OrderedDict iterators.
+                                let fire_msg = if *od_seq != 0 {
+                                    ordered_dict_guard_msg(container, *recorded_len, *od_seq)
+                                } else {
+                                    *msg
+                                };
+                                vm_try!(Err(PyError::Runtime(fire_msg.to_string())));
                             }
                             let cur_pos = *pos;
                             if cur_pos < items.len() {
