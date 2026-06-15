@@ -77,6 +77,34 @@ except TypeError as e:
     print("issubclass TypeError:", e)
 
 
+# A custom __subclasscheck__ on type(arg2) accepts a non-class first arg:
+# CPython resolves the hook before validating arg 1, so issubclass(5, M())
+# returns the hook's result rather than raising "arg 1 must be a class".
+class SubAny:
+    def __subclasscheck__(self, sub):
+        return sub == 5
+
+
+print(issubclass(5, SubAny()))
+print(issubclass(6, SubAny()))
+
+
+# arg 1 validation is lazy and per-leaf inside a tuple: a real class checked
+# first raises, but a hook-bearing instance checked first short-circuits.
+try:
+    issubclass(5, (str, SubAny()))
+except TypeError as e:
+    print("issubclass tuple TypeError:", e)
+print(issubclass(5, (SubAny(), str)))
+
+
+# With no hook, a non-class first arg still raises the original TypeError.
+try:
+    issubclass(5, object())
+except TypeError as e:
+    print("issubclass arg1 TypeError:", e)
+
+
 # Ordinary class-based checks are unaffected.
 print(isinstance(5, int))
 print(isinstance(5, (str, int)))

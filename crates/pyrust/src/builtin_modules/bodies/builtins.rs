@@ -1725,15 +1725,13 @@ pyrust_module! {
                 format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
             ));
         }
-        // `cls` may be either a user-defined class (`PyClass`) or a
-        // built-in type token (`BuiltinFunction("int")` etc.); anything
-        // else is a `TypeError`, matching CPython.
-        if !is_class_like(&args[0].value) {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() arg 1 must be a class"),
-            ));
-        }
+        // The `arg 1 must be a class` validation lives inside
+        // `issubclass_check`, *after* the `__subclasscheck__` hook is
+        // resolved on `type(classinfo)`: CPython only rejects a non-class
+        // `cls` when no custom `__subclasscheck__` handles it (and validates
+        // lazily per tuple/union leaf), so `issubclass(5, M())` where
+        // `type(M())` defines the hook must return the hook's result rather
+        // than raising.  See issue #2525.
         let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
         Ok(Value::bool_(result))
     }
@@ -8827,6 +8825,18 @@ fn issubclass_check(
             let result = interp.call_function_expanded(sc_fn, &call_args)?;
             return interp.truthy_value(&result);
         }
+    }
+    // `cls` may be either a user-defined class (`PyClass`) or a built-in type
+    // token (`BuiltinFunction("int")` etc.); anything else is a `TypeError`,
+    // matching CPython.  This runs *after* the `__subclasscheck__` dispatch
+    // above so a custom hook on `type(classinfo)` can accept a non-class
+    // `cls` (issue #2525); it is reached per tuple/union leaf, matching
+    // CPython's lazy per-leaf validation.
+    if !is_class_like(cls) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() arg 1 must be a class"),
+        ));
     }
     match (cls.kind(), classinfo.kind()) {
         // User-defined → user-defined: walk the `base` chain.
