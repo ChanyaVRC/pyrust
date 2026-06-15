@@ -1211,12 +1211,37 @@ impl Interpreter {
         // type) and delegates to the shared `object.__X__` / formatting
         // machinery.  Ownership verified against python3.12
         // (`[c for c in T.__mro__ if '__X__' in c.__dict__]`).
-        if matches!(name, "__hash__" | "__repr__" | "__str__" | "__format__")
+        // Issue #2433: the six rich-comparison slots join `__hash__`/`__repr__`/
+        // `__str__`/`__format__` here — every primitive owns its comparisons in
+        // CPython, so `list.__eq__` must read `'list'`, not the inherited
+        // `object.__eq__`.
+        if matches!(
+            name,
+            "__hash__"
+                | "__repr__"
+                | "__str__"
+                | "__format__"
+                | "__eq__"
+                | "__ne__"
+                | "__lt__"
+                | "__le__"
+                | "__gt__"
+                | "__ge__"
+        )
             && let Some(qualified) = primitive_owned_object_dunder(&class, name)
             && matches!(
                 lookup_class_attr(&class, name).as_ref().map(|v| v.kind()),
                 Some(ValueKind::BuiltinFunction(
-                    "object.__hash__" | "object.__repr__" | "object.__str__" | "object.__format__"
+                    "object.__hash__"
+                        | "object.__repr__"
+                        | "object.__str__"
+                        | "object.__format__"
+                        | "object.__eq__"
+                        | "object.__ne__"
+                        | "object.__lt__"
+                        | "object.__le__"
+                        | "object.__gt__"
+                        | "object.__ge__"
                 ))
             )
         {
@@ -3247,6 +3272,30 @@ impl Interpreter {
 
 }
 
+/// Issue #2433: the interned `"<type>.<cmp_dunder>"` sentinel for a primitive's
+/// rich-comparison slot.  A `match` over `&'static str` literals so the result
+/// stays `'static` without per-call allocation (unlike a `format!` + leak).
+fn cmp_dunder_sentinel(type_name: &str, dunder: &str) -> &'static str {
+    macro_rules! arms {
+        ($($t:literal),+ $(,)?) => {
+            match (type_name, dunder) {
+                $(
+                    ($t, "__eq__") => concat!($t, ".__eq__"),
+                    ($t, "__ne__") => concat!($t, ".__ne__"),
+                    ($t, "__lt__") => concat!($t, ".__lt__"),
+                    ($t, "__le__") => concat!($t, ".__le__"),
+                    ($t, "__gt__") => concat!($t, ".__gt__"),
+                    ($t, "__ge__") => concat!($t, ".__ge__"),
+                )+
+                _ => unreachable!("cmp_dunder_sentinel: ({type_name}, {dunder})"),
+            }
+        };
+    }
+    arms!(
+        "list", "tuple", "dict", "set", "frozenset", "bytes", "bytearray", "float", "complex",
+    )
+}
+
 /// Issue #2276: for a primitive type (or a subclass of one) that *overrides* an
 /// object-level dunder in CPython, return the `'static` type-qualified sentinel
 /// name (`"str.__hash__"`, `"int.__format__"`, …) so an unbound `T.__X__` access
@@ -3267,6 +3316,37 @@ fn primitive_owned_object_dunder(
     class: &Rc<RefCell<PyClass>>,
     name: &str,
 ) -> Option<&'static str> {
+    // Issue #2433: every primitive type *owns* the six rich-comparison slots in
+    // CPython (`[c for c in list.__mro__ if '__eq__' in c.__dict__][0] is list`),
+    // so `list.__eq__` is `<slot wrapper '__eq__' of 'list' objects>`, not
+    // `'object'`.  Synthesise a type-qualified sentinel for the most-derived
+    // primitive in the class chain.  `int`/`str` already register these as real
+    // type attrs (their slot table marks them `SLOT_ATTR`), so they never reach
+    // here; this covers list/tuple/dict/set/frozenset/bytes/bytearray/float/
+    // complex, whose comparison slots are protocol-only.  `bool` inherits int's
+    // comparisons (`bool.__eq__` owner is `int`), so it is excluded.
+    if matches!(
+        name,
+        "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
+    ) {
+        const CMP_OWNERS: &[&str] = &[
+            "list",
+            "tuple",
+            "dict",
+            "set",
+            "frozenset",
+            "bytes",
+            "bytearray",
+            "float",
+            "complex",
+        ];
+        for type_name in CMP_OWNERS {
+            if class_chain_contains_name(class, type_name) {
+                return Some(cmp_dunder_sentinel(type_name, name));
+            }
+        }
+        return None;
+    }
     // Walk the primitive bases most-derived first; `bool` before `int` so a
     // bare `bool` attributes `__format__`/`__hash__` to `int` (CPython:
     // `bool.__format__` is inherited from `int`).
