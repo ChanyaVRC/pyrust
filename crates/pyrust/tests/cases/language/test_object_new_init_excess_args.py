@@ -131,3 +131,39 @@ def _r1_new(cls, *a):
 
 R1.__new__ = _r1_new
 show("R1(1)", lambda: R1(1))
+
+
+# --- assigning the genuine object.__new__ does NOT wrap the slot ---
+# CPython's update_one_slot keeps tp_new == object_new when the assigned value
+# is the real object.__new__ and the class was not already wrapped, so the
+# bare-class / __init__ rules apply (NOT the object.__new__() wording).
+
+# A1: assign object.__new__, no custom __init__ -> "<Cls>() takes no arguments"
+class A1:
+    pass
+
+
+A1.__new__ = object.__new__
+show("A1(1)", lambda: A1(1))
+
+# A2: assign object.__new__, WITH custom __init__ -> accepted (no error)
+class A2:
+    def __init__(self, x):
+        self.x = x
+
+
+A2.__new__ = object.__new__
+show("A2(1)", lambda: A2(1))
+
+# A3: but if a class-body __new__ existed first, the slot is already wrapped and
+# re-assigning object.__new__ does NOT revert it -> object.__new__() wording.
+class A3:
+    def __new__(cls, *a):
+        return super().__new__(cls)
+
+    def __init__(self, x):
+        self.x = x
+
+
+A3.__new__ = object.__new__
+show("A3(1)", lambda: A3(1))

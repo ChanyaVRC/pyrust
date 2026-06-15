@@ -2259,13 +2259,36 @@ impl Interpreter {
                 }
             }
             {
+                // Issue #2335: assigning `__new__` at runtime installs CPython's
+                // sticky `slot_tp_new` wrapper.  The one exception is assigning
+                // the *genuine* `object.__new__` to a class whose effective
+                // `__new__` is still the genuine `object.__new__` — CPython's
+                // `update_one_slot` leaves `tp_new == object_new` (no wrapper) in
+                // that case, so excess-arg handling falls back to the bare-class /
+                // `__init__`-based rules (`Cls.__new__ = object.__new__` with a
+                // custom `__init__` accepts excess args; with no `__init__` it
+                // raises `<Cls>() takes no arguments`).  Once the slot has ever
+                // held any non-`object.__new__` value (a class-body `def __new__`,
+                // a user-function assignment, or a `del`), the wrapper is sticky
+                // and re-assigning `object.__new__` does NOT revert it.
+                let setting_new = name == "__new__";
+                let stays_unwrapped = setting_new
+                    && matches!(
+                        value.kind(),
+                        ValueKind::BuiltinFunction("object.__new__")
+                    )
+                    && !class_chain_new_slot_wrapped(&class)
+                    && lookup_class_attr(&class, "__new__").is_none_or(|cur| {
+                        matches!(
+                            cur.kind(),
+                            ValueKind::BuiltinFunction("object.__new__")
+                        )
+                    });
                 let mut cls = class.borrow_mut();
                 cls.attrs.insert(name.to_string(), value);
                 let v = cls.mutation_version.get().wrapping_add(1);
                 cls.mutation_version.set(v);
-                // Issue #2335: assigning `__new__` at runtime installs CPython's
-                // sticky `slot_tp_new` wrapper (it never reverts), so record it.
-                if name == "__new__" {
+                if setting_new && !stays_unwrapped {
                     cls.new_slot_wrapped.set(true);
                 }
             }
