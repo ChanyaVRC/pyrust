@@ -59,3 +59,30 @@ print(w in [w])
 print([w].index(w))
 print([w].count(w))
 print([w] == [w])
+
+# Hash-based containers (set / frozenset / dict) short-circuit on identity too:
+# a NaN key finds *itself* even though `nan == nan` is False.  Same caveat as
+# above — only same-NaN-object cases are asserted (pyrust's value-NaN can't tell
+# two distinct `float('nan')` calls apart, so e.g. `len({float('nan'),
+# float('nan')})` is intentionally not asserted here).
+print(n in {n})
+print(n in {1, n, 2})
+print(n in frozenset({n}))
+print({n} == {n})
+print(frozenset({n}) == frozenset({n}))
+
+# NaN as a dict key: insert, lookup, membership, get, del all find it by identity
+d = {n: "v"}
+print(n in d)
+print(d[n])
+print(d.get(n))
+print({n: 1} == {n: 1})
+d[n] = "w"
+print(d[n], len(d))
+del d[n]
+print(n in d)
+
+# set.discard / set.remove find the NaN by identity
+s = {1, n, 2}
+s.discard(n)
+print(n in s, len(s))
