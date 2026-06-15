@@ -139,6 +139,21 @@ fn get_or_parse_template(template: &str) -> Rc<ParsedTemplate> {
 ///  * `!` then end → `end of string while looking for conversion specifier`
 ///  * `!c` then a stray char → `expected ':' after conversion specifier`
 ///  * format spec (after `:`) never closed (`{x:`, `{x!r:`) → `unmatched '{' in format spec`
+///
+/// Render a conversion char for the "Unknown conversion specifier" message the
+/// way CPython does. CPython builds the message with `PyUnicode_FromFormat`'s
+/// `%c`, which prints printable ASCII (`0x21..=0x7e`) literally and every other
+/// code point as `\x` + minimal lowercase hex (e.g. `ñ` → `\xf1`, space → `\x20`,
+/// `€` → `\x20ac`).
+fn fmt_conversion_char(c: char) -> String {
+    let cp = c as u32;
+    if (0x21..=0x7e).contains(&cp) {
+        c.to_string()
+    } else {
+        format!("\\x{cp:x}")
+    }
+}
+
 fn classify_unterminated_field(field: &str) -> &'static str {
     if field.is_empty() {
         return "Single '{' encountered in format string";
@@ -237,12 +252,17 @@ fn parse_template(template: &str) -> ParsedTemplate {
             let field = &template[i + 1..j];
             i = j + 1;
 
-            let (field_name_full, spec) = split_field_and_spec(field);
-            let (field_name, conversion) = match field_name_full.rsplit_once('!') {
-                Some((name, conv)) if conv.len() == 1 => {
-                    (name, Some(conv.chars().next().unwrap()))
+            let (field_name, conversion, spec) = match split_field_conv_spec(field) {
+                Ok(parts) => parts,
+                Err(msg) => {
+                    // Malformed conversion flag (`{x!}`, `{x!ab}`, `{x!r!s}`).
+                    // CPython raises this `ValueError` in field order, after any
+                    // earlier complete fields render, so defer it as a `Raise`
+                    // segment at this point rather than aborting earlier output.
+                    flush_lit!();
+                    segs.push(TemplateSeg::Raise(msg));
+                    return ParsedTemplate { segs };
                 }
-                _ => (field_name_full, None),
             };
 
             let (head_str, rest) = split_head_and_accessors(field_name);
@@ -465,7 +485,10 @@ impl Interpreter {
             Some('s') => Value::string(self.render_value_as_str(&value)?),
             Some('a') => Value::string(ascii_repr_interp(self, &value)?),
             Some(c) => {
-                return Err(pyrust_core::value_err!("Unknown conversion specifier {c}"));
+                return Err(pyrust_core::value_err!(
+                    "Unknown conversion specifier {}",
+                    fmt_conversion_char(c)
+                ));
             }
             None => value,
         })

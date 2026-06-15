@@ -8000,20 +8000,51 @@ impl Interpreter {
 
 } // impl Interpreter (format_str_template + render_value_as_str)
 
-/// Splits a replacement field on the first `:` that is not inside `[]`,
-/// returning `(field_name_with_conversion, format_spec)`.
-fn split_field_and_spec(field: &str) -> (&str, &str) {
+/// Splits a *terminated* replacement field into `(field_name, conversion,
+/// format_spec)`, mirroring CPython 3.12's `field_name_split` / `parse_field`.
+///
+/// Scans for the first `!` or `:` at bracket depth 0 (so `!`/`:` inside a `[…]`
+/// subscript stay part of the field name). A `:` starts the format spec with no
+/// conversion. A `!` ends the field name and the single following char is the
+/// conversion flag; the char after that must be the field end or a `:`.
+///
+/// Returns `Err(msg)` with CPython's exact `ValueError` text for a malformed
+/// conversion (`{x!}`, `{x!ab}`, `{x!r!s}`), so the caller can defer it as a
+/// render-time error in field order.
+fn split_field_conv_spec(
+    field: &str,
+) -> std::result::Result<(&str, Option<char>, &str), &'static str> {
     let bytes = field.as_bytes();
     let mut bracket_depth = 0;
     for (idx, b) in bytes.iter().enumerate() {
         match b {
             b'[' => bracket_depth += 1,
             b']' if bracket_depth > 0 => bracket_depth -= 1,
-            b':' if bracket_depth == 0 => return (&field[..idx], &field[idx + 1..]),
+            b':' if bracket_depth == 0 => return Ok((&field[..idx], None, &field[idx + 1..])),
+            b'!' if bracket_depth == 0 => {
+                let name = &field[..idx];
+                // The single char after '!' is the conversion flag. CPython
+                // takes whatever byte follows verbatim (even ':'), so we read a
+                // full UTF-8 char rather than splitting on ':' first.
+                let after = &field[idx + 1..];
+                let Some(conv) = after.chars().next() else {
+                    // `{x!}` — '!' with no conversion char before the field end.
+                    return Err("unmatched '{' in format spec");
+                };
+                let rest = &after[conv.len_utf8()..];
+                // After the conversion char CPython expects end-of-field or ':'.
+                if rest.is_empty() {
+                    return Ok((name, Some(conv), ""));
+                }
+                if let Some(spec) = rest.strip_prefix(':') {
+                    return Ok((name, Some(conv), spec));
+                }
+                return Err("expected ':' after conversion specifier");
+            }
             _ => {}
         }
     }
-    (field, "")
+    Ok((field, None, ""))
 }
 
 /// Splits a field name like `0.x[1].y` into `("0", ".x[1].y")`.
