@@ -65,6 +65,75 @@ macro_rules! reject_kwargs {
     };
 }
 
+/// Issue #2500: reject keyword arguments on a non-dunder container
+/// method_descriptor that accepts none (`dict.get`, `set.add`, `tuple.count`,
+/// `bytes.find`, …).  The receiver-only `pyrust_builtins::{dict,set,tuple,…}`
+/// dispatchers silently discard `kwargs`, so the dispatch sites guard here.
+///
+/// Returns `None` when `kw` is empty (the common case — no allocation) or when
+/// `method` legitimately takes keywords (`dict.update`, `list.sort`,
+/// `bytes.split`, …), otherwise the CPython 3.12 `TypeError`.  The message
+/// carries the `type.method()` qualifier, matching what CPython's
+/// `LOAD_METHOD`/`CALL_METHOD` (syntactic `obj.method(...)`) path reports for
+/// every container method_descriptor.  (CPython's *separately-bound* method
+/// object — `f = s.union; f(x=1)` — drops the qualifier for the variadic
+/// set-algebra methods, but that path is a distinct dispatcher and out of scope
+/// here.)
+///
+/// `#[inline]` so the `kw.is_empty()` short-circuit folds into the hot
+/// method-call dispatch sites (`dispatch_builtin_container_method`,
+/// `bound_method_dispatch_inner`) and the common no-kwarg call pays only a
+/// single already-loaded length check.
+#[inline]
+fn reject_container_method_kwargs(
+    type_name: &str,
+    method: &str,
+    kw: &PyDict,
+) -> Option<PyError> {
+    if kw.is_empty() {
+        return None;
+    }
+    // Gate on the per-type method table so an *unknown* name still takes the
+    // attribute-error path rather than a misleading
+    // `type.unknown() takes no keyword arguments` (#2499 self-review).
+    let known = match type_name {
+        "dict" => pyrust_builtins::dict::has_method(method),
+        "set" => pyrust_builtins::set::has_method(method),
+        "frozenset" => pyrust_builtins::frozenset::METHODS.contains(&method),
+        "tuple" => pyrust_builtins::tuple::has_method(method),
+        "bytes" => pyrust_builtins::bytes::has_method(method),
+        "bytearray" => pyrust_builtins::bytearray::has_method(method),
+        _ => false,
+    };
+    if !known {
+        return None;
+    }
+    // Methods that genuinely accept keyword arguments in CPython 3.12 and so
+    // must NOT be rejected here (they reach the per-type dispatcher, which
+    // validates the specific keyword names itself).
+    let accepts_kwargs = match type_name {
+        "dict" => method == "update",
+        "list" => method == "sort",
+        "bytes" | "bytearray" => matches!(
+            method,
+            "decode"
+                | "expandtabs"
+                | "hex"
+                | "rsplit"
+                | "split"
+                | "splitlines"
+                | "translate"
+        ),
+        _ => false,
+    };
+    if accepts_kwargs {
+        return None;
+    }
+    Some(pyrust_core::type_err!(
+        "{type_name}.{method}() takes no keyword arguments"
+    ))
+}
+
 /// Build the per-type `TypeError` message for sequence item access with a
 /// non-integer non-`__index__` index, matching CPython 3.12.
 ///
@@ -856,6 +925,11 @@ impl Interpreter {
                         pyrust_builtins::int::call(method, &self_val, &pos, &kw)
                     }
                     "bytes" => {
+                        // Issue #2500: bytes methods take no keyword arguments
+                        // (the receiver-only `bytes::call` discards `kw`).
+                        if let Some(err) = reject_container_method_kwargs("bytes", method, &kw) {
+                            return Err(err);
+                        }
                         // Accept bytes-subclass / bytearray args (#1928).
                         let pos = coerce_bytes_subclass_method_args(method, pos);
                         pyrust_builtins::bytes::call(method, &self_val, &pos, &kw)
@@ -920,6 +994,10 @@ impl Interpreter {
                         }
                     }
                     "tuple" => {
+                        // Issue #2500: tuple methods take no keyword arguments.
+                        if let Some(err) = reject_container_method_kwargs("tuple", method, &kw) {
+                            return Err(err);
+                        }
                         if method == "index" || method == "count" {
                             match self_val.kind() {
                                 ValueKind::Tuple(items) => {
@@ -977,9 +1055,21 @@ impl Interpreter {
                         }
                         self.call_dict_method(method, self_val, pos, &kw)
                     }
-                    "set" => self.call_set_method(method, self_val, pos),
+                    "set" => {
+                        // Issue #2500: set methods take no keyword arguments.
+                        if let Some(err) = reject_container_method_kwargs("set", method, &kw) {
+                            return Err(err);
+                        }
+                        self.call_set_method(method, self_val, pos)
+                    }
                     "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
-                    "frozenset" => self.call_frozenset_method(method, self_val, pos),
+                    "frozenset" => {
+                        // Issue #2500: frozenset methods take no keyword arguments.
+                        if let Some(err) = reject_container_method_kwargs("frozenset", method, &kw) {
+                            return Err(err);
+                        }
+                        self.call_frozenset_method(method, self_val, pos)
+                    }
                     _ => unreachable!("guard matched type_name above"),
                 }
             }
@@ -1478,8 +1568,11 @@ impl Interpreter {
                 pyrust_builtins::float::call(method, f, pos)
             }
             Kind::Bytes => {
+                // Issue #2500: bytes methods take no keyword arguments.
+                if let Some(err) = reject_container_method_kwargs("bytes", method, &kw) {
+                    return Err(err);
+                }
                 if method == "join" {
-                    reject_kwargs!(kw, "bytes.join");
                     let args_vec: Vec<Value> = std::mem::take(pos);
                     self.call_bytes_join(receiver, args_vec)
                 } else {
@@ -1604,11 +1697,19 @@ impl Interpreter {
                 self.call_dict_method(method, receiver, args_vec, &kw)
             }
             Kind::Set => {
+                // Issue #2500: set methods take no keyword arguments.
+                if let Some(err) = reject_container_method_kwargs("set", method, &kw) {
+                    return Err(err);
+                }
                 let args_vec: Vec<Value> = std::mem::take(pos);
                 self.call_set_method(method, receiver, args_vec)
             }
             Kind::Other => match receiver.kind() {
             ValueKind::Tuple(items) => {
+                // Issue #2500: tuple methods take no keyword arguments.
+                if let Some(err) = reject_container_method_kwargs("tuple", method, &kw) {
+                    return Err(err);
+                }
                 let args_vec: Vec<Value> = std::mem::take(pos);
                 if method == "index" || method == "count" {
                     let needs_dispatch = args_vec
@@ -1646,6 +1747,16 @@ impl Interpreter {
                 pyrust_builtins::complex::call(method, &receiver, args_vec)
             }
             ValueKind::BuiltinObject { ops, state } => {
+                // Issue #2500: bytearray / frozenset method_descriptors that
+                // take no keyword arguments reject them (`bytearray.find`,
+                // `frozenset.isdisjoint`).  `ops.call_method` would otherwise
+                // silently drop the kwargs.  bytearray methods that DO accept
+                // keywords (`split`, `decode`, …) are exempted by the helper.
+                if let Some(err) =
+                    reject_container_method_kwargs(ops.type_name(), method, &kw)
+                {
+                    return Err(err);
+                }
                 let mut args_vec: Vec<Value> = std::mem::take(pos);
                 // bytearray methods accept bytes-subclass / bytearray args
                 // (#1928); coerce them to a real `Bytes` value before the
@@ -1761,6 +1872,21 @@ impl Interpreter {
                                 ValueKind::Bytes(_) => BkKind::Bytes,
                                 _ => BkKind::Other,
                             };
+                            // Issue #2500: container method_descriptors on a
+                            // builtin-subclass instance reject keyword arguments
+                            // with the *base* type's wording (`set.add()`,
+                            // `tuple.count()`, `bytes.find()`).  The helper
+                            // returns `None` for kwarg-accepting methods
+                            // (`dict.update`, `list.sort`, `bytes.split`, …) and
+                            // for str/int/float (handled below), so those paths
+                            // are unaffected.
+                            if let Some(err) = reject_container_method_kwargs(
+                                &pyrust_core::builtin_type_name(&backing),
+                                method,
+                                &kw,
+                            ) {
+                                return Err(err);
+                            }
                             let args_vec: Vec<Value> = std::mem::take(pos);
                             return match bk_kind {
                                 BkKind::Dict => {
@@ -9951,6 +10077,13 @@ impl Interpreter {
                 }
             }
             2 => {
+                // Issue #2500: dict methods take no keyword arguments (except
+                // `update`).  The `needs_rc` view fast path (`keys`/`values`/
+                // `items`) returns before `call_dict_method`, so it would bypass
+                // the guard that lives at the top of `call_dict_method`.
+                if let Some(err) = reject_container_method_kwargs("dict", method, kw) {
+                    return Err(err);
+                }
                 if pyrust_builtins::dict::needs_rc(method) {
                     // Lazy views need the Rc to share storage with the source
                     // dict — the regular dispatch path only sees a Vec snapshot.
@@ -9968,6 +10101,10 @@ impl Interpreter {
                 self.call_dict_method(method, receiver, pos, kw)
             }
             3 => {
+                // Issue #2500: tuple methods take no keyword arguments.
+                if let Some(err) = reject_container_method_kwargs("tuple", method, kw) {
+                    return Err(err);
+                }
                 // Snapshot the tuple's items once so the `&[Value]` borrow does
                 // not straddle the `&mut self` calls below.  Tuples are
                 // immutable, so the snapshot is exact.
@@ -10010,7 +10147,13 @@ impl Interpreter {
                     self.call_str_method(method, receiver, pos)
                 }
             }
-            5 => self.call_set_method(method, receiver, pos),
+            5 => {
+                // Issue #2500: set methods take no keyword arguments.
+                if let Some(err) = reject_container_method_kwargs("set", method, kw) {
+                    return Err(err);
+                }
+                self.call_set_method(method, receiver, pos)
+            }
             _ => Err(PyError::Runtime(
                 "dispatch_builtin_container_method called with non-container tag".to_string(),
             )),

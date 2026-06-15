@@ -2885,6 +2885,12 @@ impl Interpreter {
         args: Vec<Value>,
         kwargs: &PyDict,
     ) -> Result<Value> {
+        // Issue #2500: every dict method except `update` (which accepts
+        // `**kwargs`) rejects keyword arguments — the receiver-only
+        // `pyrust_builtins::dict::call` otherwise discards them silently.
+        if let Some(err) = reject_container_method_kwargs("dict", method, kwargs) {
+            return Err(err);
+        }
         match method {
             "get" | "__contains__" | "pop" | "setdefault" => {
                 let mut iter = args.into_iter();
