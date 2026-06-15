@@ -31,59 +31,144 @@ use std::rc::Rc;
 
 pyrust_module! {
     /// CPython: itertools.chain(*iterables) — concatenate iterables.
-    /// Lazy across sources (each is materialised only when reached).
+    /// Lazy across sources (each is iterated only when reached).  A real
+    /// `PyClass` so `type(chain(...))` is `<class 'itertools.chain'>` and
+    /// `isinstance` / `chain.from_iterable` flow through the standard class
+    /// machinery (#2370).
     /// <https://docs.python.org/3/library/itertools.html#itertools.chain>
-    fn chain(args) -> Result<Value> {
-        reject_keyword_args_expanded("chain", args)?;
-        // Pre-materialise user `PyInstance` AND `Generator` sources so
-        // user `__iter__` dispatch / generator resumption (both of
-        // which need the interpreter) happen here instead of inside
-        // the registry callback, which can only walk
-        // `NativeIterFrame` generators (#446).  Re-uses the same
-        // helper `enumerate`/`zip`/`reversed` call so behaviour stays
-        // consistent across the lazy iter family.
-        let sources: Vec<Value> = args
-            .iter()
-            .map(|a| super::builtins::materialize_user_iter(_interp, a.value.clone()))
-            .collect::<Result<_>>()?;
-        Ok(pyrust_builtins::iter_helpers::chain(sources))
-    }
-
-    /// CPython: itertools.chain.from_iterable(iterable) — the alternate
-    /// constructor that takes a *single* iterable whose elements are the
-    /// iterables to chain.  Equivalent to `chain(*iterable)` but lazy: the
-    /// outer iterable is consumed one element at a time, and each inner
-    /// iterable is only iterated when reached, so an infinite outer source
-    /// works up to the consumed point.  Exposed via attribute access on the
-    /// `chain` builtin (see `env.rs::get_attr` BuiltinFunction arm).
-    /// <https://docs.python.org/3/library/itertools.html#itertools.chain.from_iterable>
-    fn chain_from_iterable(args) -> Result<Value> {
-        reject_keyword_args_expanded("chain.from_iterable", args)?;
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "chain.from_iterable() takes exactly one argument ({} given)",
-                    args.len()
-                ),
-            ));
+    class chain {
+        iter_self;
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            reject_keyword_args_expanded("chain", user)?;
+            // Pre-materialise user `PyInstance` AND `Generator` sources so
+            // user `__iter__` dispatch / generator resumption (both of
+            // which need the interpreter) happen here instead of mid-walk
+            // (#446).  Built-in containers stay un-materialised — each is
+            // wrapped in an iterator lazily, only when `__next__` reaches it.
+            let sources: Vec<Value> = user
+                .iter()
+                .map(|a| super::builtins::materialize_user_iter(_interp, a.value.clone()))
+                .collect::<Result<_>>()?;
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_sources", Value::list(sources));
+            a.attrs.insert("_src_idx", Value::int(0));
+            // `_cur_iter` holds the iterator for the source at `_src_idx`,
+            // or None when none has been created yet for that index.
+            a.attrs.insert("_cur_iter", Value::none());
+            Ok(Value::none())
         }
-        // `iter(arg)` over the outer iterable.  This does not consume any
-        // element yet (for a generator source it just returns the generator);
-        // the first element is pulled on the first `__next__`, matching
-        // CPython's lazy timing.  The returned `ChainFromIterableIter` is a
-        // generator-state iterator (like `map` / `filter`), so per-element
-        // iteration goes through the dedicated `step_chain_from_iterable`
-        // dispatch in `ForIter` / `call_next` — no PyInstance `__next__` VM
-        // re-entry per element (#2362).
-        let outer = crate::builtin_modules::builtins::make_iterator(_interp, &args[0].value)?;
-        Ok(Value::generator(Box::new(
-            crate::interpreter::ChainFromIterableIter {
-                outer,
-                inner: None,
-                done: false,
-            },
-        )))
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            loop {
+                let (cur_iter, idx, n_sources) = {
+                    let a = inst.borrow();
+                    let cur_iter = a
+                        .attrs
+                        .get("_cur_iter")
+                        .cloned()
+                        .ok_or_else(|| internal(FN_NAME))?;
+                    let idx = match a.attrs.get("_src_idx").map(|v| v.kind()) {
+                        Some(ValueKind::Int(n)) => n as usize,
+                        _ => return Err(internal(FN_NAME)),
+                    };
+                    let n_sources = match a.attrs.get("_sources").map(|v| v.kind()) {
+                        Some(ValueKind::List(items)) => items.len(),
+                        _ => return Err(internal(FN_NAME)),
+                    };
+                    (cur_iter, idx, n_sources)
+                };
+                if cur_iter.is_none() {
+                    // No live iterator for the current source slot.
+                    if idx >= n_sources {
+                        return Err(PyError::named("StopIteration", String::new()));
+                    }
+                    // Lazily `iter()` the source at `idx` (matches CPython's
+                    // per-source `GetIter` timing).
+                    let source = {
+                        let a = inst.borrow();
+                        match a.attrs.get("_sources").map(|v| v.kind()) {
+                            Some(ValueKind::List(items)) => items[idx].clone(),
+                            _ => return Err(internal(FN_NAME)),
+                        }
+                    };
+                    let iter = make_iter(_interp, &source)?;
+                    inst.borrow_mut().attrs.insert("_cur_iter", iter);
+                    continue;
+                }
+                match _interp.call_next(&cur_iter, None) {
+                    Ok(v) => return Ok(v),
+                    Err(e) if is_stop_iteration(&e) => {
+                        // Advance to the next source; clear the live iterator.
+                        let mut a = inst.borrow_mut();
+                        a.attrs.insert("_src_idx", Value::int(idx as i64 + 1));
+                        a.attrs.insert("_cur_iter", Value::none());
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+
+        /// CPython: itertools.chain.from_iterable(iterable) — the alternate
+        /// constructor that takes a *single* iterable whose elements are the
+        /// iterables to chain.  Equivalent to `chain(*iterable)` but lazy: the
+        /// outer iterable is consumed one element at a time, and each inner
+        /// iterable is only iterated when reached, so an infinite outer source
+        /// works up to the consumed point.  Exposed on the `chain` class, so
+        /// `type(chain.from_iterable(...))` reports `<class 'itertools.chain'>`.
+        /// <https://docs.python.org/3/library/itertools.html#itertools.chain.from_iterable>
+        fn from_iterable(args) -> Result<Value> {
+            // CPython's `from_iterable` is a classmethod callable on both the
+            // class (`chain.from_iterable(it)`) and an instance
+            // (`chain([]).from_iterable(it)`), with cls/self silently dropped.
+            //
+            // Class access returns this BuiltinFunction *unbound* — `args` is
+            // exactly the user-supplied positionals.  Instance access binds the
+            // chain instance as a receiver, prepending it as `args[0]`.  The two
+            // are told apart by count, not by type (a count test stays correct
+            // even when the user passes a chain instance *as* the iterable,
+            // e.g. `chain.from_iterable(chain([[1]]))`): from_iterable always
+            // takes exactly one user argument, so `len() == 2` is the bound
+            // form (strip the receiver) and `len() == 1` is the unbound form.
+            let user: &[ExpandedCallArg] = match args.len() {
+                2 if matches!(
+                    args[0].value.kind(),
+                    ValueKind::PyInstance(_) | ValueKind::PyClass(_)
+                ) =>
+                {
+                    &args[1..]
+                }
+                _ => args,
+            };
+            reject_keyword_args_expanded("chain.from_iterable", user)?;
+            if user.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "chain.from_iterable() takes exactly one argument ({} given)",
+                        user.len()
+                    ),
+                ));
+            }
+            // `iter(arg)` over the outer iterable.  This does not consume any
+            // element yet (for a generator source it just returns the generator);
+            // the first element is pulled on the first `__next__`, matching
+            // CPython's lazy timing.  The returned `ChainFromIterableIter` is a
+            // generator-state iterator (like `map` / `filter`), so per-element
+            // iteration goes through the dedicated `step_chain_from_iterable`
+            // dispatch in `ForIter` / `call_next` — no PyInstance `__next__` VM
+            // re-entry per element (#2362).
+            let outer = crate::builtin_modules::builtins::make_iterator(_interp, &user[0].value)?;
+            Ok(Value::generator(Box::new(
+                crate::interpreter::ChainFromIterableIter {
+                    outer,
+                    inner: None,
+                    done: false,
+                },
+            )))
+        }
     }
 
     /// `itertools.islice` — fully lazy slice with class-based dispatch.
