@@ -6,18 +6,17 @@
 //! #2411/#2426: CPython 3.12's PEP 657 underlines are fine-grained — they
 //! underline the precise sub-expression that raised, and OMIT the caret row
 //! when the anchor covers the whole stripped line (a bare `name`, `f()`,
-//! `raise X(...)`, etc.).  Stage 1 of #2426 plumbs the column anchor for the
-//! highest-value form: a bare-name `Var` load (the instruction that raises an
-//! uncaught `NameError`).  For that form pyrust now renders the exact narrow
-//! `^` caret, byte-for-byte with CPython 3.12 — whether the name appears as an
-//! assignment RHS, a call argument, a binary-op operand, or a subscript
-//! base/index.
+//! `raise X(...)`, etc.).  pyrust plumbs the column anchor for the high-value
+//! forms: bare-name `Var` loads (uncaught `NameError`), calls, binary ops
+//! (`~` operands + `^` operator), and subscripts (`~` object + `^` `[...]`) —
+//! on *every* frame, including re-raised and chained exceptions (#2411).  For
+//! these forms pyrust renders the exact caret byte-for-byte with CPython 3.12.
 //!
-//! Forms NOT yet plumbed (binary-op `~^` context marks, subscript spans,
-//! attribute access, function-frame anchors) carry NO column span and stay
+//! Forms still NOT plumbed (attribute access, comparison/short-circuit
+//! operators, const-folded nested binary ops) carry NO column span and stay
 //! caret-free — strictly safer than a wrong caret ("a wrong caret is worse
 //! than no caret").  These tests assert:
-//!   * plumbed `Var`-anchor frames are byte-exact with CPython, and
+//!   * plumbed-anchor frames are byte-exact with CPython, and
 //!   * unplumbed forms never print a `^` underline they cannot place correctly.
 
 use std::env;
@@ -174,39 +173,78 @@ NameError: name 'café_undef' is not defined
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
 
-// ── Unplumbed forms: caret-free (never a wrong caret) ───────────────────────
+// ── #2411: binary-op `~^` context marks and subscript spans ─────────────────
 
 #[test]
-fn unplumbed_forms_never_print_a_caret_underline() {
-    // Binary-op `~^` context marks, subscript spans, and attribute access are
-    // not yet plumbed; they must NOT print a caret pyrust cannot place exactly.
-    let scripts = [
-        "1 + \"s\"\n",            // binop TypeError
-        "d = {}\nd[\"k\"]\n",     // subscript KeyError
-        "(1).nonexistent_attr\n", // attribute AttributeError
-        "[1, 2, 3][10]\n",        // subscript IndexError
-    ];
-    for (i, src) in scripts.iter().enumerate() {
-        let stderr = run_pyrust_stderr("unplumbed.py", src);
-        assert!(
-            !stderr.contains('^'),
-            "script {i} printed a caret pyrust cannot place exactly:\n{stderr}",
-        );
-    }
+fn binop_typeerror_caret_is_byte_exact() {
+    // `1 + "s"`: CPython underlines the operands with `~` and the operator `^`.
+    let stderr = run_pyrust_stderr("binop_t.py", "1 + \"s\"\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"binop_t.py\", line 1, in <module>
+    1 + \"s\"
+    ~~^~~~~
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
 }
 
 #[test]
-fn nameerror_inside_function_frame_is_caret_free_for_now() {
-    // Function-frame anchors are a stage-2 follow-up.  A NameError raised inside
-    // a function must not print any (necessarily wrong) caret on either the
-    // function frame or the module call-site frame in stage 1.
+fn subscript_keyerror_caret_is_byte_exact() {
+    // `d["k"]`: the object gets `~`, the `[...]` subscript gets `^`.
+    let stderr = run_pyrust_stderr("subkey.py", "d = {}\nd[\"k\"]\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"subkey.py\", line 2, in <module>
+    d[\"k\"]
+    ~^^^^^
+KeyError: 'k'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn subscript_indexerror_caret_is_byte_exact() {
+    // `[1, 2, 3][10]`: the list literal gets `~`, the `[10]` subscript gets `^`.
+    let stderr = run_pyrust_stderr("subidx.py", "[1, 2, 3][10]\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"subidx.py\", line 1, in <module>
+    [1, 2, 3][10]
+    ~~~~~~~~~^^^^
+IndexError: list index out of range
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn attribute_access_remains_caret_free() {
+    // Attribute access carries no column span (CPython 3.12 also omits the caret
+    // for a bare `obj.attr` whose anchor covers the whole stripped line).
+    let stderr = run_pyrust_stderr("attr.py", "(1).nonexistent_attr\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"attr.py\", line 1, in <module>
+    (1).nonexistent_attr
+AttributeError: 'int' object has no attribute 'nonexistent_attr'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn nameerror_inside_function_frame_carries_its_caret() {
+    // #2411: a NameError raised inside a function now underlines the offending
+    // name on the *function* frame (byte-exact), while the module call-site
+    // frame (`g()`, a whole-line anchor) stays caret-free.
     let stderr = run_pyrust_stderr("func.py", "def g():\n    return undef_in_func\ng()\n");
-    assert!(
-        stderr.contains("  File \"func.py\", line 2, in g\n"),
-        "function frame must appear in the traceback:\n{stderr}",
-    );
-    assert!(
-        !stderr.contains('^'),
-        "function-frame NameError must be caret-free in stage 1:\n{stderr}",
-    );
+    let expected = "\
+Traceback (most recent call last):
+  File \"func.py\", line 3, in <module>
+    g()
+  File \"func.py\", line 2, in g
+    return undef_in_func
+           ^^^^^^^^^^^^^
+NameError: name 'undef_in_func' is not defined
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
 }

@@ -16,6 +16,12 @@ pub struct Parser {
     /// when the parser was constructed without column tracking; `Var` anchors
     /// are then recorded as `None`.
     cols: Vec<u32>,
+    /// Optional 0-based end columns (char offset one past the token's last char,
+    /// within its physical line), one per token, for multi-token PEP 657 caret
+    /// anchors (issue #2411).  Empty when constructed without column tracking; a
+    /// recorded 0 means "no reliable end col" (e.g. a token whose lexing crossed
+    /// a physical newline) and suppresses the caret rather than emit a wrong one.
+    cols_end: Vec<u32>,
     /// Current expression-nesting depth.  Incremented on every `parse_expr`
     /// entry; since each bracketed construct (`(`, `[`, `{`, call args,
     /// subscripts) re-enters `parse_expr` for its contents, this tracks the
@@ -45,6 +51,7 @@ impl Parser {
             pos: 0,
             line_nos: Vec::new(),
             cols: Vec::new(),
+            cols_end: Vec::new(),
             expr_depth: 0,
         }
     }
@@ -61,19 +68,26 @@ impl Parser {
             pos: 0,
             line_nos,
             cols: Vec::new(),
+            cols_end: Vec::new(),
             expr_depth: 0,
         }
     }
 
-    /// Construct a parser with per-token line numbers **and** start columns
-    /// produced by `Lexer::into_tokens_with_pos` (issue #2426).  Enables PEP 657
-    /// caret anchors on the expression forms stage 1 plumbs.
-    pub fn new_with_pos(tokens: Vec<Token>, line_nos: Vec<u32>, cols: Vec<u32>) -> Self {
+    /// Construct a parser with per-token line numbers **and** start/end columns
+    /// produced by `Lexer::into_tokens_with_pos` (issues #2426 / #2411).  Enables
+    /// PEP 657 caret anchors on the plumbed expression forms.
+    pub fn new_with_pos(
+        tokens: Vec<Token>,
+        line_nos: Vec<u32>,
+        cols: Vec<u32>,
+        cols_end: Vec<u32>,
+    ) -> Self {
         Self {
             tokens,
             pos: 0,
             line_nos,
             cols,
+            cols_end,
             expr_depth: 0,
         }
     }
@@ -88,6 +102,24 @@ impl Parser {
     /// column information is available (issue #2426).
     fn current_col(&self) -> Option<u32> {
         self.cols.get(self.pos).copied()
+    }
+
+    /// Return the 0-based end column (one past the last char) of the token at
+    /// `pos`, or `None` when no end-column information is available or the token
+    /// carries the "no reliable end col" sentinel 0 (issue #2411).
+    fn end_col_at(&self, pos: usize) -> Option<u32> {
+        match self.cols_end.get(pos).copied() {
+            Some(0) | None => None,
+            Some(c) => Some(c),
+        }
+    }
+
+    /// Return the end column of the token most recently consumed (`self.pos - 1`),
+    /// i.e. the end column of the sub-expression that just finished parsing
+    /// (issue #2411).  `None` before any token is consumed or when no reliable
+    /// end col is available.
+    fn prev_end_col(&self) -> Option<u32> {
+        self.end_col_at(self.pos.checked_sub(1)?)
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Stmt>> {
@@ -1650,11 +1682,14 @@ impl Parser {
     }
 
     fn parse_raise(&mut self) -> Result<Stmt> {
+        // Start col of the `raise` keyword for the #2411 whole-statement anchor.
+        let raise_start = self.current_col();
         self.expect(&Token::Raise)?;
         if self.at_stmt_end() {
             Ok(Stmt::Raise {
                 expr: None,
                 cause: None,
+                span: None,
             })
         } else {
             let expr = Some(self.parse_expr()?);
@@ -1664,7 +1699,14 @@ impl Parser {
             } else {
                 None
             };
-            Ok(Stmt::Raise { expr, cause })
+            // The statement spans from `raise` through the end of the last
+            // parsed expression (the cause, when present, else the exception).
+            // Whole-`^` span (full == prim), matching CPython's raise underline.
+            let span = match (raise_start, self.prev_end_col()) {
+                (Some(s), Some(e)) if s < e => Some((s, s, e, e)),
+                _ => None,
+            };
+            Ok(Stmt::Raise { expr, cause, span })
         }
     }
 
@@ -2118,6 +2160,31 @@ impl Parser {
         })
     }
 
+    /// Build the PEP 657 caret anchor for a binary expression `left OP right`
+    /// (issue #2411): operands underlined with `~`, the operator with `^`.
+    ///
+    /// `left_start` is the start col of the whole left operand (captured before
+    /// it was parsed); `op_col` / `op_end` bracket the operator token; the right
+    /// operand's end col is read from the just-consumed token (`prev_end_col`).
+    /// Returns `None` (caret suppressed) if any piece is missing or the columns
+    /// are inconsistent — never a wrong caret.
+    fn make_binary_span(
+        &self,
+        left_start: Option<u32>,
+        op_col: Option<u32>,
+        op_end: Option<u32>,
+    ) -> Option<crate::ast::CaretSpan> {
+        let full_start = left_start?;
+        let prim_start = op_col?;
+        let prim_end = op_end?;
+        let full_end = self.prev_end_col()?;
+        if full_start <= prim_start && prim_start < prim_end && prim_end <= full_end {
+            Some((full_start, prim_start, prim_end, full_end))
+        } else {
+            None
+        }
+    }
+
     fn parse_or(&mut self) -> Result<Expr> {
         let mut expr = self.parse_and()?;
         while self.is(&Token::Or) {
@@ -2127,6 +2194,9 @@ impl Parser {
                 left: Box::new(expr),
                 op: BinaryOp::Or,
                 right: Box::new(right),
+                // Short-circuit ops don't raise from a single operator
+                // instruction; leave caret-free (issue #2411).
+                span: None,
             };
         }
         Ok(expr)
@@ -2141,6 +2211,7 @@ impl Parser {
                 left: Box::new(expr),
                 op: BinaryOp::And,
                 right: Box::new(right),
+                span: None,
             };
         }
         Ok(expr)
@@ -2221,6 +2292,9 @@ impl Parser {
                 left: Box::new(left),
                 op: op.into(),
                 right: Box::new(right),
+                // Comparison operators can be multi-token (`not in`, `is not`);
+                // leave caret-free rather than risk a wrong span (issue #2411).
+                span: None,
             });
         }
         Ok(Expr::Compare {
@@ -2230,48 +2304,61 @@ impl Parser {
     }
 
     fn parse_bitor(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let mut expr = self.parse_bitxor()?;
         while self.is(&Token::Pipe) {
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_bitxor()?;
+            let span = self.make_binary_span(left_start, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::BitOr,
                 right: Box::new(right),
+                span,
             };
         }
         Ok(expr)
     }
 
     fn parse_bitxor(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let mut expr = self.parse_bitand()?;
         while self.is(&Token::Caret) {
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_bitand()?;
+            let span = self.make_binary_span(left_start, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::BitXor,
                 right: Box::new(right),
+                span,
             };
         }
         Ok(expr)
     }
 
     fn parse_bitand(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let mut expr = self.parse_shift()?;
         while self.is(&Token::Ampersand) {
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_shift()?;
+            let span = self.make_binary_span(left_start, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::BitAnd,
                 right: Box::new(right),
+                span,
             };
         }
         Ok(expr)
     }
 
     fn parse_shift(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let mut expr = self.parse_term()?;
         loop {
             let op = if self.is(&Token::LShift) {
@@ -2281,18 +2368,22 @@ impl Parser {
             } else {
                 break;
             };
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_term()?;
+            let span = self.make_binary_span(left_start, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
                 right: Box::new(right),
+                span,
             };
         }
         Ok(expr)
     }
 
     fn parse_term(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let mut expr = self.parse_factor()?;
         loop {
             let op = if self.is(&Token::Plus) {
@@ -2302,18 +2393,22 @@ impl Parser {
             } else {
                 break;
             };
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_factor()?;
+            let span = self.make_binary_span(left_start, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
                 right: Box::new(right),
+                span,
             };
         }
         Ok(expr)
     }
 
     fn parse_factor(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let mut expr = self.parse_unary()?;
         loop {
             let op = if self.is(&Token::Star) {
@@ -2329,12 +2424,15 @@ impl Parser {
             } else {
                 break;
             };
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_unary()?;
+            let span = self.make_binary_span(left_start, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
                 right: Box::new(right),
+                span,
             };
         }
         Ok(expr)
@@ -2372,35 +2470,50 @@ impl Parser {
     }
 
     fn parse_power(&mut self) -> Result<Expr> {
+        let left_start = self.current_col();
         let base = self.parse_postfix()?;
         if self.is(&Token::StarStar) {
+            let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let exp = self.parse_unary()?; // right-associative
+            let span = self.make_binary_span(left_start, op_col, op_end);
             return Ok(Expr::Binary {
                 left: Box::new(base),
                 op: BinaryOp::Pow,
                 right: Box::new(exp),
+                span,
             });
         }
         Ok(base)
     }
 
     fn parse_postfix(&mut self) -> Result<Expr> {
+        // Start col of the primary (callee / subscript object) for #2411 caret
+        // anchors on `callee(...)` and `obj[...]` forms.
+        let primary_start = self.current_col();
         let mut expr = self.parse_primary()?;
         loop {
             if self.is(&Token::LParen) {
                 self.bump();
                 let args = self.parse_call_args()?;
                 self.expect(&Token::RParen)?;
+                // The whole `callee(...)` span is underlined with `^` (full ==
+                // prim); end col is the just-consumed `)` (#2411).
+                let span = match (primary_start, self.prev_end_col()) {
+                    (Some(s), Some(e)) if s < e => Some((s, s, e, e)),
+                    _ => None,
+                };
                 expr = Expr::Call {
                     func: Box::new(expr),
                     args,
+                    span,
                 };
                 continue;
             }
             if self.is(&Token::LBracket) {
+                let bracket_col = self.current_col();
                 self.bump();
-                expr = self.parse_subscript(expr)?;
+                expr = self.parse_subscript(expr, primary_start, bracket_col)?;
                 continue;
             }
             if self.is(&Token::Dot) {
@@ -2427,7 +2540,14 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_subscript(&mut self, target: Expr) -> Result<Expr> {
+    fn parse_subscript(
+        &mut self,
+        target: Expr,
+        // Start col of the subscript object and the `[` bracket, for the #2411
+        // caret anchor: object underlined `~`, `[...]` underlined `^`.
+        object_start: Option<u32>,
+        bracket_col: Option<u32>,
+    ) -> Result<Expr> {
         // Inside [ already consumed. Parse optional slice or index.
         // A leading `*` (PEP 646 starred subscript, e.g. `m[*idx]`) forces the
         // index to be a tuple even with a single element.
@@ -2493,9 +2613,18 @@ impl Parser {
                 first
             };
             self.expect(&Token::RBracket)?;
+            // Anchor: object `[object_start, bracket_col)` underlined `~`, the
+            // `[...]` part `[bracket_col, ]end)` underlined `^` (#2411).
+            let span = match (object_start, bracket_col, self.prev_end_col()) {
+                (Some(obj), Some(br), Some(end)) if obj <= br && br < end => {
+                    Some((obj, br, end, end))
+                }
+                _ => None,
+            };
             Ok(Expr::Index {
                 target: Box::new(target),
                 index: Box::new(index),
+                span,
             })
         }
     }
@@ -2921,6 +3050,7 @@ impl Parser {
                         left: Box::new(prev),
                         op: BinaryOp::And,
                         right: Box::new(filter),
+                        span: None,
                     },
                 });
             }
@@ -3150,7 +3280,7 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
             name: name.clone(),
             expr: rhs,
         }),
-        Expr::Index { target, index } => Ok(Stmt::IndexAssign {
+        Expr::Index { target, index, .. } => Ok(Stmt::IndexAssign {
             target: target.clone(),
             index: index.clone(),
             expr: rhs,
@@ -3256,7 +3386,7 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         }
         Expr::Var(name, _) => Ok(AssignTarget::Name(name.clone())),
         Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
-        Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
+        Expr::Index { target, index, .. } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Slice {
             target,
             lower,

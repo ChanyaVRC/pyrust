@@ -30,8 +30,8 @@ fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
 fn parse_source_with_linenos(src: &str) -> Result<(Vec<ast::Stmt>, Vec<u32>)> {
     // Thread per-token start columns through too, so the compiler can record
     // PEP 657 caret anchors for uncaught tracebacks (issue #2426).
-    let (tokens, line_nos, cols) = Lexer::new(src)?.into_tokens_with_pos();
-    let mut parser = Parser::new_with_pos(tokens, line_nos, cols);
+    let (tokens, line_nos, cols, cols_end) = Lexer::new(src)?.into_tokens_with_pos();
+    let mut parser = Parser::new_with_pos(tokens, line_nos, cols, cols_end);
     parser.parse_program_with_linenos()
 }
 

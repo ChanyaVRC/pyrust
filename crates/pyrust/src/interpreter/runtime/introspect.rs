@@ -451,6 +451,9 @@ impl Interpreter {
         // generator rather than `<module>` (issue #2445).
         catch_gen_info: Option<&(std::sync::Arc<str>, std::sync::Arc<str>)>,
         catch_lineno: i64,
+        // PEP 657 caret anchor of the catching frame's raising instruction
+        // (issue #2411), for a same-frame raise that carries no inner node.
+        catch_col_span: Option<(u32, u32, u32, u32)>,
         tail: Value,
     ) -> Value {
         // Determine the catching frame's code object.
@@ -518,7 +521,9 @@ impl Interpreter {
                 self.module_globals_dict.clone(),
                 Value::dict(Default::default()),
             );
-            node = tb_obj::traceback_node(frame, node, lineno, -1);
+            // Carry the captured frame's PEP 657 caret anchor onto the node so a
+            // re-raised / chained exception renders the same carets (#2411).
+            node = tb_obj::traceback_node_with_col(frame, node, lineno, -1, fi.col_span);
         }
 
         // Finally, the catching frame as the outermost node.
@@ -529,7 +534,7 @@ impl Interpreter {
             self.module_globals_dict.clone(),
             Value::dict(Default::default()),
         );
-        tb_obj::traceback_node(catch_frame, node, catch_lineno, -1)
+        tb_obj::traceback_node_with_col(catch_frame, node, catch_lineno, -1, catch_col_span)
     }
 
     /// Build a *deferred* traceback placeholder for an exception being caught.
@@ -619,6 +624,9 @@ impl Interpreter {
             catch_func,
             catch_gen_info,
             catch_lineno,
+            // The raising instruction's caret anchor was published just before
+            // handler dispatch (vm.rs), so it is current here (#2411).
+            catch_col_span: pyrust_core::get_current_vm_col_span(),
             tail,
         });
         Value::builtin_object(DEFERRED_TRACEBACK_OPS, state)
@@ -637,7 +645,7 @@ impl Interpreter {
         // Clone out the snapshot fields, then drop the borrow before recursing
         // into the tail (which may itself be a deferred placeholder sharing no
         // lock, but keeping the borrow narrow is cleaner).
-        let (frames, catch_func, catch_gen_info, catch_lineno, tail) = {
+        let (frames, catch_func, catch_gen_info, catch_lineno, catch_col_span, tail) = {
             let borrow = state.borrow();
             let s = borrow.downcast_ref::<DeferredTracebackState>()?;
             (
@@ -645,6 +653,7 @@ impl Interpreter {
                 s.catch_func.clone(),
                 s.catch_gen_info.clone(),
                 s.catch_lineno,
+                s.catch_col_span,
                 s.tail.clone(),
             )
         };
@@ -657,6 +666,7 @@ impl Interpreter {
             catch_func.as_deref(),
             catch_gen_info.as_ref(),
             catch_lineno,
+            catch_col_span,
             tail,
         ))
     }
@@ -833,13 +843,15 @@ impl Interpreter {
         let tb = self
             .materialize_deferred_traceback(&stored)
             .unwrap_or(stored);
-        let nodes = pyrust_builtins::traceback::walk_frames(&tb);
+        let nodes = pyrust_builtins::traceback::walk_frames_with_col(&tb);
         if nodes.is_empty() {
             return None;
         }
-        // Source-line lookup: CPython echoes the line stripped of leading
-        // indentation and re-indented to a fixed four spaces (the prefix is
-        // added by `format_traceback`), so store the fully-stripped text.
+        // Source-line lookup: store the line with its own leading indentation
+        // *preserved* (only trailing whitespace stripped).  `format_traceback`
+        // dedents it for display and uses the leading-whitespace count to rebase
+        // the PEP 657 caret anchor (#2411); pre-trimming the start would drop
+        // that offset and drop/misplace the caret.
         let resolve = |lineno: Option<u32>| -> Option<std::sync::Arc<str>> {
             let n = lineno?;
             if src.is_empty() {
@@ -847,7 +859,7 @@ impl Interpreter {
             }
             src.lines()
                 .nth((n as usize).saturating_sub(1))
-                .map(|l| std::sync::Arc::from(l.trim()))
+                .map(|l| std::sync::Arc::from(l.trim_end()))
         };
         let mut frames: Vec<pyrust_core::FrameInfo> = Vec::with_capacity(snapshot.len() + nodes.len());
         // Prefix: the frames the exception unwound through after the re-raise.
@@ -865,18 +877,19 @@ impl Interpreter {
                 lineno: fi.lineno,
                 source_line: resolve(fi.lineno),
                 funcname: fi.funcname.clone(),
-                col_span: None,
+                col_span: fi.col_span,
             });
         }
-        // The carried chain (outermost-first).
-        for (funcname, lineno) in nodes {
+        // The carried chain (outermost-first), each node carrying its PEP 657
+        // caret anchor recovered from the original capture (#2411).
+        for (funcname, lineno, col_span) in nodes {
             let lineno = if lineno > 0 { Some(lineno as u32) } else { None };
             frames.push(pyrust_core::FrameInfo {
                 filename: filename.clone(),
                 lineno,
                 source_line: resolve(lineno),
                 funcname: std::sync::Arc::from(&funcname[..]),
-                col_span: None,
+                col_span,
             });
         }
         Some(frames)
@@ -900,6 +913,11 @@ pub(crate) struct DeferredTracebackState {
     /// code object reports the generator rather than `<module>` (issue #2445).
     catch_gen_info: Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
     catch_lineno: i64,
+    /// PEP 657 caret anchor of the instruction that raised in the catching frame
+    /// (issue #2411), captured at catch time from `get_current_vm_col_span`.
+    /// Carried so a same-frame raise (e.g. `1/0` caught then chained) keeps its
+    /// fine-grained caret when the deferred chain is materialised.
+    catch_col_span: Option<(u32, u32, u32, u32)>,
     /// Existing traceback chain this snapshot's frames are prepended onto when
     /// materialised (issue #2367).  `None` for a fresh catch; a real or deferred
     /// traceback for a re-raised / carried exception.

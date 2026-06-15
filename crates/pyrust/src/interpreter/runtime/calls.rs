@@ -3666,7 +3666,10 @@ impl Interpreter {
                 lineno: tb_lineno,
                 source_line: None,
                 funcname: std::sync::Arc::from(&function.name[..]),
-                col_span: None,
+                // This callee just escaped, so the published anchor (#2411) is
+                // the col span of the instruction that propagated the error
+                // within this frame.
+                col_span: pyrust_core::get_current_vm_col_span(),
             });
         }
         self.vm_frame_views.pop();
@@ -4117,7 +4120,10 @@ impl Interpreter {
                         lineno: tb_lineno,
                         source_line: None,
                         funcname: std::sync::Arc::from(&function.name[..]),
-                        col_span: None,
+                        // This callee just escaped, so the published anchor
+                        // (#2411) is the col span of the instruction that
+                        // propagated the error within this frame.
+                        col_span: pyrust_core::get_current_vm_col_span(),
                     });
                 }
                 self.vm_frame_views.pop();
@@ -4432,7 +4438,10 @@ impl Interpreter {
                     lineno: tb_lineno,
                     source_line: None,
                     funcname: std::sync::Arc::from(&function.name[..]),
-                    col_span: None,
+                    // This callee just escaped, so the published anchor (#2411)
+                    // is the col span of the instruction that propagated the
+                    // error within this frame.
+                    col_span: pyrust_core::get_current_vm_col_span(),
                 });
             }
             self.vm_frame_views.pop();

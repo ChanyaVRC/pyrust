@@ -1445,6 +1445,13 @@ impl Interpreter {
     #[inline(never)]
     fn vm_unwind_error(&mut self, mut err: PyError, st: &mut UnwindState) -> UnwindOutcome {
         let mut line = *st.cur_line;
+        // PEP 657 caret anchor of the raising instruction (#2411).  The VM
+        // published it (before handler dispatch) for the *innermost* frame —
+        // the one that actually raised — which is the first frame popped here.
+        // Outer trampolined frames raised at their own call sites whose anchors
+        // we don't track on the trampoline, so only the innermost frame claims
+        // this span; the rest stay caret-free (a missing caret beats a wrong one).
+        let mut innermost_col = pyrust_core::get_current_vm_col_span();
         loop {
             let floor = st.gen_drive_stack.last().map_or(0, |g| g.tramp_floor);
             while st.tramp_stack.len() > floor {
@@ -1452,6 +1459,7 @@ impl Interpreter {
                 if let Some(view) = self.vm_frame_views.pop()
                     && let Some(func) = view.function
                 {
+                    let frame_col = innermost_col.take();
                     // Callee's own code-object filename (#2438): a trampolined
                     // call into an imported module's function reports that
                     // module's source file, not the running script's path.
@@ -1470,7 +1478,7 @@ impl Interpreter {
                         lineno: if line == 0 { None } else { Some(line) },
                         source_line: None,
                         funcname: std::sync::Arc::from(&func.name[..]),
-                        col_span: None,
+                        col_span: frame_col,
                     });
                 }
                 self.env = saved.saved_env;
@@ -1943,7 +1951,19 @@ impl Interpreter {
                     // `pc` was already advanced past the current instruction
                     // (the `pc += 1` below the fetch), so the raising
                     // instruction's index — the exception-table key — is `pc - 1`.
-                    Err(e) => match self.handle_vm_error(
+                    Err(e) => {
+                        // Publish the raising instruction's PEP 657 caret anchor
+                        // (#2411) BEFORE dispatching to the handler, so a deferred
+                        // traceback built for a *caught* exception (e.g. `1/0`
+                        // caught and later re-raised / chained) records the anchor
+                        // for the frame that actually raised — the escape-path
+                        // publish below only fires when the error leaves the frame.
+                        pyrust_core::set_current_vm_col_span(
+                            code.col_table.get(pc.wrapping_sub(1)).copied().and_then(
+                                |s| if s == (0, 0, 0, 0) { None } else { Some(s) },
+                            ),
+                        );
+                        match self.handle_vm_error(
                         e,
                         &mut exc_handlers,
                         exc_ctx_frame_base,
@@ -1964,24 +1984,20 @@ impl Interpreter {
                             continue 'vm;
                         }
                         Err(e) => {
-                            // Error escapes this frame: publish the raising
-                            // instruction's PEP 657 caret anchor (#2426) for the
-                            // traceback formatter.  Read only here on the cold
-                            // escape path — never on the per-instruction hot path.
-                            // Last writer wins, so the outermost (module) frame's
-                            // anchor is what `get_current_vm_col_span` returns.
-                            pyrust_core::set_current_vm_col_span(
-                                code.col_table.get(pc.wrapping_sub(1)).copied().and_then(
-                                    |s| if s == (0, 0) { None } else { Some(s) },
-                                ),
-                            );
+                            // Error escapes this frame.  The raising instruction's
+                            // PEP 657 caret anchor (#2426/#2411) was already
+                            // published above (before handler dispatch); last
+                            // writer wins, so the outermost (module) frame's anchor
+                            // is what `get_current_vm_col_span` returns.
+                            //
                             // Unwind any active trampolined frames (record their
                             // traceback, pop their views, restore each caller's
                             // env) and publish the line tracker (issues #348,
                             // #2234).
                             tramp_unwind_err!(e);
                         }
-                    },
+                    }
+                    }
                 }
             };
         }
@@ -6021,7 +6037,7 @@ mod vm_tests {
             insns,
             filename: std::sync::Arc::from("<unknown>"),
             lineno_table: vec![0u32; n],
-            col_table: vec![(0, 0); n],
+            col_table: vec![(0, 0, 0, 0); n],
             first_lineno: 0,
             consts: vec![],
             names: vec![],
@@ -6055,7 +6071,7 @@ mod vm_tests {
         code.insns.push(Insn::MatchExcept(0, 1));     // no active_exception → error
         code.insns.push(Insn::ReturnNone);
         code.lineno_table.extend([0u32, 0, 0]);
-        code.col_table.extend([(0u32, 0u32); 3]);
+        code.col_table.extend([(0u32, 0u32, 0u32, 0u32); 3]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![Value::unset(); 1];
         // SAFETY (test): regs is alive for the duration of run_bytecode;

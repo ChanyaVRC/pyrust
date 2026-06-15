@@ -197,6 +197,13 @@ pub enum Stmt {
     Raise {
         expr: Option<Expr>,
         cause: Option<Expr>,
+        /// PEP 657 caret anchor (issue #2411) for the whole `raise <expr>`
+        /// statement (from the `raise` keyword through the end of the raised
+        /// expression).  CPython underlines the entire raise statement, so this
+        /// is a whole-`^` span (`full == prim`); the formatter omits it when it
+        /// covers the whole dedented line (a bare `raise name` at statement
+        /// scope).  `None` for a bare `raise` or when built without column info.
+        span: Option<CaretSpan>,
     },
     Import {
         names: Vec<(String, Option<String>)>,
@@ -319,6 +326,21 @@ pub enum FStringPart {
     },
 }
 
+/// A PEP 657 fine-grained caret anchor for a multi-token expression form
+/// (issue #2411): `(full_start, prim_start, prim_end, full_end)`, all 0-based
+/// char columns within the expression's (single) source line, end-exclusive.
+///
+/// The formatter underlines `[full_start, full_end)`, drawing `^` under the
+/// "primary" sub-range `[prim_start, prim_end)` and `~` under the rest:
+///
+/// * **Call / attribute / bare name** — `full == prim`, so the whole span is
+///   `^` (and, per CPython, omitted when it covers the entire stripped line).
+/// * **Binary op** — `prim` is the operator token, the operands get `~`
+///   (`(10 + 2) * 3 / 0` → `~~~~~~~~~~~~~^~~`).
+/// * **Subscript** — `prim` is the `[...]` part, the object gets `~`
+///   (`d['a']` → `~^^^^^`).
+pub type CaretSpan = (u32, u32, u32, u32);
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
@@ -379,6 +401,10 @@ pub enum Expr {
         left: Box<Expr>,
         op: BinaryOp,
         right: Box<Expr>,
+        /// PEP 657 caret anchor (issue #2411): operands underlined with `~`,
+        /// the operator token with `^`.  `None` for operators synthesised by
+        /// the parser/optimizer or built without column info.
+        span: Option<CaretSpan>,
     },
     /// Chained: a < b < c  →  Compare { left: a, ops: [(Lt, b), (Lt, c)] }
     Compare {
@@ -397,6 +423,10 @@ pub enum Expr {
     Call {
         func: Box<Expr>,
         args: Vec<CallArg>,
+        /// PEP 657 caret anchor (issue #2411): the whole `callee(...)` span,
+        /// underlined with `^`.  `None` for calls synthesised by the parser or
+        /// built without column info.
+        span: Option<CaretSpan>,
     },
     Attr {
         target: Box<Expr>,
@@ -405,6 +435,9 @@ pub enum Expr {
     Index {
         target: Box<Expr>,
         index: Box<Expr>,
+        /// PEP 657 caret anchor (issue #2411): object underlined with `~`, the
+        /// `[...]` subscript with `^`.  `None` when built without column info.
+        span: Option<CaretSpan>,
     },
     Slice {
         target: Box<Expr>,
