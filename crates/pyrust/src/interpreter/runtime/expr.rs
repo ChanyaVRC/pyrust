@@ -163,7 +163,11 @@ fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
 fn try_seq_fast_eq(av: &[Value], bv: &[Value]) -> SeqFast {
     debug_assert_eq!(av.len(), bv.len());
     for (x, y) in av.iter().zip(bv.iter()) {
-        if x == y {
+        // CPython compares list/tuple elements with `PyObject_RichCompareBool`,
+        // which short-circuits on identity before `__eq__`; a NaN at the same
+        // index in both sequences (e.g. `[n] == [n]`) is therefore equal even
+        // though `n == n` is False.
+        if x == y || x.is_identical_nan(y) {
             continue;
         }
         if pair_may_need_dispatch(x, y) {
@@ -5098,7 +5102,9 @@ impl Interpreter {
                     }
                     return Ok(Value::bool_(false));
                 }
-                if elem == item {
+                // Identity short-circuit (CPython `PyObject_RichCompareBool`):
+                // a NaN searching for itself matches even though `==` is False.
+                if elem == item || elem.is_identical_nan(item) {
                     return Ok(Value::bool_(true));
                 }
             }

@@ -845,7 +845,15 @@ impl PartialEq for PyKey {
             (PyKey::Int(a), PyKey::Int(b)) => a == b,
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
             (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
-            (PyKey::Float(a), PyKey::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
+            // Bit-identical floats are equal first (`a == b`): this is the
+            // dict/set counterpart of `Value::is_identical_nan` — CPython's
+            // `PyObject_RichCompareBool` short-circuits on `a is b` before
+            // `__eq__`, so a NaN key finds *itself* (`{n: 1}[n]`, `n in {n}`)
+            // even though `nan == nan` is False.  Non-NaN floats fall through
+            // to the usual value compare unchanged.
+            (PyKey::Float(a), PyKey::Float(b)) => {
+                a == b || f64::from_bits(*a) == f64::from_bits(*b)
+            }
             // Cross-type: Float vs Int (and Bool, since Bool is a subtype of int).
             // A float equals an int key iff the float is finite, has no
             // fractional part, and its value equals the integer exactly.
@@ -3664,6 +3672,24 @@ impl Value {
             top16(self.0),
             t if t <= TAG_FLOAT_MAX
         ) || matches!(top16(self.0), TAG_NONE | TAG_BOOL | TAG_INT | TAG_STR)
+    }
+
+    /// Identity short-circuit for sequence searches (`x in [x]`, `.index`,
+    /// `.count`, list/tuple `==`).  CPython's `PyObject_RichCompareBool` treats
+    /// `a is b` as equal *before* calling `__eq__`, which is observable only for
+    /// `NaN` — the one primitive where `x == x` is `False`.
+    ///
+    /// pyrust's floats are NaN-boxed values, not heap objects, so true object
+    /// identity doesn't exist for them.  The achievable approximation is raw
+    /// bit-pattern equality: two floats holding the same NaN payload are
+    /// bit-identical and are reported as "the same object" here.  This is
+    /// slightly *looser* than CPython for two distinct-but-bitwise-equal NaN
+    /// objects (CPython reports `False`; we report `True`), but it fixes the
+    /// common `n in [n]` case and the container invariant that an element you
+    /// just inserted is findable.  Restricted to floats so no other type's
+    /// equality semantics change.
+    pub fn is_identical_nan(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.is_float() && f64::from_bits(self.0).is_nan()
     }
 
     /// Returns a stable identity value for pool-allocated and Rc-shared types:
