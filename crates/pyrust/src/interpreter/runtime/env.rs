@@ -1308,7 +1308,15 @@ impl Interpreter {
                             )
                         }
                     }
-                    UserFunctionKind::Regular => value,
+                    // Issue #2479: a non-dunder method *defined on* a builtin
+                    // primitive subclass (e.g. `OrderedDict.move_to_end`, a
+                    // Python `def` on `OrderedDict`) is a C `method_descriptor`
+                    // in CPython, so calling it with an unrelated receiver
+                    // (`OrderedDict.move_to_end({1: 2}, 1)`) raises a receiver-
+                    // class TypeError.  Wrap it so the call site can enforce.
+                    UserFunctionKind::Regular => {
+                        wrap_subclass_unbound_method(&class, name, value)
+                    }
                     UserFunctionKind::Builtin(_) => value,
                 },
                 // classmethod(non_fn): CPython returns a method object bound to
@@ -1339,7 +1347,13 @@ impl Interpreter {
                                 Value::py_class(Rc::clone(&class)),
                             )
                         }
-                        None => value,
+                        // Issue #2479: an inherited primitive method sentinel
+                        // (e.g. `OrderedDict.clear` → `BuiltinFunction("dict.clear")`)
+                        // accessed on a *proper subclass* of the owning
+                        // primitive must reject an unrelated (e.g. plain-`dict`)
+                        // receiver, matching CPython's owner-class descriptor
+                        // guard.  Wrap so the call site can enforce.
+                        None => wrap_subclass_unbound_method(&class, name, value),
                     }
                 }
             });
@@ -3310,6 +3324,116 @@ impl Interpreter {
         Ok(value.truthy())
     }
 
+}
+
+/// Issue #2479: wrap an unbound method (`OrderedDict.clear`,
+/// `OrderedDict.move_to_end`) accessed on a *proper subclass* of a builtin
+/// primitive in an `unbound_method_descriptor`, so the call site can reject an
+/// unrelated receiver (`OrderedDict.clear({1: 2})`) with CPython's
+/// `descriptor '<m>' for '<owner>' objects doesn't apply to a '<X>' object`
+/// TypeError.
+///
+/// Returns `value` unchanged (no wrapping) when:
+///   * `class` *is* the primitive itself (`dict.clear` must accept any dict),
+///   * `class` is not in `OrderedDict`'s chain — a user Python `dict` subclass
+///     does not re-own inherited C descriptors, and its own `def`s stay plain
+///     `function`s, so neither enforces a receiver-class guard,
+///   * `name` is not one of the non-dunder methods `OrderedDict` re-owns
+///     (`OrderedDict.<m>.__objclass__ is OrderedDict`).
+fn wrap_subclass_unbound_method(
+    class: &Rc<RefCell<PyClass>>,
+    name: &str,
+    value: Value,
+) -> Value {
+    // The primitive's own descriptors (`dict.clear`) accept any receiver of the
+    // primitive kind — never wrap them.
+    if crate::interpreter::is_primitive_class(class) {
+        return value;
+    }
+    // Issue #2479: only stdlib types that CPython implements in C re-expose
+    // inherited primitive methods as *their own* `method_descriptor`s (with the
+    // subclass as `__objclass__`), and only those enforce a receiver-class
+    // guard.  pyrust models `OrderedDict` in Python, so without this it inherits
+    // the shared `dict` sentinels and never enforces.  A *user* Python subclass
+    // of `dict` does NOT re-own these — `class MyDict(dict): ...`'s `clear` is
+    // still `dict.clear` (objclass `dict`), and its own `def shout(self)` is a
+    // plain `function`, neither of which enforces — so we must NOT wrap those.
+    //
+    // The enforced set is exactly the non-dunder methods `OrderedDict` owns in
+    // CPython 3.12 (`OrderedDict.<m>.__objclass__ is OrderedDict`):
+    //   clear, pop, popitem, update, setdefault, copy, keys, values, items,
+    //   move_to_end.
+    // Methods OrderedDict merely inherits (`get`, `__contains__`, …) keep
+    // objclass `dict` and accept any dict receiver, so they are excluded.
+    if !class_chain_contains_name(class, "OrderedDict") {
+        return value;
+    }
+    let owns = matches!(
+        name,
+        "clear"
+            | "pop"
+            | "popitem"
+            | "update"
+            | "setdefault"
+            | "copy"
+            | "keys"
+            | "values"
+            | "items"
+            | "move_to_end"
+    );
+    if !owns {
+        return value;
+    }
+    // Determine the *owning* class for the descriptor error wording.  CPython
+    // attributes the descriptor to the type that owns it — e.g. `OD2.clear`
+    // reports `collections.OrderedDict`, not `OD2`.  Walk the base chain and
+    // pick the deepest `OrderedDict`-derived layer (the `OrderedDict` class
+    // itself, unless a subclass re-owns the method — which pyrust does not model
+    // for these inherited sentinels).
+    let owner = ordered_dict_owner(class);
+    pyrust_builtins::unbound_method_descriptor::unbound_method_descriptor(
+        Value::py_class(owner),
+        name.to_string(),
+        value,
+    )
+}
+
+/// Walk `class`'s primary base chain and return the `OrderedDict` class itself
+/// — the descriptor-owning layer reported in CPython's `descriptor '<m>' for
+/// '<owner>' objects ...` wording.  For `OD2(OrderedDict)` and `OrderedDict`
+/// alike this is `OrderedDict`.  Falls back to `class` if `OrderedDict` is not
+/// found on the primary line (should not happen given the caller's guard).
+fn ordered_dict_owner(class: &Rc<RefCell<PyClass>>) -> Rc<RefCell<PyClass>> {
+    let mut cur = Rc::clone(class);
+    loop {
+        if cur.borrow().name == "OrderedDict" {
+            return cur;
+        }
+        let next = cur.borrow().base.clone();
+        match next {
+            Some(b) => cur = b,
+            None => return Rc::clone(class),
+        }
+    }
+}
+
+/// CPython's `tp_name`-style display name for a class used in descriptor error
+/// messages: `<module>.<qualname>`, dropping the module prefix when it is
+/// `builtins` or absent (issue #2479).  `OrderedDict` → `collections.OrderedDict`.
+pub(crate) fn class_descriptor_display_name(class: &Rc<RefCell<PyClass>>) -> String {
+    let borrowed = class.borrow();
+    let qualname = borrowed.qualname.clone();
+    let module = borrowed
+        .attrs
+        .get("__module__")
+        .and_then(|m| match m.kind() {
+            ValueKind::Str(s) => Some(s.to_string()),
+            _ => None,
+        });
+    match module {
+        Some(m) if m != "builtins" && !m.is_empty() => format!("{m}.{qualname}"),
+        _ => qualname,
+    }
 }
 
 /// Issue #2433: the interned `"<type>.<cmp_dunder>"` sentinel for a primitive's

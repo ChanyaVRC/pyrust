@@ -30,6 +30,7 @@ pub mod super_bound_builtin;
 pub mod traceback;
 pub mod tuple;
 pub mod type_call_wrapper;
+pub mod unbound_method_descriptor;
 pub mod unicode_data;
 pub mod union_type;
 
