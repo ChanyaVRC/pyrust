@@ -79,13 +79,6 @@ impl Interpreter {
             flags |= code_obj::CO_VARKEYWORDS;
         }
 
-        // co_filename: the script path the function was compiled from.
-        let filename = self
-            .script_filename
-            .as_ref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "<unknown>".to_string());
-
         // The remaining attributes come from the compiled `FnCode` when
         // available: co_firstlineno, co_consts, co_names, co_cellvars,
         // co_stacksize, the function-body locals appended to co_varnames, and
@@ -94,6 +87,17 @@ impl Interpreter {
             .precompiled_code
             .as_ref()
             .and_then(|rc| Rc::clone(rc).downcast::<crate::bytecode::FnCode>().ok());
+
+        // co_filename: the source path the function's code object was compiled
+        // from.  Read it from the code object (#2438) so an imported module's
+        // function reports its module's file, not the importing script's; fall
+        // back to the running script path only when no code object is available
+        // (synthetic / builtin-shaped functions).
+        let filename = fncode
+            .as_ref()
+            .map(|c| c.filename.to_string())
+            .or_else(|| self.script_filename.as_ref().map(|s| s.to_string()))
+            .unwrap_or_else(|| "<unknown>".to_string());
 
         // co_cellvars: cell variables this function defines (locals captured by
         // a nested scope), in CPython's sorted order.  Also used to exclude
@@ -458,7 +462,16 @@ impl Interpreter {
         // toward the front (outermost callee).
         for fi in captured.iter().rev() {
             let lineno = fi.lineno.map(|n| n as i64).unwrap_or(0);
-            let co = code_obj::code(fi.funcname.to_string(), 0, Vec::new());
+            // Carry the frame's own source filename into `f_code.co_filename`
+            // (#2438): a reconstructed traceback frame for an imported module's
+            // function must report that module's file, not `<unknown>`.
+            let co = code_obj::code_with_loc(
+                fi.funcname.to_string(),
+                0,
+                Vec::new(),
+                fi.filename.to_string(),
+                0,
+            );
             let frame = frame_obj::frame(
                 co,
                 lineno,

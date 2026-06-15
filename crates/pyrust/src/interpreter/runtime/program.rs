@@ -178,11 +178,19 @@ impl Interpreter {
         // Reset any captured frames from a previous run (REPL re-invocation).
         pyrust_core::reset_captured_error_frames();
         pyrust_core::reset_current_vm_line();
+        // Tag every code object with this script's path so traceback frames and
+        // `__code__.co_filename` report the file the code came from, even when an
+        // imported module's function is called from a different script (#2438).
+        let script_path = self
+            .script_filename
+            .as_deref()
+            .unwrap_or("<unknown>");
         let code = match crate::compiler::compile_script_with_linenos(
             program,
             Rc::clone(&local_index),
             repl_mode,
             linenos,
+            script_path,
         ) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Some(Err(e)),
@@ -550,6 +558,7 @@ impl Interpreter {
                     Rc::clone(&local_index),
                     false,
                     &linenos,
+                    "<string>",
                 ) {
                     Ok(c) => Rc::new(crate::optimizer::optimize(c)),
                     Err(e) => return Err(e),
@@ -573,7 +582,7 @@ impl Interpreter {
                     unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 self.vm_frame_views.pop();
-                record_exec_string_frame(&vm_result);
+                record_exec_string_frame(&vm_result, &code.filename);
                 // Write fastlocals back to module env so names are visible
                 // after exec() returns, matching top-level assignment semantics.
                 for (name, &idx) in local_index.iter() {
@@ -613,6 +622,7 @@ impl Interpreter {
             &program,
             Rc::clone(&local_index),
             &linenos,
+            "<string>",
         ) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Err(e),
@@ -653,7 +663,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(code, regs_slice);
         self.vm_frame_views.pop();
-        record_exec_string_frame(&vm_result);
+        record_exec_string_frame(&vm_result, &code.filename);
         vm_result
     }
 
@@ -689,6 +699,7 @@ impl Interpreter {
             Rc::clone(&local_index),
             false,
             linenos,
+            "<string>",
         ) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Err(e),
@@ -723,7 +734,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(&code, regs_slice);
         self.vm_frame_views.pop();
-        record_exec_string_frame(&vm_result);
+        record_exec_string_frame(&vm_result, &code.filename);
 
         // Write fastlocal registers back to the dict env so we can flush them.
         for (name, &idx) in local_index.iter() {
@@ -814,7 +825,7 @@ impl Interpreter {
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let vm_result = self.run_bytecode(code, regs_slice);
         self.vm_frame_views.pop();
-        record_exec_string_frame(&vm_result);
+        record_exec_string_frame(&vm_result, &code.filename);
 
         self.env = previous_env;
         self.module_globals_dict = prev_mgd;
@@ -852,7 +863,7 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 self.vm_frame_views.pop();
-                record_exec_string_frame(&vm_result);
+                record_exec_string_frame(&vm_result, &code.filename);
                 // Write fastlocals back to module env.
                 for (name, &idx) in local_index.iter() {
                     if !regs[idx as usize].is_unset() {
@@ -890,7 +901,7 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 let vm_result = self.run_bytecode(&code, regs_slice);
                 self.vm_frame_views.pop();
-                record_exec_string_frame(&vm_result);
+                record_exec_string_frame(&vm_result, &code.filename);
 
                 for (name, &idx) in local_index.iter() {
                     if !regs[idx as usize].is_unset() {
@@ -1064,14 +1075,18 @@ fn resolve_frame_source_line(
 /// exec'd string is not a file, so CPython prints no source text for it.
 ///
 /// Only records on error; the no-error path skips it entirely.
-fn record_exec_string_frame(vm_result: &Result<Value>) {
+///
+/// `filename` is the exec'd code object's `co_filename`: `<string>` for
+/// `exec`/`eval` of a raw source string, or the path passed to `compile(...,
+/// filename, ...)` when a pre-compiled code object is run (#2438).
+fn record_exec_string_frame(vm_result: &Result<Value>, filename: &std::sync::Arc<str>) {
     if vm_result.is_err() {
         let lineno = match pyrust_core::get_current_vm_line() {
             0 => None,
             n => Some(n),
         };
         pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
-            filename: std::sync::Arc::from("<string>"),
+            filename: filename.clone(),
             lineno,
             source_line: None,
             funcname: std::sync::Arc::from("<module>"),

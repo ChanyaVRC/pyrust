@@ -171,6 +171,21 @@ impl CodeBuild {
 /// or a traceback frame reconstructed from a `FrameInfo`).  `co_qualname`
 /// defaults to `co_name`.
 pub fn code(name: String, argcount: i64, varnames: Vec<Value>) -> Value {
+    code_with_loc(name, argcount, varnames, "<unknown>".to_string(), 0)
+}
+
+/// Like [`code`] but also carries the source `filename` (`co_filename`) and
+/// `firstlineno` (`co_firstlineno`).  Used when reconstructing a traceback
+/// frame's `f_code` from a captured `FrameInfo`, so that
+/// `tb.tb_frame.f_code.co_filename` reports the frame's own source file rather
+/// than `<unknown>` (issue #2438).
+pub fn code_with_loc(
+    name: String,
+    argcount: i64,
+    varnames: Vec<Value>,
+    filename: String,
+    firstlineno: i64,
+) -> Value {
     let nlocals = varnames.len() as i64;
     CodeBuild {
         qualname: name.clone(),
@@ -182,8 +197,8 @@ pub fn code(name: String, argcount: i64, varnames: Vec<Value>) -> Value {
         stacksize: 0,
         varnames,
         flags: 0,
-        filename: "<unknown>".to_string(),
-        firstlineno: 0,
+        filename,
+        firstlineno,
         consts: Vec::new(),
         names: Vec::new(),
         freevars: Vec::new(),

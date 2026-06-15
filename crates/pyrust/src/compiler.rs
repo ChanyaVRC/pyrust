@@ -32,6 +32,7 @@ pub fn compile_script_with_linenos(
     local_index: Rc<HashMap<String, Reg>>,
     repl_mode: bool,
     linenos: &[u32],
+    filename: &str,
 ) -> Result<FnCode, PyError> {
     // Validate global/nonlocal ordering at module scope.  CPython 3.12 raises
     // SyntaxError for `x = 1; global x` at module level too.
@@ -42,6 +43,9 @@ pub fn compile_script_with_linenos(
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
     let mut c = Compiler::new(local_index, 0, cell_vars);
+    // Threaded source file (#2438): the module's code object and every nested
+    // function/class it compiles report this path as their `co_filename`.
+    c.filename = std::sync::Arc::from(filename);
     // Issue #820: module-scope stores emit SyncModuleGlobal to keep
     // module_globals_dict live after globals() has been called.
     c.is_module_scope = true;
@@ -103,6 +107,7 @@ pub fn compile_eval_expr_with_linenos(
     stmts: &[Stmt],
     local_index: Rc<HashMap<String, Reg>>,
     linenos: &[u32],
+    filename: &str,
 ) -> Result<FnCode, PyError> {
     let expr = match stmts {
         [Stmt::Expr(e)] => e,
@@ -121,6 +126,8 @@ pub fn compile_eval_expr_with_linenos(
     };
     let cell_vars = collect_cell_vars(stmts, &local_index);
     let mut c = Compiler::new(local_index, 0, cell_vars);
+    // Threaded source file (#2438): the eval expression's `co_filename`.
+    c.filename = std::sync::Arc::from(filename);
     if let Some(&ln) = linenos.first()
         && ln != 0
     {
@@ -4220,6 +4227,13 @@ struct Compiler {
     /// — emitted into `FnCode::first_lineno` (the function's `co_firstlineno`).
     /// 0 for the module-level compiler (issue #2185).
     first_lineno: u32,
+    /// Source-file path the code being compiled comes from — emitted into
+    /// `FnCode::filename` (the code object's `co_filename`).  Threaded into every
+    /// nested function/class body so an imported module's functions report their
+    /// own file in tracebacks and `__code__.co_filename` (issue #2438), rather
+    /// than the running script's path.  `<unknown>` until a compile entry point
+    /// sets it.
+    filename: std::sync::Arc<str>,
     consts: Vec<Value>,
     const_index: HashMap<crate::value::PyKey, u16>,
     names: Vec<String>,
@@ -5007,6 +5021,7 @@ impl Compiler {
             current_lineno: 0,
             current_col_span: (0, 0),
             first_lineno: 0,
+            filename: std::sync::Arc::from("<unknown>"),
             consts: Vec::new(),
             const_index: HashMap::new(),
             names: Vec::new(),
@@ -5588,6 +5603,7 @@ impl Compiler {
         let names_len = self.names.len();
         Ok(FnCode {
             insns,
+            filename: self.filename,
             lineno_table: self.lineno_table,
             col_table: self.col_table,
             first_lineno: self.first_lineno,
@@ -8764,6 +8780,10 @@ impl Compiler {
         }
 
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        // Threaded source file (#2438): the nested function's code object shares
+        // its enclosing scope's `co_filename` so an imported module's functions
+        // report their own file in tracebacks.
+        sub.filename = self.filename.clone();
         // Thread the enclosing function scope chain into the child compiler.
         // Since compile_def always produces a function scope, add self.local_index
         // (if self is a function scope) and mark the child as a function scope.
@@ -9296,6 +9316,9 @@ impl Compiler {
 
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
         sub.is_class_body = true;
+        // Threaded source file (#2438): methods defined in this class body inherit
+        // the enclosing scope's `co_filename`.
+        sub.filename = self.filename.clone();
         sub.qualname_prefix = class_qualname.clone();
         // Thread the enclosing function scope chain into the class body compiler.
         // Class scope is transparent to `nonlocal` (not a function scope), so we
@@ -11545,6 +11568,9 @@ impl Compiler {
         }
 
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        // Threaded source file (#2438): a lambda's code object inherits the
+        // enclosing scope's `co_filename`.
+        sub.filename = self.filename.clone();
         sub.outer_locals = self.outer_locals.clone();
         if self.is_function_scope {
             sub.outer_locals.push(Rc::clone(&self.local_index));
@@ -11993,6 +12019,9 @@ impl Compiler {
         }
 
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        // Threaded source file (#2438): the comprehension's implicit code object
+        // inherits the enclosing scope's `co_filename`.
+        sub.filename = self.filename.clone();
         // Comprehensions create an implicit function scope; thread outer_locals.
         sub.outer_locals = self.outer_locals.clone();
         if self.is_function_scope {
