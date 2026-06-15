@@ -869,6 +869,21 @@ impl Interpreter {
                         }
                     }
                     "list" => {
+                        // Issue #2291: list method_descriptors (except `sort`,
+                        // which accepts `key=`/`reverse=`) reject keyword
+                        // arguments with `list.<method>() takes no keyword
+                        // arguments`.  The receiver-only
+                        // `pyrust_builtins::list::call` silently ignores `kw`,
+                        // so guard here before delegating.  Gate on `has_method`
+                        // so an unknown name still raises AttributeError first.
+                        // The `!kw.is_empty()` short-circuits the common
+                        // no-kwarg call before the `has_method` scan.
+                        if !kw.is_empty()
+                            && method != "sort"
+                            && pyrust_builtins::list::has_method(method)
+                        {
+                            reject_kwargs!(kw, "list.{}", method);
+                        }
                         if method == "sort" {
                             // Interpreter-aware sort so user `key=` and no-key
                             // user `__lt__` dispatch correctly (#1925).
@@ -1525,6 +1540,20 @@ impl Interpreter {
                 }
             }
             Kind::List => {
+                // Issue #2291: list method_descriptors (except `sort`, which
+                // accepts `key=`/`reverse=`) reject keyword arguments with
+                // `list.<method>() takes no keyword arguments`.  The
+                // receiver-only `pyrust_builtins::list::call` silently ignores
+                // `kw`, so guard here before delegating.  Gate on `has_method`
+                // so an unknown name still raises AttributeError first.  The
+                // `!kw.is_empty()` short-circuits the common no-kwarg call
+                // before the `has_method` scan.
+                if !kw.is_empty()
+                    && method != "sort"
+                    && pyrust_builtins::list::has_method(method)
+                {
+                    reject_kwargs!(kw, "list.{}", method);
+                }
                 let args_vec: Vec<Value> = std::mem::take(pos);
                 if method == "sort" {
                     // Route through the interpreter-aware sort so a user
@@ -1817,6 +1846,16 @@ impl Interpreter {
                                     self.call_dict_method(method, backing, args_vec, &kw)
                                 }
                                 BkKind::List => {
+                                    // Issue #2291: list method_descriptors
+                                    // (except `sort`) reject keyword arguments.
+                                    // Gate on `has_method` so an unknown name
+                                    // still raises AttributeError first.
+                                    if !kw.is_empty()
+                                        && method != "sort"
+                                        && pyrust_builtins::list::has_method(method)
+                                    {
+                                        reject_kwargs!(kw, "list.{}", method);
+                                    }
                                     if method == "sort" {
                                         // Interpreter-aware sort so user `key=`
                                         // and no-key user `__lt__` dispatch
@@ -9800,6 +9839,20 @@ impl Interpreter {
         }
         match obj_kind_tag {
             1 => {
+                // Issue #2291: list method_descriptors (except `sort`, which
+                // accepts `key=`/`reverse=`) reject keyword arguments with
+                // `list.<method>() takes no keyword arguments`.  The
+                // receiver-only `pyrust_builtins::list::call` silently ignores
+                // `kw`, so guard here before delegating.  Gate on `has_method`
+                // so an unknown name still raises AttributeError first.  The
+                // `!kw.is_empty()` short-circuits the common no-kwarg call
+                // before the `has_method` scan.
+                if !kw.is_empty()
+                    && method != "sort"
+                    && pyrust_builtins::list::has_method(method)
+                {
+                    reject_kwargs!(kw, "list.{}", method);
+                }
                 // `list.insert(i, x)` / `list.pop([i])` accept any `__index__`
                 // object as the index (CPython 3.12).  The receiver-only
                 // `pyrust_builtins::list::call` cannot dispatch user dunders, so
