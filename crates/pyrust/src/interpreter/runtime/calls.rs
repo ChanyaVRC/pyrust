@@ -278,6 +278,59 @@ impl Interpreter {
         {
             return dispatch(self, args);
         }
+
+        // Issue #2479: an unbound method accessed on a builtin-primitive
+        // subclass (`OrderedDict.clear`, `OrderedDict.move_to_end`) is wrapped
+        // in an `unbound_method_descriptor` carrying its owning class.  CPython
+        // exposes these as C `method_descriptor`s owned by the subclass type, so
+        // calling them with an unrelated receiver raises a receiver-class
+        // TypeError.  Validate that `args[0]` is an instance of the owning class
+        // (or a subclass), then re-dispatch to the underlying callable.  Placed
+        // after the `BuiltinFunction` registry fast path (the wrapper is a
+        // `BuiltinObject`, never a `BuiltinFunction`) so the hot builtin-call
+        // path is not lengthened.
+        if let Some((owning_class_val, method, callable)) =
+            pyrust_builtins::unbound_method_descriptor::as_unbound_method_descriptor(&function)
+        {
+            let ValueKind::PyClass(owning_class) = owning_class_val.kind() else {
+                // Defensive: a malformed descriptor with no class — fall back to
+                // dispatching the underlying callable unchanged.
+                return self.call_function_expanded(callable, args);
+            };
+            let owning_class = Rc::clone(owning_class);
+            // CPython's wording uses the module-qualified type name
+            // (`collections.OrderedDict`) for the "doesn't apply to" message but
+            // the bare qualname (`OrderedDict`) for the "needs an argument" one.
+            let owner_display = class_descriptor_display_name(&owning_class);
+            let owner_bare = owning_class.borrow().qualname.clone();
+            // The receiver is the first positional argument.  An empty call
+            // (`OrderedDict.clear()`) is CPython's "unbound method ... needs an
+            // argument" error.
+            let receiver = args.iter().find(|a| a.name.is_none()).map(|a| &a.value);
+            let receiver_ok = match receiver {
+                Some(r) => match r.kind() {
+                    ValueKind::PyInstance(inst) => {
+                        class_is_subclass_of(&Rc::clone(&inst.borrow().class), &owning_class)
+                    }
+                    // A bare builtin value (plain `dict`, `list`, …) is never an
+                    // instance of a *subclass* like `OrderedDict`.
+                    _ => false,
+                },
+                None => {
+                    return Err(pyrust_core::type_err!(
+                        "unbound method {owner_bare}.{method}() needs an argument"
+                    ));
+                }
+            };
+            if !receiver_ok {
+                let actual = pyrust_core::builtin_type_name(receiver.expect("checked Some above"));
+                return Err(pyrust_core::type_err!(
+                    "descriptor '{method}' for '{owner_display}' objects doesn't apply to a '{actual}' object"
+                ));
+            }
+            return self.call_function_expanded(callable, args);
+        }
+
         match function.kind() {
             // Migrated to `crate::builtin_modules::builtins`:
             //   print, range, open, __vcall__, plus all the simple top-level
