@@ -2163,7 +2163,21 @@ impl Interpreter {
                     // env.values).  Putting the dict check BEFORE lookup_name
                     // was wrong: a function-level cell var named "g" would have
                     // shadowed by a same-named module global in the dict.
-                    let (val, cache_ver) = if let Some(v) = vm_try!(self.lookup_name(name)) {
+                    // Issue #2340: a `LoadGlobal` name is never the current
+                    // frame's own register-local (those use Move / CheckLocal)
+                    // and — having reached this opcode rather than `LoadCell` — is
+                    // not one of this scope's cell vars either.  So if the env
+                    // walk finds it as an *unbound local* of an enclosing scope it
+                    // is a captured free variable → CPython raises `NameError`,
+                    // not `UnboundLocalError`.  list/set/dict comprehensions are
+                    // the exception: CPython 3.12 inlines them into the enclosing
+                    // frame (PEP 709), so an unbound enclosing-local read there
+                    // stays `UnboundLocalError`.  (`current_fn_id` is unreliable
+                    // here — it is `None` while a generator/genexpr body resumes.)
+                    let is_free = !code.is_inlined_comp;
+                    let (val, cache_ver) = if let Some(v) =
+                        vm_try!(self.lookup_name_inner(name, is_free))
+                    {
                         // Value came from the env chain.  Cache it only when the
                         // value actually came from the MODULE env — the only env
                         // whose mutations are tracked by `global_env_version`.
@@ -2261,7 +2275,16 @@ impl Interpreter {
                     // enclosing owning env and a cell to this scope's env.  The
                     // common case (a bound cell) returns `Some` and we are done.
                     let name = pool_get!(code.names, *name_idx, "name");
-                    if let Some(v) = vm_try!(self.lookup_name(name)) {
+                    // Issue #2340: an unbound binding is a captured *free*
+                    // variable (CPython `NameError`) unless it is a cell var
+                    // declared in *this* function (a local captured by a nested
+                    // function → `UnboundLocalError`).  `nonlocal` names are not
+                    // in `cell_vars`, so they correctly take the free path.  An
+                    // inlined list/set/dict comprehension (PEP 709) reads the
+                    // enclosing frame's locals, so it keeps `UnboundLocalError`.
+                    let is_cell_local = code.cell_vars.iter().any(|c| c == name);
+                    let is_free = !is_cell_local && !code.is_inlined_comp;
+                    if let Some(v) = vm_try!(self.lookup_name_inner(name, is_free)) {
                         regs[*dst as usize] = v;
                     } else {
                         // Env miss: a `del`-ed / never-bound cell.  Fall through
@@ -5766,6 +5789,7 @@ mod vm_tests {
             is_generator: false,
             is_coroutine: false,
             is_class_method: false,
+            is_inlined_comp: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(Vec::new()),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
