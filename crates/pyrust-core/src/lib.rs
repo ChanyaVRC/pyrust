@@ -5094,13 +5094,24 @@ pub fn slot_wrapper_dunder(name: &str) -> Option<(&str, &str)> {
     }
     // CPython models these container slots as `method_descriptor`, not
     // `wrapper_descriptor` — keep the generic presentation for them.
+    // Issue #2399: `range.__reversed__` is a method_descriptor too.
     if matches!(
         (dunder, type_name),
         ("__getitem__", "list" | "dict")
             | ("__contains__", "dict" | "set" | "frozenset")
-            | ("__reversed__", "list" | "dict")
+            | ("__reversed__", "list" | "dict" | "range")
     ) {
         return None;
+    }
+    // Issue #2399: `range` owns `__hash__`/`__bool__`/`__repr__` as its own slot
+    // wrappers (`<slot wrapper '__repr__' of 'range' objects>`), unlike the other
+    // primitives where these are inherited from `object` or synthesised via the
+    // type-qualified `primitive_owned_object_dunder` path.  range registers them
+    // directly as `BuiltinFunction("range.__X__")` (helpers.rs RANGE_CLASS init),
+    // so classify them here as wrapper_descriptor.  (`__str__` is NOT owned by
+    // range — it inherits `object.__str__` — so it is excluded.)
+    if type_name == "range" && matches!(dunder, "__hash__" | "__bool__" | "__repr__") {
+        return Some((type_name, dunder));
     }
     // The closed set of dunders pyrust exposes unbound as slot wrappers
     // (`calls.rs::slot_dunder_table` SLOT_ATTR rows, minus the exceptions
@@ -5199,6 +5210,13 @@ const PRIMITIVE_TYPE_NAMES: &[&str] = &[
 /// `object.*`-inherited names, slot-wrapper dunders, and the deferred dunders.
 pub fn method_descriptor_name(name: &str) -> Option<(&str, &str)> {
     let (type_name, method) = name.rsplit_once('.')?;
+    // Issue #2399: `range.__reversed__` is a method_descriptor (every other
+    // range dunder is a slot wrapper, handled by `slot_wrapper_dunder`).
+    // `range` is not in `PRIMITIVE_TYPE_NAMES` (it is a VM-native type), so the
+    // guard below would otherwise reject it.
+    if (type_name, method) == ("range", "__reversed__") {
+        return Some((type_name, method));
+    }
     if !PRIMITIVE_TYPE_NAMES.contains(&type_name) {
         return None;
     }

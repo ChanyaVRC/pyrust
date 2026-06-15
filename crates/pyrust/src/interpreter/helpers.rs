@@ -531,11 +531,27 @@ thread_local! {
     /// in `register_abc_extra_bases`.  Issues #1793, #1800.
     static RANGE_CLASS: Rc<RefCell<PyClass>> = {
         let obj = OBJECT_CLASS.with(Rc::clone);
+        // Issue #2399: expose `range`'s slot dunders as type-level attributes,
+        // mirroring the SLOT_ATTR registration `build_primitive_classes` does for
+        // the other primitives.  `range` is built in its own thread-local (not the
+        // primitive-class loop), so the registration is inlined here.  Each name
+        // becomes a `BuiltinFunction("range.<dunder>")` sentinel that resolves via
+        // `get_attr_class`'s MRO lookup and dispatches through
+        // `dispatch_builtin_protocol_dunder` (the `<type>.<method>` call arm).
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        for (dunder, flags) in slot_dunder_table("range") {
+            if flags & SLOT_ATTR == 0 {
+                continue;
+            }
+            let qualified: &'static str =
+                Box::leak(format!("range.{dunder}").into_boxed_str());
+            attrs.insert(dunder.to_string(), Value::builtin_function(qualified));
+        }
         let cls = Rc::new(RefCell::new(PyClass::new(
             "range",
             "range",
             Some(Rc::clone(&obj)),
-            IndexMap::new(),
+            attrs,
         )));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
