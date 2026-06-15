@@ -57,3 +57,19 @@ c = C()
 show(lambda: c.m(x=1, **{"x": 2}))
 show(lambda: c.m(**{"x": 1}, **{"x": 9}))
 show(lambda: c.m(**{"x": 1}, **{"y": 2}))
+
+
+# Builtin callee: the error names the builtin (no `builtins.` prefix).
+show(lambda: dict(**{"x": 1}, **{"x": 2}))
+
+# Constructor callee: the error uses the type's `<module>.<qualname>`.
+show(lambda: C(**{"self": 1}, **{"self": 2}))
+
+
+class Outer:
+    class Inner:
+        def __init__(self, x):
+            self.x = x
+
+
+show(lambda: Outer.Inner(**{"x": 1}, **{"x": 2}))

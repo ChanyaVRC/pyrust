@@ -7195,6 +7195,24 @@ fn callee_function_str(callee: &Value) -> Option<String> {
         ValueKind::BoundMethod { function, .. } | ValueKind::ClassBoundMethod { function, .. } => {
             function.clone()
         }
+        // Constructor call `C(**a, **b)`: CPython's `_PyObject_FunctionStr`
+        // names the type by `<module>.<qualname>` (the `builtins.` prefix is
+        // dropped, e.g. `dict()`).
+        ValueKind::PyClass(class) => {
+            let c = class.borrow();
+            let qual = c.qualname.clone();
+            let module = c
+                .attrs
+                .get("__module__")
+                .and_then(|v| v.as_str().map(|s| s.to_string()));
+            return match module.as_deref() {
+                Some(m) if !m.is_empty() && m != "builtins" => Some(format!("{m}.{qual}")),
+                _ => Some(qual),
+            };
+        }
+        // Builtin function/method (`print`, `sorted`, `dict.fromkeys`, …): the
+        // stored name is already the (module-less) qualname CPython reports.
+        ValueKind::BuiltinFunction(name) => return Some(name.to_string()),
         _ => return None,
     };
     let qual = f.effective_qualname();
