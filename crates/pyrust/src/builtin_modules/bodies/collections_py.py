@@ -191,7 +191,11 @@ class OrderedDict(dict):
     # delegating to them is unavailable — issue #1884 self-review.)
 
     def __reversed__(self):
-        return iter(list(self.keys())[::-1])
+        # Route through the live, size-guarded reversed-view iterator
+        # (issue #2448) rather than a dead `list(...)[::-1]` snapshot, so
+        # mutating the OrderedDict mid-`reversed(od)` raises RuntimeError
+        # ("OrderedDict mutated during iteration") just as CPython does.
+        return reversed(self.keys())
 
     def popitem(self, last=True):
         '''Remove and return a (key, value) pair from the dictionary.

@@ -1355,27 +1355,36 @@ pyrust_module! {
         }
         // dict / dict views are reversible by insertion order (CPython 3.8+,
         // issue #2093).  The backing IndexMap preserves insertion order, so we
-        // build a forward-ordered list of keys / values / (key, value) pairs and
-        // hand it to the reversed-iterator helper (which yields it in reverse).
+        // build a forward-ordered list of keys / values / (key, value) pairs,
+        // reverse it, and wrap it in a `NativeIterFrame` carrying a size-mutation
+        // guard keyed to the live backing dict (#2448).  Like CPython's forward
+        // view iterators, mutating the dict's size during a `reversed()` walk
+        // raises `RuntimeError` on the next `next()` call.
         if let ValueKind::Dict(map) = seq.0.kind() {
-            let keys: Vec<Value> = map.keys().map(|k| key_to_value(k.clone())).collect();
-            return Ok(pyrust_builtins::iter_helpers::reversed(Value::list(keys)));
+            let mut items: Vec<Value> = map.keys().map(|k| key_to_value(k.clone())).collect();
+            items.reverse();
+            let frame = make_reversed_dict_iter(items, seq.0.clone());
+            return Ok(Value::generator(Box::new(frame)));
         }
         if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0)
             && let Some(rc) = pyrust_builtins::dict_views::as_dict_rc(&seq.0) {
-                let map = rc.borrow();
-                let forward: Vec<Value> = match kind {
-                    // dict_keys
-                    0 => map.keys().map(|k| key_to_value(k.clone())).collect(),
-                    // dict_values
-                    1 => map.values().cloned().collect(),
-                    // dict_items
-                    _ => map
-                        .iter()
-                        .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
-                        .collect(),
+                let mut items: Vec<Value> = {
+                    let map = rc.borrow();
+                    match kind {
+                        // dict_keys
+                        0 => map.keys().map(|k| key_to_value(k.clone())).collect(),
+                        // dict_values
+                        1 => map.values().cloned().collect(),
+                        // dict_items
+                        _ => map
+                            .iter()
+                            .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
+                            .collect(),
+                    }
                 };
-                return Ok(pyrust_builtins::iter_helpers::reversed(Value::list(forward)));
+                items.reverse();
+                let frame = make_reversed_dict_iter(items, seq.0.clone());
+                return Ok(Value::generator(Box::new(frame)));
             }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
@@ -7981,6 +7990,37 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
             Ok(Value::generator(Box::new(frame)))
         }
     }
+}
+
+/// Build the `reversed()` iterator for a `dict` or one of its views (#2448).
+///
+/// `items` must already be in *reverse* order (the caller materialises the
+/// forward key/value/pair list and reverses it).  `container` is the live
+/// `dict` Value or dict-view whose size is re-read on each step: like CPython's
+/// forward dict iterators, mutating the dict's size during the `reversed()`
+/// walk raises `RuntimeError` on the next `next()` call.  The wording and
+/// check-ordering follow the OrderedDict-aware convention shared with the
+/// forward path (`is_ordered_view`): OrderedDict-backed views test exhaustion
+/// before the guard (`exhaust_first`), plain dicts test the guard first.
+fn make_reversed_dict_iter(items: Vec<Value>, container: Value) -> NativeIterFrame {
+    let recorded_len = items.len();
+    // CPython names these `dict_reversekeyiterator` etc.; pyrust currently
+    // reports the generic `list_reverseiterator` for all reversed iterators
+    // (a pre-existing type-name divergence, out of scope for #2448).
+    let mut frame = NativeIterFrame::new(items, "list_reverseiterator");
+    let (msg, exhaust_first) = if pyrust_builtins::dict_views::is_ordered_view(&container) {
+        ("OrderedDict mutated during iteration", true)
+    } else {
+        ("dictionary changed size during iteration", false)
+    };
+    frame.guard = Some(Box::new(NativeIterGuard {
+        container,
+        version: recorded_len as i64,
+        kind: GuardVersion::Size,
+        msg,
+        exhaust_first,
+    }));
+    frame
 }
 
 // `int_hash` and `bigint_hash` were previously defined here.  They are now
