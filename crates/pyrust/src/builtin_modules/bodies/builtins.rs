@@ -7442,10 +7442,18 @@ pub(crate) fn value_class(obj: &Value) -> Value {
             } else if borrow.downcast_ref::<FilterIter>().is_some() {
                 Value::builtin_function("filter")
             } else if borrow.downcast_ref::<ChainFromIterableIter>().is_some() {
-                // `type(chain.from_iterable(...)).__name__ == "chain"` (bare
-                // name; repr / error messages keep the `itertools.` prefix via
-                // `full_type_name_str`), matching CPython (#2362).
-                Value::builtin_function("chain")
+                // `chain.from_iterable(...)` is a native iterator, but CPython
+                // reports it as an `itertools.chain` instance.  Route `type()`
+                // to the real `chain` PyClass captured on import so that
+                // `type(chain.from_iterable(...)) is type(chain(...))` (#2370).
+                // `chain.from_iterable` can only be reached after `import
+                // itertools`, so the singleton is always populated here; the
+                // bare-`chain` fallback covers the unreachable un-imported case.
+                if let Some(chain_cls) = crate::interpreter::itertools_chain_class() {
+                    Value::py_class(chain_cls)
+                } else {
+                    Value::builtin_function("chain")
+                }
             } else if borrow.downcast_ref::<EnumerateIter>().is_some() {
                 Value::builtin_function("enumerate")
             } else if borrow.downcast_ref::<ZipIter>().is_some() {
@@ -8562,6 +8570,14 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             ValueKind::PyClass(cls_rc) => {
                 let meta = cls_rc.borrow().metatype.clone();
                 Some(meta.unwrap_or_else(type_class_singleton))
+            }
+            // `chain.from_iterable(...)` is a native iterator that CPython
+            // reports as an `itertools.chain` instance, so `isinstance(it,
+            // chain)` must walk the captured `chain` class (#2370).
+            ValueKind::Generator(state_rc)
+                if state_rc.borrow().downcast_ref::<ChainFromIterableIter>().is_some() =>
+            {
+                crate::interpreter::itertools_chain_class()
             }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };

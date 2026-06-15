@@ -638,6 +638,34 @@ thread_local! {
     };
 }
 
+thread_local! {
+    /// The `itertools.chain` `PyClass` registered into the imported
+    /// `itertools` module, captured on first import (#2370).  `chain(...)`
+    /// instances reference this exact class object, and the lazy
+    /// `chain.from_iterable(...)` iterator (a native `ChainFromIterableIter`
+    /// generator) routes its `type()` through `itertools_chain_class()` so
+    /// that `type(chain(...)) is type(chain.from_iterable(...))` holds.
+    static ITERTOOLS_CHAIN_CLASS: RefCell<Option<Rc<RefCell<PyClass>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Record the `itertools.chain` class so the `chain.from_iterable` iterator
+/// can report it as its `type()`.  Idempotent — only the first import sets
+/// the cell (subsequent imports return the cached module unchanged).
+pub(crate) fn set_itertools_chain_class(class: Rc<RefCell<PyClass>>) {
+    ITERTOOLS_CHAIN_CLASS.with(|c| {
+        if c.borrow().is_none() {
+            *c.borrow_mut() = Some(class);
+        }
+    });
+}
+
+/// The `itertools.chain` `PyClass`, if `itertools` has been imported.  Used by
+/// `type()` of a `chain.from_iterable(...)` iterator (#2370).
+pub(crate) fn itertools_chain_class() -> Option<Rc<RefCell<PyClass>>> {
+    ITERTOOLS_CHAIN_CLASS.with(|c| c.borrow().clone())
+}
+
 /// Holder for the per-primitive `PyClass` Rc's.  Constructed once per
 /// thread at startup, then cloned cheaply (Rc::clone) on every `type(x)` /
 /// `resolve_builtin("int")` etc. call.

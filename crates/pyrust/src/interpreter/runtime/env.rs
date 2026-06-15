@@ -608,13 +608,6 @@ impl Interpreter {
                         Value::none(),
                     );
                     Ok(pyrust_builtins::property::property_method(empty, kind))
-                } else if func_name == "itertools.chain" && name == "from_iterable" {
-                    // Issue #1920: `itertools.chain` is a BuiltinFunction (not a
-                    // real PyClass), so its `from_iterable` alternate constructor
-                    // has no natural attribute slot.  Resolve it to the registered
-                    // `itertools.chain_from_iterable` builtin, which builds the
-                    // lazy flattening iterator.
-                    Ok(Value::builtin_function("itertools.chain_from_iterable"))
                 } else {
                     Err(pyrust_core::py_err!("AttributeError", "type object '{}' has no attribute '{name}'", func_name))
                 }
@@ -2845,6 +2838,15 @@ impl Interpreter {
             // classes with no `__module__` entry.
             if name == "itertools" {
                 crate::builtin_modules::itertools::patch_class_modules(&val);
+                // Capture the `chain` class so `type(chain.from_iterable(...))`
+                // (a native iterator) reports the same class object as
+                // `type(chain(...))` (issue #2370).
+                if let ValueKind::PyModule(m) = val.kind()
+                    && let Some(chain_val) = m.borrow().attrs.get("chain").cloned()
+                    && let ValueKind::PyClass(chain_cls) = chain_val.kind()
+                {
+                    crate::interpreter::set_itertools_chain_class(Rc::clone(chain_cls));
+                }
             }
             // `io` post-process (issue #2008): `closed` is a read-only property
             // in CPython (accessed without parens).  The `pyrust_module!` macro
