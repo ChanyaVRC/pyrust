@@ -6776,8 +6776,14 @@ fn format_float_value(
             body.push('%');
         }
         // nan has no sign, but the explicit sign flag ('+' / ' ') still applies
-        // (CPython: format(nan, '+') -> '+nan').
-        return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
+        // (CPython: format(nan, '+') -> '+nan').  Grouping is ignored for
+        // non-finite values: the zero-fill must be a solid block, not
+        // comma-grouped synthetic digits (#2504).
+        let fs = FormatSpec {
+            grouping: None,
+            ..fs.clone()
+        };
+        return Ok(assemble_numeric(sign_prefix, "", body, &fs, '>', 3));
     }
     if f.is_infinite() {
         let mut body = if matches!(t, 'F' | 'G' | 'E') {
@@ -6789,7 +6795,13 @@ fn format_float_value(
         if t == '%' {
             body.push('%');
         }
-        return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
+        // Grouping is ignored for non-finite values: the zero-fill must be a
+        // solid block, not comma-grouped synthetic digits (#2504).
+        let fs = FormatSpec {
+            grouping: None,
+            ..fs.clone()
+        };
+        return Ok(assemble_numeric(sign_prefix, "", body, &fs, '>', 3));
     }
 
     // Validate grouping vs type.  Comma and '_' are allowed on all float
