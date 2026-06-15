@@ -8673,6 +8673,25 @@ fn isinstance_check(
         }
         return Ok(false);
     }
+    // Issue #2525: when `cls` is a plain instance (not a class) whose *type*
+    // defines `__instancecheck__`, CPython invokes
+    // `type(cls).__instancecheck__(cls, obj)` rather than rejecting it.  The
+    // special method is looked up on the type, so resolve it on the instance's
+    // class MRO before applying the `is_class_like` guard.  `get_attr` binds the
+    // method to the instance receiver, so calling it with `[obj]` yields the
+    // `(cls, obj)` argument pairing CPython uses.
+    if let ValueKind::PyInstance(inst) = cls.kind() {
+        let inst_class = Rc::clone(&inst.borrow().class);
+        if crate::interpreter::lookup_class_attr(&inst_class, "__instancecheck__").is_some() {
+            let ic_fn = interp.get_attr(cls, "__instancecheck__")?;
+            let call_args = [crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: obj.clone(),
+            }];
+            let result = interp.call_function_expanded(ic_fn, &call_args)?;
+            return interp.truthy_value(&result);
+        }
+    }
     if !is_class_like(cls) {
         return Err(PyError::named(
             "TypeError",
@@ -8782,6 +8801,25 @@ fn issubclass_check(
         if has_sc {
             let classinfo_val = Value::py_class(Rc::clone(classinfo_rc));
             let sc_fn = interp.get_attr(&classinfo_val, "__subclasscheck__")?;
+            let call_args = [crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: cls.clone(),
+            }];
+            let result = interp.call_function_expanded(sc_fn, &call_args)?;
+            return interp.truthy_value(&result);
+        }
+    }
+    // Issue #2525: when `classinfo` is a plain instance (not a class) whose
+    // *type* defines `__subclasscheck__`, CPython invokes
+    // `type(classinfo).__subclasscheck__(classinfo, cls)` rather than raising
+    // `TypeError`.  Resolve the hook on the instance's class MRO before the
+    // match's `arg 2 must be a class` fallback.  `get_attr` binds the method to
+    // the instance receiver, so calling it with `[cls]` yields the
+    // `(classinfo, cls)` pairing CPython uses.
+    if let ValueKind::PyInstance(inst) = classinfo.kind() {
+        let inst_class = Rc::clone(&inst.borrow().class);
+        if crate::interpreter::lookup_class_attr(&inst_class, "__subclasscheck__").is_some() {
+            let sc_fn = interp.get_attr(classinfo, "__subclasscheck__")?;
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
                 value: cls.clone(),
