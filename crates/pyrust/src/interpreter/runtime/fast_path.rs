@@ -2342,6 +2342,22 @@ fn fill_get_attr_cache(
     if name == "__class__" || name == "__dict__" {
         return;
     }
+    // PEP 695 lazy bound/constraints (#2290): `__bound__` / `__constraints__` on
+    // a TypeVar are served by `get_attr_instance_raw`'s thunk interceptor, which
+    // only runs on the slow path.  An eager None/() default also lives in the
+    // instance dict (see `make_typevar_instance`), so caching an `InstanceAttr`
+    // entry here would let a later same-site read return that stale default and
+    // bypass the thunk — e.g. `for t in f.__type_params__: t.__bound__` would
+    // print `None` for every bounded param after the first.  Like
+    // `__traceback__`, never cache these names for TypeVar instances so they
+    // always re-enter the interceptor.
+    if (name == "__bound__" || name == "__constraints__")
+        && obj_val
+            .as_py_instance_rc()
+            .is_some_and(|rc| is_typevar_class(&rc.borrow().class))
+    {
+        return;
+    }
     let mut cache = code.attr_cache.borrow_mut();
     match &cache[pc - 1] {
         AttrCacheEntry::Megamorphic => {}
