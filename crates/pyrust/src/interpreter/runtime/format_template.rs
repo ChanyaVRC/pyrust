@@ -49,6 +49,26 @@ enum FieldHead {
     Named(String),
 }
 
+/// Borrowed counterpart of [`FieldHead`].  The renderer resolves a field head
+/// against a borrowed key (`&str`), so keyword names never need re-allocation
+/// at resolution time (#2375).
+enum FieldHeadRef<'a> {
+    Auto,
+    Index(usize),
+    Named(&'a str),
+}
+
+impl FieldHead {
+    /// Borrow this owned head as a [`FieldHeadRef`] for the renderer.
+    fn as_ref(&self) -> FieldHeadRef<'_> {
+        match self {
+            FieldHead::Auto => FieldHeadRef::Auto,
+            FieldHead::Index(n) => FieldHeadRef::Index(*n),
+            FieldHead::Named(s) => FieldHeadRef::Named(s.as_str()),
+        }
+    }
+}
+
 /// A pre-classified replacement field.  Everything here is template-derived and
 /// call-invariant; only value resolution + spec expansion happen per call.
 struct ParsedField {
@@ -273,14 +293,14 @@ impl Interpreter {
     /// logic so error messages and ordering are byte-identical.
     fn resolve_field_base(
         &self,
-        head: &FieldHead,
+        head: &FieldHeadRef<'_>,
         positional: &[Value],
-        keyword: &[(String, Value)],
+        keyword: &[(&str, Value)],
         auto_idx: &mut Option<usize>,
         saw_manual: &mut bool,
     ) -> Result<Value> {
         match head {
-            FieldHead::Auto => {
+            FieldHeadRef::Auto => {
                 if *saw_manual {
                     return Err(pyrust_core::value_err!("cannot switch from manual field specification to automatic field numbering"));
                 }
@@ -292,7 +312,7 @@ impl Interpreter {
                     )
                 })
             }
-            FieldHead::Index(n) => {
+            FieldHeadRef::Index(n) => {
                 if auto_idx.is_some() && *auto_idx != Some(0) {
                     return Err(pyrust_core::value_err!("cannot switch from automatic field numbering to manual field specification"));
                 }
@@ -305,12 +325,50 @@ impl Interpreter {
                     )
                 })
             }
-            FieldHead::Named(name) => keyword
+            FieldHeadRef::Named(name) => keyword
                 .iter()
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| v.clone())
-                .ok_or_else(|| PyError::key_error(Value::string(name))),
+                .ok_or_else(|| PyError::key_error(Value::string(*name))),
         }
+    }
+
+    /// Render a single replacement field into `out` from borrowed,
+    /// template-derived descriptors: value resolution, accessor application,
+    /// conversion, spec expansion, and `__format__` dispatch.  Factored out of
+    /// the cached renderer so the keyword lookup runs against a borrowed `&str`
+    /// key (#2375) without re-allocating the name.
+    #[allow(clippy::too_many_arguments)]
+    fn render_one_field(
+        &mut self,
+        out: &mut String,
+        head: &FieldHeadRef<'_>,
+        accessors: &str,
+        conversion: Option<char>,
+        spec: &str,
+        spec_has_braces: bool,
+        positional: &[Value],
+        keyword: &[(&str, Value)],
+        auto_idx: &mut Option<usize>,
+        saw_manual: &mut bool,
+    ) -> Result<()> {
+        let base = self.resolve_field_base(head, positional, keyword, auto_idx, saw_manual)?;
+        let value = apply_field_accessors(self, base, accessors)?;
+        let value = self.apply_field_conversion(value, conversion)?;
+
+        let expanded_spec;
+        let spec = if spec_has_braces {
+            expanded_spec = expand_format_spec_positional(
+                spec, positional, keyword, auto_idx, saw_manual,
+            )?;
+            expanded_spec.as_str()
+        } else {
+            spec
+        };
+
+        let formatted = self.dispatch_dunder_format(&value, spec)?;
+        out.push_str(&extract_str_value(&formatted));
+        Ok(())
     }
 
     /// Cached implementation of `str.format`.  Walks the parsed template's
@@ -319,7 +377,7 @@ impl Interpreter {
         &mut self,
         template: &str,
         positional: &[Value],
-        keyword: &[(String, Value)],
+        keyword: &[(&str, Value)],
     ) -> Result<Value> {
         let parsed = get_or_parse_template(template);
         let mut out = String::with_capacity(template.len());
@@ -333,32 +391,18 @@ impl Interpreter {
                     return Err(pyrust_core::value_err!(msg.to_string()));
                 }
                 TemplateSeg::Field(f) => {
-                    let base = self.resolve_field_base(
-                        &f.head,
+                    self.render_one_field(
+                        &mut out,
+                        &f.head.as_ref(),
+                        &f.accessors,
+                        f.conversion,
+                        &f.spec,
+                        f.spec_has_braces,
                         positional,
                         keyword,
                         &mut auto_idx,
                         &mut saw_manual,
                     )?;
-                    let value = apply_field_accessors(self, base, &f.accessors)?;
-                    let value = self.apply_field_conversion(value, f.conversion)?;
-
-                    let expanded_spec;
-                    let spec = if f.spec_has_braces {
-                        expanded_spec = expand_format_spec_positional(
-                            &f.spec,
-                            positional,
-                            keyword,
-                            &mut auto_idx,
-                            &mut saw_manual,
-                        )?;
-                        expanded_spec.as_str()
-                    } else {
-                        f.spec.as_str()
-                    };
-
-                    let formatted = self.dispatch_dunder_format(&value, spec)?;
-                    out.push_str(&extract_str_value(&formatted));
                 }
             }
         }
