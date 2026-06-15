@@ -330,6 +330,13 @@ pub(crate) struct VmFrameView {
     /// the frame's `co_name` / code object without threading the name through
     /// the VM dispatch signatures.
     pub(crate) function: Option<Rc<UserFunction>>,
+    /// For generator frames (which carry no `UserFunction`, so `function` is
+    /// `None`), the generator code object's `(funcname, filename)`.  Used so a
+    /// traceback built when an exception is *caught inside* the generator body
+    /// (e.g. via `generator.throw()`) attributes the catching frame to the
+    /// generator rather than falling back to the `<module>` frame (issue #2445).
+    /// `None` for every non-generator frame.
+    pub(crate) gen_code_info: Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`

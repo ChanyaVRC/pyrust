@@ -132,6 +132,8 @@ impl Interpreter {
             // Meaningless until the first yield; initialised to 0 as a safe
             // default (the Yield opcode always overwrites this before resumption).
             yield_dst: 0,
+            // Suspended yield line; 0 until the first yield (issue #2445).
+            suspended_line: 0,
             // Set by resume_generator_with_exc when FrameOutcome::Returned(val)
             // is received; read by Insn::YieldFrom to retrieve the sub-iterator's
             // StopIteration.value (PEP 380).
@@ -3499,6 +3501,7 @@ impl Interpreter {
             env: env_opt,
             is_class_method: code.is_class_method,
             function: Some(Rc::clone(function)),
+            gen_code_info: None,
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
         // of `regs` (a local RegsBuf that outlives this call).  No
@@ -3951,6 +3954,7 @@ impl Interpreter {
                     env: env_opt,
                     is_class_method: code.is_class_method,
                     function: Some(Rc::clone(&function)),
+                    gen_code_info: None,
                 });
                 // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
                 // of `regs` (a local RegsBuf that outlives this call).  No
@@ -4270,6 +4274,7 @@ impl Interpreter {
                 env: env_opt,
                 is_class_method: code.is_class_method,
                 function: Some(Rc::clone(&function)),
+                gen_code_info: None,
             });
             // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
             // of `regs` (a local RegsBuf that outlives this call).  No
@@ -8921,6 +8926,7 @@ impl Interpreter {
             env: None,
             is_class_method: false,
             function: None,
+            gen_code_info: None,
         });
         // SAFETY: class_regs_ptr is valid for class_regs_len Values for the
         // lifetime of class_regs.  No &mut [Value] referencing class_regs is

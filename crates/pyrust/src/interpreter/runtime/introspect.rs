@@ -446,26 +446,44 @@ impl Interpreter {
         &self,
         captured: &[pyrust_core::FrameInfo],
         catch_func: Option<&UserFunction>,
+        // For a generator catching frame (no `UserFunction`), its
+        // `(funcname, filename)` so the catch node is attributed to the
+        // generator rather than `<module>` (issue #2445).
+        catch_gen_info: Option<&(std::sync::Arc<str>, std::sync::Arc<str>)>,
         catch_lineno: i64,
         tail: Value,
     ) -> Value {
         // Determine the catching frame's code object.
         let catch_code = match catch_func {
             Some(func) => self.build_code_object(func),
-            // Module-scope catching frame: carry the running script's path into
-            // `f_code.co_filename` (#2438) so `tb.tb_frame.f_code.co_filename`
-            // for the outermost `<module>` frame reports the script file rather
-            // than `<unknown>`, matching CPython and the printed `File "..."`
-            // line.  The inner captured frames already carry their own filename
-            // via `code_with_loc` below.
-            None => {
-                let filename = self
-                    .script_filename
-                    .as_ref()
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0)
-            }
+            // No `UserFunction` for the catching frame.  A generator body
+            // (issue #2445) carries its own `(funcname, filename)`, so build a
+            // code object naming the generator; otherwise fall back to the
+            // module-scope frame.
+            None => match catch_gen_info {
+                Some((funcname, filename)) => code_obj::code_with_loc(
+                    funcname.to_string(),
+                    0,
+                    Vec::new(),
+                    filename.to_string(),
+                    0,
+                ),
+                // Module-scope catching frame: carry the running script's path
+                // into `f_code.co_filename` (#2438) so
+                // `tb.tb_frame.f_code.co_filename` for the outermost `<module>`
+                // frame reports the script file rather than `<unknown>`,
+                // matching CPython and the printed `File "..."` line.  The
+                // inner captured frames already carry their own filename via
+                // `code_with_loc` below.
+                None => {
+                    let filename = self
+                        .script_filename
+                        .as_ref()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    code_obj::code_with_loc("<module>".to_string(), 0, Vec::new(), filename, 0)
+                }
+            },
         };
 
         // Build the chain from innermost (tb_next == None) outward, so the
@@ -574,13 +592,20 @@ impl Interpreter {
         if drop_innermost && !captured.is_empty() {
             captured.pop();
         }
-        let catch_func = self
-            .vm_frame_views
-            .last()
-            .and_then(|view| view.function.clone());
+        let last_view = self.vm_frame_views.last();
+        let catch_func = last_view.and_then(|view| view.function.clone());
+        // Issue #2445: a generator body has no `UserFunction`; fall back to the
+        // generator's recorded `(funcname, filename)` so the catching frame is
+        // attributed to the generator instead of `<module>`.
+        let catch_gen_info = if catch_func.is_none() {
+            last_view.and_then(|view| view.gen_code_info.clone())
+        } else {
+            None
+        };
         let state: Box<dyn std::any::Any> = Box::new(DeferredTracebackState {
             frames: captured,
             catch_func,
+            catch_gen_info,
             catch_lineno,
             tail,
         });
@@ -600,12 +625,13 @@ impl Interpreter {
         // Clone out the snapshot fields, then drop the borrow before recursing
         // into the tail (which may itself be a deferred placeholder sharing no
         // lock, but keeping the borrow narrow is cleaner).
-        let (frames, catch_func, catch_lineno, tail) = {
+        let (frames, catch_func, catch_gen_info, catch_lineno, tail) = {
             let borrow = state.borrow();
             let s = borrow.downcast_ref::<DeferredTracebackState>()?;
             (
                 s.frames.clone(),
                 s.catch_func.clone(),
+                s.catch_gen_info.clone(),
                 s.catch_lineno,
                 s.tail.clone(),
             )
@@ -617,6 +643,7 @@ impl Interpreter {
         Some(self.build_traceback_from_snapshot(
             &frames,
             catch_func.as_deref(),
+            catch_gen_info.as_ref(),
             catch_lineno,
             tail,
         ))
@@ -856,6 +883,10 @@ pub(crate) const DEFERRED_TRACEBACK_OPS: &DeferredTracebackOps = &DeferredTraceb
 pub(crate) struct DeferredTracebackState {
     frames: Vec<pyrust_core::FrameInfo>,
     catch_func: Option<Rc<UserFunction>>,
+    /// When the catching frame is a generator body (no `UserFunction`, so
+    /// `catch_func` is `None`), its `(funcname, filename)` so the catch frame's
+    /// code object reports the generator rather than `<module>` (issue #2445).
+    catch_gen_info: Option<(std::sync::Arc<str>, std::sync::Arc<str>)>,
     catch_lineno: i64,
     /// Existing traceback chain this snapshot's frames are prepended onto when
     /// materialised (issue #2367).  `None` for a fresh catch; a real or deferred
