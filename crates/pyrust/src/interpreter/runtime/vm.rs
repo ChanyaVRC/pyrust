@@ -2198,10 +2198,13 @@ impl Interpreter {
                     // is a captured free variable → CPython raises `NameError`,
                     // not `UnboundLocalError`.  list/set/dict comprehensions are
                     // the exception: CPython 3.12 inlines them into the enclosing
-                    // frame (PEP 709), so an unbound enclosing-local read there
-                    // stays `UnboundLocalError`.  (`current_fn_id` is unreliable
-                    // here — it is `None` while a generator/genexpr body resumes.)
-                    let is_free = !code.is_inlined_comp;
+                    // frame (PEP 709), so an unbound read there stays
+                    // `UnboundLocalError` *only* when the name is a local of that
+                    // inlining-target frame; a free variable of the enclosing
+                    // function (owned by a grandparent) is still `NameError`
+                    // (issue #2457).  (`current_fn_id` is unreliable here — it is
+                    // `None` while a generator/genexpr body resumes.)
+                    let is_free = comp_read_is_free(code, name);
                     let (val, cache_ver) = if let Some(v) =
                         vm_try!(self.lookup_name_inner(name, is_free))
                     {
@@ -2308,9 +2311,11 @@ impl Interpreter {
                     // function → `UnboundLocalError`).  `nonlocal` names are not
                     // in `cell_vars`, so they correctly take the free path.  An
                     // inlined list/set/dict comprehension (PEP 709) reads the
-                    // enclosing frame's locals, so it keeps `UnboundLocalError`.
+                    // enclosing frame's locals, so it keeps `UnboundLocalError`
+                    // for those — but a free variable of the enclosing function
+                    // (owned by a grandparent) is still `NameError` (issue #2457).
                     let is_cell_local = code.cell_vars.iter().any(|c| c == name);
-                    let is_free = !is_cell_local && !code.is_inlined_comp;
+                    let is_free = !is_cell_local && comp_read_is_free(code, name);
                     if let Some(v) = vm_try!(self.lookup_name_inner(name, is_free)) {
                         regs[*dst as usize] = v;
                     } else {
@@ -5420,7 +5425,26 @@ fn resolve_global_via_builtins(
     Ok((v, cur_ver))
 }
 
+/// Decide whether an unbound name read via `LoadGlobal` / `LoadCell` should be
+/// reported as a captured *free* variable (`NameError`) or a plain local
+/// (`UnboundLocalError`) — see issue #2340 / #2457.
+///
+/// A read that reaches these opcodes is never the current frame's own
+/// register-local, so for an ordinary function it is always free.  The exception
+/// is an inlined list/set/dict comprehension (PEP 709): CPython runs its body in
+/// the enclosing frame, so an unbound read of one of that frame's *locals* keeps
+/// `UnboundLocalError`, while a free variable of the enclosing function (owned by
+/// a grandparent scope) is still `NameError`.  `comp_enclosing_locals` holds the
+/// inlining-target frame's local names; a hit means the read is a local of that
+/// frame (not free).
 #[inline]
+fn comp_read_is_free(code: &crate::bytecode::FnCode, name: &str) -> bool {
+    match &code.comp_enclosing_locals {
+        Some(locals) => !locals.contains(name),
+        None => true,
+    }
+}
+
 fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecode::Reg) -> crate::interpreter::Result<Value> {
     let v = &regs[reg as usize];
     if v.is_unset() {
@@ -5822,6 +5846,7 @@ mod vm_tests {
             is_coroutine: false,
             is_class_method: false,
             is_inlined_comp: false,
+            comp_enclosing_locals: None,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(Vec::new()),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),

@@ -338,6 +338,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         is_coroutine: code.is_coroutine,
         is_class_method: code.is_class_method,
         is_inlined_comp: code.is_inlined_comp,
+        comp_enclosing_locals: code.comp_enclosing_locals,
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
         binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
