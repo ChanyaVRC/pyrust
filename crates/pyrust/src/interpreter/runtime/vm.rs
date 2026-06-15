@@ -373,6 +373,12 @@ pub(crate) struct GeneratorFrame {
     /// Fully-qualified name of the generator function (issue #1270).
     /// Exposed as `g.__qualname__`.
     pub(crate) qualname: std::sync::Arc<str>,
+    /// Source line of the `yield` the generator is currently suspended at
+    /// (`0` before the first yield).  Restored into the dispatch loop's
+    /// `cur_line` on resume so that an exception caught inside the body after a
+    /// `generator.throw()` reports the yield line — not the throw call site —
+    /// in its traceback (issue #2445).
+    pub(crate) suspended_line: u32,
     /// True when this frame backs a *coroutine* (an `async def` body, issue
     /// #1039) rather than a plain generator.  Coroutines reuse the entire
     /// suspend/resume machinery but report `type(coro).__name__ == "coroutine"`,
@@ -572,6 +578,9 @@ pub(crate) struct GenSaveState {
     /// Carried here so `resume_generator_with_exc` can persist it onto
     /// `GeneratorFrame::yield_dst` for the subsequent send() call.
     pub(crate) yield_dst: crate::bytecode::Reg,
+    /// Source line of the `Yield` that produced this suspension, persisted onto
+    /// `GeneratorFrame::suspended_line` (issue #2445).
+    pub(crate) suspended_line: u32,
 }
 
 /// Outcome of executing a generator frame (returned by `run_bytecode_inner` and
@@ -995,6 +1004,11 @@ impl Interpreter {
             // traceback `tb_frame` for a generator-raised exception is built
             // from the lazily-captured `FrameInfo` (which carries `fn_name`).
             function: None,
+            // Issue #2445: carry the generator's name + filename so a traceback
+            // built when an exception is *caught inside* the body (e.g.
+            // `generator.throw()`) attributes the catching frame to the
+            // generator instead of falling back to the `<module>` frame.
+            gen_code_info: Some((frame.fn_name.clone(), frame.code.filename.clone())),
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
@@ -1002,6 +1016,14 @@ impl Interpreter {
         // pointer + len) is used instead, removing the LLVM noalias constraint
         // that made the VmFrameView dereferences UB (issue #547).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        // Issue #2445: when injecting an exception (generator.throw()/close()),
+        // seed the dispatch loop's `cur_line` with the suspended yield line so a
+        // traceback for an exception caught inside the body reports the yield
+        // line rather than the caller's throw call site.  Only relevant once the
+        // generator has yielded at least once (pc != 0 ⇒ suspended_line set).
+        if inject_exc.is_some() && frame.pc != 0 {
+            pyrust_core::set_current_vm_line(frame.suspended_line);
+        }
         let result = self.run_bytecode_inner(
             &frame.code,
             regs_slice,
@@ -1048,6 +1070,7 @@ impl Interpreter {
                 frame.active_exception = saved.active_exception;
                 frame.exc_saved_active_slice = saved.exc_saved_active_slice;
                 frame.yield_dst = saved.yield_dst;
+                frame.suspended_line = saved.suspended_line;
                 Ok(value)
             }
             Ok(FrameOutcome::Returned(ret_val)) => {
@@ -1225,6 +1248,8 @@ impl Interpreter {
             env: gen_env_opt,
             is_class_method: gframe.code.is_class_method,
             function: None,
+            // Issue #2445: see the matching site in `resume_generator_with_exc`.
+            gen_code_info: Some((gframe.fn_name.clone(), gframe.code.filename.clone())),
         });
         let gen_code_rc = Rc::clone(&gframe.code);
         let gen_code_ptr: *const crate::bytecode::FnCode = Rc::as_ptr(&gen_code_rc);
@@ -2017,6 +2042,7 @@ impl Interpreter {
                     env: None,
                     is_class_method: callee_code.is_class_method,
                     function: Some(Rc::clone(f)),
+                    gen_code_info: None,
                 });
                 tramp_active_base = $base;
                 active_code_rc = Some(callee_code);
@@ -3811,6 +3837,10 @@ impl Interpreter {
                         gd.gframe.iters = std::mem::take(&mut iters);
                         gd.gframe.exc_handlers = std::mem::take(&mut exc_handlers);
                         gd.gframe.yield_dst = *dst;
+                        // Issue #2445: persist the yield line so a later
+                        // `generator.throw()` reports it (mirrors the native
+                        // suspend path in `Insn::Yield`).
+                        gd.gframe.suspended_line = cur_line;
                         self.vm_frame_views.pop();
                         let dst_reg = gd.dst as usize;
                         regs = gd.saved_regs;
@@ -3863,6 +3893,7 @@ impl Interpreter {
                             active_exception: saved_active,
                             exc_saved_active_slice: saved_exc_saved_active,
                             yield_dst: *dst,
+                            suspended_line: cur_line,
                         },
                     });
                 }
@@ -3908,6 +3939,8 @@ impl Interpreter {
                                 gd.gframe.iters = std::mem::take(&mut iters);
                                 gd.gframe.exc_handlers = std::mem::take(&mut exc_handlers);
                                 gd.gframe.yield_dst = *sent_reg;
+                                // Issue #2445: persist the yield-from line.
+                                gd.gframe.suspended_line = cur_line;
                                 self.vm_frame_views.pop();
                                 let dst_reg = gd.dst as usize;
                                 regs = gd.saved_regs;
@@ -3946,6 +3979,7 @@ impl Interpreter {
                                     // The sent value for the next iteration goes into
                                     // sent_reg so the sub-iterator receives it.
                                     yield_dst: *sent_reg,
+                                    suspended_line: cur_line,
                                 },
                             });
                         }
