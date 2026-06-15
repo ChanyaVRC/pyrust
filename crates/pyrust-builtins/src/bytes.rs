@@ -82,7 +82,7 @@ pub fn call(method: &str, receiver: &Value, args: &[Value], kwargs: &PyDict) -> 
 /// return `Value::bytes`; the bytearray module wraps those into bytearray.
 pub fn call_on_slice(method: &str, bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
     match method {
-        "hex" => bytes_hex(bytes, args),
+        "hex" => bytes_hex(bytes, args, kwargs),
         "decode" => bytes_decode(bytes, args, kwargs),
         "startswith" => bytes_startswith(bytes, args),
         "endswith" => bytes_endswith(bytes, args),
@@ -180,7 +180,13 @@ pub fn call_on_slice(method: &str, bytes: &[u8], args: &[Value], kwargs: &PyDict
 /// group gets the remainder); negative groups from the LEFT (rightmost group
 /// gets the remainder).  `bytes_per_sep=0` is treated as "no separator".
 /// The separator must be a single ASCII character.
-fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
+fn bytes_hex(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
+    // Merge positional args with `sep` / `bytes_per_sep` keyword arguments.
+    // Positional args take precedence; a keyword that duplicates a positional
+    // arg is a TypeError, matching CPython.
+    let merged = merge_hex_kwargs(args, kwargs)?;
+    let args: &[Value] = &merged;
+
     if args.is_empty() {
         // Fast path: no separator.
         let mut out = String::with_capacity(bytes.len() * 2);
@@ -328,6 +334,82 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
     }
 
     Ok(Value::string(groups.join(sep)))
+}
+
+/// Merge `bytes.hex()` positional args with `sep` / `bytes_per_sep` keyword
+/// arguments into a single positional vector `[sep?, bytes_per_sep?]`.
+///
+/// CPython's argument clinic checks, in order:
+///   1. total arg count > 2 → "takes at most 2 (keyword )arguments (N given)";
+///   2. unknown keyword → "'K' is an invalid keyword argument for hex()";
+///   3. a keyword duplicating a positional → "argument for hex() given by name
+///      ('K') and position (P)".
+fn merge_hex_kwargs(args: &[Value], kwargs: &PyDict) -> Result<Vec<Value>> {
+    // The total-count overflow check runs even for the all-positional form:
+    // `hex("-", 1, 2)` is a TypeError in CPython, not a silent drop of the
+    // third positional. The noun is "keyword arguments" only when every excess
+    // argument came in by keyword (i.e. no positionals at all).
+    let total = args.len() + kwargs.len();
+    if total > 2 {
+        let noun = if args.is_empty() {
+            "keyword arguments"
+        } else {
+            "arguments"
+        };
+        return Err(PyError::named(
+            "TypeError",
+            format!("hex() takes at most 2 {noun} ({total} given)"),
+        ));
+    }
+
+    if kwargs.is_empty() {
+        return Ok(args.to_vec());
+    }
+
+    // Reject unknown keyword arguments.
+    for key in kwargs.keys() {
+        if let PyKey::Str(s) = key {
+            let name = s.as_str().unwrap_or("");
+            if name != "sep" && name != "bytes_per_sep" {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{name}' is an invalid keyword argument for hex()"),
+                ));
+            }
+        }
+    }
+
+    let kw_sep = kwargs.get(&StrKey("sep"));
+    let kw_bps = kwargs.get(&StrKey("bytes_per_sep"));
+
+    // A keyword must not duplicate a positional argument.
+    if !args.is_empty() && kw_sep.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for hex() given by name ('sep') and position (1)".to_string(),
+        ));
+    }
+    if args.get(1).is_some() && kw_bps.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "argument for hex() given by name ('bytes_per_sep') and position (2)".to_string(),
+        ));
+    }
+
+    // Assemble the effective positional vector. `bytes_per_sep` only takes
+    // effect when a separator is present (CPython treats `hex(bytes_per_sep=2)`
+    // with no sep as a plain hex string).
+    let sep = args.first().or(kw_sep);
+    let bps = args.get(1).or(kw_bps);
+    let mut merged = Vec::with_capacity(2);
+    match sep {
+        None => return Ok(merged),
+        Some(s) => merged.push(s.clone()),
+    }
+    if let Some(b) = bps {
+        merged.push(b.clone());
+    }
+    Ok(merged)
 }
 
 // ---------------------------------------------------------------------------
