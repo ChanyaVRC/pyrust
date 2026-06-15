@@ -65,16 +65,97 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
     )
 }
 
+/// Order-preserving alignment of `new_insns` onto `old_insns` by structural
+/// identity (issue #2432).  Returns one entry per new instruction: `Some(p)` if
+/// it is matched to old position `p`, `None` if it has no match (an
+/// optimizer-synthesized instruction, or one whose duplicates were all consumed
+/// by other new instructions).  The chosen positions are strictly increasing in
+/// new-index order, so a later new instruction can never claim an old position
+/// before one already claimed by an earlier new instruction — the exact failure
+/// the greedy forward scan exhibited on repeated identical instructions.
+///
+/// This is a longest-common-subsequence match computed with the Hunt–Szymanski
+/// patience-sorting technique: for each new instruction in order, its candidate
+/// old positions (looked up from `positions`) are offered in **descending**
+/// order to a patience solitaire over old positions; the resulting longest
+/// increasing run of old positions is the LCS, and back-pointers recover which
+/// new index each chosen old position belongs to.  Cost is
+/// `O((Σ candidates) · log)`, linear in the common case where most instructions
+/// are structurally unique.
+fn lcs_align(
+    old_insns: &[Insn],
+    new_insns: &[Insn],
+    positions: &HashMap<&Insn, Vec<usize>>,
+) -> Vec<Option<usize>> {
+    let mut aligned = vec![None; new_insns.len()];
+    if old_insns.is_empty() || new_insns.is_empty() {
+        return aligned;
+    }
+
+    // Patience solitaire over old positions.  `piles[t]` holds the smallest old
+    // position that ends an increasing subsequence of length `t + 1`.  For each
+    // candidate we also remember which (new_index, old_position) produced it and
+    // a back-pointer into the previous pile, so the LCS can be reconstructed.
+    let mut piles: Vec<usize> = Vec::new(); // tail old-position per pile (monotone)
+    // Parallel record per *placement*: (new_idx, old_pos, prev_record_idx).
+    let mut records: Vec<(usize, usize, Option<usize>)> = Vec::new();
+    // `pile_record[t]` = index into `records` of the current tail of pile `t`.
+    let mut pile_record: Vec<usize> = Vec::new();
+
+    for (new_idx, new_insn) in new_insns.iter().enumerate() {
+        let Some(locs) = positions.get(new_insn) else {
+            continue;
+        };
+        // Offer candidate old positions in DESCENDING order so that several equal
+        // instructions in one new step land on distinct piles (standard
+        // Hunt–Szymanski requirement to keep the matching order-preserving).
+        for &old_pos in locs.iter().rev() {
+            // Pile to extend: first pile whose tail is `>= old_pos` (strictly
+            // increasing subsequence).
+            let t = piles.partition_point(|&tail| tail < old_pos);
+            let prev = if t == 0 {
+                None
+            } else {
+                Some(pile_record[t - 1])
+            };
+            let rec_idx = records.len();
+            records.push((new_idx, old_pos, prev));
+            if t == piles.len() {
+                piles.push(old_pos);
+                pile_record.push(rec_idx);
+            } else {
+                piles[t] = old_pos;
+                pile_record[t] = rec_idx;
+            }
+        }
+    }
+
+    // Reconstruct the LCS by following back-pointers from the last pile's tail.
+    if let Some(&last) = pile_record.last() {
+        let mut cur = Some(last);
+        while let Some(idx) = cur {
+            let (new_idx, old_pos, prev) = records[idx];
+            aligned[new_idx] = Some(old_pos);
+            cur = prev;
+        }
+    }
+
+    aligned
+}
+
 /// Remap both the `lineno_table` and the PEP 657 `col_table` (issue #2426) from
 /// an old instruction sequence to a new one in a **single shared scan**.
 ///
-/// The lineno half is byte-identical to the historical `remap_linenos`: a
-/// greedy forward scan that, for each `new_insn`, finds the first matching
-/// not-yet-consumed `old_insn` (by opcode equality) and inherits its line —
-/// falling back to the running prefix line for optimizer-created instructions.
-/// This is deliberately approximate, but error-raising instructions (BinOp,
-/// Call, GetAttr, …) are never removed by the optimizer (they have side
-/// effects), so their line numbers — and now their anchors — are preserved.
+/// The lineno half aligns the optimized stream onto the original by an
+/// order-preserving longest-common-subsequence match (`lcs_align`, issue
+/// #2432): each matched `new_insn` inherits the line of the `old_insn` it pairs
+/// with, falling back to the running prefix line for optimizer-created
+/// instructions.  LCS replaced the old greedy forward scan, which mis-attributed
+/// the lines of two structurally-identical instructions (e.g. two
+/// `raise ValueError(str)` in one module frame) when the monotonic cursor
+/// skipped the first occurrence.  Error-raising instructions (BinOp, Call,
+/// GetAttr, …) are never removed by the optimizer (they have side effects), so
+/// their line numbers — and now their anchors — are preserved.
 ///
 /// The col half reuses the very same match: a matched new instruction inherits
 /// `old_cols[i]`.  Two safety rules uphold "a wrong caret is worse than no
@@ -148,15 +229,34 @@ fn remap_lineno_and_col_tables(
         }
     }
 
+    // Order-preserving optimal alignment of `new_insns` onto `old_insns`
+    // (issue #2432).  The historical scan used a single monotonic cursor and, for
+    // each new instruction, took the *first* structurally-equal old occurrence at
+    // or after the cursor.  With two structurally-identical instructions
+    // (e.g. two `raise ValueError(str)` in one module frame) an earlier new
+    // instruction whose only candidate sat *after* the first occurrence could
+    // advance the cursor past it, so a later new instruction was forced onto the
+    // wrong (second) occurrence — flipping the two raises' source lines.
+    //
+    // Since the optimized stream is (modulo a handful of synthesized
+    // instructions) a subsequence of the original, the correct mapping is the
+    // longest common subsequence by structural identity.  `lcs_align` computes,
+    // for each new instruction, the old position it aligns to under an optimal
+    // order-preserving matching — repeated identical instructions are paired up
+    // 1:1 in source order instead of greedily, which is exactly what fixes the
+    // cross-attribution.  Unmatched new instructions (`None`) fall through to the
+    // discriminant / running-prefix fallbacks below, anchored to a cursor derived
+    // from the surrounding aligned positions so those stay stable too.
+    let aligned = lcs_align(old_insns, new_insns, &positions);
+
     let mut old_pos: usize = 0;
     let mut linenos = Vec::with_capacity(new_insns.len());
     let mut cols = vec![(0, 0); new_insns.len()];
-    for (out_col, new_insn) in cols.iter_mut().zip(new_insns) {
-        // First old position `>= old_pos` matching `new_insn`, via the index.
-        let matched = positions.get(new_insn).and_then(|locs| {
-            let k = locs.partition_point(|&p| p < old_pos);
-            locs.get(k).copied()
-        });
+    for ((out_col, new_insn), aligned_pos) in cols.iter_mut().zip(new_insns).zip(&aligned) {
+        // Use the LCS-aligned old position when this new instruction was matched;
+        // it is guaranteed `>= old_pos`, preserving the monotonic-cursor invariant
+        // the fallbacks below rely on.
+        let matched = *aligned_pos;
         match matched {
             Some(i) => {
                 linenos.push(old_linenos.get(i).copied().unwrap_or(0));
