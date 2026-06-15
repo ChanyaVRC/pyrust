@@ -145,6 +145,10 @@ pyrust_builtin_modules! {
     typing,
     copy,
     pathlib,
+    // `string`: ASCII character-class constants are native; `capwords`,
+    // `Template`, and `Formatter` are injected from `string_py.py` by the
+    // post-load hook in `env.rs::load_module` (issue #2515).
+    string,
     contextlib,
     "__future__" as future,
     warnings,
