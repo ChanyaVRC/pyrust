@@ -7256,10 +7256,15 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::Tuple(_) => with_object_dunders(builtin_method_names("tuple")),
         ValueKind::Dict(_) => with_object_dunders(builtin_method_names("dict")),
         ValueKind::Set(_) => with_object_dunders(builtin_method_names("set")),
-        ValueKind::Float(_) | ValueKind::Complex(_, _) | ValueKind::None
-        | ValueKind::NotImplemented | ValueKind::Ellipsis | ValueKind::Range { .. } => {
-            with_object_dunders(Vec::new())
-        }
+        // Issue #2490: `float`/`complex` route through `builtin_method_names`
+        // like every other primitive so their slot dunders (`__add__`,
+        // `__trunc__`, `__neg__`, …) and instance methods (`conjugate`,
+        // `hex`, …) appear in `dir(1.7)` / `dir(1j)` — matching `hasattr`
+        // and CPython.
+        ValueKind::Float(_) => with_object_dunders(builtin_method_names("float")),
+        ValueKind::Complex(_, _) => with_object_dunders(builtin_method_names("complex")),
+        ValueKind::None | ValueKind::NotImplemented | ValueKind::Ellipsis
+        | ValueKind::Range { .. } => with_object_dunders(Vec::new()),
         ValueKind::BuiltinObject { ops, .. } => {
             with_object_dunders(builtin_method_names(ops.type_name()))
         }
@@ -7713,6 +7718,8 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         "frozenset" => pyrust_builtins::frozenset::METHODS,
         "bytearray" => pyrust_builtins::bytearray::METHODS,
         "slice" => pyrust_builtins::slice::METHODS,
+        "float" => pyrust_builtins::float::METHODS,
+        "complex" => pyrust_builtins::complex::METHODS,
         _ => &[],
     };
     let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
@@ -7730,6 +7737,25 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     }
     if type_name == "dict" {
         out.push("fromkeys".to_string());
+    }
+    // Issue #2490: float/complex expose `real`/`imag` read-only properties
+    // (intercepted in `get_attr`) and `float.fromhex` (a classmethod
+    // registered in helpers.rs); none are in the `METHODS` slice.  These all
+    // resolve via `hasattr`, so listing them keeps `dir()` consistent with
+    // attribute access.  CPython also advertises `__int__`/`__float__`/
+    // `__getformat__`/`__getnewargs__` (float) and `__complex__`/
+    // `__getnewargs__` (complex), but those slots are not yet resolvable on
+    // pyrust instances — omitting them keeps `dir()` in lock-step with
+    // `hasattr` (the invariant the bug report is about).
+    if type_name == "float" {
+        for n in ["fromhex", "real", "imag"] {
+            out.push(n.to_string());
+        }
+    }
+    if type_name == "complex" {
+        for n in ["real", "imag"] {
+            out.push(n.to_string());
+        }
     }
     out
 }
