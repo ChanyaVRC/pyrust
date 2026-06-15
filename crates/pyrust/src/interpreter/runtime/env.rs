@@ -3038,6 +3038,16 @@ impl Interpreter {
             {
                 crate::builtin_modules::operator::inject_python_members(self, m)?;
             }
+            // `typing` Python-source members (issue #2516): inject
+            // `get_type_hints`, `get_origin`, `get_args`, `runtime_checkable`,
+            // `reveal_type`, the special-form markers (`Self`, `Never`,
+            // `Annotated`, …), `ParamSpec`, `TypeVarTuple`, and the
+            // `NamedTuple` helper functions by exec'ing `typing_py.py`.
+            if name == "typing"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::typing::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*

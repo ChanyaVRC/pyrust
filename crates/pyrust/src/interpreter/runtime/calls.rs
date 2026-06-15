@@ -4876,6 +4876,25 @@ impl Interpreter {
         class: Rc<RefCell<PyClass>>,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        // Functional `NamedTuple('Point', [...])` (issue #2516): the
+        // `typing.NamedTuple` marker is not a constructible class — route the
+        // call to the Python helper `typing._namedtuple_functional`.
+        if crate::builtin_modules::typing::is_namedtuple_marker(&class) {
+            let func = self
+                .load_module("typing")
+                .ok()
+                .and_then(|m| match m.kind() {
+                    ValueKind::PyModule(rc) => {
+                        rc.borrow().attrs.get("_namedtuple_functional").cloned()
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    PyError::Runtime("typing._namedtuple_functional unavailable".into())
+                })?;
+            return self.call_function_expanded(func, args);
+        }
+
         // Issue #1956: `Cls(*args)` is uniformly `type(Cls).__call__(Cls, *args)`.
         // If the metaclass defines a *user* `__call__` override, route through
         // it; its `super().__call__(*args)` chains back to the default
@@ -9358,6 +9377,18 @@ impl Interpreter {
         let (base, extra_bases_vec) =
             self.make_class_resolve_bases(regs, num_locals, bases_base, bases_n)?;
 
+        // `class X(NamedTuple): ...` (issue #2516): if any base is the
+        // `typing.NamedTuple` marker, rebuild the class as a
+        // `collections.namedtuple` from its annotated fields and class-body
+        // members, mirroring CPython's `NamedTupleMeta`.
+        if base.as_ref().is_some_and(crate::builtin_modules::typing::is_namedtuple_marker)
+            || extra_bases_vec
+                .iter()
+                .any(crate::builtin_modules::typing::is_namedtuple_marker)
+        {
+            return self.build_typing_namedtuple(&class_name, &attrs);
+        }
+
         let slots = make_class_extract_slots(&mut attrs, &class_name)?;
         let class = Rc::new(RefCell::new(PyClass {
             extra_bases: extra_bases_vec.clone(),
@@ -9650,6 +9681,74 @@ impl Interpreter {
 
         let attrs = collect_class_attrs(local_index, &class_regs, store_order, num_class_regs);
         Ok((attrs, class_env_rc))
+    }
+
+    /// Rebuild a `class X(NamedTuple): ...` body as a `collections.namedtuple`
+    /// (issue #2516).  Field order comes from `__annotations__`; class-body
+    /// assignments whose name is an annotated field become the namedtuple's
+    /// defaults; any remaining namespace members (methods, docstring) are set
+    /// on the resulting class.  Delegates the actual build to the Python helper
+    /// `typing._build_namedtuple_class`.
+    fn build_typing_namedtuple(
+        &mut self,
+        class_name: &str,
+        attrs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        // Ordered field names from the class body's `__annotations__`.
+        let field_names: Vec<String> = attrs
+            .get("__annotations__")
+            .and_then(|a| {
+                a.as_dict().map(|d| {
+                    d.keys()
+                        .filter_map(|k| match k {
+                            PyKey::Str(s) => s.as_str().map(str::to_string),
+                            _ => None,
+                        })
+                        .collect::<Vec<String>>()
+                })
+            })
+            .unwrap_or_default();
+        let field_set: std::collections::HashSet<&str> =
+            field_names.iter().map(String::as_str).collect();
+
+        let fields = Value::list(field_names.iter().cloned().map(Value::string).collect());
+
+        // Defaults: class-body assignments whose name is an annotated field.
+        let defaults = Value::dict(PyDict::default());
+        // Extra namespace: methods/other members that are not fields and not
+        // the synthetic class-body bookkeeping keys.
+        let namespace = Value::dict(PyDict::default());
+        for (key, value) in attrs.iter() {
+            if key == "__annotations__" || key == "__qualname__" {
+                continue;
+            }
+            if field_set.contains(key.as_str()) {
+                defaults.dict_insert(PyKey::str_from(key), value.clone())?;
+            } else {
+                namespace.dict_insert(PyKey::str_from(key), value.clone())?;
+            }
+        }
+
+        let builder = self
+            .load_module("typing")
+            .ok()
+            .and_then(|m| match m.kind() {
+                ValueKind::PyModule(rc) => {
+                    rc.borrow().attrs.get("_build_namedtuple_class").cloned()
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                PyError::Runtime("typing._build_namedtuple_class unavailable".into())
+            })?;
+
+        let args = [
+            ExpandedCallArg { name: None, value: Value::string(class_name) },
+            ExpandedCallArg { name: None, value: fields },
+            ExpandedCallArg { name: None, value: defaults },
+            ExpandedCallArg { name: None, value: namespace },
+        ];
+        self.call_function_expanded(builder, &args)
     }
 
     /// Resolve `R[bases_base .. bases_base+bases_n]` into (primary, extras),
