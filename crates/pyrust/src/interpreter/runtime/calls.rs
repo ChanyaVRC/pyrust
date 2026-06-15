@@ -3532,7 +3532,7 @@ impl Interpreter {
             env: env_opt,
             is_class_method: code.is_class_method,
             function: Some(Rc::clone(function)),
-            gen_code_info: None,
+            gen_frame: None,
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
         // of `regs` (a local RegsBuf that outlives this call).  No
@@ -3985,7 +3985,7 @@ impl Interpreter {
                     env: env_opt,
                     is_class_method: code.is_class_method,
                     function: Some(Rc::clone(&function)),
-                    gen_code_info: None,
+                    gen_frame: None,
                 });
                 // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
                 // of `regs` (a local RegsBuf that outlives this call).  No
@@ -4305,7 +4305,7 @@ impl Interpreter {
                 env: env_opt,
                 is_class_method: code.is_class_method,
                 function: Some(Rc::clone(&function)),
-                gen_code_info: None,
+                gen_frame: None,
             });
             // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
             // of `regs` (a local RegsBuf that outlives this call).  No
@@ -8961,7 +8961,7 @@ impl Interpreter {
             env: None,
             is_class_method: false,
             function: None,
-            gen_code_info: None,
+            gen_frame: None,
         });
         // SAFETY: class_regs_ptr is valid for class_regs_len Values for the
         // lifetime of class_regs.  No &mut [Value] referencing class_regs is
