@@ -1524,6 +1524,23 @@ type FStringExpr = (
     usize,
 );
 
+/// Build the `SyntaxError` message CPython 3.12 raises for a bad conversion
+/// character after `!` in an f-string replacement field.  CPython's PEG parser
+/// distinguishes two cases:
+///   * the char terminates the field (`}`, `:`) or is whitespace → there is no
+///     conversion char at all: `f-string: missing conversion character`
+///   * any other char that isn't `s`/`r`/`a` → it is present but invalid:
+///     `f-string: invalid conversion character 'X': expected 's', 'r', or 'a'`
+fn fstring_conversion_error(conv: char) -> PyError {
+    if conv == '}' || conv == ':' || conv.is_whitespace() {
+        PyError::Lex("f-string: missing conversion character".to_string())
+    } else {
+        PyError::Lex(format!(
+            "f-string: invalid conversion character '{conv}': expected 's', 'r', or 'a'"
+        ))
+    }
+}
+
 /// Parse the expression inside `{...}` of an f-string.
 /// `pos` points to the first character after the opening `{`.
 /// Returns `(expr_src, conversion, format_spec, debug_text, next_pos)` where
@@ -1608,7 +1625,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
                         PyError::Lex("expected conversion flag after '!'".to_string())
                     })?;
                     if !matches!(conv, 'r' | 's' | 'a') {
-                        return Err(PyError::Lex(format!("unknown conversion flag '{conv}'")));
+                        return Err(fstring_conversion_error(conv));
                     }
                     pos += 1;
                     Some(conv)
@@ -1637,7 +1654,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
                     PyError::Lex("expected conversion flag after '!'".to_string())
                 })?;
                 if !matches!(conv, 'r' | 's' | 'a') {
-                    return Err(PyError::Lex(format!("unknown conversion flag '{conv}'")));
+                    return Err(fstring_conversion_error(conv));
                 }
                 pos += 1; // skip conversion char
                 // Now check for format spec or closing }
@@ -1775,9 +1792,7 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                                 PyError::Lex("expected conversion flag after '!'".to_string())
                             })?;
                             if !matches!(conv, 'r' | 's' | 'a') {
-                                return Err(PyError::Lex(format!(
-                                    "unknown conversion flag '{conv}'"
-                                )));
+                                return Err(fstring_conversion_error(conv));
                             }
                             conversion = Some(conv);
                             *pos += 1;
