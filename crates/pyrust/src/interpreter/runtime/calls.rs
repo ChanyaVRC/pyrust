@@ -494,13 +494,23 @@ impl Interpreter {
                 ))
             }
             ValueKind::BuiltinFunction("str.format_map") => {
+                // `format_map` is implemented in Python in CPython, so its
+                // unbound-call diagnostics use the method_descriptor wording
+                // ("unbound method str.format_map() needs an argument" /
+                // "descriptor 'format_map' for 'str' objects doesn't apply to a
+                // '<type>' object"), not the slot-wrapper wording (issue #2320).
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!("format_map", "str"))?;
+                    .ok_or_else(|| pyrust_core::descriptor_needs_arg!("format_map", "str", method))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(pyrust_core::descriptor_requires!("format_map", "str")),
+                    _ => {
+                        let actual = pyrust_core::builtin_type_name(self_val);
+                        return Err(pyrust_core::descriptor_requires!(
+                            "format_map", "str", actual, method
+                        ));
+                    }
                 };
                 // format_map takes exactly one positional argument (the mapping)
                 // and no keyword arguments.  CPython rejects any keyword argument
