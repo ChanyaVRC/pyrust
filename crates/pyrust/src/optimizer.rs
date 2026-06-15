@@ -341,6 +341,36 @@ fn remap_lineno_and_col_tables(
         }
     }
 
+    // Discriminants whose diagonal recovery is sound even when `disc_ambiguous`
+    // (issue #2442).  A side-effecting opcode (`GetAttr`, `GetItem`, …) is never
+    // deleted or folded by the optimizer — only renumbered — so its k-th
+    // surviving copy descends, in order, from the k-th original copy.  When every
+    // old occurrence of the opcode still appears in the new stream (count
+    // preserved), the monotone `partition_point` scan in the discriminant
+    // fallback pairs each renumbered op with its true 1:1 origin, so the
+    // per-occurrence span at that position is correct even though the opcode as a
+    // whole carries differing spans.  Without this, an `a.b.c` chain — whose inner
+    // `GetAttr b` is renumbered by copy-prop and whose two `GetAttr`s have
+    // distinct spans (so `GetAttr` is `disc_ambiguous`) — loses the inner caret.
+    // If a fold dropped a copy the count guard fails and the conservative
+    // `disc_ambiguous` refusal stands (a missing caret beats a wrong one, #2426).
+    let mut disc_diag_sound: HashSet<std::mem::Discriminant<Insn>> = HashSet::new();
+    if want_cols {
+        let mut new_disc_counts: HashMap<std::mem::Discriminant<Insn>, usize> = HashMap::new();
+        for insn in new_insns {
+            if insn_anchor_by_discriminant(insn) {
+                *new_disc_counts
+                    .entry(std::mem::discriminant(insn))
+                    .or_default() += 1;
+            }
+        }
+        for (disc, locs) in &disc_positions {
+            if new_disc_counts.get(disc).copied().unwrap_or(0) >= locs.len() {
+                disc_diag_sound.insert(*disc);
+            }
+        }
+    }
+
     // Order-preserving optimal alignment of `new_insns` onto `old_insns`
     // (issue #2432).  The historical scan used a single monotonic cursor and, for
     // each new instruction, took the *first* structurally-equal old occurrence at
@@ -415,7 +445,9 @@ fn remap_lineno_and_col_tables(
                 match disc_matched {
                     Some(i) => {
                         linenos.push(old_linenos.get(i).copied().unwrap_or(0));
-                        if want_cols && !disc_ambiguous.contains(&std::mem::discriminant(new_insn))
+                        let disc = std::mem::discriminant(new_insn);
+                        if want_cols
+                            && (!disc_ambiguous.contains(&disc) || disc_diag_sound.contains(&disc))
                         {
                             *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                         }
