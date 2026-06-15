@@ -1456,10 +1456,31 @@ impl Interpreter {
             let floor = st.gen_drive_stack.last().map_or(0, |g| g.tramp_floor);
             while st.tramp_stack.len() > floor {
                 let saved = st.tramp_stack.pop().unwrap();
+                // PEP 657 stage 2 (#2443): the *caller* of the frame recorded
+                // below raised at its call instruction, whose anchor is
+                // `col_table[saved_pc - 1]` in the caller's code object
+                // (`saved_code_ptr`).  Compute it now and carry it forward as the
+                // next iteration's `innermost_col`, so every trampolined frame —
+                // not just the innermost — claims its own caret.  `saved_pc` is the
+                // caller's resume pc (already advanced past the call), so the
+                // raising instruction's index is `saved_pc - 1`; `(0,0,0,0)` means
+                // "no anchor" and stays caret-free.  SAFETY: `saved_code_ptr`
+                // points at the caller's `FnCode`, kept alive by
+                // `saved_active_code_rc` (or the still-live bottom frame) until this
+                // frame is restored.
+                let caller_call_col = {
+                    let caller_code: &crate::bytecode::FnCode =
+                        unsafe { &*saved.saved_code_ptr };
+                    caller_code
+                        .col_table
+                        .get(saved.saved_pc.wrapping_sub(1))
+                        .copied()
+                        .and_then(|s| if s == (0, 0, 0, 0) { None } else { Some(s) })
+                };
                 if let Some(view) = self.vm_frame_views.pop()
                     && let Some(func) = view.function
                 {
-                    let frame_col = innermost_col.take();
+                    let frame_col = innermost_col;
                     // Callee's own code-object filename (#2438): a trampolined
                     // call into an imported module's function reports that
                     // module's source file, not the running script's path.
@@ -1481,6 +1502,7 @@ impl Interpreter {
                         col_span: frame_col,
                     });
                 }
+                innermost_col = caller_call_col;
                 self.env = saved.saved_env;
                 line = saved.saved_cur_line;
             }
@@ -1535,12 +1557,28 @@ impl Interpreter {
                 }
                 Err(e2) => {
                     err = e2;
+                    // The error now escapes the *consumer* at its `ForIter` site;
+                    // that instruction's anchor is the innermost caret for the
+                    // frames unwound on the next outer-loop iteration (#2443).
+                    let ccode: &crate::bytecode::FnCode = unsafe { &**st.code_ptr };
+                    innermost_col = ccode
+                        .col_table
+                        .get(foriter_pc)
+                        .copied()
+                        .and_then(|s| if s == (0, 0, 0, 0) { None } else { Some(s) });
                     continue;
                 }
             }
         }
         *st.cur_line = line;
         pyrust_core::set_current_vm_line(line);
+        // PEP 657 stage 2 (#2443): publish the call-site anchor of the frame that
+        // natively entered this trampoline (computed as the last `caller_call_col`
+        // carried into `innermost_col`) so the native caller's `FrameInfo` — built
+        // by `calls.rs` (function frame) or `program.rs` (module frame) from
+        // `get_current_vm_col_span()` — also claims its caret, not just the
+        // trampolined frames recorded above.
+        pyrust_core::set_current_vm_col_span(innermost_col);
         UnwindOutcome::Escape(err)
     }
 

@@ -248,3 +248,52 @@ NameError: name 'undef_in_func' is not defined
 ";
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
+
+// ── #2443 stage 2: narrow caret on an *outer* function frame's call site ─────
+
+#[test]
+fn outer_function_frame_call_site_carries_its_caret() {
+    // #2443: the call site that propagated the error on an outer trampolined
+    // frame (`1 + inner()`, where CPython underlines just `inner()` with `^^^^^^^`)
+    // now draws its caret, not just the innermost frame.  Stage 1 left every
+    // non-innermost function frame caret-free.
+    let src = "def inner():\n    raise ValueError(\"boom\")\n\ndef outer():\n    x = 1 + inner()\n    return x\n\nouter()\n";
+    let stderr = run_pyrust_stderr("outer.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"outer.py\", line 8, in <module>
+    outer()
+  File \"outer.py\", line 5, in outer
+    x = 1 + inner()
+            ^^^^^^^
+  File \"outer.py\", line 2, in inner
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn three_deep_frames_each_carry_their_own_caret() {
+    // #2443: with three trampolined frames the middle and outer frames each draw
+    // the narrow caret of their own call sub-expression (CPython underlines just
+    // the `b()` / `a()` call, not the surrounding binop / subscript), while the
+    // innermost `raise` is a whole-line anchor and stays caret-free.
+    let src = "def a():\n    raise ValueError(\"deep\")\n\ndef b():\n    return [a()][0]\n\ndef c():\n    return 10 * b()\n\nc()\n";
+    let stderr = run_pyrust_stderr("deep.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"deep.py\", line 10, in <module>
+    c()
+  File \"deep.py\", line 8, in c
+    return 10 * b()
+                ^^^
+  File \"deep.py\", line 5, in b
+    return [a()][0]
+            ^^^
+  File \"deep.py\", line 2, in a
+    raise ValueError(\"deep\")
+ValueError: deep
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
