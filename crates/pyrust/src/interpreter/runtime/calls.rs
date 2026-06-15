@@ -9982,6 +9982,13 @@ impl Interpreter {
                 }
             }
             2 => {
+                // Issue #2500: dict methods take no keyword arguments (except
+                // `update`).  The `needs_rc` view fast path (`keys`/`values`/
+                // `items`) returns before `call_dict_method`, so it would bypass
+                // the guard that lives at the top of `call_dict_method`.
+                if let Some(err) = reject_container_method_kwargs("dict", method, kw) {
+                    return Err(err);
+                }
                 if pyrust_builtins::dict::needs_rc(method) {
                     // Lazy views need the Rc to share storage with the source
                     // dict — the regular dispatch path only sees a Vec snapshot.
