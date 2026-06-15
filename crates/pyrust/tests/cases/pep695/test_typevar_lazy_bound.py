@@ -142,3 +142,22 @@ def bare[T](x):
 B = bare.__type_params__[0]
 print("bare bound:", B.__bound__)           # bare bound: None
 print("bare constraints:", B.__constraints__)  # bare constraints: ()
+
+# ── Same-site repeated access across params (GetAttr inline-cache guard) ───────
+# `for t in __type_params__: t.__bound__` reads `__bound__` from one bytecode
+# site for several distinct TypeVars.  The lazy thunk lives behind the slow-path
+# interceptor, but an eager None/() default also sits in the instance dict, so if
+# the GetAttr inline cache caches the first param's instance-attr read, later
+# params would wrongly return that stale default and skip their thunk.
+
+
+def multi[A, B: int, C: (str, bytes), D](x):
+    return x
+
+
+for t in multi.__type_params__:
+    print("multi:", t.__name__, t.__bound__, t.__constraints__)
+# multi: A None ()
+# multi: B <class 'int'> ()
+# multi: C None (<class 'str'>, <class 'bytes'>)
+# multi: D None ()
