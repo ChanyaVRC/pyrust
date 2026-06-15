@@ -370,7 +370,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_const_reg_prop(insns, num_locals, &consts);
     let insns = pass_binopinplace_downgrade(insns, num_locals, &consts);
-    let insns = pass_concat_merge(insns, num_locals, &mut num_regs);
+    let insns = pass_concat_merge(insns, num_locals, &mut num_regs, &consts);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
     let insns = pass_cse(insns, num_locals);
@@ -7318,6 +7318,68 @@ pub(crate) fn rewrite_offsets_with(
 
 // ─── String concat chain merging ──────────────────────────────────────────────
 
+/// Apply the per-instruction transfer function for the `str_regs` dataflow used
+/// by [`pass_concat_merge`].  Updates `str_regs` (the set of registers known to
+/// hold a `str`) to reflect the effect of executing `insn`.
+///
+/// Conservative: a register is only *added* when the instruction provably yields
+/// a string; every other write to a register *removes* it from the set.  This is
+/// intentionally one-directional (no fixpoint over back-edges) — the caller
+/// clears the set at every basic-block boundary, so a register staying in the
+/// set always means "definitely a str on this straight-line path".
+fn apply_str_regs_transfer(insn: &Insn, consts: &[Value], str_regs: &mut HashSet<u32>) {
+    use crate::ast::BinaryOp;
+    match insn {
+        // A `str` constant load makes the dst a string.
+        Insn::LoadConst(dst, c) => {
+            if matches!(consts[*c as usize].kind(), ValueKind::Str(_)) {
+                str_regs.insert(*dst);
+            } else {
+                str_regs.remove(dst);
+            }
+        }
+        // Copies propagate string-ness from source to destination.
+        Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+            if str_regs.contains(src) {
+                str_regs.insert(*dst);
+            } else {
+                str_regs.remove(dst);
+            }
+        }
+        // `str + str` is a `str`; otherwise the op may not yield a string.
+        Insn::BinOp(dst, lhs, BinaryOp::Add, rhs) => {
+            if str_regs.contains(lhs) && str_regs.contains(rhs) {
+                str_regs.insert(*dst);
+            } else {
+                str_regs.remove(dst);
+            }
+        }
+        // `str + const`: a string result iff both sides are strings.
+        Insn::BinOpConst(dst, lhs, BinaryOp::Add, c, _) => {
+            if str_regs.contains(lhs) && matches!(consts[*c as usize].kind(), ValueKind::Str(_)) {
+                str_regs.insert(*dst);
+            } else {
+                str_regs.remove(dst);
+            }
+        }
+        // These always produce a `str`: f-string lowering / format / a prior
+        // Concat fusion / str-typed builtin string methods are not modelled here,
+        // but the always-string opcodes are.
+        Insn::Concat { dst, .. }
+        | Insn::BuildString(dst, _, _)
+        | Insn::FormatValue(dst, _)
+        | Insn::FormatValueSpec(dst, _, _) => {
+            str_regs.insert(*dst);
+        }
+        // Any other instruction that writes a register clears its string-ness.
+        other => {
+            if let Some(dst) = writable_dst(other) {
+                str_regs.remove(&dst);
+            }
+        }
+    }
+}
+
 /// Merge a chain of `BinOp(Add)` instructions into a single `Concat` instruction
 /// that performs the concatenation in one allocation.
 ///
@@ -7360,13 +7422,30 @@ pub(crate) fn rewrite_offsets_with(
 /// the operand window.  The instruction vector is rebuilt with jump-offset
 /// rewriting (mirrors `pass_ivsr`), growing by 2 for the first chain found.
 ///
-/// The type guard (string vs non-string) is deferred to the VM's Concat handler.
+/// ## String-only gate (issue #2383)
+///
+/// The fusion is only profitable for **string** chains, where it collapses N-1
+/// allocations into one.  For int (and other primitive) chains the operand
+/// window `Move`s are pure overhead — ~19% slower than the equivalent plain
+/// `BinOp` chain.  We therefore only fuse a chain when its first operand
+/// register is *statically known* to hold a string (`str_regs`, seeded from
+/// `str`-typed constants and string-producing instructions, propagated forward
+/// per basic block — mirrors the `int_regs` gate in `pass_algebraic_simplify`).
+/// Chains whose leading operand isn't provably a string keep their `BinOp`
+/// form.  The runtime Concat handler's own string/non-string check is retained
+/// as a correctness backstop.
+///
 /// Run [`pass_concat_merge_once`] to fixed-point: keep merging until no new
 /// chain can be fused.  A single pass handles only the first eligible chain;
 /// iterating ensures all chains in a function are folded.
-fn pass_concat_merge(mut insns: Vec<Insn>, num_locals: u32, num_regs: &mut u32) -> Vec<Insn> {
+fn pass_concat_merge(
+    mut insns: Vec<Insn>,
+    num_locals: u32,
+    num_regs: &mut u32,
+    consts: &[Value],
+) -> Vec<Insn> {
     loop {
-        let (next, changed) = pass_concat_merge_once(insns, num_locals, num_regs);
+        let (next, changed) = pass_concat_merge_once(insns, num_locals, num_regs, consts);
         insns = next;
         if !changed {
             return insns;
@@ -7381,6 +7460,7 @@ fn pass_concat_merge_once(
     insns: Vec<Insn>,
     num_locals: u32,
     num_regs: &mut u32,
+    consts: &[Value],
 ) -> (Vec<Insn>, bool) {
     use crate::ast::BinaryOp;
 
@@ -7425,6 +7505,24 @@ fn pass_concat_merge_once(
         });
     }
 
+    // Forward dataflow: `str_regs_before[pc]` is the set of registers statically
+    // known to hold a `str` value just before `insns[pc]` executes.  The set is
+    // cleared at every basic-block boundary (a register's type can't be trusted
+    // across a join).  Seeded from `str`-typed constants and string-producing
+    // instructions; mirrors the `int_regs` analysis used by other passes.  Only
+    // chains whose leading operand is in this set get fused (issue #2383).
+    let mut str_regs_before: Vec<HashSet<u32>> = Vec::with_capacity(n);
+    {
+        let mut str_regs: HashSet<u32> = HashSet::new();
+        for (idx, insn) in insns.iter().enumerate() {
+            if bb_starts.contains(&idx) {
+                str_regs.clear();
+            }
+            str_regs_before.push(str_regs.clone());
+            apply_str_regs_transfer(insn, consts, &mut str_regs);
+        }
+    }
+
     // Scan for the first mergeable chain.
     let mut i = 0;
     while i < n {
@@ -7436,6 +7534,15 @@ fn pass_concat_merge_once(
                 continue;
             }
         };
+
+        // String-only gate (issue #2383): only fuse when the chain's leading
+        // operand is statically known to be a `str`.  Int / other primitive
+        // chains keep their plain `BinOp` form (the operand-window Moves are
+        // pure overhead for them).  If we can't prove it's a string, skip.
+        if !str_regs_before[i].contains(&lhs0) {
+            i += 1;
+            continue;
+        }
 
         // Extend the chain: BinOp(t_{k+1}, t_k, Add, rhs_{k+1}).
         let mut chain_positions: Vec<usize> = vec![i];
@@ -12441,31 +12548,40 @@ elif x == 2:
 
     // ── pass_concat_merge ─────────────────────────────────────────────────────
 
+    // A constant pool whose slot 0 is a `str`, used to seed `str_regs` so the
+    // string-only gate (issue #2383) admits the chain.  Operand registers are
+    // marked string via `LoadConst(reg, 0)` prefixes in each test.
+    fn str_consts() -> Vec<Value> {
+        vec![Value::string("")]
+    }
+
     #[test]
     fn concat_merge_fuses_three_binop_chain() {
         use crate::ast::BinaryOp;
+        // LoadConst(0..) seed the operand regs as strings so the gate admits the
+        // chain.  num_locals = 2, r0=0, r1=1 (locals), t1=2, r2=3, t2=4.
         // BinOp(t1, r0, Add, r1)   ← t1 is temp (>= num_locals=2), single-use
         // BinOp(t2, t1, Add, r2)   ← t2 is temp, single-use
-        // Return(t2)
-        // num_locals = 2, r0=0, r1=1 (locals), t1=2, r2=3, t2=4
         let insns = vec![
+            Insn::LoadConst(0, 0), // r0 = "" (str)
+            Insn::LoadConst(1, 0), // r1 = "" (str)
+            Insn::LoadConst(3, 0), // r2 = "" (str)
             Insn::BinOp(2, 0, BinaryOp::Add, 1),
             Insn::BinOp(4, 2, BinaryOp::Add, 3),
             Insn::Return(4),
         ];
         let mut num_regs = 5u32;
-        let out = pass_concat_merge(insns, 2, &mut num_regs);
+        let out = pass_concat_merge(insns, 2, &mut num_regs, &str_consts());
 
-        // Should have: 3 Moves + 1 Concat + 1 Return = 5 instructions.
-        assert_eq!(out.len(), 5, "3 Moves + Concat + Return");
-        // The first three instructions should be Moves loading the operands.
-        assert!(matches!(out[0], Insn::Move(_, 0)), "Move(base+0, r0)");
-        assert!(matches!(out[1], Insn::Move(_, 1)), "Move(base+1, r1)");
-        assert!(matches!(out[2], Insn::Move(_, 3)), "Move(base+2, r2)");
-        // The fourth instruction should be Concat with count=3.
+        // 3 LoadConst + 3 Moves + 1 Concat + 1 Return = 8 instructions.
+        assert_eq!(out.len(), 8, "3 LoadConst + 3 Moves + Concat + Return");
+        // The chain BinOps are replaced by Moves into the operand window.
+        assert!(matches!(out[3], Insn::Move(_, 0)), "Move(base+0, r0)");
+        assert!(matches!(out[4], Insn::Move(_, 1)), "Move(base+1, r1)");
+        assert!(matches!(out[5], Insn::Move(_, 3)), "Move(base+2, r2)");
         assert!(
             matches!(
-                out[3],
+                out[6],
                 Insn::Concat {
                     dst: 4,
                     count: 3,
@@ -12479,14 +12595,45 @@ elif x == 2:
     }
 
     #[test]
+    fn concat_merge_skips_non_string_chain() {
+        use crate::ast::BinaryOp;
+        // Issue #2383: an int chain (no `str` evidence on the leading operand)
+        // must NOT be fused — the operand-window Moves are pure overhead.
+        let insns = vec![
+            Insn::BinOp(2, 0, BinaryOp::Add, 1),
+            Insn::BinOp(4, 2, BinaryOp::Add, 3),
+            Insn::Return(4),
+        ];
+        let mut num_regs = 5u32;
+        // Empty const pool → no register is provably a string.
+        let out = pass_concat_merge(insns, 2, &mut num_regs, &[]);
+        assert_eq!(out.len(), 3, "int chain left as plain BinOps");
+        assert!(matches!(out[0], Insn::BinOp(..)));
+        assert!(matches!(out[1], Insn::BinOp(..)));
+        assert!(
+            !out.iter().any(|i| matches!(i, Insn::Concat { .. })),
+            "no Concat for a non-string chain"
+        );
+        assert_eq!(num_regs, 5, "num_regs unchanged");
+    }
+
+    #[test]
     fn concat_merge_requires_two_binops_minimum() {
         use crate::ast::BinaryOp;
         // Single BinOp(Add): only 2 operands, should NOT be merged.
-        let insns = vec![Insn::BinOp(2, 0, BinaryOp::Add, 1), Insn::Return(2)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::LoadConst(1, 0),
+            Insn::BinOp(2, 0, BinaryOp::Add, 1),
+            Insn::Return(2),
+        ];
         let mut num_regs = 3u32;
-        let out = pass_concat_merge(insns, 2, &mut num_regs);
-        assert_eq!(out.len(), 2, "no merge for 2-operand chain");
-        assert!(matches!(out[0], Insn::BinOp(..)), "BinOp unchanged");
+        let out = pass_concat_merge(insns, 2, &mut num_regs, &str_consts());
+        assert_eq!(out.len(), 4, "no merge for 2-operand chain");
+        assert!(
+            !out.iter().any(|i| matches!(i, Insn::Concat { .. })),
+            "BinOp unchanged"
+        );
         assert_eq!(num_regs, 3, "num_regs unchanged");
     }
 
@@ -12495,15 +12642,21 @@ elif x == 2:
         use crate::ast::BinaryOp;
         // t1 is read twice (by BinOp and by Return), so it cannot be removed.
         let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::LoadConst(1, 0),
+            Insn::LoadConst(3, 0),
             Insn::BinOp(2, 0, BinaryOp::Add, 1),
             Insn::BinOp(4, 2, BinaryOp::Add, 3), // reads t1=2
             Insn::Return(2),                     // also reads t1=2 → use_count=2
         ];
         let mut num_regs = 5u32;
-        let out = pass_concat_merge(insns, 2, &mut num_regs);
+        let out = pass_concat_merge(insns, 2, &mut num_regs, &str_consts());
         // Must NOT merge because t1 has use_count=2.
-        assert_eq!(out.len(), 3, "no merge when intermediate is multi-use");
-        assert!(matches!(out[0], Insn::BinOp(..)));
+        assert_eq!(out.len(), 6, "no merge when intermediate is multi-use");
+        assert!(
+            !out.iter().any(|i| matches!(i, Insn::Concat { .. })),
+            "no fusion"
+        );
         assert_eq!(num_regs, 5, "num_regs unchanged");
     }
 
@@ -12517,31 +12670,39 @@ elif x == 2:
         //   i=3: Jump(-3)                  ← target = 3+1+(-3) = 1
         //
         // Because i=1 is a BB start the chain [0,1] straddles a BB boundary
-        // and must NOT be fused.
+        // and must NOT be fused.  Operands are seeded as strings so only the
+        // BB-boundary guard (not the string gate) can prevent the merge.
         let insns = vec![
-            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0
-            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1 ← BB start
-            Insn::Return(4),                     // i=2
-            Insn::Jump(-3),                      // i=3: target = 1
+            Insn::LoadConst(0, 0),               // r0 = "" (str)
+            Insn::LoadConst(1, 0),               // r1 = "" (str)
+            Insn::LoadConst(3, 0),               // r2 = "" (str)
+            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=3
+            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=4 ← BB start
+            Insn::Return(4),                     // i=5
+            Insn::Jump(-3),                      // i=6: target = 6+1+(-3) = 4
         ];
         let mut num_regs = 5u32;
-        let out = pass_concat_merge(insns, 2, &mut num_regs);
-        assert_eq!(out.len(), 4, "no merge across BB boundary");
-        assert!(matches!(out[0], Insn::BinOp(..)));
+        let out = pass_concat_merge(insns, 2, &mut num_regs, &str_consts());
+        assert_eq!(out.len(), 7, "no merge across BB boundary");
+        assert!(
+            !out.iter().any(|i| matches!(i, Insn::Concat { .. })),
+            "no fusion across a BB boundary"
+        );
         assert_eq!(num_regs, 5, "num_regs unchanged");
     }
 
     #[test]
-    fn concat_merge_on_compiled_four_string_add() {
-        // Full pipeline: compile `def f(a,b,c,d): return a+b+c+d` and verify
-        // the optimized code contains Concat but no chain of 3+ BinOp(Add).
+    fn concat_merge_skips_compiled_opaque_param_add() {
+        // Function parameters have no static type evidence, so the gate
+        // (issue #2383) declines to fuse — the chain keeps its plain BinOp form
+        // rather than paying for an operand-window Move per operand.
         let code = compile_fn("def f(a, b, c, d):\n    return a + b + c + d\n");
         let optimized = optimize(code);
         let inner = &optimized.fn_protos[0].code;
-        let has_concat = inner.insns.iter().any(|i| matches!(i, Insn::Concat { .. }));
         assert!(
-            has_concat,
-            "optimizer should fuse a+b+c+d into a single Concat instruction"
+            !inner.insns.iter().any(|i| matches!(i, Insn::Concat { .. })),
+            "opaque-param chain must NOT be fused; insns: {:?}",
+            inner.insns
         );
     }
 
