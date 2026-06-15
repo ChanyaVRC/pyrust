@@ -5092,6 +5092,59 @@ pub fn slot_wrapper_dunder(name: &str) -> Option<(&str, &str)> {
     if !(dunder.starts_with("__") && dunder.ends_with("__") && dunder.len() > 4) {
         return None;
     }
+    // Issue #2433: the object-inherited slot dunders.  CPython exposes these as
+    // `wrapper_descriptor`s owned by `object` (`<slot wrapper '__init__' of
+    // 'object' objects>`).  `__reduce__`/`__reduce_ex__`/`__sizeof__`/`__dir__`/
+    // `__format__` are NOT here — they are `method_descriptor`s, handled by
+    // `method_descriptor_name`.  `__new__`/`__init_subclass__`/`__subclasshook__`
+    // are static/class builtins (`builtin_function_or_method`) and excluded.
+    if type_name == "object" {
+        return matches!(
+            dunder,
+            "__delattr__"
+                | "__setattr__"
+                | "__getattribute__"
+                | "__init__"
+                | "__str__"
+                | "__hash__"
+                | "__repr__"
+                | "__eq__"
+                | "__ne__"
+                | "__lt__"
+                | "__le__"
+                | "__gt__"
+                | "__ge__"
+        )
+        .then_some((type_name, dunder));
+    }
+    // Issue #2433: type-owned `__hash__`/`__repr__`/`__str__` (synthesised as
+    // `BuiltinFunction("str.__hash__")` etc. by `primitive_owned_object_dunder`)
+    // are `wrapper_descriptor`s (`<slot wrapper '__repr__' of 'str' objects>`).
+    // `__format__` is a `method_descriptor` (handled by `method_descriptor_name`).
+    if matches!(dunder, "__hash__" | "__repr__" | "__str__")
+        && matches!(
+            type_name,
+            "int"
+                | "float"
+                | "complex"
+                | "str"
+                | "bytes"
+                | "tuple"
+                | "frozenset"
+                | "list"
+                | "dict"
+                | "set"
+                | "bool"
+        )
+    {
+        return Some((type_name, dunder));
+    }
+    // Issue #2433: `int.__bool__`/`__float__`/`__int__` are int-owned slot
+    // wrappers in CPython.  (`float.__bool__`/etc. are protocol-only here and
+    // not exposed unbound, so only `int` reaches this row.)
+    if type_name == "int" && matches!(dunder, "__bool__" | "__float__" | "__int__") {
+        return Some((type_name, dunder));
+    }
     // CPython models these container slots as `method_descriptor`, not
     // `wrapper_descriptor` — keep the generic presentation for them.
     // Issue #2399: `range.__reversed__` is a method_descriptor too.
@@ -5217,12 +5270,32 @@ pub fn method_descriptor_name(name: &str) -> Option<(&str, &str)> {
     if (type_name, method) == ("range", "__reversed__") {
         return Some((type_name, method));
     }
+    // Issue #2433: `object.__reduce__`/`__reduce_ex__`/`__sizeof__`/`__dir__`/
+    // `__format__` are the object-inherited *method_descriptor*s (`<method
+    // '__reduce__' of 'object' objects>`).  `object` is not in
+    // `PRIMITIVE_TYPE_NAMES`, so handle it before that guard.  The remaining
+    // `object.*` dunders are slot wrappers (see `slot_wrapper_dunder`) or static
+    // builtins (`__new__`/`__init_subclass__`/`__subclasshook__`).
+    if type_name == "object" {
+        return matches!(
+            method,
+            "__reduce__" | "__reduce_ex__" | "__sizeof__" | "__dir__" | "__format__"
+        )
+        .then_some((type_name, method));
+    }
     if !PRIMITIVE_TYPE_NAMES.contains(&type_name) {
         return None;
     }
     // Slot-wrapper dunders are `wrapper_descriptor`, not method_descriptor.
     if slot_wrapper_dunder(name).is_some() {
         return None;
+    }
+    // Issue #2433: type-owned `__format__` (`str`/`int`/`float`, synthesised by
+    // `primitive_owned_object_dunder`) is a `method_descriptor`
+    // (`<method '__format__' of 'str' objects>`), unlike the sibling
+    // `__hash__`/`__repr__`/`__str__` slot wrappers handled above.
+    if method == "__format__" {
+        return Some((type_name, method));
     }
     let is_dunder = method.starts_with("__") && method.ends_with("__") && method.len() > 4;
     if is_dunder {

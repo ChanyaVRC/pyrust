@@ -2607,7 +2607,8 @@ impl Interpreter {
         //     and `sq_ass_item` (`__setitem__`) carry a leading space.
         let want: usize = match method {
             "__len__" | "__neg__" | "__pos__" | "__abs__" | "__invert__" | "__hash__"
-            | "__str__" | "__repr__" | "__bool__" | "__reversed__" | "__iter__" => 0,
+            | "__str__" | "__repr__" | "__bool__" | "__reversed__" | "__iter__"
+            | "__float__" | "__int__" => 0,
             "__setitem__" => 2,
             _ => 1,
         };
@@ -2659,6 +2660,18 @@ impl Interpreter {
             "__bool__" => {
                 let b = self.truthy_value(&receiver)?;
                 return Ok(Value::bool_(b));
+            }
+            // Issue #2433: `int.__float__`/`int.__int__` (exposed unbound and
+            // bound on `int`).  CPython exposes these as int-owned slot wrappers;
+            // `(5).__float__()` → `5.0`, `(5).__int__()` → `5`.  Route through
+            // the `float`/`int` constructors so int-subclass receivers coerce
+            // exactly as the builtins do.
+            "__float__" | "__int__" => {
+                let ctor = if method == "__float__" { "float" } else { "int" };
+                let arg = ExpandedCallArg { name: None, value: receiver };
+                let dispatch = crate::builtin_registry::lookup(ctor)
+                    .unwrap_or_else(|| panic!("{ctor} must be in the registry"));
+                return dispatch(self, &[arg]);
             }
             // #2093: `dict.__reversed__()` yields keys in reverse insertion
             // order.  Routes through the `reversed` builtin, which handles the
@@ -7419,7 +7432,11 @@ pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__lshift__", PA), ("__rshift__", PA),
             ("__eq__", PA), ("__ne__", PA), ("__lt__", PA), ("__le__", PA),
             ("__gt__", PA), ("__ge__", PA),
-            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
+            ("__hash__", P), ("__str__", P), ("__repr__", P),
+            // Issue #2433: `int.__bool__`/`__float__`/`__int__` are int-owned slot
+            // wrappers in CPython (`<slot wrapper '__bool__' of 'int' objects>`);
+            // expose them unbound so `int.__bool__`/`(5).__float__()` resolve.
+            ("__bool__", PA), ("__float__", PA), ("__int__", PA),
             ("__divmod__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
             ("__invert__", P),
             ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
