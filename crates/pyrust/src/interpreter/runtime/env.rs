@@ -3365,7 +3365,12 @@ fn wrap_subclass_unbound_method(
     //   move_to_end.
     // Methods OrderedDict merely inherits (`get`, `__contains__`, …) keep
     // objclass `dict` and accept any dict receiver, so they are excluded.
-    if !class_chain_contains_name(class, "OrderedDict") {
+    //
+    // Match the *real* `collections.OrderedDict` (name + module), not any class
+    // merely named `OrderedDict`: a user `class OrderedDict(dict)` is a plain
+    // Python subclass whose `clear` stays `dict.clear`/`function` in CPython and
+    // must NOT be wrapped.
+    if ordered_dict_owner(class).is_none() {
         return value;
     }
     let owns = matches!(
@@ -3386,11 +3391,12 @@ fn wrap_subclass_unbound_method(
     }
     // Determine the *owning* class for the descriptor error wording.  CPython
     // attributes the descriptor to the type that owns it — e.g. `OD2.clear`
-    // reports `collections.OrderedDict`, not `OD2`.  Walk the base chain and
-    // pick the deepest `OrderedDict`-derived layer (the `OrderedDict` class
-    // itself, unless a subclass re-owns the method — which pyrust does not model
-    // for these inherited sentinels).
-    let owner = ordered_dict_owner(class);
+    // reports `collections.OrderedDict`, not `OD2`.  The owner was already
+    // located by the guard above (the real `collections.OrderedDict` layer).
+    let owner = match ordered_dict_owner(class) {
+        Some(o) => o,
+        None => return value,
+    };
     pyrust_builtins::unbound_method_descriptor::unbound_method_descriptor(
         Value::py_class(owner),
         name.to_string(),
@@ -3398,23 +3404,40 @@ fn wrap_subclass_unbound_method(
     )
 }
 
-/// Walk `class`'s primary base chain and return the `OrderedDict` class itself
-/// — the descriptor-owning layer reported in CPython's `descriptor '<m>' for
-/// '<owner>' objects ...` wording.  For `OD2(OrderedDict)` and `OrderedDict`
-/// alike this is `OrderedDict`.  Falls back to `class` if `OrderedDict` is not
-/// found on the primary line (should not happen given the caller's guard).
-fn ordered_dict_owner(class: &Rc<RefCell<PyClass>>) -> Rc<RefCell<PyClass>> {
-    let mut cur = Rc::clone(class);
-    loop {
-        if cur.borrow().name == "OrderedDict" {
-            return cur;
-        }
-        let next = cur.borrow().base.clone();
-        match next {
-            Some(b) => cur = b,
-            None => return Rc::clone(class),
-        }
+/// Walk `class`'s full base graph (primary `base` *and* `extra_bases`, mirroring
+/// [`class_chain_contains_name`]) and return the `collections.OrderedDict` class
+/// itself — the descriptor-owning layer reported in CPython's `descriptor '<m>'
+/// for '<owner>' objects ...` wording.  For `OD2(OrderedDict)`,
+/// `OD3(Mixin, OrderedDict)`, and `OrderedDict` alike this is `OrderedDict`, so
+/// the wording stays `collections.OrderedDict` regardless of where on the base
+/// graph the `OrderedDict` layer sits.
+///
+/// Matches on name **and** `__module__ == "collections"` so a user `class
+/// OrderedDict(dict)` (a plain Python subclass that CPython does *not* model as
+/// a C type re-owning inherited descriptors) is not mistaken for the stdlib
+/// type.  Returns `None` when no real `collections.OrderedDict` layer is found.
+fn ordered_dict_owner(class: &Rc<RefCell<PyClass>>) -> Option<Rc<RefCell<PyClass>>> {
+    fn is_collections_ordered_dict(class: &Rc<RefCell<PyClass>>) -> bool {
+        let borrowed = class.borrow();
+        borrowed.name == "OrderedDict"
+            && matches!(
+                borrowed.attrs.get("__module__").map(|m| m.kind()),
+                Some(ValueKind::Str(s)) if &*s == "collections"
+            )
     }
+    fn find(class: &Rc<RefCell<PyClass>>) -> Option<Rc<RefCell<PyClass>>> {
+        if is_collections_ordered_dict(class) {
+            return Some(Rc::clone(class));
+        }
+        let borrowed = class.borrow();
+        if let Some(base) = &borrowed.base
+            && let Some(found) = find(base)
+        {
+            return Some(found);
+        }
+        borrowed.extra_bases.iter().find_map(find)
+    }
+    find(class)
 }
 
 /// CPython's `tp_name`-style display name for a class used in descriptor error

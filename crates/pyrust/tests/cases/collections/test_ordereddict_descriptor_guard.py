@@ -47,6 +47,20 @@ show("OrderedDict.move_to_end(plain)",
 show("OD2.clear(plain)", lambda: OD2.clear({1: 2}))
 show("OD2.move_to_end(plain)", lambda: OD2.move_to_end({1: 2}, 1))
 
+# Multiple inheritance: owner is still collections.OrderedDict regardless of
+# where OrderedDict sits on the base graph (#2479 review).
+class Mixin:
+    pass
+
+
+class OD3(Mixin, OrderedDict):
+    pass
+
+
+show("OD3.clear(plain)", lambda: OD3.clear({1: 2}))
+print("OD3.clear objclass:", OD3.clear.__objclass__.__name__)
+print("OD3.clear qualname:", OD3.clear.__qualname__)
+
 # Empty call: "needs an argument" wording.
 show("OrderedDict.clear()", lambda: OrderedDict.clear())
 show("OrderedDict.move_to_end()", lambda: OrderedDict.move_to_end())
@@ -72,6 +86,20 @@ show("dict.clear(plain)", lambda: (dict.clear({1: 2}), "ok")[1])
 print("MyDict.shout type:", type(MyDict.shout).__name__)
 show("MyDict.shout(plain)", lambda: MyDict.shout({1: 2}))
 show("MyDict.clear(plain)", lambda: (MyDict.clear({1: 2}), "ok")[1])
+
+# --- a user class merely NAMED OrderedDict does NOT enforce (#2479 review) ---
+# Only the real collections.OrderedDict re-owns inherited descriptors; a plain
+# Python subclass that happens to share the name keeps its own `def`.
+def _user_named_ordereddict():
+    class OrderedDict(dict):  # noqa: F811  (shadows the import on purpose)
+        def clear(self):
+            return "custom clear"
+
+    print("user OrderedDict.clear type:", type(OrderedDict.clear).__name__)
+    show("user OrderedDict.clear(plain)", lambda: OrderedDict.clear({1: 2}))
+
+
+_user_named_ordereddict()
 
 # --- descriptor introspection ---
 print("clear type:", type(OrderedDict.clear).__name__)
