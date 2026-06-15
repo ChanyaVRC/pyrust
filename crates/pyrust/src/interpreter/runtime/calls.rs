@@ -6903,7 +6903,7 @@ fn regroup_with_zero_pad(
     let mut emitted = 0usize;
     let sep_byte = sep as u8;
     let push_digit = |out_rev: &mut Vec<u8>, emitted: &mut usize, d: u8| {
-        if *emitted > 0 && *emitted % group_size == 0 {
+        if *emitted > 0 && (*emitted).is_multiple_of(group_size) {
             out_rev.push(sep_byte);
         }
         out_rev.push(d);
