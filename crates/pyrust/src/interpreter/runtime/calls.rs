@@ -3029,12 +3029,12 @@ impl Interpreter {
     /// whereas `round(5, None)` returns `5`.  `round` swallows an explicit
     /// `None` (treats it as "omitted"), so reject it here before delegating.
     fn int_round_dunder(&mut self, recv: &Value, ndigits: Option<Value>) -> Result<Value> {
-        if let Some(n) = &ndigits {
-            if matches!(n.kind(), ValueKind::None) {
-                return Err(pyrust_core::type_err!(
-                    "'NoneType' object cannot be interpreted as an integer"
-                ));
-            }
+        if let Some(n) = &ndigits
+            && matches!(n.kind(), ValueKind::None)
+        {
+            return Err(pyrust_core::type_err!(
+                "'NoneType' object cannot be interpreted as an integer"
+            ));
         }
         let dispatch =
             crate::builtin_registry::lookup("round").expect("round must be in the registry");
