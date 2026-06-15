@@ -1708,6 +1708,24 @@ impl Interpreter {
                                             &backing, method, ordered,
                                         );
                                     }
+                                    // issue #2465: record an OrderedDict
+                                    // `clear()` (with its pre-clear size) keyed
+                                    // by the backing dict's identity, so a guard
+                                    // hit during iteration reports "changed
+                                    // size" rather than "mutated".  Only the
+                                    // OrderedDict subclass tracks this; every
+                                    // other dict subclass keeps plain-dict
+                                    // wording.
+                                    if method == "clear"
+                                        && class_is_named_ordered_dict(&class)
+                                        && let Some(id) = backing.value_id()
+                                    {
+                                        let prelen =
+                                            backing.dict_with(|d| d.len()).unwrap_or(0);
+                                        crate::interpreter::note_ordered_dict_clear(
+                                            id, prelen,
+                                        );
+                                    }
                                     self.call_dict_method(method, backing, args_vec, &kw)
                                 }
                                 BkKind::List => {
@@ -9788,6 +9806,17 @@ impl Interpreter {
                 // `list` snapshot `call_dict_method` falls through to.
                 if pyrust_builtins::dict::needs_rc(prim_method) {
                     return Self::dict_view_for_backing(&backing, prim_method, ordered);
+                }
+                // issue #2465: record an OrderedDict `clear()` so a guard hit
+                // during iteration reports "changed size" not "mutated".  This
+                // is the cached-dispatch counterpart of the slow `BkKind::Dict`
+                // hook; both funnel every OrderedDict method through here.
+                if prim_method == "clear"
+                    && ordered
+                    && let Some(id) = backing.value_id()
+                {
+                    let prelen = backing.dict_with(|d| d.len()).unwrap_or(0);
+                    crate::interpreter::note_ordered_dict_clear(id, prelen);
                 }
                 let empty_kw = PyDict::default();
                 self.call_dict_method(prim_method, backing, args, &empty_kw)
