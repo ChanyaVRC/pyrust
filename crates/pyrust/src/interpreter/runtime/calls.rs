@@ -689,6 +689,11 @@ impl Interpreter {
                 let is_method_descriptor_dunder = matches!(
                     (type_name, method),
                     ("dict" | "set" | "frozenset", "__contains__")
+                        // Issue #2297: `int.__round__`/`__trunc__`/`__floor__`/
+                        // `__ceil__` are method_descriptors (the "doesn't apply
+                        // to" receiver-guard wording); `int.__index__` stays a
+                        // slot wrapper.
+                        | ("int", "__round__" | "__trunc__" | "__floor__" | "__ceil__")
                 );
                 let is_dunder =
                     method.starts_with("__") && method.ends_with("__") && !is_method_descriptor_dunder;
@@ -1363,7 +1368,18 @@ impl Interpreter {
             if !kw.is_empty() {
                 let type_name = pyrust_core::builtin_type_name(&receiver);
                 return Err(if is_named_protocol_wrapper(method, &type_name) {
-                    pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                    // Issue #2297: `int.__round__`/`__trunc__`/`__floor__`/
+                    // `__ceil__` are int-owned method_descriptors; a `bool`
+                    // receiver still reports the owning `int` in the wording
+                    // (`int.__round__() takes no keyword arguments`).
+                    let owner = if type_name == "bool"
+                        && matches!(method, "__round__" | "__trunc__" | "__floor__" | "__ceil__")
+                    {
+                        "int"
+                    } else {
+                        &type_name
+                    };
+                    pyrust_core::type_err!("{owner}.{method}() takes no keyword arguments")
                 } else {
                     pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
                 });
@@ -2630,6 +2646,20 @@ impl Interpreter {
         mut args: Vec<Value>,
     ) -> Result<Value> {
         let type_name = pyrust_core::builtin_type_name(&receiver);
+        // Issue #2297: `int.__round__(ndigits=None)` accepts 0 or 1 positional
+        // argument — handle its arity separately from the fixed-arity slots below
+        // (CPython's C-clinic wording: `__round__ expected at most 1 argument,
+        // got N`).  Routed before the fixed `want` check so the optional second
+        // operand does not trip the generic "expected 1 argument" path.
+        if method == "__round__" {
+            if args.len() > 1 {
+                return Err(pyrust_core::type_err!(
+                    "__round__ expected at most 1 argument, got {}",
+                    args.len()
+                ));
+            }
+            return self.int_round_dunder(&receiver, args.pop());
+        }
         // Arity check up front so the error matches CPython 3.12's slot-wrapper
         // messages rather than a downstream operator error.  CPython's wording
         // is slot-dependent (verified against `python3.12`):
@@ -2642,7 +2672,10 @@ impl Interpreter {
         let want: usize = match method {
             "__len__" | "__neg__" | "__pos__" | "__abs__" | "__invert__" | "__hash__"
             | "__str__" | "__repr__" | "__bool__" | "__reversed__" | "__iter__"
-            | "__float__" | "__int__" => 0,
+            | "__float__" | "__int__"
+            // Issue #2297: `int.__index__`/`__trunc__`/`__floor__`/`__ceil__` are
+            // zero-arg slot wrappers.
+            | "__index__" | "__trunc__" | "__floor__" | "__ceil__" => 0,
             "__setitem__" => 2,
             _ => 1,
         };
@@ -2656,6 +2689,18 @@ impl Interpreter {
             if method == "__reversed__" {
                 return Err(pyrust_core::type_err!(
                     "{type_name}.__reversed__() takes no arguments ({} given)",
+                    args.len()
+                ));
+            }
+            // Issue #2297: `int.__trunc__`/`__floor__`/`__ceil__` are named
+            // no-arg method-wrappers in CPython 3.12 — the wording uses the
+            // owning type `int` even for a `bool` receiver
+            // (`int.__trunc__() takes no arguments (N given)`).  `__index__`
+            // (just below, anonymous slot) keeps the "expected 0 arguments,
+            // got N" form instead.
+            if matches!(method, "__trunc__" | "__floor__" | "__ceil__") {
+                return Err(pyrust_core::type_err!(
+                    "int.{method}() takes no arguments ({} given)",
                     args.len()
                 ));
             }
@@ -2705,6 +2750,18 @@ impl Interpreter {
                 let arg = ExpandedCallArg { name: None, value: receiver };
                 let dispatch = crate::builtin_registry::lookup(ctor)
                     .unwrap_or_else(|| panic!("{ctor} must be in the registry"));
+                return dispatch(self, &[arg]);
+            }
+            // Issue #2297: `int.__index__`/`__trunc__`/`__floor__`/`__ceil__`
+            // all return the integer value of the receiver unchanged
+            // (`(5).__trunc__()` → `5`, `(7).__floor__()` → `7`).  Like CPython,
+            // a `bool` receiver normalises to plain `int`
+            // (`True.__index__()` → `1`, not `True`); route through the `int`
+            // constructor, which preserves `BigInt` and performs that coercion.
+            "__index__" | "__trunc__" | "__floor__" | "__ceil__" => {
+                let arg = ExpandedCallArg { name: None, value: receiver };
+                let dispatch = crate::builtin_registry::lookup("int")
+                    .expect("int must be in the registry");
                 return dispatch(self, &[arg]);
             }
             // #2093: `dict.__reversed__()` yields keys in reverse insertion
@@ -2974,6 +3031,34 @@ impl Interpreter {
             _ => crate::ast::BinaryOp::Ge,
         };
         self.eval_binary(recv.clone(), op, other.clone())
+    }
+
+    /// Issue #2297: `int.__round__([ndigits])`.  CPython's `int.__round__`
+    /// always returns an `int` (`(125).__round__(-1)` → `120`, banker's
+    /// rounding); omitted `ndigits` returns the value unchanged.  Routes
+    /// through the `round` registry builtin, which already implements the int +
+    /// `ndigits` semantics (negative `ndigits` rounding, `BigInt` results).
+    ///
+    /// Unlike the `round()` builtin, the `int.__round__` *slot* index-coerces
+    /// `ndigits` with no `None` special-case: `(5).__round__(None)` raises
+    /// `TypeError: 'NoneType' object cannot be interpreted as an integer`,
+    /// whereas `round(5, None)` returns `5`.  `round` swallows an explicit
+    /// `None` (treats it as "omitted"), so reject it here before delegating.
+    fn int_round_dunder(&mut self, recv: &Value, ndigits: Option<Value>) -> Result<Value> {
+        if let Some(n) = &ndigits
+            && matches!(n.kind(), ValueKind::None)
+        {
+            return Err(pyrust_core::type_err!(
+                "'NoneType' object cannot be interpreted as an integer"
+            ));
+        }
+        let dispatch =
+            crate::builtin_registry::lookup("round").expect("round must be in the registry");
+        let mut call_args = vec![ExpandedCallArg { name: None, value: recv.clone() }];
+        if let Some(n) = ndigits {
+            call_args.push(ExpandedCallArg { name: None, value: n });
+        }
+        dispatch(self, &call_args)
     }
 
     /// Dispatch a scalar-numeric forward dunder (int/float/complex/bool) accessed
@@ -7365,6 +7450,10 @@ pub(crate) fn is_named_protocol_wrapper(method: &str, type_name: &str) -> bool {
         ("__getitem__", "list" | "dict")
             | ("__contains__", "dict" | "set" | "frozenset")
             | ("__reversed__", "list" | "dict")
+            // Issue #2297: `int.__round__`/`__trunc__`/`__floor__`/`__ceil__` are
+            // `method_descriptor`s (named keyword-rejection wording).
+            // `int.__index__` stays an anonymous slot wrapper.
+            | ("__round__" | "__trunc__" | "__floor__" | "__ceil__", "int" | "bool")
     )
 }
 
@@ -7473,6 +7562,13 @@ pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             ("__bool__", PA), ("__float__", PA), ("__int__", PA),
             ("__divmod__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
             ("__invert__", P),
+            // Issue #2297: `int.__round__`/`__index__`/`__trunc__`/`__floor__`/
+            // `__ceil__` are int-owned descriptors (`__index__` a slot wrapper,
+            // the rest method_descriptors) — exposed unbound so `int.__round__`
+            // resolves, and dispatchable bound so `(5).__round__()`/
+            // `(5).__floor__()` compute.
+            ("__round__", PA), ("__index__", PA), ("__trunc__", PA),
+            ("__floor__", PA), ("__ceil__", PA),
             ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
             ("__rtruediv__", P), ("__rfloordiv__", P), ("__rmod__", P),
             ("__rpow__", P), ("__rdivmod__", P),
