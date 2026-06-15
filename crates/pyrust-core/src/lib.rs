@@ -5306,9 +5306,9 @@ pub fn method_descriptor_name(name: &str) -> Option<(&str, &str)> {
     }
     let is_dunder = method.starts_with("__") && method.ends_with("__") && method.len() > 4;
     if is_dunder {
-        // The method_descriptor container dunders, plus the int numeric
-        // method_descriptors (issue #2297): `int.__round__`/`__trunc__`/
-        // `__floor__`/`__ceil__` are `method_descriptor`s in CPython
+        // The method_descriptor container dunders, plus the int/float numeric
+        // method_descriptors (issue #2297/#2481): `int`/`float`.`__round__`/
+        // `__trunc__`/`__floor__`/`__ceil__` are `method_descriptor`s in CPython
         // (`<method '__round__' of 'int' objects>`), unlike the sibling
         // `int.__index__` slot wrapper (handled by `slot_wrapper_dunder`).
         if matches!(
@@ -5316,7 +5316,10 @@ pub fn method_descriptor_name(name: &str) -> Option<(&str, &str)> {
             ("__getitem__", "list" | "dict")
                 | ("__contains__", "dict" | "set" | "frozenset")
                 | ("__reversed__", "list" | "dict")
-                | ("__round__" | "__trunc__" | "__floor__" | "__ceil__", "int")
+                | (
+                    "__round__" | "__trunc__" | "__floor__" | "__ceil__",
+                    "int" | "float"
+                )
         ) {
             return Some((type_name, method));
         }
