@@ -337,10 +337,10 @@ impl Interpreter {
                     }
                 };
                 let mut positional: Vec<Value> = Vec::new();
-                let mut keyword: Vec<(String, Value)> = Vec::new();
+                let mut keyword: Vec<(&str, Value)> = Vec::new();
                 for a in &args[1..] {
                     match &a.name {
-                        Some(n) => keyword.push((n.clone(), a.value.clone())),
+                        Some(n) => keyword.push((n.as_str(), a.value.clone())),
                         None => positional.push(a.value.clone()),
                     }
                 }
@@ -1421,11 +1421,14 @@ impl Interpreter {
                             ));
                         }
                     };
-                    let keyword: Vec<(String, Value)> = kw
-                        .into_iter()
+                    // Borrow each kwarg name as `&str` from the owned `kw` dict
+                    // (which lives for this call) rather than re-allocating a
+                    // `String` per key — the keyword-field hot path (#2375).
+                    let keyword: Vec<(&str, Value)> = kw
+                        .iter()
                         .filter_map(|(k, v)| {
                             if let PyKey::Str(name) = k {
-                                Some((name.as_str().unwrap_or("").to_owned(), v))
+                                Some((name.as_str().unwrap_or(""), v.clone()))
                             } else {
                                 None
                             }
@@ -1873,15 +1876,14 @@ impl Interpreter {
                                                 Rc::clone(inst),
                                             ));
                                         }
-                                        let keyword: Vec<(String, Value)> = kw
-                                            .into_iter()
+                                        let keyword: Vec<(&str, Value)> = kw
+                                            .iter()
                                             .filter_map(|(k, v)| {
                                                 if let PyKey::Str(name) = k {
                                                     Some((
                                                         name.as_str()
-                                                            .unwrap_or("")
-                                                            .to_owned(),
-                                                        v,
+                                                            .unwrap_or(""),
+                                                        v.clone(),
                                                     ))
                                                 } else {
                                                     None
@@ -7947,7 +7949,7 @@ fn apply_field_accessors(
 fn expand_format_spec_positional(
     spec: &str,
     positional: &[Value],
-    keyword: &[(String, Value)],
+    keyword: &[(&str, Value)],
     auto_idx: &mut Option<usize>,
     saw_manual: &mut bool,
 ) -> Result<String> {
@@ -8008,7 +8010,7 @@ fn expand_format_spec_positional(
                 } else {
                     keyword
                         .iter()
-                        .find(|(k, _)| k == inner)
+                        .find(|(k, _)| *k == inner)
                         .map(|(_, v)| v.clone())
                         .ok_or_else(|| PyError::key_error(Value::string(inner)))?
                 };
@@ -9717,10 +9719,10 @@ impl Interpreter {
     ) -> Result<Value> {
         match method {
             "format" => {
-                let mut keyword: Vec<(String, Value)> = Vec::with_capacity(kw.len());
+                let mut keyword: Vec<(&str, Value)> = Vec::with_capacity(kw.len());
                 for (k, v) in kw {
                     if let PyKey::Str(name) = k {
-                        keyword.push((name.as_str().unwrap_or("").to_owned(), v.clone()));
+                        keyword.push((name.as_str().unwrap_or(""), v.clone()));
                     }
                 }
                 let template = receiver
