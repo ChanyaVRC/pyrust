@@ -1524,19 +1524,60 @@ type FStringExpr = (
     usize,
 );
 
+/// Lex the conversion segment after `!` in an f-string replacement field the way
+/// CPython does: if `chars[pos]` is a NAME-start char (`is_alphabetic()` covers
+/// ASCII + Unicode XID_Start, plus `_`), consume the whole NAME (name-start char
+/// followed by name-continue chars) and return it; otherwise return an empty
+/// string (the next char isn't a valid conversion at all, e.g. `5`/`.`).
+///
+/// The returned segment is then validated by `fstring_conversion_error` /
+/// the caller, so multi-char segments like `sr` produce CPython's quoted-segment
+/// message and non-name-start chars produce the no-detail "invalid conversion
+/// character" form.
+fn lex_conversion_segment(chars: &[char], pos: usize) -> String {
+    match chars.get(pos).copied() {
+        Some(c) if c.is_alphabetic() || c == '_' => {
+            let mut segment = String::new();
+            segment.push(c);
+            let mut i = pos + 1;
+            while let Some(&c) = chars.get(i) {
+                if c.is_alphabetic() || c.is_ascii_digit() || c == '_' {
+                    segment.push(c);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            segment
+        }
+        _ => String::new(),
+    }
+}
+
 /// Build the `SyntaxError` message CPython 3.12 raises for a bad conversion
-/// character after `!` in an f-string replacement field.  CPython's PEG parser
-/// distinguishes two cases:
-///   * the char terminates the field (`}`, `:`) or is whitespace → there is no
-///     conversion char at all: `f-string: missing conversion character`
-///   * any other char that isn't `s`/`r`/`a` → it is present but invalid:
-///     `f-string: invalid conversion character 'X': expected 's', 'r', or 'a'`
-fn fstring_conversion_error(conv: char) -> PyError {
-    if conv == '}' || conv == ':' || conv.is_whitespace() {
-        PyError::Lex("f-string: missing conversion character".to_string())
+/// segment after `!` in an f-string replacement field.  CPython's PEG parser
+/// distinguishes three cases:
+///   * `!` is followed by a field terminator (`}`, `:`) or whitespace → there is
+///     no conversion char at all: `f-string: missing conversion character`
+///   * the next char isn't a NAME-start char (so the NAME-lex captured nothing,
+///     e.g. `5`/`.`) → `f-string: invalid conversion character` (no quoted char)
+///   * a non-empty NAME segment that isn't `s`/`r`/`a` (e.g. `z`, `sr`, `ra`) →
+///     `f-string: invalid conversion character '<segment>': expected 's', 'r', or 'a'`
+fn fstring_conversion_error(chars: &[char], pos: usize, segment: &str) -> PyError {
+    if segment.is_empty() {
+        match chars.get(pos).copied() {
+            Some('}') | Some(':') => {
+                PyError::Lex("f-string: missing conversion character".to_string())
+            }
+            Some(c) if c.is_whitespace() => {
+                PyError::Lex("f-string: missing conversion character".to_string())
+            }
+            None => PyError::Lex("f-string: missing conversion character".to_string()),
+            _ => PyError::Lex("f-string: invalid conversion character".to_string()),
+        }
     } else {
         PyError::Lex(format!(
-            "f-string: invalid conversion character '{conv}': expected 's', 'r', or 'a'"
+            "f-string: invalid conversion character '{segment}': expected 's', 'r', or 'a'"
         ))
     }
 }
@@ -1621,14 +1662,15 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
                 // surrounding whitespace).
                 let conversion = if chars.get(pos) == Some(&'!') {
                     pos += 1;
-                    let conv = chars.get(pos).copied().ok_or_else(|| {
-                        PyError::Lex("expected conversion flag after '!'".to_string())
-                    })?;
-                    if !matches!(conv, 'r' | 's' | 'a') {
-                        return Err(fstring_conversion_error(conv));
+                    let segment = lex_conversion_segment(chars, pos);
+                    match segment.as_str() {
+                        "s" | "r" | "a" => {
+                            let conv = segment.chars().next().unwrap();
+                            pos += 1;
+                            Some(conv)
+                        }
+                        _ => return Err(fstring_conversion_error(chars, pos, &segment)),
                     }
-                    pos += 1;
-                    Some(conv)
                 } else {
                     None
                 };
@@ -1650,12 +1692,11 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
             Some('!') if depth == 0 && paren_depth == 0 && chars.get(pos + 1) != Some(&'=') => {
                 let expr_src = src.trim().to_string();
                 pos += 1; // skip '!'
-                let conv = chars.get(pos).copied().ok_or_else(|| {
-                    PyError::Lex("expected conversion flag after '!'".to_string())
-                })?;
-                if !matches!(conv, 'r' | 's' | 'a') {
-                    return Err(fstring_conversion_error(conv));
-                }
+                let segment = lex_conversion_segment(chars, pos);
+                let conv = match segment.as_str() {
+                    "s" | "r" | "a" => segment.chars().next().unwrap(),
+                    _ => return Err(fstring_conversion_error(chars, pos, &segment)),
+                };
                 pos += 1; // skip conversion char
                 // Now check for format spec or closing }
                 let format_spec = if chars.get(pos) == Some(&':') {
@@ -1788,12 +1829,11 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                                 && chars.get(*pos + 1) != Some(&'=') =>
                         {
                             *pos += 1;
-                            let conv = chars.get(*pos).copied().ok_or_else(|| {
-                                PyError::Lex("expected conversion flag after '!'".to_string())
-                            })?;
-                            if !matches!(conv, 'r' | 's' | 'a') {
-                                return Err(fstring_conversion_error(conv));
-                            }
+                            let segment = lex_conversion_segment(chars, *pos);
+                            let conv = match segment.as_str() {
+                                "s" | "r" | "a" => segment.chars().next().unwrap(),
+                                _ => return Err(fstring_conversion_error(chars, *pos, &segment)),
+                            };
                             conversion = Some(conv);
                             *pos += 1;
                             if chars.get(*pos) != Some(&'}') {
