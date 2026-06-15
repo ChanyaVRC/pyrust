@@ -6876,16 +6876,30 @@ fn sign_prefix_for(negative: bool, sign: Option<char>) -> &'static str {
 }
 
 /// Insert grouping characters into a digit string (right-to-left).
+///
+/// `digits` is always ASCII (decimal / hex / oct / bin digits) and `sep` is the
+/// ASCII `,` or `_` separator, so the work is done over bytes in a single
+/// pre-sized allocation rather than collecting a `Vec<char>` and reversing it
+/// twice.
 fn group_digits(digits: &str, sep: char, group_size: usize) -> String {
-    let bytes: Vec<char> = digits.chars().collect();
-    let mut out: Vec<char> = Vec::with_capacity(bytes.len() + bytes.len() / group_size);
-    for (i, c) in bytes.iter().rev().enumerate() {
+    let digits = digits.as_bytes();
+    let len = digits.len();
+    let sep_count = len.saturating_sub(1) / group_size;
+    let mut out = vec![0u8; len + sep_count];
+    let sep_byte = sep as u8;
+    // Walk source and destination from the right, inserting a separator every
+    // `group_size` source digits.
+    let mut dst = out.len();
+    for (i, &c) in digits.iter().rev().enumerate() {
         if i > 0 && i % group_size == 0 {
-            out.push(sep);
+            dst -= 1;
+            out[dst] = sep_byte;
         }
-        out.push(*c);
+        dst -= 1;
+        out[dst] = c;
     }
-    out.iter().rev().collect()
+    // `out` is all ASCII (digits + separator).
+    String::from_utf8(out).expect("ascii grouped digits")
 }
 
 /// Apply decimal grouping to the integer part of a float body (e.g. "1234.50"
@@ -7004,23 +7018,51 @@ fn regroup_with_zero_pad(
         (body, "")
     };
 
-    // Strip existing separators from the integer part.
-    let bare_int: String = int_part.chars().filter(|c| *c != sep).collect();
+    // Count the bare digits (separators stripped) in the integer part.
+    let bare_len = int_part.chars().filter(|c| *c != sep).count();
     let target_int_len = int_part.chars().count() + pad;
 
-    // Iteratively prepend zeros and regroup until length matches target.
-    // Bounded by `target_int_len` iterations.
-    let mut digits = bare_int;
-    for _ in 0..=target_int_len {
-        let grouped = group_digits(&digits, sep, group_size);
-        if grouped.chars().count() >= target_int_len {
-            return format!("{grouped}{rest}");
-        }
-        digits.insert(0, '0');
+    // Determine the number of zero-padded digits `n` (>= bare_len) needed so the
+    // grouped length — `n` digits plus `(n - 1) / group_size` separators —
+    // reaches `target_int_len`.  This is the closed form of the old
+    // prepend-a-zero-then-regroup loop, computed without re-grouping each step.
+    // `grouped_len(0)` is 0; `grouped_len(n>=1)` is `n + (n - 1) / group_size`.
+    let grouped_len = |n: usize| if n == 0 { 0 } else { n + (n - 1) / group_size };
+    let mut n = bare_len;
+    while grouped_len(n) < target_int_len {
+        n += 1;
     }
-    // Safety fallback (unreachable in practice).
-    let grouped = group_digits(&digits, sep, group_size);
-    format!("{grouped}{rest}")
+    let zeros = n - bare_len;
+
+    // Emit directly into a single pre-sized buffer.  Build the grouped digits
+    // right-to-left (original digits then the synthetic leading zeros) into a
+    // byte vec — both digits and the separator are ASCII — then reverse once.
+    let sep_count = n.saturating_sub(1) / group_size;
+    let mut out_rev: Vec<u8> = Vec::with_capacity(n + sep_count + rest.len());
+    let mut emitted = 0usize;
+    let sep_byte = sep as u8;
+    let push_digit = |out_rev: &mut Vec<u8>, emitted: &mut usize, d: u8| {
+        if *emitted > 0 && (*emitted).is_multiple_of(group_size) {
+            out_rev.push(sep_byte);
+        }
+        out_rev.push(d);
+        *emitted += 1;
+    };
+    for c in int_part.bytes().rev() {
+        if c == sep_byte {
+            continue;
+        }
+        push_digit(&mut out_rev, &mut emitted, c);
+    }
+    for _ in 0..zeros {
+        push_digit(&mut out_rev, &mut emitted, b'0');
+    }
+    out_rev.reverse();
+    out_rev.extend_from_slice(rest.as_bytes());
+
+    // out_rev holds only ASCII (grouped digits + separators) plus `rest`, which
+    // for the float/decimal path is the original ASCII fractional/exponent tail.
+    String::from_utf8(out_rev).expect("ascii grouped digits with ascii tail")
 }
 
 /// When the alternate form '#' is given to f/e/E/%, force a decimal point in
