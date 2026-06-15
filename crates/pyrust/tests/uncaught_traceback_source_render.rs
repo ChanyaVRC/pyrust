@@ -274,6 +274,70 @@ ValueError: boom
 }
 
 #[test]
+fn tail_call_frame_carries_its_caret() {
+    // #2443: a `return f()` fuses to a `TailCall` in the optimizer (the `Call`
+    // disappears from the stream), so its PEP 657 anchor must be recovered in
+    // `remap_lineno_and_col_tables` — otherwise the outer frame whose entire
+    // body is the tail call drew no caret.  CPython underlines just `inner()`.
+    let src =
+        "def inner():\n    raise ValueError(\"boom\")\n\ndef outer():\n    return inner()\n\nouter()\n";
+    let stderr = run_pyrust_stderr("tc.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"tc.py\", line 7, in <module>
+    outer()
+  File \"tc.py\", line 5, in outer
+    return inner()
+           ^^^^^^^
+  File \"tc.py\", line 2, in inner
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn method_call_frame_carries_its_caret() {
+    // #2443: a method call `obj.m(...)` compiles to `CallMethod`, not `Call`, so
+    // the simple-positional caret arming missed it entirely (stage 1 left every
+    // `CallMethod`/`CallKw` site caret-free).  CPython underlines `c.m()`.
+    let src = "class C:\n    def m(self):\n        raise KeyError(\"k\")\n\nc = C()\n\ndef f():\n    x = c.m()\n    return x\n\nf()\n";
+    let stderr = run_pyrust_stderr("method.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"method.py\", line 11, in <module>
+    f()
+  File \"method.py\", line 8, in f
+    x = c.m()
+        ^^^^^
+  File \"method.py\", line 3, in m
+    raise KeyError(\"k\")
+KeyError: 'k'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn keyword_call_frame_carries_its_caret() {
+    // #2443: a keyword call `g(a=5)` compiles to `CallKw`; arm + remap-preserve
+    // its caret too.  CPython underlines `g(a=5)`.
+    let src = "def g(a=0):\n    raise TypeError(\"t\")\n\ndef f():\n    x = g(a=5)\n    return x\n\nf()\n";
+    let stderr = run_pyrust_stderr("kw.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"kw.py\", line 8, in <module>
+    f()
+  File \"kw.py\", line 5, in f
+    x = g(a=5)
+        ^^^^^^
+  File \"kw.py\", line 2, in g
+    raise TypeError(\"t\")
+TypeError: t
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
 fn three_deep_frames_each_carry_their_own_caret() {
     // #2443: with three trampolined frames the middle and outer frames each draw
     // the narrow caret of their own call sub-expression (CPython underlines just
