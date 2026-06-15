@@ -1077,6 +1077,16 @@ pub struct FnCode {
     /// the keyword-name → parameter-slot mapping for a monomorphic call site so
     /// the binder skips the per-call linear name scan; see [`KwCallCacheEntry`].
     pub(crate) kwcall_cache: RefCell<Vec<KwCallCacheEntry>>,
+    /// Per-instruction cache for constant f-string format specs (issues
+    /// #2357 / #2372).
+    ///
+    /// Indexed by instruction position (`pc`) — same length as `insns`.  Only
+    /// entries at `FormatValueSpec` positions are ever populated.  A constant
+    /// spec (`f"{x:.2f}"`) is parsed once and cached here; a dynamic spec
+    /// (`f"{x:{w}f}"`) keeps missing (its spec string is freshly allocated each
+    /// iteration) and is never cached.  Pc-keyed, so it is immune to the const
+    /// remapping `pass_compact_consts` performs.  See [`FmtSpecCacheEntry`].
+    pub(crate) fmt_spec_cache: RefCell<Vec<crate::interpreter::FmtSpecCacheEntry>>,
     /// Zero-cost exception table (CPython 3.11 model).  Parallel to `insns`:
     /// `exc_table[pc]` is the absolute target PC of the innermost `try` handler
     /// active when an exception is raised at `pc`, or [`EXC_NO_HANDLER`] for

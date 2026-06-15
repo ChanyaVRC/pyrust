@@ -550,6 +550,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
         binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
         kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
+        fmt_spec_cache: RefCell::new(vec![
+            crate::interpreter::FmtSpecCacheEntry::Empty;
+            insns_len
+        ]),
         exc_table,
         has_exc_handlers,
     }

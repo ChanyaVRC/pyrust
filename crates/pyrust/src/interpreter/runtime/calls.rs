@@ -5815,6 +5815,106 @@ pub(crate) fn apply_format_spec_named(
     Ok(Value::string(formatted))
 }
 
+/// Per-instruction cache for a constant f-string format spec
+/// (`FormatValueSpec` opcode, issue #2357 / #2372).
+///
+/// A constant spec such as `".2f"` in `f"{x:.2f}"` is parsed once and cached
+/// here, keyed by the *instruction pc*, so the per-iteration `parse_format_spec`
+/// scan is eliminated from spec-heavy hot loops.  The slot is validated against
+/// the spec string's backing pointer on every read: a constant spec loads the
+/// same interned const-pool string each iteration (pointer hit), while a dynamic
+/// spec (`f"{x:{w}f}"`) allocates a fresh string each time (pointer miss → the
+/// cache is bypassed and the spec is parsed normally, never cached).
+///
+/// The cache lives in a side table indexed by pc, so it is immune to the const
+/// remapping `pass_compact_consts` performs (the landmine called out in #2372).
+#[derive(Clone, Debug)]
+pub(crate) enum FmtSpecCacheEntry {
+    Empty,
+    Cached {
+        /// Backing-byte pointer of the spec string that produced `parsed`.
+        spec_ptr: *const u8,
+        /// Byte length of that spec string (cheap extra guard).
+        spec_len: usize,
+        /// The parsed spec.  Parsing is value-independent (it depends only on
+        /// the spec text), so the same parse is reused for every value rendered
+        /// through this site; only `render_format_spec` re-runs per value.
+        parsed: Rc<FormatSpec>,
+        /// Keeps the spec string's backing allocation alive while cached so the
+        /// `spec_ptr` identity check cannot alias a freed-then-reused buffer.
+        _keep: Value,
+    },
+}
+
+// SAFETY: pyrust's interpreter is single-threaded.  A `FmtSpecCacheEntry` is
+// only read/written inside `run_bytecode_inner` on one thread; the raw spec
+// pointer (and the `Rc`/`Value` it guards) are never sent across threads.  This
+// mirrors the existing `unsafe impl` on `KwCallCacheEntry` so `FnCode` stays
+// `Send + Sync`.
+unsafe impl Send for FmtSpecCacheEntry {}
+unsafe impl Sync for FmtSpecCacheEntry {}
+
+/// Apply a (usually constant) f-string format spec to `value`, consulting a
+/// per-pc parse cache so a constant spec is parsed only once.  Mirrors
+/// [`apply_format_spec`] for non-`PyInstance` values; `PyInstance` values must
+/// still go through `dispatch_dunder_format` (user `__format__`) and never reach
+/// here.  `cache` is the caller's `FnCode::fmt_spec_cache`; `idx` is the `pc` of
+/// the executing `FormatValueSpec` instruction.
+pub(crate) fn apply_format_spec_cached(
+    value: &Value,
+    spec_val: &Value,
+    cache: &RefCell<Vec<FmtSpecCacheEntry>>,
+    idx: usize,
+) -> Result<Value> {
+    let spec = spec_val.as_str().unwrap_or("");
+    if spec.is_empty() {
+        if pyrust_core::value_may_exceed_int_str_limit(value) {
+            pyrust_core::check_int_str_conversion(value)?;
+        }
+        return Ok(Value::string(value.to_py_str()));
+    }
+
+    if !value_has_real_format(value) {
+        let type_name = pyrust_core::builtin_type_name(value);
+        return Err(pyrust_core::type_err!(
+            "unsupported format string passed to {}.__format__",
+            type_name
+        ));
+    }
+
+    let type_name = pyrust_core::builtin_type_name(value);
+
+    // Fast path: the spec string is the same backing buffer we last parsed at
+    // this pc.  Clone the parsed `Rc` out under a short borrow so the cache
+    // `RefCell` is released before `render_format_spec` runs.
+    let spec_ptr = spec.as_ptr();
+    let spec_len = spec.len();
+    let cached_parsed = match &cache.borrow()[idx] {
+        FmtSpecCacheEntry::Cached {
+            spec_ptr: cp,
+            spec_len: cl,
+            parsed,
+            ..
+        } if *cp == spec_ptr && *cl == spec_len => Some(Rc::clone(parsed)),
+        _ => None,
+    };
+    if let Some(parsed) = cached_parsed {
+        let formatted = render_format_spec(value, &parsed, &type_name)?;
+        return Ok(Value::string(formatted));
+    }
+
+    // Miss: parse once, render, and cache against this spec buffer.
+    let parsed = Rc::new(parse_format_spec(spec, &type_name)?);
+    let formatted = render_format_spec(value, &parsed, &type_name)?;
+    cache.borrow_mut()[idx] = FmtSpecCacheEntry::Cached {
+        spec_ptr,
+        spec_len,
+        parsed,
+        _keep: spec_val.clone(),
+    };
+    Ok(Value::string(formatted))
+}
+
 /// Render a format-spec character (a presentation-type code) the way CPython
 /// embeds it in an "Unknown format code" error message.  CPython emits the
 /// code point literally for the ASCII range `0x20..=0x7f` (note: DEL, 0x7f, is
@@ -5900,7 +6000,7 @@ fn format_dunder_owner(receiver: &Value) -> std::borrow::Cow<'static, str> {
 }
 
 #[derive(Debug, Clone)]
-struct FormatSpec {
+pub(crate) struct FormatSpec {
     fill: char,
     align: Option<char>,
     /// True when the user explicitly supplied a fill character (the

@@ -5656,6 +5656,10 @@ impl Compiler {
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
             binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
             kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
+            fmt_spec_cache: RefCell::new(vec![
+                crate::interpreter::FmtSpecCacheEntry::Empty;
+                insns_len
+            ]),
             // Empty until the optimizer's `build_exc_table` pass runs; while
             // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
