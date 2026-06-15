@@ -29,8 +29,9 @@ pub fn call(method: &str, items: &[Value], args: Vec<Value>) -> Result<Value> {
             "TypeError",
             "'tuple' __iter__ must be dispatched by the interpreter",
         )),
-        _ => Err(PyError::Runtime(format!(
-            "'tuple' object has no attribute '{method}'"
-        ))),
+        _ => Err(PyError::named(
+            "AttributeError",
+            format!("'tuple' object has no attribute '{method}'"),
+        )),
     }
 }

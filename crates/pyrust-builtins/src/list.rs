@@ -55,9 +55,10 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -
             "TypeError",
             "'list' __iter__ must be dispatched by the interpreter",
         )),
-        _ => Err(PyError::Runtime(format!(
-            "'list' object has no attribute '{method}'"
-        ))),
+        _ => Err(PyError::named(
+            "AttributeError",
+            format!("'list' object has no attribute '{method}'"),
+        )),
     }
 }
 

@@ -134,9 +134,10 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             "TypeError",
             "'set' __iter__ must be dispatched by the interpreter",
         )),
-        _ => Err(PyError::Runtime(format!(
-            "'set' object has no attribute '{method}'"
-        ))),
+        _ => Err(PyError::named(
+            "AttributeError",
+            format!("'set' object has no attribute '{method}'"),
+        )),
     }
 }
 

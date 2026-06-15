@@ -354,9 +354,10 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             "TypeError",
             "'str' __iter__ must be dispatched by the interpreter",
         )),
-        _ => Err(PyError::Runtime(format!(
-            "'str' object has no attribute '{method}'"
-        ))),
+        _ => Err(PyError::named(
+            "AttributeError",
+            format!("'str' object has no attribute '{method}'"),
+        )),
     }
 }
 
