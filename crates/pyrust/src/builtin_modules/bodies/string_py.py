@@ -48,16 +48,19 @@ class Template:
     def __init__(self, template):
         self.template = template
 
-    def _invalid(self, i):
-        # Report the 1-based line/column of the offending delimiter at
-        # index ``i`` in ``self.template`` (matches CPython's _invalid).
-        prefix = self.template[:i]
-        lineno = prefix.count("\n") + 1
-        last_nl = prefix.rfind("\n")
-        if last_nl == -1:
-            colno = i + 1
+    def _invalid(self, dollar):
+        # Report the 1-based line/column of the invalid placeholder.  CPython
+        # measures from the position *after* the delimiter (its regex
+        # ``invalid`` group matches at ``dollar + 1``), and splits on
+        # universal newlines via splitlines, not just \n.
+        i = dollar + 1
+        lines = self.template[:i].splitlines(keepends=True)
+        if not lines:
+            colno = 1
+            lineno = 1
         else:
-            colno = i - last_nl
+            colno = i - len("".join(lines[:-1]))
+            lineno = len(lines)
         raise ValueError(
             "Invalid placeholder in string: line %d, col %d" % (lineno, colno)
         )
@@ -227,10 +230,14 @@ def _formatter_parser(format_string):
                 literal.append("{")
                 i += 2
                 continue
-            # Start of a replacement field.
+            # Start of a replacement field.  A '{' with nothing following it
+            # (the last char of the string) is CPython's "Single '{'" case;
+            # a '{' followed by content but no closing '}' is "expected '}'".
             literal_text = "".join(literal)
             literal = []
             i += 1
+            if i >= n:
+                raise ValueError("Single '{' encountered in format string")
             # Parse field name up to '!' (conversion), ':' (spec) or '}'.
             field_start = i
             depth = 0
@@ -256,7 +263,9 @@ def _formatter_parser(format_string):
                     )
                 conversion = s[i]
                 i += 1
+            in_spec = False
             if i < n and s[i] == ":":
+                in_spec = True
                 i += 1
                 spec_start = i
                 depth = 0
@@ -271,6 +280,11 @@ def _formatter_parser(format_string):
                     i += 1
                 format_spec = s[spec_start:i]
             if i >= n or s[i] != "}":
+                # A format spec that ran to end-of-string without its closing
+                # '}' is CPython's "unmatched '{' in format spec"; the field
+                # name reaching EOS without a spec is "expected '}'".
+                if in_spec:
+                    raise ValueError("unmatched '{' in format spec")
                 raise ValueError("expected '}' before end of string")
             i += 1
             out.append((literal_text, field_name, format_spec, conversion))

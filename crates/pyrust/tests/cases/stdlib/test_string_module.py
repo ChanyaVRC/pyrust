@@ -70,3 +70,16 @@ show("fmt_switch2", lambda: f.format("{0} {}", "a", "b"))
 show("fmt_bad_conv", lambda: f.format("{0!x}", "a"))
 show("fmt_single_brace", lambda: f.format("a } b"))
 show("fmt_unmatched", lambda: f.format("a {0"))
+
+# --- invalid-placeholder line/col + malformed-field wording (regressions) ---
+# CPython measures the column from the position after the delimiter and
+# splits on universal newlines (\r, \x0b, \x0c), not just \n.
+show("inv_midline", lambda: Template("abc$!def").substitute())
+show("inv_cr", lambda: Template("a\rb$!").substitute())
+show("inv_formfeed", lambda: Template("\x0c$!").substitute())
+show("inv_nl_midline", lambda: Template("x\nyy$!").substitute())
+# A '{' that is the last char is "Single '{'"; a format spec running to
+# end-of-string is "unmatched '{' in format spec".
+show("fmt_lone_open", lambda: f.format("end{"))
+show("fmt_spec_eos", lambda: f.format("{0:", "a"))
+show("fmt_nested_spec_eos", lambda: f.format("{0:{1}", "a", 3))
