@@ -74,14 +74,22 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
 /// before one already claimed by an earlier new instruction — the exact failure
 /// the greedy forward scan exhibited on repeated identical instructions.
 ///
-/// This is a longest-common-subsequence match computed with the Hunt–Szymanski
-/// patience-sorting technique: for each new instruction in order, its candidate
-/// old positions (looked up from `positions`) are offered in **descending**
-/// order to a patience solitaire over old positions; the resulting longest
-/// increasing run of old positions is the LCS, and back-pointers recover which
-/// new index each chosen old position belongs to.  Cost is
-/// `O((Σ candidates) · log)`, linear in the common case where most instructions
-/// are structurally unique.
+/// Each new instruction is reduced to **at most one** candidate old position by
+/// occurrence rank: the j-th occurrence of a value `V` in the new stream pairs
+/// only with the j-th occurrence of `V` in the old stream.  Because the
+/// optimized stream is a subsequence of the original, equal instructions can only
+/// be matched diagonally (the k-th surviving copy descends from the k-th
+/// original copy), so this single-candidate reduction yields the same alignment
+/// the duplicate-aware LCS would — without offering every (new, old) occurrence
+/// pair to the solver, which is `O(N²)` when many instructions are identical
+/// (e.g. a module of repeated `raise`/`x = 1 + 2` statements, exactly the class
+/// issue #2432 is about).
+///
+/// The reduced single candidates are then fed, in **new-index** order, to a
+/// patience solitaire over old positions; the longest strictly-increasing run is
+/// the LCS, and back-pointers recover which new index each chosen old position
+/// belongs to.  Cost is `O(N · log N)` regardless of how many instructions
+/// repeat.
 fn lcs_align(
     old_insns: &[Insn],
     new_insns: &[Insn],
@@ -102,14 +110,23 @@ fn lcs_align(
     // `pile_record[t]` = index into `records` of the current tail of pile `t`.
     let mut pile_record: Vec<usize> = Vec::new();
 
+    // Per-value running occurrence counter for the new stream, so the j-th new
+    // occurrence of a value selects the j-th old occurrence from `positions`.
+    let mut seen: HashMap<&Insn, usize> = HashMap::new();
+
     for (new_idx, new_insn) in new_insns.iter().enumerate() {
         let Some(locs) = positions.get(new_insn) else {
             continue;
         };
-        // Offer candidate old positions in DESCENDING order so that several equal
-        // instructions in one new step land on distinct piles (standard
-        // Hunt–Szymanski requirement to keep the matching order-preserving).
-        for &old_pos in locs.iter().rev() {
+        let rank = seen.entry(new_insn).or_insert(0);
+        let old_pos = match locs.get(*rank) {
+            Some(&p) => p,
+            // More new copies than old copies of this value (a synthesized
+            // duplicate): leave it unmatched for the fallbacks below.
+            None => continue,
+        };
+        *rank += 1;
+        {
             // Pile to extend: first pile whose tail is `>= old_pos` (strictly
             // increasing subsequence).
             let t = piles.partition_point(|&tail| tail < old_pos);
