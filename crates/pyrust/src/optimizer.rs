@@ -2520,6 +2520,42 @@ fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
     end == insns.len()
 }
 
+/// True if the register(s) backing a `KwCallName` include `r`.
+fn kwcall_name_reads(name: &crate::bytecode::KwCallName, r: u32) -> bool {
+    match name {
+        crate::bytecode::KwCallName::Callee(reg) => *reg == r,
+        crate::bytecode::KwCallName::Method { obj, .. } => *obj == r,
+    }
+}
+
+/// Insert the register(s) backing a `KwCallName` into a read set.
+fn kwcall_name_insert(name: &crate::bytecode::KwCallName, reads: &mut HashSet<u32>) {
+    match name {
+        crate::bytecode::KwCallName::Callee(reg) => {
+            reads.insert(*reg);
+        }
+        crate::bytecode::KwCallName::Method { obj, .. } => {
+            reads.insert(*obj);
+        }
+    }
+}
+
+/// Apply a register substitution `s` to the register(s) backing a `KwCallName`.
+fn kwcall_name_subst(
+    name: crate::bytecode::KwCallName,
+    mut s: impl FnMut(u32) -> u32,
+) -> crate::bytecode::KwCallName {
+    match name {
+        crate::bytecode::KwCallName::Callee(reg) => crate::bytecode::KwCallName::Callee(s(reg)),
+        crate::bytecode::KwCallName::Method { obj, name_idx } => {
+            crate::bytecode::KwCallName::Method {
+                obj: s(obj),
+                name_idx,
+            }
+        }
+    }
+}
+
 /// Returns `true` if `insn` reads the value of register `r`.
 fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
     use Insn::*;
@@ -2604,6 +2640,18 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Three source registers.
         SetItem(a, b, c) => *a == r || *b == r || *c == r,
+
+        // Call-context kwarg merges read their dict + source + the registers
+        // backing the callee-name source.
+        DictMergeKwCall { dict, src, name } => {
+            *dict == r || *src == r || kwcall_name_reads(name, r)
+        }
+        SetItemKwCall {
+            dict,
+            key,
+            val,
+            name,
+        } => *dict == r || *key == r || *val == r || kwcall_name_reads(name, r),
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
@@ -2782,6 +2830,23 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             reads.insert(*a);
             reads.insert(*b);
             reads.insert(*c);
+        }
+
+        DictMergeKwCall { dict, src, name } => {
+            reads.insert(*dict);
+            reads.insert(*src);
+            kwcall_name_insert(name, reads);
+        }
+        SetItemKwCall {
+            dict,
+            key,
+            val,
+            name,
+        } => {
+            reads.insert(*dict);
+            reads.insert(*key);
+            reads.insert(*val);
+            kwcall_name_insert(name, reads);
         }
 
         Call(base, argc) | CallMemo(base, argc) => {
@@ -3790,6 +3855,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | ListAppend(..)
         | ListExtend(..)
         | DictUpdate(..)
+        | DictMergeKwCall { .. }
+        | SetItemKwCall { .. }
         | RecordClassStore(..)
         | RecordClassDel(..)
         | SyncModuleGlobal(..)
@@ -5428,6 +5495,22 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::ListAppend(lst, val) => Insn::ListAppend(lst, s(&copies, val)),
             Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
             Insn::DictUpdate(dct, other) => Insn::DictUpdate(dct, s(&copies, other)),
+            Insn::DictMergeKwCall { dict, src, name } => Insn::DictMergeKwCall {
+                dict,
+                src: s(&copies, src),
+                name: kwcall_name_subst(name, |r| s(&copies, r)),
+            },
+            Insn::SetItemKwCall {
+                dict,
+                key,
+                val,
+                name,
+            } => Insn::SetItemKwCall {
+                dict,
+                key: s(&copies, key),
+                val: s(&copies, val),
+                name: kwcall_name_subst(name, |r| s(&copies, r)),
+            },
             Insn::SetAttr(obj, n, val) => Insn::SetAttr(obj, n, s(&copies, val)),
             Insn::SetTypeVarAttr(obj, n, val) => Insn::SetTypeVarAttr(obj, n, s(&copies, val)),
             Insn::DeleteAttr(obj, n) => Insn::DeleteAttr(obj, n),
@@ -7466,6 +7549,29 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*a);
             f(*b);
             f(*c);
+        }
+
+        DictMergeKwCall { dict, src, name } => {
+            f(*dict);
+            f(*src);
+            match name {
+                crate::bytecode::KwCallName::Callee(reg) => f(*reg),
+                crate::bytecode::KwCallName::Method { obj, .. } => f(*obj),
+            }
+        }
+        SetItemKwCall {
+            dict,
+            key,
+            val,
+            name,
+        } => {
+            f(*dict);
+            f(*key);
+            f(*val);
+            match name {
+                crate::bytecode::KwCallName::Callee(reg) => f(*reg),
+                crate::bytecode::KwCallName::Method { obj, .. } => f(*obj),
+            }
         }
 
         Call(base, argc) | CallMemo(base, argc) => {

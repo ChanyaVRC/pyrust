@@ -12558,6 +12558,7 @@ impl Compiler {
             }
             self.emit(Insn::BuildDict(kw_dict_reg, empty_dict_base, 0));
 
+            let has_kw_splat = args.iter().any(|a| a.double_splat);
             for arg in args {
                 if arg.splat {
                     let val = self.compile_expr(&arg.value);
@@ -12565,14 +12566,35 @@ impl Compiler {
                     self.free_temp(val);
                 } else if arg.double_splat {
                     let val = self.compile_expr(&arg.value);
-                    self.emit(Insn::DictUpdate(kw_dict_reg, val));
+                    // The callee is `obj.<name>`; its qualname is derived from
+                    // the receiver's class on the error path.
+                    self.emit(Insn::DictMergeKwCall {
+                        dict: kw_dict_reg,
+                        src: val,
+                        name: crate::bytecode::KwCallName::Method {
+                            obj: obj_reg,
+                            name_idx,
+                        },
+                    });
                     self.free_temp(val);
                 } else if let Some(kw_name) = &arg.name {
                     let val = self.compile_expr(&arg.value);
                     let key_idx = self.intern_const(Value::string(kw_name.clone()));
                     let key_reg = self.alloc_temp();
                     self.emit(Insn::LoadConst(key_reg, key_idx));
-                    self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));
+                    if has_kw_splat {
+                        self.emit(Insn::SetItemKwCall {
+                            dict: kw_dict_reg,
+                            key: key_reg,
+                            val,
+                            name: crate::bytecode::KwCallName::Method {
+                                obj: obj_reg,
+                                name_idx,
+                            },
+                        });
+                    } else {
+                        self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));
+                    }
                     self.free_temp(key_reg);
                     self.free_temp(val);
                 } else {
@@ -12631,6 +12653,12 @@ impl Compiler {
         }
         self.emit(Insn::BuildDict(kw_dict_reg, empty_dict_base, 0));
 
+        // When the call mixes a `**d` splat with other keyword sources, a key
+        // present in two of them is a `TypeError` in CPython (DICT_MERGE), not a
+        // silent overwrite.  Route kwargs through the duplicate-checking
+        // instructions only in that case so the common no-splat call is
+        // untouched.  `func_reg` carries the callee for the error's qualname.
+        let has_kw_splat = args.iter().any(|a| a.double_splat);
         for arg in args {
             if arg.splat {
                 let val = self.compile_expr(&arg.value);
@@ -12638,14 +12666,27 @@ impl Compiler {
                 self.free_temp(val);
             } else if arg.double_splat {
                 let val = self.compile_expr(&arg.value);
-                self.emit(Insn::DictUpdate(kw_dict_reg, val));
+                self.emit(Insn::DictMergeKwCall {
+                    dict: kw_dict_reg,
+                    src: val,
+                    name: crate::bytecode::KwCallName::Callee(func_reg),
+                });
                 self.free_temp(val);
             } else if let Some(kw_name) = &arg.name {
                 let val = self.compile_expr(&arg.value);
                 let key_idx = self.intern_const(Value::string(kw_name.clone()));
                 let key_reg = self.alloc_temp();
                 self.emit(Insn::LoadConst(key_reg, key_idx));
-                self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));
+                if has_kw_splat {
+                    self.emit(Insn::SetItemKwCall {
+                        dict: kw_dict_reg,
+                        key: key_reg,
+                        val,
+                        name: crate::bytecode::KwCallName::Callee(func_reg),
+                    });
+                } else {
+                    self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));
+                }
                 self.free_temp(key_reg);
                 self.free_temp(val);
             } else {

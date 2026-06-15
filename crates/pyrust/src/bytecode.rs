@@ -13,6 +13,19 @@ pub type CellVar = String;
 
 pub type Reg = u32;
 
+/// How a `DictMergeKwCall` / `SetItemKwCall` recovers the callee's qualified
+/// name for the `… got multiple values for keyword argument …` error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KwCallName {
+    /// The callee value lives in register `R[reg]` (direct `f(**a, **b)` call);
+    /// the error uses its `<module>.<qualname>`.
+    Callee(Reg),
+    /// Method call `obj.m(**a, **b)`: the receiver is in `R[obj]` and the method
+    /// name is `names[name_idx]`.  The error uses `<module>.<class>.<method>`
+    /// derived from the receiver's class.
+    Method { obj: Reg, name_idx: u16 },
+}
+
 /// Static parameter metadata for a function prototype.  Shared via `Rc` so that
 /// `MakeFunction` (which may run on every loop iteration) pays only a refcount
 /// bump instead of cloning four separate `Vec`s.
@@ -555,6 +568,25 @@ pub enum Insn {
     ListExtend(Reg, Reg),
     /// R[dict].update(R[src])  — in-place dict merge
     DictUpdate(Reg, Reg),
+    /// R[dict].merge(R[src]) for a `**d` keyword splat in a *call* context.
+    /// Like `DictUpdate` but raises `TypeError: <callee>() got multiple values
+    /// for keyword argument '<k>'` on a duplicate key (CPython `DICT_MERGE`),
+    /// instead of silently overwriting (`dict.update` / `{**a, **b}` literals do
+    /// overwrite).  The callee name for the error is resolved from `name`.
+    DictMergeKwCall {
+        dict: Reg,
+        src: Reg,
+        name: KwCallName,
+    },
+    /// R[dict][R[key]] = R[val] for a named (`kw=v`) argument in a *call*
+    /// context, raising the same duplicate-key `TypeError` as `DictMergeKwCall`
+    /// when `R[key]` is already present (collision with a prior `**d` splat).
+    SetItemKwCall {
+        dict: Reg,
+        key: Reg,
+        val: Reg,
+        name: KwCallName,
+    },
     /// Suspend the generator and yield R[src] to the caller.
     /// The result of the yield expression (sent value) is placed in R[dst].
     Yield { src: Reg, dst: Reg },
