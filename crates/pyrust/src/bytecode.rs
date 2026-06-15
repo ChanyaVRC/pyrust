@@ -469,7 +469,7 @@ pub enum Insn {
     /// `annots_n == 0` means no annotations; `annots_base` is ignored in that case.
     /// The annotation names (parallel to the register values) are stored in
     /// `FnProto::annotation_keys`.
-    MakeFunction(Reg, u32, Reg, u8, Reg, u8),
+    MakeFunction(Reg, u16, Reg, u8, Reg, u8),
     /// R[dst] = load_module(names[name_idx])
     ImportModule(Reg, u16),
 
@@ -523,7 +523,7 @@ pub enum Insn {
     /// R[dst] = create class(fn_protos[proto_idx], bases R[bases_base..+bases_n], name=names[name_idx])
     /// PEP 487: kwarg_n keyword arg values are in R[kwarg_base..kwarg_base+kwarg_n];
     /// names come from fn_protos[proto_idx].class_kwarg_names.
-    MakeClass(Reg, u32, Reg, u8, u16, Reg, u8),
+    MakeClass(Reg, u16, Reg, u8, u16, Reg, u8),
     /// R[dst] = metaclass-driven class creation, where the metaclass value is in
     /// R[meta_reg].  Same layout as `MakeClass` plus a trailing `meta_reg`.
     /// Unlike `MakeClass`, this calls `metaclass.__prepare__(name, bases, **kw)`
@@ -533,7 +533,7 @@ pub enum Insn {
     /// (`type.__new__`) rather than in `MakeClass` (issues #2128/#2130).
     /// Tuple: (dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base,
     /// kwarg_n, meta_reg).
-    MakeClassMeta(Reg, u32, Reg, u8, u16, Reg, u8, Reg),
+    MakeClassMeta(Reg, u16, Reg, u8, u16, Reg, u8, Reg),
     /// R[dst] = TypeVar(name=consts[name_idx])
     /// PEP 695: construct an (initially unbounded) `TypeVar` object for a generic
     /// type parameter — `__bound__` is `None` and `__constraints__` is `()`.
