@@ -139,6 +139,7 @@ fn get_or_parse_template(template: &str) -> Rc<ParsedTemplate> {
 ///  * `!` then end → `end of string while looking for conversion specifier`
 ///  * `!c` then a stray char → `expected ':' after conversion specifier`
 ///  * format spec (after `:`) never closed (`{x:`, `{x!r:`) → `unmatched '{' in format spec`
+///
 /// Render a conversion char for the "Unknown conversion specifier" message the
 /// way CPython does. CPython builds the message with `PyUnicode_FromFormat`'s
 /// `%c`, which prints printable ASCII (`0x21..=0x7e`) literally and every other
