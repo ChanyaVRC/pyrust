@@ -608,6 +608,7 @@ impl Parser {
                         expr = Expr::Attr {
                             target: Box::new(expr),
                             name: attr,
+                            span: None,
                         };
                     }
                     if self.is(&Token::LParen) {
@@ -2529,9 +2530,17 @@ impl Parser {
                         )));
                     }
                 };
+                // PEP 657 caret anchor (#2442): underline the whole `obj.attr`
+                // span (full == prim) from the target's start column to the
+                // just-consumed attribute name's end column.
+                let span = match (primary_start, self.prev_end_col()) {
+                    (Some(s), Some(e)) if s < e => Some((s, s, e, e)),
+                    _ => None,
+                };
                 expr = Expr::Attr {
                     target: Box::new(expr),
                     name,
+                    span,
                 };
                 continue;
             }
@@ -3275,7 +3284,7 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
         Expr::Var(name, _) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
-        Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
+        Expr::Attr { target, name, .. } => Ok(Stmt::AttrAssign {
             target: *target.clone(),
             name: name.clone(),
             expr: rhs,
@@ -3385,7 +3394,7 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
         Expr::Var(name, _) => Ok(AssignTarget::Name(name.clone())),
-        Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
+        Expr::Attr { target, name, .. } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
         Expr::Index { target, index, .. } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Slice {
             target,

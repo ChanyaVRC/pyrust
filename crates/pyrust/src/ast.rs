@@ -431,6 +431,11 @@ pub enum Expr {
     Attr {
         target: Box<Expr>,
         name: String,
+        /// PEP 657 caret anchor (issue #2442): the whole `obj.attr` span,
+        /// underlined with `^` (full == prim), from the target's start column to
+        /// the attribute name's end column.  `None` for attribute accesses
+        /// synthesised by the parser or built without column info.
+        span: Option<CaretSpan>,
     },
     Index {
         target: Box<Expr>,
