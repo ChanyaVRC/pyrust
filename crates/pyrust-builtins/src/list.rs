@@ -22,7 +22,10 @@ pub fn has_method(method: &str) -> bool {
 /// directly to the interpreter-free `call` below.  Single source of truth for
 /// the carve-out (see `crates/pyrust-builtins/README.md`).
 pub fn requires_interpreter(method: &str) -> bool {
-    matches!(method, "sort" | "index" | "count" | "remove")
+    // `extend` (#2522): driving a lazy-iterator / generator / user-`__iter__`
+    // argument needs the interpreter; the receiver-only `ms::extend` →
+    // `iter_values_via_registry` path only drains a `NativeIterFrame`.
+    matches!(method, "sort" | "index" | "count" | "remove" | "extend")
 }
 
 pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -> Result<Value> {

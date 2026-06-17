@@ -962,6 +962,11 @@ impl Interpreter {
                             // Interpreter-aware sort so user `key=` and no-key
                             // user `__lt__` dispatch correctly (#1925).
                             self.list_sort_with_kwargs(&self_val, pos, &kw)
+                        } else if method == "extend" {
+                            // Interpreter-aware extend so lazy iterators
+                            // (map/filter/genexpr/user generators) are driven,
+                            // not just NativeIterFrame (#2522).
+                            self.call_list_extend(&self_val, pos)
                         } else if method == "remove" {
                             self.call_seq_remove(&self_val, pos)
                         } else if method == "index" || method == "count" {
@@ -1654,6 +1659,11 @@ impl Interpreter {
                     // correctly — `pyrust_builtins::list::call` can reach
                     // neither (#1925).
                     self.list_sort_with_kwargs(&receiver, args_vec, &kw)
+                } else if method == "extend" {
+                    // Interpreter-aware extend so lazy iterators
+                    // (map/filter/genexpr/user generators) are driven, not just
+                    // NativeIterFrame (#2522).
+                    self.call_list_extend(&receiver, args_vec)
                 } else if method == "remove" {
                     self.call_seq_remove(&receiver, args_vec)
                 } else if method == "index" || method == "count" {
@@ -1989,6 +1999,11 @@ impl Interpreter {
                                         self.list_sort_with_kwargs(
                                             &backing, args_vec, &kw,
                                         )
+                                    } else if method == "extend" {
+                                        // Interpreter-aware extend so lazy
+                                        // iterators (map/filter/genexpr/user
+                                        // generators) are driven (#2522).
+                                        self.call_list_extend(&backing, args_vec)
                                     } else if method == "remove" {
                                         self.call_seq_remove(&backing, args_vec)
                                     } else if method == "index" || method == "count" {
@@ -2515,6 +2530,31 @@ impl Interpreter {
         // empty zero-cap Vec (its old buffer went to the callee); it
         // re-grows on next call.
         result
+    }
+
+    /// Interpreter-aware `list.extend(iterable)` (#2522).
+    ///
+    /// The receiver-only `pyrust_builtins::mutable_sequence::extend` materialises
+    /// its argument through `iter_values_via_registry` → the free `iter_values`,
+    /// which can only drain a `NativeIterFrame` and rejects every other generator
+    /// state (`map`/`filter`/genexpr/user generators) with a `TypeError`.  Driving
+    /// those requires the interpreter, so route `extend` through `collect_iterable`
+    /// — the same path `list(iterable)` uses — before touching the receiver.
+    ///
+    /// Materialising the snapshot BEFORE mutating the receiver preserves the
+    /// aliasing fix from #414/#427 (`a.extend(a)` can't produce a simultaneous
+    /// borrow): `collect_iterable` reads the argument to completion first.
+    fn call_list_extend(&mut self, receiver: &Value, mut args: Vec<Value>) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "list.extend() takes exactly one argument ({} given)",
+                args.len()
+            ));
+        }
+        let iterable = args.pop().unwrap();
+        let snapshot = self.collect_iterable(&iterable)?;
+        receiver.list_extend(snapshot)?;
+        Ok(Value::none())
     }
 
     /// Collect all values from an iterable (including generators) into a Vec.
@@ -10055,6 +10095,11 @@ impl Interpreter {
                     if method == "remove" {
                         return self.call_seq_remove(&receiver, pos);
                     }
+                    if method == "extend" {
+                        // Drive lazy iterators (map/filter/genexpr/user
+                        // generators) through the interpreter (#2522).
+                        return self.call_list_extend(&receiver, pos);
+                    }
                     // index / count: peek to decide whether values_user_eq
                     // dispatch is needed (resolve_seq_index_pos only touches
                     // pos[1..], so pos[0] (the target) is stable).
@@ -10383,7 +10428,10 @@ impl Interpreter {
         }
         match prim_type {
             "list" => {
-                if prim_method == "remove" {
+                if prim_method == "extend" {
+                    // Drive lazy iterators through the interpreter (#2522).
+                    self.call_list_extend(&backing, args)
+                } else if prim_method == "remove" {
                     self.call_seq_remove(&backing, args)
                 } else if prim_method == "index" || prim_method == "count" {
                     let needs_dispatch = args
