@@ -185,10 +185,52 @@ fn bytes_hex(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
     // Positional args take precedence; a keyword that duplicates a positional
     // arg is a TypeError, matching CPython.
     let merged = merge_hex_kwargs(args, kwargs)?;
-    let args: &[Value] = &merged;
 
+    // CPython runs the bytes_per_sep converter unconditionally and *before* any
+    // sep validation — even when no sep is present (where the value is otherwise
+    // unused). It is the Argument Clinic `int` converter, so it (1) rejects
+    // non-integers with the standard coercion TypeError and (2) rejects integers
+    // that do not fit a C `int` (32-bit) with OverflowError. merge_hex_kwargs
+    // returns an empty vec when no sep is given, so we check the original
+    // args/kwargs to reach a kwarg-only bytes_per_sep.
+    let bps_raw: Option<&Value> = if merged.len() >= 2 {
+        merged.get(1)
+    } else {
+        args.get(1).or_else(|| kwargs.get(&StrKey("bytes_per_sep")))
+    };
+    let bytes_per_sep: i64 = match bps_raw.map(|v| v.kind()) {
+        None => 1,
+        Some(ValueKind::Bool(b)) => b as i64,
+        Some(ValueKind::Int(n)) => {
+            // CPython's int converter targets a C `int` (32-bit).
+            if i32::try_from(n).is_err() {
+                return Err(PyError::named(
+                    "OverflowError",
+                    "Python int too large to convert to C int".to_string(),
+                ));
+            }
+            n
+        }
+        Some(ValueKind::BigInt(_)) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C int".to_string(),
+            ));
+        }
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    builtin_type_name(bps_raw.unwrap())
+                ),
+            ));
+        }
+    };
+
+    let args: &[Value] = &merged;
     if args.is_empty() {
-        // Fast path: no separator.
+        // Fast path: no separator. bytes_per_sep already validated above.
         let mut out = String::with_capacity(bytes.len() * 2);
         for b in bytes {
             use std::fmt::Write as _;
@@ -265,18 +307,8 @@ fn bytes_hex(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Value> {
         }
     };
 
-    let bytes_per_sep: i64 = match args.get(1).map(|v| v.kind()) {
-        None => 1,
-        Some(ValueKind::Int(n)) => n,
-        Some(ValueKind::Bool(b)) => b as i64,
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                "bytes.hex() bytes_per_sep must be an integer".to_string(),
-            ));
-        }
-    };
-
+    // bytes_per_sep was resolved and range-checked up front (before sep
+    // validation), matching CPython's Argument Clinic converter ordering.
     if bytes_per_sep == 0 {
         // CPython 3.12: bytes_per_sep=0 means "no separator" — returns plain hex.
         let mut out = String::with_capacity(bytes.len() * 2);
