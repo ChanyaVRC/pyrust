@@ -899,6 +899,10 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         (&bytes_class, "bytes"),
         (&bytearray_class, "bytearray"),
         (&float_class, "float"),
+        // Issue #2536: `complex` slot dunders were marked `P` (protocol-only)
+        // and complex was absent from this loop, so `complex.__add__` /
+        // `hasattr(complex, '__add__')` / unbound calls failed.
+        (&complex_class, "complex"),
     ] {
         for (dunder, flags) in slot_dunder_table(type_name) {
             if flags & SLOT_ATTR == 0 {

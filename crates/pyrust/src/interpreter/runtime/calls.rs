@@ -8150,14 +8150,26 @@ pub(crate) fn slot_dunder_table(type_name: &str) -> &'static [(&'static str, u8)
             // `(1.7).__trunc__()`/`(1.7).__round__()` compute.
             ("__round__", PA), ("__trunc__", PA), ("__floor__", PA), ("__ceil__", PA),
         ],
+        // Issue #2536: every dunder CPython 3.12 carries in `complex.__dict__`
+        // is a complex-owned slot wrapper, so expose them unbound (`PA`) — the
+        // same treatment `int` (#2480) and `float` (#2488) received.  Owned set
+        // (`[c for c in complex.__mro__ if d in c.__dict__][0] is complex`):
+        // the six rich-comparison slots (present in `__dict__` even though
+        // `<`/`<=`/… raise TypeError at call time), `__hash__`/`__repr__`/
+        // `__bool__`, the forward + reflected arithmetic slots, and
+        // `__neg__`/`__pos__`/`__abs__`.  `__str__` is inherited from `object`
+        // (not in `complex.__dict__`), so it stays `P` (dispatchable bound but
+        // no complex-owned type attr — `complex.__str__` must resolve to
+        // `<slot wrapper '__str__' of 'object' objects>`).
         "complex" => &[
-            ("__eq__", P), ("__ne__", P), ("__lt__", P), ("__le__", P),
-            ("__gt__", P), ("__ge__", P),
-            ("__hash__", P), ("__str__", P), ("__repr__", P), ("__bool__", P),
-            ("__add__", P), ("__sub__", P), ("__mul__", P), ("__truediv__", P),
-            ("__pow__", P), ("__neg__", P), ("__pos__", P), ("__abs__", P),
-            ("__radd__", P), ("__rsub__", P), ("__rmul__", P),
-            ("__rtruediv__", P), ("__rpow__", P),
+            ("__eq__", PA), ("__ne__", PA), ("__lt__", PA), ("__le__", PA),
+            ("__gt__", PA), ("__ge__", PA),
+            ("__hash__", PA), ("__repr__", PA), ("__bool__", PA),
+            ("__add__", PA), ("__sub__", PA), ("__mul__", PA), ("__truediv__", PA),
+            ("__pow__", PA), ("__neg__", PA), ("__pos__", PA), ("__abs__", PA),
+            ("__radd__", PA), ("__rsub__", PA), ("__rmul__", PA),
+            ("__rtruediv__", PA), ("__rpow__", PA),
+            ("__str__", P),
         ],
         // Issue #2399: `range` is a `ValueKind::Range`/`BigRange`, not a
         // primitive `PyClass` populated by `build_primitive_classes`, so its

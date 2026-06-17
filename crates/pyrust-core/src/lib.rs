@@ -5202,6 +5202,21 @@ pub fn slot_wrapper_dunder(name: &str) -> Option<(&str, &str)> {
         // ever resolved for `bool` here (`int.__invert__` isn't exposed), so
         // adding it doesn't broaden any other type's surface.
         "__invert__",
+        // Issue #2536: the unary number-protocol slots (`nb_negative`/
+        // `nb_positive`/`nb_absolute`), `nb_bool`, and the reflected arithmetic
+        // slots.  `complex` is the first primitive to expose these unbound
+        // (`complex.__neg__` → `<slot wrapper '__neg__' of 'complex' objects>`);
+        // `int`/`float` keep them protocol-only (and `int`/`range` `__bool__`
+        // resolve via earlier type-specific arms), so this only broadens
+        // `complex`'s repr surface.
+        "__neg__",
+        "__pos__",
+        "__abs__",
+        "__bool__",
+        "__radd__",
+        "__rmul__",
+        "__rtruediv__",
+        "__rpow__",
         "__rsub__",
         "__lshift__",
         "__rshift__",
