@@ -5110,7 +5110,11 @@ impl Interpreter {
                     // and restart on the dispatch path (preserving semantics).
                     let snapshot: Vec<Value> = items.to_vec();
                     for elem in &snapshot {
-                        if self.values_user_eq(elem, item)? {
+                        // Identity short-circuit (CPython `PyObject_RichCompareBool`)
+                        // before `__eq__` — needed for NaN-bearing complex, which is
+                        // non-scalar and so reaches this dispatch branch instead of
+                        // the scalar fast path below (#2535).
+                        if elem.is_identical_nan(item) || self.values_user_eq(elem, item)? {
                             return Ok(Value::bool_(true));
                         }
                     }

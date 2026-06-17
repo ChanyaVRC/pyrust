@@ -5775,7 +5775,10 @@ impl Interpreter {
         let window = &items[start..stop];
         if Self::seq_search_needs_dispatch(target, window) {
             for (i, item) in window.iter().enumerate() {
-                if self.values_user_eq(item, target)? {
+                // Identity short-circuit before `__eq__` (RichCompareBool) keeps a
+                // NaN-bearing complex findable even when a container/instance
+                // element forced this dispatch branch (#2535).
+                if item.is_identical_nan(target) || self.values_user_eq(item, target)? {
                     return Ok(Value::int((start + i) as i64));
                 }
             }
@@ -5813,7 +5816,10 @@ impl Interpreter {
         if Self::seq_search_needs_dispatch(target, &items) {
             let mut n: i64 = 0;
             for item in &items {
-                if self.values_user_eq(item, target)? {
+                // Identity short-circuit before `__eq__` (RichCompareBool) so a
+                // NaN-bearing complex still counts itself when a container/instance
+                // element forced this dispatch branch (#2535).
+                if item.is_identical_nan(target) || self.values_user_eq(item, target)? {
                     n += 1;
                 }
             }
@@ -5923,7 +5929,9 @@ impl Interpreter {
                 Some(Some(item)) => item,
                 _ => break,
             };
-            if self.values_user_eq(&item, target)? {
+            // Identity short-circuit before `__eq__` (RichCompareBool) so a
+            // NaN-bearing complex removes itself even though `==` is False (#2535).
+            if item.is_identical_nan(target) || self.values_user_eq(&item, target)? {
                 if receiver.list_with(|items| i < items.len()).unwrap_or(false) {
                     receiver.list_pop_at(i)?;
                 }

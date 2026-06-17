@@ -887,7 +887,15 @@ impl PartialEq for PyKey {
             (PyKey::Bytes(a), PyKey::Bytes(b)) => a.as_ref() == b.as_ref(),
             // Complex equality: two complex keys are equal iff both components match.
             // -0.0 == 0.0 in IEEE 754, which matches CPython's `==` for complex.
-            (PyKey::Complex(ar, ai), PyKey::Complex(br, bi)) => ar == br && ai == bi,
+            // The bit-equality fallback (mirroring the `PyKey::Float` arm) lets a
+            // NaN-bearing complex key find *itself* — CPython's
+            // `PyObject_RichCompareBool` short-circuits on `a is b` before `__eq__`,
+            // so `{z: 1}[z]` / `z in {z}` work even though `nan != nan`.  Components
+            // are `f64`, so the fallback compares raw bit patterns (#2535).
+            (PyKey::Complex(ar, ai), PyKey::Complex(br, bi)) => {
+                (ar == br || ar.to_bits() == br.to_bits())
+                    && (ai == bi || ai.to_bits() == bi.to_bits())
+            }
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
@@ -3696,10 +3704,44 @@ impl Value {
     /// slightly *looser* than CPython for two distinct-but-bitwise-equal NaN
     /// objects (CPython reports `False`; we report `True`), but it fixes the
     /// common `n in [n]` case and the container invariant that an element you
-    /// just inserted is findable.  Restricted to floats so no other type's
-    /// equality semantics change.
+    /// just inserted is findable.  Restricted to floats and complex (whose
+    /// components are also bit-copied f64s) so no other type's equality
+    /// semantics change.
+    #[inline]
     pub fn is_identical_nan(&self, other: &Self) -> bool {
-        self.0 == other.0 && self.is_float() && f64::from_bits(self.0).is_nan()
+        if self.0 == other.0 {
+            // Same NaN-boxed bits: the float arm (the original #2344 case).
+            return self.is_float() && f64::from_bits(self.0).is_nan();
+        }
+        // Distinct bits.  The only non-identical pair that can still be "the same
+        // object" for RichCompareBool is a NaN-bearing complex (two heap allocs).
+        // Keep this wrapper tiny so it inlines into `try_seq_fast_eq` /
+        // membership loops; the scalar callers (int/float/str) bail on the single
+        // `top16` tag check and never pay the pointer-deref (#2535 perf).
+        if top16(self.0) == TAG_OPAQUE && top16(other.0) == TAG_OPAQUE {
+            return self.opaque_identical_nan(other);
+        }
+        false
+    }
+
+    /// Cold tail of [`Value::is_identical_nan`] for two `TAG_OPAQUE` operands.
+    /// Identity can't be the raw `self.0 == other.0` pointer compare the float
+    /// arm uses — two distinct heap allocations of the same complex are still
+    /// "the same value".  Mirror the float intent: when a component is NaN,
+    /// treat bit-identical components as the same object so a freshly-inserted
+    /// NaN-bearing complex stays findable (`z = complex(nan, 0); z in [z]`).
+    #[cold]
+    #[inline(never)]
+    fn opaque_identical_nan(&self, other: &Self) -> bool {
+        if let (Opaque::Complex(ar, ai), Opaque::Complex(br, bi)) =
+            (unsafe { &*self.opaque_ptr() }, unsafe {
+                &*other.opaque_ptr()
+            })
+            && (ar.is_nan() || ai.is_nan())
+        {
+            return ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits();
+        }
+        false
     }
 
     /// Returns a stable identity value for pool-allocated and Rc-shared types:
@@ -4929,6 +4971,12 @@ impl PartialEq for Value {
             (ValueKind::Dict(a), ValueKind::Dict(b)) => *a == *b,
             (ValueKind::Set(a), ValueKind::Set(b)) => *a == *b,
             (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
+            // Plain component equality — NO NaN bit-equality fallback here, to
+            // match the `ValueKind::Float` arm above: bare `==` on two distinct
+            // NaN-bearing complex values is `False` in CPython
+            // (`complex(nan,0) == complex(nan,0)` is `False`).  The identity
+            // short-circuit that makes `z in [z]` / `{z:1}[z]` work lives in
+            // `is_identical_nan` and the `PyKey::Complex` arm, not in `==` (#2535).
             (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => ar == br && ai == bi,
             (ValueKind::Int(n), ValueKind::Complex(br, bi)) => (n as f64) == br && bi == 0.0,
             (ValueKind::Complex(ar, ai), ValueKind::Int(n)) => ar == (n as f64) && ai == 0.0,
