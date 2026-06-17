@@ -48,7 +48,8 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
+use crate::interpreter::Interpreter;
+use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -106,6 +107,38 @@ thread_local! {
         );
         Rc::new(RefCell::new(PyClass::new("Protocol", "Protocol", None, attrs)))
     };
+
+    // `NamedTuple` is a real `PyClass` so it can serve as a class base
+    // (`class Point(NamedTuple): x: int`).  Class creation detects the marker
+    // attr `__pyrust_namedtuple_marker__` and rebuilds the class as a
+    // `collections.namedtuple`; the functional call form is routed to the
+    // Python helper `typing._namedtuple_functional`.  See
+    // `calls.rs::exec_make_class` / `call_class_expanded`.
+    static NAMEDTUPLE_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__pyrust_namedtuple_marker__".to_string(),
+            Value::bool_(true),
+        );
+        Rc::new(RefCell::new(PyClass::new(
+            "NamedTuple",
+            "NamedTuple",
+            None,
+            attrs,
+        )))
+    };
+}
+
+/// Identity check: is `class` the `typing.NamedTuple` marker?  Used by the
+/// class-creation machinery (`calls.rs`) to detect `class X(NamedTuple): ...`
+/// and the functional `NamedTuple('X', ...)` call.
+pub(crate) fn is_namedtuple_marker(class: &Rc<RefCell<PyClass>>) -> bool {
+    NAMEDTUPLE_CLASS.with(|nt| Rc::ptr_eq(class, nt))
+}
+
+/// The `typing.NamedTuple` marker class value (for the module constant).
+pub(crate) fn namedtuple_marker_value() -> Value {
+    NAMEDTUPLE_CLASS.with(|c| Value::py_class(Rc::clone(c)))
 }
 
 /// (method-short, registry-name) pairs for `_Any`.
@@ -150,6 +183,15 @@ pyrust_module! {
         // instances) so they can serve as class bases.
         "Generic"  => GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))),
         "Protocol" => PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+
+        // `NamedTuple` marker class — usable as a class base and callable as a
+        // factory.  Class creation rebuilds subclasses as namedtuples.
+        "NamedTuple" => namedtuple_marker_value(),
+
+        // `TYPE_CHECKING` is always `False` at runtime (PEP 563 / typing docs):
+        // it is `True` only for static type checkers.  This lets the common
+        // `if TYPE_CHECKING: import ...` guard import nothing at runtime.
+        "TYPE_CHECKING" => Value::bool_(false),
     }
 
     // ── _Any dispatch fns ─────────────────────────────────────────────────────
@@ -426,4 +468,86 @@ fn primitive_class_value(name: &str) -> Value {
         Some(rc) => Value::py_class(rc),
         None => Value::none(),
     }
+}
+
+// ── Python-source members (issue #2516) ───────────────────────────────────────
+//
+// Members that are most naturally expressed in Python (`get_type_hints`,
+// `get_origin`, `get_args`, `runtime_checkable`, `reveal_type`, the
+// `Self`/`Never`/`Annotated`/… special-form markers, `ParamSpec`,
+// `TypeVarTuple`, …) live in `typing_py.py`.  They are exec'd once into a
+// throwaway namespace at first import of `typing`, and the resulting public
+// names are copied onto the module — mirroring `collections::inject_python_members`.
+
+/// Python-source definitions for the runtime helpers and special-form markers.
+const TYPING_PY_SOURCE: &str = include_str!("typing_py.py");
+
+/// Public names defined by `TYPING_PY_SOURCE` to export onto the module.
+/// Private helpers (`_resolve`, `_namedtuple_functional`,
+/// `_build_namedtuple_class`, `_SpecialMarker`) are intentionally omitted.
+const TYPING_PY_EXPORTS: &[&str] = &[
+    "get_origin",
+    "get_args",
+    "get_type_hints",
+    "runtime_checkable",
+    "final",
+    "no_type_check",
+    "reveal_type",
+    "assert_never",
+    "assert_type",
+    "dataclass_transform",
+    "get_overloads",
+    "clear_overloads",
+    "Self",
+    "Never",
+    "LiteralString",
+    "Annotated",
+    "TypeAlias",
+    "Concatenate",
+    "Unpack",
+    "Required",
+    "NotRequired",
+    "TypeGuard",
+    "ParamSpec",
+    "TypeVarTuple",
+];
+
+/// Exec `TYPING_PY_SOURCE` once and copy its public names onto the `typing`
+/// module.  The native special forms (`Optional`, `Union`, `Type`, …) are
+/// pre-seeded into the exec namespace so the Python helpers can reference them
+/// by identity (e.g. `get_origin` normalising `Optional`/`Union` origins).
+/// `_namedtuple_functional` and `_build_namedtuple_class` are also retained on
+/// the module under their private names for the native `NamedTuple` paths.
+pub(crate) fn inject_python_members(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<crate::value::PyModule>>,
+) -> Result<()> {
+    let ns = Value::dict(crate::value::PyDict::default());
+    // Seed the exec namespace with the native special-form names the helpers
+    // reference by identity.
+    for name in [
+        "Optional", "Union", "Type", "Callable", "ClassVar", "Final", "Literal",
+    ] {
+        let v = module.borrow().attrs.get(name).cloned();
+        if let Some(v) = v {
+            ns.dict_insert(PyKey::str_from(name), v)?;
+        }
+    }
+    interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
+    let dict = ns
+        .as_dict()
+        .ok_or_else(|| PyError::Runtime("typing: exec namespace not a dict".into()))?;
+    let mut exports: Vec<&str> = TYPING_PY_EXPORTS.to_vec();
+    // Private helpers consumed by the native NamedTuple paths.
+    exports.push("_namedtuple_functional");
+    exports.push("_build_namedtuple_class");
+    for name in exports {
+        if let Some(val) = dict.get(&PyKey::str_from(name)) {
+            module
+                .borrow_mut()
+                .attrs
+                .insert(name.to_string(), val.clone());
+        }
+    }
+    Ok(())
 }

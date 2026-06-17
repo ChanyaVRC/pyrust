@@ -1,0 +1,257 @@
+# Python-source members of the `typing` module (issue #2516).
+#
+# These names are most naturally expressed in Python and are exec'd once into
+# a throwaway namespace at first import of `typing`; the resulting public names
+# are copied onto the module by `inject_python_members`.  The native special
+# forms (`List`, `Optional`, `Union`, `Generic`, `Protocol`, `TypeVar`, …) are
+# already present on the module before this source runs, so the helpers below
+# may reference them via the names the exec namespace is pre-seeded with.
+
+import collections as _collections
+import sys as _sys
+
+
+def get_origin(tp):
+    """Return the unsubscripted origin of a typing/PEP 585 generic.
+
+    `get_origin(List[int])` is `list`, `get_origin(Optional[str])` is `Union`,
+    `get_origin(int)` is `None`.  Mirrors CPython's `typing.get_origin`.
+    """
+    origin = getattr(tp, "__origin__", None)
+    if origin is None:
+        return None
+    # The native special-form aliases carry the sentinel class as their
+    # `__origin__`.  Normalise to match CPython's observable origins.
+    if origin is Optional or origin is Union:
+        return Union
+    if origin is Type:
+        return type
+    return origin
+
+
+def get_args(tp):
+    """Return the type arguments of a typing/PEP 585 generic.
+
+    `get_args(List[int])` is `(int,)`, `get_args(Optional[str])` is
+    `(str, NoneType)`, `get_args(int)` is `()`.
+    """
+    args = getattr(tp, "__args__", None)
+    if args is None:
+        return ()
+    origin = getattr(tp, "__origin__", None)
+    # `Optional[X]` is `Union[X, None]` in CPython, so its args include
+    # `NoneType`.  pyrust's native `Optional[X]` carries just `(X,)`.
+    if origin is Optional and type(None) not in args:
+        return tuple(args) + (type(None),)
+    return tuple(args)
+
+
+def _resolve(value, globalns):
+    """Resolve a single annotation: eval string forward refs, else identity."""
+    if isinstance(value, str):
+        try:
+            return eval(value, globalns)
+        except Exception:
+            return value
+    return value
+
+
+def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
+    """Return a dict of type hints for a function, class, or module.
+
+    String (forward-reference) annotations are evaluated against the object's
+    globals.  For classes, annotations are collected across the MRO with base
+    classes contributing first (subclass annotations win on conflict).
+    """
+    if isinstance(obj, type):
+        hints = {}
+        for base in reversed(obj.__mro__):
+            base_globals = globalns
+            if base_globals is None:
+                module = getattr(base, "__module__", None)
+                mod = _sys.modules.get(module) if module else None
+                base_globals = getattr(mod, "__dict__", {}) if mod else {}
+            ann = base.__dict__.get("__annotations__", {})
+            for name, value in ann.items():
+                hints[name] = _resolve(value, base_globals)
+        return hints
+
+    ann = getattr(obj, "__annotations__", None)
+    if ann is None:
+        return {}
+    if globalns is None:
+        globalns = getattr(obj, "__globals__", {})
+    return {name: _resolve(value, globalns) for name, value in ann.items()}
+
+
+def _namedtuple_functional(typename, fields=None, /, **kwargs):
+    """Functional form of `typing.NamedTuple`.
+
+    `NamedTuple('Point', [('x', int), ('y', int)])` and the keyword form
+    `NamedTuple('Point', x=int, y=int)` both build a `collections.namedtuple`.
+    The class form `class Point(NamedTuple): x: int` is handled natively.
+    This is invoked from the native `NamedTuple` marker's call path.
+    """
+    if fields is None:
+        fields = list(kwargs.items())
+    elif kwargs:
+        raise TypeError(
+            "Either list of fields or keywords can be provided to NamedTuple, not both"
+        )
+    names = [n for (n, _t) in fields]
+    return _collections.namedtuple(typename, names)
+
+
+def _build_namedtuple_class(typename, fields, defaults, namespace):
+    """Build a `NamedTuple` subclass from a `class` statement (issue #2516).
+
+    Called natively from class creation when a class inherits from the
+    `NamedTuple` marker.  `fields` is the ordered list of annotated field
+    names, `defaults` maps a subset of them to default values, and `namespace`
+    holds any extra members defined in the class body (methods, docstring).
+    """
+    # Defaults must occupy a trailing run of fields, matching CPython's
+    # NamedTupleMeta (a non-default field may not follow a default one).
+    seen_default = None
+    defs = []
+    for name in fields:
+        if name in defaults:
+            seen_default = name
+            defs.append(defaults[name])
+        elif seen_default is not None:
+            raise TypeError(
+                "Non-default namedtuple field " + name +
+                " cannot follow default field " + seen_default
+            )
+    cls = _collections.namedtuple(typename, fields, defaults=defs)
+    # Class-body bookkeeping attrs that namedtuple already manages or that are
+    # read-only on a type object; never copy these over.
+    skip = {"__dict__", "__weakref__", "__annotations__", "__new__", "__slots__"}
+    for key, value in namespace.items():
+        if key in skip or key in fields:
+            continue
+        try:
+            setattr(cls, key, value)
+        except (AttributeError, TypeError):
+            pass
+    return cls
+
+
+def runtime_checkable(cls):
+    """Mark a `Protocol` as runtime-checkable (no-op marker in pyrust)."""
+    cls.__protocol_runtime_checkable__ = True
+    return cls
+
+
+def final(f):
+    """`@final` decorator — runtime no-op marker."""
+    try:
+        f.__final__ = True
+    except (AttributeError, TypeError):
+        pass
+    return f
+
+
+def no_type_check(arg):
+    """`@no_type_check` decorator — runtime no-op marker."""
+    return arg
+
+
+def reveal_type(obj):
+    """Stub for static checkers: prints the runtime type and returns `obj`."""
+    print(f"Runtime type is {type(obj).__name__!r}", file=_sys.stderr)
+    return obj
+
+
+def assert_never(arg):
+    """`assert_never` — raises at runtime if ever reached."""
+    raise AssertionError("Expected code to be unreachable, but got: " + repr(arg))
+
+
+def assert_type(val, typ, /):
+    """`assert_type` — runtime no-op that returns its first argument."""
+    return val
+
+
+def dataclass_transform(*args, **kwargs):
+    """`@dataclass_transform()` decorator factory — runtime no-op marker."""
+
+    def decorator(cls_or_fn):
+        try:
+            cls_or_fn.__dataclass_transform__ = {}
+        except (AttributeError, TypeError):
+            pass
+        return cls_or_fn
+
+    return decorator
+
+
+def get_overloads(func):
+    """Return registered `@overload` definitions (none, since pyrust drops them)."""
+    return []
+
+
+def clear_overloads():
+    """Clear the overload registry — no-op in pyrust."""
+    return None
+
+
+class _SpecialMarker:
+    """Lightweight stand-in for special forms that are only subscripted or
+    used as annotations (`Self`, `Never`, `LiteralString`, `Annotated`, …)."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __repr__(self):
+        return "typing." + self._name
+
+    def __getitem__(self, item):
+        return self
+
+    def __call__(self, *args, **kwargs):
+        return self
+
+
+Self = _SpecialMarker("Self")
+Never = _SpecialMarker("Never")
+LiteralString = _SpecialMarker("LiteralString")
+Annotated = _SpecialMarker("Annotated")
+TypeAlias = _SpecialMarker("TypeAlias")
+Concatenate = _SpecialMarker("Concatenate")
+Unpack = _SpecialMarker("Unpack")
+Required = _SpecialMarker("Required")
+NotRequired = _SpecialMarker("NotRequired")
+TypeGuard = _SpecialMarker("TypeGuard")
+
+
+class ParamSpec:
+    """Minimal `ParamSpec` stub: stores its name and exposes `args`/`kwargs`."""
+
+    def __init__(self, name, *, bound=None, covariant=False, contravariant=False):
+        self.__name__ = name
+        self.__bound__ = bound
+
+    @property
+    def args(self):
+        return self
+
+    @property
+    def kwargs(self):
+        return self
+
+    def __repr__(self):
+        return "~" + self.__name__
+
+
+class TypeVarTuple:
+    """Minimal `TypeVarTuple` stub: stores its name."""
+
+    def __init__(self, name):
+        self.__name__ = name
+
+    def __iter__(self):
+        return iter((Unpack[self],))
+
+    def __repr__(self):
+        return self.__name__
