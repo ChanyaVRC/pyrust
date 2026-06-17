@@ -3707,26 +3707,39 @@ impl Value {
     /// just inserted is findable.  Restricted to floats and complex (whose
     /// components are also bit-copied f64s) so no other type's equality
     /// semantics change.
+    #[inline]
     pub fn is_identical_nan(&self, other: &Self) -> bool {
-        if self.0 == other.0 && self.is_float() && f64::from_bits(self.0).is_nan() {
-            return true;
+        if self.0 == other.0 {
+            // Same NaN-boxed bits: the float arm (the original #2344 case).
+            return self.is_float() && f64::from_bits(self.0).is_nan();
         }
-        // Complex lives behind TAG_OPAQUE (not NaN-boxed inline), so identity
-        // can't be the raw `self.0 == other.0` pointer compare the float arm
-        // uses — two distinct heap allocations of the same complex are still
-        // "the same value".  Mirror the float intent: when a component is NaN,
-        // treat bit-identical components as the same object so a freshly-
-        // inserted NaN-bearing complex stays findable
-        // (`z = complex(nan, 0); z in [z]`).  See #2535.
+        // Distinct bits.  The only non-identical pair that can still be "the same
+        // object" for RichCompareBool is a NaN-bearing complex (two heap allocs).
+        // Keep this wrapper tiny so it inlines into `try_seq_fast_eq` /
+        // membership loops; the scalar callers (int/float/str) bail on the single
+        // `top16` tag check and never pay the pointer-deref (#2535 perf).
         if top16(self.0) == TAG_OPAQUE && top16(other.0) == TAG_OPAQUE {
-            if let (Opaque::Complex(ar, ai), Opaque::Complex(br, bi)) =
-                (unsafe { &*self.opaque_ptr() }, unsafe {
-                    &*other.opaque_ptr()
-                })
-            {
-                if ar.is_nan() || ai.is_nan() {
-                    return ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits();
-                }
+            return self.opaque_identical_nan(other);
+        }
+        false
+    }
+
+    /// Cold tail of [`Value::is_identical_nan`] for two `TAG_OPAQUE` operands.
+    /// Identity can't be the raw `self.0 == other.0` pointer compare the float
+    /// arm uses — two distinct heap allocations of the same complex are still
+    /// "the same value".  Mirror the float intent: when a component is NaN,
+    /// treat bit-identical components as the same object so a freshly-inserted
+    /// NaN-bearing complex stays findable (`z = complex(nan, 0); z in [z]`).
+    #[cold]
+    #[inline(never)]
+    fn opaque_identical_nan(&self, other: &Self) -> bool {
+        if let (Opaque::Complex(ar, ai), Opaque::Complex(br, bi)) =
+            (unsafe { &*self.opaque_ptr() }, unsafe {
+                &*other.opaque_ptr()
+            })
+        {
+            if ar.is_nan() || ai.is_nan() {
+                return ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits();
             }
         }
         false
