@@ -5224,18 +5224,25 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 /// exception is observable even when the result is dead, so we must keep the
 /// call unless the (builtin, const-type) pair is on this audited allowlist.
 ///
-/// The list is deliberately conservative: only `abs` and `range`, the two pure
-/// builtins whose dead calls the DCE pass actually eliminates and which never
-/// raise for the listed numeric types.  `ord` (length-dependent), `dict` /
-/// `sum` (iterable-shape-dependent), and the math builtins (domain-dependent,
-/// e.g. `sqrt(-1)`, `log(0)`) are value-dependent and are never eliminated here.
+/// The list is deliberately conservative: only `abs`, the single pure builtin
+/// whose dead calls the DCE pass can prove never raise from argument *type*
+/// alone.  `abs` takes exactly one argument and is total over int/float/bool,
+/// so a per-arg type check fully proves safety.
+///
+/// `range` is intentionally **excluded**: although `range(int)` never raises,
+/// this guard checks each argument's type independently and cannot express the
+/// *cross-argument* invariant that the multi-arg forms require — `range(1, 2, 0)`
+/// has three int constants yet raises `ValueError: range() arg 3 must not be
+/// zero`.  A per-arg allowlist would eliminate that dead call and swallow the
+/// exception (the very bug class issue #2537 closes), so `range` stays.
+/// `ord` (length-dependent), `dict` / `sum` (iterable-shape-dependent), and the
+/// math builtins (domain-dependent, e.g. `sqrt(-1)`, `log(0)`) are likewise
+/// value-dependent and never eliminated here.
 fn const_safe_for_pure_builtin(name: &str, value: &Value) -> bool {
     match name {
-        // abs(int/float/bool) is total — never raises.
+        // abs(int/float/bool) is total — never raises, and abs takes exactly one
+        // argument so there is no cross-argument invariant to violate.
         "abs" => value.is_int() || value.is_float() || value.is_bool(),
-        // range(int/bool) is total; range(float) raises TypeError, so floats
-        // (and every non-integer type) must keep the call.
-        "range" => value.is_int() || value.is_bool(),
         _ => false,
     }
 }
@@ -10311,6 +10318,30 @@ mod tests {
         assert!(
             out.iter().any(|i| matches!(i, Insn::Call(..))),
             "dead range(float) call must survive — range rejects non-integers"
+        );
+    }
+
+    #[test]
+    fn builtin_dce_keeps_dead_range_call_with_int_consts() {
+        // range(1, 2, 0) — every argument is an int constant, yet the call raises
+        // `ValueError: range() arg 3 must not be zero`.  The per-argument type
+        // allowlist cannot express the cross-argument "step != 0" invariant, so
+        // `range` must NOT be eliminated even with all-int constant args
+        // (issue #2537; would otherwise swallow the ValueError).
+        let names = vec!["range".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = range (pure)
+            Insn::LoadConst(3, 0),  // r3 = 1
+            Insn::LoadConst(4, 1),  // r4 = 2
+            Insn::LoadConst(5, 2),  // r5 = 0 (step)
+            Insn::Call(2, 3),       // r2 = range(1,2,0) — result dead but RAISES
+            Insn::ReturnNone,
+        ];
+        let consts = vec![Value::int(1), Value::int(2), Value::int(0)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
+        assert!(
+            out.iter().any(|i| matches!(i, Insn::Call(..))),
+            "dead range(1,2,0) call must survive — zero step raises ValueError"
         );
     }
 

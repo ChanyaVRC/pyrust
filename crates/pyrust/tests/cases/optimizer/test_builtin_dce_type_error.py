@@ -26,6 +26,12 @@ def range_float():
     range(1.5)
 
 
+def range_zero_step():
+    # All-int constants, but the zero step raises ValueError; a per-argument
+    # type allowlist must not eliminate this dead call (issue #2537).
+    range(1, 2, 0)
+
+
 def sum_int():
     sum(5)
 
@@ -37,12 +43,14 @@ def pure_div_zero():
 try_raises("abs_str", abs_str)
 try_raises("ord_two", ord_two)
 try_raises("range_float", range_float)
+try_raises("range_zero_step", range_zero_step)
 try_raises("sum_int", sum_int)
 try_raises("pure_div_zero", pure_div_zero)
 
 # Direct dead statements (no wrapper) must raise too.
 try_raises("abs_direct", lambda: abs("x"))
 try_raises("range_direct", lambda: range(1.5))
+try_raises("range_zero_direct", lambda: range(1, 2, 0))
 
 # Valid dead calls remain side-effect-free and must not raise.
 def abs_ok():
