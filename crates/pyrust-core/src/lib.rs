@@ -3737,10 +3737,9 @@ impl Value {
             (unsafe { &*self.opaque_ptr() }, unsafe {
                 &*other.opaque_ptr()
             })
+            && (ar.is_nan() || ai.is_nan())
         {
-            if ar.is_nan() || ai.is_nan() {
-                return ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits();
-            }
+            return ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits();
         }
         false
     }
