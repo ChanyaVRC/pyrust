@@ -1725,15 +1725,13 @@ pyrust_module! {
                 format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
             ));
         }
-        // `cls` may be either a user-defined class (`PyClass`) or a
-        // built-in type token (`BuiltinFunction("int")` etc.); anything
-        // else is a `TypeError`, matching CPython.
-        if !is_class_like(&args[0].value) {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() arg 1 must be a class"),
-            ));
-        }
+        // The `arg 1 must be a class` validation lives inside
+        // `issubclass_check`, *after* the `__subclasscheck__` hook is
+        // resolved on `type(classinfo)`: CPython only rejects a non-class
+        // `cls` when no custom `__subclasscheck__` handles it (and validates
+        // lazily per tuple/union leaf), so `issubclass(5, M())` where
+        // `type(M())` defines the hook must return the hook's result rather
+        // than raising.  See issue #2525.
         let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
         Ok(Value::bool_(result))
     }
@@ -8673,6 +8671,25 @@ fn isinstance_check(
         }
         return Ok(false);
     }
+    // Issue #2525: when `cls` is a plain instance (not a class) whose *type*
+    // defines `__instancecheck__`, CPython invokes
+    // `type(cls).__instancecheck__(cls, obj)` rather than rejecting it.  The
+    // special method is looked up on the type, so resolve it on the instance's
+    // class MRO before applying the `is_class_like` guard.  `get_attr` binds the
+    // method to the instance receiver, so calling it with `[obj]` yields the
+    // `(cls, obj)` argument pairing CPython uses.
+    if let ValueKind::PyInstance(inst) = cls.kind() {
+        let inst_class = Rc::clone(&inst.borrow().class);
+        if crate::interpreter::lookup_class_attr(&inst_class, "__instancecheck__").is_some() {
+            let ic_fn = interp.get_attr(cls, "__instancecheck__")?;
+            let call_args = [crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: obj.clone(),
+            }];
+            let result = interp.call_function_expanded(ic_fn, &call_args)?;
+            return interp.truthy_value(&result);
+        }
+    }
     if !is_class_like(cls) {
         return Err(PyError::named(
             "TypeError",
@@ -8789,6 +8806,37 @@ fn issubclass_check(
             let result = interp.call_function_expanded(sc_fn, &call_args)?;
             return interp.truthy_value(&result);
         }
+    }
+    // Issue #2525: when `classinfo` is a plain instance (not a class) whose
+    // *type* defines `__subclasscheck__`, CPython invokes
+    // `type(classinfo).__subclasscheck__(classinfo, cls)` rather than raising
+    // `TypeError`.  Resolve the hook on the instance's class MRO before the
+    // match's `arg 2 must be a class` fallback.  `get_attr` binds the method to
+    // the instance receiver, so calling it with `[cls]` yields the
+    // `(classinfo, cls)` pairing CPython uses.
+    if let ValueKind::PyInstance(inst) = classinfo.kind() {
+        let inst_class = Rc::clone(&inst.borrow().class);
+        if crate::interpreter::lookup_class_attr(&inst_class, "__subclasscheck__").is_some() {
+            let sc_fn = interp.get_attr(classinfo, "__subclasscheck__")?;
+            let call_args = [crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: cls.clone(),
+            }];
+            let result = interp.call_function_expanded(sc_fn, &call_args)?;
+            return interp.truthy_value(&result);
+        }
+    }
+    // `cls` may be either a user-defined class (`PyClass`) or a built-in type
+    // token (`BuiltinFunction("int")` etc.); anything else is a `TypeError`,
+    // matching CPython.  This runs *after* the `__subclasscheck__` dispatch
+    // above so a custom hook on `type(classinfo)` can accept a non-class
+    // `cls` (issue #2525); it is reached per tuple/union leaf, matching
+    // CPython's lazy per-leaf validation.
+    if !is_class_like(cls) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() arg 1 must be a class"),
+        ));
     }
     match (cls.kind(), classinfo.kind()) {
         // User-defined → user-defined: walk the `base` chain.
