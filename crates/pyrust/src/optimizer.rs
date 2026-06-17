@@ -517,12 +517,12 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     // Second run catches argument-prep moves that became dead after the first
-    // pass removed their consuming CallMemo (pure-call DCE cascade).
+    // pass removed their consuming dead store (store-chain cascade).
     let insns = pass_dead_store_elim(insns, num_locals);
     // Drop Call instructions to pure builtins whose result is never used.
     // A third dead-store pass then removes the now-dead LoadGlobal and arg
     // loads that fed the eliminated calls.
-    let insns = pass_builtin_dce(insns, num_locals, &names);
+    let insns = pass_builtin_dce(insns, num_locals, &names, &consts);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_syncmod_sink(insns);
     // Tail-merging must not collapse two raise/return sites that carry different
@@ -4390,14 +4390,17 @@ fn is_control_flow(insn: &Insn) -> bool {
 /// - Only temp registers (`>= num_locals`) are considered; named locals may
 ///   escape via closures.
 /// - Only *unconditionally pure* instructions are removed: `LoadConst`,
-///   `LoadNone`, `Move`, `CopyReg`, and `CallMemo`.  Instructions that can
-///   raise exceptions (`LoadGlobal` → NameError; `BinOp`/`BinOpConst` →
-///   ValueError / ZeroDivisionError / etc.; `UnaryOp` → TypeError) are always
-///   preserved so that expression statements like `a << b` or
-///   `undefined_name` still propagate their errors instead of being silently
-///   dropped.  `CallMemo` is emitted only for callees declared `#[pure]`
-///   (no observable side effects) in `pyrust_module!`, so dropping a dead
-///   `CallMemo` result is safe.
+///   `LoadNone`, `Move`, and `CopyReg`.  Instructions that can raise exceptions
+///   (`LoadGlobal` → NameError; `BinOp`/`BinOpConst` → ValueError /
+///   ZeroDivisionError / etc.; `UnaryOp` → TypeError) are always preserved so
+///   that expression statements like `a << b` or `undefined_name` still
+///   propagate their errors instead of being silently dropped.  `CallMemo` is
+///   also preserved: although it targets a `#[pure]` callee (no observable side
+///   effects), a pure call can still *raise* — `abs("x")`, `range(1.5)`, or a
+///   pure user function whose body raises — and dropping a dead pure call would
+///   swallow that exception (issue #2537).  Dead pure-builtin calls with
+///   statically safe constant arguments are eliminated by `pass_builtin_dce`,
+///   which carries the callee name and constant types needed to prove no raise.
 /// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
 ///   is the initial value consumed by a later loop iteration.
 fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
@@ -4479,9 +4482,15 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             {
                 Some(*r)
             }
-            // Pure-callee calls: the compiler emits CallMemo only for #[pure]
-            // functions, so a dead result has no observable side effect.
-            Insn::CallMemo(r, _) if *r >= num_locals => Some(*r),
+            // NB: `CallMemo` is intentionally *not* droppable here.  The compiler
+            // emits it for `#[pure]` callees, but "pure" means "no observable
+            // side effects" — it does **not** mean "cannot raise".  A pure call
+            // with type-incompatible arguments (`abs("x")`, `range(1.5)`) or a
+            // pure user function whose body raises still produces an observable
+            // exception even when the result is dead, and CPython never elides a
+            // call (issue #2537).  Dead pure-*builtin* calls with statically safe
+            // constant arguments are still eliminated by `pass_builtin_dce`,
+            // which has the callee name + const types needed to prove no raise.
             _ => None,
         };
         if let Some(r) = dst {
@@ -5193,7 +5202,11 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 ///   side effect that must be preserved.
 /// - Calls in loops that have a visible back-edge in the suffix (conservative:
 ///   the result might feed a subsequent iteration).
-/// - `CallMemo` instructions — those are already handled by `pass_dead_store_elim`.
+/// - `CallMemo` instructions (calls to `#[pure]` user functions).  These are
+///   never eliminated: a pure callee has no side effects but can still raise
+///   (its body, or a nested pure-builtin call with bad constant args), and
+///   CPython never elides a call (issue #2537).  Neither this pass nor
+///   `pass_dead_store_elim` drops a dead `CallMemo`.
 ///
 /// ## Interaction with `pass_dead_store_elim`
 ///
@@ -5201,7 +5214,45 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 /// and the `LoadConst` instructions that prepared the arguments are
 /// typically dead.  A subsequent `pass_dead_store_elim` invocation cleans those
 /// up (see the pipeline in `optimize_fn_code`).
-fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<Insn> {
+/// Returns `true` only when calling pure builtin `name` with the constant
+/// `value` is statically guaranteed not to raise for **any** value of that
+/// type — i.e. the dead call can be safely eliminated.
+///
+/// A constant argument is *not* automatically safe: scalar pure builtins raise
+/// `TypeError`/`ValueError` on type-incompatible constants exactly as they do on
+/// runtime values (`abs("x")`, `ord("ab")`, `range(1.5)`, `sum(5)` …).  That
+/// exception is observable even when the result is dead, so we must keep the
+/// call unless the (builtin, const-type) pair is on this audited allowlist.
+///
+/// The list is deliberately conservative: only `abs`, the single pure builtin
+/// whose dead calls the DCE pass can prove never raise from argument *type*
+/// alone.  `abs` takes exactly one argument and is total over int/float/bool,
+/// so a per-arg type check fully proves safety.
+///
+/// `range` is intentionally **excluded**: although `range(int)` never raises,
+/// this guard checks each argument's type independently and cannot express the
+/// *cross-argument* invariant that the multi-arg forms require — `range(1, 2, 0)`
+/// has three int constants yet raises `ValueError: range() arg 3 must not be
+/// zero`.  A per-arg allowlist would eliminate that dead call and swallow the
+/// exception (the very bug class issue #2537 closes), so `range` stays.
+/// `ord` (length-dependent), `dict` / `sum` (iterable-shape-dependent), and the
+/// math builtins (domain-dependent, e.g. `sqrt(-1)`, `log(0)`) are likewise
+/// value-dependent and never eliminated here.
+fn const_safe_for_pure_builtin(name: &str, value: &Value) -> bool {
+    match name {
+        // abs(int/float/bool) is total — never raises, and abs takes exactly one
+        // argument so there is no cross-argument invariant to violate.
+        "abs" => value.is_int() || value.is_float() || value.is_bool(),
+        _ => false,
+    }
+}
+
+fn pass_builtin_dce(
+    insns: Vec<Insn>,
+    num_locals: u32,
+    names: &[String],
+    consts: &[Value],
+) -> Vec<Insn> {
     let n = insns.len();
     if n == 0 {
         return insns;
@@ -5210,7 +5261,9 @@ fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<
     // `pure_reg` tracks temp registers (>= num_locals) that are known to
     // currently hold a pure builtin function loaded by `LoadGlobal`.
     // Entries are cleared whenever any instruction overwrites the register.
-    let mut pure_reg: HashSet<u32> = HashSet::new();
+    // Maps a temp register holding a pure builtin to its name (so the
+    // elimination guard can consult the per-builtin safe-const allowlist).
+    let mut pure_reg: HashMap<u32, &str> = HashMap::new();
 
     // `const_reg` tracks temp registers that are currently known to hold a
     // value loaded from the const pool via `LoadConst`.  Entries are cleared
@@ -5220,7 +5273,9 @@ fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<
     // expression (a `BinOp`, `Call`, `BuildList`, etc.), the callee may raise
     // a `TypeError` or `ValueError` on the bad argument — an observable side
     // effect that must not be silently dropped.
-    let mut const_reg: HashSet<u32> = HashSet::new();
+    // Maps a temp register holding a `LoadConst` value to its const-pool index,
+    // so the elimination guard can inspect the actual constant's type.
+    let mut const_reg: HashMap<u32, usize> = HashMap::new();
 
     // Track active exception handlers.  `SetupExcept` increments this counter;
     // `PopExcept` decrements it on the normal (no-exception) path.
@@ -5243,12 +5298,26 @@ fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<
         if let Insn::Call(func_reg, argc) = insn {
             let func_reg = *func_reg;
             let argc = *argc as u32;
-            if exc_depth == 0 && func_reg >= num_locals && pure_reg.contains(&func_reg) {
-                // Guard: all argument registers must be known-const.
+            if exc_depth == 0
+                && func_reg >= num_locals
+                && let Some(&builtin_name) = pure_reg.get(&func_reg)
+            {
+                // Guard: every argument register must hold a compile-time
+                // constant whose *type* is statically safe for this builtin.
                 // Argument registers are func_reg+1 .. func_reg+argc (inclusive).
+                //
                 // A runtime-expression arg can have any type, so the call may
-                // raise TypeError/ValueError — which is an observable side effect.
-                let all_args_const = (1..=argc).all(|k| const_reg.contains(&(func_reg + k)));
+                // raise TypeError/ValueError — an observable side effect.  But a
+                // constant arg is not automatically safe either: `abs("x")`,
+                // `ord("ab")`, `range(1.5)` all raise on compile-time constants.
+                // So we additionally require the constant's type to be on the
+                // per-builtin safe allowlist (see `const_safe_for_pure_builtin`).
+                let all_args_const = (1..=argc).all(|k| {
+                    const_reg
+                        .get(&(func_reg + k))
+                        .and_then(|&c_idx| consts.get(c_idx))
+                        .is_some_and(|v| const_safe_for_pure_builtin(builtin_name, v))
+                });
 
                 if all_args_const {
                     // Conservative: skip if a back-edge follows (same guard as DSE).
@@ -5282,18 +5351,21 @@ fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<
 
         // ── Step 3: update pure_reg and const_reg for what this instruction writes ──
 
-        if let Insn::LoadConst(r, _) = insn {
-            // Track temp registers that hold a compile-time constant value.
+        if let Insn::LoadConst(r, c_idx) = insn {
+            // Track temp registers that hold a compile-time constant value,
+            // remembering the const-pool index so the guard can inspect its type.
             if *r >= num_locals {
-                const_reg.insert(*r);
+                const_reg.insert(*r, *c_idx as usize);
+                pure_reg.remove(r);
             }
         } else if let Insn::LoadGlobal(r, name_idx) = insn {
             // Track temp registers that are loaded with a pure builtin name.
             if *r >= num_locals {
-                let is_pure = (*name_idx as usize) < names.len()
-                    && crate::builtin_registry::is_pure(&names[*name_idx as usize]);
-                if is_pure {
-                    pure_reg.insert(*r);
+                let name = (*name_idx as usize)
+                    .lt(&names.len())
+                    .then(|| names[*name_idx as usize].as_str());
+                if let Some(name) = name.filter(|n| crate::builtin_registry::is_pure(n)) {
+                    pure_reg.insert(*r, name);
                 } else {
                     pure_reg.remove(r);
                 }
@@ -10146,44 +10218,20 @@ mod tests {
     }
 
     #[test]
-    fn dse_drops_dead_call_memo() {
-        // CallMemo(r2, 0) — result r2 never read.  CallMemo is pure so it is safe
-        // to drop.
+    fn dse_keeps_dead_call_memo() {
+        // CallMemo(r2, 0) — result r2 never read.  A `#[pure]` callee has no
+        // side effects but can still *raise* (e.g. a pure user function whose
+        // body raises), so dead-store-elim must NOT drop it (issue #2537).
         let insns = vec![
-            Insn::LoadGlobal(2, 0), // r2 = some_pure_fn (kept: LoadGlobal can raise)
-            Insn::CallMemo(2, 0),   // r2 = some_pure_fn() — result dead
+            Insn::LoadGlobal(2, 0), // r2 = some_pure_fn
+            Insn::CallMemo(2, 0),   // r2 = some_pure_fn() — result dead but may raise
             Insn::ReturnNone,
         ];
         let out = pass_dead_store_elim(insns, 2);
-        // CallMemo dropped; LoadGlobal and ReturnNone kept.
-        assert_eq!(out.len(), 2, "dead CallMemo should be removed");
-        assert!(matches!(out[0], Insn::LoadGlobal(2, 0)));
-        assert!(matches!(out[1], Insn::ReturnNone));
-    }
-
-    #[test]
-    fn dse_drops_dead_call_memo_two_pass_cascade() {
-        // Two-pass test: CallMemo(r2, 1) is dead; after dropping it, the
-        // LoadConst(r3, 0) that was the argument also becomes dead.
-        // The second invocation of pass_dead_store_elim cleans it up.
-        let insns = vec![
-            Insn::LoadGlobal(2, 0), // r2 = abs (kept)
-            Insn::LoadConst(3, 0),  // r3 = 5 — arg for abs; dead after CallMemo dropped
-            Insn::CallMemo(2, 1),   // r2 = abs(5) — result dead
-            Insn::ReturnNone,
-        ];
-        // First pass drops CallMemo; second pass drops LoadConst.
-        let after_first = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 3, "dead CallMemo must be preserved (may raise)");
         assert!(
-            !after_first.iter().any(|i| matches!(i, Insn::CallMemo(..))),
-            "first pass must drop CallMemo"
-        );
-        let after_second = pass_dead_store_elim(after_first, 2);
-        assert!(
-            !after_second
-                .iter()
-                .any(|i| matches!(i, Insn::LoadConst(..))),
-            "second pass must drop the now-dead LoadConst arg"
+            out.iter().any(|i| matches!(i, Insn::CallMemo(..))),
+            "dead CallMemo to a pure callee must survive — it can still raise"
         );
     }
 
@@ -10225,12 +10273,76 @@ mod tests {
             Insn::Call(2, 1),       // r2 = abs(r3) — all args const, result dead
             Insn::ReturnNone,
         ];
-        let out = pass_builtin_dce(insns, 2, &names);
+        let consts = vec![Value::int(-5)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
         assert!(
             !out.iter().any(|i| matches!(i, Insn::Call(..))),
             "dead Call with const args to pure builtin should be removed"
         );
         assert!(matches!(out.last(), Some(Insn::ReturnNone)));
+    }
+
+    #[test]
+    fn builtin_dce_keeps_dead_call_with_wrong_type_const_arg() {
+        // `abs("x")` raises TypeError in CPython even though "x" is a compile-time
+        // constant.  The dead call must NOT be eliminated (issue #2537), otherwise
+        // the observable exception is silently swallowed.
+        let names = vec!["abs".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = abs  (pure)
+            Insn::LoadConst(3, 0),  // r3 = const[0] = "x" (str)
+            Insn::Call(2, 1),       // r2 = abs("x") — raises TypeError, must be kept
+            Insn::ReturnNone,
+        ];
+        let consts = vec![Value::string("x")];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
+        assert!(
+            out.iter().any(|i| matches!(i, Insn::Call(..))),
+            "dead Call to pure builtin with type-incompatible const must survive"
+        );
+    }
+
+    #[test]
+    fn builtin_dce_keeps_dead_range_call_with_float_const_arg() {
+        // `range(1.5)` raises TypeError (float not interpretable as integer) even
+        // though 1.5 is constant; the call must survive (issue #2537).
+        let names = vec!["range".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = range  (pure)
+            Insn::LoadConst(3, 0),  // r3 = const[0] = 1.5 (float)
+            Insn::Call(2, 1),       // r2 = range(1.5) — raises TypeError, must be kept
+            Insn::ReturnNone,
+        ];
+        let consts = vec![Value::float(1.5)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
+        assert!(
+            out.iter().any(|i| matches!(i, Insn::Call(..))),
+            "dead range(float) call must survive — range rejects non-integers"
+        );
+    }
+
+    #[test]
+    fn builtin_dce_keeps_dead_range_call_with_int_consts() {
+        // range(1, 2, 0) — every argument is an int constant, yet the call raises
+        // `ValueError: range() arg 3 must not be zero`.  The per-argument type
+        // allowlist cannot express the cross-argument "step != 0" invariant, so
+        // `range` must NOT be eliminated even with all-int constant args
+        // (issue #2537; would otherwise swallow the ValueError).
+        let names = vec!["range".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = range (pure)
+            Insn::LoadConst(3, 0),  // r3 = 1
+            Insn::LoadConst(4, 1),  // r4 = 2
+            Insn::LoadConst(5, 2),  // r5 = 0 (step)
+            Insn::Call(2, 3),       // r2 = range(1,2,0) — result dead but RAISES
+            Insn::ReturnNone,
+        ];
+        let consts = vec![Value::int(1), Value::int(2), Value::int(0)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
+        assert!(
+            out.iter().any(|i| matches!(i, Insn::Call(..))),
+            "dead range(1,2,0) call must survive — zero step raises ValueError"
+        );
     }
 
     #[test]
@@ -10245,7 +10357,8 @@ mod tests {
             Insn::Call(2, 1), // r2 = abs(r3) — r3 is NOT in const_reg → keep call
             Insn::ReturnNone,
         ];
-        let out = pass_builtin_dce(insns, 2, &names);
+        let consts: Vec<Value> = vec![];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
         assert_eq!(out.len(), 4, "Call with runtime arg must not be removed");
         assert!(
             out.iter().any(|i| matches!(i, Insn::Call(..))),
@@ -10264,7 +10377,8 @@ mod tests {
             Insn::Call(2, 1),       // r2 = len(r3) — result dead, but must not be removed
             Insn::ReturnNone,
         ];
-        let out = pass_builtin_dce(insns, 2, &names);
+        let consts = vec![Value::int(0)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
         assert_eq!(out.len(), 4, "Call to impure builtin must not be removed");
         assert!(
             out.iter().any(|i| matches!(i, Insn::Call(..))),
@@ -10282,7 +10396,8 @@ mod tests {
             Insn::Call(2, 1),       // r2 = abs(r3) — result used by Return
             Insn::Return(2),
         ];
-        let out = pass_builtin_dce(insns, 2, &names);
+        let consts = vec![Value::int(-5)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
         assert_eq!(out.len(), 4, "live Call must not be removed");
         assert!(matches!(out[2], Insn::Call(2, 1)));
     }
@@ -10298,7 +10413,8 @@ mod tests {
             Insn::Call(2, 1),       // r2 = print(r3) — result dead, but call has side effects
             Insn::ReturnNone,
         ];
-        let out = pass_builtin_dce(insns, 2, &names);
+        let consts = vec![Value::int(0)];
+        let out = pass_builtin_dce(insns, 2, &names, &consts);
         assert_eq!(out.len(), 4, "Call to impure builtin must not be removed");
         assert!(matches!(out[2], Insn::Call(2, 1)));
     }
