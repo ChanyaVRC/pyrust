@@ -1783,6 +1783,11 @@ impl Interpreter {
                     } else {
                         args_vec = coerce_bytes_subclass_method_args(method, args_vec);
                     }
+                    // #2532: drive a lazy-iterator `extend` argument through the
+                    // interpreter before the receiver-only ops table sees it.
+                    if method == "extend" {
+                        args_vec = self.prepare_bytearray_extend_args(args_vec)?;
+                    }
                 }
                 // Thread any keyword arguments through to the builtin object
                 // (e.g. `bytearray.split(maxsplit=1)`); `call_method` keeps its
@@ -2198,7 +2203,7 @@ impl Interpreter {
                                     // bytes-subclass / bytearray args first
                                     // (#1928); `join`'s single iterable arg holds
                                     // the items to join, so coerce its elements.
-                                    let args_vec = if method == "join" {
+                                    let mut args_vec = if method == "join" {
                                         args_vec
                                             .into_iter()
                                             .map(coerce_bytes_subclass_join_iterable)
@@ -2208,6 +2213,13 @@ impl Interpreter {
                                             method, args_vec,
                                         )
                                     };
+                                    // #2532: drive a lazy-iterator `extend`
+                                    // argument through the interpreter before the
+                                    // receiver-only ops table sees it.
+                                    if method == "extend" {
+                                        args_vec = self
+                                            .prepare_bytearray_extend_args(args_vec)?;
+                                    }
                                     let kw_str: indexmap::IndexMap<String, Value> =
                                         kw.iter()
                                             .map(|(k, v)| {
@@ -2782,6 +2794,37 @@ impl Interpreter {
         } else {
             iter_values(val)
         }
+    }
+
+    /// Interpreter-aware pre-pass for `bytearray.extend(iterable)` (#2532).
+    ///
+    /// The receiver-only `bytearray::bytes_from_value` materialises its argument
+    /// through `iter_values_via_registry`, which can only drain a
+    /// `NativeIterFrame` and rejects every other generator state
+    /// (`map`/`filter`/genexpr/user generators) with `can't extend bytearray with
+    /// <type>`. Driving those needs the interpreter, so when the single argument
+    /// is a lazy `Generator`, materialise it to completion via `collect_iterable`
+    /// (the same path `list(iterable)` uses) and replace it with a `List` — which
+    /// `bytes_from_value` already handles, including the per-element
+    /// `range(0, 256)` / non-int validation.
+    ///
+    /// Non-generator arguments are left untouched so the ops table keeps its
+    /// CPython wording (`can't extend bytearray with int` for a non-iterable, the
+    /// per-character `'str' object cannot be interpreted as an integer` for a str,
+    /// etc.). Materialising the snapshot before the receiver is mutated also
+    /// preserves the self-extend aliasing guarantee.
+    fn prepare_bytearray_extend_args(&mut self, mut args: Vec<Value>) -> Result<Vec<Value>> {
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "bytearray.extend() takes exactly one argument ({} given)",
+                args.len()
+            ));
+        }
+        if matches!(args[0].kind(), ValueKind::Generator(_)) {
+            let snapshot = self.collect_iterable(&args[0])?;
+            args[0] = Value::list(snapshot);
+        }
+        Ok(args)
     }
 
     /// Issue #2276: dispatch an unbound type-qualified object-level dunder
