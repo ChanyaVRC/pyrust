@@ -3021,6 +3021,14 @@ impl Interpreter {
             {
                 crate::builtin_modules::asyncio::inject_python_members(self, m)?;
             }
+            // `string` Python-source members (issue #2515): inject
+            // `capwords`, `Template`, and `Formatter`, defined in
+            // `string_py.py`, after the native constants are registered.
+            if name == "string"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::string::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*
