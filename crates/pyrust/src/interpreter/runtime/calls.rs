@@ -1774,12 +1774,11 @@ impl Interpreter {
                 // them.  Other BuiltinObject types (frozenset) are untouched.
                 if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME {
                     if method == "join" {
-                        // join's single iterable arg holds the items to join;
-                        // coerce its bytes-subclass / bytearray elements.
-                        args_vec = args_vec
-                            .into_iter()
-                            .map(coerce_bytes_subclass_join_iterable)
-                            .collect();
+                        // #2538: drive a lazy-iterator `join` argument through the
+                        // interpreter (the ops table can only drain a
+                        // NativeIterFrame) and coerce its bytes-subclass /
+                        // bytearray elements.
+                        args_vec = self.prepare_bytearray_join_args(args_vec)?;
                     } else {
                         args_vec = coerce_bytes_subclass_method_args(method, args_vec);
                     }
@@ -2202,12 +2201,12 @@ impl Interpreter {
                                     // `bound_method_dispatch_inner`).  Coerce
                                     // bytes-subclass / bytearray args first
                                     // (#1928); `join`'s single iterable arg holds
-                                    // the items to join, so coerce its elements.
+                                    // the items to join.
                                     let mut args_vec = if method == "join" {
-                                        args_vec
-                                            .into_iter()
-                                            .map(coerce_bytes_subclass_join_iterable)
-                                            .collect()
+                                        // #2538: drive a lazy-iterator `join`
+                                        // argument through the interpreter and
+                                        // coerce its elements.
+                                        self.prepare_bytearray_join_args(args_vec)?
                                     } else {
                                         coerce_bytes_subclass_method_args(
                                             method, args_vec,
@@ -2823,6 +2822,46 @@ impl Interpreter {
         if matches!(args[0].kind(), ValueKind::Generator(_)) {
             let snapshot = self.collect_iterable(&args[0])?;
             args[0] = Value::list(snapshot);
+        }
+        Ok(args)
+    }
+
+    /// Issue #2538: materialise a lazy `bytearray.join` iterable (map/filter/
+    /// genexpr/user `__iter__`) before the receiver-only ops table sees it.
+    /// The ops table can only drain a `NativeIterFrame`, so anything that is
+    /// not already a `List`/`Tuple` is collected through the interpreter,
+    /// mirroring `call_bytes_join`.  Elements are coerced from bytes-subclass /
+    /// bytearray to a real `Bytes` value (#1928) after collection.
+    fn prepare_bytearray_join_args(&mut self, mut args: Vec<Value>) -> Result<Vec<Value>> {
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "bytearray.join() takes exactly one argument ({} given)",
+                args.len()
+            ));
+        }
+        let needs_collect =
+            !matches!(args[0].kind(), ValueKind::List(_) | ValueKind::Tuple(_));
+        if needs_collect {
+            let items = self.collect_iterable(&args[0]).map_err(|e| {
+                let is_not_iterable = e.class_name_is("TypeError")
+                    && matches!(&e,
+                        PyError::Named(_, msg) | PyError::Class(_, msg)
+                            if msg.contains("is not iterable"));
+                if is_not_iterable {
+                    pyrust_core::type_err!("can only join an iterable")
+                } else {
+                    e
+                }
+            })?;
+            args[0] =
+                Value::list(items.into_iter().map(coerce_bytes_subclass_arg).collect());
+        } else {
+            // List/Tuple fast path may hold bytes-subclass / bytearray items;
+            // CPython joins them by their bytes value (#1928).
+            args[0] = coerce_bytes_subclass_join_iterable(std::mem::replace(
+                &mut args[0],
+                Value::none(),
+            ));
         }
         Ok(args)
     }
