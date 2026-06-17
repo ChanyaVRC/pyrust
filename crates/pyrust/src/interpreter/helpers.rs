@@ -5638,39 +5638,38 @@ fn is_pure_expr(
             }
             args.iter().all(|a| is_pure_expr(&a.value, pure_fns, local_names))
         }
-        Expr::Attr { target, .. } => is_pure_expr(target, pure_fns, local_names),
-        Expr::Index { target, index, .. } => {
-            is_pure_expr(target, pure_fns, local_names) && is_pure_expr(index, pure_fns, local_names)
-        }
-        Expr::Slice { target, lower, upper, step } => {
-            is_pure_expr(target, pure_fns, local_names)
-                && lower.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-                && upper.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-                && step.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
-        }
+        // Attribute access, subscription and slicing are never pure: each can
+        // raise on otherwise-pure operands and can invoke user protocol methods
+        // (`__getattr__`/`__getattribute__`, `__getitem__`).  Examples:
+        //   (1).foo   -> AttributeError
+        //   {}["x"]   -> KeyError
+        //   (1)[0]    -> TypeError ('int' object is not subscriptable)
+        //   (1)[0:1]  -> TypeError
+        // Classifying such a function as pure lets a dead-result `CallMemo` be
+        // dead-store-eliminated, silently swallowing the exception (issue #2517 —
+        // sibling of #2409's `raise` and #2487's div/mod cases).  Recursing into
+        // the operands is unsound because the *operation itself* is the side
+        // effect, so mark these impure unconditionally.
+        Expr::Attr { .. } => false,
+        Expr::Index { .. } => false,
+        Expr::Slice { .. } => false,
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
         Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } | Expr::GenExp { .. } => false,
         // Walrus has a side effect (assignment).
         Expr::Named { .. } => false,
         Expr::FString(parts) => {
+            // An f-string with an interpolated expression invokes the formatting
+            // protocol (`__format__`/`__str__`/`__repr__`) and can raise even on
+            // a pure operand: a bad format spec on a built-in raises `ValueError`
+            // (`f"{(1):foo}"`), and a user `__format__` may have side effects or
+            // raise.  Recursing into the operand parts classified such an
+            // expression pure, letting a dead-result `CallMemo` be
+            // dead-store-eliminated and swallowing the effect/exception (sibling
+            // of #2517 — #2409/#2487 bug class).  Only a fully-literal f-string
+            // (no interpolation) is pure.
             use crate::ast::FStringPart;
-            fn check_parts(
-                parts: &[FStringPart],
-                pure_fns: &std::collections::HashSet<String>,
-                local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
-            ) -> bool {
-                parts.iter().all(|p| match p {
-                    FStringPart::Literal(_) => true,
-                    FStringPart::Expr { expr, format_spec, .. } => {
-                        is_pure_expr(expr, pure_fns, local_names)
-                            && format_spec
-                                .as_ref()
-                                .is_none_or(|sp| check_parts(sp, pure_fns, local_names))
-                    }
-                })
-            }
-            check_parts(parts, pure_fns, local_names)
+            parts.iter().all(|p| matches!(p, FStringPart::Literal(_)))
         }
         // yield/yield from/await always have side effects (suspension).
         Expr::Yield(_) | Expr::YieldFrom(_) | Expr::Await(_) => false,
