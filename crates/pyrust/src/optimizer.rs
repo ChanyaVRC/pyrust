@@ -70,6 +70,8 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
             | Insn::BinOpInPlace(..)
             | Insn::UnaryOp(..)
             | Insn::Call(..)
+            | Insn::CallMemo(..)
+            | Insn::CallKw { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodExpanded { .. }
             | Insn::CallMethodKw { .. }
@@ -281,6 +283,37 @@ fn remap_lineno_and_col_tables(
     // matched (mirrors the `old_pos` discipline of the main scan).
     let mut binop_col_cursor: usize = 0;
 
+    // Ascending old positions of the call opcodes (`Call` / `CallMemo`) the
+    // self-tail-call peephole (`pass_self_tail_call`) may have rewritten into a
+    // `TailCall` (issue #2443).  A `return f(...)` compiles to `Call(r) + Return(r)`,
+    // which the peephole fuses 1:1 into `TailCall`; `TailCall` doesn't exist in the
+    // old stream, so it gets no structural / discriminant match and would lose its
+    // PEP 657 caret anchor (the `callee(...)` span the compiler armed on the
+    // `Call`).  The recovery mirrors the fused-binop one below: a monotone scan over
+    // these positions recovers each `TailCall`'s origin column.
+    let old_call_positions: Vec<usize> = old_insns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, insn)| matches!(insn, Insn::Call(..) | Insn::CallMemo(..)).then_some(i))
+        .collect();
+    // Sound only when every old call survives in order (as a plain `Call`/`CallMemo`
+    // — matched exactly / by discriminant above — or as a fused `TailCall`).  Inlining
+    // or call-elision would break the 1:1 mapping and risk a caret on the wrong call,
+    // so disable the recovery in that case (a missing caret beats a wrong one, #2426).
+    let new_call_origin_count = new_insns
+        .iter()
+        .filter(|i| {
+            matches!(
+                i,
+                Insn::Call(..) | Insn::CallMemo(..) | Insn::TailCall { .. }
+            )
+        })
+        .count();
+    let tailcall_recovery_sound = new_call_origin_count >= old_call_positions.len();
+    // Cursor into `old_call_positions`, advanced monotonically as `TailCall`s are
+    // matched (mirrors `binop_col_cursor`).
+    let mut tailcall_col_cursor: usize = 0;
+
     // Instructions whose anchored occurrences disagree get no anchor (ambiguous).
     let mut ambiguous: HashSet<&Insn> = HashSet::new();
     // Discriminants (opcode-only) whose anchored occurrences disagree: used by the
@@ -406,6 +439,23 @@ fn remap_lineno_and_col_tables(
                             if let Some(&i) = old_binop_positions.get(binop_col_cursor) {
                                 *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                                 binop_col_cursor += 1;
+                            }
+                        }
+                        // Recover the caret anchor of a `TailCall` synthesized from
+                        // `Call`/`CallMemo + Return` (issue #2443), mirroring the
+                        // fused-binop recovery above.
+                        if want_cols
+                            && tailcall_recovery_sound
+                            && matches!(new_insn, Insn::TailCall { .. })
+                        {
+                            while tailcall_col_cursor < old_call_positions.len()
+                                && old_call_positions[tailcall_col_cursor] < old_pos
+                            {
+                                tailcall_col_cursor += 1;
+                            }
+                            if let Some(&i) = old_call_positions.get(tailcall_col_cursor) {
+                                *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                                tailcall_col_cursor += 1;
                             }
                         }
                     }

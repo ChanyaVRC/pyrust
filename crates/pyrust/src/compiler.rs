@@ -12222,9 +12222,11 @@ impl Compiler {
         &mut self,
         func: &Expr,
         args: &[crate::ast::CallArg],
-        // PEP 657 caret anchor (#2411) for the whole `callee(...)` span.  Armed
-        // immediately before the terminal call instruction on the simple
-        // positional-call path; complex paths (keyword / method / splat) stay
+        // PEP 657 caret anchor (#2411 / #2443) for the whole `callee(...)` span.
+        // Armed immediately before the terminal call instruction on the simple
+        // positional, keyword, and method paths so an error propagated through
+        // any of these draws its caret on the call site (#2443 stage 2 lists
+        // `a.b()` / `f(a=5)` explicitly).  Splat paths (`f(*a)` / `f(**d)`) stay
         // caret-free (safe — a missing caret beats a wrong one).
         span: Option<crate::ast::CaretSpan>,
     ) -> Reg {
@@ -12239,7 +12241,7 @@ impl Compiler {
         // (`obj.m(a=1)`) still take the variadic path so in-place mutation of
         // the receiver register is preserved.
         if has_kwargs && !has_splat && !matches!(func, Expr::Attr { .. }) {
-            return self.compile_keyword_call(func, args);
+            return self.compile_keyword_call(func, args, span);
         }
 
         // Keyword method call `obj.m(<pos…>, k=v…)` with no splats (issue #2392).
@@ -12253,7 +12255,7 @@ impl Compiler {
             && !has_splat
             && let Expr::Attr { target, name } = func
         {
-            return self.compile_keyword_method_call(target, name, args);
+            return self.compile_keyword_method_call(target, name, args, span);
         }
 
         // Double-splat expansion `f(<pos…>, **d)` (issue #2393): exactly one
@@ -12276,7 +12278,7 @@ impl Compiler {
 
         // Detect obj.method(args) — emit CallMethod to allow in-place mutation.
         if let Expr::Attr { target, name } = func {
-            return self.compile_method_call(target, name, args);
+            return self.compile_method_call(target, name, args, span);
         }
 
         let argc = args.len() as u8;
@@ -12334,7 +12336,12 @@ impl Compiler {
     /// Python's grammar guarantees every positional argument precedes every
     /// keyword argument in a call, so source order already lays out positionals
     /// before keyword values — no reordering of evaluation is needed.
-    fn compile_keyword_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
+    fn compile_keyword_call(
+        &mut self,
+        func: &Expr,
+        args: &[crate::ast::CallArg],
+        span: Option<crate::ast::CaretSpan>,
+    ) -> Reg {
         let total = args.len();
         if total > u8::MAX as usize {
             // Too many args to encode in a u8 — fall back to the generic path.
@@ -12382,6 +12389,9 @@ impl Compiler {
             }
             self.next_temp = saved;
         }
+        // Arm the `callee(...)` caret anchor on the terminal call (#2443);
+        // `emit` consumes and clears it.
+        self.set_col_span_for_next(span);
         self.emit(Insn::CallKw {
             func: func_reg,
             total: total as u8,
@@ -12409,6 +12419,7 @@ impl Compiler {
         target: &Expr,
         method_name: &str,
         args: &[crate::ast::CallArg],
+        span: Option<crate::ast::CaretSpan>,
     ) -> Reg {
         let total = args.len();
         if total > u8::MAX as usize {
@@ -12508,6 +12519,9 @@ impl Compiler {
             self.next_temp = saved;
         }
         let name_idx = self.intern_name(method_name);
+        // Arm the `obj.m(...)` caret anchor on the terminal call (#2443);
+        // `emit` consumes and clears it.
+        self.set_col_span_for_next(span);
         self.emit(Insn::CallMethodKw {
             dst: dst_reg,
             obj: obj_reg,
@@ -12526,6 +12540,7 @@ impl Compiler {
         target: &Expr,
         method_name: &str,
         args: &[crate::ast::CallArg],
+        span: Option<crate::ast::CaretSpan>,
     ) -> Reg {
         let nargs = args.len() as u8;
 
@@ -12609,6 +12624,9 @@ impl Compiler {
             self.next_temp = saved;
         }
         let name_idx = self.intern_name(method_name);
+        // Arm the `obj.m(...)` caret anchor on the terminal call (#2443);
+        // `emit` consumes and clears it.
+        self.set_col_span_for_next(span);
         self.emit(Insn::CallMethod {
             dst: dst_reg,
             obj: obj_reg,
