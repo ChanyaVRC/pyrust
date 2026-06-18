@@ -537,7 +537,7 @@ fn build_union(raw: Vec<Value>, none_type: Value) -> Result<Value> {
 /// Append `arg` to `acc` unless an equal value is already present, preserving
 /// first-seen order (CPython de-dups union members).
 fn push_unique(acc: &mut Vec<Value>, arg: Value) {
-    if !acc.iter().any(|existing| *existing == arg) {
+    if !acc.contains(&arg) {
         acc.push(arg);
     }
 }
