@@ -520,7 +520,18 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // Inter-procedural inlining of small pure leaf functions (issue #349).
     // Runs first so that const-fold / LICM / forcount machinery can subsequently
     // optimise the spliced body in the caller's scope.
-    let insns = pass_inline(code.insns, &mut consts, &mut num_regs, &fn_protos, &names);
+    let (insns, inline_frames_post_inline) =
+        pass_inline(code.insns, &mut consts, &mut num_regs, &fn_protos, &names);
+    // Snapshot the post-inline stream so the inline-frame provenance (#2569),
+    // which is parallel to *that* stream, can be remapped onto the final stream
+    // through the structural alignment used for the line/col tables.  Only kept
+    // when something was actually inlined.
+    let inlined_any = inline_frames_post_inline.iter().any(|f| f.is_some());
+    let post_inline_insns: Vec<Insn> = if inlined_any {
+        insns.clone()
+    } else {
+        Vec::new()
+    };
     let insns = pass_thread_jumps(insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
@@ -606,6 +617,15 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // computed against the pre-compaction stream apply unchanged after it.
     let (lineno_table, col_table) =
         remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
+    // Remap the inliner's callee-frame provenance (#2569) from the post-inline
+    // stream onto the final (pre-compaction) stream by the same structural
+    // alignment used for the line/col tables.  `pass_compact_consts` below is
+    // 1:1 order-preserving, so the pc-keyed table applies unchanged after it.
+    let inline_frames = if inlined_any {
+        remap_inline_frames(&post_inline_insns, &inline_frames_post_inline, &insns)
+    } else {
+        None
+    };
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     let insns_len = insns.len();
@@ -638,6 +658,86 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         ]),
         exc_table,
         has_exc_handlers,
+        inline_frames,
+    }
+}
+
+/// Remap the inliner's callee-frame provenance (issue #2569) from the
+/// post-inline instruction stream onto the final stream.
+///
+/// `old_frames[i]` is the callee frame for `old_insns[i]` (`None` for non-spliced
+/// instructions).  Using the same order-preserving LCS alignment the line/col
+/// remap relies on, each surviving final instruction that descends from a
+/// spliced body instruction inherits its callee frame.  Returns a `pc`-sorted
+/// sparse table (final-stream index → frame), or `None` when no provenance
+/// survived (e.g. every spliced raising instruction was folded away — those
+/// cannot raise, so no frame is needed).
+fn remap_inline_frames(
+    old_insns: &[Insn],
+    old_frames: &[Option<crate::bytecode::InlineFrameInfo>],
+    new_insns: &[Insn],
+) -> Option<Box<[(u32, crate::bytecode::InlineFrameInfo)]>> {
+    // Baseline order-preserving alignment of new→old by structural identity.
+    // Most spliced instructions (LoadConst, Move, MakeFunction, …) match exactly
+    // and anchor the stream.  A raising opcode (BinOp, GetItem, Call, …) is never
+    // deleted or reordered by the optimizer — only register-renumbered — so its
+    // operands may change and break structural equality, leaving it unmatched.
+    // We recover such an instruction by its *opcode discriminant*, scanning the
+    // new stream between the surrounding anchors (mirrors the `disc_diag_sound`
+    // recovery in `remap_lineno_and_col_tables`).
+    let mut positions: HashMap<&Insn, Vec<usize>> = HashMap::new();
+    for (i, insn) in old_insns.iter().enumerate() {
+        positions.entry(insn).or_default().push(i);
+    }
+    // new_pc → matched old_pc (LCS).
+    let aligned = lcs_align(old_insns, new_insns, &positions);
+    // old_pc → matched new_pc (invert the LCS).
+    let mut old_to_new: Vec<Option<usize>> = vec![None; old_insns.len()];
+    for (new_pc, &m) in aligned.iter().enumerate() {
+        if let Some(old_pc) = m {
+            old_to_new[old_pc] = Some(new_pc);
+        }
+    }
+
+    let disc = std::mem::discriminant::<Insn>;
+    let mut table: Vec<(u32, crate::bytecode::InlineFrameInfo)> = Vec::new();
+    // Next new-stream index already consumed by a previous recovery, so two
+    // adjacent renumbered raising ops don't both claim the same new instruction.
+    let mut new_cursor: usize = 0;
+    for (old_pc, frame) in old_frames.iter().enumerate() {
+        let Some(frame) = frame else { continue };
+        // Direct structural match: trust it.
+        if let Some(new_pc) = old_to_new[old_pc] {
+            table.push((new_pc as u32, frame.clone()));
+            new_cursor = new_pc + 1;
+            continue;
+        }
+        // Renumbered raising op: search forward from `new_cursor` for the first
+        // new instruction with the same discriminant that is *not* itself an LCS
+        // anchor (an anchor descends from a different old instruction).  Bound the
+        // search by the next matched old anchor so we never cross a frame
+        // boundary.
+        let bound = old_insns
+            .iter()
+            .enumerate()
+            .skip(old_pc + 1)
+            .find_map(|(p, _)| old_to_new[p])
+            .unwrap_or(new_insns.len());
+        let d = disc(&old_insns[old_pc]);
+        let found = (new_cursor..bound)
+            .find(|&np| disc(&new_insns[np]) == d && aligned.get(np).copied().flatten().is_none());
+        if let Some(new_pc) = found {
+            table.push((new_pc as u32, frame.clone()));
+            new_cursor = new_pc + 1;
+        }
+        // Not found ⇒ the raising op was folded away (it then cannot raise), so a
+        // missing frame is correct.
+    }
+    table.sort_by_key(|&(p, _)| p);
+    if table.is_empty() {
+        None
+    } else {
+        Some(table.into_boxed_slice())
     }
 }
 
@@ -662,10 +762,13 @@ const INLINE_MAX_INSNS: usize = 12;
 ///
 /// Instructions that may *raise* (e.g. `BinOp` on mismatched types) are allowed:
 /// the identical instruction runs at the same logical point, so the exception
-/// type and message are byte-identical.  Only the traceback *frame list* would
-/// differ, and pyrust's tracebacks already omit per-frame line numbers / carets
-/// and the parity harness strips all `Traceback`/`File "…"` lines, so the
-/// observable behaviour (final exception line) is unchanged.
+/// type and message are byte-identical.  The traceback *frame list* would
+/// otherwise differ — eliminating the splice's call frame drops the callee's
+/// `File "…", line N` entry and its PEP 657 caret — but `pass_inline` records
+/// per-instruction callee provenance ([`crate::bytecode::InlineFrameInfo`]) for
+/// every spliced body instruction, and the cold error-unwind path reconstructs
+/// the synthetic callee frame from it, so an error raised inside an inlined body
+/// renders the same two-frame traceback CPython 3.12 does (issue #2569).
 fn inline_body_insn_ok(insn: &Insn) -> bool {
     use Insn::*;
     match insn {
@@ -707,6 +810,10 @@ struct InlinePlan {
     /// the callee's own register numbering.  Const indices have already been
     /// rewritten to point into the caller's merged const pool.
     body: Vec<Insn>,
+    /// Traceback provenance for each body instruction (parallel to `body`),
+    /// reconstructing the callee frame on the cold error path (issue #2569).
+    /// Carries the callee's name / filename / per-instruction line / caret.
+    body_frames: Vec<crate::bytecode::InlineFrameInfo>,
     /// The trailing return: `Some(reg)` for `Return(reg)` (in callee numbering),
     /// `None` for `ReturnNone`.
     ret: Option<u32>,
@@ -789,8 +896,18 @@ fn build_inline_plan(proto: &FnProto, caller_consts: &mut Vec<Value>) -> Option<
             None => return None,
         }
     }
+    // Callee frame provenance shared by every spliced instruction (issue #2569).
+    let callee_funcname: std::sync::Arc<str> = std::sync::Arc::from(&*proto.name);
+    let callee_filename: std::sync::Arc<str> = std::sync::Arc::from(&*code.filename);
     let mut body: Vec<Insn> = Vec::with_capacity(body_insns.len());
-    for ins in body_insns {
+    let mut body_frames: Vec<crate::bytecode::InlineFrameInfo> =
+        Vec::with_capacity(body_insns.len());
+    // The callee's `lineno_table` uses 0 to mean "same line as the previous
+    // instruction" (the VM only updates its line counter on non-zero entries).
+    // Resolve the running line here so each spliced instruction carries an
+    // absolute callee source line for its reconstructed frame (#2569).
+    let mut running_line: u32 = code.first_lineno;
+    for (i, ins) in body_insns.iter().enumerate() {
         let mut ins = ins.clone();
         match &mut ins {
             Insn::LoadConst(_, idx) | Insn::BinOpConst(_, _, _, idx, _) => {
@@ -799,11 +916,23 @@ fn build_inline_plan(proto: &FnProto, caller_consts: &mut Vec<Value>) -> Option<
             _ => {}
         }
         body.push(ins);
+        if let Some(&ln) = code.lineno_table.get(i)
+            && ln != 0
+        {
+            running_line = ln;
+        }
+        body_frames.push(crate::bytecode::InlineFrameInfo {
+            funcname: std::sync::Arc::clone(&callee_funcname),
+            filename: std::sync::Arc::clone(&callee_filename),
+            lineno: running_line,
+            col_span: code.col_table.get(i).copied().unwrap_or((0, 0, 0, 0)),
+        });
     }
     Some(InlinePlan {
         callee_num_regs: code.num_regs,
         argc: argc as u8,
         body,
+        body_frames,
         ret,
     })
 }
@@ -891,15 +1020,24 @@ fn shift_insn_regs(insn: &mut Insn, base: u32) {
 ///     `import *` — so the global binding cannot be swapped at runtime.
 ///
 /// When either fails, the call is left untouched (partial coverage is fine).
+///
+/// Returns the spliced instruction stream and, parallel to it, an
+/// `Option<InlineFrameInfo>` per instruction recording the callee frame each
+/// spliced body instruction came from (issue #2569).  Non-inlined instructions
+/// — and the inliner's own arg-binding / return moves, which cannot raise —
+/// carry `None`.  This table is later remapped through the remaining optimizer
+/// passes and stored in `FnCode::inline_frames` for cold-path traceback
+/// reconstruction.
 fn pass_inline(
     insns: Vec<Insn>,
     consts: &mut Vec<Value>,
     num_regs: &mut u32,
     fn_protos: &[FnProto],
     names: &[String],
-) -> Vec<Insn> {
+) -> (Vec<Insn>, Vec<Option<crate::bytecode::InlineFrameInfo>>) {
     if fn_protos.is_empty() {
-        return insns;
+        let frames = vec![None; insns.len()];
+        return (insns, frames);
     }
 
     // ── Binding-stability precondition: the namespace must not be reifiable. ──
@@ -914,7 +1052,8 @@ fn pass_inline(
         .any(|nm| matches!(nm.as_str(), "globals" | "locals" | "vars" | "exec" | "eval"))
         || insns.iter().any(|i| matches!(i, Insn::ImportStar(_)));
     if reifies_namespace {
-        return insns;
+        let frames = vec![None; insns.len()];
+        return (insns, frames);
     }
 
     let n = insns.len();
@@ -988,6 +1127,9 @@ fn pass_inline(
     // lands (for an inlined call, the position where its splice begins).  Built
     // alongside `out` so that jumps crossing inlined regions can be re-targeted.
     let mut out: Vec<(Option<usize>, Insn)> = Vec::with_capacity(n);
+    // Parallel to `out`: callee frame provenance for each spliced body
+    // instruction (issue #2569); `None` for everything else.
+    let mut out_frames: Vec<Option<crate::bytecode::InlineFrameInfo>> = Vec::with_capacity(n);
     let mut old_to_new: Vec<usize> = vec![0; n + 1];
     let mut changed = false;
     for pc in 0..n {
@@ -1013,22 +1155,26 @@ fn pass_inline(
                     next_window += plan.callee_num_regs;
                     for i in 0..argc as u32 {
                         out.push((None, Insn::Move(base + i, fn_reg + 1 + i)));
+                        out_frames.push(None);
                     }
-                    for body_ins in &plan.body {
+                    for (body_ins, frame) in plan.body.iter().zip(&plan.body_frames) {
                         let mut body_ins = body_ins.clone();
                         shift_insn_regs(&mut body_ins, base);
                         out.push((None, body_ins));
+                        out_frames.push(Some(frame.clone()));
                     }
                     match plan.ret {
                         Some(r) => out.push((None, Insn::Move(fn_reg, base + r))),
                         None => out.push((None, Insn::LoadNone(fn_reg))),
                     }
+                    out_frames.push(None);
                     changed = true;
                     continue;
                 }
             }
         }
         out.push((Some(pc), insn.clone()));
+        out_frames.push(None);
     }
     old_to_new[n] = out.len();
 
@@ -1040,18 +1186,21 @@ fn pass_inline(
         // Nothing inlined — return the original stream untouched (no offset
         // rewrite needed, and `out` may have re-cloned everything already, so
         // hand back the cheaper original).
-        return insns;
+        let frames = vec![None; insns.len()];
+        return (insns, frames);
     }
 
     // Second pass: rewrite position-relative offsets of every copied
     // instruction to account for the inserted splices.  Inliner-generated
     // instructions carry no offsets and pass through unchanged.
-    out.into_iter()
+    let out_insns: Vec<Insn> = out
+        .into_iter()
         .map(|(old_i, insn)| match old_i {
             Some(i) => rewrite_offsets(insn, i, &old_to_new),
             None => insn,
         })
-        .collect()
+        .collect();
+    (out_insns, out_frames)
 }
 
 /// Resolve the proto that a `Call`/`CallMemo` at `call_pc` targets, by locating
@@ -13527,6 +13676,50 @@ elif x == 2:
                 .any(|i| matches!(i, Insn::BinOp(_, _, crate::ast::BinaryOp::Mul, _))),
             "inlined body's multiply must appear in caller; insns: {:?}",
             code.insns
+        );
+    }
+
+    #[test]
+    fn inline_records_callee_frame_provenance() {
+        // Issue #2569: a spliced raising instruction must carry callee frame
+        // provenance so the cold unwind path can reconstruct the callee
+        // traceback frame (otherwise an inlined error shows only the caller).
+        let code = optimize(compile_fn("def f(x):\n    return 1 + x\nf(\"z\")\n"));
+        assert!(
+            !has_user_call(&code.insns),
+            "f(\"z\") should be inlined; insns: {:?}",
+            code.insns
+        );
+        let table = code
+            .inline_frames
+            .as_deref()
+            .expect("inlined code must carry an inline_frames table");
+        // The spliced Add must have a provenance entry naming the callee `f`,
+        // its body line (2), and a non-empty caret span (the `1 + x` anchor).
+        let add_pc = code
+            .insns
+            .iter()
+            .position(|i| matches!(i, Insn::BinOp(_, _, crate::ast::BinaryOp::Add, _)))
+            .expect("inlined Add must survive") as u32;
+        let entry = table
+            .iter()
+            .find(|&&(p, _)| p == add_pc)
+            .map(|(_, f)| f)
+            .expect("the spliced Add must have an inline frame");
+        // The frame must name the inlined callee.  (The `compile_fn` test helper
+        // compiles without line tracking, so `lineno` / `col_span` stay zero
+        // here; their end-to-end correctness is covered by the parity fixture
+        // tests/cases/optimizer/test_inline_traceback_frame.py.)
+        assert_eq!(&*entry.funcname, "f");
+    }
+
+    #[test]
+    fn no_inline_frames_when_nothing_inlined() {
+        // A scope that inlines nothing carries no provenance table (no alloc).
+        let code = optimize(compile_fn("x = 1 + 2\ny = x * 3\n"));
+        assert!(
+            code.inline_frames.is_none(),
+            "no inlining ⇒ no inline_frames table"
         );
     }
 
