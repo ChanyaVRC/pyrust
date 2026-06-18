@@ -14,6 +14,7 @@ print(hasattr(f, "__call__"))  # True
 print(f.__call__())  # None
 print(type(f.__call__).__name__)  # method-wrapper
 print(f.__call__.__name__)  # __call__
+print(f.__call__.__qualname__)  # function.__call__
 print(f.__call__.__self__ is f)  # True
 
 
@@ -45,6 +46,7 @@ print(type(C.__call__()).__name__)  # C
 # --- builtin function ---
 print(hasattr(len, "__call__"))  # True
 print(len.__call__([1, 2, 3]))  # 3
+print(len.__call__.__qualname__)  # builtin_function_or_method.__call__
 
 
 # --- method descriptor ---
@@ -76,6 +78,7 @@ print(hasattr(w, "__call__"))  # True
 print(w.__call__())  # None
 print(w.__call__.__call__())  # None
 print(f.__call__.__call__())  # None
+print(w.__call__.__qualname__)  # method-wrapper.__call__
 
 
 # --- callable() consistency ---
