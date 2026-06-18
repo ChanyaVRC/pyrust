@@ -55,3 +55,26 @@ r = repr(sys.version_info)
 print(r.startswith('sys.version_info('))  # True
 print('major=' in r)                      # True
 print('minor=' in r)                      # True
+
+# ── slicing and tuple conversion (#2618) ─────────────────────────────────────
+# Slicing returns a plain tuple; list()/tuple() yield 5 elements.  Exact
+# version numbers differ between implementations, so only structural
+# properties are tested.
+
+vi = sys.version_info
+
+print(type(vi[:2]).__name__ == 'tuple')   # True
+print(len(vi[:2]) == 2)                   # True
+print(len(vi[1:4]) == 3)                  # True
+print(len(vi[::-1]) == 5)                 # True
+print(len(vi[::2]) == 3)                  # True
+print(len(vi[-2:]) == 2)                  # True
+print(vi[:2] == (vi[0], vi[1]))           # True
+print(len(list(vi)) == 5)                 # True
+print(len(tuple(vi)) == 5)                # True
+
+# slice with non-integer member still rejected as TypeError by indexing path
+try:
+    vi['x']
+except TypeError:
+    print('TypeError')                    # TypeError

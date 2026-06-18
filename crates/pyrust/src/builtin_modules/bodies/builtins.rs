@@ -5974,6 +5974,43 @@ pyrust_module! {
         ))))
     }
 
+    /// Issue #2619: `bool.__new__(cls, x=False)` — applies truthiness
+    /// conversion and returns a canonical bool.  `bool` is final in CPython,
+    /// so `cls` is always `bool` and the result is `True if x else False`.
+    /// Without this dedicated handler `bool.__new__` would inherit
+    /// `int.__new__`, returning an int-backed value tagged as bool.
+    ///
+    /// CPython signature: `bool.__new__(cls, x=False, /)`
+    #[py_name = "bool.__new__"]
+    fn bool_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "bool.__new__(): not enough arguments".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        if !matches!(cls_val.kind(), ValueKind::PyClass(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "bool.__new__(X): X is not a type object ({})",
+                    value_type_name_str(&cls_val)
+                ),
+            ));
+        }
+        match rest {
+            [] => Ok(Value::bool_(false)),
+            [x] => Ok(Value::bool_(_interp.truthy_value(&x.value)?)),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("bool expected at most 1 argument, got {}", rest.len()),
+            )),
+        }
+    }
+
     /// Issue #1465: `int.__new__(cls, x=0)` — allocator for int subclasses.
     /// Creates a `PyInstance` of `cls` with the int backing store
     /// (`__builtin_data__`) populated from the constructor arguments.

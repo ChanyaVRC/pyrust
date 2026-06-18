@@ -794,6 +794,10 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // which would create a bare instance without backing data).
     // Issue #1465: same fix for scalar primitives — int/str/float/bytes.
     for (cls, type_name) in [
+        // Issue #2619: `bool.__new__(bool, x)` must apply truthiness conversion
+        // and return a canonical bool, not inherit `int.__new__` (which would
+        // return an int-backed value tagged as bool).
+        (&bool_class, "bool"),
         (&bytes_class, "bytes"),
         (&float_class, "float"),
         (&frozenset_class, "frozenset"),
