@@ -3515,7 +3515,7 @@ impl Value {
     ///
     /// The wrapped function reuses the **original** `id` so the fn_cache and
     /// any other id-keyed caches share a single entry between the decorated
-    /// and undecorated forms.  The function body and `is_pure` flag are
+    /// and undecorated forms.  The function body and `is_memo_pure` flag are
     /// identical (the kind tag only affects attribute-lookup-time binding,
     /// not execution), so cache hits across forms are correct.  See #303.
     pub fn with_function_kind(f: Rc<UserFunction>, kind: UserFunctionKind) -> Self {
