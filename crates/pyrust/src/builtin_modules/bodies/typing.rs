@@ -169,13 +169,16 @@ const TYPING_ALIAS_METHODS: &[(&str, &str)] = &[
 
 pyrust_module! {
     constants {
-        // PEP 585: these names are deprecated aliases for built-in types.
-        // Using the actual primitive classes means `List[int]` dispatches
-        // through the existing `__class_getitem__` mechanism.
-        "List"  => primitive_class_value("list"),
-        "Dict"  => primitive_class_value("dict"),
-        "Set"   => primitive_class_value("set"),
-        "Tuple" => primitive_class_value("tuple"),
+        // PEP 585: these names are deprecated aliases for built-in types
+        // (CPython's `typing._SpecialGenericAlias`).  They are *distinct*
+        // objects from the underlying builtins — `typing.List is not list` —
+        // with a `typing.`-prefixed repr (`typing.List`, `typing.List[int]`).
+        // `isinstance`/`issubclass` delegate to the underlying builtin.
+        "List"      => legacy_alias_value("List"),
+        "Dict"      => legacy_alias_value("Dict"),
+        "Set"       => legacy_alias_value("Set"),
+        "FrozenSet" => legacy_alias_value("FrozenSet"),
+        "Tuple"     => legacy_alias_value("Tuple"),
 
         // `Any` — special singleton.  Built via thread-local class to avoid
         // recursion during `module()` construction.
@@ -190,7 +193,11 @@ pyrust_module! {
         "ClassVar" => class_value_for("ClassVar"),
         "Final"    => class_value_for("Final"),
         "Literal"  => class_value_for("Literal"),
-        "Type"     => class_value_for("Type"),
+
+        // `Type` is the deprecated alias for the built-in `type`; like the
+        // PEP 585 aliases above it reprs as `typing.Type` and delegates
+        // `isinstance`/`issubclass` to `type`.
+        "Type"     => legacy_alias_value("Type"),
 
         // `Generic` and `Protocol` are real PyClass values (not _TypingAlias
         // instances) so they can serve as class bases.
@@ -584,6 +591,107 @@ thread_local! {
         }
         map
     };
+}
+
+thread_local! {
+    /// Map from legacy-alias name (`List`, `Dict`, …) → its dedicated
+    /// `_SpecialGenericAlias`-style `PyClass` singleton.  Each carries:
+    ///   * `qualname`/`name` = the alias name (`List`),
+    ///   * `__module__` = `"typing"` so the `GenericAlias` repr qualifies a
+    ///     subscript as `typing.List[int]`,
+    ///   * `__pyrust_class_repr__` = `"typing.List"` so the *bare* class reprs
+    ///     as `typing.List` (not `<class 'typing.List'>`),
+    ///   * `__class_getitem__` sentinel so `List[int]` builds a `GenericAlias`
+    ///     with this class as origin,
+    ///   * `__pyrust_legacy_alias_of__` = the underlying builtin name
+    ///     (`"list"`) so `isinstance`/`issubclass` delegate to that builtin.
+    static LEGACY_ALIAS_CLASSES: std::collections::HashMap<&'static str, Rc<RefCell<PyClass>>> = {
+        // (alias name, underlying builtin name)
+        let names: &[(&str, &str)] = &[
+            ("List", "list"),
+            ("Dict", "dict"),
+            ("Set", "set"),
+            ("FrozenSet", "frozenset"),
+            ("Tuple", "tuple"),
+            ("Type", "type"),
+        ];
+        let mut map = std::collections::HashMap::new();
+        for (name, builtin) in names {
+            let name = *name;
+            let mut attrs: IndexMap<String, Value> = IndexMap::new();
+            attrs.insert(
+                "__class_getitem__".to_string(),
+                Value::builtin_function(legacy_alias_cgi_name(name)),
+            );
+            attrs.insert("__module__".to_string(), Value::string("typing"));
+            attrs.insert(
+                "__pyrust_class_repr__".to_string(),
+                Value::string(format!("typing.{name}")),
+            );
+            // The underlying builtin this alias delegates to, stored as the
+            // class value itself so both `legacy_alias_delegate` (native) and
+            // `get_origin` (Python) can normalise to it directly.
+            attrs.insert(
+                "__pyrust_legacy_alias_of__".to_string(),
+                legacy_builtin_class_value(builtin),
+            );
+            let class = Rc::new(RefCell::new(PyClass::new(name, name, None, attrs)));
+            map.insert(name, class);
+        }
+        map
+    };
+}
+
+/// Registry name for a legacy alias's `__class_getitem__` sentinel.  The name
+/// contains `.__class_getitem__`, which makes `expr.rs`'s subscript handler
+/// build a `GenericAlias` (origin = this class) directly rather than invoking
+/// the function — so the function body is never called.
+fn legacy_alias_cgi_name(name: &str) -> &'static str {
+    match name {
+        "List" => "typing.List.__class_getitem__",
+        "Dict" => "typing.Dict.__class_getitem__",
+        "Set" => "typing.Set.__class_getitem__",
+        "FrozenSet" => "typing.FrozenSet.__class_getitem__",
+        "Tuple" => "typing.Tuple.__class_getitem__",
+        "Type" => "typing.Type.__class_getitem__",
+        _ => "typing._legacy.__class_getitem__",
+    }
+}
+
+/// The module-constant `Value` for a legacy alias (`typing.List`, …).
+fn legacy_alias_value(name: &str) -> Value {
+    LEGACY_ALIAS_CLASSES.with(|map| {
+        map.get(name)
+            .cloned()
+            .map(Value::py_class)
+            .unwrap_or_else(Value::none)
+    })
+}
+
+/// Resolve a legacy-alias builtin name (`"list"`, `"type"`, …) to its
+/// `PyClass` value.  `type` lives in the metaclass singleton; the rest are
+/// primitive classes.
+fn legacy_builtin_class_value(builtin: &str) -> Value {
+    if builtin == "type" {
+        return Value::py_class(crate::interpreter::type_class_singleton());
+    }
+    crate::interpreter::primitive_class_by_name(builtin)
+        .map(Value::py_class)
+        .unwrap_or_else(Value::none)
+}
+
+/// If `class` is one of the legacy typing aliases (`typing.List`, …), return
+/// the `PyClass` value of the underlying builtin it delegates to (`list`, …).
+/// Used by `isinstance`/`issubclass` so checks against the alias behave like
+/// checks against the builtin.  Returns `None` for any other class.
+pub(crate) fn legacy_alias_delegate(class: &Rc<RefCell<PyClass>>) -> Option<Value> {
+    // Confirm pointer identity against a singleton (not just the marker attr)
+    // so a user class that happens to set the attr cannot hijack delegation.
+    let is_ours = LEGACY_ALIAS_CLASSES.with(|map| map.values().any(|c| Rc::ptr_eq(c, class)));
+    if !is_ours {
+        return None;
+    }
+    class.borrow().attrs.get("__pyrust_legacy_alias_of__").cloned()
 }
 
 /// Helper to get a primitive-class Value by name.

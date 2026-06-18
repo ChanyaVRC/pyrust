@@ -4631,15 +4631,26 @@ impl Value {
                 UserFunctionKind::Builtin(name) => format!("<built-in function {name}>"),
             },
             ValueKind::PyClass(class) => {
-                let (qualname, module) = {
+                let (qualname, module, custom_repr) = {
                     let c = class.borrow();
                     let qualname = c.qualname.clone();
                     let module = c
                         .attrs
                         .get("__module__")
                         .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    (qualname, module)
+                    // Some pseudo-classes (e.g. the deprecated `typing.List`
+                    // aliases, CPython's `_SpecialGenericAlias`) render without
+                    // the `<class '...'>` wrapper.  When the class carries a
+                    // `__pyrust_class_repr__` string, use it verbatim.
+                    let custom_repr = c
+                        .attrs
+                        .get("__pyrust_class_repr__")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    (qualname, module, custom_repr)
                 };
+                if let Some(r) = custom_repr {
+                    return r;
+                }
                 match module.as_deref() {
                     Some("builtins") | None => format!("<class '{qualname}'>"),
                     Some(m) => format!("<class '{m}.{qualname}'>"),
