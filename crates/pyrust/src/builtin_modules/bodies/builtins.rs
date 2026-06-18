@@ -8775,7 +8775,10 @@ fn isinstance_check(
 /// protocols (unlike `issubclass`), so no data-member guard here.
 fn protocol_structural_isinstance(obj: &Value, cls_rc: &Rc<RefCell<PyClass>>) -> Result<bool> {
     require_runtime_checkable(cls_rc)?;
-    Ok(protocol_members_present(obj, cls_rc))
+    // `isinstance` resolves members on the subject's *type* (issue #2551).  When
+    // the subject is itself a class, that type is its metaclass — so a member
+    // supplied by the metaclass counts, matching `getattr_static`.
+    Ok(protocol_members_present(obj, cls_rc, false))
 }
 
 /// Structural `issubclass(cls, P)` for a `typing.Protocol` subclass `cls_rc`
@@ -8798,7 +8801,10 @@ fn protocol_structural_issubclass(
             "Protocols with non-method members don't support issubclass()".to_string(),
         ));
     }
-    Ok(protocol_members_present(candidate, cls_rc))
+    // `issubclass` checks the candidate *class*'s own MRO — the class is its own
+    // lookup target, NOT its metaclass.  `isinstance(C, P)` and `issubclass(C, P)`
+    // therefore differ when a member lives on the metaclass (CPython 3.12).
+    Ok(protocol_members_present(candidate, cls_rc, true))
 }
 
 /// Shared guard for both Protocol checks: a Protocol subclass must be
@@ -8825,7 +8831,15 @@ fn require_runtime_checkable(cls_rc: &Rc<RefCell<PyClass>>) -> Result<()> {
 /// via static attribute lookup (issue #2551 — bypassing `__getattr__` and
 /// descriptors).  Missing/empty `__protocol_attrs__` matches everything, mirroring
 /// CPython for an attribute-free protocol body.
-fn protocol_members_present(subject: &Value, cls_rc: &Rc<RefCell<PyClass>>) -> bool {
+///
+/// `subject_is_class` selects the lookup target: for `issubclass` the subject is
+/// the candidate class itself (walk its own MRO), while for `isinstance` the
+/// subject is resolved to its type — its metaclass when it happens to be a class.
+fn protocol_members_present(
+    subject: &Value,
+    cls_rc: &Rc<RefCell<PyClass>>,
+    subject_is_class: bool,
+) -> bool {
     let attrs = crate::interpreter::lookup_class_attr(cls_rc, "__protocol_attrs__");
     let names: Vec<String> = protocol_attr_names(attrs.as_ref());
     // CPython 3.12 treats a member that resolves to `None` as absent unless the
@@ -8841,7 +8855,7 @@ fn protocol_members_present(subject: &Value, cls_rc: &Rc<RefCell<PyClass>>) -> b
         // descriptor `__get__`.  A dynamic `get_attr` probe both over-matches
         // (`__getattr__`-supplied attrs count as present) and lets a raising
         // `__getattr__` abort the check.  `has_static_attr` never raises.
-        match has_static_attr(subject, name) {
+        match has_static_attr(subject, name, subject_is_class) {
             None => return false,
             Some(val) => {
                 if matches!(val.kind(), ValueKind::None) && !non_callable.iter().any(|n| n == name)
@@ -8861,25 +8875,42 @@ fn protocol_members_present(subject: &Value, cls_rc: &Rc<RefCell<PyClass>>) -> b
 /// `__getattr__` or descriptor `__get__`.  Returns the raw stored `Value` if
 /// found, else `None`.  Never raises — a missing attribute, or a `__getattr__`
 /// that would raise, is simply "absent" (issues #2551 / #2552).
-fn has_static_attr(value: &Value, name: &str) -> Option<Value> {
+///
+/// `value_is_class` selects the lookup target when `value` is a class:
+/// `issubclass(C, P)` (`true`) walks `C`'s own MRO, treating `C` as the lookup
+/// target; `isinstance(C, P)` (`false`) resolves `C`'s type — its metaclass — so
+/// a protocol member supplied by the metaclass counts, matching CPython's
+/// `getattr_static(C, name)` which searches the metaclass MRO.
+fn has_static_attr(value: &Value, name: &str, value_is_class: bool) -> Option<Value> {
     // Instance `__dict__` shadows the class, matching attribute resolution order.
     if let ValueKind::PyInstance(inst) = value.kind()
         && let Some(v) = inst.borrow().attrs.get(name)
     {
         return Some(v.clone());
     }
-    // Class-side static walk.  When `value` is itself a class (the `issubclass`
-    // class-side check) it is its own lookup target; otherwise resolve its type —
-    // the instance's class for a `PyInstance`, or the primitive-type singleton for
-    // `list`/`int`/… so e.g. `isinstance([], Sized)` still sees `list.__len__`.
-    // `lookup_class_attr` walks the C3 MRO reading each class's own `attrs` dict
-    // directly — no `__getattr__`, no descriptor binding.
-    let class = if matches!(value.kind(), ValueKind::PyClass(_)) {
-        value.clone()
-    } else {
-        value_class(value)
-    };
-    if let ValueKind::PyClass(cls_rc) = class.kind() {
+    // Class-side static walk via `lookup_class_attr`, which reads each class's own
+    // `attrs` dict directly along the C3 MRO — no `__getattr__`, no descriptor
+    // binding.
+    if let ValueKind::PyClass(cls_rc) = value.kind() {
+        // The subject is a class.  `issubclass(C, P)` checks `C`'s own MRO only.
+        if value_is_class {
+            return crate::interpreter::lookup_class_attr(cls_rc, name);
+        }
+        // `isinstance(C, P)` mirrors `getattr_static(C, name)`, which searches both
+        // `C`'s own MRO and `C`'s metaclass MRO (a classmethod on `C` and a method
+        // on the metaclass both satisfy the protocol).
+        if let Some(v) = crate::interpreter::lookup_class_attr(cls_rc, name) {
+            return Some(v);
+        }
+        if let ValueKind::PyClass(meta_rc) = value_class(value).kind() {
+            return crate::interpreter::lookup_class_attr(meta_rc, name);
+        }
+        return None;
+    }
+    // Non-class subject: resolve its type — the instance's class for a
+    // `PyInstance`, or the primitive-type singleton for `list`/`int`/… so e.g.
+    // `isinstance([], Sized)` still sees `list.__len__`.
+    if let ValueKind::PyClass(cls_rc) = value_class(value).kind() {
         return crate::interpreter::lookup_class_attr(cls_rc, name);
     }
     None

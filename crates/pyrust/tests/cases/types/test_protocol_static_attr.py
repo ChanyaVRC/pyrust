@@ -82,3 +82,34 @@ class WithDescriptor:
 
 
 print(isinstance(WithDescriptor(), HasBar))  # True
+
+
+# isinstance against a *class* subject mirrors inspect.getattr_static, which
+# searches both the class's own MRO and the metaclass MRO.  issubclass checks the
+# class's own MRO only, so the two diverge for members supplied by the metaclass.
+@runtime_checkable
+class HasM(Protocol):
+    def m(self): ...
+
+
+class WithClassmethod:
+    @classmethod
+    def m(cls):
+        return 1
+
+
+print(isinstance(WithClassmethod, HasM))  # True (own MRO)
+print(issubclass(WithClassmethod, HasM))  # False (m not on instances)
+
+
+class Meta(type):
+    def m(cls):
+        return 1
+
+
+class WithMetaMethod(metaclass=Meta):
+    pass
+
+
+print(isinstance(WithMetaMethod, HasM))  # True (metaclass MRO)
+print(issubclass(WithMetaMethod, HasM))  # False
