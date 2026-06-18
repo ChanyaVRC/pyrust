@@ -674,6 +674,16 @@ impl Interpreter {
                         "__self__" => return Ok(receiver),
                         "__module__" => return Ok(Value::none()),
                         "__doc__" => return Ok(Value::none()),
+                        "__call__" => {
+                            // Issue #2550: a builtin bound method (`[].append`) is
+                            // callable; CPython's `l.append.__call__` is a
+                            // `builtin_function_or_method object` method-wrapper.
+                            // Re-dispatches onto the bound method.
+                            return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                                target.clone(),
+                                "builtin_function_or_method",
+                            ));
+                        }
                         _ => {}
                     }
                 }
@@ -943,6 +953,16 @@ impl Interpreter {
                         if name == "__self__" {
                             return Ok(Value::py_instance(Rc::clone(receiver)));
                         }
+                        if name == "__call__" {
+                            // Issue #2550: a bound method is callable, so CPython
+                            // exposes `m.__call__ == <method-wrapper '__call__' of
+                            // method object at 0x...>`.  The wrapper re-dispatches
+                            // onto the bound method via `as_type_call_wrapper`.
+                            return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                                target.clone(),
+                                "method",
+                            ));
+                        }
                         if let Some(v) = bound_method_common_attr(function, name) {
                             return v;
                         }
@@ -953,6 +973,15 @@ impl Interpreter {
                         }
                         if name == "__self__" {
                             return Ok(Value::py_class(Rc::clone(class)));
+                        }
+                        if name == "__call__" {
+                            // Issue #2550: a classmethod-bound method is callable;
+                            // CPython's `C.cm.__call__` is a `method object`
+                            // method-wrapper.  Re-dispatches onto the bound method.
+                            return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                                target.clone(),
+                                "method",
+                            ));
                         }
                         if let Some(v) = bound_method_common_attr(function, name) {
                             return v;

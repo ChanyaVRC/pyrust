@@ -35,3 +35,38 @@ print(repr(str.upper.__call__).rsplit(" at ", 1)[0])
 # staticmethod is callable (PEP-3155, 3.12); classmethod object is not.
 print(hasattr(staticmethod(f), "__call__"))
 print(hasattr(classmethod(f), "__call__"))
+
+
+# Bound methods (instance, classmethod-bound) and builtin bound methods are
+# also callable, so they expose `__call__` too.
+class C:
+    @classmethod
+    def cm(cls):
+        return "cm"
+
+    @staticmethod
+    def sm():
+        return "sm"
+
+    def m(self):
+        return "m"
+
+
+c = C()
+print(hasattr(C.cm, "__call__"))
+print(hasattr(C.sm, "__call__"))
+print(hasattr(C.m, "__call__"))
+print(hasattr(c.cm, "__call__"))
+print(hasattr(c.m, "__call__"))
+print(C.cm.__call__())
+print(c.m.__call__())
+print(type(c.m.__call__).__name__)
+print(repr(c.m.__call__).rsplit(" at ", 1)[0])
+print(repr(C.cm.__call__).rsplit(" at ", 1)[0])
+
+# Builtin bound method (`list.append` bound to an instance).
+lst = [1, 2]
+print(hasattr(lst.append, "__call__"))
+lst.append.__call__(3)
+print(lst)
+print(repr(lst.append.__call__).rsplit(" at ", 1)[0])
