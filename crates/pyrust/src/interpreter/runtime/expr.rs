@@ -6869,6 +6869,7 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
                 ValueKind::Int(_)
                     | ValueKind::BigInt(_)
                     | ValueKind::Float(_)
+                    | ValueKind::Complex(_, _)
                     | ValueKind::Str(_)
                     | ValueKind::Bytes(_)
             );
@@ -7633,6 +7634,12 @@ fn set_subset_cmp(
 /// the value is a `BigInt` that is too large to convert to `f64` (matching
 /// CPython 3.12's `OverflowError: int too large to convert to float`).
 fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
+    // Issue #2544: a `complex`/`int`/`float` subclass instance carries its
+    // primitive in `__builtin_data__`; unwrap it so subclass operands take the
+    // same numeric path as the base type (`C(1, 2) + 1` → `(2+2j)`).  A user
+    // arithmetic dunder was already dispatched upstream in `eval_binary`, so no
+    // override gate is needed here.
+    let v = coerce_numeric(v);
     match v.kind() {
         ValueKind::Complex(re, im) => Ok(Some((re, im))),
         ValueKind::Int(n) => Ok(Some((n as f64, 0.0))),
@@ -7640,6 +7647,21 @@ fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
         ValueKind::Bool(b) => Ok(Some((if b { 1.0 } else { 0.0 }, 0.0))),
         ValueKind::BigInt(b) => Ok(Some((bigint_to_float_or_overflow(b)?, 0.0))),
         _ => Ok(None),
+    }
+}
+
+/// True when `v` is a `complex` value or a `complex`-backed subclass instance
+/// (issue #2544).  Used to decide whether an arithmetic operand pair should be
+/// routed through the complex path; a bare `int`/`float` operand stays on its
+/// dedicated numeric fast path.
+fn is_complex_operand(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::Complex(_, _) => true,
+        ValueKind::PyInstance(_) => v
+            .as_py_instance_rc()
+            .and_then(instance_builtin_data)
+            .is_some_and(|b| matches!(b.kind(), ValueKind::Complex(_, _))),
+        _ => false,
     }
 }
 
@@ -7654,8 +7676,10 @@ type ComplexOperands = ((f64, f64), (f64, f64));
 /// not a numeric type.  Returns `Err(...)` when a `BigInt` operand overflows
 /// `f64` (propagated as `OverflowError`).
 fn both_as_complex(left: &Value, right: &Value) -> Result<Option<ComplexOperands>> {
-    let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
-    let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
+    // Issue #2544: also treat a `complex`-backed subclass instance as complex so
+    // its arithmetic flows through here rather than falling to the TypeError arm.
+    let l_is_c = is_complex_operand(left);
+    let r_is_c = is_complex_operand(right);
     if !l_is_c && !r_is_c {
         return Ok(None);
     }

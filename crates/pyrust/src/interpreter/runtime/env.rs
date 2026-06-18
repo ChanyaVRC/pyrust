@@ -1626,6 +1626,16 @@ impl Interpreter {
                 {
                     return Ok(v);
                 }
+        // Complex subclass instances (issue #2544): `complex` exposes
+        // `real`/`imag` getset_descriptors and the `conjugate` method, so a
+        // subclass instance must resolve them through the `complex` backing.
+        if matches!(name, "real" | "imag" | "conjugate")
+            && let Some(backing) = instance_builtin_data(&instance)
+                && let Some(v) =
+                    pyrust_builtins::numeric_attrs_descriptor::complex_attr(&backing, name)
+                {
+                    return Ok(v);
+                }
 
         // Step 3: Non-data descriptor or plain class attribute.
         // `cached_property` and user-defined non-data descriptors
