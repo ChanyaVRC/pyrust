@@ -3551,7 +3551,7 @@ impl Interpreter {
                     let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
                     'memo: {
                         let fid = match func_val.kind() {
-                            ValueKind::UserFunction(f) if f.is_pure => f.id,
+                            ValueKind::UserFunction(f) if f.is_memo_pure => f.id,
                             _ => break 'memo,
                         };
                         if matches!(self.memo_stats.get(&fid), Some((_, _, false))) {

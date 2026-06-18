@@ -76,7 +76,21 @@ pub struct FnProto {
     pub local_names: Rc<HashSet<String>>,
     pub global_names: Rc<HashSet<String>>,
     pub nonlocal_names: Rc<HashSet<String>>,
-    pub is_pure: bool,
+    /// True when a call to this function may have its result *cached and reused*
+    /// for equal arguments (issue #2523).  Read by the VM's `CallMemo` result
+    /// cache (`vm.rs::Insn::CallMemo`).  More permissive than [`Self::is_dce_pure`]:
+    /// a benign raise or user dunder dispatch is acceptable because the cache
+    /// only fires for all-integer arguments and a scalar result.  Derived from
+    /// `interpreter::is_memo_pure_body`.
+    pub is_memo_pure: bool,
+    /// True when a *dead-result* call to this function may be eliminated entirely
+    /// (issue #2523).  Read by the optimizer to gate dead-`CallMemo` removal in
+    /// `pass_dead_store_elim` and inlining in `build_inline_plan`.  Conservative:
+    /// any expression that can raise or dispatch a user dunder makes the body
+    /// impure, so the effect/exception CPython observes is never swallowed.
+    /// Derived from `interpreter::is_dce_pure_body`.  Invariant:
+    /// `is_dce_pure ⇒ is_memo_pure`.
+    pub is_dce_pure: bool,
     /// Names for annotation registers passed to `MakeFunction`.  Parallel to
     /// the `annots_base..+annots_n` register window: `annotation_keys[i]` is
     /// the dict key (parameter name or `"return"`) for `R[annots_base + i]`.

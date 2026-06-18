@@ -5531,8 +5531,50 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 // `crates/pyrust/src/builtin_modules/{math,sys}.rs`.  See
 // `docs/builtin-migration.md` for the recipe.
 
-/// Returns true if `expr` produces no observable side effects given the set of
-/// locally-defined functions already confirmed pure (`pure_fns`).
+/// Which of the two purity questions a predicate is answering.
+///
+/// A single structural walk serves two callers with *different* safety
+/// requirements (issue #2523):
+///
+/// * [`PurityMode::Dce`] — "may a dead-result call be eliminated entirely?".
+///   This requires *no observable effect at all*, including a raise or a user
+///   dunder dispatch.  A comparison (`a < a`), a unary op (`-a`), a
+///   raise-capable binary op (`a / b`), attribute/index/slice access and an
+///   interpolated f-string can each dispatch a user protocol method or raise,
+///   so under this mode they disqualify the body.  Used by the compiler to
+///   gate `CallMemo`-DCE eligibility — dropping such a call would swallow the
+///   effect/exception CPython observes (issues #2409 / #2487 / #2517 and the
+///   comparison/unary cases in #2523).
+///
+/// * [`PurityMode::Memo`] — "may the call's result be cached and reused for
+///   equal arguments?".  This requires the result to be *determined by the
+///   arguments* with no *persistent state mutation* and no read of mutable
+///   external state.  It diverges from `Dce` in exactly one respect: a
+///   **comparison** (`a < a`, as `Expr::Compare` or a rich-comparison
+///   `Expr::Binary`) and a **unary op** (`-a`) are acceptable, because they
+///   dispatch a `__lt__`/`__neg__`/… that is deterministic for the integer
+///   arguments the VM's result cache (`vm.rs::Insn::CallMemo`) actually keys on
+///   (`int` carries no user dunders) — so self-recursive `fib`/`fact`/`ack`
+///   (which use `<`/`-`) stay memoized.  Everything else `Dce` rejects, `Memo`
+///   also rejects: a raise-capable binary op (`a / b`, `a in b`), an
+///   attribute / index / slice read (which can observe mutable state such as
+///   `sys.exc_info()[2]`), and an interpolated f-string.
+///
+/// `Memo` is *more permissive* than `Dce`: the `Memo` arms only ever *add*
+/// acceptance over `Dce` (comparisons and unary ops), so every `Dce`-pure body
+/// is also `Memo`-pure (`is_dce_pure_body ⊆ is_memo_pure_body`) — verified
+/// structurally below.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PurityMode {
+    Dce,
+    Memo,
+}
+
+/// Returns true if `expr` is pure under `mode` given the set of locally-defined
+/// functions already confirmed pure (`pure_fns`).  See [`PurityMode`] for how
+/// the two modes differ; the only arms that diverge are `Unary`, `Compare`, and
+/// `Binary` on a rich-comparison operator (all accepted by `Memo`, rejected by
+/// `Dce`).
 ///
 /// A `Call` is pure only when the callee is a built-in declared `#[pure]` in
 /// `pyrust_module! { … }` (reflected through `BuiltinReg::is_pure` — see
@@ -5548,6 +5590,7 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 /// makes the optimizer DCE / fold `foo(…)` calls without any further edit.
 fn is_pure_expr(
     expr: &Expr,
+    mode: PurityMode,
     pure_fns: &std::collections::HashSet<String>,
     local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
 ) -> bool {
@@ -5571,37 +5614,62 @@ fn is_pure_expr(
         // `counter` (issue #346 correctness requirement).
         Expr::Var(n, _) => local_names.contains_key(n.as_str()),
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
-            items.iter().all(|e| is_pure_expr(e, pure_fns, local_names))
+            items.iter().all(|e| is_pure_expr(e, mode, pure_fns, local_names))
         }
-        Expr::Starred(inner) => is_pure_expr(inner, pure_fns, local_names),
+        Expr::Starred(inner) => is_pure_expr(inner, mode, pure_fns, local_names),
         Expr::Dict(items) => items.iter().all(|item| match item {
             crate::ast::DictItem::Pair(k, v) => {
-                is_pure_expr(k, pure_fns, local_names) && is_pure_expr(v, pure_fns, local_names)
+                is_pure_expr(k, mode, pure_fns, local_names)
+                    && is_pure_expr(v, mode, pure_fns, local_names)
             }
-            crate::ast::DictItem::DoubleSplat(e) => is_pure_expr(e, pure_fns, local_names),
+            crate::ast::DictItem::DoubleSplat(e) => is_pure_expr(e, mode, pure_fns, local_names),
         }),
-        Expr::Unary { expr, .. } => is_pure_expr(expr, pure_fns, local_names),
-        Expr::Binary { op, left, right, .. } => {
-            // A binary op is pure only when the *operator itself* cannot raise.
-            // Division/modulo can raise `ZeroDivisionError` (`1/0`, `1%0`),
-            // shifts raise `ValueError` on a negative count, `@` (MatMul) raises
-            // `TypeError` on non-matmul operands, and `in`/`not in` invoke
-            // `__contains__`/iteration.  Classifying such a function as pure lets
-            // a dead-result `CallMemo` be dead-store-eliminated, silently
-            // swallowing the exception (issue #2487 — sibling of #2409's `raise`
-            // case).  Operands must also be pure.
-            !binop_may_raise(*op)
-                && is_pure_expr(left, pure_fns, local_names)
-                && is_pure_expr(right, pure_fns, local_names)
+        // A unary op dispatches a user dunder (`__neg__` / `__pos__` /
+        // `__invert__`) that can have side effects or raise `TypeError` on an
+        // operand without the slot.  For DCE this disqualifies the body —
+        // dropping a dead-result `CallMemo` would swallow that effect (the `-a`
+        // case in #2523).  For Memo it is acceptable: the result is determined
+        // by the operand and the VM cache only fires for integer args (which
+        // carry no user dunders).
+        Expr::Unary { expr, .. } => {
+            mode == PurityMode::Memo && is_pure_expr(expr, mode, pure_fns, local_names)
         }
+        Expr::Binary { op, left, right, .. } => {
+            // Operator-level purity differs by mode (issue #2523):
+            //   * `binop_may_raise` (division/modulo → `ZeroDivisionError`, shifts
+            //     → `ValueError`, `@` → `TypeError`, `in`/`not in` → user
+            //     `__contains__`) is impure in BOTH modes — these can raise *and*
+            //     read mutable external state (a user `__contains__`), so they are
+            //     neither DCE-safe nor reliably cacheable.
+            //   * A rich comparison (`==`/`<`/… as `Expr::Binary`) dispatches a
+            //     user `__eq__`/`__lt__`/… and can raise `TypeError`: NOT DCE-safe
+            //     (the `a < a` swallow case), but memo-safe (the VM cache fires
+            //     only for integer args, which carry no user dunders), so it is
+            //     pure in Memo mode only.
+            // Plain arithmetic / bitwise / boolean / identity operators are pure
+            // in both modes.  Operands must also be pure.
+            let op_ok = match mode {
+                PurityMode::Dce => !binop_dce_unsafe(*op),
+                PurityMode::Memo => !binop_may_raise(*op),
+            };
+            op_ok
+                && is_pure_expr(left, mode, pure_fns, local_names)
+                && is_pure_expr(right, mode, pure_fns, local_names)
+        }
+        // A comparison dispatches a user rich-comparison dunder (`__lt__` /
+        // `__eq__` / …) that can have side effects or raise `TypeError` for
+        // unordered operands (`1 < "x"`).  Same DCE-vs-Memo split as `Unary`:
+        // DCE must keep the call (the `a < a` / `1 < a` cases in #2523), Memo
+        // may treat it as cacheable.
         Expr::Compare { left, ops } => {
-            is_pure_expr(left, pure_fns, local_names)
-                && ops.iter().all(|(_, e)| is_pure_expr(e, pure_fns, local_names))
+            mode == PurityMode::Memo
+                && is_pure_expr(left, mode, pure_fns, local_names)
+                && ops.iter().all(|(_, e)| is_pure_expr(e, mode, pure_fns, local_names))
         }
         Expr::Ternary { cond, then, else_ } => {
-            is_pure_expr(cond, pure_fns, local_names)
-                && is_pure_expr(then, pure_fns, local_names)
-                && is_pure_expr(else_, pure_fns, local_names)
+            is_pure_expr(cond, mode, pure_fns, local_names)
+                && is_pure_expr(then, mode, pure_fns, local_names)
+                && is_pure_expr(else_, mode, pure_fns, local_names)
         }
         // A lambda expression allocates a fresh Rc<UserFunction> on every evaluation,
         // so any enclosing function that returns one is not pure in the identity sense.
@@ -5659,23 +5727,22 @@ fn is_pure_expr(
             if !callee_is_pure {
                 return false;
             }
-            args.iter().all(|a| is_pure_expr(&a.value, pure_fns, local_names))
+            args.iter().all(|a| is_pure_expr(&a.value, mode, pure_fns, local_names))
         }
-        // Attribute access, subscription and slicing are never pure: each can
-        // raise on otherwise-pure operands and can invoke user protocol methods
-        // (`__getattr__`/`__getattribute__`, `__getitem__`).  Examples:
+        // Attribute access, subscription and slicing are impure in BOTH modes.
+        // They can raise on otherwise-pure operands and invoke user protocol
+        // methods (`__getattr__`/`__getattribute__`, `__getitem__`):
         //   (1).foo   -> AttributeError
         //   {}["x"]   -> KeyError
         //   (1)[0]    -> TypeError ('int' object is not subscriptable)
         //   (1)[0:1]  -> TypeError
-        // Classifying such a function as pure lets a dead-result `CallMemo` be
-        // dead-store-eliminated, silently swallowing the exception (issue #2517 —
-        // sibling of #2409's `raise` and #2487's div/mod cases).  Recursing into
-        // the operands is unsound because the *operation itself* is the side
-        // effect, so mark these impure unconditionally.
-        Expr::Attr { .. } => false,
-        Expr::Index { .. } => false,
-        Expr::Slice { .. } => false,
+        // For DCE, eliminating a dead-result call would swallow that effect
+        // (issue #2517 — sibling of #2409's `raise` and #2487's div/mod cases).
+        // For Memo they are *also* impure: an attribute / item read can observe
+        // mutable external state (e.g. `sys.exc_info()[2].tb_lineno`), so caching
+        // the result by argument value would serve stale data.  Recursing into
+        // the operands is unsound because the *operation itself* is the effect.
+        Expr::Attr { .. } | Expr::Index { .. } | Expr::Slice { .. } => false,
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
         Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } | Expr::GenExp { .. } => false,
@@ -5685,12 +5752,12 @@ fn is_pure_expr(
             // An f-string with an interpolated expression invokes the formatting
             // protocol (`__format__`/`__str__`/`__repr__`) and can raise even on
             // a pure operand: a bad format spec on a built-in raises `ValueError`
-            // (`f"{(1):foo}"`), and a user `__format__` may have side effects or
-            // raise.  Recursing into the operand parts classified such an
-            // expression pure, letting a dead-result `CallMemo` be
-            // dead-store-eliminated and swallowing the effect/exception (sibling
-            // of #2517 — #2409/#2487 bug class).  Only a fully-literal f-string
-            // (no interpolation) is pure.
+            // (`f"{(1):foo}"`), and a user `__format__` may have side effects,
+            // raise, or read mutable external state.  Impure in BOTH modes —
+            // eliminating a dead-result call would swallow the effect (DCE,
+            // sibling of #2517 — #2409/#2487 bug class) and caching the result
+            // could serve stale data (Memo).  Only a fully-literal f-string (no
+            // interpolation) is pure.
             use crate::ast::FStringPart;
             parts.iter().all(|p| matches!(p, FStringPart::Literal(_)))
         }
@@ -5721,7 +5788,32 @@ fn binop_may_raise(op: crate::ast::BinaryOp) -> bool {
     )
 }
 
-/// Returns true if every statement in `body` is free of observable side effects.
+/// True when a binary operator makes its expression *DCE-unsafe*: evaluating it
+/// can have an observable effect (raise, or dispatch a user dunder) even on
+/// otherwise-pure operands, so a dead-result call whose body uses it must not be
+/// eliminated (issue #2523).  This is a superset of [`binop_may_raise`]: in
+/// addition to the raise-capable operators it includes the **rich-comparison**
+/// operators (`==` / `!=` / `<` / `<=` / `>` / `>=`), which dispatch
+/// `__eq__` / `__lt__` / … and can raise `TypeError` for unordered operands
+/// (`1 < "x"`).  A parser may lower a single comparison to `Expr::Binary` with
+/// one of these ops (chained comparisons use `Expr::Compare`), so both shapes
+/// must be gated.
+///
+/// The identity operators (`is` / `is not`) and the short-circuit boolean
+/// operators (`and` / `or`) are *not* DCE-unsafe: they never dispatch a user
+/// dunder and never raise on their own.  Plain arithmetic / bitwise operators
+/// are DCE-safe for the literal/local operands `is_pure_expr` admits.
+fn binop_dce_unsafe(op: crate::ast::BinaryOp) -> bool {
+    use crate::ast::BinaryOp::*;
+    binop_may_raise(op) || matches!(op, Eq | Ne | Lt | Le | Gt | Ge)
+}
+
+/// True if `body` is *DCE-pure*: a dead-result call to a function with this
+/// body may be eliminated entirely.  Conservative — any expression that can
+/// raise or dispatch a user dunder (comparisons, unary ops, raise-capable
+/// binary ops, attribute/index/slice access, interpolated f-strings) makes the
+/// body impure (issue #2523).  Used by the compiler to gate whether a dead
+/// `CallMemo` is dead-store-eliminable.
 ///
 /// `pure_fns` is the set of locally-defined functions already confirmed pure;
 /// calls to names outside this set and outside the registry's `#[pure]`-marked
@@ -5734,16 +5826,45 @@ fn binop_may_raise(op: crate::ast::BinaryOp) -> bool {
 /// reads of free variables (module globals, outer-scope names) are impure
 /// because the memoisation in `CallMemo` would cache the first result and
 /// silently hide subsequent mutations.
-pub(crate) fn is_pure_body(
+pub(crate) fn is_dce_pure_body(
     body: &[Stmt],
     pure_fns: &std::collections::HashSet<String>,
     local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
 ) -> bool {
-    body.iter().all(|s| is_pure_stmt(s, pure_fns, local_names))
+    is_pure_body(body, PurityMode::Dce, pure_fns, local_names)
+}
+
+/// True if `body` is *memo-pure*: a call to a function with this body may have
+/// its result cached and reused for equal arguments.  More permissive than
+/// [`is_dce_pure_body`] — a benign raise or user dunder dispatch is acceptable
+/// because the VM's result cache (`vm.rs::Insn::CallMemo`) only activates for
+/// all-integer arguments and a scalar result, and `int` carries no user
+/// dunders.  This keeps self-recursive `fib`/`fact`/`ack` (which use `<`/`-`)
+/// memoized.  Only *persistent state mutation* (global/nonlocal writes,
+/// attribute/index mutation, I/O, fresh-object allocation) disqualifies a body.
+///
+/// `is_dce_pure_body ⊆ is_memo_pure_body`: every DCE-pure body is memo-pure
+/// (the `Memo` mode only ever relaxes the `Dce` expression arms).
+pub(crate) fn is_memo_pure_body(
+    body: &[Stmt],
+    pure_fns: &std::collections::HashSet<String>,
+    local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
+) -> bool {
+    is_pure_body(body, PurityMode::Memo, pure_fns, local_names)
+}
+
+fn is_pure_body(
+    body: &[Stmt],
+    mode: PurityMode,
+    pure_fns: &std::collections::HashSet<String>,
+    local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
+) -> bool {
+    body.iter().all(|s| is_pure_stmt(s, mode, pure_fns, local_names))
 }
 
 fn is_pure_stmt(
     stmt: &Stmt,
+    mode: PurityMode,
     pure_fns: &std::collections::HashSet<String>,
     local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
 ) -> bool {
@@ -5758,9 +5879,9 @@ fn is_pure_stmt(
         Stmt::With { .. } => false,
 
         // Assignments and augmented assignments are local writes → pure if RHS is.
-        Stmt::Assign(_, expr) | Stmt::Expr(expr) => is_pure_expr(expr, pure_fns, local_names),
-        Stmt::AugAssign { expr, .. } => is_pure_expr(expr, pure_fns, local_names),
-        Stmt::Return(Some(expr)) => is_pure_expr(expr, pure_fns, local_names),
+        Stmt::Assign(_, expr) | Stmt::Expr(expr) => is_pure_expr(expr, mode, pure_fns, local_names),
+        Stmt::AugAssign { expr, .. } => is_pure_expr(expr, mode, pure_fns, local_names),
+        Stmt::Return(Some(expr)) => is_pure_expr(expr, mode, pure_fns, local_names),
         Stmt::Return(None) => true,
         // `raise` and a failing `assert` propagate an exception — an observable
         // effect, not a local write.  A function whose body can raise is NOT
@@ -5773,36 +5894,36 @@ fn is_pure_stmt(
 
         // Control flow: recurse into sub-blocks.
         Stmt::If { branches, else_branch, .. } => {
-            branches
-                .iter()
-                .all(|(cond, blk)| is_pure_expr(cond, pure_fns, local_names) && is_pure_body(blk, pure_fns, local_names))
-                && else_branch
-                    .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
+            branches.iter().all(|(cond, blk)| {
+                is_pure_expr(cond, mode, pure_fns, local_names)
+                    && is_pure_body(blk, mode, pure_fns, local_names)
+            }) && else_branch
+                .as_deref()
+                .is_none_or(|b| is_pure_body(b, mode, pure_fns, local_names))
         }
         Stmt::While { cond, body, else_branch, .. } => {
-            is_pure_expr(cond, pure_fns, local_names)
-                && is_pure_body(body, pure_fns, local_names)
+            is_pure_expr(cond, mode, pure_fns, local_names)
+                && is_pure_body(body, mode, pure_fns, local_names)
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
+                    .is_none_or(|b| is_pure_body(b, mode, pure_fns, local_names))
         }
         Stmt::For { iter, body, else_branch, .. } => {
-            is_pure_expr(iter, pure_fns, local_names)
-                && is_pure_body(body, pure_fns, local_names)
+            is_pure_expr(iter, mode, pure_fns, local_names)
+                && is_pure_body(body, mode, pure_fns, local_names)
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
+                    .is_none_or(|b| is_pure_body(b, mode, pure_fns, local_names))
         }
         Stmt::Try { body, handlers, else_branch, finally_branch, .. } => {
-            is_pure_body(body, pure_fns, local_names)
-                && handlers.iter().all(|h| is_pure_body(&h.body, pure_fns, local_names))
+            is_pure_body(body, mode, pure_fns, local_names)
+                && handlers.iter().all(|h| is_pure_body(&h.body, mode, pure_fns, local_names))
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
+                    .is_none_or(|b| is_pure_body(b, mode, pure_fns, local_names))
                 && finally_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
+                    .is_none_or(|b| is_pure_body(b, mode, pure_fns, local_names))
         }
 
         // Annotated assignment modifies __annotations__ dict — impure at module/class scope.
@@ -5813,10 +5934,10 @@ fn is_pure_stmt(
         Stmt::Def { .. } | Stmt::Class { .. } => false,
         Stmt::Pass | Stmt::Break | Stmt::Continue => true,
         Stmt::Match { subject, arms } => {
-            is_pure_expr(subject, pure_fns, local_names)
+            is_pure_expr(subject, mode, pure_fns, local_names)
                 && arms
                     .iter()
-                    .all(|arm| is_pure_body(&arm.body, pure_fns, local_names))
+                    .all(|arm| is_pure_body(&arm.body, mode, pure_fns, local_names))
         }
         // TypeAlias allocates a new heap object → impure (identity changes).
         Stmt::TypeAlias { .. } => false,
@@ -6650,7 +6771,7 @@ pub(crate) fn call_del_if_last_binding(
 
 #[cfg(test)]
 mod purity_tests {
-    use super::is_pure_body;
+    use super::{is_dce_pure_body, is_memo_pure_body};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::collections::{HashMap, HashSet};
@@ -6658,6 +6779,15 @@ mod purity_tests {
     fn parse_body(src: &str) -> Vec<crate::ast::Stmt> {
         let tokens = Lexer::new(src).expect("lex failed").into_tokens();
         Parser::new(tokens).parse_program().expect("parse failed")
+    }
+
+    /// Locals helper: treat the given names as function-local registers so a
+    /// test exercises operator/call purity rather than free-variable reads.
+    fn locals_of(names: &[&str]) -> HashMap<String, u32> {
+        (0u32..)
+            .zip(names.iter())
+            .map(|(i, n)| (n.to_string(), i))
+            .collect()
     }
 
     /// Module-namespaced builtins (`math.sqrt`, `math.sin`, …) must be
@@ -6677,8 +6807,12 @@ mod purity_tests {
             .map(|(k, v)| (k.to_string(), *v))
             .collect();
         assert!(
-            is_pure_body(&body, &HashSet::new(), &locals),
+            is_dce_pure_body(&body, &HashSet::new(), &locals),
             "math.sqrt / math.sin must register as pure (registry-keyed lookup)"
+        );
+        assert!(
+            is_memo_pure_body(&body, &HashSet::new(), &locals),
+            "dce-pure implies memo-pure"
         );
     }
 
@@ -6689,7 +6823,7 @@ mod purity_tests {
     fn value_method_calls_stay_impure() {
         let body = parse_body("y = obj.frobnicate(x)\nreturn y\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
+            !is_memo_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "obj.method(...) calls must be conservatively impure"
         );
     }
@@ -6700,7 +6834,7 @@ mod purity_tests {
     fn nested_attribute_calls_stay_impure() {
         let body = parse_body("y = a.b.c(x)\nreturn y\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
+            !is_memo_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "a.b.c(...) calls must be conservatively impure"
         );
     }
@@ -6712,7 +6846,7 @@ mod purity_tests {
     fn impure_builtins_are_rejected() {
         let body = parse_body("print(x)\nreturn x\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
+            !is_memo_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "print(...) is registered impure and must NOT pass the gate"
         );
     }
@@ -6726,7 +6860,7 @@ mod purity_tests {
     fn nested_def_is_impure() {
         let body = parse_body("def f(): pass\nreturn f\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
+            !is_memo_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "body with nested def must be impure (fixes #769)"
         );
     }
@@ -6738,7 +6872,7 @@ mod purity_tests {
     fn nested_class_is_impure() {
         let body = parse_body("class C: pass\nreturn C\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
+            !is_memo_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "body with nested class must be impure (fixes #769)"
         );
     }
@@ -6750,9 +6884,100 @@ mod purity_tests {
     fn lambda_expr_is_impure() {
         let body = parse_body("return lambda x: x + 1\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
+            !is_memo_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "body returning a lambda must be impure (fixes #769)"
         );
+    }
+
+    // ── DCE-purity vs memo-purity split (issue #2523) ────────────────────────
+
+    /// A bare comparison `a < a` can dispatch a user `__lt__` (side effect) or
+    /// raise `TypeError` for unordered operands.  It must be memo-pure (the VM
+    /// cache only fires for int args, which have no user dunders) but NOT
+    /// dce-pure (a dead-result call must keep the comparison).
+    #[test]
+    fn comparison_is_memo_pure_but_not_dce_pure() {
+        let body = parse_body("a < a\n");
+        let locals = locals_of(&["a"]);
+        assert!(
+            is_memo_pure_body(&body, &HashSet::new(), &locals),
+            "`a < a` must be memo-pure"
+        );
+        assert!(
+            !is_dce_pure_body(&body, &HashSet::new(), &locals),
+            "`a < a` must NOT be dce-pure (may dispatch __lt__ / raise)"
+        );
+    }
+
+    /// A unary op `-a` dispatches `__neg__`: same split as comparison.
+    #[test]
+    fn unary_op_is_memo_pure_but_not_dce_pure() {
+        let body = parse_body("-a\n");
+        let locals = locals_of(&["a"]);
+        assert!(
+            is_memo_pure_body(&body, &HashSet::new(), &locals),
+            "`-a` must be memo-pure"
+        );
+        assert!(
+            !is_dce_pure_body(&body, &HashSet::new(), &locals),
+            "`-a` must NOT be dce-pure (may dispatch __neg__)"
+        );
+    }
+
+    /// A raise-capable binary op `a / a` (ZeroDivisionError, or a user
+    /// `__truediv__`) is impure in BOTH modes — it can raise *and* read mutable
+    /// external state.  Non-raising arithmetic (`a + 1`) is pure in both.
+    #[test]
+    fn raise_capable_binop_impure_both_and_nonraising_is_both() {
+        let div = parse_body("a / a\n");
+        let add = parse_body("a + 1\n");
+        let locals = locals_of(&["a"]);
+        assert!(
+            !is_memo_pure_body(&div, &HashSet::new(), &locals),
+            "`a / a` must NOT be memo-pure (raise-capable)"
+        );
+        assert!(
+            !is_dce_pure_body(&div, &HashSet::new(), &locals),
+            "`a / a` must NOT be dce-pure (ZeroDivisionError)"
+        );
+        assert!(
+            is_dce_pure_body(&add, &HashSet::new(), &locals),
+            "`a + 1` is dce-pure (non-raising)"
+        );
+        assert!(
+            is_memo_pure_body(&add, &HashSet::new(), &locals),
+            "dce-pure implies memo-pure"
+        );
+    }
+
+    /// Structural subset invariant: `is_dce_pure_body ⊆ is_memo_pure_body` over a
+    /// spread of representative bodies — DCE-pure must never hold where
+    /// memo-pure does not.
+    #[test]
+    fn dce_pure_implies_memo_pure() {
+        let locals = locals_of(&["a", "b", "x", "y", "z"]);
+        let pf = HashSet::new();
+        for src in [
+            "a + 1\n",
+            "a < b\n",
+            "-a\n",
+            "a / b\n",
+            "return a if a else b\n",
+            "y = math.sqrt(x)\nreturn y\n",
+            "obj.m(x)\n",
+            "a[0]\n",
+            "return f\"{a}\"\n",
+            "print(a)\n",
+            "raise a\n",
+        ] {
+            let body = parse_body(src);
+            if is_dce_pure_body(&body, &pf, &locals) {
+                assert!(
+                    is_memo_pure_body(&body, &pf, &locals),
+                    "subset invariant violated for {src:?}: dce-pure but not memo-pure"
+                );
+            }
+        }
     }
 }
 

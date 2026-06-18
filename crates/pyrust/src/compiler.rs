@@ -4274,8 +4274,17 @@ struct Compiler {
     error_msg: Option<String>,
     def_set: u64,
     fn_protos: Vec<FnProto>,
-    /// Names of pure (side-effect-free) functions defined in this scope.
+    /// Names of *memo-pure* functions defined in this scope — callees whose
+    /// result may be cached/reused (drives `CallMemo` emission).  See issue
+    /// #2523 for the memo-vs-DCE purity distinction.
     pure_locals: HashSet<String>,
+    /// Names of *DCE-pure* functions defined in this scope — callees a
+    /// dead-result call to which may be eliminated entirely (no observable
+    /// effect, no raise).  A strict subset of `pure_locals`.  Used as the
+    /// transitive-callee allow-list when computing a nested function's own
+    /// `is_dce_pure` (a function calling a merely-memo-pure callee can still
+    /// raise, so it is *not* DCE-pure — issue #2523).
+    dce_pure_locals: HashSet<String>,
     /// True when this Compiler is producing the body of a `class` block.
     /// In that mode, every store into a top-level class-body local is
     /// instrumented with `Insn::RecordClassStore(slot)` so the VM can
@@ -5079,6 +5088,7 @@ impl Compiler {
             def_set: def_bound_mask,
             fn_protos: Vec::new(),
             pure_locals: HashSet::new(),
+            dce_pure_locals: HashSet::new(),
             is_class_body: false,
             is_class_method: false,
             qualname_prefix: String::new(),
@@ -8713,7 +8723,8 @@ impl Compiler {
 
     /// Build the inner-function scope metadata, validate global/nonlocal/
     /// annotation rules, compile the body into a child compiler, and push the
-    /// resulting `FnProto`.  Returns `(proto_idx, is_pure, has_kwonly_params)`,
+    /// resulting `FnProto`.  Returns
+    /// `(proto_idx, is_memo_pure, is_dce_pure, has_kwonly_params)`,
     /// or `None` when a (syntax/limit) error was recorded and the caller must
     /// bail out.
     #[allow(clippy::too_many_arguments)]
@@ -8726,7 +8737,7 @@ impl Compiler {
         def_lineno: u32,
         return_annotation: Option<&Expr>,
         is_async: bool,
-    ) -> Option<(u16, bool, bool)> {
+    ) -> Option<(u16, bool, bool, bool)> {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
         let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
@@ -8768,14 +8779,31 @@ impl Compiler {
         let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
 
         let def_bound = crate::interpreter::compute_def_bound_mask(params, &inner_index_rc);
-        // Include `name` so self-recursive calls are treated as pure (fixpoint assumption).
+        // Include `name` so self-recursive calls are treated as pure (fixpoint
+        // assumption).  The memo-pure analysis trusts every memo-pure local
+        // callee; the DCE-pure analysis trusts only DCE-pure local callees (a
+        // function calling a merely-memo-pure callee can still raise, so it is
+        // not itself DCE-pure — issue #2523).
         let mut pure_fns_with_self = self.pure_locals.clone();
         pure_fns_with_self.insert(name.to_string());
+        let mut dce_pure_fns_with_self = self.dce_pure_locals.clone();
+        dce_pure_fns_with_self.insert(name.to_string());
         // A coroutine function (`async def`, issue #1039) is never pure: calling
         // it must build a coroutine object (an observable side effect), so it
         // must not be inlined, memoized, or const-folded by the optimizer.
-        let is_pure = !is_async
-            && crate::interpreter::is_pure_body(body, &pure_fns_with_self, &inner_index_rc);
+        //
+        // Two purity flags drive two different optimizer decisions (issue #2523):
+        //   * `is_memo_pure` — may a call's result be cached/reused?  Permissive;
+        //     gates `CallMemo` emission, the VM result cache, and inlining.  Keeps
+        //     `<`/`-` self-recursive functions (`fib`) memoized.
+        //   * `is_dce_pure` — may a *dead-result* call be eliminated?  Conservative;
+        //     gates dead-`CallMemo` removal.  Rejects bodies that can raise or
+        //     dispatch a user dunder so the effect is never swallowed.
+        // `is_dce_pure ⊆ is_memo_pure` by construction.
+        let is_memo_pure = !is_async
+            && crate::interpreter::is_memo_pure_body(body, &pure_fns_with_self, &inner_index_rc);
+        let is_dce_pure = !is_async
+            && crate::interpreter::is_dce_pure_body(body, &dce_pure_fns_with_self, &inner_index_rc);
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
@@ -8891,17 +8919,23 @@ impl Compiler {
         };
         sub.qualname_prefix = format!("{fn_qualname}.<locals>");
         let has_kwonly_params = params.iter().any(|p| p.is_keyword_only);
-        if is_pure && !has_kwonly_params {
+        if is_memo_pure && !has_kwonly_params {
             // Seed the inner compiler with the function's own name so that
             // direct self-recursive calls are compiled as CallMemo rather than
             // Call.  This lets the VM return from the fn_cache on repeated
             // invocations without re-entering call_function_expanded at all,
-            // making recursive pure functions (e.g. fib) substantially faster.
-            // This is sound: a pure function calling only itself (and other
-            // pure things) is itself pure, satisfying the fixpoint assumption.
+            // making recursive memoizable functions (e.g. fib) substantially
+            // faster.  Memo-purity (not the stricter DCE-purity) is the right
+            // gate here: a self-recursive `fib` uses `<`/`-` and so is *not*
+            // DCE-pure, but its result is still cacheable (issue #2523).
             // Exclude kwonly-param functions: CallMemo keys by raw positional
             // registers and would bypass keyword-only enforcement on self-calls.
             sub.pure_locals.insert(name.to_string());
+            // A self-recursive dead call inside a DCE-pure function body may be
+            // eliminated only when the function itself is DCE-pure (#2523).
+            if is_dce_pure {
+                sub.dce_pure_locals.insert(name.to_string());
+            }
         }
         // `co_firstlineno`: the `def`/`lambda` line, recorded on the body's
         // FnCode (issue #2185).
@@ -8974,13 +9008,14 @@ impl Compiler {
             local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
-            is_pure,
+            is_memo_pure,
+            is_dce_pure,
             annotation_keys,
             docstring: fn_docstring,
             class_kwarg_names: SmallVec::new(),
         });
 
-        Some((proto_idx, is_pure, has_kwonly_params))
+        Some((proto_idx, is_memo_pure, is_dce_pure, has_kwonly_params))
     }
 
     /// Compile a function's default-value expressions into a contiguous
@@ -9145,7 +9180,7 @@ impl Compiler {
         is_async: bool,
         type_params: &[TypeParam],
     ) {
-        let (proto_idx, is_pure, has_kwonly_params) = match self.build_def_proto(
+        let (proto_idx, is_memo_pure, is_dce_pure, has_kwonly_params) = match self.build_def_proto(
             name,
             params,
             body,
@@ -9245,8 +9280,18 @@ impl Compiler {
         // CallMemo keys by raw positional arg values; a kwarg-based call stores
         // a cache entry that an invalid positional-only call could match, bypassing
         // keyword-only enforcement in call_user_function_expanded.
-        if is_pure && decorators.is_empty() && !has_kwonly_params {
-            self.pure_locals.insert(name.to_string());
+        // Memo-purity (not the stricter DCE-purity) gates `CallMemo` emission so
+        // the VM result cache stays active; dead-`CallMemo` DCE is separately
+        // gated on the target proto's `is_dce_pure` in the optimizer (#2523).
+        // Record DCE-pure names too so that a *later* sibling function calling
+        // this one can itself qualify as DCE-pure (transitive callee allow-list).
+        if decorators.is_empty() && !has_kwonly_params {
+            if is_memo_pure {
+                self.pure_locals.insert(name.to_string());
+            }
+            if is_dce_pure {
+                self.dce_pure_locals.insert(name.to_string());
+            }
         }
         self.free_temp(dst);
     }
@@ -9455,7 +9500,8 @@ impl Compiler {
             local_names,
             global_names: body_global,
             nonlocal_names: body_nonlocal_rc,
-            is_pure: false,
+            is_memo_pure: false,
+            is_dce_pure: false,
             annotation_keys: SmallVec::new(),
             docstring: class_docstring,
             class_kwarg_names: keywords.iter().map(|(k, _)| k.clone()).collect(),
@@ -11659,7 +11705,6 @@ impl Compiler {
         }
         let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
         let def_bound = crate::interpreter::compute_def_bound_mask(&params, &inner_index_rc);
-        let is_pure = false;
         let inner_cell_vars = collect_cell_vars(&fn_body, &inner_index_rc);
         let inner_global_rc = Rc::new(inner_global);
         let inner_nonlocal_rc = Rc::new(inner_nonlocal);
@@ -11775,7 +11820,9 @@ impl Compiler {
             local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
-            is_pure,
+            // Lambdas / comprehensions are never pure (fresh-closure identity).
+            is_memo_pure: false,
+            is_dce_pure: false,
             annotation_keys: SmallVec::new(),
             docstring: None,
             class_kwarg_names: SmallVec::new(),
@@ -12127,7 +12174,6 @@ impl Compiler {
         let def_bound = crate::interpreter::compute_def_bound_mask(&params, &inner_index_rc);
         // Genexp bodies are never pure (they produce a generator object with
         // side-effectful iteration).
-        let is_pure = false;
         let inner_cell_vars = collect_cell_vars(&body, &inner_index_rc);
         let inner_global_rc = Rc::new(inner_global);
         let inner_nonlocal_rc = Rc::new(inner_nonlocal);
@@ -12219,7 +12265,9 @@ impl Compiler {
             local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
-            is_pure,
+            // Lambdas / comprehensions are never pure (fresh-closure identity).
+            is_memo_pure: false,
+            is_dce_pure: false,
             annotation_keys: SmallVec::new(),
             docstring: None,
             class_kwarg_names: SmallVec::new(),
