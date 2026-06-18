@@ -218,6 +218,40 @@ IndexError: list index out of range
 }
 
 #[test]
+fn chained_subscript_keyerror_caret_is_byte_exact() {
+    // #2570: `d['a']['b']['c']` with a missing `'c'` underlines only the
+    // failing third subscript (`^`), the rest of the chain with `~`.  The inner
+    // `GetItem`s collapse to identical register operands after copy-prop, so the
+    // optimizer's per-opcode "ambiguous" col guard used to drop every caret past
+    // the first — leaving the chain caret-free.
+    let stderr = run_pyrust_stderr("chainkey.py", "d = {'a': {'b': {}}}\nd['a']['b']['c']\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"chainkey.py\", line 2, in <module>
+    d['a']['b']['c']
+    ~~~~~~~~~~~^^^^^
+KeyError: 'c'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn chained_subscript_indexerror_caret_is_byte_exact() {
+    // #2570: `a[0][1][2]` — `a[0][1]` indexes the single-element `[0]` out of
+    // range, so the *second* subscript fails; CPython underlines `a[0]` with `~`
+    // and the failing `[1]` with `^`.
+    let stderr = run_pyrust_stderr("chainidx.py", "a = [[0], [1]]\na[0][1][2]\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"chainidx.py\", line 2, in <module>
+    a[0][1][2]
+    ~~~~^^^
+IndexError: list index out of range
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
 fn attribute_access_remains_caret_free() {
     // Attribute access carries no column span (CPython 3.12 also omits the caret
     // for a bare `obj.attr` whose anchor covers the whole stripped line).

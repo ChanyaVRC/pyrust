@@ -314,22 +314,11 @@ fn remap_lineno_and_col_tables(
     // matched (mirrors `binop_col_cursor`).
     let mut tailcall_col_cursor: usize = 0;
 
-    // Instructions whose anchored occurrences disagree get no anchor (ambiguous).
-    let mut ambiguous: HashSet<&Insn> = HashSet::new();
     // Discriminants (opcode-only) whose anchored occurrences disagree: used by the
     // discriminant-match fallback below to refuse a col anchor when the same
     // opcode carries different spans across the old stream (#2411).
     let mut disc_ambiguous: HashSet<std::mem::Discriminant<Insn>> = HashSet::new();
     if want_cols {
-        for (insn, locs) in &positions {
-            let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0, 0, 0));
-            if locs
-                .iter()
-                .any(|&p| old_cols.get(p).copied().unwrap_or((0, 0, 0, 0)) != first)
-            {
-                ambiguous.insert(*insn);
-            }
-        }
         for (disc, locs) in &disc_positions {
             let first = old_cols.get(locs[0]).copied().unwrap_or((0, 0, 0, 0));
             if locs
@@ -402,7 +391,19 @@ fn remap_lineno_and_col_tables(
         match matched {
             Some(i) => {
                 linenos.push(old_linenos.get(i).copied().unwrap_or(0));
-                if want_cols && !ambiguous.contains(new_insn) {
+                // LCS alignment pinned this new instruction to the *specific*
+                // old position `i` (repeated identical instructions are paired
+                // 1:1 in source order — see `lcs_align`), so `old_cols[i]` is the
+                // exact per-occurrence anchor and is always safe to carry.  The
+                // only-fallback `disc_ambiguous` guard — opcodes whose
+                // structurally-identical copies carry differing spans — must NOT
+                // gate this branch: there the true origin is unknown, but here
+                // the LCS match *is* the origin (issue #2570: a chained subscript
+                // `d['a']['b']['c']`'s inner `GetItem`s collapse to identical
+                // register operands after copy-prop; a per-opcode ambiguity guard
+                // dropped every caret past the first, even though each `GetItem`
+                // was LCS-aligned to its own distinct origin).
+                if want_cols {
                     *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                 }
                 old_pos = i + 1;
@@ -430,8 +431,10 @@ fn remap_lineno_and_col_tables(
                 // for the line but not the column would leave nearly every binary
                 // op / subscript / call caret-free (their registers are routinely
                 // renumbered), defeating the feature.  Only carry it when the
-                // discriminant's anchored occurrences are unambiguous, mirroring the
-                // exact-match `ambiguous` guard above.
+                // discriminant's anchored occurrences are unambiguous (or the
+                // count-preserving `disc_diag_sound` diagonal recovery applies) —
+                // here, unlike the LCS-matched branch above, the true 1:1 origin
+                // is not known, so a per-opcode ambiguity must suppress the col.
                 let disc_matched = if insn_anchor_by_discriminant(new_insn) {
                     disc_positions
                         .get(&std::mem::discriminant(new_insn))
