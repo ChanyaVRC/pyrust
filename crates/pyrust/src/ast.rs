@@ -330,6 +330,13 @@ pub enum FStringPart {
     /// trailing `=` (whitespace preserved).  The compiler emits this as a
     /// literal prefix and defaults the value conversion to `repr` (unless an
     /// explicit conversion flag or format spec is present).
+    ///
+    /// `line` is the absolute source line of this field's `{` (the f-string
+    /// fragment's start line plus the field's newline offset within that
+    /// fragment).  The compiler stamps the field's bytecode with it so a field
+    /// on a continuation line of a multi-line f-string — or in a later
+    /// implicitly-joined fragment — reports its own line in tracebacks
+    /// (issue #2587).  `0` when source line info is unavailable.
     Expr {
         expr: Box<Expr>,
         conversion: Option<char>,
@@ -342,6 +349,7 @@ pub enum FStringPart {
         /// spec, fields synthesised without column info, or fields on a
         /// continuation line of a multi-line f-string.
         span: Option<CaretSpan>,
+        line: u32,
     },
 }
 

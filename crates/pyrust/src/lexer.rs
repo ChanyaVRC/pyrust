@@ -1405,6 +1405,15 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
 /// (CPython raw mode); `{{` / `}}` double-brace escaping is still active.
 ///
 /// Returns `(Token::FString(parts), next_pos)`.
+/// Count the physical newlines in `chars[from..to]`.  Used to compute an
+/// f-string field's line offset relative to the f-string's start (#2587).
+fn count_newlines(chars: &[char], from: usize, to: usize) -> u32 {
+    chars[from..to.min(chars.len())]
+        .iter()
+        .filter(|&&c| c == '\n')
+        .count() as u32
+}
+
 fn lex_fstring(
     chars: &[char],
     start: usize,
@@ -1465,8 +1474,12 @@ fn lex_fstring(
                 parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
             }
             let open_idx = pos;
+            // Number of physical newlines from the f-string content start up
+            // to this field's `{` — the field's line offset (issue #2587).
+            let line_offset = count_newlines(chars, content_start, pos);
             pos += 1; // skip '{'
-            let (src, conversion, format_spec, debug_text, next) = lex_fstring_expr(chars, pos)?;
+            let (src, conversion, format_spec, debug_text, next) =
+                lex_fstring_expr(chars, pos, content_start)?;
             // PEP 657 (#2582): record the `{...}` field columns relative to the
             // f-string's source line.  `next - 1` is the closing `}`.  Skip when
             // the field crosses a physical line (multi-line f-string) — the
@@ -1488,6 +1501,7 @@ fn lex_fstring(
                 format_spec,
                 debug_text,
                 field_cols,
+                line_offset,
             });
             pos = next;
             continue;
@@ -1613,7 +1627,7 @@ fn fstring_conversion_error(chars: &[char], pos: usize, segment: &str) -> PyErro
 /// `next_pos` is just after the closing `}`.  `debug_text` is `Some(...)` for
 /// the Python 3.8 debug form `f"{x=}"` and contains the verbatim source text
 /// of the expression with the trailing `=` (whitespace preserved).
-fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
+fn lex_fstring_expr(chars: &[char], start: usize, base: usize) -> Result<FStringExpr> {
     let mut pos = start;
     let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
     let mut src = String::new();
@@ -1702,7 +1716,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
                 // Optional format spec.
                 let format_spec = if chars.get(pos) == Some(&':') {
                     pos += 1;
-                    Some(lex_format_spec(chars, &mut pos)?)
+                    Some(lex_format_spec(chars, &mut pos, base)?)
                 } else {
                     None
                 };
@@ -1726,7 +1740,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
                 // Now check for format spec or closing }
                 let format_spec = if chars.get(pos) == Some(&':') {
                     pos += 1;
-                    Some(lex_format_spec(chars, &mut pos)?)
+                    Some(lex_format_spec(chars, &mut pos, base)?)
                 } else {
                     None
                 };
@@ -1741,7 +1755,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
             Some(':') if depth == 0 && paren_depth == 0 => {
                 let expr_src = src.trim().to_string();
                 pos += 1; // skip ':'
-                let spec = lex_format_spec(chars, &mut pos)?;
+                let spec = lex_format_spec(chars, &mut pos, base)?;
                 if chars.get(pos) != Some(&'}') {
                     return Err(PyError::Lex(
                         "expected '}' to close f-string expression".to_string(),
@@ -1775,7 +1789,7 @@ fn lex_fstring_expr(chars: &[char], start: usize) -> Result<FStringExpr> {
 /// balanced Python expression (e.g. `f"{x:>{f(1)}}"`).  What is not
 /// supported here is a further format spec on the nested field itself
 /// (i.e. no `{w:>{n}:5}`) — that was kept out to bound recursion.
-fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> {
+fn lex_format_spec(chars: &[char], pos: &mut usize, base: usize) -> Result<Vec<FStringPart>> {
     let mut parts: Vec<FStringPart> = Vec::new();
     let mut literal = String::new();
     loop {
@@ -1797,6 +1811,8 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                 if !literal.is_empty() {
                     parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
                 }
+                // Line offset of this nested field's `{` (issue #2587).
+                let line_offset = count_newlines(chars, base, *pos);
                 *pos += 1;
                 // Collect expression source until matching `}` (no further
                 // *replacement-field* nesting permitted — matching CPython).
@@ -1883,6 +1899,7 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                     // Nested fields inside a format spec don't get their own
                     // caret anchor (#2582).
                     field_cols: None,
+                    line_offset,
                 });
             }
             Some(c) => {

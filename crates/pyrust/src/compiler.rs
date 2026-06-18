@@ -11225,7 +11225,18 @@ impl Compiler {
                     format_spec,
                     debug_text,
                     span,
+                    line,
                 } => {
+                    // Stamp this field's instructions with its own source line
+                    // so a field on a continuation line of a multi-line
+                    // f-string (or in a later implicitly-joined fragment)
+                    // anchors the traceback on the right line (issue #2587).
+                    // `line == 0` means line info is unavailable; leave the
+                    // statement's current line in place.
+                    let saved_lineno = self.current_lineno;
+                    if *line != 0 {
+                        self.set_lineno(*line);
+                    }
                     // Python 3.8 debug form `f"{x=}"`: emit the verbatim
                     // source text (with trailing `=`) as a literal prefix
                     // BEFORE the formatted value.  When no explicit
@@ -11320,7 +11331,8 @@ impl Compiler {
                     // the previous `Call(format, 2)` lowering paid on every
                     // interpolation.  User `__format__` dispatch for PyInstance
                     // values is preserved by the VM via `dispatch_dunder_format`.
-                    if let Some(spec_parts) = format_spec {
+                    let field_r = if let Some(spec_parts) = format_spec {
+                        // Nested spec fields carry their own absolute `line`.
                         let spec_r = self.compile_fstring(spec_parts);
                         let dst = self.alloc_temp();
                         // PEP 657 (#2582): the `{...}` field caret covers a
@@ -11344,7 +11356,10 @@ impl Compiler {
                         self.emit(Insn::FormatValue(dst, val_r));
                         self.free_temp(val_r);
                         dst
-                    }
+                    };
+                    // Restore the statement's line for the next part / literal.
+                    self.set_lineno(saved_lineno);
+                    field_r
                 }
             };
             part_regs.push(r);

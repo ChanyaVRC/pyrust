@@ -14,6 +14,13 @@ pub enum FStringPart {
     /// is emitted as a literal prefix before the formatted value, and the
     /// default conversion becomes `repr` (unless an explicit conversion
     /// flag or format spec overrides it).
+    ///
+    /// `line_offset` is the number of physical newlines between the start of
+    /// the f-string literal and the field's opening `{`.  In a multi-line
+    /// f-string this lets the compiler stamp the field's bytecode with the
+    /// field's actual source line (f-string start line + `line_offset`)
+    /// instead of the statement start line, so tracebacks anchor the caret on
+    /// the right line (issue #2587).
     Expr {
         src: String,
         conversion: Option<char>,
@@ -26,6 +33,7 @@ pub enum FStringPart {
         /// for nested fields inside a format spec, fields on a continuation
         /// line of a multi-line f-string, or when no column info is available.
         field_cols: Option<(u32, u32)>,
+        line_offset: u32,
     },
 }
 
