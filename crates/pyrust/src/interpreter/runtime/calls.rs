@@ -12,6 +12,19 @@ thread_local! {
 /// `make_class_resolve_bases`.
 type ResolvedBases = (Option<Rc<RefCell<PyClass>>>, Vec<Rc<RefCell<PyClass>>>);
 
+/// True when `e` is a `TypeError` from the *iterator-acquisition* step of
+/// `iter(arg)` — either the argument has no `__iter__` ("is not iterable") or
+/// its `__iter__` returned a non-iterator ("is not an iterator"). The join
+/// shims rewrite both to CPython's `can only join an iterable`. TypeErrors
+/// raised by user code inside `__iter__`/`__next__` during *consumption* must
+/// NOT match here so they propagate unchanged (#576 Copilot review).
+fn is_join_not_iterable_error(e: &PyError) -> bool {
+    e.class_name_is("TypeError")
+        && matches!(&e,
+            PyError::Named(_, msg) | PyError::Class(_, msg)
+                if msg.contains("is not iterable") || msg.contains("is not an iterator"))
+}
+
 pub(crate) fn get_recursion_limit() -> usize {
     RECURSION_LIMIT.with(|l| l.get())
 }
@@ -2843,11 +2856,7 @@ impl Interpreter {
             !matches!(args[0].kind(), ValueKind::List(_) | ValueKind::Tuple(_));
         if needs_collect {
             let items = self.collect_iterable(&args[0]).map_err(|e| {
-                let is_not_iterable = e.class_name_is("TypeError")
-                    && matches!(&e,
-                        PyError::Named(_, msg) | PyError::Class(_, msg)
-                            if msg.contains("is not iterable"));
-                if is_not_iterable {
+                if is_join_not_iterable_error(&e) {
                     pyrust_core::type_err!("can only join an iterable")
                 } else {
                     e
