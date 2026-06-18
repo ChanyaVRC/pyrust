@@ -323,6 +323,71 @@ pyrust_module! {
         }
     }
 
+    // ── redirect_stdout / redirect_stderr ──────────────────────────────────────
+
+    /// CPython: contextlib.redirect_stdout(new_target).
+    /// Context manager that temporarily redirects `sys.stdout` to `new_target`
+    /// for the duration of the `with` block, restoring the previous value on
+    /// exit.  Reentrant/reusable like CPython's `_RedirectStream`: each
+    /// `__enter__` pushes the saved stream and each `__exit__` pops it.
+    /// <https://docs.python.org/3/library/contextlib.html#contextlib.redirect_stdout>
+    class redirect_stdout {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            if user.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            inst.borrow_mut().attrs.insert("_new_target", user[0].value.clone());
+            inst.borrow_mut().attrs.insert("_old_targets", Value::list(vec![]));
+            let _ = _interp;
+            Ok(Value::none())
+        }
+
+        fn __enter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            redirect_enter(_interp, &inst, "stdout")
+        }
+
+        fn __exit__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            redirect_exit(_interp, &inst, "stdout")
+        }
+    }
+
+    /// CPython: contextlib.redirect_stderr(new_target).
+    /// Like `redirect_stdout`, but for `sys.stderr`.
+    /// <https://docs.python.org/3/library/contextlib.html#contextlib.redirect_stderr>
+    class redirect_stderr {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            if user.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            inst.borrow_mut().attrs.insert("_new_target", user[0].value.clone());
+            inst.borrow_mut().attrs.insert("_old_targets", Value::list(vec![]));
+            let _ = _interp;
+            Ok(Value::none())
+        }
+
+        fn __enter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            redirect_enter(_interp, &inst, "stderr")
+        }
+
+        fn __exit__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            redirect_exit(_interp, &inst, "stderr")
+        }
+    }
+
     // ── ExitStack ─────────────────────────────────────────────────────────────
 
     /// CPython: contextlib.ExitStack().
@@ -584,6 +649,54 @@ fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
             "internal: contextlib module did not register class `{name}`",
         ),
     }
+}
+
+/// Shared `__enter__` for `redirect_stdout`/`redirect_stderr`.  Snapshots the
+/// current `sys.<stream>` onto the instance's `_old_targets` stack, installs the
+/// redirect target, and returns it (the `with … as` value).
+fn redirect_enter(
+    interp: &mut crate::Interpreter,
+    inst: &Rc<RefCell<PyInstance>>,
+    stream: &str,
+) -> Result<Value> {
+    let new_target = inst
+        .borrow()
+        .attrs
+        .get("_new_target")
+        .cloned()
+        .unwrap_or_else(Value::none);
+    let old = interp.current_std_stream(stream)?;
+    let old_targets = inst
+        .borrow()
+        .attrs
+        .get("_old_targets")
+        .cloned()
+        .unwrap_or_else(|| Value::list(vec![]));
+    old_targets.list_push(old)?;
+    interp.set_std_stream(stream, new_target.clone())?;
+    Ok(new_target)
+}
+
+/// Shared `__exit__` for `redirect_stdout`/`redirect_stderr`.  Pops the saved
+/// stream off `_old_targets` and restores it as `sys.<stream>`.  Never
+/// suppresses exceptions (returns `False`).
+fn redirect_exit(
+    interp: &mut crate::Interpreter,
+    inst: &Rc<RefCell<PyInstance>>,
+    stream: &str,
+) -> Result<Value> {
+    let old_targets = inst
+        .borrow()
+        .attrs
+        .get("_old_targets")
+        .cloned()
+        .unwrap_or_else(|| Value::list(vec![]));
+    let restored = match old_targets.list_len() {
+        Some(n) if n > 0 => old_targets.list_pop_at(n - 1).unwrap_or_else(|_| Value::none()),
+        _ => Value::none(),
+    };
+    interp.set_std_stream(stream, restored)?;
+    Ok(Value::bool_(false))
 }
 
 /// Construct a `_ContextManagerFactory` instance seeding `_func`.

@@ -41,3 +41,20 @@ print(issubclass(set, typing.Set))
 print(issubclass(frozenset, typing.FrozenSet))
 print(issubclass(bool, typing.Type))
 print(issubclass(dict, typing.List))
+
+
+# Issue #2608: a user class cannot hijack its own class repr by defining a
+# `__pyrust_class_repr__` attribute (the typing-alias repr override is a
+# dedicated internal field, never a `__dict__` attribute).
+class Sneaky:
+    __pyrust_class_repr__ = "HACKED"
+
+
+print(repr(Sneaky))
+
+
+class SneakyStr(str):
+    __pyrust_class_repr__ = "HACKED2"
+
+
+print(repr(SneakyStr))
