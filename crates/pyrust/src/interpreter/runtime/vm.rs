@@ -1595,6 +1595,110 @@ impl Interpreter {
     /// expansion site.
     #[cold]
     #[inline(never)]
+    /// Materialise a raw `PyError` variant into an exception `Value`
+    /// (`PyInstance`).  `PyError::Raised` is already a value and passes through.
+    /// The non-exception transport variants (`PyError::Return`,
+    /// `PyError::Break`, …) are not exceptions and are returned unchanged via
+    /// `Err`, so a caller using `?` re-propagates them exactly as the inline
+    /// match did before this was extracted (issue #2583).
+    fn materialize_pyerror(&mut self, e: PyError) -> std::result::Result<Value, PyError> {
+        Ok(match e {
+            PyError::Raised(v) => v,
+            PyError::Runtime(msg) => {
+                if let Some(cls) = self.exc_classes.get("RuntimeError") {
+                    instantiate_exception(cls, vec![Value::string(msg)])
+                } else {
+                    self.instantiate_named_exception("RuntimeError", msg)?
+                }
+            }
+            PyError::Named(cls, msg) => self.instantiate_named_exception(&cls, msg)?,
+            PyError::Class(cls, msg) => {
+                let args = if msg.is_empty() {
+                    vec![]
+                } else {
+                    vec![Value::string(msg)]
+                };
+                instantiate_exception(cls, args)
+            }
+            PyError::KeyError(key) => {
+                self.instantiate_named_exception_with_value("KeyError", key)?
+            }
+            PyError::NameError {
+                class_name,
+                message,
+                name,
+            } => self.instantiate_name_error_exception(class_name, message, name)?,
+            PyError::AttributeError { message, name, obj } => {
+                self.instantiate_attribute_error_exception(message, name, obj)?
+            }
+            PyError::ImportError {
+                class_name,
+                message,
+                module_name,
+            } => self.instantiate_import_error_exception(class_name, message, module_name)?,
+            PyError::OsError {
+                class_name,
+                errno,
+                strerror,
+                filename,
+                filename2,
+            } => self
+                .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)?,
+            PyError::UnicodeDecodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => self.instantiate_unicode_decode_error_exception(
+                encoding, object, start, end, reason,
+            )?,
+            PyError::UnicodeEncodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => self.instantiate_unicode_encode_error_exception(
+                encoding, object, start, end, reason,
+            )?,
+            other => return Err(other),
+        })
+    }
+
+    /// Issue #2583: when an exception finds no handler in this frame and is
+    /// about to propagate to the caller, attach PEP 3134 implicit context if it
+    /// was raised while another exception is being handled.
+    ///
+    /// `handle_vm_error` attaches `__context__` only on the *catch* path
+    /// (`attach_implicit_context`, after materialising the instance).  An
+    /// implicitly-raised exception (e.g. a `TypeError` from `1 + "x"`) that
+    /// escapes *uncaught* never reaches that point — it returns as a raw
+    /// `PyError` variant — so without this hook the escaping exception carries
+    /// no `__context__` and the uncaught-traceback printer cannot render the
+    /// "During handling of the above exception, another exception occurred:"
+    /// block that CPython shows for a second exception raised inside an
+    /// `except` handler.
+    ///
+    /// Materialising the raw variant into a `PyInstance` here (only when a
+    /// handler is actually active) lets us set `__context__` to the
+    /// currently-handled exception, exactly as the catch path would have.
+    /// The common case — no active handler — returns `e` untouched, so the
+    /// hot escape path pays nothing.
+    fn escape_with_implicit_context(&mut self, e: PyError) -> PyError {
+        if self.handled_exc_stack.is_empty() {
+            return e;
+        }
+        // Materialise into a PyInstance so `__context__` can be attached.  On
+        // any materialisation failure, fall back to the original error.
+        let exc_val = match self.materialize_pyerror(e) {
+            Ok(v) => v,
+            Err(orig) => return orig,
+        };
+        self.attach_implicit_context(&exc_val);
+        PyError::Raised(exc_val)
+    }
+
     fn handle_vm_error(
         &mut self,
         e: PyError,
@@ -1616,78 +1720,17 @@ impl Interpreter {
             // Fallback: dynamic SetupExcept/PopExcept handler stack.
             match exc_handlers.pop() {
                 Some(h) => h,
-                None => return Err(e),
+                None => return Err(self.escape_with_implicit_context(e)),
             }
         } else {
             // Zero-cost table lookup.  `EXC_NO_HANDLER` ⇒ no handler covers this
             // pc ⇒ the exception propagates to the caller frame.
             match exc_table.get(raise_pc).copied() {
                 Some(t) if t != crate::bytecode::EXC_NO_HANDLER => t as usize,
-                _ => return Err(e),
+                _ => return Err(self.escape_with_implicit_context(e)),
             }
         };
-        let exc_val = match e {
-            PyError::Raised(v) => v,
-            PyError::Runtime(msg) => {
-                if let Some(cls) = self.exc_classes.get("RuntimeError") {
-                    instantiate_exception(cls, vec![Value::string(msg)])
-                } else {
-                    self.instantiate_named_exception("RuntimeError", msg)?
-                }
-            }
-            PyError::Named(cls, msg) => {
-                self.instantiate_named_exception(&cls, msg)?
-            }
-            PyError::Class(cls, msg) => {
-                let args = if msg.is_empty() { vec![] } else { vec![Value::string(msg)] };
-                instantiate_exception(cls, args)
-            }
-            PyError::KeyError(key) => {
-                self.instantiate_named_exception_with_value("KeyError", key)?
-            }
-            PyError::NameError { class_name, message, name } => {
-                self.instantiate_name_error_exception(class_name, message, name)?
-            }
-            PyError::AttributeError { message, name, obj } => {
-                self.instantiate_attribute_error_exception(message, name, obj)?
-            }
-            PyError::ImportError { class_name, message, module_name } => {
-                self.instantiate_import_error_exception(class_name, message, module_name)?
-            }
-            PyError::OsError {
-                class_name,
-                errno,
-                strerror,
-                filename,
-                filename2,
-            } => {
-                self
-                    .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)?
-            }
-            PyError::UnicodeDecodeError {
-                encoding,
-                object,
-                start,
-                end,
-                reason,
-            } => {
-                self.instantiate_unicode_decode_error_exception(
-                    encoding, object, start, end, reason,
-                )?
-            }
-            PyError::UnicodeEncodeError {
-                encoding,
-                object,
-                start,
-                end,
-                reason,
-            } => {
-                self.instantiate_unicode_encode_error_exception(
-                    encoding, object, start, end, reason,
-                )?
-            }
-            other => return Err(other),
-        };
+        let exc_val = self.materialize_pyerror(e)?;
         self.attach_implicit_context(&exc_val);
         // Issue #1441 / #2170: set __traceback__ on the exception instance when
         // it is caught.  Only PyInstance values (all normal exceptions) have an
@@ -1742,6 +1785,17 @@ impl Interpreter {
                 inst.attrs.insert("__traceback__", tb);
             }
         }
+        // Issue #2583: now that this exception is caught and its `__traceback__`
+        // snapshot has been cloned out of the captured-frame thread-local, clear
+        // the snapshot so a *new* exception raised inside this handler body
+        // starts capturing from an empty frame list.  Without this reset the
+        // second exception's unwind frames prepend onto the first exception's
+        // stale frames, merging both tracebacks into one (the bug).  The first
+        // exception's frames are already preserved in its deferred
+        // `__traceback__`, so nothing is lost.  Explicit re-raises do their own
+        // snapshot bookkeeping (`reset_captured_frames_if_reraise`) at the raise
+        // site and are unaffected.
+        pyrust_core::reset_captured_error_frames();
         // Save the current active_exception BEFORE the dedup-pop below.
         // This is the value that was active when the new exception was raised,
         // i.e. the previous handler's exception (or None if no outer handler).
