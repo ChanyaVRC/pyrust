@@ -4283,15 +4283,11 @@ pyrust_module! {
                 // PyInstance with a backing dict (dict subclass).
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
-                    if let Some(backing) = instance_builtin_data(&inst_rc) {
-                        if let Some(map) = backing.as_dict() {
-                            result.extend(map.clone());
-                        } else {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("{FN_NAME}() argument must be a mapping or iterable"),
-                            ));
-                        }
+                    let dict_backing = instance_builtin_data(&inst_rc)
+                        .and_then(|backing| backing.as_dict().cloned());
+                    if let Some(map) = dict_backing {
+                        // PyInstance with a backing dict (dict subclass).
+                        result.extend(map);
                     } else if is_dict_subclass_instance(&inst_rc) {
                         // Dict subclasses that keep their mapping in a custom
                         // backing attr rather than `__builtin_data__` — e.g.
