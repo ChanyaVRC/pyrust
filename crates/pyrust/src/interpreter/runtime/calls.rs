@@ -863,7 +863,7 @@ impl Interpreter {
                 let mut receiver_ordered = false;
                 let self_val =
                     if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple"
-                        | "str" | "int" | "float" | "bytes") {
+                        | "str" | "int" | "float" | "bytes" | "complex") {
                         // Extract the Rc before kind() drops its borrow.
                         let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
                             Some(Rc::clone(inst))

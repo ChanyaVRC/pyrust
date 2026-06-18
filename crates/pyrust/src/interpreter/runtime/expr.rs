@@ -3720,15 +3720,17 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__truediv__", "__rtruediv__") {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                self.div(coerce_numeric(&left), coerce_numeric(&right))
+                // Issue #1204: `div` extracts the scalar backing internally and
+                // keeps the original operands for the subclass-named TypeError.
+                self.div(left, right)
             }
             BinaryOp::FloorDiv => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__floordiv__", "__rfloordiv__") {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                self.floor_div(coerce_numeric(&left), coerce_numeric(&right))
+                // Issue #1204: `floor_div` extracts the scalar backing
+                // internally and keeps the originals for the TypeError arm.
+                self.floor_div(left, right)
             }
             BinaryOp::Mod => {
                 // str % args: printf-style formatting (#1393).
@@ -3774,8 +3776,9 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                self.modulo(coerce_numeric(&left), coerce_numeric(&right))
+                // Issue #1204: `modulo` extracts the scalar backing internally
+                // and keeps the originals for the TypeError arm.
+                self.modulo(left, right)
             }
             BinaryOp::Eq => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
@@ -3835,15 +3838,17 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract scalar primitive backing so that
-                // `MyInt(42) ** 2` works identically to `42 ** 2`.
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
+                // `MyInt(42) ** 2` works identically to `42 ** 2`.  Keep the
+                // original `left`/`right` for the TypeError arm so CPython's
+                // subclass-named message (`'C' and 'str'`, #2544) is preserved.
+                let cl = coerce_numeric(&left);
+                let cr = coerce_numeric(&right);
                 // When either operand is complex, use complex
                 // exponentiation: z^w = exp(w * ln(z)).  `both_as_complex`
                 // returns Ok(Some) only when at least one operand is
                 // already a Complex value; pure int/float/bigint pairs
                 // route through the canonical NumericOps slot below.
-                if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right)? {
+                if let Some(((zr, zi), (wr, wi))) = both_as_complex(&cl, &cr)? {
                     return complex_pow(zr, zi, wr, wi);
                 }
                 // Canonical numeric `**` via the NumericOps slot table
@@ -3851,7 +3856,7 @@ impl Interpreter {
                 // the BigInt-exponent OverflowError arms, and the float
                 // power path (negative-real → complex, 0.0 ** negative
                 // ZeroDivisionError).
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, &left, &right) {
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, &cl, &cr) {
                     return result;
                 }
                 Err(unsupported_operand("** or pow()", &left, &right))
@@ -4768,7 +4773,11 @@ impl Interpreter {
 
 
     fn div(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right)? {
+        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
+        // numeric path, but keep the originals for the subclass-named TypeError.
+        let cl = coerce_numeric(&left);
+        let cr = coerce_numeric(&right);
+        if let Some((a, b)) = both_as_complex(&cl, &cr)? {
             // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
             let denom = b.0 * b.0 + b.1 * b.1;
             if denom == 0.0 {
@@ -4781,26 +4790,34 @@ impl Interpreter {
         }
         // Canonical numeric true division via the NumericOps slot table
         // (#458).  Non-numeric operands return None → TypeError.
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::Div, &left, &right) {
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Div, &cl, &cr) {
             return result;
         }
         Err(unsupported_operand("/", &left, &right))
     }
 
     fn floor_div(&self, left: Value, right: Value) -> Result<Value> {
+        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
+        // numeric path, but keep the originals for the subclass-named TypeError.
+        let cl = coerce_numeric(&left);
+        let cr = coerce_numeric(&right);
         // Canonical numeric floor division via the NumericOps slot table
         // (#458): one site handles int/int (with BigInt promotion on
         // i64::MIN overflow, #485), BigInt cross-type arms, and float
         // floor division, plus the ZeroDivisionError wording.
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::FloorDiv, &left, &right) {
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::FloorDiv, &cl, &cr) {
             return result;
         }
         Err(unsupported_operand("//", &left, &right))
     }
 
     fn modulo(&self, left: Value, right: Value) -> Result<Value> {
+        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
+        // numeric path, but keep the originals for the subclass-named TypeError.
+        let cl = coerce_numeric(&left);
+        let cr = coerce_numeric(&right);
         // Canonical numeric modulo via the NumericOps slot table (#458).
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mod, &left, &right) {
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mod, &cl, &cr) {
             return result;
         }
         Err(unsupported_operand("%", &left, &right))
@@ -6866,6 +6883,7 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
                 ValueKind::Int(_)
                     | ValueKind::BigInt(_)
                     | ValueKind::Float(_)
+                    | ValueKind::Complex(_, _)
                     | ValueKind::Str(_)
                     | ValueKind::Bytes(_)
             );
@@ -7630,6 +7648,12 @@ fn set_subset_cmp(
 /// the value is a `BigInt` that is too large to convert to `f64` (matching
 /// CPython 3.12's `OverflowError: int too large to convert to float`).
 fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
+    // Issue #2544: a `complex`/`int`/`float` subclass instance carries its
+    // primitive in `__builtin_data__`; unwrap it so subclass operands take the
+    // same numeric path as the base type (`C(1, 2) + 1` → `(2+2j)`).  A user
+    // arithmetic dunder was already dispatched upstream in `eval_binary`, so no
+    // override gate is needed here.
+    let v = coerce_numeric(v);
     match v.kind() {
         ValueKind::Complex(re, im) => Ok(Some((re, im))),
         ValueKind::Int(n) => Ok(Some((n as f64, 0.0))),
@@ -7637,6 +7661,21 @@ fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
         ValueKind::Bool(b) => Ok(Some((if b { 1.0 } else { 0.0 }, 0.0))),
         ValueKind::BigInt(b) => Ok(Some((bigint_to_float_or_overflow(b)?, 0.0))),
         _ => Ok(None),
+    }
+}
+
+/// True when `v` is a `complex` value or a `complex`-backed subclass instance
+/// (issue #2544).  Used to decide whether an arithmetic operand pair should be
+/// routed through the complex path; a bare `int`/`float` operand stays on its
+/// dedicated numeric fast path.
+fn is_complex_operand(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::Complex(_, _) => true,
+        ValueKind::PyInstance(_) => v
+            .as_py_instance_rc()
+            .and_then(instance_builtin_data)
+            .is_some_and(|b| matches!(b.kind(), ValueKind::Complex(_, _))),
+        _ => false,
     }
 }
 
@@ -7651,8 +7690,10 @@ type ComplexOperands = ((f64, f64), (f64, f64));
 /// not a numeric type.  Returns `Err(...)` when a `BigInt` operand overflows
 /// `f64` (propagated as `OverflowError`).
 fn both_as_complex(left: &Value, right: &Value) -> Result<Option<ComplexOperands>> {
-    let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
-    let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
+    // Issue #2544: also treat a `complex`-backed subclass instance as complex so
+    // its arithmetic flows through here rather than falling to the TypeError arm.
+    let l_is_c = is_complex_operand(left);
+    let r_is_c = is_complex_operand(right);
     if !l_is_c && !r_is_c {
         return Ok(None);
     }
