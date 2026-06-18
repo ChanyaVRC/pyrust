@@ -2876,6 +2876,7 @@ impl Parser {
                             }
                         }
                         Some(Token::FString(lex_parts)) => {
+                            let token_line = self.current_lineno();
                             self.bump();
                             // Promote: flush accumulated plain text as a Literal part.
                             let parts = fstring_parts.get_or_insert_with(Vec::new);
@@ -2886,7 +2887,7 @@ impl Parser {
                                 }
                                 plain.clear();
                             }
-                            parts.extend(self.parse_fstring_parts(lex_parts)?);
+                            parts.extend(self.parse_fstring_parts(lex_parts, token_line)?);
                         }
                         Some(Token::Bytes(_)) => {
                             return Err(PyError::Parse(
@@ -2933,14 +2934,16 @@ impl Parser {
                 Ok(Expr::Bytes(bs))
             }
             Some(Token::FString(lex_parts)) => {
+                let token_line = self.current_lineno();
                 self.bump();
-                let mut parts = self.parse_fstring_parts(lex_parts)?;
+                let mut parts = self.parse_fstring_parts(lex_parts, token_line)?;
                 // Adjacent string/f-string literal concatenation.
                 loop {
                     match self.current().cloned() {
                         Some(Token::FString(next_lex)) => {
+                            let next_line = self.current_lineno();
                             self.bump();
-                            parts.extend(self.parse_fstring_parts(next_lex)?);
+                            parts.extend(self.parse_fstring_parts(next_lex, next_line)?);
                         }
                         Some(Token::Str(next)) => {
                             self.bump();
@@ -3313,7 +3316,16 @@ impl Parser {
 
     /// Convert lexer-level `FStringPart`s into AST-level `FStringPart`s by
     /// running a sub-parser on each raw expression source string.
-    fn parse_fstring_parts(&self, lex_parts: Vec<LexFStringPart>) -> Result<Vec<FStringPart>> {
+    /// `token_line` is the source line where the f-string fragment begins
+    /// (the line of the `f"..."` token).  Each field's `line_offset` (counted
+    /// by the lexer from the fragment start) is added to it to recover the
+    /// field's absolute source line for tracebacks (issue #2587).  `0` means
+    /// no line info is available.
+    fn parse_fstring_parts(
+        &self,
+        lex_parts: Vec<LexFStringPart>,
+        token_line: u32,
+    ) -> Result<Vec<FStringPart>> {
         let mut ast_parts = Vec::new();
         for lp in lex_parts {
             match lp {
@@ -3326,14 +3338,21 @@ impl Parser {
                     format_spec,
                     debug_text,
                     field_cols,
+                    line_offset,
                 } => {
                     let expr = parse_expr_str(&src)?;
                     // Recursively parse any nested expressions inside the
                     // format spec — they need to be visible to every AST
                     // recursor (scope-pass, closure-capture analyser, etc.).
+                    // Nested spec fields share the same fragment start line.
                     let format_spec = match format_spec {
                         None => None,
-                        Some(parts) => Some(self.parse_fstring_parts(parts)?),
+                        Some(parts) => Some(self.parse_fstring_parts(parts, token_line)?),
+                    };
+                    let line = if token_line == 0 {
+                        0
+                    } else {
+                        token_line + line_offset
                     };
                     // PEP 657 (#2582): the whole `{...}` field is underlined
                     // with `^` (full == prim), matching CPython's FORMAT_VALUE
@@ -3351,6 +3370,7 @@ impl Parser {
                         format_spec,
                         debug_text,
                         span,
+                        line,
                     });
                 }
             }
