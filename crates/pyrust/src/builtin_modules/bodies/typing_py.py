@@ -144,7 +144,8 @@ _PROTOCOL_EXCLUDED_ATTRS = frozenset({
     "__init__", "__new__", "__init_subclass__", "__subclasshook__",
     "__class_getitem__", "__doc__", "__dict__", "__weakref__",
     "__abstractmethods__", "__protocol_attrs__",
-    "__protocol_runtime_checkable__", "__module__", "__qualname__",
+    "__protocol_runtime_checkable__", "__non_callable_proto_members__",
+    "__module__", "__qualname__",
     "__slots__", "__parameters__", "__orig_bases__", "__annotations__",
 })
 
@@ -178,11 +179,24 @@ def runtime_checkable(cls):
 
     Sets `__protocol_runtime_checkable__` plus `__protocol_attrs__` — the set
     of attribute names a subject must have for a structural `isinstance` check
-    to succeed (issue #2526).  The structural check itself lives in the
-    `isinstance` builtin.
+    to succeed (issue #2526) — and `__non_callable_proto_members__`, the subset
+    of those attrs whose class value is not callable (data members).  The
+    structural check itself lives in the `isinstance` builtin; it mirrors
+    CPython 3.12, which treats a member resolved to `None` as absent unless the
+    member is a declared non-callable.
     """
     cls.__protocol_runtime_checkable__ = True
-    cls.__protocol_attrs__ = _collect_protocol_attrs(cls)
+    attrs = _collect_protocol_attrs(cls)
+    cls.__protocol_attrs__ = attrs
+    # Mirror CPython's `runtime_checkable`: a protocol attr whose class value is
+    # not callable is a data member.  `isinstance` allows such a member to hold
+    # `None` on the subject, but a callable (method) member resolved to `None`
+    # is treated as absent.
+    non_callable = set()
+    for attr in attrs:
+        if not callable(getattr(cls, attr, None)):
+            non_callable.add(attr)
+    cls.__non_callable_proto_members__ = non_callable
     return cls
 
 

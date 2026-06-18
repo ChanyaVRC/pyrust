@@ -8793,7 +8793,36 @@ fn protocol_structural_isinstance(
     // strings).  Missing/empty means no requirements → matches everything,
     // mirroring CPython for an attribute-free protocol body.
     let attrs = crate::interpreter::lookup_class_attr(cls_rc, "__protocol_attrs__");
-    let names: Vec<String> = match attrs.as_ref().map(|v| v.kind()) {
+    let names: Vec<String> = protocol_attr_names(attrs.as_ref());
+    // CPython 3.12 treats a member that resolves to `None` as absent unless the
+    // member is a declared non-callable (data) member.  `runtime_checkable`
+    // records the non-callable subset in `__non_callable_proto_members__`.
+    let non_callable = protocol_attr_names(
+        crate::interpreter::lookup_class_attr(cls_rc, "__non_callable_proto_members__")
+            .as_ref(),
+    );
+    for name in &names {
+        match interp.get_attr(obj, name) {
+            Ok(val) => {
+                if matches!(val.kind(), ValueKind::None)
+                    && !non_callable.iter().any(|n| n == name)
+                {
+                    // A callable (method) member resolved to `None` → absent.
+                    return Ok(false);
+                }
+            }
+            Err(ref e) if e.class_name_is("AttributeError") => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Extract the string names from a Protocol `set`-valued bookkeeping attribute
+/// (`__protocol_attrs__` / `__non_callable_proto_members__`).  A missing or
+/// non-`set` value yields an empty list.
+fn protocol_attr_names(attr: Option<&Value>) -> Vec<String> {
+    match attr.map(|v| v.kind()) {
         Some(ValueKind::Set(items)) => items
             .iter()
             .filter_map(|k| match k {
@@ -8802,15 +8831,7 @@ fn protocol_structural_isinstance(
             })
             .collect(),
         _ => Vec::new(),
-    };
-    for name in &names {
-        match interp.get_attr(obj, name) {
-            Ok(_) => {}
-            Err(ref e) if e.class_name_is("AttributeError") => return Ok(false),
-            Err(e) => return Err(e),
-        }
     }
-    Ok(true)
 }
 
 /// `issubclass(cls, classinfo)` — same tuple-recursive contract as

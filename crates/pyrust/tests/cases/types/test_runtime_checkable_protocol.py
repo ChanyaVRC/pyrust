@@ -102,3 +102,27 @@ try:
     print("NO ERROR")
 except TypeError as e:
     print("TypeError:", e)
+
+
+# CPython 3.12 treats a method member that resolves to None as absent, but
+# allows a declared data (non-callable) member to hold None.
+@runtime_checkable
+class HasMethod(Protocol):
+    def run(self): ...
+
+
+@runtime_checkable
+class HasData(Protocol):
+    data: int
+
+
+class NoneMethod:
+    run = None
+
+
+class NoneData:
+    data = None
+
+
+print(isinstance(NoneMethod(), HasMethod))  # False: method member is None
+print(isinstance(NoneData(), HasData))  # True: data member may be None
