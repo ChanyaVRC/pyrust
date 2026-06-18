@@ -449,6 +449,109 @@ fn class_value_for(name: &str) -> Value {
     })
 }
 
+/// Build a `Union`/`Optional` alias from a subscript, normalising it the way
+/// CPython's `_SpecialForm.__getitem__` does (issue #2524):
+///
+/// 1. `Optional[X]` is `Union[X, None]` — the lone arg is collected and
+///    `NoneType` is appended.  `Optional` rejects a multi-element subscript
+///    with the same `TypeError` CPython raises.
+/// 2. Each arg that is itself a `Union`/`Optional` alias is *flattened* —
+///    its `__args__` are spliced in rather than the nested alias surviving.
+/// 3. `None` arguments are lowered to the `NoneType` class.
+/// 4. Duplicate args are dropped, preserving first-seen order.
+/// 5. A union of a single unique type collapses to that type
+///    (`Union[int]` → `int`); an empty union is a `TypeError`.
+///
+/// The resulting alias always carries the `Union` class as its origin, so
+/// `get_origin` reports `Union` and the repr reconstructs the `Optional[X]`
+/// spelling for the two-arg `X | None` case.
+pub(crate) fn union_or_optional_getitem(form: &str, index: Value) -> Result<Value> {
+    let none_type = || primitive_class_value("NoneType");
+
+    // Collect the raw subscript arguments.
+    let raw: Vec<Value> = match index.kind() {
+        ValueKind::Tuple(items) => {
+            if form == "Optional" {
+                // `Optional[int, str]` is a TypeError in CPython.
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "typing.Optional requires a single type. Got {}.",
+                        index.repr()
+                    ),
+                ));
+            }
+            items.to_vec()
+        }
+        _ => vec![index.clone()],
+    };
+
+    if form == "Optional" {
+        // `Optional[X]` == `Union[X, None]`.
+        let mut args = raw;
+        args.push(Value::none());
+        return build_union(args, none_type());
+    }
+
+    if raw.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "Cannot take a Union of no types.".to_string(),
+        ));
+    }
+    build_union(raw, none_type())
+}
+
+/// Flatten, lower-`None`, de-duplicate, and collapse a list of `Union` args.
+fn build_union(raw: Vec<Value>, none_type: Value) -> Result<Value> {
+    let mut flat: Vec<Value> = Vec::with_capacity(raw.len());
+    for arg in raw {
+        // Lower `None` to `NoneType` first so nested-vs-bare `None` dedup
+        // consistently.
+        let arg = if arg.is_none() { none_type.clone() } else { arg };
+        // Splice in the args of a nested `Union`/`Optional` alias.
+        if let Some((origin, nested_args)) =
+            pyrust_builtins::generic_alias::as_generic_alias_origin_args(&arg)
+            && is_union_class(&origin)
+            && let ValueKind::Tuple(items) = nested_args.kind()
+        {
+            for inner in items.iter() {
+                push_unique(&mut flat, inner.clone());
+            }
+            continue;
+        }
+        push_unique(&mut flat, arg);
+    }
+
+    // A single-type union collapses to the type itself (`Union[int]` → `int`).
+    if flat.len() == 1 {
+        return Ok(flat.into_iter().next().unwrap());
+    }
+
+    Ok(pyrust_builtins::generic_alias::generic_alias(
+        class_value_for("Union"),
+        Value::tuple(flat),
+    ))
+}
+
+/// Append `arg` to `acc` unless an equal value is already present, preserving
+/// first-seen order (CPython de-dups union members).
+fn push_unique(acc: &mut Vec<Value>, arg: Value) {
+    if !acc.contains(&arg) {
+        acc.push(arg);
+    }
+}
+
+/// True if `v` is the `Union` special-form class singleton (the origin every
+/// flattened union alias carries).
+fn is_union_class(v: &Value) -> bool {
+    if let ValueKind::PyClass(rc) = v.kind() {
+        return SPECIAL_FORM_CLASSES
+            .with(|map| map.get("Union").map(|u| Rc::ptr_eq(rc, u)).unwrap_or(false));
+    }
+    false
+}
+
 thread_local! {
     /// Map from special-form name → PyClass with `__class_getitem__` registered.
     static SPECIAL_FORM_CLASSES: std::collections::HashMap<&'static str, Rc<RefCell<PyClass>>> = {
@@ -468,6 +571,14 @@ thread_local! {
                 "__class_getitem__".to_string(),
                 Value::builtin_function(reg_name),
             );
+            // `Union`/`Optional` aliases must repr with a `typing.` prefix
+            // (`typing.Union[int, str]`).  The `GenericAlias` repr qualifies a
+            // class origin with its `__module__`, so seed it here.  The flatten
+            // helper always uses the `Union` class as the alias origin, so only
+            // these two need the module.
+            if matches!(*name, "Union" | "Optional") {
+                attrs.insert("__module__".to_string(), Value::string("typing"));
+            }
             let class = Rc::new(RefCell::new(PyClass::new(*name, *name, None, attrs)));
             map.insert(*name, class);
         }

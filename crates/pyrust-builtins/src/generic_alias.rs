@@ -64,6 +64,23 @@ impl BuiltinTypeOps for GenericAliasOps {
             _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
         };
 
+        // `typing.Union[X, NoneType]` (exactly two args, one of them
+        // `NoneType`) renders as `typing.Optional[X]`, mirroring CPython's
+        // `_SpecialForm`/`_GenericAlias.__repr__` for unions.  The flatten
+        // helper in `typing.rs` always lowers `Optional[...]` to a `Union`
+        // origin, so this is the single place the `Optional` spelling is
+        // reconstructed.
+        if origin_name == "typing.Union"
+            && let ValueKind::Tuple(items) = s.args.kind()
+            && items.len() == 2
+        {
+            let none_pos = items.iter().position(is_none_type_class);
+            if let Some(pos) = none_pos {
+                let other = &items[1 - pos];
+                return format!("typing.Optional[{}]", repr_type_arg(other));
+            }
+        }
+
         // args is a tuple; for `tuple[()]` it is empty, which CPython's
         // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
         // rather than the empty string that joining an empty list yields.
@@ -105,6 +122,12 @@ impl BuiltinTypeOps for GenericAliasOps {
     /// `__args__` are equal.  `__origin__` uses `Value::eq` (pointer-identity
     /// for `PyClass` singletons); `__args__` is a tuple, so it recurses
     /// element-wise.  Any non-`GenericAlias` `other` compares unequal.
+    ///
+    /// `typing.Union` aliases are the exception: CPython compares them by
+    /// `frozenset(self.__args__) == frozenset(other.__args__)`, so member
+    /// order is irrelevant (`Union[int, str] == Union[str, int]`).  The
+    /// flatten helper already de-dups args, so an order-insensitive
+    /// element-wise comparison matches that frozenset semantics.
     fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
         let borrow = state.borrow();
         let s = match borrow.downcast_ref::<GenericAliasState>() {
@@ -124,7 +147,13 @@ impl BuiltinTypeOps for GenericAliasOps {
                 Some(s) => s,
                 None => return false,
             };
-            s.origin == other_s.origin && s.args == other_s.args
+            if s.origin != other_s.origin {
+                return false;
+            }
+            if is_union_origin(&s.origin) {
+                return union_args_set_eq(&s.args, &other_s.args);
+            }
+            s.args == other_s.args
         } else {
             false
         }
@@ -141,7 +170,16 @@ impl BuiltinTypeOps for GenericAliasOps {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<GenericAliasState>()?;
         let origin_hash = value_hash_u64(&s.origin)?;
-        let args_hash = value_hash_u64(&s.args)?;
+        // `typing.Union` hashes its args as a `frozenset` (order-independent),
+        // so `hash(Union[int, str]) == hash(Union[str, int])` and stays
+        // consistent with the order-insensitive `eq` above.  XOR of the
+        // per-element hashes is commutative, matching frozenset's semantics
+        // (args are already de-duplicated by the flatten helper).
+        let args_hash = if is_union_origin(&s.origin) {
+            union_args_set_hash(&s.args)?
+        } else {
+            value_hash_u64(&s.args)?
+        };
         Some(origin_hash ^ args_hash)
     }
 
@@ -159,6 +197,13 @@ impl BuiltinTypeOps for GenericAliasOps {
             value,
         })
     }
+}
+
+/// True if `v` is the `NoneType` class singleton (the union component that
+/// `None` lowers to).  Matched by qualname so the union repr can collapse
+/// `Union[X, NoneType]` to `Optional[X]`.
+fn is_none_type_class(v: &Value) -> bool {
+    matches!(v.kind(), ValueKind::PyClass(rc) if rc.borrow().qualname == "NoneType")
 }
 
 /// Produce the repr for a single type argument, matching how CPython formats
@@ -288,6 +333,64 @@ pub fn as_generic_alias_origin(v: &Value) -> Option<Value> {
         return Some(s.origin.clone());
     }
     None
+}
+
+/// Read a `GenericAlias`'s `(origin, args)` pair, if `v` is one.
+///
+/// Used by the `typing` module's `Union`/`Optional` flatten helper, which
+/// needs to splice a nested alias's `__args__` into the outer union.
+pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && ops.type_name() == TYPE_NAME
+    {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<GenericAliasState>()?;
+        return Some((s.origin.clone(), s.args.clone()));
+    }
+    None
+}
+
+/// True if `origin` is the `typing.Union` special-form class — the origin
+/// every flattened `Union`/`Optional` alias carries.  Matched by
+/// `__qualname__ == "Union"` plus `__module__ == "typing"` so it does not also
+/// catch a user class happening to be named `Union`.
+fn is_union_origin(origin: &Value) -> bool {
+    if let ValueKind::PyClass(rc) = origin.kind() {
+        let c = rc.borrow();
+        return c.qualname == "Union"
+            && c.attrs.get("__module__").and_then(|m| m.as_str()) == Some("typing");
+    }
+    false
+}
+
+/// Order-insensitive equality of two `Union` arg tuples, mirroring CPython's
+/// `frozenset(a.__args__) == frozenset(b.__args__)`.  The flatten helper
+/// de-dups args, so equal length plus every member of `a` present in `b` is a
+/// faithful set comparison.
+fn union_args_set_eq(a: &Value, b: &Value) -> bool {
+    match (a.kind(), b.kind()) {
+        (ValueKind::Tuple(xs), ValueKind::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().all(|x| ys.iter().any(|y| x == y))
+        }
+        _ => a == b,
+    }
+}
+
+/// Order-independent hash of a `Union` arg tuple, consistent with
+/// `union_args_set_eq`.  XOR of the per-element hashes is commutative, matching
+/// the `frozenset(args)` hash CPython uses.  Returns `None` if any arg is
+/// unhashable.
+fn union_args_set_hash(args: &Value) -> Option<u64> {
+    match args.kind() {
+        ValueKind::Tuple(items) => {
+            let mut acc: u64 = 0;
+            for item in items.iter() {
+                acc ^= value_hash_u64(item)?;
+            }
+            Some(acc)
+        }
+        _ => value_hash_u64(args),
+    }
 }
 
 /// Construct a `GenericAlias` value.
