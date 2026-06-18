@@ -58,3 +58,11 @@ print(D(1, 2) + 1)
 # repr/str of a complex subclass instance.
 print(repr(c))
 print(str(c))
+
+# Operators complex does not support raise TypeError naming the *subclass*
+# type (not the coerced base `complex`), matching CPython (issue #2544).
+for expr in ("c // 1", "c % 1", "c / 'x'", "c ** 'x'"):
+    try:
+        eval(expr)
+    except TypeError as e:
+        print(e)

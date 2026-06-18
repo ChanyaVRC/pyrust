@@ -3723,15 +3723,17 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__truediv__", "__rtruediv__") {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                self.div(coerce_numeric(&left), coerce_numeric(&right))
+                // Issue #1204: `div` extracts the scalar backing internally and
+                // keeps the original operands for the subclass-named TypeError.
+                self.div(left, right)
             }
             BinaryOp::FloorDiv => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__floordiv__", "__rfloordiv__") {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                self.floor_div(coerce_numeric(&left), coerce_numeric(&right))
+                // Issue #1204: `floor_div` extracts the scalar backing
+                // internally and keeps the originals for the TypeError arm.
+                self.floor_div(left, right)
             }
             BinaryOp::Mod => {
                 // str % args: printf-style formatting (#1393).
@@ -3777,8 +3779,9 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
                     return r;
                 }
-                // Issue #1204: extract backing for scalar primitive subclasses.
-                self.modulo(coerce_numeric(&left), coerce_numeric(&right))
+                // Issue #1204: `modulo` extracts the scalar backing internally
+                // and keeps the originals for the TypeError arm.
+                self.modulo(left, right)
             }
             BinaryOp::Eq => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
@@ -3838,15 +3841,17 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract scalar primitive backing so that
-                // `MyInt(42) ** 2` works identically to `42 ** 2`.
-                let left = coerce_numeric(&left);
-                let right = coerce_numeric(&right);
+                // `MyInt(42) ** 2` works identically to `42 ** 2`.  Keep the
+                // original `left`/`right` for the TypeError arm so CPython's
+                // subclass-named message (`'C' and 'str'`, #2544) is preserved.
+                let cl = coerce_numeric(&left);
+                let cr = coerce_numeric(&right);
                 // When either operand is complex, use complex
                 // exponentiation: z^w = exp(w * ln(z)).  `both_as_complex`
                 // returns Ok(Some) only when at least one operand is
                 // already a Complex value; pure int/float/bigint pairs
                 // route through the canonical NumericOps slot below.
-                if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right)? {
+                if let Some(((zr, zi), (wr, wi))) = both_as_complex(&cl, &cr)? {
                     return complex_pow(zr, zi, wr, wi);
                 }
                 // Canonical numeric `**` via the NumericOps slot table
@@ -3854,7 +3859,7 @@ impl Interpreter {
                 // the BigInt-exponent OverflowError arms, and the float
                 // power path (negative-real → complex, 0.0 ** negative
                 // ZeroDivisionError).
-                if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, &left, &right) {
+                if let Some(result) = dispatch_numeric_binop(BinaryOp::Pow, &cl, &cr) {
                     return result;
                 }
                 Err(unsupported_operand("** or pow()", &left, &right))
@@ -4771,7 +4776,11 @@ impl Interpreter {
 
 
     fn div(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right)? {
+        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
+        // numeric path, but keep the originals for the subclass-named TypeError.
+        let cl = coerce_numeric(&left);
+        let cr = coerce_numeric(&right);
+        if let Some((a, b)) = both_as_complex(&cl, &cr)? {
             // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
             let denom = b.0 * b.0 + b.1 * b.1;
             if denom == 0.0 {
@@ -4784,26 +4793,34 @@ impl Interpreter {
         }
         // Canonical numeric true division via the NumericOps slot table
         // (#458).  Non-numeric operands return None → TypeError.
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::Div, &left, &right) {
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Div, &cl, &cr) {
             return result;
         }
         Err(unsupported_operand("/", &left, &right))
     }
 
     fn floor_div(&self, left: Value, right: Value) -> Result<Value> {
+        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
+        // numeric path, but keep the originals for the subclass-named TypeError.
+        let cl = coerce_numeric(&left);
+        let cr = coerce_numeric(&right);
         // Canonical numeric floor division via the NumericOps slot table
         // (#458): one site handles int/int (with BigInt promotion on
         // i64::MIN overflow, #485), BigInt cross-type arms, and float
         // floor division, plus the ZeroDivisionError wording.
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::FloorDiv, &left, &right) {
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::FloorDiv, &cl, &cr) {
             return result;
         }
         Err(unsupported_operand("//", &left, &right))
     }
 
     fn modulo(&self, left: Value, right: Value) -> Result<Value> {
+        // Issue #1204/#2544: coerce scalar primitive subclass backings for the
+        // numeric path, but keep the originals for the subclass-named TypeError.
+        let cl = coerce_numeric(&left);
+        let cr = coerce_numeric(&right);
         // Canonical numeric modulo via the NumericOps slot table (#458).
-        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mod, &left, &right) {
+        if let Some(result) = dispatch_numeric_binop(BinaryOp::Mod, &cl, &cr) {
             return result;
         }
         Err(unsupported_operand("%", &left, &right))
