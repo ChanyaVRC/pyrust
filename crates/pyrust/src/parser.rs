@@ -532,6 +532,7 @@ impl Parser {
                         Ok(Pattern::Literal(Expr::Unary {
                             op: crate::ast::UnaryOp::Neg,
                             expr: Box::new(Expr::Int(n)),
+                            span: None,
                         }))
                     }
                     Some(Token::BigInt(s)) => {
@@ -539,6 +540,7 @@ impl Parser {
                         Ok(Pattern::Literal(Expr::Unary {
                             op: crate::ast::UnaryOp::Neg,
                             expr: Box::new(Expr::BigInt(s)),
+                            span: None,
                         }))
                     }
                     Some(Token::Float(f)) => {
@@ -546,6 +548,7 @@ impl Parser {
                         Ok(Pattern::Literal(Expr::Unary {
                             op: crate::ast::UnaryOp::Neg,
                             expr: Box::new(Expr::Float(f)),
+                            span: None,
                         }))
                     }
                     other => Err(PyError::Parse(format!(
@@ -2225,6 +2228,9 @@ impl Parser {
             return Ok(Expr::Unary {
                 op: UnaryOp::Not,
                 expr: Box::new(expr),
+                // CPython anchors the operand only for `not` (a distinct shape
+                // from arithmetic unary), so leave caret-free here (#2582).
+                span: None,
             });
         }
         self.parse_comparison()
@@ -2439,26 +2445,55 @@ impl Parser {
         Ok(expr)
     }
 
+    /// Build the PEP 657 caret anchor for an arithmetic unary expression
+    /// `OP operand` (issue #2582): the whole `OP operand` span is underlined
+    /// with `^` (full == prim), from the operator's start column through the end
+    /// of the operand.  `op_start` is captured before the operator is bumped;
+    /// the operand's end col is read from the just-consumed token
+    /// (`prev_end_col`).  Returns `None` if either column is missing or
+    /// inconsistent — never a wrong caret.
+    fn make_unary_span(&self, op_start: Option<u32>) -> Option<crate::ast::CaretSpan> {
+        let start = op_start?;
+        let end = self.prev_end_col()?;
+        if start < end {
+            Some((start, start, end, end))
+        } else {
+            None
+        }
+    }
+
     fn parse_unary(&mut self) -> Result<Expr> {
         if self.is(&Token::Minus) {
+            let op_start = self.current_col();
             self.bump();
+            let expr = Box::new(self.parse_unary()?);
+            let span = self.make_unary_span(op_start);
             return Ok(Expr::Unary {
                 op: UnaryOp::Neg,
-                expr: Box::new(self.parse_unary()?),
+                expr,
+                span,
             });
         }
         if self.is(&Token::Tilde) {
+            let op_start = self.current_col();
             self.bump();
+            let expr = Box::new(self.parse_unary()?);
+            let span = self.make_unary_span(op_start);
             return Ok(Expr::Unary {
                 op: UnaryOp::BitNot,
-                expr: Box::new(self.parse_unary()?),
+                expr,
+                span,
             });
         }
         if self.is(&Token::Plus) {
+            let op_start = self.current_col();
             self.bump();
+            let expr = Box::new(self.parse_unary()?);
+            let span = self.make_unary_span(op_start);
             return Ok(Expr::Unary {
                 op: UnaryOp::Pos,
-                expr: Box::new(self.parse_unary()?),
+                expr,
+                span,
             });
         }
         // `await expr` — soft keyword, only meaningful inside `async def`; the
@@ -3245,6 +3280,7 @@ impl Parser {
                     conversion,
                     format_spec,
                     debug_text,
+                    field_cols,
                 } => {
                     let expr = parse_expr_str(&src)?;
                     // Recursively parse any nested expressions inside the
@@ -3254,11 +3290,22 @@ impl Parser {
                         None => None,
                         Some(parts) => Some(self.parse_fstring_parts(parts)?),
                     };
+                    // PEP 657 (#2582): the whole `{...}` field is underlined
+                    // with `^` (full == prim), matching CPython's FORMAT_VALUE
+                    // anchor.
+                    let span = field_cols.and_then(|(open, close)| {
+                        if open < close {
+                            Some((open, open, close, close))
+                        } else {
+                            None
+                        }
+                    });
                     ast_parts.push(FStringPart::Expr {
                         expr: Box::new(expr),
                         conversion,
                         format_spec,
                         debug_text,
+                        span,
                     });
                 }
             }
@@ -3673,6 +3720,7 @@ impl MapKey {
             Expr::Unary {
                 op: UnaryOp::Neg,
                 expr,
+                ..
             } => match MapKey::from_expr(expr) {
                 Some(MapKey::Num { value, repr }) => Some(MapKey::Num {
                     value: -value,
