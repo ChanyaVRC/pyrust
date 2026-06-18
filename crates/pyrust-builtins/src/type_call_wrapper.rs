@@ -1,23 +1,36 @@
-//! `type.__call__` bound method-wrapper — produced when `__call__` is looked up
-//! on a class object that does not define its own `__call__` in its MRO
-//! (issue #2096).
+//! `__call__` method-wrapper — produced when `__call__` is looked up on a
+//! callable object that does not define its own Python-level `__call__`.
 //!
-//! Every class is callable (to construct instances) via the metaclass slot
-//! `type.__call__`.  CPython surfaces this as `C.__call__ ==
-//! <method-wrapper '__call__' of type object at 0x...>` — a `method-wrapper`
-//! bound to the class — so that `hasattr(C, '__call__')` agrees with
-//! `callable(C)`.  We model it with a `BuiltinObject` carrying the bound class;
-//! the interpreter detects it in `call_function_expanded` via
-//! [`as_type_call_wrapper`] and re-dispatches the call onto the class itself
-//! (so `C.__call__(...)` behaves exactly like `C(...)`).
+//! Two cases share this wrapper:
+//!
+//! * **Classes** (issue #2096): every class is callable (to construct
+//!   instances) via the metaclass slot `type.__call__`.  CPython surfaces this
+//!   as `C.__call__ == <method-wrapper '__call__' of type object at 0x...>`.
+//! * **Functions / builtins** (issue #2550): plain functions, lambdas, and
+//!   builtin functions are callable, and CPython exposes `f.__call__ ==
+//!   <method-wrapper '__call__' of function object at 0x...>` (and
+//!   `... of builtin_function_or_method object ...` for builtins) so that
+//!   `hasattr(f, '__call__')` is `True`.
+//!
+//! We model it with a `BuiltinObject` carrying the bound callable plus the
+//! owner's type name (for the repr); the interpreter detects it in
+//! `call_function_expanded` via [`as_type_call_wrapper`] and re-dispatches the
+//! call onto the bound callable (so `C.__call__(...)` behaves exactly like
+//! `C(...)`, and `f.__call__(...)` like `f(...)`).
 
 use std::any::Any;
 
 use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
 
 pub struct TypeCallWrapperState {
-    /// The class object the wrapper is bound to (`C` in `C.__call__`).
-    pub class: Value,
+    /// The callable the wrapper is bound to (`C` in `C.__call__`, `f` in
+    /// `f.__call__`).
+    pub callable: Value,
+    /// The type name of the owner object, used only in `repr`.  CPython reports
+    /// `<method-wrapper '__call__' of <owner> object at 0x...>` — `type object`
+    /// for a class, `function object` for a function,
+    /// `builtin_function_or_method object` for a builtin.
+    pub owner: &'static str,
 }
 
 pub struct TypeCallWrapperOps;
@@ -30,12 +43,17 @@ impl BuiltinTypeOps for TypeCallWrapperOps {
         TYPE_NAME
     }
 
-    fn repr(&self, _state: &BuiltinState) -> String {
-        // CPython: `<method-wrapper '__call__' of type object at 0x...>`.
+    fn repr(&self, state: &BuiltinState) -> String {
+        // CPython: `<method-wrapper '__call__' of <owner> object at 0x...>`.
         // The address is implementation-specific; report 0x0 (matching the
         // convention used by pyrust's other lightweight introspection
         // objects, e.g. the `code` object).
-        "<method-wrapper '__call__' of type object at 0x0>".to_string()
+        let owner = state
+            .borrow()
+            .downcast_ref::<TypeCallWrapperState>()
+            .map(|s| s.owner)
+            .unwrap_or("type");
+        format!("<method-wrapper '__call__' of {owner} object at 0x0>")
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
@@ -47,25 +65,32 @@ impl BuiltinTypeOps for TypeCallWrapperOps {
         let s = borrow.downcast_ref::<TypeCallWrapperState>()?;
         match name {
             "__name__" | "__qualname__" => Some(Value::string("__call__")),
-            // `C.__call__.__self__` is the bound class.
-            "__self__" => Some(s.class.clone()),
-            "__objclass__" => Some(s.class.clone()),
+            // `C.__call__.__self__` is the bound callable.
+            "__self__" => Some(s.callable.clone()),
+            "__objclass__" => Some(s.callable.clone()),
             _ => None,
         }
     }
 
     // `call` is not implemented — like `bound_method` / `super_bound_builtin`,
     // the interpreter intercepts via `as_type_call_wrapper` before the trait
-    // default, because constructing the instance needs the interpreter handle.
+    // default, because re-dispatching the call needs the interpreter handle.
 }
 
-/// Construct a `type.__call__` wrapper bound to `class`.
+/// Construct a `type.__call__` wrapper bound to `class` (issue #2096).
 pub fn type_call_wrapper(class: Value) -> Value {
-    let state: Box<dyn Any> = Box::new(TypeCallWrapperState { class });
+    call_wrapper(class, "type")
+}
+
+/// Construct a `__call__` wrapper bound to an arbitrary callable, reporting
+/// `owner` in its repr (`"function"` / `"builtin_function_or_method"` for
+/// issue #2550).
+pub fn call_wrapper(callable: Value, owner: &'static str) -> Value {
+    let state: Box<dyn Any> = Box::new(TypeCallWrapperState { callable, owner });
     Value::builtin_object(TYPE_CALL_WRAPPER_OPS, state)
 }
 
-/// Extract the bound class from a `type.__call__` wrapper Value, or `None`.
+/// Extract the bound callable from a `__call__` wrapper Value, or `None`.
 pub fn as_type_call_wrapper(value: &Value) -> Option<Value> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
@@ -78,5 +103,5 @@ pub fn as_type_call_wrapper(value: &Value) -> Option<Value> {
     }
     let borrow = state.borrow();
     let s = borrow.downcast_ref::<TypeCallWrapperState>()?;
-    Some(s.class.clone())
+    Some(s.callable.clone())
 }
