@@ -283,6 +283,53 @@ fn remap_lineno_and_col_tables(
     // matched (mirrors the `old_pos` discipline of the main scan).
     let mut binop_col_cursor: usize = 0;
 
+    // Suffix recovery for the *folded* case (issues #2577 / #2578).  When a
+    // const-foldable sub-expression collapses (`a + b` with `a`,`b` known →
+    // `LoadConst`), `binop_recovery_sound` is false and the forward cursor above
+    // is disabled — yet the surviving raising op (`(a+b) + "s"`, `"s" + (x+2)`)
+    // still has a valid origin col in the old stream and must keep its caret.
+    //
+    // The optimizer's outermost binary op is emitted last (post-order) and folds
+    // only ever *remove* binops, so the surviving binops are a subsequence of the
+    // old binops in order.  When that subsequence is a contiguous **suffix** of
+    // the old binops, the k-th-from-last surviving op descends 1:1 from the
+    // k-th-from-last old binop.  We accept the suffix alignment only when the
+    // operator sequence of the surviving new binops equals the operator sequence
+    // of the last N old binops — a structural cross-check that fails for a
+    // *middle* fold (`x + y + (a+b)`, where the surviving ops are not a suffix),
+    // keeping such an op caret-free (a missing caret beats a wrong one, #2426).
+    let binop_origin_op = |insn: &Insn| -> Option<crate::ast::BinaryOp> {
+        match insn {
+            Insn::BinOp(_, _, op, _) => Some(*op),
+            Insn::BinOpConst(_, _, op, _, false) | Insn::BinOpImm(_, _, op, _, false) => Some(*op),
+            _ => None,
+        }
+    };
+    // Old positions where a per-op suffix col can be recovered, paired with the
+    // surviving new binop index (set up below only when the suffix cross-check
+    // passes); consumed by a flat lookup in the main scan.
+    let mut suffix_binop_old_pos: HashMap<usize, usize> = HashMap::new();
+    if want_cols && !binop_recovery_sound && new_binop_origin_count > 0 {
+        let old_start = old_binop_positions.len() - new_binop_origin_count;
+        let surviving: Vec<(usize, crate::ast::BinaryOp)> = new_insns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, insn)| binop_origin_op(insn).map(|op| (i, op)))
+            .collect();
+        let ops_match = surviving.iter().enumerate().all(|(j, &(_, op))| {
+            old_binop_positions
+                .get(old_start + j)
+                .and_then(|&p| old_insns.get(p))
+                .and_then(binop_origin_op)
+                == Some(op)
+        });
+        if ops_match {
+            for (j, &(new_i, _)) in surviving.iter().enumerate() {
+                suffix_binop_old_pos.insert(new_i, old_binop_positions[old_start + j]);
+            }
+        }
+    }
+
     // Ascending old positions of the call opcodes (`Call` / `CallMemo`) the
     // self-tail-call peephole (`pass_self_tail_call`) may have rewritten into a
     // `TailCall` (issue #2443).  A `return f(...)` compiles to `Call(r) + Return(r)`,
@@ -394,7 +441,9 @@ fn remap_lineno_and_col_tables(
     let mut old_pos: usize = 0;
     let mut linenos = Vec::with_capacity(new_insns.len());
     let mut cols = vec![(0, 0, 0, 0); new_insns.len()];
-    for ((out_col, new_insn), aligned_pos) in cols.iter_mut().zip(new_insns).zip(&aligned) {
+    for (new_idx, ((out_col, new_insn), aligned_pos)) in
+        cols.iter_mut().zip(new_insns).zip(&aligned).enumerate()
+    {
         // Use the LCS-aligned old position when this new instruction was matched;
         // it is guaranteed `>= old_pos`, preserving the monotonic-cursor invariant
         // the fallbacks below rely on.
@@ -493,6 +542,15 @@ fn remap_lineno_and_col_tables(
                     }
                 }
             }
+        }
+        // Folded-statement suffix recovery (issues #2577 / #2578): a surviving
+        // binary op whose foldable sibling collapsed gets its origin col from the
+        // suffix alignment computed above.  Authoritative for these ops — the
+        // exact/discriminant paths cannot have a correct match for a fused
+        // `BinOpConst` (it has no old counterpart), and a plain surviving `BinOp`
+        // in a folded statement is `disc_ambiguous` so it was left caret-free.
+        if want_cols && let Some(&i) = suffix_binop_old_pos.get(&new_idx) {
+            *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
         }
     }
     (linenos, cols)
