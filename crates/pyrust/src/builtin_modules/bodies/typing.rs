@@ -141,6 +141,19 @@ pub(crate) fn namedtuple_marker_value() -> Value {
     NAMEDTUPLE_CLASS.with(|c| Value::py_class(Rc::clone(c)))
 }
 
+/// True if `class` is the `typing.Protocol` singleton or a subclass of it.
+/// Used by `isinstance` to apply structural protocol checks (issue #2526).
+pub(crate) fn is_protocol_subclass(class: &Rc<RefCell<PyClass>>) -> bool {
+    PROTOCOL_CLASS.with(|p| crate::interpreter::class_is_subclass_of(class, p))
+}
+
+/// True if `class` is the bare `typing.Protocol` marker singleton itself
+/// (not a user subclass).  `isinstance` skips the structural check for it so
+/// `Protocol` keeps ordinary class semantics (issue #2526).
+pub(crate) fn is_protocol_marker_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    PROTOCOL_CLASS.with(|p| Rc::ptr_eq(class, p))
+}
+
 /// (method-short, registry-name) pairs for `_Any`.
 const ANY_METHODS: &[(&str, &str)] = &[
     ("__repr__", "typing._Any.__repr__"),

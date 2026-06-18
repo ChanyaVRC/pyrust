@@ -137,9 +137,52 @@ def _build_namedtuple_class(typename, fields, defaults, namespace):
     return cls
 
 
+# Names that CPython's `_get_protocol_attrs` never treats as protocol members:
+# typing/Protocol bookkeeping attrs and `object` infrastructure, not
+# user-declared requirements (issue #2526).
+_PROTOCOL_EXCLUDED_ATTRS = frozenset({
+    "__init__", "__new__", "__init_subclass__", "__subclasshook__",
+    "__class_getitem__", "__doc__", "__dict__", "__weakref__",
+    "__abstractmethods__", "__protocol_attrs__",
+    "__protocol_runtime_checkable__", "__module__", "__qualname__",
+    "__slots__", "__parameters__", "__orig_bases__", "__annotations__",
+})
+
+
+def _collect_protocol_attrs(cls):
+    """Collect the member names a `@runtime_checkable` Protocol requires.
+
+    Mirrors CPython 3.12's `typing._get_protocol_attrs`: the union of names
+    declared in the protocol body and in any protocol *bases* (but not on
+    `object` / `Protocol` / `Generic`), minus typing bookkeeping names.  For a
+    simple protocol this is just the method/attribute names the user wrote,
+    plus any annotation-only data members (`name: str`).
+    """
+    attrs = set()
+    for base in getattr(cls, "__mro__", (cls,)):
+        if getattr(base, "__name__", "") in ("Protocol", "Generic", "object"):
+            continue
+        for key in vars(base):
+            if key not in _PROTOCOL_EXCLUDED_ATTRS:
+                attrs.add(key)
+        ann = getattr(base, "__annotations__", None)
+        if isinstance(ann, dict):
+            for key in ann:
+                if key not in _PROTOCOL_EXCLUDED_ATTRS:
+                    attrs.add(key)
+    return attrs
+
+
 def runtime_checkable(cls):
-    """Mark a `Protocol` as runtime-checkable (no-op marker in pyrust)."""
+    """Mark a `Protocol` as runtime-checkable and record its member names.
+
+    Sets `__protocol_runtime_checkable__` plus `__protocol_attrs__` — the set
+    of attribute names a subject must have for a structural `isinstance` check
+    to succeed (issue #2526).  The structural check itself lives in the
+    `isinstance` builtin.
+    """
     cls.__protocol_runtime_checkable__ = True
+    cls.__protocol_attrs__ = _collect_protocol_attrs(cls)
     return cls
 
 
