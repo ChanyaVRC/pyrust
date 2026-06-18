@@ -2576,8 +2576,54 @@ impl Interpreter {
             ));
         }
         let iterable = args.pop().unwrap();
-        let snapshot = self.collect_iterable(&iterable)?;
-        receiver.list_extend(snapshot)?;
+        // Fast path for eager built-in containers (list/tuple/str/range/dict/
+        // set/bytes). Iterating these never runs user code, so no exception can
+        // be raised mid-iteration and there is no partial progress to preserve —
+        // CPython's incremental semantics are indistinguishable from a bulk
+        // extend here. `collect_iterable` reads the argument to completion before
+        // the receiver is touched, which also keeps the self-extend aliasing
+        // guarantee (`a.extend(a)`). Skipping the per-element `iter()`/
+        // `call_next` loop avoids a ~6.7x regression on the common
+        // `list.extend(list)` path. (frozenset / bytearray are `BuiltinObject`,
+        // which also backs lazy map/filter/zip iterators, so they take the
+        // incremental path below — still correct, just rarer as an argument.)
+        if matches!(
+            iterable.kind(),
+            ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Str(_)
+                | ValueKind::Range { .. }
+                | ValueKind::BigRange { .. }
+                | ValueKind::Dict(_)
+                | ValueKind::Set(_)
+                | ValueKind::Bytes(_)
+        ) {
+            let snapshot = self.collect_iterable(&iterable)?;
+            receiver.list_extend(snapshot)?;
+            return Ok(Value::none());
+        }
+        // CPython's `list.extend` appends incrementally and keeps the partial
+        // progress when the iterator raises mid-iteration (#2531). For lazy
+        // iterables (generators, map/filter/zip, user `__iter__`/`__next__` or
+        // the legacy `__getitem__` protocol) whose iteration runs user code,
+        // turn the argument into an iterator via the `iter()` builtin — the same
+        // path `list()` / the `for`-loop use — and push each element onto the
+        // receiver as it arrives. `iter()` snapshots eager containers into a
+        // `NativeIterFrame`, so self-extend still terminates even on this path.
+        let iter_arg = ExpandedCallArg {
+            name: None,
+            value: iterable,
+        };
+        let dispatch =
+            crate::builtin_registry::lookup("iter").expect("iter must be in the registry");
+        let iterator = dispatch(self, &[iter_arg])?;
+        loop {
+            match self.call_next(&iterator, None) {
+                Ok(item) => receiver.list_push(item)?,
+                Err(ref e) if e.class_name_is("StopIteration") => break,
+                Err(e) => return Err(e),
+            }
+        }
         Ok(Value::none())
     }
 
@@ -2815,16 +2861,21 @@ impl Interpreter {
     /// `NativeIterFrame` and rejects every other generator state
     /// (`map`/`filter`/genexpr/user generators) with `can't extend bytearray with
     /// <type>`. Driving those needs the interpreter, so when the single argument
-    /// is a lazy `Generator`, materialise it to completion via `collect_iterable`
-    /// (the same path `list(iterable)` uses) and replace it with a `List` — which
+    /// is a lazy `Generator` — or a user-defined iterable `PyInstance`
+    /// (`__iter__`/`__next__` or the legacy `__getitem__` protocol, #2534) —
+    /// materialise it to completion via `collect_iterable` (the same path
+    /// `list(iterable)` uses) and replace it with a `List`, which
     /// `bytes_from_value` already handles, including the per-element
     /// `range(0, 256)` / non-int validation.
     ///
-    /// Non-generator arguments are left untouched so the ops table keeps its
-    /// CPython wording (`can't extend bytearray with int` for a non-iterable, the
+    /// Other arguments are left untouched so the ops table keeps its CPython
+    /// wording (`can't extend bytearray with int` for a non-iterable, the
     /// per-character `'str' object cannot be interpreted as an integer` for a str,
-    /// etc.). Materialising the snapshot before the receiver is mutated also
-    /// preserves the self-extend aliasing guarantee.
+    /// etc.). A *non-iterable* `PyInstance` is likewise left alone so the ops
+    /// table reports `can't extend bytearray with <type>` rather than the
+    /// `'X' object is not iterable` `collect_iterable` would raise. Materialising
+    /// the snapshot before the receiver is mutated also preserves the self-extend
+    /// aliasing guarantee.
     fn prepare_bytearray_extend_args(&mut self, mut args: Vec<Value>) -> Result<Vec<Value>> {
         if args.len() != 1 {
             return Err(pyrust_core::type_err!(
@@ -2832,7 +2883,26 @@ impl Interpreter {
                 args.len()
             ));
         }
-        if matches!(args[0].kind(), ValueKind::Generator(_)) {
+        let needs_collect = match args[0].kind() {
+            ValueKind::Generator(_) => true,
+            // A user-defined PyInstance is collected only when it is actually
+            // iterable; a plain object falls through so the ops table picks the
+            // canonical `can't extend bytearray with <type>` message (#2534).
+            // Gate strictly on the iteration protocols (`__iter__` / the legacy
+            // `__getitem__`): a subclass of an *iterable* builtin (list/dict/
+            // bytes/set/…) inherits one of these on its class, while a subclass
+            // of a non-iterable builtin (int/float/complex/bool) inherits
+            // neither and must fall through to the ops-table message — collecting
+            // it would surface `'int' object is not iterable` instead of
+            // `can't extend bytearray with <type>` (matching CPython).
+            ValueKind::PyInstance(inst) => {
+                let class = Rc::clone(&inst.borrow().class);
+                lookup_class_attr(&class, "__iter__").is_some()
+                    || lookup_class_attr(&class, "__getitem__").is_some()
+            }
+            _ => false,
+        };
+        if needs_collect {
             let snapshot = self.collect_iterable(&args[0])?;
             args[0] = Value::list(snapshot);
         }
