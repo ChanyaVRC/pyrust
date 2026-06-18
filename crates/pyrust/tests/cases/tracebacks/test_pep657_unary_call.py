@@ -38,6 +38,21 @@ except TypeError as e:
     print("unary invert:", type(e).__name__, e)
 
 
+# --- `not x` whose `__bool__` raises -> `^` over the whole `not x` span ---
+# CPython 3.12 anchors the full `not operand` span (UNARY_NOT col_offset 0
+# through the operand end), the same shape as arithmetic unary, when the
+# operand's `__bool__` raises (#2582).
+class BoolBoom:
+    def __bool__(self):
+        raise ValueError("bool boom")
+
+
+try:
+    _ = (not BoolBoom()) or True
+except ValueError as e:
+    print("unary not:", type(e).__name__, e)
+
+
 # --- f-string `{x!r}` conversion error -> `^^^^^` under the field ---
 class ReprBoom:
     def __repr__(self):

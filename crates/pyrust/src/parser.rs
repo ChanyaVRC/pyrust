@@ -2223,14 +2223,17 @@ impl Parser {
 
     fn parse_not(&mut self) -> Result<Expr> {
         if self.is(&Token::Not) {
+            let op_start = self.current_col();
             self.bump();
             let expr = self.parse_not()?;
+            // CPython 3.12 anchors the whole `not operand` span with `^`
+            // (full == prim), the same shape as arithmetic unary, when the
+            // operand's `__bool__` raises (#2582).
+            let span = self.make_unary_span(op_start);
             return Ok(Expr::Unary {
                 op: UnaryOp::Not,
                 expr: Box::new(expr),
-                // CPython anchors the operand only for `not` (a distinct shape
-                // from arithmetic unary), so leave caret-free here (#2582).
-                span: None,
+                span,
             });
         }
         self.parse_comparison()
