@@ -1118,6 +1118,38 @@ pub struct FnCode {
     /// propagates straight out (no frame on the stack could catch it).
     /// Conservatively `true` for un-optimized bytecode (no trampolining).
     pub(crate) has_exc_handlers: bool,
+    /// PEP 657 / traceback provenance for instructions spliced in by the
+    /// pure-function inliner (`optimizer.rs::pass_inline`, issue #2569).
+    ///
+    /// The inliner eliminates the callee's real call frame; without this table
+    /// an error raised inside an inlined body would render in the caller's frame
+    /// with the wrong line and no callee caret (the divergence #2569 fixes).
+    /// Sorted by `pc` (the final instruction index in `insns`); each entry
+    /// reconstructs the callee's traceback frame for that spliced instruction.
+    /// `None` when this code object inlined nothing — the common case, so no
+    /// allocation is paid.  Read **only on the cold error-unwind path**, so the
+    /// per-instruction hot path is untouched.
+    pub(crate) inline_frames: Option<Box<[(u32, InlineFrameInfo)]>>,
+}
+
+/// Traceback provenance for one instruction spliced into a caller by the
+/// pure-function inliner (issue #2569).  Reconstructs the callee's
+/// `FrameInfo` on the cold error-unwind path so an exception raised inside an
+/// inlined body still shows the callee frame (line + PEP 657 caret), matching
+/// CPython 3.12.
+#[derive(Debug, Clone)]
+pub(crate) struct InlineFrameInfo {
+    /// The inlined callee's name (`co_name`) — e.g. `"f"` for `def f(...)`.
+    pub(crate) funcname: std::sync::Arc<str>,
+    /// The callee's source-file path (`co_filename`); may differ from the
+    /// caller's when the helper was imported from another module.
+    pub(crate) filename: std::sync::Arc<str>,
+    /// 1-based source line *inside the callee body* that this spliced
+    /// instruction came from.  `0` when the callee carried no line table.
+    pub(crate) lineno: u32,
+    /// PEP 657 caret anchor for this spliced instruction, taken from the
+    /// callee's own `col_table`.  `(0, 0, 0, 0)` means "no anchor".
+    pub(crate) col_span: crate::ast::CaretSpan,
 }
 
 pub(crate) use crate::optimizer::EXC_NO_HANDLER;

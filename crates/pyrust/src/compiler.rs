@@ -5677,6 +5677,9 @@ impl Compiler {
             // Conservative: un-optimized bytecode is never trampolined.  The
             // optimizer recomputes this from the real `exc_table` (#2234).
             has_exc_handlers: true,
+            // The inliner (`pass_inline`) only runs in the optimizer; freshly
+            // compiled bytecode has spliced nothing (#2569).
+            inline_frames: None,
         })
     }
 

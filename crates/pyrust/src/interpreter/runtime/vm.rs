@@ -2001,6 +2001,36 @@ impl Interpreter {
                                 |s| if s == (0, 0, 0, 0) { None } else { Some(s) },
                             ),
                         );
+                        // Issue #2569: if the raising instruction was spliced in by
+                        // the pure-function inliner, its real call frame was
+                        // eliminated.  Reconstruct the callee's traceback frame here
+                        // (innermost — recorded first), BEFORE handler dispatch, so
+                        // both an escaping traceback and a caught exception's
+                        // `__traceback__` chain show CPython's two-frame output.  A
+                        // handler that catches and exits normally clears the
+                        // captured-frame snapshot at `PopExcContext`, so no stale
+                        // callee frame leaks.
+                        if let Some(table) = code.inline_frames.as_deref() {
+                            let raise_pc = pc.wrapping_sub(1) as u32;
+                            if let Ok(slot) = table.binary_search_by_key(&raise_pc, |&(p, _)| p) {
+                                let frame = &table[slot].1;
+                                pyrust_core::record_traceback_frame(pyrust_core::FrameInfo {
+                                    filename: std::sync::Arc::clone(&frame.filename),
+                                    lineno: if frame.lineno == 0 {
+                                        None
+                                    } else {
+                                        Some(frame.lineno)
+                                    },
+                                    source_line: None,
+                                    funcname: std::sync::Arc::clone(&frame.funcname),
+                                    col_span: if frame.col_span == (0, 0, 0, 0) {
+                                        None
+                                    } else {
+                                        Some(frame.col_span)
+                                    },
+                                });
+                            }
+                        }
                         match self.handle_vm_error(
                         e,
                         &mut exc_handlers,
@@ -2023,10 +2053,11 @@ impl Interpreter {
                         }
                         Err(e) => {
                             // Error escapes this frame.  The raising instruction's
-                            // PEP 657 caret anchor (#2426/#2411) was already
-                            // published above (before handler dispatch); last
-                            // writer wins, so the outermost (module) frame's anchor
-                            // is what `get_current_vm_col_span` returns.
+                            // PEP 657 caret anchor (#2426/#2411) and any inlined
+                            // callee frame (#2569) were already published above
+                            // (before handler dispatch); last writer wins, so the
+                            // outermost (module) frame's anchor is what
+                            // `get_current_vm_col_span` returns.
                             //
                             // Unwind any active trampolined frames (record their
                             // traceback, pop their views, restore each caller's
@@ -6128,6 +6159,7 @@ mod vm_tests {
             // uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),
             has_exc_handlers: false,
+            inline_frames: None,
         }
     }
 
