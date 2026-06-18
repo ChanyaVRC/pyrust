@@ -9304,7 +9304,7 @@ impl Interpreter {
         let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
         let param_spec = Rc::clone(&proto.param_spec);
         let annotation_keys = proto.annotation_keys.clone();
-        let is_pure = proto.is_pure;
+        let is_memo_pure = proto.is_memo_pure;
         let proto_doc = proto.docstring.as_ref().map(|s| Value::string(s.clone()));
 
         let mut params = Vec::with_capacity(param_spec.names.len());
@@ -9369,7 +9369,7 @@ impl Interpreter {
             global_names: proto_global_names,
             nonlocal_names: proto_nonlocal_names,
             env: Rc::clone(&self.env),
-            is_pure,
+            is_memo_pure,
             precompiled_code: Some(proto_code),
             wrapped_func: None,
         });

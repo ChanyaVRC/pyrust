@@ -1634,7 +1634,13 @@ pub struct UserFunction {
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
     pub env: EnvRef,
-    pub is_pure: bool,
+    /// True when a call to this function may have its result *cached and reused*
+    /// for equal arguments — read by the VM's `CallMemo` result cache
+    /// (`vm.rs::Insn::CallMemo`).  More permissive than DCE-purity: a benign
+    /// raise or user dunder dispatch is acceptable because the cache only fires
+    /// for all-integer arguments and a scalar result (issue #2523).  Copied from
+    /// the function's `FnProto::is_memo_pure`.
+    pub is_memo_pure: bool,
     pub precompiled_code: Option<Rc<dyn Any>>,
     /// When `kind` is `StaticMethod` or `ClassMethod`, holds the original
     /// wrapped function `Rc` so that `sm.__func__` can return the exact same
@@ -3455,7 +3461,7 @@ impl Value {
                 global_names: Rc::new(HashSet::new()),
                 nonlocal_names: Rc::new(HashSet::new()),
                 env: Environment::new(None),
-                is_pure: false,
+                is_memo_pure: false,
                 precompiled_code: None,
                 wrapped_func: None,
             });
@@ -3555,7 +3561,7 @@ impl Value {
             global_names: Rc::clone(&f.global_names),
             nonlocal_names: Rc::clone(&f.nonlocal_names),
             env: Rc::clone(&f.env),
-            is_pure: f.is_pure,
+            is_memo_pure: f.is_memo_pure,
             precompiled_code: f.precompiled_code.clone(),
             wrapped_func,
         };
@@ -7296,7 +7302,7 @@ mod tests {
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
             env: Environment::new(None),
-            is_pure: false,
+            is_memo_pure: false,
             precompiled_code: None,
             wrapped_func: None,
         })

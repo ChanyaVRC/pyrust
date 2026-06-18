@@ -547,15 +547,15 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_licm(insns, num_locals);
     let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
-    let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_dead_store_elim(insns, num_locals, &fn_protos);
     // Second run catches argument-prep moves that became dead after the first
     // pass removed their consuming dead store (store-chain cascade).
-    let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_dead_store_elim(insns, num_locals, &fn_protos);
     // Drop Call instructions to pure builtins whose result is never used.
     // A third dead-store pass then removes the now-dead LoadGlobal and arg
     // loads that fed the eliminated calls.
     let insns = pass_builtin_dce(insns, num_locals, &names, &consts);
-    let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_dead_store_elim(insns, num_locals, &fn_protos);
     let insns = pass_syncmod_sink(insns);
     // Tail-merging must not collapse two raise/return sites that carry different
     // source lines into one survivor copy — doing so loses the duplicate site's
@@ -716,7 +716,12 @@ struct InlinePlan {
 /// build its [`InlinePlan`], merging the callee's constant pool into the
 /// caller's `consts`.  Returns `None` (no inlining) on any disqualifier.
 fn build_inline_plan(proto: &FnProto, caller_consts: &mut Vec<Value>) -> Option<InlinePlan> {
-    if !proto.is_pure {
+    // Inlining splices the callee body in-place, so every effect (a raise, a
+    // user dunder dispatch) still fires at the same program point — memo-purity
+    // is the correct (and behaviour-preserving) gate here, not the stricter
+    // DCE-purity.  A memo-pure body using `<`/`-` stays inlinable exactly as
+    // before the #2523 predicate split.
+    if !proto.is_memo_pure {
         return None;
     }
     let code = &proto.code;
@@ -4426,16 +4431,21 @@ fn is_control_flow(insn: &Insn) -> bool {
 ///   (`LoadGlobal` → NameError; `BinOp`/`BinOpConst` → ValueError /
 ///   ZeroDivisionError / etc.; `UnaryOp` → TypeError) are always preserved so
 ///   that expression statements like `a << b` or `undefined_name` still
-///   propagate their errors instead of being silently dropped.  `CallMemo` is
-///   also preserved: although it targets a `#[pure]` callee (no observable side
-///   effects), a pure call can still *raise* — `abs("x")`, `range(1.5)`, or a
-///   pure user function whose body raises — and dropping a dead pure call would
-///   swallow that exception (issue #2537).  Dead pure-builtin calls with
-///   statically safe constant arguments are eliminated by `pass_builtin_dce`,
-///   which carries the callee name and constant types needed to prove no raise.
+///   propagate their errors instead of being silently dropped.
+/// - A dead `CallMemo` is removed **only** when its target proto is provably
+///   `is_dce_pure` (no observable effect at all, including a raise or user
+///   dunder dispatch — issue #2523).  This is stricter than `is_memo_pure`
+///   (which only requires the result to be cacheable): a `#[pure]`-by-memo body
+///   using `<` / `-` / `a / b` / `obj[i]` can still raise (`abs("x")`,
+///   `range(1.5)`, `1 < "x"`, a pure user fn whose body raises — issue #2537),
+///   so dropping its dead result would swallow that exception.  The proto is
+///   resolved from the call-site `Move(fn_reg, src)` → `MakeFunction` chain;
+///   when it cannot be resolved (computed callee, rebindable holder) the call
+///   is conservatively kept.  Dead pure-builtin calls with statically safe
+///   constant arguments are additionally eliminated by `pass_builtin_dce`.
 /// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
 ///   is the initial value consumed by a later loop iteration.
-fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32, fn_protos: &[FnProto]) -> Vec<Insn> {
     let n = insns.len();
     let mut keep = vec![true; n];
 
@@ -4483,6 +4493,57 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         back_edge_after[i] = back_edge_after[i + 1] || insn_is_back_edge(&insns[i]);
     }
 
+    // ── DCE-pure `CallMemo` target resolution ────────────────────────────────
+    // A dead `CallMemo` may be dropped only when its callee proto is provably
+    // `is_dce_pure` (issue #2523).  Resolve the proto behind the call-site
+    // `Move(fn_reg, src)` via the same single-write `MakeFunction` chain
+    // `pass_inline` uses; bail (keep the call) on any indirection.  Only build
+    // the write maps when the stream actually contains a `CallMemo` to keep the
+    // common (memo-free) function on the original linear path.
+    let has_call_memo = insns.iter().any(|i| matches!(i, Insn::CallMemo(..)));
+    let (cm_write_count, cm_single_write): (HashMap<u32, u32>, HashMap<u32, usize>) =
+        if has_call_memo {
+            let mut wc: HashMap<u32, u32> = HashMap::new();
+            let mut sw: HashMap<u32, usize> = HashMap::new();
+            let mut wbuf: HashSet<u32> = HashSet::new();
+            for (pc, insn) in insns.iter().enumerate() {
+                wbuf.clear();
+                collect_writes(insn, &mut wbuf);
+                for &d in &wbuf {
+                    *wc.entry(d).or_insert(0) += 1;
+                    sw.insert(d, pc);
+                }
+            }
+            (wc, sw)
+        } else {
+            (HashMap::new(), HashMap::new())
+        };
+    let resolve_fn_reg = |reg: u32| -> Option<u16> {
+        if cm_write_count.get(&reg).copied() != Some(1) {
+            return None;
+        }
+        let &wpc = cm_single_write.get(&reg)?;
+        match &insns[wpc] {
+            Insn::MakeFunction(d, proto_idx, _, defs_n, _, annots_n)
+                if *d == reg && *defs_n == 0 && *annots_n == 0 =>
+            {
+                Some(*proto_idx)
+            }
+            _ => None,
+        }
+    };
+    // True when the `CallMemo` at `call_pc` (function-value register `fn_reg`)
+    // provably targets a DCE-pure proto and so may be dropped if its result is
+    // dead.
+    let call_memo_dce_pure = |call_pc: usize, fn_reg: u32| -> bool {
+        match resolve_call_target(&insns, call_pc, fn_reg, &resolve_fn_reg) {
+            Some(proto_idx) => fn_protos
+                .get(proto_idx as usize)
+                .is_some_and(|p| p.is_dce_pure),
+            None => false,
+        }
+    };
+
     // The dead-store decision for a store at index `i` to register `r` mirrors
     // `reg_is_read_before_next_write(&insns[i + 1..], r)`, which returns at the
     // first instruction `j > i` matching, in priority order: (1) reads r → true,
@@ -4514,15 +4575,17 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             {
                 Some(*r)
             }
-            // NB: `CallMemo` is intentionally *not* droppable here.  The compiler
-            // emits it for `#[pure]` callees, but "pure" means "no observable
-            // side effects" — it does **not** mean "cannot raise".  A pure call
-            // with type-incompatible arguments (`abs("x")`, `range(1.5)`) or a
-            // pure user function whose body raises still produces an observable
-            // exception even when the result is dead, and CPython never elides a
-            // call (issue #2537).  Dead pure-*builtin* calls with statically safe
-            // constant arguments are still eliminated by `pass_builtin_dce`,
-            // which has the callee name + const types needed to prove no raise.
+            // A `CallMemo` is droppable only when its target proto is provably
+            // `is_dce_pure` (issue #2523): no observable side effect *and* no
+            // possible raise / user dunder dispatch.  `is_memo_pure` alone is
+            // insufficient — a memoizable body using `<` / `-` / `a / b` /
+            // `obj[i]` can still raise (`abs("x")`, `range(1.5)`, `1 < "x"`, a
+            // pure user fn whose body raises — issue #2537), and CPython never
+            // elides such a call.  Unresolvable callees (computed / rebindable)
+            // are conservatively kept.  Dead pure-*builtin* calls with
+            // statically safe constant arguments are still eliminated by
+            // `pass_builtin_dce`, which has the callee name + const types.
+            Insn::CallMemo(r, _) if *r >= num_locals && call_memo_dce_pure(i, *r) => Some(*r),
             _ => None,
         };
         if let Some(r) = dst {
@@ -10106,7 +10169,7 @@ mod tests {
             Insn::LoadConst(2, 1), // live — r2 used by Return
             Insn::Return(2),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(matches!(out[0], Insn::LoadConst(2, 1)));
         assert!(matches!(out[1], Insn::Return(2)));
@@ -10116,7 +10179,7 @@ mod tests {
     fn dse_keeps_store_that_is_read() {
         // LoadConst(r2, 0) is read by Return — must be kept.
         let insns = vec![Insn::LoadConst(2, 0), Insn::Return(2)];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(out.len(), 2, "live LoadConst must not be removed");
     }
 
@@ -10128,7 +10191,7 @@ mod tests {
             Insn::LoadConst(0, 1), // overwrites r0
             Insn::Return(0),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(out.len(), 3, "local register writes must not be removed");
     }
 
@@ -10145,7 +10208,7 @@ mod tests {
             Insn::Jump(-2),        // back-edge
             Insn::Return(2),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(
             out.len(),
             3,
@@ -10163,7 +10226,7 @@ mod tests {
             Insn::BinOp(3, 2, BinaryOp::Add, 2), // overwrites r3
             Insn::Return(3),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(out.len(), 3, "dead Move should be removed");
         assert!(matches!(out[1], Insn::BinOp(3, 2, BinaryOp::Add, 2)));
     }
@@ -10190,7 +10253,7 @@ mod tests {
             Insn::LoadConst(2, 1),
             Insn::Return(2),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(
             out.len(),
             5,
@@ -10223,7 +10286,7 @@ mod tests {
             Insn::Jump(-3),        // back-edge: target = 2+1-3 = 0
             Insn::Return(2),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(
             out.len(),
             3,
@@ -10250,20 +10313,149 @@ mod tests {
     }
 
     #[test]
-    fn dse_keeps_dead_call_memo() {
-        // CallMemo(r2, 0) — result r2 never read.  A `#[pure]` callee has no
-        // side effects but can still *raise* (e.g. a pure user function whose
-        // body raises), so dead-store-elim must NOT drop it (issue #2537).
+    fn dse_keeps_dead_call_memo_unresolvable_callee() {
+        // CallMemo(r2, 0) — result r2 never read, callee loaded via LoadGlobal
+        // (not a resolvable `Move`+`MakeFunction` chain).  An unresolvable callee
+        // could be memo-pure-but-not-DCE-pure (it can still raise), so dead-store-
+        // elim must conservatively keep it (issue #2523 / #2537).
         let insns = vec![
             Insn::LoadGlobal(2, 0), // r2 = some_pure_fn
-            Insn::CallMemo(2, 0),   // r2 = some_pure_fn() — result dead but may raise
+            Insn::CallMemo(2, 0),   // r2 = some_pure_fn() — result dead but unresolvable
             Insn::ReturnNone,
         ];
-        let out = pass_dead_store_elim(insns, 2);
-        assert_eq!(out.len(), 3, "dead CallMemo must be preserved (may raise)");
+        let out = pass_dead_store_elim(insns, 2, &[]);
+        assert_eq!(
+            out.len(),
+            3,
+            "dead CallMemo with unresolvable callee must be preserved"
+        );
         assert!(
             out.iter().any(|i| matches!(i, Insn::CallMemo(..))),
-            "dead CallMemo to a pure callee must survive — it can still raise"
+            "dead CallMemo to an unresolvable callee must survive — it may raise"
+        );
+    }
+
+    #[test]
+    fn purity_split_compare_is_memo_pure_not_dce_pure() {
+        // A function whose body is a bare comparison (`a < a`) can dispatch a
+        // user `__lt__` / raise, so it must be memo-pure (cacheable for int args)
+        // but NOT dce-pure (its dead-result call must not be eliminated — the
+        // `a < a` swallow case in issue #2523).
+        let code = optimize(compile_fn("def f(a):\n    a < a\n"));
+        let f = code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "f")
+            .expect("f proto");
+        assert!(f.is_memo_pure, "`a < a` body is memo-pure (cacheable)");
+        assert!(
+            !f.is_dce_pure,
+            "`a < a` body is NOT dce-pure (may dispatch __lt__)"
+        );
+    }
+
+    #[test]
+    fn purity_split_unary_is_memo_pure_not_dce_pure() {
+        // `-a` dispatches `__neg__`: memo-pure but not dce-pure (issue #2523).
+        let code = optimize(compile_fn("def f(a):\n    -a\n"));
+        let f = code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "f")
+            .expect("f proto");
+        assert!(f.is_memo_pure, "`-a` body is memo-pure");
+        assert!(
+            !f.is_dce_pure,
+            "`-a` body is NOT dce-pure (may dispatch __neg__)"
+        );
+    }
+
+    #[test]
+    fn purity_split_nonraising_arith_is_both() {
+        // `a + 1` uses only non-raising arithmetic on a local, so it is both
+        // memo-pure and dce-pure (the `is_dce_pure ⊆ is_memo_pure` happy path).
+        let code = optimize(compile_fn("def f(a):\n    return a + 1\n"));
+        let f = code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "f")
+            .expect("f proto");
+        assert!(f.is_dce_pure, "`a + 1` body is dce-pure");
+        assert!(f.is_memo_pure, "dce-pure implies memo-pure");
+    }
+
+    #[test]
+    fn dse_drops_dead_call_to_nested_dce_pure_fn() {
+        // A dead-result call to a nested DCE-pure function is eliminated end-to-end
+        // (issue #2523): the call site resolves to a single `MakeFunction`, the
+        // proto is `is_dce_pure`, and the result is unused, so neither a Call nor a
+        // CallMemo to it survives (whether removed by DCE or by inlining).
+        let code = optimize(compile_fn(
+            "def outer(a):\n    def g(x):\n        return x + 1\n    g(a)\n    return a\n",
+        ));
+        let outer = code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "outer")
+            .expect("outer proto");
+        let g = outer
+            .code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "g")
+            .expect("g proto");
+        assert!(g.is_dce_pure, "g (x + 1) must be dce-pure");
+        assert!(
+            !outer
+                .code
+                .insns
+                .iter()
+                .any(|i| matches!(i, Insn::Call(..) | Insn::CallMemo(..))),
+            "dead call to dce-pure g must be eliminated: {:?}",
+            outer.code.insns
+        );
+    }
+
+    #[test]
+    fn dse_keeps_dead_call_to_nested_non_dce_pure_fn() {
+        // A dead-result call to a nested function that is memo-pure but NOT
+        // dce-pure (its body is a comparison, which dispatches a user `__lt__` /
+        // can raise) must keep an effect-bearing instruction so the effect is not
+        // swallowed (issue #2523 — the `a < a` swallow case).
+        let code = optimize(compile_fn(
+            "def outer(a):\n    def g(x):\n        return x < x\n    g(a)\n    return a\n",
+        ));
+        let outer = code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "outer")
+            .expect("outer proto");
+        let g = outer
+            .code
+            .fn_protos
+            .iter()
+            .find(|p| &*p.name == "g")
+            .expect("g proto");
+        assert!(
+            g.is_memo_pure,
+            "g (x < x) is memo-pure (cacheable for int args)"
+        );
+        assert!(
+            !g.is_dce_pure,
+            "g (x < x) must NOT be dce-pure (may dispatch __lt__)"
+        );
+        // Either the call survives, or g was inlined (splicing the comparison into
+        // outer as a `BinOp(Lt)` / `CmpJump*`).  In both cases an effect-bearing
+        // instruction remains; assert a call or a `Lt` comparison is present.
+        let preserved = outer.code.insns.iter().any(|i| {
+            matches!(i, Insn::Call(..) | Insn::CallMemo(..))
+                || matches!(i, Insn::BinOp(_, _, crate::ast::BinaryOp::Lt, _))
+                || matches!(i, Insn::BinOpConst(_, _, crate::ast::BinaryOp::Lt, _, _))
+        });
+        assert!(
+            preserved,
+            "effect of non-dce-pure g must survive: {:?}",
+            outer.code.insns
         );
     }
 
@@ -10275,7 +10467,7 @@ mod tests {
             Insn::CallMemo(2, 0),   // r2 = some_fn() — result used by Return
             Insn::Return(2),
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(out.len(), 3, "live CallMemo must not be removed");
         assert!(matches!(out[1], Insn::CallMemo(2, 0)));
     }
@@ -10288,7 +10480,7 @@ mod tests {
             Insn::CallMemo(1, 0),   // r1 = fn() — local, must not be removed
             Insn::ReturnNone,
         ];
-        let out = pass_dead_store_elim(insns, 2);
+        let out = pass_dead_store_elim(insns, 2, &[]);
         assert_eq!(out.len(), 3, "CallMemo to local must not be removed");
     }
 
@@ -11043,7 +11235,11 @@ mod tests {
                 {
                     *r
                 }
-                Insn::CallMemo(r, _) if *r >= num_locals => *r,
+                // NB: `CallMemo` is not droppable in this reference: the real
+                // pass only drops a dead `CallMemo` when its target proto is
+                // `is_dce_pure` (#2523), and this differential test invokes it
+                // with no protos (`&[]`), so no `CallMemo` is ever resolved as
+                // droppable.  Keeping them here matches that.
                 _ => continue,
             };
             if global_read_count.get(&dst).copied().unwrap_or(0) == 0 {
@@ -11136,7 +11332,7 @@ mod tests {
     fn dead_store_elim_matches_reference() {
         for stream in sample_streams() {
             for num_locals in [0u32, 2, 3] {
-                let a = pass_dead_store_elim(stream.clone(), num_locals);
+                let a = pass_dead_store_elim(stream.clone(), num_locals, &[]);
                 let b = dead_store_elim_reference(stream.clone(), num_locals);
                 assert_eq!(
                     a, b,
