@@ -70,7 +70,7 @@ def _is_descriptor(obj):
     )
 
 
-class EnumMeta(type):
+class EnumType(type):
     """Metaclass that turns plain class-body assignments into enum members."""
 
     @classmethod
@@ -135,8 +135,9 @@ class EnumMeta(type):
         return "<enum %r>" % cls.__name__
 
 
-# CPython 3.12 exposes the metaclass under both names.
-EnumType = EnumMeta
+# CPython 3.12 renamed the metaclass to ``EnumType`` and keeps ``EnumMeta`` as
+# a backwards-compatible alias, so ``type(Color).__name__ == 'EnumType'``.
+EnumMeta = EnumType
 
 
 class Enum(metaclass=EnumMeta):
