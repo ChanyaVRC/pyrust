@@ -75,7 +75,10 @@ pyrust_module! {
                 Some(v) => v,
                 None => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() of empty iterable with no initial value"),
+                    // CPython's C `reduce` uses the bare `reduce()` here, with
+                    // no `functools.` module prefix (unlike most other arity
+                    // errors in this module, which carry the qualified name).
+                    "reduce() of empty iterable with no initial value".to_string(),
                 )),
             }
         };
@@ -638,6 +641,42 @@ pyrust_module! {
         }
     }
 
+    /// CPython: functools.singledispatch(func).
+    /// Transforms `func` into a single-dispatch generic function: the
+    /// implementation chosen at call time is selected by the type of the
+    /// first positional argument.  The returned wrapper exposes
+    /// `.register(cls[, func])` (also usable as `@wrapper.register` with a
+    /// type-annotated first parameter, or `@wrapper.register(cls)`),
+    /// `.dispatch(cls)`, and a read-only-ish `.registry` mapping.
+    ///
+    /// The implementation is pure Python (executed lazily in a private
+    /// namespace, like the `CacheInfo` named-tuple and `total_ordering`'s
+    /// derivations).  It mirrors CPython's structure for the common case
+    /// of concrete-class dispatch via `cls.__mro__`; it does not implement
+    /// ABC virtual-subclass resolution (`_compose_mro`).
+    /// <https://docs.python.org/3/library/functools.html#functools.singledispatch>
+    fn singledispatch(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly 1 argument ({} given)", args.len()),
+            ));
+        }
+        let func = args[0].value.clone();
+        if !is_callable(&func) {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} requires a callable argument"),
+            ));
+        }
+        let factory = singledispatch_factory(_interp)?;
+        _interp.call_function_expanded(
+            factory,
+            &[ExpandedCallArg { name: None, value: func }],
+        )
+    }
+
     /// CPython: functools.total_ordering(cls).
     /// Class decorator that fills in the missing rich-comparison methods given
     /// at least one of `__lt__` / `__le__` / `__gt__` / `__ge__`.  Raises
@@ -1064,6 +1103,93 @@ class CacheInfo(tuple):
         return self[3]
     def __repr__(self):
         return f'CacheInfo(hits={self[0]}, misses={self[1]}, maxsize={self[2]}, currsize={self[3]})'
+";
+
+// ── singledispatch helpers ───────────────────────────────────────────────────
+
+thread_local! {
+    /// Cached `singledispatch` factory function, built once per thread on
+    /// first use.  Holds the pure-Python `singledispatch(func)` defined in
+    /// `SINGLEDISPATCH_SOURCE`.
+    static SINGLEDISPATCH_FACTORY: RefCell<Option<Value>> = const { RefCell::new(None) };
+}
+
+/// Lazily define and return the pure-Python `singledispatch` factory.
+fn singledispatch_factory(interp: &mut Interpreter) -> Result<Value> {
+    if let Some(f) = SINGLEDISPATCH_FACTORY.with(|c| c.borrow().clone()) {
+        return Ok(f);
+    }
+    let ns = Value::dict(PyDict::default());
+    interp.exec_source(SINGLEDISPATCH_SOURCE, Some(ns.clone()), None)?;
+    let f = ns
+        .as_dict()
+        .and_then(|d| d.get(&PyKey::str_from("singledispatch")).cloned())
+        .ok_or_else(|| internal("singledispatch"))?;
+    SINGLEDISPATCH_FACTORY.with(|c| *c.borrow_mut() = Some(f.clone()));
+    Ok(f)
+}
+
+/// Pure-Python `singledispatch`, transcribed (and simplified) from
+/// CPython's `functools.singledispatch`.  Dispatch is by the type of the
+/// first positional argument, resolved through that type's MRO.  The
+/// annotation form (`@wrapper.register` on a function whose first
+/// parameter is annotated with a type) and the explicit form
+/// (`@wrapper.register(cls)` / `wrapper.register(cls, func)`) are both
+/// supported.  ABC virtual-subclass resolution is not modelled.
+const SINGLEDISPATCH_SOURCE: &str = "\
+import functools
+
+
+def singledispatch(func):
+    registry = {}
+    dispatch_cache = {}
+
+    def dispatch(cls):
+        try:
+            return dispatch_cache[cls]
+        except KeyError:
+            pass
+        try:
+            impl = registry[cls]
+        except KeyError:
+            impl = registry[object]
+            for t in cls.__mro__:
+                if t in registry:
+                    impl = registry[t]
+                    break
+        dispatch_cache[cls] = impl
+        return impl
+
+    def register(cls, func=None):
+        if func is None:
+            if isinstance(cls, type):
+                return lambda f: register(cls, f)
+            ann = getattr(cls, '__annotations__', {})
+            func = cls
+            argname, cls = next(iter(ann.items()))
+            if not isinstance(cls, type):
+                raise TypeError(
+                    f'Invalid annotation for {argname!r}. '
+                    f'{cls!r} is not a class.'
+                )
+        registry[cls] = func
+        dispatch_cache.clear()
+        return func
+
+    def wrapper(*args, **kw):
+        if not args:
+            raise TypeError(
+                f'{funcname} requires at least 1 positional argument'
+            )
+        return dispatch(args[0].__class__)(*args, **kw)
+
+    funcname = getattr(func, '__name__', 'singledispatch function')
+    registry[object] = func
+    wrapper.register = register
+    wrapper.dispatch = dispatch
+    wrapper.registry = registry
+    functools.update_wrapper(wrapper, func)
+    return wrapper
 ";
 
 // ── wraps helpers ────────────────────────────────────────────────────────────
