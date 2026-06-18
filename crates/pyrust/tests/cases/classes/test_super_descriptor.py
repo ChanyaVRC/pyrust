@@ -99,3 +99,37 @@ class PlainSub(Plain):
 
 
 print(PlainSub().get_x())
+
+
+# class-level super() on a property: __get__(None, owner) returns the property
+# object itself, NOT the getter's value (mirrors `B.prop` at class level).
+class CA:
+    @property
+    def val(self):
+        return 42
+
+
+class CB(CA):
+    pass
+
+
+print(type(super(CB, CB).val).__name__)
+
+
+# class-level super() on a custom descriptor: __get__(None, owner) is invoked.
+class NDesc:
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return "class-access"
+        return "inst-access"
+
+
+class NA:
+    d = NDesc()
+
+
+class NB(NA):
+    pass
+
+
+print(super(NB, NB).d)

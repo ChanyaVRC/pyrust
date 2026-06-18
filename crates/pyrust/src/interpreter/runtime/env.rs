@@ -4142,6 +4142,12 @@ fn call_descriptor_get(
         })
         && partial_slot.is_none()
     {
+        // Class-level access (`instance is None`, e.g. `super(B, B).prop`):
+        // CPython's `property.__get__(None, owner)` returns the property
+        // itself rather than invoking the getter, mirroring `B.prop`.
+        if instance.is_none() {
+            return Ok(descriptor.clone());
+        }
         return if fget.is_none() {
             // CPython 3.12: `property 'x' of 'C' object has no getter` (issue #1845).
             // The name comes from __set_name__ (issue #1846); anonymous
