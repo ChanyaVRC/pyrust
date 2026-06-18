@@ -6383,6 +6383,32 @@ fn caret_row(
     col_span: Option<(u32, u32, u32, u32)>,
 ) -> Option<String> {
     let (full_start, prim_start, prim_end, full_end) = col_span?;
+    // Multi-line binary-op anchor (issue #2571): the expression straddles
+    // physical lines, so its operator / right-operand columns belong to a later
+    // line than the displayed one.  The parser marks this with the
+    // `ast::MULTILINE_FULL_END` (== `u32::MAX`) sentinel; clamp the underline to
+    // the end of the displayed (dedented) line and draw solid `^` from
+    // `full_start`, matching CPython 3.12.
+    if full_end == u32::MAX {
+        let full_start = full_start as usize;
+        if full_start < leading {
+            return None;
+        }
+        let f_start = full_start - leading;
+        let line_len = stripped.chars().count();
+        if f_start >= line_len {
+            return None;
+        }
+        let mut row = String::from("    ");
+        for _ in 0..f_start {
+            row.push(' ');
+        }
+        for _ in f_start..line_len {
+            row.push('^');
+        }
+        row.push('\n');
+        return Some(row);
+    }
     let (full_start, prim_start, prim_end, full_end) = (
         full_start as usize,
         prim_start as usize,

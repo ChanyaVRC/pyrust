@@ -98,6 +98,15 @@ impl Parser {
         self.line_nos.get(self.pos).copied().unwrap_or(0)
     }
 
+    /// Return the 1-based source line number of the token most recently
+    /// consumed (`self.pos - 1`), or 0 when unavailable (issue #2571).
+    fn prev_lineno(&self) -> u32 {
+        match self.pos.checked_sub(1) {
+            Some(p) => self.line_nos.get(p).copied().unwrap_or(0),
+            None => 0,
+        }
+    }
+
     /// Return the 0-based start column of the current token, or `None` when no
     /// column information is available (issue #2426).
     fn current_col(&self) -> Option<u32> {
@@ -2165,13 +2174,27 @@ impl Parser {
     /// (issue #2411): operands underlined with `~`, the operator with `^`.
     ///
     /// `left_start` is the start col of the whole left operand (captured before
-    /// it was parsed); `op_col` / `op_end` bracket the operator token; the right
-    /// operand's end col is read from the just-consumed token (`prev_end_col`).
-    /// Returns `None` (caret suppressed) if any piece is missing or the columns
-    /// are inconsistent — never a wrong caret.
+    /// it was parsed); `left_lineno` is its 1-based source line; `op_col` /
+    /// `op_end` bracket the operator token; the right operand's end col is read
+    /// from the just-consumed token (`prev_end_col`).  Returns `None` (caret
+    /// suppressed) if any piece is missing or the columns are inconsistent —
+    /// never a wrong caret.
+    ///
+    /// ## Multi-line operands (issue #2571)
+    ///
+    /// When the expression spans more than one physical line (the left operand
+    /// and the right operand's end token sit on different lines), the per-line
+    /// columns of `op` / `full_end` belong to a *later* line than the displayed
+    /// source line (which is the left operand's line).  Mixing them with the
+    /// left's column produces a nonsensical single-line span, which the
+    /// formatter then drops (no caret).  CPython 3.12 instead underlines from
+    /// the expression start to the end of the *first* displayed line, all `^`.
+    /// We signal that case with the `MULTILINE_FULL_END` sentinel so the
+    /// formatter clamps to the displayed line and draws solid carets.
     fn make_binary_span(
         &self,
         left_start: Option<u32>,
+        left_lineno: u32,
         op_col: Option<u32>,
         op_end: Option<u32>,
     ) -> Option<crate::ast::CaretSpan> {
@@ -2179,6 +2202,18 @@ impl Parser {
         let prim_start = op_col?;
         let prim_end = op_end?;
         let full_end = self.prev_end_col()?;
+        // Multi-line: the displayed line is the left operand's line, but the
+        // operator / right-operand columns are measured on a later line, so the
+        // single-line span is meaningless.  Emit the clamp sentinel (#2571).
+        let end_lineno = self.prev_lineno();
+        if left_lineno != 0 && end_lineno != 0 && left_lineno != end_lineno {
+            return Some((
+                full_start,
+                full_start,
+                crate::ast::MULTILINE_FULL_END,
+                crate::ast::MULTILINE_FULL_END,
+            ));
+        }
         if full_start <= prim_start && prim_start < prim_end && prim_end <= full_end {
             Some((full_start, prim_start, prim_end, full_end))
         } else {
@@ -2306,12 +2341,13 @@ impl Parser {
 
     fn parse_bitor(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let mut expr = self.parse_bitxor()?;
         while self.is(&Token::Pipe) {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_bitxor()?;
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::BitOr,
@@ -2324,12 +2360,13 @@ impl Parser {
 
     fn parse_bitxor(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let mut expr = self.parse_bitand()?;
         while self.is(&Token::Caret) {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_bitand()?;
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::BitXor,
@@ -2342,12 +2379,13 @@ impl Parser {
 
     fn parse_bitand(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let mut expr = self.parse_shift()?;
         while self.is(&Token::Ampersand) {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_shift()?;
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op: BinaryOp::BitAnd,
@@ -2360,6 +2398,7 @@ impl Parser {
 
     fn parse_shift(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let mut expr = self.parse_term()?;
         loop {
             let op = if self.is(&Token::LShift) {
@@ -2372,7 +2411,7 @@ impl Parser {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_term()?;
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
@@ -2385,6 +2424,7 @@ impl Parser {
 
     fn parse_term(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let mut expr = self.parse_factor()?;
         loop {
             let op = if self.is(&Token::Plus) {
@@ -2397,7 +2437,7 @@ impl Parser {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_factor()?;
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
@@ -2410,6 +2450,7 @@ impl Parser {
 
     fn parse_factor(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let mut expr = self.parse_unary()?;
         loop {
             let op = if self.is(&Token::Star) {
@@ -2428,7 +2469,7 @@ impl Parser {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let right = self.parse_unary()?;
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             expr = Expr::Binary {
                 left: Box::new(expr),
                 op,
@@ -2472,12 +2513,13 @@ impl Parser {
 
     fn parse_power(&mut self) -> Result<Expr> {
         let left_start = self.current_col();
+        let left_lineno = self.current_lineno();
         let base = self.parse_postfix()?;
         if self.is(&Token::StarStar) {
             let (op_col, op_end) = (self.current_col(), self.end_col_at(self.pos));
             self.bump();
             let exp = self.parse_unary()?; // right-associative
-            let span = self.make_binary_span(left_start, op_col, op_end);
+            let span = self.make_binary_span(left_start, left_lineno, op_col, op_end);
             return Ok(Expr::Binary {
                 left: Box::new(base),
                 op: BinaryOp::Pow,
