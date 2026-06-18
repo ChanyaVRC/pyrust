@@ -55,7 +55,12 @@ pub struct ExceptHandler {
 #[derive(Debug, Clone)]
 pub enum AssignTarget {
     Name(String),
-    Attr(Box<Expr>, String),
+    /// Attribute target `obj.attr`.  The third field is the PEP 657 caret
+    /// anchor (issue #2442) for the whole `obj.attr` span — used to paint the
+    /// caret when an augmented attribute assignment (`obj.attr += ...`) raises
+    /// `AttributeError` on the read or store.  `None` when built without column
+    /// info.
+    Attr(Box<Expr>, String, Option<CaretSpan>),
     Index(Box<Expr>, Box<Expr>),
     /// Slice target: a[lower:upper:step] — only valid for augmented assignment
     /// (plain slice assignment goes through `Stmt::SliceAssign`).
@@ -83,6 +88,13 @@ pub enum Stmt {
         target: Expr,
         name: String,
         expr: Expr,
+        /// PEP 657 caret anchor (issue #2442): the whole `obj.attr` span of the
+        /// assignment *target*, underlined with `^` (full == prim).  Used to
+        /// paint the caret when the `SetAttr` raises `AttributeError` (e.g.
+        /// `x.foo = 1` on an object that rejects the attribute), matching
+        /// CPython 3.12.  `None` for targets synthesised by the parser or built
+        /// without column info.
+        span: Option<CaretSpan>,
     },
     IndexAssign {
         target: Box<Expr>,
