@@ -2805,7 +2805,20 @@ impl Interpreter {
             // the backing primitive.
             if user_iter.is_none()
                 && let Some(backing) = instance_builtin_data(&inst_rc) {
-                    return self.collect_iterable(&backing);
+                    // A subclass of a non-iterable builtin (`class C(int): pass`)
+                    // is itself not iterable; CPython reports the actual subclass
+                    // name, not the backing base's, so re-label the not-iterable
+                    // error with the carrier's class name (#2557).
+                    return self.collect_iterable(&backing).map_err(|e| {
+                        if e.class_name_is("TypeError") {
+                            pyrust_core::type_err!(
+                                "'{}' object is not iterable",
+                                class.borrow().name
+                            )
+                        } else {
+                            e
+                        }
+                    });
                 }
             let iterator = if let Some(method_val) = user_iter {
                 invoke_class_method(

@@ -1594,7 +1594,10 @@ pyrust_module! {
                             // inherited tp_iter slot behaviour.  A dict subclass also
                             // gets a size-mutation guard, OrderedDict-aware (#2400).
                             let type_name = builtin_iter_type_name(&backing);
-                            let items = iter_values(&backing)?;
+                            // Pass the carrier (not the unwrapped backing) so a
+                            // non-iterable base subclass (`class C(int): pass`)
+                            // reports its own class name, not the base's (#2557).
+                            let items = iter_values(&val)?;
                             let mut frame = NativeIterFrame::new(items, type_name);
                             if backing.as_dict().is_some()
                                 && let Some(recorded_len) =

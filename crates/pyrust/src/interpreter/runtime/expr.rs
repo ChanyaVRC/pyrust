@@ -6997,7 +6997,21 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // list/dict/set subclass: delegate to the backing primitive value.
     if let Some(inst_rc) = value.as_py_instance_rc()
         && let Some(backing) = instance_builtin_data(inst_rc) {
-            return iter_values(&backing);
+            // A subclass of a *non-iterable* builtin (e.g. `class C(int): pass`)
+            // is itself not iterable.  CPython reports the actual subclass name
+            // ("'C' object is not iterable"), not the backing base's name, so
+            // re-label the not-iterable error with the carrier's class name
+            // rather than letting the int/float/… backing surface "'int' …".
+            return iter_values(&backing).map_err(|e| {
+                if e.class_name_is("TypeError") {
+                    pyrust_core::type_err!(
+                        "'{}' object is not iterable",
+                        inst_rc.borrow().class.borrow().name
+                    )
+                } else {
+                    e
+                }
+            });
         }
     match value.kind() {
         ValueKind::List(items) => Ok(items.to_vec()),
