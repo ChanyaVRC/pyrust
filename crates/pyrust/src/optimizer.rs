@@ -388,6 +388,51 @@ fn remap_lineno_and_col_tables(
     // matched (mirrors `binop_col_cursor`).
     let mut tailcall_col_cursor: usize = 0;
 
+    // Old fusion sites for the `not`-invert peephole (issue #2588): a position `i`
+    // where `UnaryOp(_, Not, src)` is immediately followed by a conditional jump on
+    // that same register.  `pass_not_invert` collapses the pair into a single
+    // `JumpIfTrue`/`JumpIfFalse(src, …)` — eliminating the `UnaryOp(Not)`, so the
+    // surviving jump exists in neither sense nor register-shape in the old stream
+    // and gets no structural / discriminant match (a conditional jump is not in the
+    // `insn_anchor_by_discriminant` set), losing its caret.  CPython 3.12 anchors
+    // the bool-converting jump at the *operand* span (`if not B():` → `^` under
+    // `B()`, not `not B()`), which is the caret the compiler armed on the operand's
+    // value-producing instruction — emitted (post-order) immediately before the
+    // `UnaryOp(Not)`, i.e. at `i - 1`.  Record that operand col per fusion site,
+    // keyed by the jump's old position `i + 1`, so a monotone scan recovers each
+    // fused jump's anchor, mirroring the fused-binop / `TailCall` recoveries above.
+    let old_notjump_operand_cols: Vec<(usize, (u32, u32, u32, u32))> = old_insns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, insn)| {
+            let next = old_insns.get(i + 1)?;
+            match (insn, next) {
+                (
+                    Insn::UnaryOp(r, crate::ast::UnaryOp::Not, _),
+                    Insn::JumpIfFalse(c, _) | Insn::JumpIfTrue(c, _),
+                ) if *r == *c => {
+                    let operand_col = i
+                        .checked_sub(1)
+                        .and_then(|j| old_cols.get(j).copied())
+                        .unwrap_or((0, 0, 0, 0));
+                    Some((i + 1, operand_col))
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    // Sound only when every old fusion site was actually fused — i.e. no
+    // `UnaryOp(_, Not, _)` survives in the new stream.  `pass_not_invert` either
+    // fuses a site (dropping the `not`) or leaves it untouched (the `UnaryOp(Not)`
+    // then survives); requiring zero survivors guarantees the 1:1
+    // site→fused-jump mapping the diagonal cursor relies on.
+    let new_not_unaryop_survives = new_insns
+        .iter()
+        .any(|i| matches!(i, Insn::UnaryOp(_, crate::ast::UnaryOp::Not, _)));
+    let notjump_recovery_sound = !old_notjump_operand_cols.is_empty() && !new_not_unaryop_survives;
+    // Cursor into `old_notjump_operand_cols` (mirrors `binop_col_cursor`).
+    let mut notjump_col_cursor: usize = 0;
+
     // Discriminants (opcode-only) whose anchored occurrences disagree: used by the
     // discriminant-match fallback below to refuse a col anchor when the same
     // opcode carries different spans across the old stream (#2411).
@@ -567,6 +612,26 @@ fn remap_lineno_and_col_tables(
                             if let Some(&i) = old_call_positions.get(tailcall_col_cursor) {
                                 *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                                 tailcall_col_cursor += 1;
+                            }
+                        }
+                        // Recover the caret anchor of a conditional jump synthesized
+                        // from `UnaryOp(Not) + JumpIf*` by `pass_not_invert` (issue
+                        // #2588), mirroring the `TailCall` recovery above.  The
+                        // anchor is the operand span recorded per old fusion site.
+                        if want_cols
+                            && notjump_recovery_sound
+                            && matches!(new_insn, Insn::JumpIfFalse(..) | Insn::JumpIfTrue(..))
+                        {
+                            while notjump_col_cursor < old_notjump_operand_cols.len()
+                                && old_notjump_operand_cols[notjump_col_cursor].0 < old_pos
+                            {
+                                notjump_col_cursor += 1;
+                            }
+                            if let Some(&(_, operand_col)) =
+                                old_notjump_operand_cols.get(notjump_col_cursor)
+                            {
+                                *out_col = operand_col;
+                                notjump_col_cursor += 1;
                             }
                         }
                     }
