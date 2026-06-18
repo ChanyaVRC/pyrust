@@ -599,8 +599,10 @@ thread_local! {
     ///   * `qualname`/`name` = the alias name (`List`),
     ///   * `__module__` = `"typing"` so the `GenericAlias` repr qualifies a
     ///     subscript as `typing.List[int]`,
-    ///   * `__pyrust_class_repr__` = `"typing.List"` so the *bare* class reprs
-    ///     as `typing.List` (not `<class 'typing.List'>`),
+    ///   * `override_repr` = `"typing.List"` so the *bare* class reprs as
+    ///     `typing.List` (not `<class 'typing.List'>`).  This is a dedicated
+    ///     `PyClass` field, not a `__dict__` attr, so a user class cannot hijack
+    ///     its own repr (issue #2608),
     ///   * `__class_getitem__` sentinel so `List[int]` builds a `GenericAlias`
     ///     with this class as origin,
     ///   * `__pyrust_legacy_alias_of__` = the underlying builtin name
@@ -624,10 +626,6 @@ thread_local! {
                 Value::builtin_function(legacy_alias_cgi_name(name)),
             );
             attrs.insert("__module__".to_string(), Value::string("typing"));
-            attrs.insert(
-                "__pyrust_class_repr__".to_string(),
-                Value::string(format!("typing.{name}")),
-            );
             // The underlying builtin this alias delegates to, stored as the
             // class value itself so both `legacy_alias_delegate` (native) and
             // `get_origin` (Python) can normalise to it directly.
@@ -635,7 +633,11 @@ thread_local! {
                 "__pyrust_legacy_alias_of__".to_string(),
                 legacy_builtin_class_value(builtin),
             );
-            let class = Rc::new(RefCell::new(PyClass::new(name, name, None, attrs)));
+            let mut pyclass = PyClass::new(name, name, None, attrs);
+            // Verbatim bare-class repr (`typing.List`).  Set on the dedicated
+            // field, not in `attrs`, so user classes can't hijack it (#2608).
+            pyclass.override_repr = Some(format!("typing.{name}").into_boxed_str());
+            let class = Rc::new(RefCell::new(pyclass));
             map.insert(name, class);
         }
         map

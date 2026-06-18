@@ -193,6 +193,50 @@ impl Interpreter {
         }
     }
 
+    /// If `sys` is imported and its `stdout` (or `stderr`, per `name`) has been
+    /// reassigned away from the default native console wrapper — e.g. by
+    /// `contextlib.redirect_stdout(io.StringIO())` — return that replacement
+    /// object so `print()` can route through its `write()` method.  Returns
+    /// `None` when `sys` isn't imported or the stream is still the default
+    /// console handle (the common case, served by the native fast path).
+    pub(crate) fn redirected_std_stream(&self, name: &str) -> Option<Value> {
+        let module_val = self.module_cache.borrow().get("sys").cloned()?;
+        let ValueKind::PyModule(m) = module_val.kind() else {
+            return None;
+        };
+        let stream = m.borrow().attrs.get(name).cloned()?;
+        // A default stdio wrapper means "not redirected" → fast path.
+        if pyrust_builtins::file::default_stdio_kind(&stream).is_some() {
+            return None;
+        }
+        Some(stream)
+    }
+
+    /// Read the current value of `sys.<name>` (`stdout`/`stderr`), importing the
+    /// `sys` module on demand so the standard wrapper exists even on first use.
+    /// Used by `contextlib.redirect_stdout`/`redirect_stderr` to snapshot the
+    /// outgoing stream before swapping in the redirect target.
+    pub(crate) fn current_std_stream(&mut self, name: &str) -> Result<Value> {
+        let module_val = self.load_module("sys")?;
+        let ValueKind::PyModule(m) = module_val.kind() else {
+            return Err(PyError::Runtime("internal: sys is not a module".to_string()));
+        };
+        let stream = m.borrow().attrs.get(name).cloned();
+        Ok(stream.unwrap_or_else(Value::none))
+    }
+
+    /// Assign `sys.<name> = value` (`stdout`/`stderr`), importing `sys` on
+    /// demand.  Used by `contextlib.redirect_stdout`/`redirect_stderr` to
+    /// install and later restore the active stream.
+    pub(crate) fn set_std_stream(&mut self, name: &str, value: Value) -> Result<()> {
+        let module_val = self.load_module("sys")?;
+        let ValueKind::PyModule(m) = module_val.kind() else {
+            return Err(PyError::Runtime("internal: sys is not a module".to_string()));
+        };
+        m.borrow_mut().attrs.insert(name.to_string(), value);
+        Ok(())
+    }
+
     /// Shared constructor for the `GeneratorFrame` wrapped in a
     /// `Value::generator`. Both call-site branches in
     /// `call_user_function_expanded` (simple-arity and variadic) bind

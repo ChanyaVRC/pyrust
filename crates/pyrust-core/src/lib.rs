@@ -1947,6 +1947,14 @@ pub struct PyClass {
     /// excess constructor args with "takes exactly one argument".  The flag is
     /// inherited by subclasses through the MRO walk in the excess-args check.
     pub new_slot_wrapped: Cell<bool>,
+    /// Verbatim `repr()` override for internal pseudo-class singletons (the
+    /// deprecated `typing.List`/`typing.Dict`/… aliases, mirroring CPython's
+    /// `_SpecialGenericAlias` which reprs as `typing.List`, not
+    /// `<class 'typing.List'>`).  `None` for every ordinary class.  This is a
+    /// dedicated field rather than a `__dict__` attribute so a user class cannot
+    /// hijack its own repr by defining `__pyrust_class_repr__` (issue #2608);
+    /// only the typing module's init code sets it, on its own singletons.
+    pub override_repr: Option<Box<str>>,
 }
 
 impl Default for PyClass {
@@ -1968,6 +1976,7 @@ impl Default for PyClass {
             slots: None,
             construction_cache: RefCell::new(None),
             new_slot_wrapped: Cell::new(false),
+            override_repr: None,
         }
     }
 }
@@ -4640,12 +4649,10 @@ impl Value {
                         .and_then(|v| v.as_str().map(|s| s.to_string()));
                     // Some pseudo-classes (e.g. the deprecated `typing.List`
                     // aliases, CPython's `_SpecialGenericAlias`) render without
-                    // the `<class '...'>` wrapper.  When the class carries a
-                    // `__pyrust_class_repr__` string, use it verbatim.
-                    let custom_repr = c
-                        .attrs
-                        .get("__pyrust_class_repr__")
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    // the `<class '...'>` wrapper.  This is keyed off a dedicated
+                    // `override_repr` field — never a `__dict__` attribute — so a
+                    // user class cannot hijack its own repr (issue #2608).
+                    let custom_repr = c.override_repr.as_ref().map(|s| s.to_string());
                     (qualname, module, custom_repr)
                 };
                 if let Some(r) = custom_repr {

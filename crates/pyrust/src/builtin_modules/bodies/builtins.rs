@@ -4466,7 +4466,14 @@ pyrust_module! {
         for value in &print_options.values {
             rendered.push(render_instance_str(_interp, value)?);
         }
-        if let Some(file_val) = print_options.file {
+        // No explicit `file=` → CPython prints to the *current* `sys.stdout`.
+        // When that has been redirected (e.g. `contextlib.redirect_stdout`),
+        // route through the replacement's `write()`; otherwise fall through to
+        // the native console fast path below.
+        let file = print_options
+            .file
+            .or_else(|| _interp.redirected_std_stream("stdout"));
+        if let Some(file_val) = file {
             // CPython calls file.write() once per item separated by sep,
             // then calls file.write(end), then file.flush() if flush=True.
             let write_fn = _interp.get_attr(&file_val, "write")?;

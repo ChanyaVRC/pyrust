@@ -995,6 +995,29 @@ pub fn make_stdin() -> Value {
     )
 }
 
+/// If `value` is one of the *default* stdio stream wrappers (the objects
+/// returned by [`make_stdout`] / [`make_stderr`] / [`make_stdin`]), report which
+/// channel it wraps; otherwise `None`.  Used by `print()` to decide whether the
+/// current `sys.stdout` is still the native console (fast path) or has been
+/// redirected to some other writable object (`contextlib.redirect_stdout`,
+/// `io.StringIO`, a user file, …), in which case output must route through that
+/// object's `write()` method instead of the native handle.
+pub fn default_stdio_kind(value: &Value) -> Option<StdioKind> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    // Pointer-compare the ops vtable against the stdio singleton so unrelated
+    // `BuiltinObject`s (frozenset, etc.) are excluded before any downcast.
+    if !std::ptr::eq(
+        ops as *const _ as *const (),
+        STDIO_OPS as *const _ as *const (),
+    ) {
+        return None;
+    }
+    let borrow = state.borrow();
+    borrow.downcast_ref::<StdioState>().map(|s| s.kind)
+}
+
 pub fn stdio_has_method(name: &str) -> bool {
     matches!(
         name,
