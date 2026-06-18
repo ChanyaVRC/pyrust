@@ -1167,13 +1167,46 @@ impl Interpreter {
                 let cgitem = class.borrow().attrs.get("__class_getitem__").cloned();
                 if let Some(method_val) = cgitem {
                     // Distinguish between the built-in sentinel and a
-                    // user-defined classmethod.
-                    let is_builtin_sentinel = matches!(
-                        method_val.kind(),
+                    // user-defined classmethod, and pick out the `Union` /
+                    // `Optional` special forms that need per-form normalisation
+                    // (issue #2524).
+                    enum Sentinel {
+                        Generic,
+                        Union,
+                        Optional,
+                        None,
+                    }
+                    let sentinel = match method_val.kind() {
+                        ValueKind::BuiltinFunction("typing.Union.__class_getitem__") => {
+                            Sentinel::Union
+                        }
+                        ValueKind::BuiltinFunction("typing.Optional.__class_getitem__") => {
+                            Sentinel::Optional
+                        }
                         ValueKind::BuiltinFunction(name)
-                            if name.contains(".__class_getitem__")
-                    );
-                    if is_builtin_sentinel {
+                            if name.contains(".__class_getitem__") =>
+                        {
+                            Sentinel::Generic
+                        }
+                        _ => Sentinel::None,
+                    };
+                    if !matches!(sentinel, Sentinel::None) {
+                        // `Union`/`Optional` flatten nested unions, lower `None`,
+                        // de-dup, and collapse singletons before the alias is
+                        // built.  The typing module owns those semantics.
+                        match sentinel {
+                            Sentinel::Union => {
+                                return crate::builtin_modules::typing::union_or_optional_getitem(
+                                    "Union", index,
+                                );
+                            }
+                            Sentinel::Optional => {
+                                return crate::builtin_modules::typing::union_or_optional_getitem(
+                                    "Optional", index,
+                                );
+                            }
+                            _ => {}
+                        }
                         // Built-in sentinel: create a `GenericAlias` directly.
                         // Normalise the subscript into a tuple for
                         // `GenericAlias.__args__`:

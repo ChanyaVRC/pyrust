@@ -64,6 +64,23 @@ impl BuiltinTypeOps for GenericAliasOps {
             _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
         };
 
+        // `typing.Union[X, NoneType]` (exactly two args, one of them
+        // `NoneType`) renders as `typing.Optional[X]`, mirroring CPython's
+        // `_SpecialForm`/`_GenericAlias.__repr__` for unions.  The flatten
+        // helper in `typing.rs` always lowers `Optional[...]` to a `Union`
+        // origin, so this is the single place the `Optional` spelling is
+        // reconstructed.
+        if origin_name == "typing.Union"
+            && let ValueKind::Tuple(items) = s.args.kind()
+            && items.len() == 2
+        {
+            let none_pos = items.iter().position(is_none_type_class);
+            if let Some(pos) = none_pos {
+                let other = &items[1 - pos];
+                return format!("typing.Optional[{}]", repr_type_arg(other));
+            }
+        }
+
         // args is a tuple; for `tuple[()]` it is empty, which CPython's
         // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
         // rather than the empty string that joining an empty list yields.
@@ -159,6 +176,13 @@ impl BuiltinTypeOps for GenericAliasOps {
             value,
         })
     }
+}
+
+/// True if `v` is the `NoneType` class singleton (the union component that
+/// `None` lowers to).  Matched by qualname so the union repr can collapse
+/// `Union[X, NoneType]` to `Optional[X]`.
+fn is_none_type_class(v: &Value) -> bool {
+    matches!(v.kind(), ValueKind::PyClass(rc) if rc.borrow().qualname == "NoneType")
 }
 
 /// Produce the repr for a single type argument, matching how CPython formats
@@ -286,6 +310,21 @@ pub fn as_generic_alias_origin(v: &Value) -> Option<Value> {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<GenericAliasState>()?;
         return Some(s.origin.clone());
+    }
+    None
+}
+
+/// Read a `GenericAlias`'s `(origin, args)` pair, if `v` is one.
+///
+/// Used by the `typing` module's `Union`/`Optional` flatten helper, which
+/// needs to splice a nested alias's `__args__` into the outer union.
+pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && ops.type_name() == TYPE_NAME
+    {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<GenericAliasState>()?;
+        return Some((s.origin.clone(), s.args.clone()));
     }
     None
 }
