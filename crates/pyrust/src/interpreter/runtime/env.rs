@@ -3167,6 +3167,25 @@ impl Interpreter {
                             "__module__".to_string(),
                             Value::string("collections"),
                         );
+                        // PEP 585 (issue #2603): every public `collections`
+                        // container class defines `__class_getitem__` in
+                        // CPython 3.12, so `collections.OrderedDict[int]` etc.
+                        // produce a `types.GenericAlias`.  Register the same
+                        // `BuiltinFunction("<qualname>.__class_getitem__")`
+                        // sentinel that `build_primitive_classes` puts on
+                        // `list`/`dict`; `eval_index`'s `PyClass` arm detects
+                        // the sentinel and builds the alias directly, while
+                        // `call_function_expanded` handles the explicit
+                        // `Cls.__class_getitem__(int)` call form.  The repr's
+                        // `collections.` prefix comes from `__module__` set
+                        // just above plus the class's `qualname`.
+                        let sentinel: &'static str = Box::leak(
+                            format!("{cls_name}.__class_getitem__").into_boxed_str(),
+                        );
+                        cls_rc.borrow_mut().attrs.insert(
+                            "__class_getitem__".to_string(),
+                            Value::builtin_function(sentinel),
+                        );
                     }
                 }
             }

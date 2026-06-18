@@ -176,6 +176,23 @@ fn index_value_to_i64(v: &Value, overflow_msg: &str) -> Result<i64> {
 }
 
 impl Interpreter {
+    /// Resolve a `collections` container class by its bare name from the
+    /// already-imported `collections` module (issue #2603).  Used by the
+    /// explicit `Cls.__class_getitem__(int)` call path, whose sentinel only
+    /// carries the class name (`"OrderedDict.__class_getitem__"`).  Returns
+    /// `None` if `collections` isn't imported or the name isn't a class.
+    fn collections_class_by_name(&self, name: &str) -> Option<Rc<RefCell<PyClass>>> {
+        let module_val = self.module_cache.borrow().get("collections").cloned()?;
+        let ValueKind::PyModule(m) = module_val.kind() else {
+            return None;
+        };
+        let attr = m.borrow().attrs.get(name).cloned()?;
+        match attr.kind() {
+            ValueKind::PyClass(rc) => Some(Rc::clone(rc)),
+            _ => None,
+        }
+    }
+
     /// Shared constructor for the `GeneratorFrame` wrapped in a
     /// `Value::generator`. Both call-site branches in
     /// `call_user_function_expanded` (simple-arity and variadic) bind
@@ -606,12 +623,18 @@ impl Interpreter {
                     .is_some_and(|(_, m)| m == "__class_getitem__") =>
             {
                 let type_name = name.split_once('.').unwrap().0;
-                // Recover the origin class value from the per-thread singleton.
-                let origin_class = primitive_class_by_name(type_name).ok_or_else(|| {
-                    PyError::Runtime(format!(
-                        "internal: unknown primitive class for __class_getitem__: {type_name}"
-                    ))
-                })?;
+                // Recover the origin class value.  Built-in primitives
+                // (`list`/`dict`/…) come from the per-thread singleton; the
+                // `collections` container classes (issue #2603) are looked up
+                // on the already-imported `collections` module by name, since
+                // their sentinel carries only the bare class name.
+                let origin_class = primitive_class_by_name(type_name)
+                    .or_else(|| self.collections_class_by_name(type_name))
+                    .ok_or_else(|| {
+                        PyError::Runtime(format!(
+                            "internal: unknown class for __class_getitem__: {type_name}"
+                        ))
+                    })?;
                 // Accept one positional argument: the type parameter(s).
                 //   `list.__class_getitem__(int)`       → args[0] = int
                 //   `list.__class_getitem__((str, int))` → args[0] = (str, int)
