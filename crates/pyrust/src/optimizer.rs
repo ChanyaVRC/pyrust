@@ -591,13 +591,13 @@ fn remap_lineno_and_col_tables(
                                 }
                                 _ => None,
                             };
-                            if let Some(key) = new_regs {
-                                if let Some(locs) = old_binop_reg_positions.get(&key) {
-                                    let candidates: Vec<usize> =
-                                        locs.iter().copied().filter(|&p| p >= old_pos).collect();
-                                    if let [i] = candidates[..] {
-                                        *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
-                                    }
+                            if let Some(key) = new_regs
+                                && let Some(locs) = old_binop_reg_positions.get(&key)
+                            {
+                                let candidates: Vec<usize> =
+                                    locs.iter().copied().filter(|&p| p >= old_pos).collect();
+                                if let [i] = candidates[..] {
+                                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                                 }
                             }
                         }
