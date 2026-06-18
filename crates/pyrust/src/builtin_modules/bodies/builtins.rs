@@ -8704,6 +8704,17 @@ fn isinstance_check(
     // giving abc_instancecheck([cls, obj]).  This also makes
     // `Iterable.__instancecheck__(x)` callable directly.
     if let ValueKind::PyClass(cls_rc) = cls.kind() {
+        // Fast path: when `cls` is one of the 11 primitive class singletons
+        // (`int`, `str`, …) a direct `ValueKind` tag check settles the result
+        // without the `metaclass_dunder` / `__instancecheck__` / Protocol
+        // probing below.  Primitives can never carry those hooks nor be a
+        // Protocol subclass, so this both preserves the hot `isinstance(x, int)`
+        // path and absorbs the cost of the #2526 Protocol check added later.
+        if let Some(hit) =
+            crate::interpreter::primitive_class_isinstance_fast(obj, cls_rc)
+        {
+            return Ok(hit);
+        }
         // Issue #1955: a metaclass `__instancecheck__` override takes
         // precedence, mirroring CPython's `type(cls).__instancecheck__(cls, x)`
         // dispatch.  `metaclass_dunder` returns `Some` only for a user
@@ -8735,8 +8746,92 @@ fn isinstance_check(
             let result = interp.call_function_expanded(ic_fn, &call_args)?;
             return interp.truthy_value(&result);
         }
+        // Issue #2526: structural `isinstance` for `typing.Protocol` subclasses.
+        // `@runtime_checkable` records the required member names in
+        // `__protocol_attrs__`; the subject is an instance iff it has every one
+        // of them (`hasattr` semantics).  A Protocol subclass that was NOT
+        // decorated raises, matching CPython 3.12's `_ProtocolMeta`.  The bare
+        // `Protocol` class itself is skipped so it keeps ordinary behaviour.
+        //
+        // Primitive classes (`int`, `str`, …) can never be Protocol subclasses,
+        // so a single pointer-keyed dispatch-table lookup short-circuits the
+        // recursive `is_protocol_subclass` base-chain walk on the hot
+        // `isinstance(x, int)` path (keeps the check perf-neutral, #2526).
+        if !crate::interpreter::is_primitive_class(cls_rc)
+            && crate::builtin_modules::typing::is_protocol_subclass(cls_rc)
+            && !crate::builtin_modules::typing::is_protocol_marker_class(cls_rc)
+        {
+            return protocol_structural_isinstance(obj, cls_rc, interp);
+        }
     }
     Ok(isinstance_single(obj, cls))
+}
+
+/// Structural `isinstance(obj, P)` for a `typing.Protocol` subclass `cls_rc`
+/// (issue #2526).  Requires `@runtime_checkable` (a `__protocol_attrs__` /
+/// `__protocol_runtime_checkable__` pair recorded by the decorator); otherwise
+/// raises the CPython 3.12 `TypeError`.  Returns `True` iff `obj` has every
+/// name in `__protocol_attrs__` via `hasattr` semantics.
+fn protocol_structural_isinstance(
+    obj: &Value,
+    cls_rc: &Rc<RefCell<PyClass>>,
+    interp: &mut crate::Interpreter,
+) -> Result<bool> {
+    let runtime_checkable = crate::interpreter::lookup_class_attr(
+        cls_rc,
+        "__protocol_runtime_checkable__",
+    )
+    .is_some_and(|v| matches!(v.kind(), ValueKind::Bool(true)));
+    if !runtime_checkable {
+        return Err(PyError::named(
+            "TypeError",
+            "Instance and class checks can only be used with @runtime_checkable protocols"
+                .to_string(),
+        ));
+    }
+    // Collect the required attribute names from `__protocol_attrs__` (a set of
+    // strings).  Missing/empty means no requirements → matches everything,
+    // mirroring CPython for an attribute-free protocol body.
+    let attrs = crate::interpreter::lookup_class_attr(cls_rc, "__protocol_attrs__");
+    let names: Vec<String> = protocol_attr_names(attrs.as_ref());
+    // CPython 3.12 treats a member that resolves to `None` as absent unless the
+    // member is a declared non-callable (data) member.  `runtime_checkable`
+    // records the non-callable subset in `__non_callable_proto_members__`.
+    let non_callable = protocol_attr_names(
+        crate::interpreter::lookup_class_attr(cls_rc, "__non_callable_proto_members__")
+            .as_ref(),
+    );
+    for name in &names {
+        match interp.get_attr(obj, name) {
+            Ok(val) => {
+                if matches!(val.kind(), ValueKind::None)
+                    && !non_callable.iter().any(|n| n == name)
+                {
+                    // A callable (method) member resolved to `None` → absent.
+                    return Ok(false);
+                }
+            }
+            Err(ref e) if e.class_name_is("AttributeError") => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Extract the string names from a Protocol `set`-valued bookkeeping attribute
+/// (`__protocol_attrs__` / `__non_callable_proto_members__`).  A missing or
+/// non-`set` value yields an empty list.
+fn protocol_attr_names(attr: Option<&Value>) -> Vec<String> {
+    match attr.map(|v| v.kind()) {
+        Some(ValueKind::Set(items)) => items
+            .iter()
+            .filter_map(|k| match k {
+                pyrust_core::PyKey::Str(v) => v.as_str().map(|s| s.to_string()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// `issubclass(cls, classinfo)` — same tuple-recursive contract as
