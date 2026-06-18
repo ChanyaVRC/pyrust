@@ -50,6 +50,18 @@ print(Union[int, str] == Union[int, str])
 print(Optional[int] == Union[int, None])
 print({Optional[int]: "ok"}[Union[int, None]])
 
+# Union equality/hashing is order-insensitive (CPython compares the args as a
+# frozenset), so reordered members compare equal and hash the same.
+print(Union[int, str] == Union[str, int])
+print(Union[int, str, float] == Union[float, int, str])
+print(hash(Union[int, str]) == hash(Union[str, int]))
+print({Union[int, str]: "ok"}[Union[str, int]])
+# A proper subset is still unequal.
+print(Union[int, str] == Union[int, str, float])
+# Order matters for non-Union generic aliases (dict args are positional).
+print(dict[str, int] == dict[int, str])
+print(list[Union[int, str]] == list[Union[str, int]])
+
 # Error cases.
 try:
     Optional[int, str]
