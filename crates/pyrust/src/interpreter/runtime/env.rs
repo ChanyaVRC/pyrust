@@ -126,6 +126,23 @@ impl Interpreter {
                                         Value::py_instance(Rc::clone(&instance)),
                                     )
                                 }
+                                // CPython super.__getattribute__ runs the descriptor
+                                // protocol on the resolved base-class attribute: a
+                                // `property` / data / non-data descriptor has its
+                                // `__get__(instance, type(instance))` invoked
+                                // (issue #2598).  `instance` is the receiver, the
+                                // owner is its concrete class.
+                                _ if is_data_descriptor(&value)
+                                    || is_non_data_descriptor(&value) =>
+                                {
+                                    return call_descriptor_get(
+                                        self,
+                                        &value,
+                                        Value::py_instance(Rc::clone(&instance)),
+                                        Value::py_class(Rc::clone(&instance_class)),
+                                        name,
+                                    );
+                                }
                                 _ => value.clone(),
                             },
                         });
@@ -229,6 +246,22 @@ impl Interpreter {
                                             fn_name,
                                             Value::py_class(Rc::clone(&obj_class)),
                                         )
+                                    }
+                                    // Descriptor protocol for class-level super()
+                                    // access (issue #2598): a property / data /
+                                    // non-data descriptor found in the base has
+                                    // `__get__(None, obj_class)` invoked, mirroring
+                                    // `obj_class.attr` for a class-bound descriptor.
+                                    None if is_data_descriptor(&value)
+                                        || is_non_data_descriptor(&value) =>
+                                    {
+                                        return call_descriptor_get(
+                                            self,
+                                            &value,
+                                            Value::none(),
+                                            Value::py_class(Rc::clone(&obj_class)),
+                                            name,
+                                        );
                                     }
                                     None => value,
                                 }
@@ -4128,6 +4161,12 @@ fn call_descriptor_get(
         })
         && partial_slot.is_none()
     {
+        // Class-level access (`instance is None`, e.g. `super(B, B).prop`):
+        // CPython's `property.__get__(None, owner)` returns the property
+        // itself rather than invoking the getter, mirroring `B.prop`.
+        if instance.is_none() {
+            return Ok(descriptor.clone());
+        }
         return if fget.is_none() {
             // CPython 3.12: `property 'x' of 'C' object has no getter` (issue #1845).
             // The name comes from __set_name__ (issue #1846); anonymous
