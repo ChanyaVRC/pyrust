@@ -496,6 +496,22 @@ impl Interpreter {
                             Rc::clone(func),
                         ));
                     }
+                    "__call__"
+                        if !matches!(func.kind, UserFunctionKind::ClassMethod) =>
+                    {
+                        // Issue #2550: a plain function, lambda, or staticmethod is
+                        // callable, so CPython exposes `f.__call__ ==
+                        // <method-wrapper '__call__' of function object at 0x...>`
+                        // (and `hasattr(f, '__call__') is True`).  Surface a wrapper
+                        // bound to the function; calling it re-dispatches onto `f`
+                        // (handled by `as_type_call_wrapper` in
+                        // `call_function_expanded`).  `classmethod` is excluded —
+                        // CPython's classmethod object is not itself callable.
+                        return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                            target.clone(),
+                            "function",
+                        ));
+                    }
                     _ => {}
                 }
                 // Fall through to arbitrary dynamic attrs.
@@ -544,6 +560,29 @@ impl Interpreter {
                         return Err(pyrust_core::py_err!("AttributeError", "'method_descriptor' object has no attribute '__module__'"));
                     }
                     return Ok(Value::string("builtins"));
+                }
+                if name == "__call__"
+                    && !matches!(func_name, "generator" | "str" | "property")
+                {
+                    // Issue #2550: builtin functions (`len`, `print`) and method
+                    // descriptors (`str.upper`) are callable, so CPython exposes
+                    // `len.__call__ == <method-wrapper '__call__' of
+                    // builtin_function_or_method object at 0x...>` (and
+                    // `... of method_descriptor object ...` for the dotted form),
+                    // with `hasattr(len, '__call__') is True`.  Surface a wrapper
+                    // bound to the builtin; calling it re-dispatches onto the
+                    // builtin (so `len.__call__([1,2,3]) == 3`).  The `generator`
+                    // / `str` / `property` type-token names are excluded — they
+                    // are handled as type objects below, not as plain builtins.
+                    let owner = if func_name.contains('.') {
+                        "method_descriptor"
+                    } else {
+                        "builtin_function_or_method"
+                    };
+                    return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                        target.clone(),
+                        owner,
+                    ));
                 }
                 if func_name == "generator" {
                     // Issue #1413: type(gen).__iter__ and type(gen).__next__.
@@ -635,6 +674,16 @@ impl Interpreter {
                         "__self__" => return Ok(receiver),
                         "__module__" => return Ok(Value::none()),
                         "__doc__" => return Ok(Value::none()),
+                        "__call__" => {
+                            // Issue #2550: a builtin bound method (`[].append`) is
+                            // callable; CPython's `l.append.__call__` is a
+                            // `builtin_function_or_method object` method-wrapper.
+                            // Re-dispatches onto the bound method.
+                            return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                                target.clone(),
+                                "builtin_function_or_method",
+                            ));
+                        }
                         _ => {}
                     }
                 }
@@ -904,6 +953,16 @@ impl Interpreter {
                         if name == "__self__" {
                             return Ok(Value::py_instance(Rc::clone(receiver)));
                         }
+                        if name == "__call__" {
+                            // Issue #2550: a bound method is callable, so CPython
+                            // exposes `m.__call__ == <method-wrapper '__call__' of
+                            // method object at 0x...>`.  The wrapper re-dispatches
+                            // onto the bound method via `as_type_call_wrapper`.
+                            return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                                target.clone(),
+                                "method",
+                            ));
+                        }
                         if let Some(v) = bound_method_common_attr(function, name) {
                             return v;
                         }
@@ -914,6 +973,15 @@ impl Interpreter {
                         }
                         if name == "__self__" {
                             return Ok(Value::py_class(Rc::clone(class)));
+                        }
+                        if name == "__call__" {
+                            // Issue #2550: a classmethod-bound method is callable;
+                            // CPython's `C.cm.__call__` is a `method object`
+                            // method-wrapper.  Re-dispatches onto the bound method.
+                            return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                                target.clone(),
+                                "method",
+                            ));
                         }
                         if let Some(v) = bound_method_common_attr(function, name) {
                             return v;
