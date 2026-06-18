@@ -4334,13 +4334,29 @@ pyrust_module! {
                     } else {
                         // Treat as iterable of (key, value) pairs.
                         let pairs = _interp.collect_iterable(&arg.value)?;
-                        for pair in pairs {
-                            let items = _interp.collect_iterable(&pair)?;
+                        for (idx, pair) in pairs.into_iter().enumerate() {
+                            let items = _interp.collect_iterable(&pair).map_err(|e| {
+                                // A non-iterable element maps to CPython's
+                                // "cannot convert ... to a sequence" TypeError;
+                                // an error raised *inside* the element's own
+                                // iteration (e.g. a user `__iter__` raising)
+                                // propagates unchanged.
+                                if is_not_iterable_error(&e) {
+                                    PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "cannot convert dictionary update sequence element #{idx} to a sequence"
+                                        ),
+                                    )
+                                } else {
+                                    e
+                                }
+                            })?;
                             if items.len() != 2 {
                                 return Err(PyError::named(
                                     "ValueError",
                                     format!(
-                                        "{FN_NAME}() update sequence element has length {}; 2 is required",
+                                        "dictionary update sequence element #{idx} has length {}; 2 is required",
                                         items.len()
                                     ),
                                 ));
@@ -4354,13 +4370,29 @@ pyrust_module! {
                 _ => {
                     // Treat as iterable of (key, value) pairs.
                     let pairs = _interp.collect_iterable(&arg.value)?;
-                    for pair in pairs {
-                        let items = _interp.collect_iterable(&pair)?;
+                    for (idx, pair) in pairs.into_iter().enumerate() {
+                        let items = _interp.collect_iterable(&pair).map_err(|e| {
+                            // A non-iterable element maps to CPython's
+                            // "cannot convert ... to a sequence" TypeError;
+                            // an error raised *inside* the element's own
+                            // iteration (e.g. a user `__iter__` raising)
+                            // propagates unchanged.
+                            if is_not_iterable_error(&e) {
+                                PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "cannot convert dictionary update sequence element #{idx} to a sequence"
+                                    ),
+                                )
+                            } else {
+                                e
+                            }
+                        })?;
                         if items.len() != 2 {
                             return Err(PyError::named(
                                 "ValueError",
                                 format!(
-                                    "{FN_NAME}() update sequence element has length {}; 2 is required",
+                                    "dictionary update sequence element #{idx} has length {}; 2 is required",
                                     items.len()
                                 ),
                             ));
@@ -7410,6 +7442,17 @@ fn base_exception_reduce_value(self_val: &Value) -> Value {
         dict.insert(PyKey::str_from(&k), v);
     }
     Value::tuple(vec![cls, args_val, Value::dict(dict)])
+}
+
+/// True when `e` is the `TypeError: '<type>' object is not iterable` raised by
+/// `collect_iterable` for a value that does not support iteration at all.
+///
+/// Used by `dict()` to rewrite that specific failure into CPython's
+/// `cannot convert dictionary update sequence element #N to a sequence`
+/// message, while leaving errors raised *inside* an element's own iteration
+/// (e.g. a user `__iter__` that raises) to propagate unchanged.
+fn is_not_iterable_error(e: &PyError) -> bool {
+    e.class_name_is("TypeError") && e.to_string().ends_with("object is not iterable")
 }
 
 pub(crate) fn value_class(obj: &Value) -> Value {
