@@ -372,7 +372,13 @@ impl Interpreter {
                     PyError::Lex(s) => format!("Lex error: {s}"),
                     PyError::Parse(s) => format!("Parse error: {s}"),
                     PyError::Runtime(s) => format!("RuntimeError: {s}"),
+                    // CPython omits the `: msg` suffix when the exception's
+                    // message is empty (e.g. internal `StopIteration` from an
+                    // exhausted iterator displays as `StopIteration`, not
+                    // `StopIteration: `).
+                    PyError::Named(cls, s) if s.is_empty() => cls.to_string(),
                     PyError::Named(cls, s) => format!("{cls}: {s}"),
+                    PyError::Class(cls, s) if s.is_empty() => cls.borrow().name.clone(),
                     PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
                     PyError::KeyError(key) => {
                         // The raw-key fast-path variant: dispatch the key's

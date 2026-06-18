@@ -1205,8 +1205,18 @@ impl Interpreter {
                 // StopIteration.value (PEP 380 §3 step 4).
                 frame.last_return_value = Some(ret_val.clone());
                 frame.done = true;
+                // CPython synthesises `StopIteration()` with *empty* args when a
+                // generator returns `None` (falls off the end or `return`/`return
+                // None`); only a non-None return value is passed as the single
+                // arg, so `.args` is `()` rather than `(None,)` in the common
+                // case (`.value` is `None` either way).
+                let args = if ret_val.is_none() {
+                    vec![]
+                } else {
+                    vec![ret_val]
+                };
                 let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
-                    PyError::Raised(instantiate_exception(cls, vec![ret_val]))
+                    PyError::Raised(instantiate_exception(cls, args))
                 } else {
                     pyrust_core::py_err!("StopIteration", String::new())
                 };
