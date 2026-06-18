@@ -228,6 +228,47 @@ fn uncaught_fresh_raise_in_finally_main_block_has_no_stale_frame() {
 }
 
 #[test]
+fn uncaught_implicit_second_exception_in_handler_chains_and_separates() {
+    // Issue #2583: a second exception raised *implicitly* (here a TypeError
+    // from `1 + x`, not an explicit `raise`) inside an `except` handler must
+    //   (a) carry the original exception as its `__context__` so the
+    //       "During handling of the above exception..." banner is printed, and
+    //   (b) keep its own unwind frames separate — the original bug merged both
+    //       exceptions' frames into a single traceback (a duplicated `f` frame)
+    //       and dropped the banner entirely because the implicit exception
+    //       escaped uncaught without `attach_implicit_context` ever running.
+    let src =
+        "def f(x):\n    return 1 + x\ntry:\n    f(\"z\")\nexcept TypeError:\n    f(\"oops\")\n";
+    let stderr = run_pyrust_stderr(src);
+    let (blocks, banners) = split_chain_blocks(&stderr);
+    assert_eq!(
+        blocks.len(),
+        2,
+        "expected one chained (context) block + main block, got:\n{stderr}"
+    );
+    assert_eq!(
+        banners,
+        vec![CONTEXT_BANNER.to_string()],
+        "implicit second exception must print the 'During handling...' banner",
+    );
+    // Chained (first TypeError) block: <module> 4 -> f 2.
+    assert_eq!(
+        frame_list(&blocks[0]),
+        vec![("<module>".to_string(), 4), ("f".to_string(), 2)],
+        "context block frames, got:\n{}",
+        blocks[0]
+    );
+    // Main (second TypeError) block: <module> 6 -> f 2.  Crucially it lists `f`
+    // exactly ONCE — the merge bug repeated it.
+    assert_eq!(
+        frame_list(&blocks[1]),
+        vec![("<module>".to_string(), 6), ("f".to_string(), 2)],
+        "main block must not inherit the handled exception's frames, got:\n{}",
+        blocks[1]
+    );
+}
+
+#[test]
 fn uncaught_from_none_suppresses_chain() {
     // `raise X from None` sets __suppress_context__: NO chained block, NO
     // banner — just the ValueError's own traceback.
