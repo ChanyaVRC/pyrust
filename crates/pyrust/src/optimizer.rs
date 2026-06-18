@@ -2442,8 +2442,31 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
     let mut transformed = insns;
     let mut keep = vec![true; n];
 
+    // Indices that are the target of some (forward or backward) jump.  The
+    // `UnaryOp` of a fusion candidate must not be such a target: fusing folds the
+    // preceding `LoadConst`'s value into the op and drops the load, but a
+    // control-flow edge landing directly on the `UnaryOp` reaches it without ever
+    // executing that load (issue #2565: a ternary's then- and else-branch each
+    // emit their own `LoadConst` feeding a shared trailing `UnaryOp`; fusing the
+    // else-branch load made the then-branch — which jumps onto the `UnaryOp` —
+    // use the else-branch constant).  Same guard as `pass_binop_const_fusion` /
+    // `pass_cmpjump_fusion`.
+    let mut jump_targets: HashSet<usize> = HashSet::new();
+    for (idx, insn) in transformed.iter().enumerate() {
+        if let Some(k) = insn_jump_off(insn) {
+            let target = idx as i64 + 1 + k as i64;
+            if target >= 0 && (target as usize) < n {
+                jump_targets.insert(target as usize);
+            }
+        }
+    }
+
     let mut i = 0;
     while i + 1 < n {
+        if jump_targets.contains(&(i + 1)) {
+            i += 1;
+            continue;
+        }
         let fused: Option<(u32, Value)> = match (&transformed[i], &transformed[i + 1]) {
             (Insn::LoadConst(lc_reg, c_idx), Insn::UnaryOp(dst, op, src))
                 if *src == *lc_reg
@@ -8809,6 +8832,32 @@ mod tests {
             consts[idx as usize].kind(),
             crate::value::ValueKind::Int(3)
         ));
+    }
+
+    #[test]
+    fn unary_fold_skips_unaryop_that_is_jump_target() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        // Ternary-as-operand-of-unary shape (issue #2565 sibling):
+        //   0 JumpIfFalse(0, 2)        a falsy → jump to the else LoadConst (idx 3)
+        //   1 LoadConst(2, 0)          then: t = const#0 (10)
+        //   2 Jump(1)                  jump past the else load, onto the UnaryOp (idx 4)
+        //   3 LoadConst(2, 1)          else: t = const#1 (20)  ← jump target of insn 0
+        //   4 UnaryOp(1, Neg, 2)       ← jump target of insn 2 (the then-branch)
+        //   5 Return(1)
+        // Fusing idx 3/4 would make the then-branch land on LoadConst(1, -20),
+        // discarding the then value. Must be skipped.
+        let mut consts = vec![Value::int(10), Value::int(20)];
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2),
+            Insn::LoadConst(2, 0),
+            Insn::Jump(1),
+            Insn::LoadConst(2, 1),
+            Insn::UnaryOp(1, UnaryOp::Neg, 2),
+            Insn::Return(1),
+        ];
+        let out = pass_unary_fold(insns.clone(), 1, &mut consts);
+        assert_eq!(out, insns, "must not fold a UnaryOp that is a jump target");
     }
 
     #[test]

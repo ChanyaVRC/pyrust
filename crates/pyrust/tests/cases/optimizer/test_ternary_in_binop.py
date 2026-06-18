@@ -48,3 +48,12 @@ print(a + (10 if a else 20) + c)  # 18
 
 # Ternary feeding a comparison.
 print(a == (5 if a else 6))  # True
+
+# Ternary as the operand of a unary op (same jump-target hazard in the unary
+# fold pass): the then- and else-branch each emit their own LoadConst feeding a
+# shared trailing UnaryOp, which the then-branch jumps onto.
+print(-(10 if a else 20))  # -10, not -20
+print(-(10 if not a else 20))  # -20
+print(~(10 if a else 20))  # -11
+print(not (10 if a else 0))  # False
+print(not (10 if not a else 0))  # True
