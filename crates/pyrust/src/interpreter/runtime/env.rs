@@ -2193,6 +2193,38 @@ impl Interpreter {
             }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
+                // CPython distinguishes "attribute does not exist" from
+                // "attribute exists on the type but is read-only" (issue #2562).
+                // `(1).real = 5` resolves `real` to a read-only getset_descriptor
+                // and raises "is not writable"; `(1).bit_length = 5` resolves to a
+                // method_descriptor and raises "is read-only"; only a genuinely
+                // absent attribute keeps "has no attribute".  We reuse the read
+                // path to decide which case we are in.  `__class__` keeps its own
+                // (current) behaviour — its write semantics are tracked separately.
+                if name != "__class__"
+                    && let Ok(read) = self.get_attr(&target, name)
+                {
+                    // Methods (method_descriptor / wrapper_descriptor /
+                    // classmethod_descriptor) read back as callables; CPython's
+                    // wording for those is "'T' object attribute 'X' is
+                    // read-only".  Read-only *data* attributes
+                    // (getset_descriptor: real/imag/numerator/denominator) read
+                    // back as plain values and use "attribute 'X' of 'T' objects
+                    // is not writable".  Built-in methods/method-wrappers surface
+                    // as the bound-method `BuiltinObject`, so probe that too.
+                    let is_method = matches!(
+                        read.kind(),
+                        ValueKind::BoundMethod { .. }
+                            | ValueKind::ClassBoundMethod { .. }
+                            | ValueKind::BuiltinFunction(_)
+                            | ValueKind::UserFunction(_)
+                    ) || pyrust_builtins::bound_method::is_bound_method(&read);
+                    return if is_method {
+                        Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object attribute '{name}' is read-only"))
+                    } else {
+                        Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of '{type_name}' objects is not writable"))
+                    };
+                }
                 Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object has no attribute '{name}'"))
             }
         }
@@ -2754,6 +2786,38 @@ impl Interpreter {
             }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
+                // CPython distinguishes "attribute does not exist" from
+                // "attribute exists on the type but is read-only" (issue #2562).
+                // `(1).real = 5` resolves `real` to a read-only getset_descriptor
+                // and raises "is not writable"; `(1).bit_length = 5` resolves to a
+                // method_descriptor and raises "is read-only"; only a genuinely
+                // absent attribute keeps "has no attribute".  We reuse the read
+                // path to decide which case we are in.  `__class__` keeps its own
+                // (current) behaviour — its write semantics are tracked separately.
+                if name != "__class__"
+                    && let Ok(read) = self.get_attr(&target, name)
+                {
+                    // Methods (method_descriptor / wrapper_descriptor /
+                    // classmethod_descriptor) read back as callables; CPython's
+                    // wording for those is "'T' object attribute 'X' is
+                    // read-only".  Read-only *data* attributes
+                    // (getset_descriptor: real/imag/numerator/denominator) read
+                    // back as plain values and use "attribute 'X' of 'T' objects
+                    // is not writable".  Built-in methods/method-wrappers surface
+                    // as the bound-method `BuiltinObject`, so probe that too.
+                    let is_method = matches!(
+                        read.kind(),
+                        ValueKind::BoundMethod { .. }
+                            | ValueKind::ClassBoundMethod { .. }
+                            | ValueKind::BuiltinFunction(_)
+                            | ValueKind::UserFunction(_)
+                    ) || pyrust_builtins::bound_method::is_bound_method(&read);
+                    return if is_method {
+                        Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object attribute '{name}' is read-only"))
+                    } else {
+                        Err(pyrust_core::py_err!("AttributeError", "attribute '{name}' of '{type_name}' objects is not writable"))
+                    };
+                }
                 Err(pyrust_core::py_err!("AttributeError", "'{type_name}' object has no attribute '{name}'"))
             }
         }
