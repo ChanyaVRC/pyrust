@@ -3340,19 +3340,25 @@ impl Parser {
                     field_cols,
                     line_offset,
                 } => {
-                    let expr = parse_expr_str(&src)?;
-                    // Recursively parse any nested expressions inside the
-                    // format spec — they need to be visible to every AST
-                    // recursor (scope-pass, closure-capture analyser, etc.).
-                    // Nested spec fields share the same fragment start line.
-                    let format_spec = match format_spec {
-                        None => None,
-                        Some(parts) => Some(self.parse_fstring_parts(parts, token_line)?),
-                    };
                     let line = if token_line == 0 {
                         0
                     } else {
                         token_line + line_offset
+                    };
+                    // Parse the field expression with `line` as its base so a
+                    // *nested* f-string (`f"{f'''…{x}…'''}"`) anchors its own
+                    // inner fields on their absolute source lines, not the
+                    // outer field's line (issue #2587).
+                    let expr = parse_expr_str(&src, line)?;
+                    // Recursively parse any nested expressions inside the
+                    // format spec — they need to be visible to every AST
+                    // recursor (scope-pass, closure-capture analyser, etc.).
+                    // Spec fields' `line_offset` is measured from the f-string
+                    // fragment start (same as a top-level field), so they share
+                    // `token_line`, not this field's `line`.
+                    let format_spec = match format_spec {
+                        None => None,
+                        Some(parts) => Some(self.parse_fstring_parts(parts, token_line)?),
                     };
                     // PEP 657 (#2582): the whole `{...}` field is underlined
                     // with `^` (full == prim), matching CPython's FORMAT_VALUE
@@ -3379,11 +3385,26 @@ impl Parser {
     }
 }
 
-/// Parse a single expression from a raw source string (used for f-string sub-expressions).
-fn parse_expr_str(src: &str) -> Result<Expr> {
+/// Parse a single expression from a raw source string (used for f-string
+/// sub-expressions).  `base_line` is the absolute source line of `src`'s first
+/// line: it is folded into the sub-lexer's per-token line numbers so a nested
+/// f-string's own fields report their absolute source line in tracebacks
+/// (issue #2587).  `base_line == 0` means no line info is available, and the
+/// sub-parser carries no line numbers (matching the prior behaviour).
+fn parse_expr_str(src: &str, base_line: u32) -> Result<Expr> {
     let lexer = crate::lexer::Lexer::new(src)?;
-    let tokens = lexer.into_tokens();
-    let mut p = Parser::new(tokens);
+    let mut p = if base_line == 0 {
+        Parser::new(lexer.into_tokens())
+    } else {
+        let (tokens, line_nos) = lexer.into_tokens_with_linenos();
+        // `src` line 1 maps to absolute `base_line`, so shift every token's
+        // 1-based line number by `base_line - 1`.
+        let line_nos = line_nos
+            .into_iter()
+            .map(|ln| if ln == 0 { 0 } else { ln + base_line - 1 })
+            .collect();
+        Parser::new_with_lines(tokens, line_nos)
+    };
     let expr = p.parse_expr()?;
     Ok(expr)
 }

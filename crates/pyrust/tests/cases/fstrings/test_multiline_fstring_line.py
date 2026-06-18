@@ -78,4 +78,20 @@ except AttributeError:
     print("case5 line:", field_line())
 
 
+# --- nested f-string field on a deeper line of its own triple-quoted body -----
+# The outer field's value is itself a multi-line f-string; its inner `{x.bad}`
+# must anchor on the inner field's absolute line, not the outer field's line.
+n = None
+try:
+    v = f"""
+    outer
+    {f'''
+    inner
+    {n.bad}
+    '''}
+    """
+except AttributeError:
+    print("case6 line:", field_line())
+
+
 print("done")
