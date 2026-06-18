@@ -2695,6 +2695,11 @@ impl Interpreter {
                     for (pk, v_lhs) in entries {
                         match self.dict_lookup(b, &pk)? {
                             Some((_, v_rhs)) => {
+                                if v_lhs == v_rhs || v_lhs.is_identical_nan(&v_rhs) {
+                                    // same object or NaN-identity: treat as equal
+                                    // (mirrors CPython PyObject_RichCompareBool)
+                                    continue;
+                                }
                                 if !self.values_user_eq(&v_lhs, &v_rhs)? {
                                     return Ok(false);
                                 }
