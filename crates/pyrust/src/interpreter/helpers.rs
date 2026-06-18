@@ -352,7 +352,11 @@ pub(crate) fn c3_linearize_classes(
             if lists.is_empty() {
                 break;
             }
+            // `object` is deferred so it never wins ahead of a non-object head;
+            // see the matching `class_mro_items` (env.rs) comment for why (#2611).
+            let obj_ptr = Rc::as_ptr(&object_class_singleton());
             let mut chosen: Option<Rc<RefCell<PyClass>>> = None;
+            let mut deferred_object: Option<Rc<RefCell<PyClass>>> = None;
             'outer: for list in &lists {
                 let head_ptr = Rc::as_ptr(&list[0]);
                 for other in &lists {
@@ -362,13 +366,20 @@ pub(crate) fn c3_linearize_classes(
                         }
                     }
                 }
+                if head_ptr == obj_ptr {
+                    deferred_object = Some(Rc::clone(&list[0]));
+                    continue;
+                }
                 chosen = Some(Rc::clone(&list[0]));
                 break;
             }
-            // No consistent head: fall back to the first remaining head so the
-            // scan still terminates.  This cannot happen for a validly-created
-            // class (the MRO was checked at creation), but we never panic.
-            let chosen = chosen.unwrap_or_else(|| Rc::clone(&lists[0][0]));
+            // No consistent head: fall back to a deferred `object`, else to the
+            // first remaining head so the scan still terminates.  The latter
+            // cannot happen for a validly-created class (the MRO was checked at
+            // creation), but we never panic.
+            let chosen = chosen
+                .or(deferred_object)
+                .unwrap_or_else(|| Rc::clone(&lists[0][0]));
             let chosen_ptr = Rc::as_ptr(&chosen);
             result.push(chosen);
             for list in &mut lists {

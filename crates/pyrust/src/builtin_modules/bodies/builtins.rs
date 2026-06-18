@@ -2550,6 +2550,35 @@ pyrust_module! {
                     ));
                 }
             }
+            ValueKind::PyClass(cls)
+                if crate::interpreter::metaclass_dunder(cls, "__len__").is_some() =>
+            {
+                // A class whose metaclass defines `__len__` (e.g. an `Enum`
+                // subclass under `EnumMeta`): `len(Color)` dispatches the
+                // metaclass slot with the class as the receiver (#2611).
+                let method_val = crate::interpreter::metaclass_dunder(cls, "__len__").unwrap();
+                let result =
+                    invoke_class_method(_interp, method_val, value.clone(), &[])?;
+                match result.kind() {
+                    ValueKind::Int(n) if n >= 0 => n,
+                    ValueKind::Int(_) => {
+                        return Err(PyError::named(
+                            "ValueError",
+                            "__len__() should return >= 0".to_string(),
+                        ))
+                    }
+                    ValueKind::Bool(b) => if b { 1 } else { 0 },
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "'{}' object cannot be interpreted as an integer",
+                                pyrust_core::builtin_type_name(&result),
+                            ),
+                        ))
+                    }
+                }
+            }
             _ => {
                 return Err(PyError::named(
                     "TypeError",
@@ -8535,17 +8564,17 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
                 // Issue #2299: the unhashable built-in types (list/dict/set/
                 // bytearray) set `__hash__ = None` on the *type*, so a subclass
                 // that does not override `__hash__` inherits unhashability.  The
-                // MRO lookup lands on the inherited `object.__hash__` sentinel
-                // (not a user function and not the type-level `None`), so detect
-                // the inherited-`None` case directly: when the chain reaches an
-                // unhashable builtin before any class defines its own `__hash__`
-                // the instance is unhashable too.  A subclass that re-enables
-                // hashing (`__hash__ = object.__hash__`) shadows that `None`.
-                if matches!(
-                    hash_method.kind(),
-                    ValueKind::BuiltinFunction("object.__hash__")
-                ) && class_hash_inherits_builtin_none(&class)
-                {
+                // MRO lookup lands on the inherited `object.__hash__` sentinel,
+                // OR — when an unhashable builtin and a user `__hash__`-defining
+                // base are *both* in the MRO — on the user method if it sits
+                // after the builtin (`class C(list, M)`: MRO `[C, list, M, …]`).
+                // `class_hash_inherits_builtin_none` walks the MRO and reports
+                // whether an unhashable builtin precedes any `__hash__`-defining
+                // class, so it covers both shapes regardless of which method the
+                // attribute lookup resolved (#2611).  A subclass that re-enables
+                // hashing (`__hash__ = object.__hash__` in its own dict) shadows
+                // that `None` and the helper returns false.
+                if class_hash_inherits_builtin_none(&class) {
                     return Err(PyError::named(
                         "TypeError",
                         format!("unhashable type: '{class_name}'"),

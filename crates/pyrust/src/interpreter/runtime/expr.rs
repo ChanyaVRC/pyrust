@@ -1208,6 +1208,21 @@ impl Interpreter {
             }
             ValueKind::PyClass(class_rc) => {
                 let class = Rc::clone(class_rc);
+                // A metaclass `__getitem__` (e.g. `EnumMeta.__getitem__`, which
+                // implements `Color['RED']` name lookup) is a type-level slot
+                // that takes precedence over the class's own
+                // `__class_getitem__` (#2611).
+                if let Some(getitem_fn) = metaclass_dunder(&class, "__getitem__") {
+                    return invoke_class_method(
+                        self,
+                        getitem_fn,
+                        Value::py_class(Rc::clone(&class)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: index,
+                        }],
+                    );
+                }
                 // Look up `__class_getitem__` in the class's own attrs (not
                 // the MRO).  Built-in collection types have a
                 // `BuiltinFunction("<type>.__class_getitem__")` sentinel
@@ -5536,6 +5551,24 @@ impl Interpreter {
                         Err(e) => return Err(e),
                     }
                 }
+            }
+            // A class whose metaclass defines `__contains__` (e.g. an `Enum`
+            // subclass under `EnumMeta`): `member in Color` dispatches the
+            // metaclass slot with the class as the receiver (#2611).
+            ValueKind::PyClass(cls)
+                if metaclass_dunder(cls, "__contains__").is_some() =>
+            {
+                let method_val = metaclass_dunder(cls, "__contains__").unwrap();
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_class(Rc::clone(cls)),
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: item.clone(),
+                    }],
+                )?;
+                Ok(Value::bool_(result.truthy()))
             }
             // Scalar non-iterables (int/float/bool/bigint/complex/None …) reach
             // here.  CPython raises `TypeError: argument of type '<type>' is not
