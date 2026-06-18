@@ -3300,6 +3300,14 @@ impl Interpreter {
             {
                 crate::builtin_modules::enum_mod::inject_python_members(self, m)?;
             }
+            // `json` Python-source members (issue #2620): the whole module is
+            // defined in `json_py.py` (`dumps` / `loads` / `JSONDecodeError`),
+            // exec'd here since the native body is empty.
+            if name == "json"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::json::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*

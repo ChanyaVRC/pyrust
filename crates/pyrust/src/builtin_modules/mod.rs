@@ -156,6 +156,10 @@ pyrust_builtin_modules! {
     contextlib,
     "__future__" as future,
     warnings,
+    // `json` is a pure-Python module (issue #2620): an empty native
+    // `pyrust_module!` plus `json_py.py` injected by the post-load hook in
+    // `env.rs::load_module`.
+    json,
     // Minimal async/await support (issue #1039): `asyncio.run` is native;
     // `sleep` / `gather` are injected from `asyncio_py.py` by the post-load
     // hook in `env.rs::load_module`.
