@@ -4417,7 +4417,11 @@ impl Interpreter {
                                             od_seq,
                                         }
                                     } else {
-                                        IterState::Materialized(vm_try!(iter_values(&backing)), 0)
+                                        // Pass the carrier (not the unwrapped
+                                        // backing) so a non-iterable base subclass
+                                        // (`class C(int): pass`) reports its own
+                                        // class name, not the base's (#2557).
+                                        IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                                     }
                                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
                                     let iter_obj = vm_try!(self.make_getitem_iter(inst_rc));
