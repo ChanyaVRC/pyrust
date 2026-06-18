@@ -3431,6 +3431,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
             target,
             name: _,
             expr,
+            ..
         } => expr_safe(target, i_name, c_name) && expr_safe(expr, i_name, c_name),
         Stmt::Expr(e) => expr_safe(e, i_name, c_name),
         Stmt::Return(e) => e.as_ref().is_none_or(|x| expr_safe(x, i_name, c_name)),
@@ -3652,7 +3653,7 @@ fn target_assigns(target: &AssignTarget, name: &str) -> bool {
 fn target_safe_for_rewrite(target: &AssignTarget, i_name: &str, c_name: &str) -> bool {
     match target {
         AssignTarget::Name(_) => true,
-        AssignTarget::Attr(t, _) => expr_safe(t, i_name, c_name),
+        AssignTarget::Attr(t, _, _) => expr_safe(t, i_name, c_name),
         AssignTarget::Index(t, idx) => {
             // `c[i] = ...` is handled at the Stmt::IndexAssign site; here we
             // only see this via `IndexAssign`/`SliceAssign` containers — never
@@ -5849,10 +5850,19 @@ impl Compiler {
                     self.mark_def(reg);
                 }
             }
-            Stmt::AttrAssign { target, name, expr } => {
+            Stmt::AttrAssign {
+                target,
+                name,
+                expr,
+                span,
+            } => {
                 let obj = self.compile_expr(target);
                 let val = self.compile_expr(expr);
                 let name_idx = self.intern_name(name);
+                // PEP 657 caret anchor (#2442): underline the whole `obj.attr`
+                // target span when the SetAttr raises AttributeError.  Arm
+                // immediately before the SetAttr; `emit` consumes and clears it.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::SetAttr(obj, name_idx, val));
                 self.free_temp(val);
                 self.free_temp(obj);
@@ -6486,9 +6496,12 @@ impl Compiler {
                                 self.emit(Insn::StoreGlobal(name_idx, base + i));
                             }
                         }
-                        AssignTarget::Attr(obj_expr, attr) => {
+                        AssignTarget::Attr(obj_expr, attr, span) => {
                             let obj = self.compile_expr(obj_expr);
                             let name_idx = self.intern_name(attr);
+                            // PEP 657 caret anchor (#2442): underline `obj.attr`
+                            // if this store raises AttributeError.
+                            self.set_col_span_for_next(*span);
                             self.emit(Insn::SetAttr(obj, name_idx, base + i));
                             self.free_temp(obj);
                         }
@@ -6532,10 +6545,13 @@ impl Compiler {
                 }
                 self.next_temp = base;
             }
-            AssignTarget::Attr(obj_expr, attr) => {
+            AssignTarget::Attr(obj_expr, attr, span) => {
                 let obj = self.compile_expr(obj_expr);
                 let val = self.compile_expr(expr);
                 let name_idx = self.intern_name(attr);
+                // PEP 657 caret anchor (#2442): underline `obj.attr` if this
+                // store raises AttributeError.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::SetAttr(obj, name_idx, val));
                 self.free_temp(val);
                 self.free_temp(obj);
@@ -6646,9 +6662,12 @@ impl Compiler {
                     self.emit(Insn::StoreGlobal(name_idx, src_reg));
                 }
             }
-            AssignTarget::Attr(obj_expr, attr) => {
+            AssignTarget::Attr(obj_expr, attr, span) => {
                 let obj = self.compile_expr(obj_expr);
                 let name_idx = self.intern_name(attr);
+                // PEP 657 caret anchor (#2442): underline `obj.attr` if this
+                // store raises AttributeError.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::SetAttr(obj, name_idx, src_reg));
                 self.free_temp(obj);
             }
@@ -6802,12 +6821,17 @@ impl Compiler {
                     self.free_temp(lhs);
                 }
             }
-            AssignTarget::Attr(obj_expr, attr) => {
+            AssignTarget::Attr(obj_expr, attr, span) => {
                 let obj = self.compile_expr(obj_expr);
                 let name_idx = self.intern_name(attr);
                 let lhs = self.alloc_temp();
+                // PEP 657 caret anchor (#2442): underline `obj.attr` for both the
+                // read (`obj.attr` missing) and the write-back; CPython anchors
+                // the augmented-assignment target span on either failure.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::GetAttr(lhs, obj, name_idx));
                 self.emit_aug_binop(lhs, op, expr);
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::SetAttr(obj, name_idx, lhs));
                 self.free_temp(lhs);
                 self.free_temp(obj);

@@ -3284,10 +3284,13 @@ fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
         Expr::Var(name, _) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
-        Expr::Attr { target, name, .. } => Ok(Stmt::AttrAssign {
+        Expr::Attr {
+            target, name, span, ..
+        } => Ok(Stmt::AttrAssign {
             target: *target.clone(),
             name: name.clone(),
             expr: rhs,
+            span: *span,
         }),
         Expr::Index { target, index, .. } => Ok(Stmt::IndexAssign {
             target: target.clone(),
@@ -3394,7 +3397,9 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
             Err(PyError::Parse("cannot assign to __debug__".to_string()))
         }
         Expr::Var(name, _) => Ok(AssignTarget::Name(name.clone())),
-        Expr::Attr { target, name, .. } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
+        Expr::Attr {
+            target, name, span, ..
+        } => Ok(AssignTarget::Attr(target.clone(), name.clone(), *span)),
         Expr::Index { target, index, .. } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Slice {
             target,
