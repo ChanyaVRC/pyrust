@@ -846,6 +846,56 @@ fn unsupported_operand(op_sym: &str, left: &Value, right: &Value) -> PyError {
     pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")
 }
 
+/// The plain and augmented operator tokens an operand-type `TypeError` should
+/// carry for `op`, or `None` for operators that never appear in an augmented
+/// assignment (comparisons, `in`, `is`, …).
+///
+/// `base` is the token CPython embeds in the *plain* binary message (note `**`
+/// uses `** or pow()`); `aug` is the in-place form (`+=`, `**=`, …) CPython
+/// uses for `a op= b`.  See issue #2561.
+fn aug_operand_symbols(op: BinaryOp) -> Option<(&'static str, &'static str)> {
+    Some(match op {
+        BinaryOp::Add => ("+", "+="),
+        BinaryOp::Sub => ("-", "-="),
+        BinaryOp::Mul => ("*", "*="),
+        BinaryOp::MatMul => ("@", "@="),
+        BinaryOp::Div => ("/", "/="),
+        BinaryOp::FloorDiv => ("//", "//="),
+        BinaryOp::Mod => ("%", "%="),
+        BinaryOp::Pow => ("** or pow()", "**="),
+        BinaryOp::BitAnd => ("&", "&="),
+        BinaryOp::BitOr => ("|", "|="),
+        BinaryOp::BitXor => ("^", "^="),
+        BinaryOp::LShift => ("<<", "<<="),
+        BinaryOp::RShift => (">>", ">>="),
+        _ => return None,
+    })
+}
+
+/// Rewrite the operand-type `TypeError` produced by the plain `eval_binary`
+/// path so it carries the augmented operator symbol (issue #2561).
+///
+/// Only the exact `unsupported operand type(s) for {base}: ` prefix is
+/// rewritten — the sequence-specific messages (`can only concatenate …`,
+/// `'int' object is not iterable`) are left verbatim, matching CPython, which
+/// does not append `=` to those.
+fn rewrite_aug_operand_error(op: BinaryOp, err: PyError) -> PyError {
+    let Some((base, aug)) = aug_operand_symbols(op) else {
+        return err;
+    };
+    let PyError::Named(class, msg) = &err else {
+        return err;
+    };
+    if class.as_ref() != "TypeError" {
+        return err;
+    }
+    let prefix = format!("unsupported operand type(s) for {base}: ");
+    let Some(rest) = msg.strip_prefix(&prefix) else {
+        return err;
+    };
+    pyrust_core::type_err!("unsupported operand type(s) for {aug}: {rest}")
+}
+
 /// Dispatch a numeric binary op through the LHS's slot table.  Returns
 /// `Some(result)` when both operands are numeric (the canonical numeric
 /// arithmetic applies), or `None` (CPython `NotImplemented`) when either
@@ -4018,6 +4068,25 @@ impl Interpreter {
             BinaryOp::IsNot => Ok(Value::bool_(!values_are_identical(&left, &right))),
             BinaryOp::And | BinaryOp::Or => unreachable!("short-circuit handled earlier"),
         }
+    }
+
+    /// `eval_binary` for an augmented assignment (`a op= b`) that fell through
+    /// the in-place dunder path (`try_inplace_op` returned `None`).
+    ///
+    /// CPython formats the operand-type `TypeError` with the *augmented* symbol
+    /// (`+=`, `-=`, `**=`, …) rather than the plain binary symbol (`+`, `-`,
+    /// `** or pow()`) — see issue #2561.  This rewrites only the
+    /// `unsupported operand type(s) for {sym}:` message produced by the plain
+    /// `eval_binary` path, leaving the sequence-specific messages
+    /// (`can only concatenate …`, `'int' object is not iterable`) untouched, to
+    /// match CPython exactly.
+    pub(crate) fn eval_binary_aug(
+        &mut self,
+        left: Value,
+        op: BinaryOp,
+        right: Value,
+    ) -> Result<Value> {
+        self.eval_binary(left, op, right).map_err(|e| rewrite_aug_operand_error(op, e))
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {

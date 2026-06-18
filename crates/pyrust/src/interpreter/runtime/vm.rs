@@ -2584,7 +2584,9 @@ impl Interpreter {
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, true)) {
                         v
                     } else {
-                        vm_try!(self.eval_binary(l, *op, r))
+                        // Augmented assignment: a failing operand-type TypeError
+                        // must report the in-place symbol (`+=`, …), issue #2561.
+                        vm_try!(self.eval_binary_aug(l, *op, r))
                     };
                     regs[*dst as usize] = result;
                 }
@@ -2607,6 +2609,9 @@ impl Interpreter {
                     // the lhs temp for plain binary ops too (issue #1874).
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, *is_aug)) {
                         v
+                    } else if *is_aug {
+                        // Augmented assign fused to a const: report `+=` etc. (#2561).
+                        vm_try!(self.eval_binary_aug(l, *op, r))
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
                     };
@@ -2626,6 +2631,9 @@ impl Interpreter {
                     // from a const-folded plain binary expression (issue #1874).
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, *is_aug)) {
                         v
+                    } else if *is_aug {
+                        // Augmented assign fused to an immediate: report `+=` etc. (#2561).
+                        vm_try!(self.eval_binary_aug(l, *op, r))
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
                     };
