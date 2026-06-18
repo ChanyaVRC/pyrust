@@ -1194,8 +1194,30 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
     }
 
+    // Indices that are the target of some (forward or backward) jump.  The
+    // `BinOp` of a fusion candidate must not be such a target: fusing folds the
+    // preceding `LoadConst`'s value into the `BinOp` and drops the load, but a
+    // control-flow edge landing directly on the `BinOp` reaches it without ever
+    // executing that load (issue #2565: a ternary's then- and else-branch each
+    // emit their own `LoadConst` feeding a shared trailing `BinOp`; fusing the
+    // else-branch load into the `BinOp` made the then-branch — which jumps onto
+    // the `BinOp` — use the else-branch constant).
+    let mut jump_targets: HashSet<usize> = HashSet::new();
+    for (idx, insn) in transformed.iter().enumerate() {
+        if let Some(k) = insn_jump_off(insn) {
+            let target = idx as i64 + 1 + k as i64;
+            if target >= 0 && (target as usize) < n {
+                jump_targets.insert(target as usize);
+            }
+        }
+    }
+
     let mut i = 0;
     while i + 1 < n {
+        if jump_targets.contains(&(i + 1)) {
+            i += 1;
+            continue;
+        }
         if let (Insn::LoadConst(lc_reg, c_idx), Insn::BinOp(dst, lhs, op, rhs)) =
             (&transformed[i], &transformed[i + 1])
         {
@@ -8573,6 +8595,32 @@ mod tests {
     }
 
     // ── pass_binop_const_fusion ───────────────────────────────────────────────
+
+    #[test]
+    fn binop_const_fusion_skips_binop_that_is_jump_target() {
+        use crate::ast::BinaryOp;
+        // Ternary-as-right-operand shape (issue #2565):
+        //   0 JumpIfFalse(0, 2)        a falsy → jump to the else LoadConst (idx 3)
+        //   1 LoadConst(2, 0)          then: t = const#0
+        //   2 Jump(1)                  jump past the else load, onto the BinOp (idx 4)
+        //   3 LoadConst(2, 1)          else: t = const#1   ← jump target of insn 0
+        //   4 BinOp(1, 0, Add, 2)      ← jump target of insn 2 (the then-branch)
+        //   5 Return(1)
+        // The else-branch LoadConst (idx 3) is adjacent to the BinOp, but the BinOp
+        // is a jump target reached by the then-branch without executing that load.
+        // Fusing would make the then-branch use the else constant, so it must be
+        // skipped.
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2),
+            Insn::LoadConst(2, 0),
+            Insn::Jump(1),
+            Insn::LoadConst(2, 1),
+            Insn::BinOp(1, 0, BinaryOp::Add, 2),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns.clone(), 1);
+        assert_eq!(out, insns, "must not fuse a BinOp that is a jump target");
+    }
 
     #[test]
     fn binop_const_fusion_fuses_loadconst_binop() {
