@@ -360,3 +360,56 @@ ValueError: deep
 ";
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
+
+#[test]
+fn constfold_left_sibling_caret_is_byte_exact() {
+    // #2577: `a + b` (both known ints) const-folds, leaving the raising `+ "s"`
+    // as a fused `BinOpConst`.  Its caret must survive the fold and underline the
+    // second `+`, byte-for-byte with CPython 3.12.
+    let src = "a = 1\nb = 2\nr = a + b + \"s\"\n";
+    let stderr = run_pyrust_stderr("cf_left.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"cf_left.py\", line 3, in <module>
+    r = a + b + \"s\"
+        ~~~~~~^~~~~
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn constfold_right_sibling_caret_is_byte_exact() {
+    // #2578: `x + 2` (paren'd, x known) folds; the outer `"s" + (...)` survives
+    // and keeps its caret under the outer `+`.
+    let src = "x = 1\nz = \"s\" + (x + 2)\n";
+    let stderr = run_pyrust_stderr("cf_right.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"cf_right.py\", line 2, in <module>
+    z = \"s\" + (x + 2)
+        ~~~~^~~~~~~~~
+TypeError: can only concatenate str (not \"int\") to str
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn constfold_sibling_subtree_fold_stays_caret_free() {
+    // Regression guard (#2579 review): `(a+b) + "s" + (c+d)` folds BOTH `a+b` and
+    // `c+d`.  The survivors `{(a+b)+"s", outer}` are not a contiguous suffix of
+    // the old binops, but every operator is `+`, so the operator-sequence
+    // cross-check alone would mis-anchor the raising `(a+b)+"s"` to the folded
+    // `c+d`'s span.  The left-spine guard rejects this alignment, so the op stays
+    // caret-free (a missing caret beats a wrong one, #2426) rather than pointing
+    // at the wrong sub-expression.
+    let src = "a = 1\nb = 2\nc = 3\nd = 4\nr = (a+b) + \"s\" + (c+d)\n";
+    let stderr = run_pyrust_stderr("cf_sibling.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"cf_sibling.py\", line 5, in <module>
+    r = (a+b) + \"s\" + (c+d)
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}

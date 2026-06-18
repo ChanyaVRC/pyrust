@@ -323,7 +323,34 @@ fn remap_lineno_and_col_tables(
                 .and_then(binop_origin_op)
                 == Some(op)
         });
-        if ops_match {
+        // The operator-sequence cross-check alone is too weak when the chain's
+        // operators repeat (e.g. all `+`): a sibling-subtree fold to the *right*
+        // of a surviving op (`(a+b) + "s" + (c+d)`, where `a+b` and `c+d` fold)
+        // leaves survivors `{(a+b)+"s", outer}` whose true old indices are not a
+        // contiguous suffix — yet every op is `+`, so `ops_match` passes and the
+        // raising `(a+b)+"s"` would be mis-anchored to the folded `c+d`'s span.
+        //
+        // Require additionally that the mapped old binops form a **left spine**:
+        // each shares the outermost op's `full_start` (the expression's left
+        // edge).  Python `+`/`*`/… are left-associative, so the left-descendant
+        // chain from the outermost op down all begins at that same column, while
+        // any right-operand subtree (the source of the dangerous interspersed
+        // fold) starts further right.  A non-left-spine alignment is rejected,
+        // leaving the op caret-free (a missing caret beats a wrong one, #2426).
+        let outer_full_start = old_binop_positions
+            .last()
+            .and_then(|&p| old_cols.get(p))
+            .map(|span| span.0);
+        let left_spine = outer_full_start.is_some_and(|start| {
+            (0..surviving.len()).all(|j| {
+                old_binop_positions
+                    .get(old_start + j)
+                    .and_then(|&p| old_cols.get(p))
+                    .map(|span| span.0)
+                    == Some(start)
+            })
+        });
+        if ops_match && left_spine {
             for (j, &(new_i, _)) in surviving.iter().enumerate() {
                 suffix_binop_old_pos.insert(new_i, old_binop_positions[old_start + j]);
             }
