@@ -9563,6 +9563,50 @@ impl Interpreter {
             return self.build_typing_namedtuple(&class_name, &attrs);
         }
 
+        // Inherited metaclass (issue #2612): a `class` statement with no
+        // explicit `metaclass=` still uses the most-derived metaclass of its
+        // bases.  If any base has a custom metatype (e.g. `abc.ABCMeta`),
+        // re-route construction through that metaclass so its `__new__` /
+        // `__call__` participate — matching CPython, where `type(Shape)` for
+        // `class Shape(abc.ABC)` is `ABCMeta`, not `type`.
+        if let Some(meta) = inherited_metaclass(base.as_ref(), &extra_bases_vec) {
+            // Rebuild the bases tuple from the originating registers and build a
+            // plain namespace dict from the collected attrs, then invoke the
+            // metaclass exactly like the explicit `metaclass=` path.
+            let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
+            for i in 0..bases_n as usize {
+                let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+                bases_vec.push(vm_read(regs, reg, num_locals)?);
+            }
+            let bases_tuple = Value::tuple(bases_vec);
+            let namespace = Value::dict(PyDict::default());
+            namespace.dict_insert(PyKey::str_from("__qualname__"), Value::string(qualname))?;
+            for (k, v) in &attrs {
+                namespace.dict_insert(PyKey::str_from(k), v.clone())?;
+            }
+            let kwargs: ExpandedArgBuf = class_kwarg_names
+                .iter()
+                .enumerate()
+                .map(|(i, key)| {
+                    let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
+                    ExpandedCallArg { name: Some(key.clone()), value: regs[reg as usize].clone() }
+                })
+                .collect();
+            let mut call_args: ExpandedArgBuf = smallvec![
+                ExpandedCallArg { name: None, value: Value::string(class_name) },
+                ExpandedCallArg { name: None, value: bases_tuple },
+                ExpandedCallArg { name: None, value: namespace },
+            ];
+            call_args.extend(kwargs);
+            let result =
+                self.call_function_expanded(Value::py_class(meta), &call_args)?;
+            class_env_rc
+                .borrow_mut()
+                .values
+                .insert("__class__", result.clone());
+            return Ok(result);
+        }
+
         let slots = make_class_extract_slots(&mut attrs, &class_name)?;
         let class = Rc::new(RefCell::new(PyClass {
             extra_bases: extra_bases_vec.clone(),
@@ -10133,6 +10177,40 @@ fn collect_class_attrs(
 /// __qualname__: wrap a bare __init_subclass__ as a classmethod, pop and
 /// validate __qualname__, and seed __module__/__doc__/__hash__/__dict__/
 /// __weakref__.
+/// Determine the inherited metaclass for a `class` statement that has no
+/// explicit `metaclass=` (issue #2612).  CPython uses the most-derived
+/// metaclass among the bases; the default `type` is represented as `None` on
+/// `PyClass.metatype`, so a class whose bases all have `metatype == None`
+/// returns `None` here and the caller takes the plain `MakeClass` fast path.
+///
+/// When at least one base carries a custom metatype, the winner must be a
+/// subclass of every other base's metatype; we return that winner so the
+/// caller routes construction through it.  If two metatypes are incomparable
+/// the first-seen is returned — a faithful resolution of the unambiguous
+/// single-hierarchy case (the only one the minimal `abc` surface needs).
+fn inherited_metaclass(
+    base: Option<&Rc<RefCell<PyClass>>>,
+    extra_bases: &[Rc<RefCell<PyClass>>],
+) -> Option<Rc<RefCell<PyClass>>> {
+    let mut winner: Option<Rc<RefCell<PyClass>>> = None;
+    let metatypes = base
+        .into_iter()
+        .chain(extra_bases.iter())
+        .filter_map(|b| b.borrow().metatype.clone());
+    for mt in metatypes {
+        match &winner {
+            None => winner = Some(mt),
+            Some(cur) => {
+                // Keep the more-derived of the two.
+                if class_is_subclass_of(&mt, cur) {
+                    winner = Some(mt);
+                }
+            }
+        }
+    }
+    winner
+}
+
 fn make_class_finalize_attrs(
     attrs: &mut IndexMap<String, Value>,
     proto_qualname: String,

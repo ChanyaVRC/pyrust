@@ -3257,6 +3257,22 @@ impl Interpreter {
             {
                 crate::builtin_modules::typing::inject_python_members(self, m)?;
             }
+            // `abc` Python-source members (issue #2612): the whole module
+            // (`ABCMeta`, `ABC`, `abstractmethod`, …) is defined in
+            // `abc_py.py`, exec'd here since the native body is empty.
+            if name == "abc"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::abc::inject_python_members(self, m)?;
+            }
+            // `dataclasses` Python-source members (issue #2610): `@dataclass`,
+            // `field`, `fields`, `asdict`, `astuple`, … are defined in
+            // `dataclasses_py.py`, exec'd here since the native body is empty.
+            if name == "dataclasses"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::dataclasses::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*

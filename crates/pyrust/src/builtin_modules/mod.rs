@@ -160,4 +160,12 @@ pyrust_builtin_modules! {
     // `sleep` / `gather` are injected from `asyncio_py.py` by the post-load
     // hook in `env.rs::load_module`.
     asyncio,
+    // `abc` (issue #2612): the whole surface (`ABCMeta`, `ABC`,
+    // `abstractmethod`, …) is defined in `abc_py.py` and injected by the
+    // post-load hook in `env.rs::load_module`; the native body is empty.
+    abc,
+    // `dataclasses` (issue #2610): `@dataclass`, `field`, `fields`, `asdict`,
+    // `astuple`, … are defined in `dataclasses_py.py` and injected by the
+    // post-load hook in `env.rs::load_module`; the native body is empty.
+    dataclasses,
 }
