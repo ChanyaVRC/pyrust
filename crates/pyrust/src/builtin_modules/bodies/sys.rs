@@ -535,6 +535,26 @@ pyrust_module! {
         }
         let fields = vi_as_fields(&args[0].value)?;
         let as_tuple = fields.as_tuple();
+        // Slice keys return a plain tuple of the selected fields, matching
+        // CPython's structseq (tuple subtype) behaviour.
+        if let Some((start, stop, step)) = pyrust_builtins::slice::slice_fields(&args[1].value) {
+            let (lo, hi, st) =
+                pyrust_builtins::slice::compute_indices(as_tuple.len() as i64, &start, &stop, &step)?;
+            let mut out = Vec::new();
+            let mut i = lo;
+            if st > 0 {
+                while i < hi {
+                    out.push(as_tuple[i as usize].clone());
+                    i += st;
+                }
+            } else {
+                while i > hi {
+                    out.push(as_tuple[i as usize].clone());
+                    i += st;
+                }
+            }
+            return Ok(Value::tuple(out));
+        }
         match args[1].value.kind() {
             ValueKind::Int(i) => {
                 let idx = normalise_index(i, as_tuple.len())?;

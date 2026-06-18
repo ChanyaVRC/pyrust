@@ -1020,6 +1020,22 @@ impl Interpreter {
                     }
                     ValueKind::ClassBoundMethod { function, class } => {
                         if name == "__func__" {
+                            // The bound method's `__func__` is the plain underlying
+                            // function, not the classmethod wrapper.  When `function`
+                            // still carries the `ClassMethod` kind tag, unwrap to the
+                            // original function stored in `wrapped_func` (matching the
+                            // direct `classmethod.__func__` path); otherwise strip the
+                            // kind tag.  Issue #2617.
+                            if function.kind == UserFunctionKind::ClassMethod {
+                                return if let Some(inner) = function.wrapped_func.as_ref() {
+                                    Ok(Value::user_function(Rc::clone(inner)))
+                                } else {
+                                    Ok(Value::with_function_kind(
+                                        Rc::clone(function),
+                                        UserFunctionKind::Regular,
+                                    ))
+                                };
+                            }
                             return Ok(Value::user_function(Rc::clone(function)));
                         }
                         if name == "__self__" {

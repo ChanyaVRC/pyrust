@@ -235,7 +235,7 @@ fn slice_bound_from_value(value: &Value) -> Result<i64> {
 /// Implements the same algorithm as CPython's `PySlice_Unpack` +
 /// `PySlice_AdjustIndices` (`Objects/sliceobject.c`).  `length` must be
 /// non-negative (caller's responsibility).
-fn compute_indices(length: i64, lo: &Value, hi: &Value, st: &Value) -> Result<(i64, i64, i64)> {
+pub fn compute_indices(length: i64, lo: &Value, hi: &Value, st: &Value) -> Result<(i64, i64, i64)> {
     // Step.
     let step = if st.is_none() {
         1
