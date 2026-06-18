@@ -96,7 +96,24 @@ except RuntimeError as e:
     print("init:", type(e).__name__, str(e))
 
 
-# 7. Still NOT swallowed when the result is captured (control case).
+# 7. TypeError from slicing an unsubscriptable object, result discarded.
+# Covers the Expr::Slice arm #2518 marked impure (distinct from Index above).
+class NoSubscript:
+    pass
+
+
+def slice_fail():
+    return NoSubscript()[1:2]
+
+
+try:
+    slice_fail()
+    print("BUG: slice_fail swallowed")
+except TypeError as e:
+    print("slice:", type(e).__name__, str(e))
+
+
+# 8. Still NOT swallowed when the result is captured (control case).
 def attr_fail2():
     return [].nope
 
