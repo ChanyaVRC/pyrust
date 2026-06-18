@@ -97,7 +97,10 @@ impl Interpreter {
                                     Value::bound_method(Rc::clone(&f), instance)
                                 }
                                 UserFunctionKind::ClassMethod => {
-                                    Value::class_bound_method(Rc::clone(&f), entry_class)
+                                    // CPython binds `cls` to type(instance) (the
+                                    // runtime type of self), not the MRO entry
+                                    // where the classmethod is defined (issue #2609).
+                                    Value::class_bound_method(Rc::clone(&f), Rc::clone(&instance_class))
                                 }
                                 UserFunctionKind::StaticMethod => {
                                     if let Some(inner) = f.wrapped_func.as_ref() {
