@@ -2517,7 +2517,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
         Expr::Bool(b) => Some(Value::bool_(*b)),
         Expr::None => Some(Value::none()),
         Expr::Ellipsis => Some(Value::ellipsis()),
-        Expr::Unary { op, expr } => {
+        Expr::Unary { op, expr, .. } => {
             let val = fold_constant(expr)?;
             match op {
                 UnaryOp::Neg => match val.kind() {
@@ -2630,6 +2630,7 @@ fn extract_literal_int(expr: &Expr) -> Option<i64> {
         Expr::Unary {
             op: UnaryOp::Neg,
             expr: inner,
+            ..
         } => {
             if let Expr::Int(n) = inner.as_ref() {
                 Some(-n)
@@ -2769,6 +2770,7 @@ fn rewrite_continue_top(body: Vec<Stmt>) -> Vec<Stmt> {
                     Expr::Unary {
                         op: UnaryOp::Not,
                         expr: Box::new(guard),
+                        span: None,
                     },
                     b_body,
                 )],
@@ -2904,12 +2906,14 @@ fn negate_expr(expr: Expr) -> Expr {
                         right,
                         span: None,
                     }),
+                    span: None,
                 },
             }
         }
         other => Expr::Unary {
             op: UnaryOp::Not,
             expr: Box::new(other),
+            span: None,
         },
     }
 }
@@ -4924,7 +4928,7 @@ fn stringify_annotation(expr: &Expr) -> String {
                 stringify_annotation(right)
             )
         }
-        Expr::Unary { op, expr } => {
+        Expr::Unary { op, expr, .. } => {
             let op_str = match op {
                 UnaryOp::Neg => "-",
                 UnaryOp::Pos => "+",
@@ -10866,9 +10870,14 @@ impl Compiler {
                     dst
                 }
             }
-            Expr::Unary { op, expr } => {
+            Expr::Unary { op, expr, span } => {
                 let src = self.compile_expr(expr);
                 let dst = self.ensure_dst(src);
+                // PEP 657 caret anchor (#2582): underline the whole `OP operand`
+                // span with `^` for the arithmetic unary forms.  Arm immediately
+                // before the UnaryOp that may raise (e.g. TypeError on `-"s"`);
+                // `emit` consumes and clears it.  `span` is `None` for `not`.
+                self.set_col_span_for_next(*span);
                 self.emit(Insn::UnaryOp(dst, *op, src));
                 dst
             }
@@ -11215,6 +11224,7 @@ impl Compiler {
                     conversion,
                     format_spec,
                     debug_text,
+                    span,
                 } => {
                     // Python 3.8 debug form `f"{x=}"`: emit the verbatim
                     // source text (with trailing `=`) as a literal prefix
@@ -11250,6 +11260,9 @@ impl Compiler {
                                 self.emit(Insn::Move(frame + 1, val_r));
                             }
                             self.free_temp(val_r);
+                            // PEP 657 (#2582): the `{...}` field caret covers a
+                            // conversion `__repr__` that raises.
+                            self.set_col_span_for_next(*span);
                             self.emit(Insn::Call(frame, 1));
                             self.next_temp = frame + 1;
                             frame
@@ -11267,6 +11280,9 @@ impl Compiler {
                                 self.emit(Insn::Move(frame + 1, val_r));
                             }
                             self.free_temp(val_r);
+                            // PEP 657 (#2582): the `{...}` field caret covers a
+                            // conversion `__str__` that raises.
+                            self.set_col_span_for_next(*span);
                             self.emit(Insn::Call(frame, 1));
                             self.next_temp = frame + 1;
                             frame
@@ -11284,6 +11300,9 @@ impl Compiler {
                                 self.emit(Insn::Move(frame + 1, val_r));
                             }
                             self.free_temp(val_r);
+                            // PEP 657 (#2582): the `{...}` field caret covers a
+                            // conversion `ascii()`/`__repr__` that raises.
+                            self.set_col_span_for_next(*span);
                             self.emit(Insn::Call(frame, 1));
                             self.next_temp = frame + 1;
                             frame
@@ -11304,6 +11323,10 @@ impl Compiler {
                     if let Some(spec_parts) = format_spec {
                         let spec_r = self.compile_fstring(spec_parts);
                         let dst = self.alloc_temp();
+                        // PEP 657 (#2582): the `{...}` field caret covers a
+                        // `__format__` that raises.  Arm immediately before the
+                        // op; `emit` consumes and clears it.
+                        self.set_col_span_for_next(*span);
                         self.emit(Insn::FormatValueSpec(dst, val_r, spec_r));
                         self.free_temp(val_r);
                         self.free_temp(spec_r);
@@ -11315,6 +11338,9 @@ impl Compiler {
                         // frame (issue #1926). The VM preserves user
                         // `__format__`/`__str__` dispatch for PyInstance values.
                         let dst = self.alloc_temp();
+                        // PEP 657 (#2582): the `{...}` field caret covers a
+                        // `__format__`/`__str__` that raises.
+                        self.set_col_span_for_next(*span);
                         self.emit(Insn::FormatValue(dst, val_r));
                         self.free_temp(val_r);
                         dst

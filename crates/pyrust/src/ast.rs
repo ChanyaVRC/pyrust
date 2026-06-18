@@ -335,6 +335,13 @@ pub enum FStringPart {
         conversion: Option<char>,
         format_spec: Option<Vec<FStringPart>>,
         debug_text: Option<String>,
+        /// PEP 657 caret anchor (issue #2582): the whole replacement field
+        /// `{...}` (including the braces and any conversion/format spec),
+        /// underlined with `^` (full == prim), matching CPython's
+        /// `FORMAT_VALUE` anchor.  `None` for nested fields inside a format
+        /// spec, fields synthesised without column info, or fields on a
+        /// continuation line of a multi-line f-string.
+        span: Option<CaretSpan>,
     },
 }
 
@@ -423,6 +430,14 @@ pub enum Expr {
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
+        /// PEP 657 caret anchor (issue #2582) for the arithmetic unary forms
+        /// `-x` / `+x` / `~x`: underlined with `^` (full == prim) from the
+        /// operator token through the end of the operand, matching CPython's
+        /// `UNARY_NEGATIVE` / `UNARY_INVERT` anchor.  `None` for `not` (CPython
+        /// anchors only the operand there, a different shape), for unary forms
+        /// synthesised by the parser/optimizer, or when built without column
+        /// info.
+        span: Option<CaretSpan>,
     },
     Binary {
         left: Box<Expr>,

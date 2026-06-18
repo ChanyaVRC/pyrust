@@ -19,6 +19,13 @@ pub enum FStringPart {
         conversion: Option<char>,
         format_spec: Option<Vec<FStringPart>>,
         debug_text: Option<String>,
+        /// PEP 657 caret anchor (issue #2582): the 0-based `(open_col,
+        /// close_col)` columns of the whole replacement field `{...}` —
+        /// `open_col` is the column of `{` and `close_col` is one past the `}`,
+        /// both relative to the start of the f-string's source line.  `None`
+        /// for nested fields inside a format spec, fields on a continuation
+        /// line of a multi-line f-string, or when no column info is available.
+        field_cols: Option<(u32, u32)>,
     },
 }
 

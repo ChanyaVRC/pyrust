@@ -338,7 +338,8 @@ impl Lexer {
                             && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
                     {
                         let quote = chars[pos + 2];
-                        let (tok, next) = lex_fstring(chars, pos + 3, quote, true)?;
+                        let (tok, next) =
+                            lex_fstring(chars, pos + 3, quote, true, self.line_start_pos)?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'f' || c == 'F')
@@ -346,7 +347,8 @@ impl Lexer {
                     {
                         // Check for f-string prefix: f" or f' (or F" / F')
                         let quote = chars[pos + 1];
-                        let (tok, next) = lex_fstring(chars, pos + 2, quote, false)?;
+                        let (tok, next) =
+                            lex_fstring(chars, pos + 2, quote, false, self.line_start_pos)?;
                         self.emit(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
@@ -1403,7 +1405,13 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
 /// (CPython raw mode); `{{` / `}}` double-brace escaping is still active.
 ///
 /// Returns `(Token::FString(parts), next_pos)`.
-fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(Token, usize)> {
+fn lex_fstring(
+    chars: &[char],
+    start: usize,
+    quote: char,
+    raw: bool,
+    line_start_pos: usize,
+) -> Result<(Token, usize)> {
     let mut parts: Vec<FStringPart> = Vec::new();
     let mut literal = String::new();
 
@@ -1456,13 +1464,30 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
             if !literal.is_empty() {
                 parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
             }
+            let open_idx = pos;
             pos += 1; // skip '{'
             let (src, conversion, format_spec, debug_text, next) = lex_fstring_expr(chars, pos)?;
+            // PEP 657 (#2582): record the `{...}` field columns relative to the
+            // f-string's source line.  `next - 1` is the closing `}`.  Skip when
+            // the field crosses a physical line (multi-line f-string) — the
+            // line-relative columns would be meaningless.
+            let close_idx = next.saturating_sub(1);
+            let field_cols = if open_idx >= line_start_pos
+                && !chars[line_start_pos..=close_idx.min(chars.len().saturating_sub(1))]
+                    .contains(&'\n')
+            {
+                let open_col = (open_idx - line_start_pos) as u32;
+                let close_col = (close_idx + 1 - line_start_pos) as u32;
+                Some((open_col, close_col))
+            } else {
+                None
+            };
             parts.push(FStringPart::Expr {
                 src,
                 conversion,
                 format_spec,
                 debug_text,
+                field_cols,
             });
             pos = next;
             continue;
@@ -1855,6 +1880,9 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                     conversion,
                     format_spec: None,
                     debug_text: None,
+                    // Nested fields inside a format spec don't get their own
+                    // caret anchor (#2582).
+                    field_cols: None,
                 });
             }
             Some(c) => {
