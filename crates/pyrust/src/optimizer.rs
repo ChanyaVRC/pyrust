@@ -354,6 +354,48 @@ fn remap_lineno_and_col_tables(
             for (j, &(new_i, _)) in surviving.iter().enumerate() {
                 suffix_binop_old_pos.insert(new_i, old_binop_positions[old_start + j]);
             }
+        } else if let Some(start) = outer_full_start {
+            // Left-spine recovery for the *multi-fold* case (issue #2586).  When
+            // two or more nested sub-expressions both const-fold, the surviving
+            // binops are no longer a contiguous suffix of the old binops — an
+            // interspersed folded right-subtree (`(a+b) + "s" + (c+d)`, where the
+            // sibling `(a+b)` and `(c+d)` both fold) opens a gap, so the suffix
+            // alignment above is rejected by the left-spine cross-check.  Yet the
+            // raising op (`(a+b)+"s"`) and the outer op still carry valid origin
+            // cols and must keep their carets.
+            //
+            // In a left-associative chain the surviving binops are exactly the
+            // ops on the expression's **left spine**: the outermost op and its
+            // repeated left-descendants, all anchored at the expression's left
+            // edge (`full_start == outer_full_start`).  A right-operand subtree
+            // always begins strictly to the right, so it never shares that
+            // column.  Collect the old binops at the left-edge column, in order,
+            // and pair them 1:1 with the survivors — but ONLY when their count
+            // matches the survivor count exactly and the operator sequences agree.
+            //
+            // The count guard is what keeps this strictly safe (a missing caret
+            // beats a wrong one, #2426): if a left-spine op itself folded, or a
+            // right-subtree op survived, the left-edge old-binop count diverges
+            // from the survivor count and the recovery is abandoned, leaving the
+            // ops caret-free rather than risking a mis-anchored span.
+            let spine_old: Vec<usize> = old_binop_positions
+                .iter()
+                .copied()
+                .filter(|&p| old_cols.get(p).map(|span| span.0) == Some(start))
+                .collect();
+            let spine_ops_match = spine_old.len() == surviving.len()
+                && surviving.iter().enumerate().all(|(j, &(_, op))| {
+                    spine_old
+                        .get(j)
+                        .and_then(|&p| old_insns.get(p))
+                        .and_then(binop_origin_op)
+                        == Some(op)
+                });
+            if spine_ops_match {
+                for (j, &(new_i, _)) in surviving.iter().enumerate() {
+                    suffix_binop_old_pos.insert(new_i, spine_old[j]);
+                }
+            }
         }
     }
 
@@ -14256,6 +14298,79 @@ elif x == 2:
             "recursive helper must not be inlined; insns: {:?}",
             code.insns
         );
+    }
+
+    /// Compile a script with PEP 657 column tracking enabled (issue #2586): the
+    /// plain `compile_fn` constructs the parser without per-token columns, so its
+    /// `col_table` is all zeros — useless for asserting caret recovery.
+    fn compile_with_cols(src: &str) -> FnCode {
+        use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
+        use std::collections::HashSet;
+        let (tokens, lines, cols, cols_end) = Lexer::new(src).unwrap().into_tokens_with_pos();
+        let mut parser = Parser::new_with_pos(tokens, lines, cols, cols_end);
+        let stmts = parser.parse_program().unwrap();
+        let empty: HashSet<String> = HashSet::new();
+        let names = collect_local_names(&[], &stmts, &empty, &empty);
+        let local_index = std::rc::Rc::new(
+            (0u32..)
+                .zip(names.iter())
+                .map(|(i, n)| (n.clone(), i))
+                .collect(),
+        );
+        crate::compiler::compile_script_with_linenos(&stmts, local_index, false, &[1], "<test>")
+            .unwrap()
+    }
+
+    /// The PEP 657 caret of a surviving binary op must be recovered even when two
+    /// or more nested sub-expressions both const-fold (issue #2586).  In
+    /// `(2 + 3) + "s" + (5 + 7)` the sibling folds `(2+3)` and `(5+7)` open a gap
+    /// so the surviving raising op is not a contiguous suffix of the old binops;
+    /// the left-spine recovery aligns each survivor to the expression's left-edge
+    /// chain.  The raising op `(2+3)+"s"` must underline `(0, 8, 9, 13)`.
+    #[test]
+    fn multifold_caret_recovers_left_spine() {
+        let opt = optimize(compile_with_cols("(2 + 3) + \"s\" + (5 + 7)\n"));
+        // Locate the surviving raising binop (the `... + "s"` fused into a
+        // BinOpConst) and assert its recovered caret matches the source span of
+        // `(2 + 3) + "s"`: full_start 0, operator at cols 8..9, full_end 13.
+        let raising = opt
+            .insns
+            .iter()
+            .zip(opt.col_table.iter())
+            .find(|(insn, _)| matches!(insn, Insn::BinOpConst(..)))
+            .map(|(_, col)| *col);
+        assert_eq!(
+            raising,
+            Some((0, 8, 9, 13)),
+            "raising binop caret should be recovered via left-spine alignment; \
+             insns/cols: {:?}",
+            opt.insns
+                .iter()
+                .zip(opt.col_table.iter())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Left-spine recovery must stay caret-free (never wrong) when a surviving
+    /// binop is a right-operand subtree rather than a left-spine op (issue #2586,
+    /// invariant #2426).  `(2 + 3) + (a + b)` folds the left sibling `(2+3)` and
+    /// leaves both the right subtree `a + b` and the outer `+` alive; the
+    /// left-edge old-binop count (1: only the outer) differs from the survivor
+    /// count (2), so the recovery is abandoned and the fused op keeps no caret.
+    #[test]
+    fn multifold_caret_skips_right_subtree_survivor() {
+        let opt = optimize(compile_with_cols("a = 0\nb = 0\n(2 + 3) + (a + b)\n"));
+        // The fused `BinOpConst` (the outer `5 + (a+b)` after the inner fold) must
+        // not borrow the right subtree's span; left-spine recovery declines here.
+        for (insn, col) in opt.insns.iter().zip(opt.col_table.iter()) {
+            if matches!(insn, Insn::BinOpConst(..)) {
+                assert_eq!(
+                    *col,
+                    (0, 0, 0, 0),
+                    "fused op must stay caret-free when a right-subtree survives"
+                );
+            }
+        }
     }
 
     #[test]

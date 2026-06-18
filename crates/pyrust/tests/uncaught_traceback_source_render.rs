@@ -465,20 +465,20 @@ TypeError: can only concatenate str (not \"int\") to str
 }
 
 #[test]
-fn constfold_sibling_subtree_fold_stays_caret_free() {
-    // Regression guard (#2579 review): `(a+b) + "s" + (c+d)` folds BOTH `a+b` and
-    // `c+d`.  The survivors `{(a+b)+"s", outer}` are not a contiguous suffix of
-    // the old binops, but every operator is `+`, so the operator-sequence
-    // cross-check alone would mis-anchor the raising `(a+b)+"s"` to the folded
-    // `c+d`'s span.  The left-spine guard rejects this alignment, so the op stays
-    // caret-free (a missing caret beats a wrong one, #2426) rather than pointing
-    // at the wrong sub-expression.
+fn constfold_sibling_subtree_fold_underlines_raising_op() {
+    // `(a+b) + "s" + (c+d)` with `a`/`b`/`c`/`d` bound to ints: the variable
+    // sub-adds `a+b` and `c+d` do NOT const-fold, so all four `+` binops survive.
+    // The raising op is the middle `(a+b) + "s"`, whose caret must underline its
+    // own span (`(a+b)` left operand, `^` on its `+`), exactly as CPython 3.12
+    // renders it (verified with python3.12).  The multi-fold left-spine recovery
+    // (#2586) anchors this correctly rather than leaving it caret-free.
     let src = "a = 1\nb = 2\nc = 3\nd = 4\nr = (a+b) + \"s\" + (c+d)\n";
     let stderr = run_pyrust_stderr("cf_sibling.py", src);
     let expected = "\
 Traceback (most recent call last):
   File \"cf_sibling.py\", line 5, in <module>
     r = (a+b) + \"s\" + (c+d)
+        ~~~~~~^~~~~
 TypeError: unsupported operand type(s) for +: 'int' and 'str'
 ";
     assert_eq!(stderr, expected, "got:\n{stderr}");
