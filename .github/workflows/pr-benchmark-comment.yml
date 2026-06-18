@@ -2,6 +2,22 @@ name: PR Benchmark Comment
 
 on:
   pull_request:
+    paths:
+      # VM dispatch loop and expression evaluator — primary perf-sensitive paths
+      - 'crates/pyrust/src/interpreter/runtime/vm.rs'
+      - 'crates/pyrust/src/interpreter/runtime/expr.rs'
+      - 'crates/pyrust/src/interpreter/runtime/calls.rs'
+      - 'crates/pyrust/src/interpreter/runtime/fast_path.rs'
+      # Compiler and optimizer — const-fold / algebraic-simplify affect tight loops
+      - 'crates/pyrust/src/compiler.rs'
+      - 'crates/pyrust/src/optimizer.rs'
+      # Builtin dispatch tables and core value representation
+      - 'crates/pyrust-builtins/src/**'
+      - 'crates/pyrust-core/src/**'
+      # Bench infrastructure itself — runner, config, report generator
+      - 'tools/bench.sh'
+      - 'tools/bench.toml'
+      - 'tools/bench_report.py'
 
 permissions:
   contents: read
