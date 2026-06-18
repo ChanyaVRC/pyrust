@@ -2929,6 +2929,15 @@ impl Interpreter {
                 }
             }
             Ok(items)
+        } else if let ValueKind::PyClass(cls) = val.kind()
+            && let Some(iter_fn) = metaclass_dunder(cls, "__iter__")
+        {
+            // A class whose metaclass defines `__iter__` (e.g. an `Enum`
+            // subclass under `EnumMeta`): `list(Color)` / `tuple(Color)` /
+            // unpacking drive `metaclass.__iter__(cls)` then drain its
+            // iterator, matching CPython (#2611).
+            let iterator = invoke_class_method(self, iter_fn, val.clone(), &[])?;
+            self.collect_iterable(&iterator)
         } else {
             iter_values(val)
         }
@@ -9548,6 +9557,7 @@ impl Interpreter {
         bases_n: u8,
         name_idx: u16,
         kwarg_base: crate::bytecode::Reg,
+        kwarg_n: u8,
     ) -> Result<Value> {
         let class_name = code
             .names
@@ -9577,6 +9587,47 @@ impl Interpreter {
         let class_docstring = proto.docstring.clone();
         let class_kwarg_names = proto.class_kwarg_names.clone();
 
+        // No explicit `metaclass=`, but a base may carry a custom metatype that
+        // must drive class creation (CPython computes the "winner" metaclass as
+        // the most-derived metatype of the bases).  Detect that here, before
+        // running the body, and route through the full metaclass protocol
+        // (`__prepare__` → body → `metaclass(name, bases, ns, **kw)`) so e.g.
+        // `class Color(Enum)` invokes `EnumMeta.__new__`.  When every base is a
+        // plain `type`-metatyped class (the common case), fall through to the
+        // fast native build below.
+        if let Some(winner) = self.inherited_metaclass_winner(regs, num_locals, bases_base, bases_n)?
+        {
+            let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
+            for i in 0..bases_n as usize {
+                let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+                bases_vec.push(vm_read(regs, reg, num_locals)?);
+            }
+            let bases_tuple = Value::tuple(bases_vec);
+            let kwargs: ExpandedArgBuf = class_kwarg_names
+                .iter()
+                .take(kwarg_n as usize)
+                .enumerate()
+                .map(|(i, key)| {
+                    let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
+                    ExpandedCallArg {
+                        name: Some(key.clone()),
+                        value: regs[reg as usize].clone(),
+                    }
+                })
+                .collect();
+            return self.make_class_via_metaclass(
+                Value::py_class(winner),
+                class_name,
+                bases_tuple,
+                kwargs,
+                class_code,
+                local_index,
+                proto_qualname,
+                proto_global_names,
+                proto_nonlocal_names,
+            );
+        }
+
         // Run the class body, collecting the attrs dict it stores.
         let (mut attrs, class_env_rc) = self.run_class_body(
             &class_code,
@@ -9605,50 +9656,6 @@ impl Interpreter {
                 .any(crate::builtin_modules::typing::is_namedtuple_marker)
         {
             return self.build_typing_namedtuple(&class_name, &attrs);
-        }
-
-        // Inherited metaclass (issue #2612): a `class` statement with no
-        // explicit `metaclass=` still uses the most-derived metaclass of its
-        // bases.  If any base has a custom metatype (e.g. `abc.ABCMeta`),
-        // re-route construction through that metaclass so its `__new__` /
-        // `__call__` participate — matching CPython, where `type(Shape)` for
-        // `class Shape(abc.ABC)` is `ABCMeta`, not `type`.
-        if let Some(meta) = inherited_metaclass(base.as_ref(), &extra_bases_vec) {
-            // Rebuild the bases tuple from the originating registers and build a
-            // plain namespace dict from the collected attrs, then invoke the
-            // metaclass exactly like the explicit `metaclass=` path.
-            let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
-            for i in 0..bases_n as usize {
-                let reg = (bases_base as usize + i) as crate::bytecode::Reg;
-                bases_vec.push(vm_read(regs, reg, num_locals)?);
-            }
-            let bases_tuple = Value::tuple(bases_vec);
-            let namespace = Value::dict(PyDict::default());
-            namespace.dict_insert(PyKey::str_from("__qualname__"), Value::string(qualname))?;
-            for (k, v) in &attrs {
-                namespace.dict_insert(PyKey::str_from(k), v.clone())?;
-            }
-            let kwargs: ExpandedArgBuf = class_kwarg_names
-                .iter()
-                .enumerate()
-                .map(|(i, key)| {
-                    let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
-                    ExpandedCallArg { name: Some(key.clone()), value: regs[reg as usize].clone() }
-                })
-                .collect();
-            let mut call_args: ExpandedArgBuf = smallvec![
-                ExpandedCallArg { name: None, value: Value::string(class_name) },
-                ExpandedCallArg { name: None, value: bases_tuple },
-                ExpandedCallArg { name: None, value: namespace },
-            ];
-            call_args.extend(kwargs);
-            let result =
-                self.call_function_expanded(Value::py_class(meta), &call_args)?;
-            class_env_rc
-                .borrow_mut()
-                .values
-                .insert("__class__", result.clone());
-            return Ok(result);
         }
 
         let slots = make_class_extract_slots(&mut attrs, &class_name)?;
@@ -9758,6 +9765,38 @@ impl Interpreter {
             })
             .collect();
 
+        self.make_class_via_metaclass(
+            metaclass,
+            class_name,
+            bases_tuple,
+            kwargs,
+            class_code,
+            local_index,
+            proto_qualname,
+            proto_global_names,
+            proto_nonlocal_names,
+        )
+    }
+
+    /// Core of the explicit-metaclass class-creation protocol, shared by the
+    /// `metaclass=` keyword path (`exec_make_class_meta`) and the
+    /// inherited-metaclass path (`exec_make_class`, when a base carries a custom
+    /// metatype).  Given an already-resolved metaclass value, this runs
+    /// CPython's `__prepare__` → run body → `metaclass(name, bases, ns, **kw)`
+    /// sequence so all class-creation hooks fire once inside the metaclass call.
+    #[allow(clippy::too_many_arguments)]
+    fn make_class_via_metaclass(
+        &mut self,
+        metaclass: Value,
+        class_name: String,
+        bases_tuple: Value,
+        kwargs: ExpandedArgBuf,
+        class_code: Rc<crate::bytecode::FnCode>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        proto_qualname: String,
+        proto_global_names: Rc<HashSet<String>>,
+        proto_nonlocal_names: Rc<HashSet<String>>,
+    ) -> Result<Value> {
         // 1. ns = metaclass.__prepare__(name, bases, **kwds).  __prepare__ is a
         //    classmethod resolved via the metaclass; `type.__prepare__` returns
         //    a fresh dict, so a metaclass without an override still gets a dict.
@@ -10013,6 +10052,54 @@ impl Interpreter {
         self.call_function_expanded(builder, &args)
     }
 
+    /// Compute the metaclass "winner" inherited from the bases for a `class`
+    /// statement with no explicit `metaclass=`.  CPython picks the most-derived
+    /// metatype among the bases (`type` is the floor).  Returns `Some(winner)`
+    /// only when the winner is a *custom* metaclass (something other than the
+    /// built-in `type` singleton), in which case `exec_make_class` must route
+    /// through the full metaclass protocol so the custom `__new__` / `__prepare__`
+    /// run.  Returns `None` when every base is plain-`type`-metatyped (the common
+    /// case), keeping the native fast build.  A bases pair whose metatypes are
+    /// unrelated is a metaclass conflict, matching CPython.
+    fn inherited_metaclass_winner(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        bases_base: crate::bytecode::Reg,
+        bases_n: u8,
+    ) -> Result<Option<Rc<RefCell<PyClass>>>> {
+        let mut winner: Option<Rc<RefCell<PyClass>>> = None;
+        for i in 0..bases_n as usize {
+            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+            let base_val = vm_read(regs, reg, num_locals)?;
+            let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(&base_val)
+                .unwrap_or(base_val);
+            let ValueKind::PyClass(c) = base_val.kind() else {
+                continue;
+            };
+            let meta = metaclass_of(c);
+            // Skip the default `type` metatype — it never beats a custom winner.
+            if Rc::ptr_eq(&meta, &type_class_singleton()) {
+                continue;
+            }
+            match &winner {
+                None => winner = Some(meta),
+                Some(cur) => {
+                    if class_is_subclass_of(&meta, cur) {
+                        winner = Some(meta);
+                    } else if !class_is_subclass_of(cur, &meta) {
+                        return Err(pyrust_core::type_err!(
+                            "metaclass conflict: the metaclass of a derived class \
+                             must be a (non-strict) subclass of the metaclasses of \
+                             all its bases"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(winner)
+    }
+
     /// Resolve `R[bases_base .. bases_base+bases_n]` into (primary, extras),
     /// rejecting non-class and non-subclassable bases, and incompatible layouts.
     fn make_class_resolve_bases(
@@ -10221,40 +10308,6 @@ fn collect_class_attrs(
 /// __qualname__: wrap a bare __init_subclass__ as a classmethod, pop and
 /// validate __qualname__, and seed __module__/__doc__/__hash__/__dict__/
 /// __weakref__.
-/// Determine the inherited metaclass for a `class` statement that has no
-/// explicit `metaclass=` (issue #2612).  CPython uses the most-derived
-/// metaclass among the bases; the default `type` is represented as `None` on
-/// `PyClass.metatype`, so a class whose bases all have `metatype == None`
-/// returns `None` here and the caller takes the plain `MakeClass` fast path.
-///
-/// When at least one base carries a custom metatype, the winner must be a
-/// subclass of every other base's metatype; we return that winner so the
-/// caller routes construction through it.  If two metatypes are incomparable
-/// the first-seen is returned — a faithful resolution of the unambiguous
-/// single-hierarchy case (the only one the minimal `abc` surface needs).
-fn inherited_metaclass(
-    base: Option<&Rc<RefCell<PyClass>>>,
-    extra_bases: &[Rc<RefCell<PyClass>>],
-) -> Option<Rc<RefCell<PyClass>>> {
-    let mut winner: Option<Rc<RefCell<PyClass>>> = None;
-    let metatypes = base
-        .into_iter()
-        .chain(extra_bases.iter())
-        .filter_map(|b| b.borrow().metatype.clone());
-    for mt in metatypes {
-        match &winner {
-            None => winner = Some(mt),
-            Some(cur) => {
-                // Keep the more-derived of the two.
-                if class_is_subclass_of(&mt, cur) {
-                    winner = Some(mt);
-                }
-            }
-        }
-    }
-    winner
-}
-
 fn make_class_finalize_attrs(
     attrs: &mut IndexMap<String, Value>,
     proto_qualname: String,

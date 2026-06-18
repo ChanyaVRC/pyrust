@@ -4404,6 +4404,7 @@ impl Interpreter {
                             BigRange(PyBigInt, PyBigInt, PyBigInt),
                             Generator,
                             PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+                            MetaIter(Value),
                             BuiltinIterable,
                             ListOrTuple,
                             Other,
@@ -4415,6 +4416,15 @@ impl Interpreter {
                             }
                             ValueKind::Generator(_) => IterTag::Generator,
                             ValueKind::PyInstance(inst) => IterTag::PyInstance(Rc::clone(inst)),
+                            // A class whose metaclass defines `__iter__` (e.g. an
+                            // `Enum` subclass under `EnumMeta`) is iterable: `for m
+                            // in Color` / `list(Color)` dispatch through the
+                            // metaclass slot, matching CPython (#2611).
+                            ValueKind::PyClass(cls)
+                                if metaclass_dunder(cls, "__iter__").is_some() =>
+                            {
+                                IterTag::MetaIter(metaclass_dunder(cls, "__iter__").unwrap())
+                            }
                             ValueKind::BuiltinObject { ops, .. } if ops.is_iterable() => {
                                 IterTag::BuiltinIterable
                             }
@@ -4532,6 +4542,19 @@ impl Interpreter {
                                 } else {
                                     IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                                 }
+                            }
+                            IterTag::MetaIter(iter_fn) => {
+                                // `metaclass.__iter__(cls)` returns an iterator
+                                // (e.g. `EnumMeta.__iter__`).  Drive it to a Vec so
+                                // the class register the loop may clobber is not
+                                // referenced again (#2611).
+                                let iter_obj = vm_try!(invoke_class_method(
+                                    self,
+                                    iter_fn,
+                                    src_val,
+                                    &[],
+                                ));
+                                IterState::Materialized(vm_try!(self.collect_iterable(&iter_obj)), 0)
                             }
                             IterTag::BuiltinIterable => {
                                 // Bytearray: materialise elements up front (like frozenset /
@@ -5091,8 +5114,8 @@ impl Interpreter {
                     let r = self.exec_make_function(code, &regs, num_locals, *proto_idx, *defs_base, *annots_base);
                     regs[*dst as usize] = vm_try!(r);
                 }
-                Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, _kwarg_n) => {
-                    let r = self.exec_make_class(code, &regs, num_locals, *proto_idx, *bases_base, *bases_n, *name_idx, *kwarg_base);
+                Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n) => {
+                    let r = self.exec_make_class(code, &regs, num_locals, *proto_idx, *bases_base, *bases_n, *name_idx, *kwarg_base, *kwarg_n);
                     regs[*dst as usize] = vm_try!(r);
                 }
                 Insn::MakeClassMeta(dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n, meta_reg) => {

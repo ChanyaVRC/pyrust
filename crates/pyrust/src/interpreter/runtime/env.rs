@@ -3276,6 +3276,14 @@ impl Interpreter {
             {
                 crate::builtin_modules::dataclasses::inject_python_members(self, m)?;
             }
+            // `enum` Python-source members (issue #2611): the whole module is
+            // defined in `enum_py.py` (`Enum` / `IntEnum` / `EnumMeta` /
+            // `EnumType` / `auto`), exec'd here since the native body is empty.
+            if name == "enum"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                crate::builtin_modules::enum_mod::inject_python_members(self, m)?;
+            }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
             // `super::os_path::module()`, which builds a *fresh*
@@ -4448,7 +4456,21 @@ fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
 
             // Find a good head: first element of some list that does not
             // appear in the tail of any other list.
+            //
+            // `object` is deferred: it is the universal root, so it must never
+            // be chosen while any non-`object` head is still available.  pyrust
+            // represents the implicit `object` base inconsistently — primitive
+            // classes carry an explicit `object` base (so their inner
+            // linearization ends in `object`) while base-less user classes do
+            // not — which can otherwise let `object` win ahead of a sibling
+            // user base when mixing the two (`class E(int, UserBase)` would
+            // linearize as `[E, int, object, UserBase]` instead of the correct
+            // `[E, int, UserBase, object]`).  Deferring `object` restores the
+            // correct order without forcing `object` into every inner list
+            // (which would create spurious conflicts for the abc-`extra_bases`
+            // carried by `dict`/`list`/… — issue #2611).
             let mut chosen: Option<Rc<RefCell<PyClass>>> = None;
+            let mut deferred_object: Option<Rc<RefCell<PyClass>>> = None;
             'outer: for list in &lists {
                 let head_ptr = Rc::as_ptr(&list[0]);
                 // Check that head_ptr does not appear in the tail of any list.
@@ -4459,8 +4481,17 @@ fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
                         }
                     }
                 }
+                if head_ptr == obj_ptr {
+                    // Valid head, but defer it in case a non-object head exists.
+                    deferred_object = Some(Rc::clone(&list[0]));
+                    continue;
+                }
                 chosen = Some(Rc::clone(&list[0]));
                 break;
+            }
+            // No non-object head was found: fall back to a deferred `object`.
+            if chosen.is_none() {
+                chosen = deferred_object;
             }
 
             let chosen = match chosen {

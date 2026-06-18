@@ -168,4 +168,9 @@ pyrust_builtin_modules! {
     // `astuple`, … are defined in `dataclasses_py.py` and injected by the
     // post-load hook in `env.rs::load_module`; the native body is empty.
     dataclasses,
+    // `enum` (issue #2611): a pure-Python module (`enum_py.py`) — `Enum`,
+    // `IntEnum`, `EnumMeta`/`EnumType`, `auto` — injected by the post-load
+    // hook in `env.rs::load_module`.  The Rust ident is `enum_mod` because
+    // `enum` is a keyword; its Python-level name is `enum`.
+    "enum" as enum_mod,
 }
