@@ -8595,6 +8595,14 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
     // singleton, so a class-vs-class walk handles every primitive check
     // (including `bool` → `int` via base inheritance).
     if let ValueKind::PyClass(expected) = cls.kind() {
+        // Deprecated `typing.List`/`typing.Dict`/… aliases (#2601): delegate
+        // the check to the underlying builtin (`list`, `dict`, …) so
+        // `isinstance([], typing.List)` behaves like `isinstance([], list)`.
+        if let Some(delegate) =
+            crate::builtin_modules::typing::legacy_alias_delegate(expected)
+        {
+            return isinstance_single(obj, &delegate);
+        }
         // Fast path: `object` is the universal base — every Python value
         // is an instance of `object`.  Check before the primitive-class
         // dispatch so that `isinstance(None, object)`,
@@ -8992,6 +9000,15 @@ fn issubclass_check(
             }
         }
         return Ok(false);
+    }
+    // Deprecated `typing.List`/`typing.Dict`/… aliases (#2601): delegate the
+    // check to the underlying builtin so `issubclass(list, typing.List)`
+    // behaves like `issubclass(list, list)`.
+    if let ValueKind::PyClass(classinfo_rc) = classinfo.kind()
+        && let Some(delegate) =
+            crate::builtin_modules::typing::legacy_alias_delegate(classinfo_rc)
+    {
+        return issubclass_check(fn_name, cls, &delegate, interp);
     }
     // PEP 604: `issubclass(X, int | str)` — unwrap UnionType to its __args__.
     if let Some(args) = pyrust_builtins::union_type::union_type_args(classinfo) {

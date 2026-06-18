@@ -24,8 +24,12 @@ def get_origin(tp):
     # `__origin__`.  Normalise to match CPython's observable origins.
     if origin is Optional or origin is Union:
         return Union
-    if origin is Type:
-        return type
+    # The deprecated `List`/`Dict`/`Type`/… aliases carry the alias class as
+    # their `__origin__`; CPython reports the underlying builtin (`list`,
+    # `type`, …), which is stashed on the alias as `__pyrust_legacy_alias_of__`.
+    builtin = getattr(origin, "__pyrust_legacy_alias_of__", None)
+    if builtin is not None:
+        return builtin
     return origin
 
 
