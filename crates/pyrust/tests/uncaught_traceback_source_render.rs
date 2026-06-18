@@ -190,6 +190,42 @@ TypeError: unsupported operand type(s) for +: 'int' and 'str'
 }
 
 #[test]
+fn binop_parenthesized_right_operand_caret_is_byte_exact() {
+    // Issue #2580: `"s" + (a + b)` with `a`/`b` const-known folds the inner
+    // `a + b` into a constant, leaving only the outer `"s" + 3` as a fused
+    // `BinOpConst`.  The fold collapses one of the two original `BinOp`s, which
+    // used to disable the monotone caret recovery and drop the outer op's caret
+    // entirely.  CPython 3.12 underlines the whole expression `~` with `^` on the
+    // operator; the surviving fused op must recover that span by register match.
+    let stderr = run_pyrust_stderr("paren_rhs.py", "a = 1\nb = 2\n\"s\" + (a + b)\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"paren_rhs.py\", line 3, in <module>
+    \"s\" + (a + b)
+    ~~~~^~~~~~~~~
+TypeError: can only concatenate str (not \"int\") to str
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn binop_parenthesized_left_operand_caret_is_byte_exact() {
+    // Issue #2580, mirror case: the folded inner binop is the *left* operand.
+    // `(a + b) + "s"` folds `a + b` away; the outer op reuses the same
+    // destination temp as the inner, so a `(dst, lhs)`-register match (not `dst`
+    // alone) is needed to pin the surviving fused op to the correct origin span.
+    let stderr = run_pyrust_stderr("paren_lhs.py", "a = 1\nb = 2\n(a + b) + \"s\"\n");
+    let expected = "\
+Traceback (most recent call last):
+  File \"paren_lhs.py\", line 3, in <module>
+    (a + b) + \"s\"
+    ~~~~~~~~^~~~~
+TypeError: unsupported operand type(s) for +: 'int' and 'str'
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
 fn subscript_keyerror_caret_is_byte_exact() {
     // `d["k"]`: the object gets `~`, the `[...]` subscript gets `^`.
     let stderr = run_pyrust_stderr("subkey.py", "d = {}\nd[\"k\"]\n");
