@@ -64,7 +64,13 @@ impl BuiltinTypeOps for TypeCallWrapperOps {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<TypeCallWrapperState>()?;
         match name {
-            "__name__" | "__qualname__" => Some(Value::string("__call__")),
+            "__name__" => Some(Value::string("__call__")),
+            // CPython reports the wrapper's `__qualname__` as
+            // `<owner-type>.__call__` (`function.__call__`,
+            // `builtin_function_or_method.__call__`, `type.__call__` for a
+            // class, `method-wrapper.__call__` for a nested wrapper) while
+            // `__name__` stays the bare slot name.
+            "__qualname__" => Some(Value::string(format!("{}.__call__", s.owner))),
             // `C.__call__.__self__` is the bound callable.
             "__self__" => Some(s.callable.clone()),
             "__objclass__" => Some(s.callable.clone()),

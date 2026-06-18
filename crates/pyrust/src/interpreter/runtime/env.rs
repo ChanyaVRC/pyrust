@@ -697,6 +697,21 @@ impl Interpreter {
                     if let Some(val) = ops.getattr(state, name) {
                         return Ok(val);
                     }
+                    // Issue #2550: a `__call__` method-wrapper is itself
+                    // callable, so CPython exposes `f.__call__.__call__ ==
+                    // <method-wrapper '__call__' of method-wrapper object at
+                    // 0x...>` (and `hasattr(f.__call__, '__call__') is True`),
+                    // with calling it re-dispatching onto the underlying
+                    // callable.  Surface another wrapper bound to this one.
+                    if name == "__call__"
+                        && ops.type_name()
+                            == pyrust_builtins::type_call_wrapper::TYPE_NAME
+                    {
+                        return Ok(pyrust_builtins::type_call_wrapper::call_wrapper(
+                            target.clone(),
+                            "method-wrapper",
+                        ));
+                    }
                     // `__slots__` member_descriptor exposes its descriptor
                     // protocol as bound methods (`S.x.__get__`, …), issue #2084.
                     if ops.type_name()
