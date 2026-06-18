@@ -104,3 +104,36 @@ try:
     bytearray().extend(StrVals())
 except TypeError as e:
     print("TypeError:", e)  # 'str' object cannot be interpreted as an integer
+
+
+# --- subclass of a NON-iterable builtin (int/float/complex) is not iterable:
+# bytearray.extend must report `can't extend bytearray with <type>`, not the
+# `'int' object is not iterable` a blind collect would surface (review #2554).
+class IntSub(int):
+    pass
+
+
+try:
+    bytearray().extend(IntSub(5))
+except TypeError as e:
+    print("intsub:", e)  # can't extend bytearray with IntSub
+
+
+class FloatSub(float):
+    pass
+
+
+try:
+    bytearray().extend(FloatSub(1.0))
+except TypeError as e:
+    print("floatsub:", e)  # can't extend bytearray with FloatSub
+
+
+# --- subclass of an ITERABLE builtin still extends through its buffer ---
+class ListSub(list):
+    pass
+
+
+ba = bytearray()
+ba.extend(ListSub([65, 66]))
+print(ba)  # bytearray(b'AB')

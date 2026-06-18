@@ -2576,21 +2576,46 @@ impl Interpreter {
             ));
         }
         let iterable = args.pop().unwrap();
+        // Fast path for eager built-in containers (list/tuple/str/range/dict/
+        // set/bytes). Iterating these never runs user code, so no exception can
+        // be raised mid-iteration and there is no partial progress to preserve —
+        // CPython's incremental semantics are indistinguishable from a bulk
+        // extend here. `collect_iterable` reads the argument to completion before
+        // the receiver is touched, which also keeps the self-extend aliasing
+        // guarantee (`a.extend(a)`). Skipping the per-element `iter()`/
+        // `call_next` loop avoids a ~6.7x regression on the common
+        // `list.extend(list)` path. (frozenset / bytearray are `BuiltinObject`,
+        // which also backs lazy map/filter/zip iterators, so they take the
+        // incremental path below — still correct, just rarer as an argument.)
+        if matches!(
+            iterable.kind(),
+            ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Str(_)
+                | ValueKind::Range { .. }
+                | ValueKind::BigRange { .. }
+                | ValueKind::Dict(_)
+                | ValueKind::Set(_)
+                | ValueKind::Bytes(_)
+        ) {
+            let snapshot = self.collect_iterable(&iterable)?;
+            receiver.list_extend(snapshot)?;
+            return Ok(Value::none());
+        }
         // CPython's `list.extend` appends incrementally and keeps the partial
-        // progress when the iterator raises mid-iteration (#2531). Turn the
-        // argument into an iterator via the `iter()` builtin — the same path
-        // `list()` / the `for`-loop use, which drives user `__iter__`/`__next__`
-        // objects (#2534), the legacy `__getitem__` protocol, and every lazy
-        // generator state — then push each element onto the receiver as it
-        // arrives. `iter()` snapshots eager containers into a `NativeIterFrame`,
-        // so `a.extend(a)` iterates the original elements and terminates,
-        // preserving the self-extend aliasing guarantee.
+        // progress when the iterator raises mid-iteration (#2531). For lazy
+        // iterables (generators, map/filter/zip, user `__iter__`/`__next__` or
+        // the legacy `__getitem__` protocol) whose iteration runs user code,
+        // turn the argument into an iterator via the `iter()` builtin — the same
+        // path `list()` / the `for`-loop use — and push each element onto the
+        // receiver as it arrives. `iter()` snapshots eager containers into a
+        // `NativeIterFrame`, so self-extend still terminates even on this path.
         let iter_arg = ExpandedCallArg {
             name: None,
             value: iterable,
         };
-        let dispatch = crate::builtin_registry::lookup("iter")
-            .expect("iter must be in the registry");
+        let dispatch =
+            crate::builtin_registry::lookup("iter").expect("iter must be in the registry");
         let iterator = dispatch(self, &[iter_arg])?;
         loop {
             match self.call_next(&iterator, None) {
@@ -2863,11 +2888,17 @@ impl Interpreter {
             // A user-defined PyInstance is collected only when it is actually
             // iterable; a plain object falls through so the ops table picks the
             // canonical `can't extend bytearray with <type>` message (#2534).
+            // Gate strictly on the iteration protocols (`__iter__` / the legacy
+            // `__getitem__`): a subclass of an *iterable* builtin (list/dict/
+            // bytes/set/…) inherits one of these on its class, while a subclass
+            // of a non-iterable builtin (int/float/complex/bool) inherits
+            // neither and must fall through to the ops-table message — collecting
+            // it would surface `'int' object is not iterable` instead of
+            // `can't extend bytearray with <type>` (matching CPython).
             ValueKind::PyInstance(inst) => {
                 let class = Rc::clone(&inst.borrow().class);
                 lookup_class_attr(&class, "__iter__").is_some()
                     || lookup_class_attr(&class, "__getitem__").is_some()
-                    || instance_builtin_data(inst).is_some()
             }
             _ => false,
         };
