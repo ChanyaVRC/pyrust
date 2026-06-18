@@ -357,6 +357,32 @@ fn remap_lineno_and_col_tables(
         }
     }
 
+    // Per-destination-register index of the old `BinOp`s (issue #2580).  The
+    // monotone `binop_col_cursor` scan above assumes the surviving fused op is the
+    // *next* old `BinOp` in source order — true when fusion is a clean 1:1
+    // replacement, but WRONG when const-folding *collapsed an inner* binop into a
+    // constant: `"s" + (a + b)` (with `a`/`b` const-known) folds the inner `a + b`
+    // away, leaving only the outer `"s" + 3` as a `BinOpConst`.  The surviving op
+    // then descends from the *second* old `BinOp`, not the first the cursor points
+    // at, so the count guard above disables the (now-misaligned) monotone recovery
+    // entirely and the outer op loses its caret.  Fusion preserves the surviving
+    // op's destination *and* register operand (folding an operand only rewrites the
+    // const side), so its origin old `BinOp` can be pinned by the `(dst, lhs)`
+    // register pair: when exactly one old `BinOp` at-or-after the cursor matches,
+    // that is unambiguously the origin and its span is safe to carry.  `dst` alone
+    // is too coarse — an inner and outer op of one expression routinely reuse the
+    // same destination temp (`(a + b) + "s"`) — so the `lhs` register breaks the
+    // tie.  Still "never a wrong caret": a non-unique match falls through to no
+    // anchor.
+    let mut old_binop_reg_positions: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    if want_cols {
+        for &p in &old_binop_positions {
+            if let Insn::BinOp(d, l, _, _) = old_insns[p] {
+                old_binop_reg_positions.entry((d, l)).or_default().push(p);
+            }
+        }
+    }
+
     // Ascending old positions of the call opcodes (`Call` / `CallMemo`) the
     // self-tail-call peephole (`pass_self_tail_call`) may have rewritten into a
     // `TailCall` (issue #2443).  A `return f(...)` compiles to `Call(r) + Return(r)`,
@@ -550,6 +576,29 @@ fn remap_lineno_and_col_tables(
                             if let Some(&i) = old_binop_positions.get(binop_col_cursor) {
                                 *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                                 binop_col_cursor += 1;
+                            }
+                        } else if want_cols && insn_is_fused_binop(new_insn) {
+                            // The monotone recovery is unsound (an inner binop was
+                            // folded away, so the surviving op is not the next old
+                            // `BinOp` in order — issue #2580).  Pin the origin by the
+                            // surviving op's `(dst, lhs)` registers: fusion preserves
+                            // them, so a *unique* old `BinOp` at-or-after the cursor
+                            // with the same register pair is unambiguously the origin.
+                            // A non-unique match stays caret-free (never a wrong one).
+                            let new_regs = match new_insn {
+                                Insn::BinOpConst(d, l, _, _, _) | Insn::BinOpImm(d, l, _, _, _) => {
+                                    Some((*d, *l))
+                                }
+                                _ => None,
+                            };
+                            if let Some(key) = new_regs
+                                && let Some(locs) = old_binop_reg_positions.get(&key)
+                            {
+                                let candidates: Vec<usize> =
+                                    locs.iter().copied().filter(|&p| p >= old_pos).collect();
+                                if let [i] = candidates[..] {
+                                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                                }
                             }
                         }
                         // Recover the caret anchor of a `TailCall` synthesized from
