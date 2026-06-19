@@ -69,6 +69,12 @@ impl BuiltinTypeOps for DictKeysOps {
     fn has_method(&self, name: &str) -> bool {
         name == "isdisjoint" || name == "__reversed__"
     }
+
+    // `mapping` is a read-only data attribute (not a method): a `mappingproxy`
+    // wrapping the parent dict, reflecting live changes (issue #2679).
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        view_mapping_attr(state, name)
+    }
 }
 
 pub fn dict_keys(rc: DictRc) -> Value {
@@ -121,6 +127,11 @@ impl BuiltinTypeOps for DictValuesOps {
     // `__reversed__` for `hasattr`/attribute access.
     fn has_method(&self, name: &str) -> bool {
         name == "__reversed__"
+    }
+
+    // `mapping` data attribute — see DictKeysOps::getattr (issue #2679).
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        view_mapping_attr(state, name)
     }
 }
 
@@ -187,6 +198,11 @@ impl BuiltinTypeOps for DictItemsOps {
     fn has_method(&self, name: &str) -> bool {
         name == "isdisjoint" || name == "__reversed__"
     }
+
+    // `mapping` data attribute — see DictKeysOps::getattr (issue #2679).
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        view_mapping_attr(state, name)
+    }
 }
 
 pub fn dict_items(rc: DictRc) -> Value {
@@ -250,4 +266,15 @@ fn borrow_view(state: &BuiltinState) -> Option<DictRc> {
     borrow
         .downcast_ref::<DictView>()
         .map(|v| Rc::clone(&v.items))
+}
+
+/// Serve the `mapping` data attribute shared by all three view types: a live
+/// `mappingproxy` wrapping the parent dict (issue #2679).  Returns `None` for
+/// any other attribute so the interpreter falls through to method lookup.
+fn view_mapping_attr(state: &BuiltinState, name: &str) -> Option<Value> {
+    if name != "mapping" {
+        return None;
+    }
+    let rc = borrow_view(state)?;
+    Some(crate::mapping_proxy::mapping_proxy_dict(rc))
 }
