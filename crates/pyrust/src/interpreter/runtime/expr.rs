@@ -154,6 +154,26 @@ fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
     )
 }
 
+/// `true` when `v` is a `PyInstance` whose class defines its own `__ne__`
+/// (i.e. the resolved `__ne__` is *not* the inherited `object.__ne__`).
+///
+/// Used by `BinaryOp::Ne` (issue #2645) to decide whether to dispatch a
+/// user-defined `__ne__` or to fall back to negating `__eq__`.  Built-in
+/// `__ne__` slots inherited from `object` resolve to
+/// `BuiltinFunction("object.__ne__")` (see `lookup_class_attr`'s object
+/// fallback), which only compares identity — exactly the slot CPython
+/// replaces with `not __eq__`.
+fn pyinstance_has_user_ne(v: &Value) -> bool {
+    let ValueKind::PyInstance(inst) = v.kind() else {
+        return false;
+    };
+    let class = Rc::clone(&inst.borrow().class);
+    match lookup_class_attr(&class, "__ne__").as_ref().map(|m| m.kind()) {
+        Some(ValueKind::BuiltinFunction("object.__ne__")) | None => false,
+        Some(_) => true,
+    }
+}
+
 /// Element-wise equality over two equal-length slices, returning
 /// [`SeqFast::Resolved`] as soon as every pair can be decided by
 /// `Value::eq` alone.  As soon as a pair that could need user dispatch
@@ -3890,8 +3910,35 @@ impl Interpreter {
                 Ok(Value::bool_(self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Ne => {
-                if let Some(r) = self.try_dunder_binary(&left, &right, "__ne__", "__ne__") {
-                    return r;
+                // CPython's `slot_tp_richcompare` derives `__ne__` as the logical
+                // negation of `__eq__` whenever a class does not define its own
+                // `__ne__` (issue #2645).  pyrust resolves the inherited
+                // `object.__ne__` instead, which only compares identity and so
+                // returns the wrong answer for `a != a` when `a.__eq__` returns
+                // `False` (and similar cases).  Only dispatch `__ne__` directly
+                // when at least one operand carries a *user-defined* `__ne__`;
+                // otherwise fall through to `not (a == b)`, which already runs
+                // the full `__eq__` / reflected-`__eq__` / NotImplemented chain.
+                if pyinstance_has_user_ne(&left) || pyinstance_has_user_ne(&right) {
+                    // A user-defined `__ne__` wins.  If it (and the reflected
+                    // slot) returns NotImplemented, CPython falls back to the
+                    // *identity*-based default — NOT to `not __eq__` — so route
+                    // through `values_user_eq` here, matching the prior
+                    // behaviour for that path.
+                    if let Some(r) = self.try_dunder_binary(&left, &right, "__ne__", "__ne__") {
+                        return r;
+                    }
+                    return Ok(Value::bool_(!self.values_user_eq(&left, &right)?));
+                }
+                // No user `__ne__`: mirror CPython's `slot_tp_richcompare`, which
+                // derives `__ne__` as `not __eq__`.  Try the user `__eq__` /
+                // reflected-`__eq__` chain first and negate its truthiness, so
+                // `b != b` honours a custom `__eq__` returning `False` (the
+                // `values_user_eq` identity short-circuit below would wrongly
+                // report equal for `a is b`).  `values_user_eq` remains the
+                // fallback for container element-wise dispatch (issue #436).
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
+                    return Ok(Value::bool_(!r?.truthy_raw()));
                 }
                 Ok(Value::bool_(!self.values_user_eq(&left, &right)?))
             }
