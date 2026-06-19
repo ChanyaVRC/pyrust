@@ -1385,7 +1385,7 @@ impl Interpreter {
                 // No user __getitem__: delegate to the backing primitive when
                 // present.  For dict backing, also honour __missing__ on a
                 // missing key (issue #1134).
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                if let Some(backing) = builtin_data_backing(target) {
                     if backing.as_dict().is_some() {
                         let lookup = if let Some(s) = index.as_str() {
                             self.dict_str_lookup(&backing, s)?
@@ -3717,18 +3717,8 @@ impl Interpreter {
                         //   int subclass  → Int/Bool/BigInt backing
                         //   str subclass  → Str backing
                         // A PyInstance without a relevant backing falls through
-                        // to the TypeError arm below. The tag enum breaks the
-                        // borrow on v.kind() before we move v or the backing.
-                        let inst_backing = match v.kind() {
-                            ValueKind::PyInstance(inst) => {
-                                Some(instance_builtin_data(&Rc::clone(inst)))
-                            }
-                            _ => None,
-                        };
-                        let v = match inst_backing {
-                            Some(Some(backing)) => backing,
-                            _ => v,
-                        };
+                        // to the TypeError arm below.
+                        let v = builtin_data_backing(&v).unwrap_or(v);
                         match v.kind() {
                             ValueKind::None => { /* delete */ }
                             ValueKind::Int(n) => {
@@ -4898,8 +4888,7 @@ impl Interpreter {
         // than mutate the backing dict in place and return the subclass here (#2639).
         if result.is_none()
             && op == BinaryOp::BitOr
-            && let Some(inst_rc) = left.as_py_instance_rc()
-                && let Some(backing) = instance_builtin_data(inst_rc)
+            && let Some(backing) = builtin_data_backing(left)
                     && matches!(backing.kind(), ValueKind::Dict(_))
                         && (is_augmented_assign || dict_entries_from_value(right).is_some()) {
                             // #1914: dedup `PyKey::Object` keys via user `__eq__`.
@@ -4933,9 +4922,9 @@ impl Interpreter {
             // to `eval_binary` rather than mutate the backing set in place (#2639).
             // The frozenset `else` branch below always runs (its `result` is always
             // `None` since `try_call_binary_method` no-ops on non-PyInstance left).
-            if let Some(inst_rc) = left.as_py_instance_rc() {
+            if left.as_py_instance_rc().is_some() {
                 if result.is_none()
-                    && let Some(backing) = instance_builtin_data(inst_rc)
+                    && let Some(backing) = builtin_data_backing(left)
                     && matches!(backing.kind(), ValueKind::Set(_)) {
                         let op_sym = match op {
                             BinaryOp::BitOr => "|=",
@@ -5014,8 +5003,7 @@ impl Interpreter {
         // through to `eval_binary_aug` rather than mutate self in place here.
         if result.is_none()
             && matches!(op, BinaryOp::Add | BinaryOp::Mul)
-            && let Some(inst_rc) = left.as_py_instance_rc()
-            && let Some(backing) = instance_builtin_data(inst_rc)
+            && let Some(backing) = builtin_data_backing(left)
             && let Some(data_rc) = pyrust_builtins::bytearray::as_bytearray_rc(&backing)
         {
             match op {
@@ -5257,7 +5245,7 @@ impl Interpreter {
                     }],
                 );
             }
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if let Some(backing) = builtin_data_backing(target) {
                 return self.eval_slice(&backing, lo, hi, st);
             }
             return Err(pyrust_core::type_err!("'{}' object is not subscriptable", class.borrow().name));
@@ -5663,7 +5651,7 @@ impl Interpreter {
                 // list/dict/set subclass with no user-defined __contains__:
                 // delegate to the backing primitive, matching CPython's
                 // inherited tp_sq_contains / sq_contains slot behaviour.
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                if let Some(backing) = builtin_data_backing(&container) {
                     return self.eval_in(backing, item);
                 }
                 // No __contains__ or __builtin_data__: fall back to __iter__ if available.
@@ -5800,7 +5788,7 @@ impl Interpreter {
             Tag::Instance(rc) => rc,
         };
         // Int subclass: extract the backing primitive (Int or BigInt).
-        if let Some(backing) = instance_builtin_data(&inst_rc)
+        if let Some(backing) = builtin_data_backing(&val)
             && matches!(backing.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
                 return Ok(backing);
             }
@@ -5848,7 +5836,7 @@ impl Interpreter {
             Tag::Instance(rc) => rc,
         };
         // Float or int subclass: extract the backing primitive directly.
-        if let Some(backing) = instance_builtin_data(&inst_rc)
+        if let Some(backing) = builtin_data_backing(&val)
             && matches!(
                 backing.kind(),
                 ValueKind::Float(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
@@ -6650,7 +6638,7 @@ impl Interpreter {
         }
         if let Some(inst_rc) = arg.as_py_instance_rc() {
             // bytes subclass: extract the backing bytes directly.
-            if let Some(backing) = instance_builtin_data(inst_rc)
+            if let Some(backing) = builtin_data_backing(&arg)
                 && let ValueKind::Bytes(rc) = backing.kind() {
                     return Ok(rc.to_vec());
                 }
@@ -8477,7 +8465,7 @@ impl Interpreter {
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 if let ValueKind::PyInstance(inst) = obj_val.kind() {
                     let inst_rc = Rc::clone(inst);
-                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    if let Some(backing) = builtin_data_backing(&obj_val) {
                         enum BkKind {
                             Dict,
                             List,
