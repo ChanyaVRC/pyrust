@@ -4882,7 +4882,14 @@ impl Interpreter {
         // mutate the backing bytearray in place and return `left` so the subclass
         // type and object identity are preserved (matching CPython's
         // `bytearray.__iadd__` / `__imul__`, which mutate self and return self).
-        if matches!(op, BinaryOp::Add | BinaryOp::Mul)
+        //
+        // `result.is_none()` gates this to the no-override case only: if a
+        // user-defined `__iadd__` / `__imul__` *exists* and returned
+        // `NotImplemented`, CPython falls back to plain binary `+` / `*` (yielding
+        // a plain `bytearray`, dropping the subclass type), so we must let it fall
+        // through to `eval_binary_aug` rather than mutate self in place here.
+        if result.is_none()
+            && matches!(op, BinaryOp::Add | BinaryOp::Mul)
             && let Some(inst_rc) = left.as_py_instance_rc()
             && let Some(backing) = instance_builtin_data(inst_rc)
             && let Some(data_rc) = pyrust_builtins::bytearray::as_bytearray_rc(&backing)

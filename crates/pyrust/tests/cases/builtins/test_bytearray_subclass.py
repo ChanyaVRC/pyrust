@@ -71,6 +71,28 @@ q = BA2(b"a")
 q += b"b"
 print(q)
 
+
+# A user-defined __iadd__ / __imul__ that returns NotImplemented falls back to
+# plain binary + / * (CPython drops the subclass type, yielding plain bytearray).
+class BA3(bytearray):
+    def __iadd__(self, other):
+        return NotImplemented
+
+
+u = BA3(b"a")
+u += b"b"
+print(u, type(u).__name__)
+
+
+class BA4(bytearray):
+    def __imul__(self, n):
+        return NotImplemented
+
+
+v = BA4(b"a")
+v *= 2
+print(v, type(v).__name__)
+
 # Non-augmented binary `+` / `*` do not mutate the operand and follow the
 # usual (non-subclass-preserving) bytearray result type.
 a = BA(b"x")
