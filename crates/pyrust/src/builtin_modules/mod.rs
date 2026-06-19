@@ -45,35 +45,67 @@ use crate::value::Value;
 /// `pyrust_module!` reads them via the surrounding scope.
 macro_rules! pyrust_builtin_modules {
     ($($spec:tt)*) => {
-        pyrust_builtin_modules_internal! { @parse [] $($spec)* }
+        pyrust_builtin_modules_internal! { @parse [] [] $($spec)* }
     };
 }
 
-/// Implementation detail of [`pyrust_builtin_modules!`].  Accumulates
-/// parsed entries as `(py_name_lit, rust_ident, fn_prefix_lit)` triples,
-/// then emits the full module + registry plumbing once the input is
-/// drained.
+/// Implementation detail of [`pyrust_builtin_modules!`].  Threads two
+/// accumulators through a TT-muncher: the first collects every entry as a
+/// `(py_name_lit, rust_ident, fn_prefix_lit)` triple; the second collects a
+/// `(py_name_lit, rust_ident)` pair for every entry carrying `@inject`, so
+/// the generated `post_load_inject` dispatcher can call that module's
+/// `inject_python_members` after import.  Once the input is drained both
+/// lists are emitted as the full module + registry plumbing.
 macro_rules! pyrust_builtin_modules_internal {
-    // Entry: `@flat ident,` — flat namespace, no fn prefix.
-    (@parse [$($acc:tt)*] @flat $ident:ident $(, $($rest:tt)*)?) => {
+    // --- `@inject` arms (must precede the plain arms so the trailing
+    //     `@ inject` token pair is matched before the plain arm consumes the
+    //     entry without it). ---
+
+    // Entry: `@flat ident @inject,` — flat namespace, post-load injection.
+    (@parse [$($acc:tt)*] [$($inj:tt)*] @flat $ident:ident @ inject $(, $($rest:tt)*)?) => {
         pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident, "")] $($($rest)*)?
+            @parse [$($acc)* (stringify!($ident), $ident, "")]
+                   [$($inj)* (stringify!($ident), $ident)] $($($rest)*)?
+        }
+    };
+    // Entry: `"py.dotted.name" as ident @inject,` — post-load injection.
+    (@parse [$($acc:tt)*] [$($inj:tt)*] $py_name:literal as $ident:ident @ inject $(, $($rest:tt)*)?) => {
+        pyrust_builtin_modules_internal! {
+            @parse [$($acc)* ($py_name, $ident, concat!($py_name, "."))]
+                   [$($inj)* ($py_name, $ident)] $($($rest)*)?
+        }
+    };
+    // Entry: `ident @inject,` — post-load injection.
+    (@parse [$($acc:tt)*] [$($inj:tt)*] $ident:ident @ inject $(, $($rest:tt)*)?) => {
+        pyrust_builtin_modules_internal! {
+            @parse [$($acc)* (stringify!($ident), $ident, concat!(stringify!($ident), "."))]
+                   [$($inj)* (stringify!($ident), $ident)] $($($rest)*)?
+        }
+    };
+
+    // --- plain arms (no `@inject`) ---
+
+    // Entry: `@flat ident,` — flat namespace, no fn prefix.
+    (@parse [$($acc:tt)*] [$($inj:tt)*] @flat $ident:ident $(, $($rest:tt)*)?) => {
+        pyrust_builtin_modules_internal! {
+            @parse [$($acc)* (stringify!($ident), $ident, "")] [$($inj)*] $($($rest)*)?
         }
     };
     // Entry: `"py.dotted.name" as ident,` — fn prefix = "<py.name>.".
-    (@parse [$($acc:tt)*] $py_name:literal as $ident:ident $(, $($rest:tt)*)?) => {
+    (@parse [$($acc:tt)*] [$($inj:tt)*] $py_name:literal as $ident:ident $(, $($rest:tt)*)?) => {
         pyrust_builtin_modules_internal! {
-            @parse [$($acc)* ($py_name, $ident, concat!($py_name, "."))] $($($rest)*)?
+            @parse [$($acc)* ($py_name, $ident, concat!($py_name, "."))] [$($inj)*] $($($rest)*)?
         }
     };
     // Entry: `ident,` — Python name = stringify!(ident), fn prefix = "<ident>.".
-    (@parse [$($acc:tt)*] $ident:ident $(, $($rest:tt)*)?) => {
+    (@parse [$($acc:tt)*] [$($inj:tt)*] $ident:ident $(, $($rest:tt)*)?) => {
         pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident, concat!(stringify!($ident), "."))] $($($rest)*)?
+            @parse [$($acc)* (stringify!($ident), $ident, concat!(stringify!($ident), "."))] [$($inj)*] $($($rest)*)?
         }
     };
     // Done — emit.
-    (@parse [$(($py_name:expr, $ident:ident, $fn_prefix:expr))*]) => {
+    (@parse [$(($py_name:expr, $ident:ident, $fn_prefix:expr))*]
+            [$(($inj_py_name:expr, $inj_ident:ident))*]) => {
         $(
             pub mod $ident {
                 /// Python-level name of this built-in module.  Used for
@@ -118,6 +150,24 @@ macro_rules! pyrust_builtin_modules_internal {
             )*
             None
         }
+
+        /// Post-import hook for Python-source modules.  For every `@inject`
+        /// entry this dispatches to that module's `inject_python_members`,
+        /// which exec's its `*_py.py` source onto the freshly imported
+        /// module.  Called once from `env.rs::load_module` immediately after
+        /// the module lands in `module_cache`, replacing the former chain of
+        /// per-module `if name == "X" { … }` blocks.
+        pub(crate) fn post_load_inject(
+            name: &str,
+            interp: &mut crate::interpreter::Interpreter,
+            module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
+        ) -> crate::error::Result<()> {
+            match name {
+                $($inj_py_name => $inj_ident::inject_python_members(interp, module)?,)*
+                _ => {}
+            }
+            Ok(())
+        }
     };
 }
 
@@ -139,42 +189,46 @@ pyrust_builtin_modules! {
     os,
     functools,
     // `operator` is a pure-Python module (issue #2514): an empty native
-    // `pyrust_module!` plus `operator_py.py` injected by the post-load hook
-    // in `env.rs::load_module`.
-    operator,
+    // `pyrust_module!` plus `operator_py.py` injected by the `@inject`
+    // post-load hook (`post_load_inject` → `inject_python_members`).
+    operator @inject,
     itertools,
-    collections,
+    // `collections` Python-source members (issue #1884) are injected by the
+    // `@inject` hook; `inject_python_members` also tags the public classes
+    // with `__module__` / `__class_getitem__` (issues #2228 / #2603).
+    collections @inject,
     "collections.abc" as collections_abc,
     io,
-    typing,
+    // `typing` Python-source members (issue #2516) injected via `@inject`.
+    typing @inject,
     copy,
     pathlib,
     // `string`: ASCII character-class constants are native; `capwords`,
     // `Template`, and `Formatter` are injected from `string_py.py` by the
-    // post-load hook in `env.rs::load_module` (issue #2515).
-    string,
+    // `@inject` post-load hook (issue #2515).
+    string @inject,
     contextlib,
     "__future__" as future,
     warnings,
     // `json` is a pure-Python module (issue #2620): an empty native
-    // `pyrust_module!` plus `json_py.py` injected by the post-load hook in
-    // `env.rs::load_module`.
-    json,
+    // `pyrust_module!` plus `json_py.py` injected by the `@inject` post-load
+    // hook.
+    json @inject,
     // Minimal async/await support (issue #1039): `asyncio.run` is native;
-    // `sleep` / `gather` are injected from `asyncio_py.py` by the post-load
-    // hook in `env.rs::load_module`.
-    asyncio,
+    // `sleep` / `gather` are injected from `asyncio_py.py` by the `@inject`
+    // post-load hook.
+    asyncio @inject,
     // `abc` (issue #2612): the whole surface (`ABCMeta`, `ABC`,
     // `abstractmethod`, …) is defined in `abc_py.py` and injected by the
-    // post-load hook in `env.rs::load_module`; the native body is empty.
-    abc,
+    // `@inject` post-load hook; the native body is empty.
+    abc @inject,
     // `dataclasses` (issue #2610): `@dataclass`, `field`, `fields`, `asdict`,
     // `astuple`, … are defined in `dataclasses_py.py` and injected by the
-    // post-load hook in `env.rs::load_module`; the native body is empty.
-    dataclasses,
+    // `@inject` post-load hook; the native body is empty.
+    dataclasses @inject,
     // `enum` (issue #2611): a pure-Python module (`enum_py.py`) — `Enum`,
-    // `IntEnum`, `EnumMeta`/`EnumType`, `auto` — injected by the post-load
-    // hook in `env.rs::load_module`.  The Rust ident is `enum_mod` because
-    // `enum` is a keyword; its Python-level name is `enum`.
-    "enum" as enum_mod,
+    // `IntEnum`, `EnumMeta`/`EnumType`, `auto` — injected by the `@inject`
+    // post-load hook.  The Rust ident is `enum_mod` because `enum` is a
+    // keyword; its Python-level name is `enum`.
+    "enum" as enum_mod @inject,
 }
