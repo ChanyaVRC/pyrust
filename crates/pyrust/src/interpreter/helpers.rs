@@ -6514,9 +6514,12 @@ pub(crate) fn format_exc_chain_prefix(
             break; // cycle guard
         }
         let borrow = inst.borrow();
+        // `get_cloned_or_slot` routes through the live `__dict__` for a dict-backed
+        // instance (#1981) so chained-exception display works after a `__dict__`
+        // replacement; `get` would miss these dunders entirely.
         let suppress = borrow
             .attrs
-            .get("__suppress_context__")
+            .get_cloned_or_slot("__suppress_context__")
             .and_then(|v| match v.kind() {
                 ValueKind::Bool(b) => Some(b),
                 _ => None,
@@ -6525,7 +6528,7 @@ pub(crate) fn format_exc_chain_prefix(
 
         if suppress {
             // raise X from Y: display __cause__ (if not None)
-            let cause = borrow.attrs.get("__cause__").cloned();
+            let cause = borrow.attrs.get_cloned_or_slot("__cause__");
             drop(borrow);
             match cause {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
@@ -6541,7 +6544,7 @@ pub(crate) fn format_exc_chain_prefix(
             }
         } else {
             // Implicit chaining: display __context__ (if not None)
-            let context = borrow.attrs.get("__context__").cloned();
+            let context = borrow.attrs.get_cloned_or_slot("__context__");
             drop(borrow);
             match context {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
@@ -6629,7 +6632,9 @@ fn chained_exc_frames(
     let ValueKind::PyInstance(inst) = exc.kind() else {
         return None;
     };
-    let stored = inst.borrow().attrs.get("__traceback__").cloned();
+    // `get_cloned_or_slot` routes through the live `__dict__` for a dict-backed instance
+    // (#1981); `get` would miss the chained exception's traceback.
+    let stored = inst.borrow().attrs.get_cloned_or_slot("__traceback__");
     let stored = stored.filter(|tb| !tb.is_none())?;
     // Materialise the deferred placeholder if needed (cold uncaught path).
     let tb = interp

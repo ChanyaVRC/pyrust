@@ -685,10 +685,13 @@ impl Interpreter {
         let ValueKind::PyInstance(inst) = exc.kind() else {
             return;
         };
+        // `get_cloned_or_slot` routes through the live `__dict__` for a dict-backed
+        // instance (#1981); `get` would return `None` and misclassify a
+        // re-raised dict-backed exception as fresh, truncating its chain.
         let has_tb = inst
             .borrow()
             .attrs
-            .get("__traceback__")
+            .get_cloned_or_slot("__traceback__")
             .is_some_and(|tb| !tb.is_none());
         if has_tb {
             pyrust_core::reset_captured_error_frames();
@@ -837,7 +840,10 @@ impl Interpreter {
         let ValueKind::PyInstance(inst) = exc.kind() else {
             return None;
         };
-        let stored = inst.borrow().attrs.get("__traceback__").cloned();
+        // `get_cloned_or_slot` routes through the live `__dict__` for a dict-backed
+        // instance (#1981); `get` would return `None` and drop the carried chain
+        // for a re-raised dict-backed exception.
+        let stored = inst.borrow().attrs.get_cloned_or_slot("__traceback__");
         let stored = stored.filter(|tb| !tb.is_none())?;
         // Materialise the deferred placeholder if needed (cold uncaught path).
         let tb = self

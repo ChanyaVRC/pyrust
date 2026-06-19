@@ -2260,6 +2260,26 @@ impl InstanceAttrs {
         self.get(name).cloned()
     }
 
+    /// Like [`get_cloned`], but for a dict-backed instance falls back to
+    /// `entries` when the name is absent from the live `__dict__`.  Exception
+    /// dunders (`__traceback__` / `args` / `__cause__` / `__context__`) are
+    /// CPython type slots that survive a `__dict__` swap, but pyrust stores them
+    /// in `entries`; a plain `__dict__` replacement keeps `entries` (it is only
+    /// shadowed for ordinary attribute reads), so the exception-machinery read
+    /// sites use this accessor to keep those slots visible after `obj.__dict__ =
+    /// d` (#1981).  Ordinary attribute reads keep using `get_cloned`, so a
+    /// replaced `__dict__` still drops plain leftover attributes (#1942).
+    #[inline]
+    pub fn get_cloned_or_slot(&self, name: &str) -> Option<Value> {
+        if let Some(d) = &self.dict_ref {
+            if let Some(v) = d.dict_with(|m| m.get(&StrKey(name)).cloned()).flatten() {
+                return Some(v);
+            }
+            return self.get(name).cloned();
+        }
+        self.get(name).cloned()
+    }
+
     /// Mutable lookup by attribute name.  Lets a caller test-and-replace an
     /// existing value with a single key scan (the catch-site `__traceback__`
     /// update does this on every caught exception).  Returns `None` for
