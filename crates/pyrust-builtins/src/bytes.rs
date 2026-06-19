@@ -3436,30 +3436,39 @@ pub fn bytes_maketrans(args: &[Value]) -> Result<Value> {
             format!("maketrans expected 2 arguments, got {}", args.len()),
         ));
     }
-    let from: &[u8] = match args[0].kind() {
-        ValueKind::Bytes(rc) => rc.as_slice(),
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "a bytes-like object is required, not '{}'",
-                    pyrust_core::builtin_type_name(&args[0])
-                ),
-            ));
-        }
+    // Accept any bytes-like object (bytes, bytearray, subclasses) per CPython.
+    let from_owned: std::borrow::Cow<'_, [u8]> = match args[0].kind() {
+        ValueKind::Bytes(rc) => std::borrow::Cow::Borrowed(rc.as_slice()),
+        _ => match crate::bytearray::as_bytearray_snapshot(&args[0]) {
+            Some(data) => std::borrow::Cow::Owned(data),
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "a bytes-like object is required, not '{}'",
+                        pyrust_core::builtin_type_name(&args[0])
+                    ),
+                ));
+            }
+        },
     };
-    let to: &[u8] = match args[1].kind() {
-        ValueKind::Bytes(rc) => rc.as_slice(),
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "a bytes-like object is required, not '{}'",
-                    pyrust_core::builtin_type_name(&args[1])
-                ),
-            ));
-        }
+    let to_owned: std::borrow::Cow<'_, [u8]> = match args[1].kind() {
+        ValueKind::Bytes(rc) => std::borrow::Cow::Borrowed(rc.as_slice()),
+        _ => match crate::bytearray::as_bytearray_snapshot(&args[1]) {
+            Some(data) => std::borrow::Cow::Owned(data),
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "a bytes-like object is required, not '{}'",
+                        pyrust_core::builtin_type_name(&args[1])
+                    ),
+                ));
+            }
+        },
     };
+    let from: &[u8] = from_owned.as_ref();
+    let to: &[u8] = to_owned.as_ref();
     if from.len() != to.len() {
         return Err(PyError::named(
             "ValueError",
