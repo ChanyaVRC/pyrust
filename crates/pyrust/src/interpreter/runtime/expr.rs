@@ -1520,6 +1520,46 @@ impl Interpreter {
         None
     }
 
+    /// Evaluate one operand's `__ne__` step in CPython's `do_richcompare(Py_NE)`
+    /// for a `PyInstance` `owner` against `other` (issue #2648).
+    ///
+    /// Returns:
+    /// - `Some(Ok(v))` — the step produced a definitive (non-NotImplemented)
+    ///   result `v` (the caller returns it);
+    /// - `Some(Err(..))` — the slot raised;
+    /// - `None` — the step yielded NotImplemented, so the caller should try the
+    ///   next step (reflected operand, then identity).
+    ///
+    /// A *user-defined* `__ne__` is dispatched directly.  The inherited default
+    /// (`object.__ne__`) is `not owner.__eq__(other)` *single-sided*: it negates
+    /// only `owner`'s own `__eq__` (not the full `==`, which would also try the
+    /// reflected `__eq__`), and stays NotImplemented when that `__eq__` is
+    /// NotImplemented.  Verified against python3.12 `object.__ne__`.
+    fn pyinstance_ne_step(&mut self, owner: &Value, other: &Value) -> Option<Result<Value>> {
+        let ValueKind::PyInstance(inst) = owner.kind() else {
+            return None;
+        };
+        let class = Rc::clone(&inst.borrow().class);
+        // User-defined `__ne__` wins outright.
+        if !matches!(
+            lookup_class_attr(&class, "__ne__").as_ref().map(|m| m.kind()),
+            Some(ValueKind::BuiltinFunction("object.__ne__")) | None
+        ) {
+            let m = lookup_class_attr(&class, "__ne__")?;
+            return match self.dispatch_binary_slot(m, owner, inst, other) {
+                Some(Ok(v)) if is_not_implemented(&v) => None,
+                other => other,
+            };
+        }
+        // Default `object.__ne__`: negate `owner.__eq__(other)` single-sided.
+        let eq = lookup_class_attr(&class, "__eq__")?;
+        match self.dispatch_binary_slot(eq, owner, inst, other) {
+            Some(Ok(v)) if is_not_implemented(&v) => None,
+            Some(Ok(v)) => Some(Ok(Value::bool_(!v.truthy_raw()))),
+            other => other,
+        }
+    }
+
     /// Dispatch a resolved binary-operator slot `m` (the value of e.g.
     /// `type(owner).__add__`) found on `owner` (a `PyInstance` backed by `inst`)
     /// with `other` as the single operand argument.
@@ -3918,15 +3958,38 @@ impl Interpreter {
                 // otherwise fall through to `not (a == b)`, which already runs
                 // the full `__eq__` / reflected-`__eq__` / NotImplemented chain.
                 if pyinstance_has_user_ne(&left) || pyinstance_has_user_ne(&right) {
-                    // A user-defined `__ne__` wins.  If it (and the reflected
-                    // slot) returns NotImplemented, CPython falls back to the
-                    // *identity*-based default — NOT to `not __eq__` — so route
-                    // through `values_user_eq` here, matching the prior
-                    // behaviour for that path.
-                    if let Some(r) = self.try_dunder_binary(&left, &right, "__ne__", "__ne__") {
+                    // At least one operand carries a user-defined `__ne__`, so
+                    // mirror CPython's `do_richcompare(Py_NE)` directly rather
+                    // than `not __eq__`.  The ordering is: (subtype-priority
+                    // reflected,) forward operand's `__ne__`, reflected operand's
+                    // `__ne__`, then the identity default `a is not b`.  Each
+                    // `__ne__` step (`pyinstance_ne_step`) dispatches a user
+                    // `__ne__` outright and treats the inherited default as
+                    // `not __eq__` single-sided.  When *both* steps yield
+                    // NotImplemented, CPython falls back to identity — NOT to
+                    // `not __eq__` (issue #2648): a user `__ne__` returning
+                    // NotImplemented must not re-dispatch `__eq__`.
+                    let right_first = matches!(
+                        (left.kind(), right.kind()),
+                        (ValueKind::PyInstance(li), ValueKind::PyInstance(ri))
+                            if !Rc::ptr_eq(&li.borrow().class, &ri.borrow().class)
+                                && class_is_subclass_of(
+                                    &ri.borrow().class,
+                                    &li.borrow().class,
+                                )
+                    );
+                    let (first, second) = if right_first {
+                        ((&right, &left), (&left, &right))
+                    } else {
+                        ((&left, &right), (&right, &left))
+                    };
+                    if let Some(r) = self.pyinstance_ne_step(first.0, first.1) {
                         return r;
                     }
-                    return Ok(Value::bool_(!self.values_user_eq(&left, &right)?));
+                    if let Some(r) = self.pyinstance_ne_step(second.0, second.1) {
+                        return r;
+                    }
+                    return Ok(Value::bool_(!values_are_identical(&left, &right)));
                 }
                 // No user `__ne__`: mirror CPython's `slot_tp_richcompare`, which
                 // derives `__ne__` as `not __eq__`.  Try the user `__eq__` /
