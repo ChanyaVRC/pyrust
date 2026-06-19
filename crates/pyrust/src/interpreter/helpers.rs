@@ -1993,19 +1993,19 @@ pub(crate) fn call_bytes_method_coerced(
     };
     let coerced = coerce_bytes_subclass_method_args(method, args);
     let result = pyrust_builtins::bytes::call(method, receiver, &coerced, kw)?;
-    if let Some(sep) = orig_sep {
-        if let ValueKind::Tuple(items) = result.kind() {
-            // A match produced a non-empty middle element; a no-match leaves it
-            // empty, and CPython keeps that empty middle as plain `bytes`.
-            let mid_nonempty = matches!(
-                items.get(1).map(|m| m.kind()),
-                Some(ValueKind::Bytes(rc)) if !rc.is_empty()
-            );
-            if mid_nonempty {
-                let mut parts: Vec<Value> = items.iter().cloned().collect();
-                parts[1] = sep;
-                return Ok(Value::tuple(parts));
-            }
+    if let Some(sep) = orig_sep
+        && let ValueKind::Tuple(items) = result.kind()
+    {
+        // A match produced a non-empty middle element; a no-match leaves it
+        // empty, and CPython keeps that empty middle as plain `bytes`.
+        let mid_nonempty = matches!(
+            items.get(1).map(|m| m.kind()),
+            Some(ValueKind::Bytes(rc)) if !rc.is_empty()
+        );
+        if mid_nonempty {
+            let mut parts: Vec<Value> = items.to_vec();
+            parts[1] = sep;
+            return Ok(Value::tuple(parts));
         }
     }
     Ok(result)
