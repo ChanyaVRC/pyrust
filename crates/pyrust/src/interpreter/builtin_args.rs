@@ -663,7 +663,7 @@ impl<'a> FromValue<'a> for PyIterable<'a> {
             ValueKind::PyInstance(inst) => {
                 let class = Rc::clone(&inst.borrow().class);
                 crate::interpreter::lookup_class_attr(&class, "__iter__").is_some()
-                    || crate::interpreter::instance_builtin_data(inst).is_some()
+                    || crate::interpreter::builtin_data_backing(value).is_some()
             }
             _ => false,
         }

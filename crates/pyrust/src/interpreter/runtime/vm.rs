@@ -709,9 +709,7 @@ pub(crate) fn live_collection_len(container: &Value) -> Option<usize> {
     // replaces the whole `Value`: either way this sees the current backing and
     // detects the size change.  Only reached on the cold guarded path (these
     // three subclasses); the common dict/set/deque guard above is untouched.
-    if let ValueKind::PyInstance(inst) = container.kind()
-        && let Some(backing) = instance_builtin_data(inst)
-    {
+    if let Some(backing) = builtin_data_backing(container) {
         return backing.as_dict().map(|d| d.len());
     }
     pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| rc.borrow().len())
@@ -789,9 +787,7 @@ fn ordered_backing_id(container: &Value) -> Option<i64> {
     if container.as_dict().is_some() {
         return container.value_id();
     }
-    if let ValueKind::PyInstance(inst) = container.kind()
-        && let Some(backing) = instance_builtin_data(inst)
-    {
+    if let Some(backing) = builtin_data_backing(container) {
         return backing.value_id();
     }
     pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| Rc::as_ptr(&rc) as i64)
@@ -2772,15 +2768,9 @@ impl Interpreter {
                                 // before the built-in unary path, since the
                                 // primitive's type slots aren't registered on the
                                 // user class.
-                                let is_instance = matches!(val.kind(), ValueKind::PyInstance(_));
-                                let operand = if is_instance {
-                                    if let ValueKind::PyInstance(inst) = val.kind() {
-                                        instance_builtin_data(inst).unwrap_or_else(|| val.clone())
-                                    } else {
-                                        val
-                                    }
-                                } else {
-                                    val
+                                let operand = match builtin_data_backing(&val) {
+                                    Some(backing) => backing,
+                                    None => val,
                                 };
                                 vm_try!(vm_eval_unary(*op, operand))
                             }

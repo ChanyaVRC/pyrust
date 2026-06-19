@@ -89,8 +89,7 @@ fn set_direct_value(v: &Value) -> Option<(Value, bool)> {
     if pyrust_builtins::frozenset::as_items(v).is_some() {
         return Some((v.clone(), true));
     }
-    if let Some(inst_rc) = v.as_py_instance_rc() {
-        let backing = instance_builtin_data(inst_rc)?;
+    if let Some(backing) = builtin_data_backing(v) {
         return set_direct_value(&backing);
     }
     None
