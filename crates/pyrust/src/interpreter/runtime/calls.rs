@@ -356,11 +356,7 @@ impl Interpreter {
             // use the instance directly.
             if let Some(method_name) = fn_name.split_once('.').map(|(_, m)| m) {
                 // Drop the kind() borrow before we may move `instance`.
-                let backing_opt = match instance.kind() {
-                    ValueKind::PyInstance(inst) => instance_builtin_data(inst),
-                    _ => None,
-                };
-                let receiver = backing_opt.unwrap_or(instance);
+                let receiver = effective_builtin_receiver(&instance, &[]).unwrap_or(instance);
                 let bound = pyrust_builtins::bound_method::bound_method(method_name, receiver);
                 return self.call_function_expanded(bound, args);
             }
@@ -947,7 +943,7 @@ impl Interpreter {
                             receiver_ordered = class_is_named_ordered_dict(
                                 &Rc::clone(&inst.borrow().class),
                             );
-                            instance_builtin_data(&inst).unwrap_or(self_val)
+                            effective_builtin_receiver(&self_val, &[]).unwrap_or(self_val)
                         } else {
                             self_val
                         }
@@ -3081,7 +3077,7 @@ impl Interpreter {
             ("set", ValueKind::Set(_)) => true,
             ("frozenset", ValueKind::BuiltinObject { ops, .. })
                 if ops.type_name() == "frozenset" => true,
-            (_, ValueKind::PyInstance(inst)) => instance_builtin_data(inst)
+            (_, ValueKind::PyInstance(_)) => effective_builtin_receiver(&self_arg.value, &[])
                 .is_some_and(|b| pyrust_core::builtin_type_name(&b) == type_name),
             _ => false,
         };
@@ -6594,9 +6590,7 @@ fn format_dunder_owner(receiver: &Value) -> std::borrow::Cow<'static, str> {
     // override resolves the method to the backing type's `__format__` in
     // CPython, so an arg error names that backing type (`int`), not `object`
     // (issue #2214).
-    if let ValueKind::PyInstance(inst) = receiver.kind()
-        && let Some(backing) = instance_builtin_data(inst)
-    {
+    if let Some(backing) = effective_builtin_receiver(receiver, &[]) {
         return format_dunder_owner(&backing);
     }
     if value_has_real_format(receiver) {

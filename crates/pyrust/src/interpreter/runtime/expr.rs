@@ -3841,10 +3841,9 @@ impl Interpreter {
                 // still runs str.__mod__, never returning NotImplemented.
                 let str_backing = if matches!(left.kind(), ValueKind::Str(_)) {
                     Some(left.clone())
-                } else if let Some(inst_rc) = left.as_py_instance_rc() {
-                    instance_builtin_data(inst_rc).filter(|backing| matches!(backing.kind(), ValueKind::Str(_)))
                 } else {
-                    None
+                    effective_builtin_receiver(&left, &[])
+                        .filter(|backing| matches!(backing.kind(), ValueKind::Str(_)))
                 };
                 if let Some(fmt_val) = str_backing {
                     return self.str_printf_format(fmt_val, right);
@@ -3857,13 +3856,12 @@ impl Interpreter {
                 // bytes subclasses return plain bytes.
                 let bytes_backing: Option<Vec<u8>> = match left.kind() {
                     ValueKind::Bytes(rc) => Some(rc.to_vec()),
-                    _ => left
-                        .as_py_instance_rc()
-                        .and_then(instance_builtin_data)
-                        .and_then(|backing| match backing.kind() {
+                    _ => effective_builtin_receiver(&left, &[]).and_then(|backing| {
+                        match backing.kind() {
                             ValueKind::Bytes(rc) => Some(rc.to_vec()),
                             _ => None,
-                        }),
+                        }
+                    }),
                 };
                 if let Some(data) = bytes_backing {
                     return self.bytes_printf_format(&data, right, false);
@@ -7100,21 +7098,20 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
     // that arithmetic and concatenation operations on bare subclass instances
     // (e.g. `MyInt(42) + 1`) fall through to the primitive fast paths below.
     // This mirrors CPython's slot delegation for `tp_as_number` / `tp_as_sequence`.
-    if let Some(inst_rc) = v.as_py_instance_rc()
-        && let Some(backing) = instance_builtin_data(inst_rc) {
-            let is_scalar = matches!(
-                backing.kind(),
-                ValueKind::Int(_)
-                    | ValueKind::BigInt(_)
-                    | ValueKind::Float(_)
-                    | ValueKind::Complex(_, _)
-                    | ValueKind::Str(_)
-                    | ValueKind::Bytes(_)
-            );
-            if is_scalar {
-                return backing;
-            }
+    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+        let is_scalar = matches!(
+            backing.kind(),
+            ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Float(_)
+                | ValueKind::Complex(_, _)
+                | ValueKind::Str(_)
+                | ValueKind::Bytes(_)
+        );
+        if is_scalar {
+            return backing;
         }
+    }
     v.clone()
 }
 
@@ -7133,25 +7130,24 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
     if let ValueKind::Bool(b) = v.kind() {
         return Value::int(b as i64);
     }
-    if let Some(inst_rc) = v.as_py_instance_rc()
-        && let Some(backing) = instance_builtin_data(inst_rc) {
-            let is_primitive = matches!(
-                backing.kind(),
-                ValueKind::Int(_)
-                    | ValueKind::BigInt(_)
-                    | ValueKind::Float(_)
-                    | ValueKind::Str(_)
-                    | ValueKind::Bytes(_)
-                    | ValueKind::List(_)
-                    | ValueKind::Tuple(_)
-                    | ValueKind::Dict(_)
-                    | ValueKind::Set(_)
-            ) || pyrust_builtins::frozenset::as_items(&backing).is_some()
-                || pyrust_builtins::bytearray::as_bytearray_snapshot(&backing).is_some();
-            if is_primitive {
-                return backing;
-            }
+    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+        let is_primitive = matches!(
+            backing.kind(),
+            ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Float(_)
+                | ValueKind::Str(_)
+                | ValueKind::Bytes(_)
+                | ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Dict(_)
+                | ValueKind::Set(_)
+        ) || pyrust_builtins::frozenset::as_items(&backing).is_some()
+            || pyrust_builtins::bytearray::as_bytearray_snapshot(&backing).is_some();
+        if is_primitive {
+            return backing;
         }
+    }
     v.clone()
 }
 
@@ -7187,7 +7183,7 @@ pub(crate) fn coerce_subclass_backing(v: &Value, override_dunders: &[&str]) -> O
 pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // list/dict/set subclass: delegate to the backing primitive value.
     if let Some(inst_rc) = value.as_py_instance_rc()
-        && let Some(backing) = instance_builtin_data(inst_rc) {
+        && let Some(backing) = effective_builtin_receiver(value, &[]) {
             // A subclass of a *non-iterable* builtin (e.g. `class C(int): pass`)
             // is itself not iterable.  CPython reports the actual subclass name
             // ("'C' object is not iterable"), not the backing base's name, so
@@ -7534,10 +7530,9 @@ fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
     }) {
         return Some(entries);
     }
-    if let Some(inst_rc) = v.as_py_instance_rc()
-        && let Some(backing) = instance_builtin_data(inst_rc) {
-            return dict_entries_from_value(&backing);
-        }
+    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+        return dict_entries_from_value(&backing);
+    }
     None
 }
 
@@ -7558,10 +7553,9 @@ fn set_items_from_value(v: &Value) -> Option<(PySet, bool)> {
     if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
         return Some(((*rc).clone(), true));
     }
-    if let Some(inst_rc) = v.as_py_instance_rc()
-        && let Some(backing) = instance_builtin_data(inst_rc) {
-            return set_items_from_value(&backing);
-        }
+    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+        return set_items_from_value(&backing);
+    }
     None
 }
 
@@ -7909,9 +7903,7 @@ fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
 fn is_complex_operand(v: &Value) -> bool {
     match v.kind() {
         ValueKind::Complex(_, _) => true,
-        ValueKind::PyInstance(_) => v
-            .as_py_instance_rc()
-            .and_then(instance_builtin_data)
+        ValueKind::PyInstance(_) => effective_builtin_receiver(v, &[])
             .is_some_and(|b| matches!(b.kind(), ValueKind::Complex(_, _))),
         _ => false,
     }
