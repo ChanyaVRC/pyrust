@@ -123,7 +123,10 @@ impl BuiltinTypeOps for MappingProxyOps {
     }
 
     fn has_method(&self, name: &str) -> bool {
-        matches!(name, "keys" | "values" | "items" | "get" | "copy")
+        matches!(
+            name,
+            "keys" | "values" | "items" | "get" | "copy" | "__reversed__"
+        )
     }
 
     fn call_method(
@@ -197,6 +200,28 @@ impl BuiltinTypeOps for MappingProxyOps {
                     .get(&key_str)
                     .cloned()
                     .unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::none())))
+            }
+            "__reversed__" => {
+                if !args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "mappingproxy.__reversed__() takes no arguments ({} given)",
+                            args.len()
+                        ),
+                    ));
+                }
+                // Yield keys in reverse insertion order (CPython 3.12 #2684).
+                // The backing attrs are insertion-ordered, so materialise the
+                // forward keys and hand them to the shared `reversed` iterator
+                // helper, which walks the list back-to-front.
+                let class = cls.borrow();
+                let keys: Vec<Value> = class
+                    .attrs
+                    .keys()
+                    .map(|k| Value::string(k.clone()))
+                    .collect();
+                Ok(crate::iter_helpers::reversed(Value::list(keys)))
             }
             "copy" => {
                 if !args.is_empty() {

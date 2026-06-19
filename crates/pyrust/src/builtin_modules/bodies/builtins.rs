@@ -1397,6 +1397,21 @@ pyrust_module! {
                 let frame = make_reversed_dict_iter(items, seq.0.clone());
                 return Ok(Value::generator(Box::new(frame)));
             }
+        // mappingproxy (`vars(SomeClass)`) is reversible by key insertion order,
+        // matching CPython 3.12's `mappingproxy.__reversed__` (#2684).  The
+        // backing class attrs are an insertion-ordered IndexMap, so we collect
+        // the keys, reverse, and wrap in a plain reverse iterator.
+        if let Some(class_rc) = pyrust_builtins::mapping_proxy::as_class_rc(&seq.0) {
+            let mut items: Vec<Value> = class_rc
+                .borrow()
+                .attrs
+                .keys()
+                .map(|k| Value::string(k.clone()))
+                .collect();
+            items.reverse();
+            let frame = NativeIterFrame::new(items, "list_reverseiterator");
+            return Ok(Value::generator(Box::new(frame)));
+        }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
         // and all BuiltinObject iterator types are not sequences and must
