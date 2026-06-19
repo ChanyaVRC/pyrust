@@ -1849,6 +1849,12 @@ fn extract_bytes_or_int_arg(arg: &Value) -> Result<std::borrow::Cow<'_, [u8]>> {
             Ok(std::borrow::Cow::Owned(vec![b]))
         }
         ValueKind::Bool(b) => Ok(std::borrow::Cow::Owned(vec![b as u8])),
+        // A BigInt is by definition outside 0..=255; CPython reports the same
+        // ValueError as an out-of-range plain int rather than a TypeError.
+        ValueKind::BigInt(_) => Err(PyError::named(
+            "ValueError",
+            "byte must be in range(0, 256)".to_string(),
+        )),
         _ => Err(PyError::named(
             "TypeError",
             format!(

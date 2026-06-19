@@ -25,3 +25,15 @@ try:
     print('WRONG')
 except ValueError:
     print('ok 256')
+
+# Sibling search methods: BigInt -> ValueError (same wording), for both
+# bytearray and bytes (they share the int-or-bytes argument helper).
+for obj in (bytearray(b'abc'), b'abc'):
+    for meth in ('count', 'index', 'find', 'rfind', 'rindex'):
+        try:
+            getattr(obj, meth)(1 << 70)
+            print('WRONG', type(obj).__name__, meth)
+        except ValueError as e:
+            print(type(obj).__name__, meth, str(e) == "byte must be in range(0, 256)")
+        except Exception as e:
+            print('WRONGTYPE', type(obj).__name__, meth, type(e).__name__)
