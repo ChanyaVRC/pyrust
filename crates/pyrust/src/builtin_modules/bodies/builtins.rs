@@ -28,7 +28,7 @@ use crate::interpreter::{
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     extract_str_value, float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
-    is_exception_class, is_str_or_str_subclass, iter_values, key_to_value, lookup_class_attr, mapping_pairs_via_protocol, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
+    is_exception_class, is_str_or_str_subclass, iter_values, key_to_value, lookup_class_attr, mapping_pairs_via_protocol, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, primitive_class_by_name, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
     bind_constructor_kwargs, reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
@@ -5922,6 +5922,7 @@ pyrust_module! {
                 ));
             }
         };
+        check_new_subtype(&class_rc, "tuple")?;
         let backing = match rest {
             [] => Value::tuple(vec![]),
             [single] => Value::tuple(_interp.collect_iterable(&single.value)?),
@@ -5976,6 +5977,7 @@ pyrust_module! {
                 ));
             }
         };
+        check_new_subtype(&class_rc, "frozenset")?;
         let backing = match rest {
             [] => pyrust_builtins::frozenset::frozenset(PySet::default()),
             [single] => {
@@ -6028,15 +6030,19 @@ pyrust_module! {
             }
             [first, rest @ ..] => (first.value.clone(), rest),
         };
-        if !matches!(cls_val.kind(), ValueKind::PyClass(_)) {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "bool.__new__(X): X is not a type object ({})",
-                    value_type_name_str(&cls_val)
-                ),
-            ));
-        }
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "bool.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        check_new_subtype(&class_rc, "bool")?;
         match rest {
             [] => Ok(Value::bool_(false)),
             [x] => Ok(Value::bool_(_interp.truthy_value(&x.value)?)),
@@ -6076,6 +6082,7 @@ pyrust_module! {
                 ));
             }
         };
+        check_new_subtype(&class_rc, "int")?;
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("int") {
             dispatch(_interp, rest)?
         } else {
@@ -6123,6 +6130,7 @@ pyrust_module! {
                 ));
             }
         };
+        check_new_subtype(&class_rc, "str")?;
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("str") {
             dispatch(_interp, rest)?
         } else {
@@ -6170,6 +6178,7 @@ pyrust_module! {
                 ));
             }
         };
+        check_new_subtype(&class_rc, "float")?;
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("float") {
             dispatch(_interp, rest)?
         } else {
@@ -6219,6 +6228,7 @@ pyrust_module! {
                 ));
             }
         };
+        check_new_subtype(&class_rc, "bytes")?;
         let backing = if let Some(dispatch) = crate::builtin_registry::lookup("bytes") {
             dispatch(_interp, rest)?
         } else {
@@ -7479,6 +7489,61 @@ pyrust_module! {
         }
         Ok(Value::string(self_val.repr()))
     }
+}
+
+/// Issue #2623: the `tp_new` subtype guard for primitive `__new__` slots.
+///
+/// CPython's `int_new` / `str_new` / `tuple_new` / … all start by validating
+/// that the explicit `cls` argument is a subtype of the type owning the slot
+/// (`PyType_IsSubtype(cls, base)`), raising `TypeError` otherwise.  `base` is
+/// the primitive whose `__new__` is being invoked (e.g. `int` for
+/// `int.__new__`).  Without this guard, `bool.__new__(int, 5)` or
+/// `str.__new__(int)` silently construct a value of the wrong type.
+///
+/// `class_rc` is the resolved `cls` argument; `base_name` is the primitive
+/// slot owner (`"int"`, `"str"`, …).  Returns `Ok(())` when `cls` is a subtype
+/// of `base`, otherwise the CPython 3.12 `TypeError`:
+///
+/// ```text
+/// <base>.__new__(<cls>): <cls> is not a subtype of <base>
+/// ```
+///
+/// with the special case for `int.__new__(bool)` (`bool` IS a subtype of `int`
+/// but its instances are not safely allocatable via `int.__new__`):
+///
+/// ```text
+/// int.__new__(bool) is not safe, use bool.__new__()
+/// ```
+fn check_new_subtype(class_rc: &Rc<RefCell<PyClass>>, base_name: &str) -> Result<()> {
+    let base = match primitive_class_by_name(base_name) {
+        Some(b) => b,
+        // Defensive: every caller passes a registered primitive name.
+        None => return Ok(()),
+    };
+    if Rc::ptr_eq(class_rc, &base) {
+        return Ok(());
+    }
+    let cls_name = class_rc.borrow().name.clone();
+    // CPython rejects allocating the built-in `bool` through `int.__new__`, even
+    // though `issubclass(bool, int)` holds, because `int`'s allocator is "not
+    // safe" for `bool`'s singleton storage.  Keyed on the *identity* of the
+    // built-in `bool` class (not its name) so a user class named `bool` that
+    // genuinely subclasses `int` is still allocatable, matching CPython.
+    if base_name == "int"
+        && primitive_class_by_name("bool").is_some_and(|b| Rc::ptr_eq(class_rc, &b))
+    {
+        return Err(PyError::named(
+            "TypeError",
+            "int.__new__(bool) is not safe, use bool.__new__()".to_string(),
+        ));
+    }
+    if class_is_subclass_of(class_rc, &base) {
+        return Ok(());
+    }
+    Err(PyError::named(
+        "TypeError",
+        format!("{base_name}.__new__({cls_name}): {cls_name} is not a subtype of {base_name}"),
+    ))
 }
 
 /// `type(obj)` — the class object for any value, mirroring CPython's
