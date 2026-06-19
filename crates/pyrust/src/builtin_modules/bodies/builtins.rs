@@ -5052,6 +5052,14 @@ pyrust_module! {
         let backing = builtin_data_backing(&self_arg.value).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "list")
         })?;
+        // #2657: a PyInstance receiver whose base is not `list` (e.g. a tuple
+        // subclass) must be rejected with CPython's method_descriptor wording.
+        if !matches!(backing.kind(), ValueKind::List(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "list", actual, method
+            ));
+        }
         _interp.eval_index(&backing, key)
     }
 
@@ -5088,6 +5096,14 @@ pyrust_module! {
         let backing = builtin_data_backing(&self_arg.value).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "tuple")
         })?;
+        // #2657: a PyInstance receiver whose base is not `tuple` (e.g. a list
+        // subclass) must be rejected with CPython's slot-wrapper wording.
+        if !matches!(backing.kind(), ValueKind::Tuple(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "tuple", actual
+            ));
+        }
         _interp.eval_index(&backing, key)
     }
 
@@ -5124,6 +5140,14 @@ pyrust_module! {
         let backing = builtin_data_backing(&self_arg.value).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "bytes")
         })?;
+        // #2657: a PyInstance receiver whose base is not `bytes` (e.g. a list
+        // subclass) must be rejected with CPython's slot-wrapper wording.
+        if !matches!(backing.kind(), ValueKind::Bytes(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "bytes", actual
+            ));
+        }
         _interp.eval_index(&backing, key)
     }
 
