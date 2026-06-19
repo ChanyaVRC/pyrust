@@ -1961,6 +1961,56 @@ pub(crate) fn coerce_bytes_subclass_method_args(
     args
 }
 
+/// Dispatch a `bytes` method, coercing bytes-subclass / bytearray arguments
+/// (#1928) and, for `partition`/`rpartition`, restoring the *original*
+/// separator object as the middle element of the result tuple (#2680).
+///
+/// CPython's `bytes.partition` / `bytes.rpartition` echo the actual separator
+/// argument in the returned tuple: `b'abc'.partition(bytearray(b'b'))[1]` is the
+/// very `bytearray` object that was passed (same type *and* identity).  Our
+/// receiver-only `bytes::call` only sees the coerced `Bytes` value, so it
+/// rebuilds the middle as plain `bytes`.  We capture the pre-coercion separator
+/// here and splice it back in when a match is found (the middle element is
+/// non-empty).  On a no-match the middle is `b''` and CPython keeps it as plain
+/// `bytes`, so we leave it untouched.
+pub(crate) fn call_bytes_method_coerced(
+    method: &str,
+    receiver: &Value,
+    args: Vec<Value>,
+    kw: &pyrust_core::PyDict,
+) -> Result<Value> {
+    let is_partition = matches!(method, "partition" | "rpartition");
+    // Preserve the original separator (before coercion flattens it to `Bytes`)
+    // only for the partition pair, and only when it isn't already exact `bytes`
+    // (which round-trips correctly); every other call pays nothing.
+    let orig_sep = if is_partition {
+        match args.first() {
+            Some(sep) if !matches!(sep.kind(), ValueKind::Bytes(_)) => Some(sep.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let coerced = coerce_bytes_subclass_method_args(method, args);
+    let result = pyrust_builtins::bytes::call(method, receiver, &coerced, kw)?;
+    if let Some(sep) = orig_sep {
+        if let ValueKind::Tuple(items) = result.kind() {
+            // A match produced a non-empty middle element; a no-match leaves it
+            // empty, and CPython keeps that empty middle as plain `bytes`.
+            let mid_nonempty = matches!(
+                items.get(1).map(|m| m.kind()),
+                Some(ValueKind::Bytes(rc)) if !rc.is_empty()
+            );
+            if mid_nonempty {
+                let mut parts: Vec<Value> = items.iter().cloned().collect();
+                parts[1] = sep;
+                return Ok(Value::tuple(parts));
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// Coerce the elements of a `join` iterable (`str.join`) so str-subclass items
 /// join by their str value (#1927).  Only `List`/`Tuple` fast-path containers
 /// are rewritten, and only when an element actually needs coercing — an

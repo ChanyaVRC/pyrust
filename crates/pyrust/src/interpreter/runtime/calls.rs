@@ -1025,9 +1025,10 @@ impl Interpreter {
                         if let Some(err) = reject_container_method_kwargs("bytes", method, &kw) {
                             return Err(err);
                         }
-                        // Accept bytes-subclass / bytearray args (#1928).
-                        let pos = coerce_bytes_subclass_method_args(method, pos);
-                        pyrust_builtins::bytes::call(method, &self_val, &pos, &kw)
+                        // Accept bytes-subclass / bytearray args (#1928);
+                        // partition/rpartition echo the original separator
+                        // object as the middle element (#2680).
+                        call_bytes_method_coerced(method, &self_val, pos, &kw)
                     }
                     "str" => {
                         if kw.is_empty() || method == "format" {
@@ -1676,12 +1677,10 @@ impl Interpreter {
                     let args_vec: Vec<Value> = std::mem::take(pos);
                     self.call_bytes_join(receiver, args_vec)
                 } else {
-                    // Accept bytes-subclass / bytearray args (#1928).
-                    let args_vec = coerce_bytes_subclass_method_args(
-                        method,
-                        std::mem::take(pos),
-                    );
-                    pyrust_builtins::bytes::call(method, &receiver, &args_vec, &kw)
+                    // Accept bytes-subclass / bytearray args (#1928);
+                    // partition/rpartition echo the original separator object
+                    // as the middle element (#2680).
+                    call_bytes_method_coerced(method, &receiver, std::mem::take(pos), &kw)
                 }
             }
             Kind::Str => {
@@ -2278,15 +2277,11 @@ impl Interpreter {
                                 }
                                 BkKind::Bytes => {
                                     // Accept bytes-subclass / bytearray args
-                                    // (#1928).
-                                    let args_vec = coerce_bytes_subclass_method_args(
-                                        method, args_vec,
-                                    );
-                                    pyrust_builtins::bytes::call(
-                                        method,
-                                        &backing,
-                                        &args_vec,
-                                        &kw,
+                                    // (#1928); partition/rpartition echo the
+                                    // original separator object as the middle
+                                    // element (#2680).
+                                    call_bytes_method_coerced(
+                                        method, &backing, args_vec, &kw,
                                     )
                                 }
                                 BkKind::Bytearray => {
