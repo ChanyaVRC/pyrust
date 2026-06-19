@@ -231,7 +231,7 @@ impl BuiltinTypeOps for ByteArrayOps {
                 .downcast_ref::<crate::slice::SliceState>()
                 .expect("slice state");
             let len = data.len() as i64;
-            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
+            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step)?;
             let result: Vec<u8> = slice_indices(start, stop, step)
                 .filter_map(|i| data.get(i).copied())
                 .collect();
@@ -261,7 +261,7 @@ impl BuiltinTypeOps for ByteArrayOps {
                 .downcast_ref::<crate::slice::SliceState>()
                 .expect("slice state");
             let len = data.len() as i64;
-            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
+            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step)?;
             drop(sb);
             let replacement = bytes_from_value(&value, "bytearray slice assignment")?;
             if step == 1 {
@@ -318,7 +318,7 @@ impl BuiltinTypeOps for ByteArrayOps {
                 .downcast_ref::<crate::slice::SliceState>()
                 .expect("slice state");
             let len = data.len() as i64;
-            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step);
+            let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step)?;
             drop(sb);
             if step == 1 {
                 // For step == 1 both bounds are forward, clamped to [0, len].
@@ -693,7 +693,12 @@ pub fn iter_elements(v: &Value) -> Option<Vec<Value>> {
 /// slice both `start` and `stop` may be `-1` (an empty slice / a walk down to
 /// and including index 0). For forward (`step >= 0`) slices both land in
 /// `[0, len]`, so step==1 callers can cast them back to `usize`.
-fn resolve_slice_indices(len: i64, start: &Value, stop: &Value, step: &Value) -> (i64, i64, i64) {
+fn resolve_slice_indices(
+    len: i64,
+    start: &Value,
+    stop: &Value,
+    step: &Value,
+) -> Result<(i64, i64, i64)> {
     let step_val: i64 = match step.kind() {
         ValueKind::Int(n) => n,
         ValueKind::Bool(b) => b as i64,
@@ -706,7 +711,12 @@ fn resolve_slice_indices(len: i64, start: &Value, stop: &Value, step: &Value) ->
         },
         _ => 1,
     };
-    let step_val = if step_val == 0 { 1 } else { step_val };
+    if step_val == 0 {
+        return Err(PyError::named(
+            "ValueError",
+            "slice step cannot be zero".to_string(),
+        ));
+    }
 
     let clamp = |v: i64, lo: i64, hi: i64| v.max(lo).min(hi);
 
@@ -762,7 +772,7 @@ fn resolve_slice_indices(len: i64, start: &Value, stop: &Value, step: &Value) ->
     // including index 0); round-tripping either through `usize` would corrupt
     // these boundary cases. For forward slices both land in [0, len], so the
     // step==1 callers can cast back to `usize` safely.
-    (start_val, stop_val, step_val)
+    Ok((start_val, stop_val, step_val))
 }
 
 /// Generate index sequence for a slice (start, stop, step) over a sequence.
