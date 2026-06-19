@@ -31,3 +31,15 @@ except TypeError:
 
 # Original bytes-only still works (regression)
 print(bytes.maketrans(b'abc', b'xyz') == tbl)  # True
+
+# bytearray subclass accepted as either argument (CPython treats it bytes-like)
+class MBA(bytearray):
+    pass
+
+print(bytes.maketrans(MBA(b'abc'), b'xyz') == tbl)        # True
+print(bytes.maketrans(b'abc', MBA(b'xyz')) == tbl)        # True
+print(bytes.maketrans(MBA(b'abc'), MBA(b'xyz')) == tbl)   # True
+
+# bytes-like subclass also accepted by bytes.strip / bytearray.strip
+print(b'xxabcxx'.strip(MBA(b'x')))                         # b'abc'
+print(bytearray(b'xxabcxx').strip(MBA(b'x')))             # bytearray(b'abc')

@@ -825,10 +825,12 @@ impl Interpreter {
             // Must appear before the generic `bytes.*` arm, which expects args[0]
             // to be the bytes receiver.
             ValueKind::BuiltinFunction("bytes.maketrans") => {
+                // Coerce bytes/bytearray subclass instances to their backing
+                // bytes-like value so `bytes_maketrans` accepts them (#2677).
                 let positional: Vec<Value> = args
                     .iter()
                     .filter(|a| a.name.is_none())
-                    .map(|a| a.value.clone())
+                    .map(|a| coerce_bytes_subclass_arg(a.value.clone()))
                     .collect();
                 pyrust_builtins::bytes::bytes_maketrans(&positional)
             }
@@ -839,7 +841,7 @@ impl Interpreter {
                 let positional: Vec<Value> = args
                     .iter()
                     .filter(|a| a.name.is_none())
-                    .map(|a| a.value.clone())
+                    .map(|a| coerce_bytes_subclass_arg(a.value.clone()))
                     .collect();
                 pyrust_builtins::bytes::bytes_maketrans(&positional)
             }
