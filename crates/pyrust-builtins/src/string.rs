@@ -2582,6 +2582,14 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
                         out.push(replacement);
                     }
                 }
+                ValueKind::BigInt(_) => {
+                    // A BigInt is always outside the valid codepoint range
+                    // 0..=0x10FFFF, so it can never be a legal mapping value.
+                    return Err(PyError::named(
+                        "ValueError",
+                        "character mapping must be in range(0x110000)".to_string(),
+                    ));
+                }
                 ValueKind::Bool(b) => {
                     // bool is a subclass of int; False=0 (NUL), True=1 (SOH)
                     let replacement =
