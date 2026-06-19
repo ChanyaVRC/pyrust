@@ -61,6 +61,14 @@ pub fn insert(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let idx = match idx_val.kind() {
         ValueKind::Int(i) => i,
         ValueKind::Bool(b) => b as i64,
+        ValueKind::BigInt(_) => {
+            // A BigInt never fits in a C ssize_t, so it can never be a valid
+            // list index. CPython raises OverflowError here, not TypeError.
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t".to_string(),
+            ));
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -89,6 +97,14 @@ pub fn pop(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let idx = match first.as_ref().map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => i,
         Some(ValueKind::Bool(b)) => b as i64,
+        Some(ValueKind::BigInt(_)) => {
+            // A BigInt never fits in a C ssize_t, so it can never be a valid
+            // list index. CPython raises OverflowError here, not TypeError.
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t".to_string(),
+            ));
+        }
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",
