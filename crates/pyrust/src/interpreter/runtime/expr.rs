@@ -4693,11 +4693,14 @@ impl Interpreter {
             // also see the change.
             match op {
                 BinaryOp::Add => {
+                    // The RHS may itself be a bytes/bytearray subclass instance,
+                    // so unwrap its backing before extracting the byte slice.
+                    let rhs_val = coerce_operand_backing(right);
                     let rhs = if let Some(rhs_data) =
-                        pyrust_builtins::bytearray::as_bytearray_snapshot(right)
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(&rhs_val)
                     {
                         rhs_data
-                    } else if let ValueKind::Bytes(rc) = right.kind() {
+                    } else if let ValueKind::Bytes(rc) = rhs_val.kind() {
                         rc.as_slice().to_vec()
                     } else {
                         let type_name = value_type_name_str(right);
@@ -4871,6 +4874,76 @@ impl Interpreter {
                     let rt = value_type_name_str(right);
                     return Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"));
                 }
+            }
+        }
+        // Issue #2386: PyInstance bytearray subclass `+=` / `*=` — when no
+        // user-defined `__iadd__` / `__imul__` was found (the inherited
+        // `bytearray.__i*__` sentinels are skipped in `try_call_binary_method`),
+        // mutate the backing bytearray in place and return `left` so the subclass
+        // type and object identity are preserved (matching CPython's
+        // `bytearray.__iadd__` / `__imul__`, which mutate self and return self).
+        //
+        // `result.is_none()` gates this to the no-override case only: if a
+        // user-defined `__iadd__` / `__imul__` *exists* and returned
+        // `NotImplemented`, CPython falls back to plain binary `+` / `*` (yielding
+        // a plain `bytearray`, dropping the subclass type), so we must let it fall
+        // through to `eval_binary_aug` rather than mutate self in place here.
+        if result.is_none()
+            && matches!(op, BinaryOp::Add | BinaryOp::Mul)
+            && let Some(inst_rc) = left.as_py_instance_rc()
+            && let Some(backing) = instance_builtin_data(inst_rc)
+            && let Some(data_rc) = pyrust_builtins::bytearray::as_bytearray_rc(&backing)
+        {
+            match op {
+                BinaryOp::Add => {
+                    // The RHS may itself be a bytes/bytearray subclass instance,
+                    // so unwrap its backing before extracting the byte slice.
+                    let rhs_val = coerce_operand_backing(right);
+                    let rhs = if let Some(rhs_data) =
+                        pyrust_builtins::bytearray::as_bytearray_snapshot(&rhs_val)
+                    {
+                        rhs_data
+                    } else if let ValueKind::Bytes(rc) = rhs_val.kind() {
+                        rc.as_slice().to_vec()
+                    } else {
+                        // CPython names the LHS by its actual (subclass) type.
+                        let lhs_name = value_type_name_str(left);
+                        let type_name = value_type_name_str(right);
+                        return Err(pyrust_core::type_err!(
+                            "can't concat {type_name} to {lhs_name}"
+                        ));
+                    };
+                    data_rc.borrow_mut().extend_from_slice(&rhs);
+                    return Ok(Some(left.clone()));
+                }
+                BinaryOp::Mul => {
+                    let n = match right.kind() {
+                        ValueKind::Int(n) => n,
+                        ValueKind::Bool(b) => b as i64,
+                        ValueKind::BigInt(_) => {
+                            return Err(pyrust_core::overflow_err!(
+                                "cannot fit 'int' into an index-sized integer"
+                            ));
+                        }
+                        _ => {
+                            let type_name = value_type_name_str(right);
+                            return Err(pyrust_core::type_err!(
+                                "can't multiply sequence by non-int of type '{type_name}'"
+                            ));
+                        }
+                    };
+                    let mut data = data_rc.borrow_mut();
+                    if n <= 0 {
+                        data.clear();
+                    } else {
+                        let orig = data.clone();
+                        for _ in 1..n {
+                            data.extend_from_slice(&orig);
+                        }
+                    }
+                    return Ok(Some(left.clone()));
+                }
+                _ => unreachable!(),
             }
         }
         Ok(None)
