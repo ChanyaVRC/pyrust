@@ -3261,7 +3261,7 @@ impl Value {
     ///
     /// `is_unset()` returns true only for this exact pattern.
     ///
-    /// Reading an unset slot through `kind()`, `truthy()`, or any accessor
+    /// Reading an unset slot through `kind()`, `truthy_raw()`, or any accessor
     /// that routes through `kind()` will panic in debug builds (via
     /// `debug_assert!`).  In release builds the assert is elided; the runtime
     /// tripwire is the compiler's `Insn::CheckLocal` emission.  Do not pass an

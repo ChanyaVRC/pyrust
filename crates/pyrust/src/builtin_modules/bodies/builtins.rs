@@ -9890,7 +9890,7 @@ fn min_max_impl(
 }
 
 /// Returns `true` when a container element (a `Value`) requires interpreter
-/// access during repr — i.e., when `Value::repr()` alone is insufficient.
+/// access during repr — i.e., when `Value::repr_raw()` alone is insufficient.
 ///
 /// The only cases that need interpreter dispatch are:
 /// - `PyInstance` — may have a user-defined `__repr__`
@@ -9930,7 +9930,7 @@ fn key_needs_interp_repr(k: &PyKey) -> bool {
 /// Shared by the `repr()` builtin and `render_instance_str` (for the container
 /// case, where `str(list)` is defined as `repr(list)` in CPython).
 ///
-/// Cycle detection mirrors `Value::repr()`: a per-call-stack thread-local
+/// Cycle detection mirrors `Value::repr_raw()`: a per-call-stack thread-local
 /// tracks which container object ids are currently being formatted; a second
 /// visit short-circuits to the CPython placeholder (`[...]` / `(...)` /
 /// `{...}`).
@@ -10055,7 +10055,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
 
     // For containers, we need to recurse with interpreter access on each
     // element.  Use a thread-local cycle-detection stack identical in spirit
-    // to the one in `Value::repr()`.
+    // to the one in `Value::repr_raw()`.
     thread_local! {
         static REPR_IN_PROGRESS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
     }
@@ -10063,7 +10063,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
     match value.kind() {
         ValueKind::List(items) => {
             // Fast path: all elements are plain scalars — no interpreter
-            // dispatch needed.  `Value::repr()` handles cycle detection
+            // dispatch needed.  `Value::repr_raw()` handles cycle detection
             // internally and produces the same output without a snapshot.
             if !items.iter().any(value_needs_interp_repr) {
                 drop(items);
@@ -10262,7 +10262,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             Ok(format!("frozenset({{{}}})", parts.join(", ")))
         }
         // Generators and built-in iterators (#2019): the pure
-        // `Value::repr()` cannot tell the concrete iterator kind apart
+        // `Value::repr_raw()` cannot tell the concrete iterator kind apart
         // (all are `ValueKind::Generator`), so it returns a fixed
         // `<generator object>`.  Reconstruct CPython's real repr here:
         //   - true generators (def-generator / genexpr):
@@ -10271,7 +10271,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         //         `<{type_name} object at 0x...>`
         ValueKind::Generator(_) => Ok(generator_repr(value)),
         // For all other value types (int, float, str, bool, None, …), the
-        // pure `Value::repr()` is correct and needs no interpreter.
+        // pure `Value::repr_raw()` is correct and needs no interpreter.
         _ => Ok(value.repr_raw()),
     }
 }

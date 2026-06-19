@@ -213,7 +213,7 @@ fn is_none_type_class(v: &Value) -> bool {
 /// `PyInstance` that has a `__name__` attribute (e.g. a `TypeVar` created by
 /// PEP 695 `type X[T] = ...` syntax), we use the `__name__` string directly
 /// so that `list[T]` renders as `list[T]` rather than `list[<object at ...>]`.
-/// For anything else we fall back to the general `Value::repr()`.
+/// For anything else we fall back to the general `Value::repr_raw()`.
 fn repr_type_arg(v: &Value) -> String {
     match v.kind() {
         // CPython's `ga_repr_item` special-cases `Ellipsis` to render `...`

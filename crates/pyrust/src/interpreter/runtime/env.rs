@@ -3444,7 +3444,7 @@ impl Interpreter {
         }
     }
 
-    /// Like `Value::truthy()` but dispatches `__bool__` / `__len__` for instances.
+    /// Like `Value::truthy_raw()` but dispatches `__bool__` / `__len__` for instances.
     pub(crate) fn truthy_value(&mut self, value: &Value) -> Result<bool> {
         if let ValueKind::PyInstance(inst) = value.kind() {
             let inst_rc = Rc::clone(inst);

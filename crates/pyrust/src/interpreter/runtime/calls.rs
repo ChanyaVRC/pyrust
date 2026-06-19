@@ -8686,7 +8686,7 @@ impl Interpreter {
                 _ => {}
             }
         }
-        // No dunders found: fall back to Value::repr(), which produces
+        // No dunders found: fall back to Value::repr_raw(), which produces
         // `<module.qualname object at 0xADDR>` matching CPython's object.__repr__.
         Ok(value.repr_raw())
     }
