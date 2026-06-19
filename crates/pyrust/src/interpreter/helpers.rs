@@ -879,6 +879,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("fromhex".to_string(), Value::builtin_function("bytearray.fromhex"));
+    // `bytearray.maketrans` is a staticmethod that returns `bytes` (identical to
+    // `bytes.maketrans`): register it so that both `bytearray.maketrans(f, t)` and
+    // `bytearray(b'').maketrans(f, t)` resolve to the same sentinel.
+    bytearray_class
+        .borrow_mut()
+        .attrs
+        .insert("maketrans".to_string(), Value::builtin_function("bytearray.maketrans"));
     // `str.maketrans` is a staticmethod: register it in str_class.attrs so
     // that both `str.maketrans(...)` and `"".maketrans(...)` resolve to the
     // same `BuiltinFunction("str.maketrans")` sentinel.
