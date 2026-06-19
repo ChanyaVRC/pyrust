@@ -11,7 +11,7 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    float_to_bigint, instance_builtin_data, invoke_class_method, lookup_class_attr,
+    builtin_data_backing, float_to_bigint, invoke_class_method, lookup_class_attr,
     reject_keyword_args_expanded, value_to_float, value_type_name_str,
 };
 use crate::value::{PyBigInt, PyToPrimitive, Value, ValueKind};
@@ -169,7 +169,7 @@ pyrust_module! {
         // backing value toward zero. Other types fall through to the TypeError.
         let f = match val.kind() {
             ValueKind::Float(f) => Some(f),
-            ValueKind::PyInstance(inst) => match instance_builtin_data(inst).as_ref().map(|b| b.kind()) {
+            ValueKind::PyInstance(_) => match builtin_data_backing(val).as_ref().map(|b| b.kind()) {
                 Some(ValueKind::Float(f)) => Some(f),
                 _ => None,
             },
@@ -1159,7 +1159,7 @@ fn math_arg_to_float(interp: &mut crate::Interpreter, val: &Value) -> Result<f64
     if let ValueKind::PyInstance(inst) = val.kind() {
         let inst_rc = Rc::clone(inst);
         let class = Rc::clone(&inst_rc.borrow().class);
-        let backing = instance_builtin_data(&inst_rc);
+        let backing = builtin_data_backing(val);
         // (1) float subclass: use the backing float directly (PyFloat_Check
         // fast path bypasses any __float__ override).
         if let Some(ref b) = backing
@@ -1243,7 +1243,7 @@ fn math_integral_exact(val: &Value) -> Option<Value> {
         ValueKind::Int(n) => Some(Value::int(n)),
         ValueKind::BigInt(b) => Some(Value::bigint(b.clone())),
         ValueKind::Bool(b) => Some(Value::int(b as i64)),
-        ValueKind::PyInstance(inst) => match instance_builtin_data(inst).as_ref().map(|b| b.kind()) {
+        ValueKind::PyInstance(_) => match builtin_data_backing(val).as_ref().map(|b| b.kind()) {
             Some(ValueKind::Int(n)) => Some(Value::int(n)),
             Some(ValueKind::BigInt(b)) => Some(Value::bigint(b.clone())),
             Some(ValueKind::Bool(b)) => Some(Value::int(b as i64)),

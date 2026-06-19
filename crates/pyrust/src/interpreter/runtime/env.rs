@@ -3494,7 +3494,7 @@ impl Interpreter {
             // For scalar primitive subclasses (MyInt, MyFloat, MyStr,
             // MyBytes), delegate truthiness to the backing value so that
             // `bool(MyInt(0))` returns False as CPython does.
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if let Some(backing) = builtin_data_backing(value) {
                 return Ok(backing.truthy_raw());
             }
             // Non-primitive PyInstance with no __bool__ / __len__: always truthy.

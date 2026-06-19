@@ -1917,7 +1917,7 @@ impl Interpreter {
                         matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
                             | "str" | "int" | "float" | "bytes" | "bytearray")
                     })
-                        && let Some(backing) = instance_builtin_data(inst) {
+                        && let Some(backing) = builtin_data_backing(&receiver) {
                             // Issue #1909: container protocol dunders
                             // (`MyList().__len__()`, `MyDict().__getitem__(k)`)
                             // operate on the backing primitive — route through
@@ -2873,7 +2873,7 @@ impl Interpreter {
             // bytearray subclasses with no user-defined __iter__ should iterate
             // the backing primitive.
             if user_iter.is_none()
-                && let Some(backing) = instance_builtin_data(&inst_rc) {
+                && let Some(backing) = builtin_data_backing(val) {
                     // A subclass of a non-iterable builtin (`class C(int): pass`)
                     // is itself not iterable; CPython reports the actual subclass
                     // name, not the backing base's, so re-label the not-iterable
