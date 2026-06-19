@@ -938,7 +938,7 @@ result = fact(10)
         let interpreter = run_program("x = [1, 2, 3]\nn = 0\nwhile x:\n    x.pop()\n    n += 1\n");
         assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::int(3)));
         let x = interpreter.lookup_name("x").unwrap().unwrap();
-        assert!(!x.truthy(), "x should be drained to empty");
+        assert!(!x.truthy_raw(), "x should be drained to empty");
     }
 
     #[test]

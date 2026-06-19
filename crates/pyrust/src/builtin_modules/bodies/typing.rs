@@ -255,7 +255,7 @@ pyrust_module! {
         let args_repr = borrow
             .attrs
             .get("_args")
-            .map(|v| v.repr())
+            .map(|v| v.repr_raw())
             .unwrap_or_else(|| "...".to_string());
         Ok(Value::string(format!("typing.{form}[{args_repr}]")))
     }
@@ -484,7 +484,7 @@ pub(crate) fn union_or_optional_getitem(form: &str, index: Value) -> Result<Valu
                     "TypeError",
                     format!(
                         "typing.Optional requires a single type. Got {}.",
-                        index.repr()
+                        index.repr_raw()
                     ),
                 ));
             }

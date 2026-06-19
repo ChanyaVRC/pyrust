@@ -2540,7 +2540,7 @@ impl Interpreter {
                                     if contained {
                                         Ok(Value::int((vi - start) / step))
                                     } else {
-                                        Err(pyrust_core::value_err!("{} is not in range", v.repr()))
+                                        Err(pyrust_core::value_err!("{} is not in range", v.repr_raw()))
                                     }
                                 }
                             }
@@ -2597,7 +2597,7 @@ impl Interpreter {
                             match Self::bigrange_member(&start, &stop, &step, v) {
                                 Some(x) => Ok(value_from_bigint((x - &start) / &step)),
                                 None if is_int_valued => {
-                                    Err(pyrust_core::value_err!("{} is not in range", v.repr()))
+                                    Err(pyrust_core::value_err!("{} is not in range", v.repr_raw()))
                                 }
                                 None => Err(pyrust_core::value_err!(
                                     "sequence.index(x): x not in sequence"
@@ -8688,7 +8688,7 @@ impl Interpreter {
         }
         // No dunders found: fall back to Value::repr(), which produces
         // `<module.qualname object at 0xADDR>` matching CPython's object.__repr__.
-        Ok(value.repr())
+        Ok(value.repr_raw())
     }
 }
 
@@ -9151,7 +9151,7 @@ fn exception_instance_args(inst_rc: &Rc<RefCell<pyrust_core::PyInstance>>) -> Ve
 /// Renders a value using its `__repr__` dunder for the `!r` conversion flag in
 /// `str.format`.  Mirrors the `repr()` builtin's dispatch: for `PyInstance`
 /// values, looks up `__repr__` via MRO, calls it, and validates the return is a
-/// `str`.  Non-instances (built-in types) fall back to `value.repr()` unchanged.
+/// `str`.  Non-instances (built-in types) fall back to `value.repr_raw()` unchanged.
 ///
 /// Note: exception instances do not bypass `__repr__` here — CPython dispatches
 /// `__repr__` on exceptions normally (only `__str__` has the special-case).
@@ -9160,7 +9160,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     // `value` is, or transitively contains, an over-limit BigInt).
     pyrust_core::check_int_str_conversion(value)?;
     let ValueKind::PyInstance(inst) = value.kind() else {
-        return Ok(value.repr());
+        return Ok(value.repr_raw());
     };
     let inst_rc = Rc::clone(inst);
     let class = Rc::clone(&inst_rc.borrow().class);
@@ -9216,7 +9216,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
             | ValueKind::Bool(_)
             | ValueKind::Float(_)
             | ValueKind::Complex(_, _)
-            | ValueKind::Bytes(_) => return Ok(backing.repr()),
+            | ValueKind::Bytes(_) => return Ok(backing.repr_raw()),
             ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                 return crate::builtin_modules::builtins::render_value_repr(interp, &backing);
             }
@@ -9259,16 +9259,16 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
                     pyrust_builtins::bytearray::as_bytearray_snapshot(&backing)
                 {
                     let class_name = class.borrow().name.clone();
-                    // `Value::bytes(...).repr()` renders the `b'...'` content
+                    // `Value::bytes(...).repr_raw()` renders the `b'...'` content
                     // form; wrap it in the subclass name.
-                    let inner = Value::bytes(data).repr();
+                    let inner = Value::bytes(data).repr_raw();
                     return Ok(format!("{class_name}({inner})"));
                 }
             }
             _ => {}
         }
     }
-    Ok(value.repr())
+    Ok(value.repr_raw())
 }
 
 /// Escapes all non-ASCII characters in `s` using Python's `\xNN`, `\uNNNN`,

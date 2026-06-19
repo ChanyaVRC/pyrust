@@ -93,7 +93,7 @@ impl BuiltinTypeOps for InstanceDictOps {
             .attrs
             .iter()
             .filter(|(k, _)| !s.is_hidden(k))
-            .map(|(k, v)| format!("{}: {}", Value::string(k.clone()).repr(), v.repr()))
+            .map(|(k, v)| format!("{}: {}", Value::string(k.clone()).repr_raw(), v.repr_raw()))
             .collect();
         format!("{{{}}}", pairs.join(", "))
     }

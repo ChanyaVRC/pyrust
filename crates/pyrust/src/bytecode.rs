@@ -287,9 +287,9 @@ pub enum Insn {
     DeleteLocal(Reg, u16),
     /// pc += offset  (offset 0 = next instruction)
     Jump(i32),
-    /// if !R[cond].truthy(): pc += offset
+    /// if !R[cond].truthy_raw(): pc += offset
     JumpIfFalse(Reg, i32),
-    /// if R[cond].truthy(): pc += offset
+    /// if R[cond].truthy_raw(): pc += offset
     JumpIfTrue(Reg, i32),
     /// if !(R[lhs] op R[rhs]): pc += offset  (integer fast path; avoids bool temp reg)
     CmpJumpIfFalse(Reg, BinaryOp, Reg, i32),

@@ -39,9 +39,9 @@ impl BuiltinTypeOps for SliceOps {
             .expect("SliceOps: bad state");
         format!(
             "slice({}, {}, {})",
-            s.start.repr(),
-            s.stop.repr(),
-            s.step.repr()
+            s.start.repr_raw(),
+            s.stop.repr_raw(),
+            s.step.repr_raw()
         )
     }
 

@@ -120,7 +120,7 @@ pub fn repr_type_component(v: &Value) -> String {
             }
         }
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
-        _ => v.repr(),
+        _ => v.repr_raw(),
     }
 }
 

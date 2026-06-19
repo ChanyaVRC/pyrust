@@ -3183,7 +3183,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
-                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy_raw() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
                     if let (Some(a), Some(b)) = (
@@ -3195,7 +3195,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
-                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy_raw() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
@@ -3214,7 +3214,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
-                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy_raw() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
@@ -3233,7 +3233,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
-                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy_raw() { pc = jump_pc!(*offset); }
                 }
 
                 // ── Exception handling ───────────────────────────────────
@@ -5193,7 +5193,7 @@ impl Interpreter {
                 Insn::PrintExpr(src) => {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     if !val.is_none() {
-                        println!("{}", val.repr());
+                        println!("{}", val.repr_raw());
                     }
                 }
 
@@ -5920,7 +5920,7 @@ pub(crate) fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
                 value_type_name_str(&val)
             )),
         },
-        UnaryOp::Not => Ok(Value::bool_(!val.truthy())),
+        UnaryOp::Not => Ok(Value::bool_(!val.truthy_raw())),
         UnaryOp::BitNot => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(!v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),

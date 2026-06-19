@@ -388,9 +388,9 @@ impl Interpreter {
                         let key_repr = if matches!(key.kind(), ValueKind::PyInstance(_)) {
                             let key_cloned = key.clone();
                             render_instance_repr(self, &key_cloned)
-                                .unwrap_or_else(|_| key.repr())
+                                .unwrap_or_else(|_| key.repr_raw())
                         } else {
-                            key.repr()
+                            key.repr_raw()
                         };
                         format!("KeyError: {key_repr}")
                     }
@@ -458,7 +458,7 @@ impl Interpreter {
                                 format!("{class_name}: {msg}")
                             }
                         }
-                        _ => format!("Uncaught exception: {}", value.repr()),
+                        _ => format!("Uncaught exception: {}", value.repr_raw()),
                     },
                 };
                 // PEP 3134: walk __cause__ / __context__ and prepend each

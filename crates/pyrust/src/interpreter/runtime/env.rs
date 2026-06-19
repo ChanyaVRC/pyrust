@@ -3495,12 +3495,12 @@ impl Interpreter {
             // MyBytes), delegate truthiness to the backing value so that
             // `bool(MyInt(0))` returns False as CPython does.
             if let Some(backing) = instance_builtin_data(&inst_rc) {
-                return Ok(backing.truthy());
+                return Ok(backing.truthy_raw());
             }
             // Non-primitive PyInstance with no __bool__ / __len__: always truthy.
             return Ok(true);
         }
-        Ok(value.truthy())
+        Ok(value.truthy_raw())
     }
 
 }

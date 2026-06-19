@@ -3134,7 +3134,7 @@ fn pass_const_branch_elim(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
         if let (Insn::LoadConst(lc_reg, c_idx), jump) = (&out[i], &out[i + 1]) {
             let (lc_reg, c_idx) = (*lc_reg, *c_idx);
             let lv = &consts[c_idx as usize];
-            let truthy = lv.truthy();
+            let truthy = lv.truthy_raw();
             let replacement: Option<Insn> = match jump {
                 Insn::JumpIfFalse(cond, k) if *cond == lc_reg => Some(if truthy {
                     Insn::Jump(0)

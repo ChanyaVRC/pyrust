@@ -669,7 +669,7 @@ impl Interpreter {
                     func.clone(),
                     &[ExpandedCallArg { name: None, value: exc.clone() }],
                 )?;
-                Ok(res.truthy())
+                Ok(res.truthy_raw())
             }
         }
     }

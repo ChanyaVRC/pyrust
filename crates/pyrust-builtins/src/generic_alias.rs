@@ -228,9 +228,9 @@ fn repr_type_arg(v: &Value) -> String {
             {
                 return s.to_string();
             }
-            v.repr()
+            v.repr_raw()
         }
-        _ => v.repr(),
+        _ => v.repr_raw(),
     }
 }
 

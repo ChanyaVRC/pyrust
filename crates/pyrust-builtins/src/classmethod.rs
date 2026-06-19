@@ -49,7 +49,7 @@ impl BuiltinTypeOps for StaticMethodAnyOps {
         let s = borrow
             .downcast_ref::<StaticMethodAnyState>()
             .expect("StaticMethodAnyState");
-        format!("<staticmethod({})>", s.wrapped.repr())
+        format!("<staticmethod({})>", s.wrapped.repr_raw())
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
@@ -151,7 +151,7 @@ impl BuiltinTypeOps for ClassMethodAnyOps {
         let s = borrow
             .downcast_ref::<ClassMethodAnyState>()
             .expect("ClassMethodAnyState");
-        format!("<classmethod({})>", s.wrapped.repr())
+        format!("<classmethod({})>", s.wrapped.repr_raw())
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {

@@ -541,7 +541,7 @@ fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
     // CPython coerces keepends via the standard truth protocol — any value is
     // accepted.  Delegate to Value::truthy() which covers all ValueKind arms
     // (including Dict, Set, BigInt, Range, Complex, BuiltinObject, etc.).
-    let keepends = args.first().is_some_and(|v| v.truthy());
+    let keepends = args.first().is_some_and(|v| v.truthy_raw());
     let mut lines: Vec<Value> = Vec::new();
     let bytes = s.as_bytes();
     let len = bytes.len();

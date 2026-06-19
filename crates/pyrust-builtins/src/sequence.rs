@@ -48,7 +48,7 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
     let msg = if type_name == "tuple" {
         "tuple.index(x): x not in tuple".to_string()
     } else {
-        format!("{} is not in {type_name}", target.repr())
+        format!("{} is not in {type_name}", target.repr_raw())
     };
     Err(PyError::named("ValueError", msg))
 }
