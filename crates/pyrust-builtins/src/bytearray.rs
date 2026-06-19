@@ -162,6 +162,10 @@ impl BuiltinTypeOps for ByteArrayOps {
                 Ok(data.contains(&(n as u8)))
             }
             ValueKind::Bool(b) => Ok(data.contains(&(b as u8))),
+            ValueKind::BigInt(_) => Err(PyError::named(
+                "ValueError",
+                "byte must be in range(0, 256)".to_string(),
+            )),
             ValueKind::Bytes(rc) => {
                 Ok(crate::bytes::find_subsequence(&data, rc.as_slice()).is_some())
             }
