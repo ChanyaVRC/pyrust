@@ -385,7 +385,18 @@ pyrust_module! {
             // __abs__ defined.
             if let Some(backing) = instance_builtin_data(&inst_rc) {
                 match backing.kind() {
-                    ValueKind::Int(v) => return Ok(Value::int(v.abs())),
+                    ValueKind::Int(v) => {
+                        // i64::MIN.checked_abs() returns None because
+                        // -i64::MIN overflows i64; promote to BigInt to
+                        // match CPython (mirrors the PyInt arm above).
+                        return Ok(match v.checked_abs() {
+                            Some(abs) => Value::int(abs),
+                            None => {
+                                let big: crate::value::PyBigInt = v.into();
+                                Value::bigint(-big)
+                            }
+                        });
+                    }
                     ValueKind::BigInt(v) => {
                         let zero: crate::value::PyBigInt = 0i64.into();
                         let abs = if v < &zero { -v.clone() } else { v.clone() };
