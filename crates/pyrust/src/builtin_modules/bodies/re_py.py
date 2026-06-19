@@ -388,6 +388,10 @@ def _decode_simple_escape(c):
 
 
 def _decode_class_escape(c):
+    # Inside a character class, ``\b`` is the backspace character (it is the
+    # word-boundary assertion only outside a class).
+    if c == 'b':
+        return '\b'
     if c in _SIMPLE_ESCAPES:
         return _SIMPLE_ESCAPES[c]
     return c
@@ -436,11 +440,22 @@ class _Matcher:
         self.groupindex = groupindex
         self.groups = None
 
-    def match_at(self, start):
+    def match_at(self, start, require_end=None):
+        # `require_end` (fullmatch) forces the overall match to land exactly at
+        # that position.  Returning None from `accept` on a too-short match lets
+        # the backtracker keep exploring longer alternatives (e.g. the `ab`
+        # branch of `a|ab` for fullmatch) instead of locking in the first
+        # success.
         self.groups = [None] * (self.ngroups + 1)
 
-        def accept(pos):
-            return pos
+        if require_end is None:
+            def accept(pos):
+                return pos
+        else:
+            def accept(pos):
+                if pos == require_end:
+                    return pos
+                return None
 
         res = self._m(self.node, start, accept)
         if res is None:
@@ -752,9 +767,9 @@ class Pattern:
         self.groups = parser.group_count
         self.groupindex = parser.groupindex
 
-    def _match_at(self, text, start):
+    def _match_at(self, text, start, require_end=None):
         m = _Matcher(self._ast, text, self.flags, self.groups, self.groupindex)
-        return m.match_at(start)
+        return m.match_at(start, require_end)
 
     def match(self, string, pos=0, endpos=None):
         if endpos is None:
@@ -769,12 +784,10 @@ class Pattern:
         if endpos is None:
             endpos = len(string)
         sub = string[:endpos]
-        res = self._match_at(sub, pos)
+        res = self._match_at(sub, pos, endpos)
         if res is None:
             return None
         s, e, groups = res
-        if e != endpos:
-            return None
         return Match(self, string, s, e, groups, pos, endpos)
 
     def search(self, string, pos=0, endpos=None):
@@ -851,9 +864,6 @@ class Pattern:
         for m in matches:
             if maxsplit and n >= maxsplit:
                 break
-            if m._start == m._end and m._start == last and m._start == 0:
-                # leading empty match: CPython does not emit a split here
-                continue
             out.append(string[last:m._start])
             if self.groups:
                 for gi in range(1, self.groups + 1):

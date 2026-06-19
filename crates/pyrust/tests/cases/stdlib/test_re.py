@@ -118,3 +118,19 @@ except re.error:
 
 # Pattern repr is stable
 print(repr(re.compile(r'\d+')))
+
+# --- fullmatch backtracks across alternation / lazy (#2626 review) ----------
+print(re.fullmatch(r'a|ab', 'ab').group())
+print(re.fullmatch(r'\d+|\d+x', '12x').group())
+print(re.fullmatch(r'a.*?', 'abc').group())
+print(re.fullmatch(r'(a)|(ab)', 'ab').groups())
+
+# --- split emits the leading empty match (3.7+ / 3.12) ----------------------
+print(re.split(r'x*', 'abc'))
+print(re.split(r'', 'abc'))
+print(re.split(r'a*', 'aXbXc'))
+print(re.split(r'(x)*', 'abc'))
+
+# --- \b inside a character class is backspace -------------------------------
+print(bool(re.match(r'[\b]', '\b')))
+print(bool(re.match(r'[^\b]', 'a')))
