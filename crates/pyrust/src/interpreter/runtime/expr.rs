@@ -3692,7 +3692,36 @@ impl Interpreter {
             }
             let is_dict = matches!(args[0].kind(), ValueKind::Dict(_));
             if is_dict {
-                return pyrust_builtins::string::call("translate", &receiver, args);
+                // pyrust-builtins matches mapping values on `ValueKind`
+                // directly, so a builtin-subclass replacement value
+                // (`class MyInt(int)` / `class MyStr(str)`) would be rejected
+                // as a TypeError even though CPython accepts the inherited
+                // int/str/None backing. pyrust-builtins has no interpreter
+                // access to unwrap `__builtin_data__`, so do it here: when any
+                // value needs unwrapping, hand pyrust-builtins a value-coerced
+                // copy of the dict. The common `str.maketrans`-produced dict
+                // (plain int / str values) needs no copy and pays only a scan.
+                let table = args.into_iter().next().unwrap();
+                let needs_coerce = |v: &Value| {
+                    builtin_data_backing(v)
+                        .is_some_and(|b| !matches!(b.kind(), ValueKind::Dict(_)))
+                };
+                let coerced = table.dict_with(|d| {
+                    if d.values().any(&needs_coerce) {
+                        let mut out = pyrust_core::PyDict::default();
+                        for (k, v) in d.iter() {
+                            let coerced_v = builtin_data_backing(v)
+                                .filter(|b| !matches!(b.kind(), ValueKind::Dict(_)))
+                                .unwrap_or_else(|| v.clone());
+                            out.insert(k.clone(), coerced_v);
+                        }
+                        Some(Value::dict(out))
+                    } else {
+                        None
+                    }
+                });
+                let table = coerced.flatten().unwrap_or(table);
+                return pyrust_builtins::string::call("translate", &receiver, vec![table]);
             }
             // General mapping protocol: call table[ordinal] per codepoint.
             // KeyError / IndexError / LookupError → keep character;
