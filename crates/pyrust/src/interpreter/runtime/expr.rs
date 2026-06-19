@@ -3188,6 +3188,39 @@ impl Interpreter {
                     }
                     return Ok(Value::none());
                 }
+                // `mappingproxy` is a mapping (it has `keys()`), but it is a
+                // BuiltinObject, not a PyInstance, so the protocol helper above
+                // returns `None` for it.  Treat both proxy variants as mappings
+                // and copy their pairs verbatim, matching `dict()` / `{**m}`
+                // (#2679, and the pre-existing class-backed `vars(C)` form).
+                let proxy_pairs: Option<Vec<(PyKey, Value)>> = if let Some(cls_rc) =
+                    pyrust_builtins::mapping_proxy::as_class_rc(&arg)
+                {
+                    Some(
+                        cls_rc
+                            .borrow()
+                            .attrs
+                            .iter()
+                            .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                            .collect(),
+                    )
+                } else {
+                    pyrust_builtins::mapping_proxy::as_dict_rc(&arg)
+                        .map(|dict_rc| dict_rc.borrow().clone().into_iter().collect())
+                };
+                if let Some(pairs) = proxy_pairs {
+                    self.dict_extend_value_dedup(&receiver, pairs)?;
+                    for (k, v) in kwargs {
+                        receiver
+                            .dict_with_mut(|dict| {
+                                dict.insert(k.clone(), v.clone());
+                            })
+                            .ok_or_else(|| {
+                                PyError::Runtime("internal: expected dict".to_string())
+                            })?;
+                    }
+                    return Ok(Value::none());
+                }
                 // Drive the iterable one element at a time and insert each
                 // pair into the dict eagerly.  This matches CPython: items
                 // yielded before a mid-iteration exception are already in the

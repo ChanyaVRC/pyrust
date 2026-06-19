@@ -56,3 +56,21 @@ except KeyError:
 print(list(mm.keys()))
 print(list(mm.values()))
 print(type(mm.copy()).__name__, mm.copy())
+
+# dict.update() accepts a dict-backed mappingproxy as a mapping (#2679).
+upd = {}
+upd.update(e.items().mapping)
+print(upd)
+
+# ... and a class-backed mappingproxy (vars(C)), exercising the same path.
+class _C:
+    p = 10
+    q = 20
+upd2 = {}
+upd2.update(vars(_C))
+print(upd2['p'], upd2['q'])
+
+# dict-subclass constructors accept the proxy as a mapping (#2679).
+from collections import OrderedDict, defaultdict
+print(dict(OrderedDict(e.items().mapping)))
+print(dict(defaultdict(int, e.keys().mapping)))

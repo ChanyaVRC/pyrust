@@ -1737,6 +1737,16 @@ fn dict_init_into(
             for (k, v) in map.iter() {
                 map_insert_eq(interp, items, k.clone(), v.clone())?;
             }
+        } else if let Some(cls_rc) = pyrust_builtins::mapping_proxy::as_class_rc(arg) {
+            // Class-backed `mappingproxy` (`vars(C)`): copy attrs verbatim.
+            for (k, v) in cls_rc.borrow().attrs.iter() {
+                map_insert_eq(interp, items, PyKey::str_from(k), v.clone())?;
+            }
+        } else if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(arg) {
+            // Dict-backed `mappingproxy` (`d.keys().mapping`, #2679): copy pairs.
+            for (k, v) in dict_rc.borrow().iter() {
+                map_insert_eq(interp, items, k.clone(), v.clone())?;
+            }
         } else if let Some(pairs) = crate::interpreter::mapping_pairs_via_protocol(interp, arg)? {
             // Any `keys()`-bearing mapping (dict subclasses like Counter /
             // defaultdict / OrderedDict, ChainMap, UserDict, duck-typed user
