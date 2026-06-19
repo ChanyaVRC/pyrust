@@ -11174,79 +11174,81 @@ impl Interpreter {
     ) -> Result<Option<Value>> {
         use crate::bytecode::AttrCacheEntry;
 
-        enum CallMethodFast {
-            Hit(Value),
-            Miss,
-        }
-                let fast = {
-                    let cache = code.attr_cache.borrow();
-                    if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
-                        &cache[call_site_pc]
-                    {
-                        if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
-                            let inst = inst_rc.borrow();
-                            let same_class =
-                                Rc::as_ptr(&inst.class) as *const () == *class_ptr;
-                            let no_shadow = !inst.attrs.contains_key(method);
-                            let version_ok = inst.class.borrow().mutation_version.get()
-                                == *class_version;
-                            let epoch_ok = pyrust_core::class_epoch() == *epoch;
-                            if same_class && no_shadow && version_ok && epoch_ok {
-                                let unbound = unbound.clone();
-                                let inst_rc_clone = Rc::clone(inst_rc);
-                                drop(inst);
-                                // Issue #976: if the cached method is a primitive
-                                // builtin (list.X / dict.X / set.X) and the instance
-                                // has a __builtin_data__ backing value, dispatch
-                                // directly to the backing primitive.
-                                // invoke_class_method cannot handle BuiltinFunction
-                                // method names — it looks them up in the top-level
-                                // registry which has no "list.append" entry.
-                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind()
-                                    && let Some((prim_type, prim_method)) =
-                                        fn_name.split_once('.')
-                                        .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
-                                        && let Some(backing) = instance_builtin_data(&inst_rc_clone) {
-                                            // Issue #2436: tag OrderedDict-backed
-                                            // views so the cached `keys`/`values`/
-                                            // `items` path picks the OrderedDict
-                                            // mutation-guard wording.
-                                            let ordered = class_is_named_ordered_dict(
-                                                &inst_rc_clone.borrow().class,
-                                            );
-                                            return self
-                                                .dispatch_backing_primitive_method(
-                                                    prim_type,
-                                                    prim_method,
-                                                    backing,
-                                                    ordered,
-                                                    args.to_vec(),
-                                                )
-                                                .map(Some);
-                                        }
-                                let inst_val = Value::py_instance(inst_rc_clone);
-                                let mut buf = std::mem::take(&mut self.call_arg_buf);
-                                buf.clear();
-                                for arg in args.iter() {
-                                    buf.push(ExpandedCallArg { name: None, value: arg.clone() });
-                                }
-                                let r = invoke_class_method(self, unbound, inst_val, &buf);
-                                self.call_arg_buf = buf;
-                                CallMethodFast::Hit(r?)
-                            } else {
-                                CallMethodFast::Miss
-                            }
-                        } else {
-                            CallMethodFast::Miss
-                        }
+        // Resolve the cached method + receiver under a SHORT-LIVED borrow of
+        // `code.attr_cache`, then DROP it before invoking anything.  The cache
+        // borrow must not span `invoke_class_method` / a backing-primitive
+        // dispatch: those run user code, and a recursive method (one whose
+        // body executes on this same `code` object) re-enters `GetAttr` and
+        // calls `code.attr_cache.borrow_mut()` in `fill_get_attr_cache`,
+        // panicking with "RefCell already borrowed" if the outer borrow is
+        // still alive.  `re_py.py`'s deeply recursive `_Matcher` methods made
+        // this re-entrant collision reachable (issue #2625).
+        let resolved: Option<(Value, Rc<std::cell::RefCell<pyrust_core::PyInstance>>)> = {
+            let cache = code.attr_cache.borrow();
+            if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
+                &cache[call_site_pc]
+            {
+                if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                    let inst = inst_rc.borrow();
+                    let same_class = Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                    let no_shadow = !inst.attrs.contains_key(method);
+                    let version_ok =
+                        inst.class.borrow().mutation_version.get() == *class_version;
+                    let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                    if same_class && no_shadow && version_ok && epoch_ok {
+                        let unbound = unbound.clone();
+                        let inst_rc_clone = Rc::clone(inst_rc);
+                        drop(inst);
+                        Some((unbound, inst_rc_clone))
                     } else {
-                        CallMethodFast::Miss
+                        None
                     }
-                };
-        match fast {
-            CallMethodFast::Hit(result) => Ok(Some(result)),
-            CallMethodFast::Miss => Ok(None),
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+            // `cache` borrow dropped here at end of block scope.
+        };
+        let Some((unbound, inst_rc_clone)) = resolved else {
+            return Ok(None);
+        };
+        // Issue #976: if the cached method is a primitive builtin
+        // (list.X / dict.X / set.X) and the instance has a __builtin_data__
+        // backing value, dispatch directly to the backing primitive.
+        // invoke_class_method cannot handle BuiltinFunction method names — it
+        // looks them up in the top-level registry which has no "list.append"
+        // entry.
+        if let ValueKind::BuiltinFunction(fn_name) = unbound.kind()
+            && let Some((prim_type, prim_method)) = fn_name
+                .split_once('.')
+                .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
+            && let Some(backing) = instance_builtin_data(&inst_rc_clone)
+        {
+            // Issue #2436: tag OrderedDict-backed views so the cached
+            // `keys`/`values`/`items` path picks the OrderedDict
+            // mutation-guard wording.
+            let ordered = class_is_named_ordered_dict(&inst_rc_clone.borrow().class);
+            return self
+                .dispatch_backing_primitive_method(
+                    prim_type,
+                    prim_method,
+                    backing,
+                    ordered,
+                    args.to_vec(),
+                )
+                .map(Some);
         }
+        let inst_val = Value::py_instance(inst_rc_clone);
+        let mut buf = std::mem::take(&mut self.call_arg_buf);
+        buf.clear();
+        for arg in args.iter() {
+            buf.push(ExpandedCallArg { name: None, value: arg.clone() });
+        }
+        let r = invoke_class_method(self, unbound, inst_val, &buf);
+        self.call_arg_buf = buf;
+        Ok(Some(r?))
     }
 
     /// Trampoline-resolution fast path for `o.m(...)` (#2345).  On an inline-cache
