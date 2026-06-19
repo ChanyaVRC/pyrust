@@ -7336,11 +7336,14 @@ pyrust_module! {
         // Re-borrow immutably to read the list value and push to it.
         // Value::list_push takes &self and uses RefCell internally — no
         // need to hold a mutable borrow on the instance for this step.
+        // Read back via `get_cloned` so a dict-backed instance (#1981/#2637)
+        // resolves the list we just inserted into its live `__dict__`; a raw
+        // `get` (entries only) would miss it and hand back a fresh orphan list,
+        // silently dropping every appended note after a `__dict__` swap.
         let notes_val = inst_rc
             .borrow()
             .attrs
-            .get("__notes__")
-            .cloned()
+            .get_cloned("__notes__")
             .unwrap_or_else(|| Value::list(vec![]));
         notes_val
             .list_push(Value::string(note_str))
