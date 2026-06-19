@@ -3222,13 +3222,17 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &PyDict) -> Result<Valu
 // ---------------------------------------------------------------------------
 
 fn bytes_partition(bytes: &[u8], args: &[Value], reverse: bool) -> Result<Value> {
-    let sep_val = args.first().ok_or_else(|| {
-        let name = if reverse { "rpartition" } else { "partition" };
-        PyError::named(
+    let name = if reverse { "rpartition" } else { "partition" };
+    if args.len() != 1 {
+        return Err(PyError::named(
             "TypeError",
-            format!("bytes.{name}() requires exactly 1 argument"),
-        )
-    })?;
+            format!(
+                "bytes.{name}() takes exactly one argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let sep_val = &args[0];
     let sep: &[u8] = match sep_val.kind() {
         ValueKind::Bytes(rc) => rc.as_slice(),
         _ => {
