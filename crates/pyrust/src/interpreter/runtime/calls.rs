@@ -853,7 +853,7 @@ impl Interpreter {
             // the explicit positional arguments — the receiver is never injected
             // into `args` for this dispatch path (unlike the generic `int.*` arm).
             ValueKind::BuiltinFunction("int.from_bytes") => {
-                let pos: Vec<Value> = args
+                let mut pos: Vec<Value> = args
                     .iter()
                     .filter(|a| a.name.is_none())
                     .map(|a| a.value.clone())
@@ -864,6 +864,12 @@ impl Interpreter {
                         kw.insert(PyKey::str_from(name.as_str()), a.value.clone());
                     }
                 }
+                // The `bytes` source may be any bytes-like object (bytes,
+                // bytearray, memoryview) or any iterable of ints in 0..=255.
+                // Resolve it to concrete `bytes` here — where the interpreter is
+                // available to drive user `__iter__` — before the receiver-only
+                // `int_from_bytes` decodes the big-endian/little-endian integer.
+                self.resolve_from_bytes_source(&mut pos, &mut kw)?;
                 pyrust_builtins::int::int_from_bytes(&pos, &kw)
             }
             // #462: class-method-of-primitive dispatch.  When a primitive
@@ -6226,6 +6232,13 @@ impl Interpreter {
         pos: &mut [Value],
         kw: &mut PyDict,
     ) -> Result<()> {
+        // `(5).from_bytes(src, ...)`: the bound-instance form reaches the
+        // receiver-only `int::call`, which can't drive a user `__iter__`.
+        // Resolve the bytes-like / iterable source to concrete bytes here
+        // (where the interpreter is available), mirroring the class-method arm.
+        if method == "from_bytes" {
+            return self.resolve_from_bytes_source(pos, kw);
+        }
         if method != "to_bytes" {
             return Ok(());
         }
@@ -6239,6 +6252,37 @@ impl Interpreter {
             && let Some(resolved) = self.try_resolve_index_value(&v)? {
                 kw.insert(length_key, resolved);
             }
+        Ok(())
+    }
+
+    /// Resolve the `bytes` source argument of `int.from_bytes` to concrete
+    /// `bytes` in place, accepting any bytes-like object (bytes, bytearray,
+    /// memoryview) or any iterable of ints in `0..=255`. The source is the
+    /// first positional arg, or the `bytes` keyword. Shared by both the
+    /// class-method (`int.from_bytes(...)`) and bound-instance
+    /// (`(5).from_bytes(...)`) dispatch paths.
+    fn resolve_from_bytes_source(&mut self, pos: &mut [Value], kw: &mut PyDict) -> Result<()> {
+        // CPython validates `byteorder` *before* it processes the bytes source,
+        // so a bad/non-str byteorder must win over a bad source. Resolving the
+        // source first (it can raise for a str / out-of-range element / bad
+        // iterable) would otherwise surface the wrong error. Pre-check the
+        // byteorder argument here so its error takes precedence, mirroring the
+        // receiver-only `int_from_bytes` messages.
+        check_from_bytes_byteorder(pos.get(1).or_else(|| kw.get(&PyKey::str_from("byteorder"))))?;
+        if let Some(src) = pos.first() {
+            if !matches!(src.kind(), ValueKind::Bytes(_)) {
+                let src = src.clone();
+                let resolved =
+                    crate::builtin_modules::builtins::from_bytes_source_to_bytes(self, &src)?;
+                pos[0] = Value::bytes(resolved);
+            }
+        } else if let Some(src) = kw.get(&PyKey::str_from("bytes")).cloned() {
+            if !matches!(src.kind(), ValueKind::Bytes(_)) {
+                let resolved =
+                    crate::builtin_modules::builtins::from_bytes_source_to_bytes(self, &src)?;
+                kw.insert(PyKey::str_from("bytes"), Value::bytes(resolved));
+            }
+        }
         Ok(())
     }
 
@@ -6263,6 +6307,34 @@ impl Interpreter {
             Err(PyError::Named(name, _)) if name == "__pyrust_NotIndex__" => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Validate the `byteorder` argument of `int.from_bytes` ahead of resolving the
+/// bytes source, so its error takes precedence (matching CPython 3.12). A
+/// missing byteorder defaults to `"big"` and is fine; only an invalid value /
+/// non-str type raises. Messages mirror the receiver-only `int_from_bytes`.
+fn check_from_bytes_byteorder(byteorder: Option<&Value>) -> Result<()> {
+    let Some(v) = byteorder else { return Ok(()) };
+    match v.kind() {
+        ValueKind::Str(s) => {
+            let s = s.to_string();
+            if s == "big" || s == "little" {
+                Ok(())
+            } else {
+                Err(PyError::named(
+                    "ValueError",
+                    "byteorder must be either 'little' or 'big'".to_string(),
+                ))
+            }
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "from_bytes() argument 'byteorder' must be str, not {}",
+                pyrust_core::builtin_type_name(v)
+            ),
+        )),
     }
 }
 
