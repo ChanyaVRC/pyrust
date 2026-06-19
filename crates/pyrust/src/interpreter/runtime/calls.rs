@@ -8573,7 +8573,7 @@ impl Interpreter {
         if let Some(method_val) = lookup_class_attr(&class, "__str__") {
             let is_object_str =
                 matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__str__"));
-            if !is_object_str || instance_builtin_data(&inst_rc).is_none() {
+            if !is_object_str || builtin_data_backing(value).is_none() {
                 let result = invoke_class_method(
                     self,
                     method_val,
@@ -8592,7 +8592,7 @@ impl Interpreter {
         // str.__str__ and bytes.__str__ return `self` directly without
         // delegating to __repr__.  int/float subclasses do NOT share this
         // property — their str() dispatches __repr__ if defined.
-        if let Some(backing) = instance_builtin_data(&inst_rc)
+        if let Some(backing) = builtin_data_backing(value)
             && matches!(backing.kind(), ValueKind::Str(_) | ValueKind::Bytes(_)) {
                 return Ok(backing.to_py_str());
             }
@@ -8603,7 +8603,7 @@ impl Interpreter {
         if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
             let is_object_repr =
                 matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__repr__"));
-            if !is_object_repr || instance_builtin_data(&inst_rc).is_none() {
+            if !is_object_repr || builtin_data_backing(value).is_none() {
                 let result = invoke_class_method(
                     self,
                     method_val,
@@ -8622,7 +8622,7 @@ impl Interpreter {
         // their contents rather than the generic object repr.
         // Use render_value_repr (interp-aware) so that PyInstance elements
         // inside the backing container have their __repr__ called correctly.
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
+        if let Some(backing) = builtin_data_backing(value) {
             match backing.kind() {
                 ValueKind::Str(_)
                 | ValueKind::Int(_)
@@ -8769,7 +8769,7 @@ impl Interpreter {
             }
         }
         // No user __format__ in MRO (or only the object builtin).
-        if let Some(backing) = instance_builtin_data(&inst_rc) {
+        if let Some(backing) = builtin_data_backing(value) {
             // `object.__format__(self, "")` is defined as `str(self)` (#2386).
             // For subclasses whose `str()` differs from the backing's `str()`
             // — set/frozenset/bytearray, which prefix the class name — the
@@ -9179,7 +9179,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
         {
             return Ok(rendered);
         }
-        if !is_object_repr || instance_builtin_data(&inst_rc).is_none() {
+        if !is_object_repr || builtin_data_backing(value).is_none() {
             let result = invoke_class_method(
                 interp,
                 method_val,
@@ -9202,7 +9202,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     // Issue #1542: scalar backings (int/float/str/bytes subclasses) also
     // need to delegate to the backing value's repr() so that
     // `"%r" % MyInt(42)` returns "42" rather than the address repr.
-    if let Some(backing) = instance_builtin_data(&inst_rc) {
+    if let Some(backing) = builtin_data_backing(value) {
         match backing.kind() {
             ValueKind::Str(_)
             | ValueKind::Int(_)
