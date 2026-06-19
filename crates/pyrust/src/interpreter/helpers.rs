@@ -1865,12 +1865,18 @@ pub(crate) fn coerce_bytes_subclass_arg(v: Value) -> Value {
     };
     match kind {
         Kind::Instance => {
+            // A bytes subclass backs `__builtin_data__` with a `Bytes`; a
+            // bytearray subclass backs it with a `bytearray` (`BuiltinObject`).
+            // Both are bytes-like; normalise either to a plain `Bytes` value so
+            // every bytes/bytearray method's argument check accepts it (#2677),
+            // mirroring the `Kind::Builtin` arm's treatment of a plain bytearray.
             let backing = v.as_py_instance_rc().and_then(|inst| {
-                inst.borrow()
-                    .attrs
-                    .get(BUILTIN_DATA_ATTR)
-                    .filter(|b| matches!(b.kind(), ValueKind::Bytes(_)))
-                    .cloned()
+                let raw = inst.borrow().attrs.get(BUILTIN_DATA_ATTR).cloned()?;
+                if matches!(raw.kind(), ValueKind::Bytes(_)) {
+                    Some(raw)
+                } else {
+                    pyrust_builtins::bytearray::as_bytearray_snapshot(&raw).map(Value::bytes)
+                }
             });
             backing.unwrap_or(v)
         }
