@@ -4782,7 +4782,14 @@ impl Interpreter {
         // For binary | (not augmented assign), only dict-compatible RHS is valid;
         // fall through to eval_binary which uses the subclass type name correctly
         // (e.g. 'D' rather than 'dict') in the unsupported-operand TypeError.
-        if op == BinaryOp::BitOr
+        //
+        // `result.is_none()` gates this to the no-override case only: if a
+        // user-defined `__ior__` *exists* and returned `NotImplemented`, CPython
+        // falls back to plain binary `|` (yielding a plain `dict`, dropping the
+        // subclass type), so we must let it fall through to `eval_binary` rather
+        // than mutate the backing dict in place and return the subclass here (#2639).
+        if result.is_none()
+            && op == BinaryOp::BitOr
             && let Some(inst_rc) = left.as_py_instance_rc()
                 && let Some(backing) = instance_builtin_data(inst_rc)
                     && matches!(backing.kind(), ValueKind::Dict(_))
@@ -4810,8 +4817,17 @@ impl Interpreter {
             op,
             BinaryOp::BitOr | BinaryOp::BitAnd | BinaryOp::Sub | BinaryOp::BitXor
         ) {
+            // `result.is_none()` gates the subclass-preserving in-place arm to the
+            // no-override case only: if a user-defined `__ior__` / `__iand__` /
+            // `__isub__` / `__ixor__` *exists* and returned `NotImplemented`,
+            // CPython falls back to plain binary `|` / `&` / `-` / `^` (yielding a
+            // plain `set`, dropping the subclass type), so we let it fall through
+            // to `eval_binary` rather than mutate the backing set in place (#2639).
+            // The frozenset `else` branch below always runs (its `result` is always
+            // `None` since `try_call_binary_method` no-ops on non-PyInstance left).
             if let Some(inst_rc) = left.as_py_instance_rc() {
-                if let Some(backing) = instance_builtin_data(inst_rc)
+                if result.is_none()
+                    && let Some(backing) = instance_builtin_data(inst_rc)
                     && matches!(backing.kind(), ValueKind::Set(_)) {
                         let op_sym = match op {
                             BinaryOp::BitOr => "|=",
