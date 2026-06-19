@@ -356,7 +356,7 @@ impl Interpreter {
             // use the instance directly.
             if let Some(method_name) = fn_name.split_once('.').map(|(_, m)| m) {
                 // Drop the kind() borrow before we may move `instance`.
-                let receiver = effective_builtin_receiver(&instance, &[]).unwrap_or(instance);
+                let receiver = builtin_data_backing(&instance).unwrap_or(instance);
                 let bound = pyrust_builtins::bound_method::bound_method(method_name, receiver);
                 return self.call_function_expanded(bound, args);
             }
@@ -943,7 +943,7 @@ impl Interpreter {
                             receiver_ordered = class_is_named_ordered_dict(
                                 &Rc::clone(&inst.borrow().class),
                             );
-                            effective_builtin_receiver(&self_val, &[]).unwrap_or(self_val)
+                            builtin_data_backing(&self_val).unwrap_or(self_val)
                         } else {
                             self_val
                         }
@@ -3077,7 +3077,7 @@ impl Interpreter {
             ("set", ValueKind::Set(_)) => true,
             ("frozenset", ValueKind::BuiltinObject { ops, .. })
                 if ops.type_name() == "frozenset" => true,
-            (_, ValueKind::PyInstance(_)) => effective_builtin_receiver(&self_arg.value, &[])
+            (_, ValueKind::PyInstance(_)) => builtin_data_backing(&self_arg.value)
                 .is_some_and(|b| pyrust_core::builtin_type_name(&b) == type_name),
             _ => false,
         };
@@ -6590,7 +6590,7 @@ fn format_dunder_owner(receiver: &Value) -> std::borrow::Cow<'static, str> {
     // override resolves the method to the backing type's `__format__` in
     // CPython, so an arg error names that backing type (`int`), not `object`
     // (issue #2214).
-    if let Some(backing) = effective_builtin_receiver(receiver, &[]) {
+    if let Some(backing) = builtin_data_backing(receiver) {
         return format_dunder_owner(&backing);
     }
     if value_has_real_format(receiver) {

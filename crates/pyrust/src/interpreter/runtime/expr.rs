@@ -3842,7 +3842,7 @@ impl Interpreter {
                 let str_backing = if matches!(left.kind(), ValueKind::Str(_)) {
                     Some(left.clone())
                 } else {
-                    effective_builtin_receiver(&left, &[])
+                    builtin_data_backing(&left)
                         .filter(|backing| matches!(backing.kind(), ValueKind::Str(_)))
                 };
                 if let Some(fmt_val) = str_backing {
@@ -3856,7 +3856,7 @@ impl Interpreter {
                 // bytes subclasses return plain bytes.
                 let bytes_backing: Option<Vec<u8>> = match left.kind() {
                     ValueKind::Bytes(rc) => Some(rc.to_vec()),
-                    _ => effective_builtin_receiver(&left, &[]).and_then(|backing| {
+                    _ => builtin_data_backing(&left).and_then(|backing| {
                         match backing.kind() {
                             ValueKind::Bytes(rc) => Some(rc.to_vec()),
                             _ => None,
@@ -7098,7 +7098,7 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
     // that arithmetic and concatenation operations on bare subclass instances
     // (e.g. `MyInt(42) + 1`) fall through to the primitive fast paths below.
     // This mirrors CPython's slot delegation for `tp_as_number` / `tp_as_sequence`.
-    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+    if let Some(backing) = builtin_data_backing(v) {
         let is_scalar = matches!(
             backing.kind(),
             ValueKind::Int(_)
@@ -7130,7 +7130,7 @@ pub(crate) fn coerce_operand_backing(v: &Value) -> Value {
     if let ValueKind::Bool(b) = v.kind() {
         return Value::int(b as i64);
     }
-    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+    if let Some(backing) = builtin_data_backing(v) {
         let is_primitive = matches!(
             backing.kind(),
             ValueKind::Int(_)
@@ -7182,8 +7182,10 @@ pub(crate) fn coerce_subclass_backing(v: &Value, override_dunders: &[&str]) -> O
 
 pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // list/dict/set subclass: delegate to the backing primitive value.
+    // Keep the `inst_rc` binding (not just `builtin_data_backing`) so the
+    // not-iterable error below can name the actual subclass, not the base.
     if let Some(inst_rc) = value.as_py_instance_rc()
-        && let Some(backing) = effective_builtin_receiver(value, &[]) {
+        && let Some(backing) = instance_builtin_data(inst_rc) {
             // A subclass of a *non-iterable* builtin (e.g. `class C(int): pass`)
             // is itself not iterable.  CPython reports the actual subclass name
             // ("'C' object is not iterable"), not the backing base's name, so
@@ -7530,7 +7532,7 @@ fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
     }) {
         return Some(entries);
     }
-    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+    if let Some(backing) = builtin_data_backing(v) {
         return dict_entries_from_value(&backing);
     }
     None
@@ -7553,7 +7555,7 @@ fn set_items_from_value(v: &Value) -> Option<(PySet, bool)> {
     if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
         return Some(((*rc).clone(), true));
     }
-    if let Some(backing) = effective_builtin_receiver(v, &[]) {
+    if let Some(backing) = builtin_data_backing(v) {
         return set_items_from_value(&backing);
     }
     None
@@ -7903,7 +7905,7 @@ fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
 fn is_complex_operand(v: &Value) -> bool {
     match v.kind() {
         ValueKind::Complex(_, _) => true,
-        ValueKind::PyInstance(_) => effective_builtin_receiver(v, &[])
+        ValueKind::PyInstance(_) => builtin_data_backing(v)
             .is_some_and(|b| matches!(b.kind(), ValueKind::Complex(_, _))),
         _ => false,
     }
