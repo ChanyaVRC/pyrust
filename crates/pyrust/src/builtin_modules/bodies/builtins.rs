@@ -26,7 +26,7 @@ use crate::interpreter::{
     compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
     dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
-    extract_str_value, float_divmod, float_to_bigint, instance_builtin_data,
+    builtin_data_backing, extract_str_value, float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
     is_exception_class, is_str_or_str_subclass, iter_values, key_to_value, lookup_class_attr, mapping_pairs_via_protocol, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, primitive_class_by_name, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even_checked, round_float_ndigits,
@@ -5034,15 +5034,12 @@ pyrust_module! {
         let self_arg = args.first().ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__getitem__", "list", method)
         })?;
-        let inst_rc = match self_arg.value.kind() {
-            ValueKind::PyInstance(rc) => Rc::clone(rc),
-            _ => {
-                let actual = pyrust_core::builtin_type_name(&self_arg.value);
-                return Err(pyrust_core::descriptor_requires!(
-                    "__getitem__", "list", actual, method
-                ));
-            }
-        };
+        if !matches!(self_arg.value.kind(), ValueKind::PyInstance(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "list", actual, method
+            ));
+        }
         let key = match args.get(1) {
             Some(key_arg) => key_arg.value.clone(),
             None => {
@@ -5052,7 +5049,7 @@ pyrust_module! {
                 ));
             }
         };
-        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+        let backing = builtin_data_backing(&self_arg.value).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "list")
         })?;
         _interp.eval_index(&backing, key)
@@ -5073,15 +5070,12 @@ pyrust_module! {
         let self_arg = args.first().ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__getitem__", "tuple")
         })?;
-        let inst_rc = match self_arg.value.kind() {
-            ValueKind::PyInstance(rc) => Rc::clone(rc),
-            _ => {
-                let actual = pyrust_core::builtin_type_name(&self_arg.value);
-                return Err(pyrust_core::descriptor_requires!(
-                    "__getitem__", "tuple", actual
-                ));
-            }
-        };
+        if !matches!(self_arg.value.kind(), ValueKind::PyInstance(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "tuple", actual
+            ));
+        }
         let key = match args.get(1) {
             Some(key_arg) => key_arg.value.clone(),
             None => {
@@ -5091,7 +5085,7 @@ pyrust_module! {
                 ));
             }
         };
-        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+        let backing = builtin_data_backing(&self_arg.value).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "tuple")
         })?;
         _interp.eval_index(&backing, key)
@@ -5112,15 +5106,12 @@ pyrust_module! {
         let self_arg = args.first().ok_or_else(|| {
             pyrust_core::descriptor_needs_arg!("__getitem__", "bytes")
         })?;
-        let inst_rc = match self_arg.value.kind() {
-            ValueKind::PyInstance(rc) => Rc::clone(rc),
-            _ => {
-                let actual = pyrust_core::builtin_type_name(&self_arg.value);
-                return Err(pyrust_core::descriptor_requires!(
-                    "__getitem__", "bytes", actual
-                ));
-            }
-        };
+        if !matches!(self_arg.value.kind(), ValueKind::PyInstance(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "bytes", actual
+            ));
+        }
         let key = match args.get(1) {
             Some(key_arg) => key_arg.value.clone(),
             None => {
@@ -5130,7 +5121,7 @@ pyrust_module! {
                 ));
             }
         };
-        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+        let backing = builtin_data_backing(&self_arg.value).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "bytes")
         })?;
         _interp.eval_index(&backing, key)
@@ -6324,12 +6315,9 @@ pyrust_module! {
         // `super().__format__('x')` / `I(255).__format__('x')` → `'ff'`
         // (issues #2211, #2214).  The error names the actual subclass, not the
         // backing primitive (issue #2212).
-        if let ValueKind::PyInstance(inst) = self_val.kind() {
-            let inst_rc = Rc::clone(inst);
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
-                let owner = value_type_name_str(&self_val);
-                return apply_format_spec_named(&backing, &spec_str, Some(&owner));
-            }
+        if let Some(backing) = builtin_data_backing(&self_val) {
+            let owner = value_type_name_str(&self_val);
+            return apply_format_spec_named(&backing, &spec_str, Some(&owner));
         }
         // CPython raises TypeError when a non-empty spec is passed to
         // object.__format__ on a value with no backing primitive (a pure user
