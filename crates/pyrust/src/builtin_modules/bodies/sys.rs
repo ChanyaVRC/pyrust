@@ -269,11 +269,15 @@ pyrust_module! {
                 // object (its `__traceback__`), not `None`.
                 let tb = match exc_val.kind() {
                     ValueKind::PyInstance(inst) => {
+                        // `get_cloned_or_slot` routes through the live `__dict__`
+                        // for a dict-backed instance (#1981/#2637); the carried
+                        // `__traceback__` is written via `insert`, which lands in
+                        // the dict after a `__dict__` swap, so a raw `get` (entries
+                        // only) would miss it and hand back `None`.
                         let raw = inst
                             .borrow()
                             .attrs
-                            .get("__traceback__")
-                            .cloned()
+                            .get_cloned_or_slot("__traceback__")
                             .unwrap_or_else(Value::none);
                         // Issue #2351: materialise a deferred placeholder and
                         // write the real chain back so repeat reads share it.

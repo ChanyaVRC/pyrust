@@ -776,8 +776,11 @@ impl Interpreter {
                 let src_b = src.borrow();
                 let mut dst_b = dst.borrow_mut();
                 for key in ["__traceback__", "__cause__", "__context__", "__notes__"] {
-                    if let Some(v) = src_b.attrs.get(key) {
-                        dst_b.attrs.insert(key, v.clone());
+                    // `get_cloned_or_slot` routes through the live `__dict__` for a
+                    // dict-backed source group (#1981/#2637); a raw `get` (entries
+                    // only) would silently drop these slots after a `__dict__` swap.
+                    if let Some(v) = src_b.attrs.get_cloned_or_slot(key) {
+                        dst_b.attrs.insert(key, v);
                     }
                 }
             }
