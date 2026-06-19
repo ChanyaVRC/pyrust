@@ -6276,12 +6276,12 @@ impl Interpreter {
                     crate::builtin_modules::builtins::from_bytes_source_to_bytes(self, &src)?;
                 pos[0] = Value::bytes(resolved);
             }
-        } else if let Some(src) = kw.get(&PyKey::str_from("bytes")).cloned() {
-            if !matches!(src.kind(), ValueKind::Bytes(_)) {
-                let resolved =
-                    crate::builtin_modules::builtins::from_bytes_source_to_bytes(self, &src)?;
-                kw.insert(PyKey::str_from("bytes"), Value::bytes(resolved));
-            }
+        } else if let Some(src) = kw.get(&PyKey::str_from("bytes")).cloned()
+            && !matches!(src.kind(), ValueKind::Bytes(_))
+        {
+            let resolved =
+                crate::builtin_modules::builtins::from_bytes_source_to_bytes(self, &src)?;
+            kw.insert(PyKey::str_from("bytes"), Value::bytes(resolved));
         }
         Ok(())
     }
