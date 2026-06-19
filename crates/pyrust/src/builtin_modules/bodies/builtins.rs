@@ -4996,6 +4996,16 @@ pyrust_module! {
         let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
             pyrust_core::descriptor_requires!("__getitem__", "dict")
         })?;
+        // #2657: a PyInstance receiver whose base is not `dict` (e.g. a list
+        // subclass) must be rejected with CPython's method_descriptor wording
+        // instead of reaching the dict-lookup helper and tripping its
+        // "internal: expected dict" assertion.
+        if !matches!(backing.kind(), ValueKind::Dict(_)) {
+            let actual = pyrust_core::builtin_type_name(&self_arg.value);
+            return Err(pyrust_core::descriptor_requires!(
+                "__getitem__", "dict", actual, method
+            ));
+        }
         let lookup = if let Some(s) = key.as_str() {
             _interp.dict_str_lookup(&backing, s)?
         } else {
