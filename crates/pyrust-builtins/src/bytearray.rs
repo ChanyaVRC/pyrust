@@ -502,6 +502,14 @@ impl BuiltinTypeOps for ByteArrayOps {
                 let idx = match args[0].kind() {
                     ValueKind::Int(n) => n,
                     ValueKind::Bool(b) => b as i64,
+                    ValueKind::BigInt(_) => {
+                        // A BigInt never fits in a C ssize_t, so it can never be
+                        // a valid index. CPython raises OverflowError here.
+                        return Err(PyError::named(
+                            "OverflowError",
+                            "Python int too large to convert to C ssize_t".to_string(),
+                        ));
+                    }
                     _ => {
                         return Err(PyError::named(
                             "TypeError",
@@ -555,6 +563,14 @@ impl BuiltinTypeOps for ByteArrayOps {
                             }
                         }
                         ValueKind::Bool(b) => b as usize,
+                        ValueKind::BigInt(_) => {
+                            // A BigInt never fits in a C ssize_t, so it can never
+                            // be a valid index. CPython raises OverflowError here.
+                            return Err(PyError::named(
+                                "OverflowError",
+                                "Python int too large to convert to C ssize_t".to_string(),
+                            ));
+                        }
                         _ => {
                             return Err(PyError::named(
                                 "TypeError",
