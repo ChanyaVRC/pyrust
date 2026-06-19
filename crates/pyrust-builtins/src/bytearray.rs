@@ -779,7 +779,7 @@ fn value_to_index(key: &Value, len: usize, type_name: &str) -> Result<usize> {
         ValueKind::BigInt(_) => {
             return Err(PyError::named(
                 "IndexError",
-                format!("{type_name} index out of range"),
+                "cannot fit 'int' into an index-sized integer".to_string(),
             ));
         }
         _ => {
