@@ -102,9 +102,9 @@ ALL_CONFIGS=$("$PYTHON" "$REPORT_PY" --dump-configs --config "$CONFIG")
 
 # ── collect test scripts ───────────────────────────────────────────────────────
 CASES_DIR="$ROOT/crates/pyrust/tests/cases"
-mapfile -t SCRIPTS < <(find "$CASES_DIR" -name "test_*.py" | sort)
+mapfile -t SCRIPTS < <(find "$CASES_DIR/performance" -name "test_*.py" | sort)
 [[ ${#SCRIPTS[@]} -gt 0 ]] || {
-  echo "error: no test_*.py found under $CASES_DIR" >&2
+  echo "error: no test_*.py found under $CASES_DIR/performance" >&2
   exit 2
 }
 
