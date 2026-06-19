@@ -1642,6 +1642,12 @@ impl Interpreter {
                     "'{class_name}' object has no attribute '__dict__'"
                 ));
             }
+            // Issue #1981: when `__dict__` was replaced wholesale
+            // (`obj.__dict__ = d`), the assigned dict is the live backing store.
+            // Return it verbatim so `obj.__dict__ is d` holds.
+            if let Some(d) = instance.borrow().attrs.dict_ref() {
+                return Ok(d.clone());
+            }
             // Return a live mutable proxy so that writes to
             // `obj.__dict__['key'] = val` propagate back to the
             // instance's actual attrs map.  Required for the data-
@@ -1729,8 +1735,9 @@ impl Interpreter {
             }
 
         // Step 2: Instance __dict__.  Scope the shared borrow so it is dropped
-        // before any materialisation below re-borrows the instance.
-        let attr_value = instance.borrow().attrs.get(name).cloned();
+        // before any materialisation below re-borrows the instance.  `get_cloned`
+        // routes through the live `__dict__` for dict-backed instances (#1981).
+        let attr_value = instance.borrow().attrs.get_cloned(name);
         if let Some(value) = attr_value {
             // Issue #2351: `__traceback__` is stored as a deferred placeholder
             // when an exception is caught; materialise it on first read and
@@ -3965,7 +3972,9 @@ fn property_accessor_error(prop: &Value, instance: &Value, which: &str) -> PyErr
 /// `instance` must be a `PyInstance`; an unset slot raises AttributeError.
 fn member_descriptor_get(instance: &Value, slot: &str) -> Result<Value> {
     if let ValueKind::PyInstance(inst) = instance.kind() {
-        if let Some(v) = inst.borrow().attrs.get(slot).cloned() {
+        // `get_slot` reads the slot's own `entries` storage, independent of any
+        // replaced `__dict__` (#1981).
+        if let Some(v) = inst.borrow().attrs.get_slot(slot).cloned() {
             return Ok(v);
         }
         let class_name = inst.borrow().class.borrow().name.clone();
@@ -4166,7 +4175,9 @@ fn call_descriptor_set(
     // (issue #2084).
     if let Some(slot) = pyrust_builtins::member_descriptor::as_member_descriptor(class_val) {
         if let ValueKind::PyInstance(inst) = instance.kind() {
-            inst.borrow_mut().attrs.insert(slot, value);
+            // `insert_slot` writes the slot's own `entries` storage, independent
+            // of any replaced `__dict__` (#1981).
+            inst.borrow_mut().attrs.insert_slot(slot, value);
             return Ok(Some(Ok(())));
         }
         return Ok(Some(Ok(())));
@@ -4248,7 +4259,9 @@ fn call_descriptor_delete(
     // already-unset slot raises AttributeError (issue #2084).
     if let Some(slot) = pyrust_builtins::member_descriptor::as_member_descriptor(class_val) {
         if let ValueKind::PyInstance(inst) = instance.kind() {
-            let removed = inst.borrow_mut().attrs.shift_remove(&slot).is_some();
+            // `shift_remove_slot` clears the slot's own `entries` storage,
+            // independent of any replaced `__dict__` (#1981).
+            let removed = inst.borrow_mut().attrs.shift_remove_slot(&slot).is_some();
             if !removed {
                 // CPython's `member_delete` raises AttributeError with just the
                 // slot name as the message (not the full "'C' object has no

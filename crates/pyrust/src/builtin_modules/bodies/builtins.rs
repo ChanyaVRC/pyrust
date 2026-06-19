@@ -2046,6 +2046,11 @@ pyrust_module! {
                         format!("{FN_NAME}() argument must have __dict__ attribute"),
                     ));
                 }
+                // Issue #1981: when `__dict__` was replaced wholesale, the live
+                // backing dict is `vars(obj)` (so `vars(obj) is obj.__dict__`).
+                if let Some(d) = instance.borrow().attrs.dict_ref() {
+                    return Ok(d.clone());
+                }
                 let is_exc = class_chain_contains_name(
                     &instance.borrow().class,
                     "BaseException",

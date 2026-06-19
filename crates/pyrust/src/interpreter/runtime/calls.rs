@@ -7973,8 +7973,15 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
     }
     match value.kind() {
         ValueKind::PyInstance(inst) => {
-            let mut names: Vec<String> =
-                inst.borrow().attrs.keys().map(|k| k.to_string()).collect();
+            // `items_snapshot` routes through the live `__dict__` for dict-backed
+            // instances (#1981), so `dir()` lists attributes set via the dict.
+            let mut names: Vec<String> = inst
+                .borrow()
+                .attrs
+                .items_snapshot()
+                .into_iter()
+                .map(|(k, _)| k.to_string())
+                .collect();
             let class = Rc::clone(&inst.borrow().class);
             collect_class_names(&class, &mut names);
             names

@@ -179,8 +179,8 @@ fn capture_state(
         return Ok(Value::none());
     }
     let mut dict: PyDict = PyDict::with_capacity_and_hasher(borrow.attrs.len(), Default::default());
-    for (k, v) in borrow.attrs.iter() {
-        dict.insert(PyKey::str_from(k.as_ref()), v.clone());
+    for (k, v) in borrow.attrs.items_snapshot() {
+        dict.insert(PyKey::str_from(k.as_ref()), v);
     }
     Ok(Value::dict(dict))
 }

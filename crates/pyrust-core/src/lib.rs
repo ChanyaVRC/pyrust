@@ -2090,6 +2090,14 @@ pub struct InstanceAttrs {
     // small-instance attr hot path, defeating the #2161 memory win.
     #[allow(clippy::box_collection)]
     index: Option<Box<HashMap<Rc<str>, usize, FxBuildHasher>>>,
+    /// When set (issue #1981), the instance's `__dict__` was replaced wholesale
+    /// by `obj.__dict__ = d`, and `d` itself is the live backing store.  All
+    /// attribute reads/writes route through this real `dict` Value, so
+    /// `obj.__dict__ is d` holds and mutations alias both ways (and non-str
+    /// keys round-trip).  `entries` / `index` are unused (kept empty) while this
+    /// is `Some`.  `None` for the common case — every instance that never had
+    /// its `__dict__` replaced — so the hot attribute path is unchanged.
+    dict_ref: Option<Value>,
 }
 
 /// Attribute count above which [`InstanceAttrs`] builds a hash index for
@@ -2103,6 +2111,7 @@ impl InstanceAttrs {
         InstanceAttrs {
             entries: Vec::new(),
             index: None,
+            dict_ref: None,
         }
     }
 
@@ -2110,16 +2119,94 @@ impl InstanceAttrs {
         InstanceAttrs {
             entries: Vec::with_capacity(cap),
             index: None,
+            dict_ref: None,
         }
+    }
+
+    /// True iff this instance's `__dict__` was replaced wholesale (issue #1981),
+    /// so attribute storage is a live external `dict` rather than `entries`.
+    /// Hot-path callers (VM inline cache) consult this to skip the `entries`
+    /// fast path for the rare dict-backed instance.
+    #[inline]
+    pub fn is_dict_backed(&self) -> bool {
+        self.dict_ref.is_some()
+    }
+
+    /// Replace the instance `__dict__` with a live `dict` Value (issue #1981).
+    /// The dict is stored by reference, so `obj.__dict__ is d` holds and later
+    /// mutations alias both ways.
+    ///
+    /// `entries` is **preserved**: for a `__slots__ = (..., '__dict__')` class
+    /// the slot values live in `entries` (written by the slot member_descriptor
+    /// via the `*_slot` raw accessors), and CPython keeps those independent of
+    /// the `__dict__` replacement.  Plain instances have empty `entries`, so
+    /// nothing is carried over for them.
+    pub fn set_dict_ref(&mut self, dict: Value) {
+        self.dict_ref = Some(dict);
+    }
+
+    /// Read a `__slots__` slot value directly from `entries`, bypassing any
+    /// `dict_ref` (#1981).  Slot storage is independent of a replaced
+    /// `__dict__`, so the member_descriptor get path uses this.
+    #[inline]
+    pub fn get_slot(&self, name: &str) -> Option<&Value> {
+        self.get(name)
+    }
+
+    /// Write a `__slots__` slot value directly into `entries`, bypassing any
+    /// `dict_ref` (#1981).  Used by the slot member_descriptor set path so slot
+    /// writes never land in a replaced `__dict__`.
+    pub fn insert_slot(&mut self, name: impl AsRef<str>, value: Value) -> Option<Value> {
+        let name = name.as_ref();
+        if let Some(pos) = self.position(name) {
+            return Some(std::mem::replace(&mut self.entries[pos].1, value));
+        }
+        let key = intern_attr_key(name);
+        let slot = self.entries.len();
+        if let Some(index) = &mut self.index {
+            index.insert(Rc::clone(&key), slot);
+        }
+        self.entries.push((key, value));
+        if self.index.is_none() && self.entries.len() > INDEX_THRESHOLD {
+            self.build_index();
+        }
+        None
+    }
+
+    /// Remove a `__slots__` slot value directly from `entries`, bypassing any
+    /// `dict_ref` (#1981).  Used by the slot member_descriptor delete path.
+    pub fn shift_remove_slot(&mut self, name: &str) -> Option<Value> {
+        let pos = self.position(name)?;
+        let removed = self.entries.remove(pos).1;
+        if self.index.is_some() {
+            if self.entries.len() > INDEX_THRESHOLD {
+                self.build_index();
+            } else {
+                self.index = None;
+            }
+        }
+        Some(removed)
+    }
+
+    /// The live backing `dict` Value, when `__dict__` was replaced (#1981).
+    #[inline]
+    pub fn dict_ref(&self) -> Option<&Value> {
+        self.dict_ref.as_ref()
     }
 
     #[inline]
     pub fn len(&self) -> usize {
+        if let Some(d) = &self.dict_ref {
+            return d.dict_len().unwrap_or(0);
+        }
         self.entries.len()
     }
 
     #[inline]
     pub fn is_empty(&self) -> bool {
+        if let Some(d) = &self.dict_ref {
+            return d.dict_len().unwrap_or(0) == 0;
+        }
         self.entries.is_empty()
     }
 
@@ -2145,8 +2232,11 @@ impl InstanceAttrs {
         self.index = Some(Box::new(index));
     }
 
-    /// Look up a value by attribute name.  Linear scan for small instances;
-    /// O(1) hash lookup once the side index has been built (#2162).
+    /// Look up a value by attribute name, returning a borrow.  Linear scan for
+    /// small instances; O(1) hash lookup once the side index has been built
+    /// (#2162).  A dict-backed instance (#1981) has empty `entries`, so this
+    /// returns `None` — borrowing into the external dict's `RefCell` can't
+    /// outlive a temporary `Ref`.  Dict-backed callers use [`get_cloned`].
     #[inline]
     pub fn get(&self, name: &str) -> Option<&Value> {
         if let Some(index) = &self.index {
@@ -2158,17 +2248,39 @@ impl InstanceAttrs {
             .map(|(_, v)| v)
     }
 
+    /// Look up a value by attribute name, returning an owned clone.  Routes
+    /// through the live `__dict__` when the instance is dict-backed (#1981);
+    /// otherwise equivalent to `self.get(name).cloned()`.  Slow attribute-read
+    /// paths use this so dict-backed instances resolve attributes correctly.
+    #[inline]
+    pub fn get_cloned(&self, name: &str) -> Option<Value> {
+        if let Some(d) = &self.dict_ref {
+            return d.dict_with(|m| m.get(&StrKey(name)).cloned()).flatten();
+        }
+        self.get(name).cloned()
+    }
+
     /// Mutable lookup by attribute name.  Lets a caller test-and-replace an
     /// existing value with a single key scan (the catch-site `__traceback__`
-    /// update does this on every caught exception).
+    /// update does this on every caught exception).  Returns `None` for
+    /// dict-backed instances (#1981) — there is no `entries` slot to borrow;
+    /// such callers fall back to `insert`, which routes through the dict.
     #[inline]
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
+        if self.dict_ref.is_some() {
+            return None;
+        }
         let pos = self.position(name)?;
         Some(&mut self.entries[pos].1)
     }
 
     #[inline]
     pub fn contains_key(&self, name: &str) -> bool {
+        if let Some(d) = &self.dict_ref {
+            return d
+                .dict_with(|m| m.contains_key(&StrKey(name)))
+                .unwrap_or(false);
+        }
         if let Some(index) = &self.index {
             return index.contains_key(name);
         }
@@ -2178,8 +2290,12 @@ impl InstanceAttrs {
     /// Insert or overwrite `name`'s value, returning the previous value when
     /// the key already existed.  New keys are appended (insertion order
     /// preserved) and interned so the name bytes are shared across instances.
+    /// Dict-backed instances (#1981) write straight into the live `__dict__`.
     pub fn insert(&mut self, name: impl AsRef<str>, value: Value) -> Option<Value> {
         let name = name.as_ref();
+        if let Some(d) = &self.dict_ref {
+            return d.dict_insert(PyKey::str_from(name), value).ok().flatten();
+        }
         if let Some(pos) = self.position(name) {
             return Some(std::mem::replace(&mut self.entries[pos].1, value));
         }
@@ -2199,7 +2315,11 @@ impl InstanceAttrs {
 
     /// Remove `name`, shifting later entries down to preserve insertion order
     /// (matching `IndexMap::shift_remove`).  Returns the removed value.
+    /// Dict-backed instances (#1981) remove from the live `__dict__`.
     pub fn shift_remove(&mut self, name: &str) -> Option<Value> {
+        if let Some(d) = &self.dict_ref {
+            return d.dict_shift_remove(&PyKey::str_from(name)).ok().flatten();
+        }
         let pos = self.position(name)?;
         let removed = self.entries.remove(pos).1;
         // The shift renumbers every entry after `pos`, invalidating the index.
@@ -2216,6 +2336,10 @@ impl InstanceAttrs {
     }
 
     pub fn clear(&mut self) {
+        if let Some(d) = &self.dict_ref {
+            let _ = d.dict_clear();
+            return;
+        }
         self.entries.clear();
         self.index = None;
     }
@@ -2228,6 +2352,31 @@ impl InstanceAttrs {
     #[inline]
     pub fn keys(&self) -> impl Iterator<Item = &Rc<str>> {
         self.entries.iter().map(|(k, _)| k)
+    }
+
+    /// Owned snapshot of `(name, value)` pairs for the string-keyed attributes,
+    /// in insertion order.  Routes through the live `__dict__` for dict-backed
+    /// instances (#1981), where non-str keys are skipped (they aren't
+    /// attribute-accessible).  Enumeration consumers (`copy`, `vars`, the
+    /// `instance_dict` proxy) use this so dict-backed instances enumerate
+    /// correctly without the borrow-lifetime constraints of `iter`.
+    pub fn items_snapshot(&self) -> Vec<(Rc<str>, Value)> {
+        if let Some(d) = &self.dict_ref {
+            return d
+                .dict_with(|m| {
+                    m.iter()
+                        .filter_map(|(k, v)| match k {
+                            PyKey::Str(s) => s.as_str().map(|s| (Rc::<str>::from(s), v.clone())),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        self.entries
+            .iter()
+            .map(|(k, v)| (Rc::clone(k), v.clone()))
+            .collect()
     }
 }
 
