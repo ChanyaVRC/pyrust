@@ -22,6 +22,13 @@ try:
 except TypeError:
     print("TypeError")
 
+# Keyword arguments to __reversed__ also raise TypeError (checked before
+# positional-arg arity, matching CPython 3.12).
+try:
+    vars(Foo).__reversed__(x=1)
+except TypeError as e:
+    print(str(e))
+
 
 # An empty class still produces a valid (possibly non-empty, dunder-only)
 # reverse iterator that round-trips against its own keys.

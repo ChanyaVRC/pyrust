@@ -202,6 +202,12 @@ impl BuiltinTypeOps for MappingProxyOps {
                     .unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::none())))
             }
             "__reversed__" => {
+                if !_kwargs.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "mappingproxy.__reversed__() takes no keyword arguments".to_string(),
+                    ));
+                }
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
