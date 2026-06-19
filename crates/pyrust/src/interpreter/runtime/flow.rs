@@ -775,13 +775,21 @@ impl Interpreter {
             && !Rc::ptr_eq(src, dst) {
                 let src_b = src.borrow();
                 let mut dst_b = dst.borrow_mut();
-                for key in ["__traceback__", "__cause__", "__context__", "__notes__"] {
-                    // `get_cloned_or_slot` routes through the live `__dict__` for a
-                    // dict-backed source group (#1981/#2637); a raw `get` (entries
-                    // only) would silently drop these slots after a `__dict__` swap.
+                // `__traceback__` / `__cause__` / `__context__` are real C-level
+                // slots in CPython that survive a `__dict__` swap; `get_cloned_or_slot`
+                // keeps them visible for a dict-backed source group (#1981/#2637),
+                // where the slot lands in `entries` after the swap.
+                for key in ["__traceback__", "__cause__", "__context__"] {
                     if let Some(v) = src_b.attrs.get_cloned_or_slot(key) {
                         dst_b.attrs.insert(key, v);
                     }
+                }
+                // `__notes__`, by contrast, is an ordinary `__dict__` attribute in
+                // CPython (`add_note` stores it there), so a `__dict__` swap drops
+                // it and the derived group must not inherit the stale pre-swap notes.
+                // Read dict-only so behaviour matches CPython for dict-backed groups.
+                if let Some(v) = src_b.attrs.get_cloned("__notes__") {
+                    dst_b.attrs.insert("__notes__", v);
                 }
             }
         Ok(derived)
