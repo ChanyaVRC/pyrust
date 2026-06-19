@@ -94,3 +94,18 @@ try:
     int.from_bytes(bytearray(b"\x01"), "middle")
 except ValueError as e:
     print("byteorder:", e)
+
+# byteorder is validated before the source is resolved: a bad byteorder wins
+# over a bad source (str / out-of-range element / non-str byteorder type).
+try:
+    int.from_bytes("ab", "middle")
+except Exception as e:
+    print("bo-before-src:", type(e).__name__, e)
+try:
+    int.from_bytes([256], "middle")
+except Exception as e:
+    print("bo-before-elem:", type(e).__name__, e)
+try:
+    int.from_bytes([256], 123)
+except Exception as e:
+    print("bo-type-before-elem:", type(e).__name__, e)

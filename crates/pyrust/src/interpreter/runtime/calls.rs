@@ -6262,6 +6262,13 @@ impl Interpreter {
     /// class-method (`int.from_bytes(...)`) and bound-instance
     /// (`(5).from_bytes(...)`) dispatch paths.
     fn resolve_from_bytes_source(&mut self, pos: &mut [Value], kw: &mut PyDict) -> Result<()> {
+        // CPython validates `byteorder` *before* it processes the bytes source,
+        // so a bad/non-str byteorder must win over a bad source. Resolving the
+        // source first (it can raise for a str / out-of-range element / bad
+        // iterable) would otherwise surface the wrong error. Pre-check the
+        // byteorder argument here so its error takes precedence, mirroring the
+        // receiver-only `int_from_bytes` messages.
+        check_from_bytes_byteorder(pos.get(1).or_else(|| kw.get(&PyKey::str_from("byteorder"))))?;
         if let Some(src) = pos.first() {
             if !matches!(src.kind(), ValueKind::Bytes(_)) {
                 let src = src.clone();
@@ -6300,6 +6307,34 @@ impl Interpreter {
             Err(PyError::Named(name, _)) if name == "__pyrust_NotIndex__" => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// Validate the `byteorder` argument of `int.from_bytes` ahead of resolving the
+/// bytes source, so its error takes precedence (matching CPython 3.12). A
+/// missing byteorder defaults to `"big"` and is fine; only an invalid value /
+/// non-str type raises. Messages mirror the receiver-only `int_from_bytes`.
+fn check_from_bytes_byteorder(byteorder: Option<&Value>) -> Result<()> {
+    let Some(v) = byteorder else { return Ok(()) };
+    match v.kind() {
+        ValueKind::Str(s) => {
+            let s = s.to_string();
+            if s == "big" || s == "little" {
+                Ok(())
+            } else {
+                Err(PyError::named(
+                    "ValueError",
+                    "byteorder must be either 'little' or 'big'".to_string(),
+                ))
+            }
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "from_bytes() argument 'byteorder' must be str, not {}",
+                pyrust_core::builtin_type_name(v)
+            ),
+        )),
     }
 }
 
