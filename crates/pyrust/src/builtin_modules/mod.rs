@@ -231,4 +231,10 @@ pyrust_builtin_modules! {
     // post-load hook.  The Rust ident is `enum_mod` because `enum` is a
     // keyword; its Python-level name is `enum`.
     "enum" as enum_mod @inject,
+    // `re` (issue #2625): a pure-Python regex engine (`re_py.py`) — `compile`,
+    // `match` / `search` / `findall` / `sub` / `split`, the `Pattern` / `Match`
+    // objects, and the `error` exception — injected by the `@inject` post-load
+    // hook.  The Rust ident is `re_mod` because `re` is a keyword; its
+    // Python-level name is `re`.
+    "re" as re_mod @inject,
 }
