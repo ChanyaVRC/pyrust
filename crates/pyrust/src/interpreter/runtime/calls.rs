@@ -832,6 +832,17 @@ impl Interpreter {
                     .collect();
                 pyrust_builtins::bytes::bytes_maketrans(&positional)
             }
+            // `bytearray.maketrans` is a staticmethod that returns `bytes`,
+            // identical to `bytes.maketrans`. Same arg-handling pattern: no
+            // implicit receiver, delegate to the shared `bytes_maketrans` impl.
+            ValueKind::BuiltinFunction("bytearray.maketrans") => {
+                let positional: Vec<Value> = args
+                    .iter()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .collect();
+                pyrust_builtins::bytes::bytes_maketrans(&positional)
+            }
             // `str.maketrans` is a staticmethod: same pattern as `bytes.maketrans`.
             // Must appear before the generic `str.*` arm.
             ValueKind::BuiltinFunction("str.maketrans") => {
