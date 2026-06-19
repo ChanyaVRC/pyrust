@@ -35,7 +35,7 @@ impl BuiltinTypeOps for MappingProxyOps {
         let inner: Vec<String> = class
             .attrs
             .iter()
-            .map(|(k, v)| format!("{}: {}", Value::string(k.clone()).repr(), v.repr()))
+            .map(|(k, v)| format!("{}: {}", Value::string(k.clone()).repr_raw(), v.repr_raw()))
             .collect();
         format!("mappingproxy({{{}}})", inner.join(", "))
     }
@@ -98,7 +98,7 @@ impl BuiltinTypeOps for MappingProxyOps {
         let key_str = match key.kind() {
             ValueKind::Str(s) => s.to_string(),
             _ => {
-                return Err(PyError::named("KeyError", key.repr()));
+                return Err(PyError::named("KeyError", key.repr_raw()));
             }
         };
         let class = cls.borrow();
@@ -106,7 +106,7 @@ impl BuiltinTypeOps for MappingProxyOps {
             .attrs
             .get(&key_str)
             .cloned()
-            .ok_or_else(|| PyError::named("KeyError", key.repr()))
+            .ok_or_else(|| PyError::named("KeyError", key.repr_raw()))
     }
 
     // `set_item` raises TypeError — the default BuiltinTypeOps impl already

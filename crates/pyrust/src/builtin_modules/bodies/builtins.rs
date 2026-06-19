@@ -3899,7 +3899,7 @@ pyrust_module! {
                     }
                 }
                 ValueKind::Bytes(rc) => {
-                    int_parse_bytes_like(rc.as_slice(), &args[0].value.repr(), 10)
+                    int_parse_bytes_like(rc.as_slice(), &args[0].value.repr_raw(), 10)
                 }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
@@ -4007,7 +4007,7 @@ pyrust_module! {
                 _ if pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).is_some() => {
                     let data =
                         pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value).unwrap();
-                    let repr = Value::bytes(data.clone()).repr();
+                    let repr = Value::bytes(data.clone()).repr_raw();
                     int_parse_bytes_like(&data, &repr, 10)
                 }
                 _ => Err(PyError::named(
@@ -4079,7 +4079,7 @@ pyrust_module! {
                         }
                     }
                     ValueKind::Bytes(rc) => {
-                        int_parse_bytes_like(rc.as_slice(), &args[0].value.repr(), base_arg)
+                        int_parse_bytes_like(rc.as_slice(), &args[0].value.repr_raw(), base_arg)
                     }
                     // bytearray with explicit base — bytes-like, parse as ASCII
                     // (#2077).  As above, CPython's `int()` error uses the
@@ -4091,7 +4091,7 @@ pyrust_module! {
                             &args[0].value,
                         )
                         .unwrap();
-                        let repr = Value::bytes(data.clone()).repr();
+                        let repr = Value::bytes(data.clone()).repr_raw();
                         int_parse_bytes_like(&data, &repr, base_arg)
                     }
                     _ => Err(PyError::named(
@@ -4144,7 +4144,7 @@ pyrust_module! {
                 // (#2077).  `bytearray` is a BuiltinObject handled by the
                 // `_` guard below.
                 ValueKind::Bytes(rc) => {
-                    float_parse_bytes_like(rc.as_slice(), &args[0].value.repr())
+                    float_parse_bytes_like(rc.as_slice(), &args[0].value.repr_raw())
                 }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
@@ -4577,7 +4577,7 @@ pyrust_module! {
         let _ = errors;    // accepted, not yet implemented
         let _ = newline;   // accepted, not yet implemented
         // `closefd` defaults to True when not supplied (None means absent).
-        let closefd_bool = closefd.is_none_or(|v| v.0.truthy());
+        let closefd_bool = closefd.is_none_or(|v| v.0.truthy_raw());
         pyrust_builtins::file::open(
             &path,
             &mode,
@@ -5274,7 +5274,7 @@ pyrust_module! {
     /// CPython's `object.__str__` is implemented by calling `tp_repr` on the
     /// object's type (typeobject.c:object_str).  We route through
     /// `render_value_repr` which dispatches `type(self).__repr__(self)` for
-    /// user instances, and falls back to `value.repr()` for primitives.
+    /// user instances, and falls back to `value.repr_raw()` for primitives.
     ///
     /// CPython signature: `object.__str__(self, /)`
     #[py_name = "object.__str__"]
@@ -5296,7 +5296,7 @@ pyrust_module! {
     ///
     /// Issue #1600: regression from PR #1595 (primitive types got
     /// `base: Some(OBJECT_CLASS)`), which caused `list.__repr__` to resolve via
-    /// MRO to this sentinel and fall through to `self_val.repr()`.
+    /// MRO to this sentinel and fall through to `self_val.repr_raw()`.
     ///
     /// Note: we call `render_value_repr(interp, &backing)` (on the raw backing
     /// value, NOT on the instance) so that nested `PyInstance` elements inside a
@@ -5325,7 +5325,7 @@ pyrust_module! {
                     | ValueKind::Bool(_)
                     | ValueKind::Float(_)
                     | ValueKind::Complex(_, _)
-                    | ValueKind::Bytes(_) => backing.repr(),
+                    | ValueKind::Bytes(_) => backing.repr_raw(),
                     ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                         render_value_repr(_interp, &backing)?
                     }
@@ -5356,12 +5356,12 @@ pyrust_module! {
                             format!("{class_name}({{{}}})", parts.join(", "))
                         }
                     }
-                    _ => self_val.repr(),
+                    _ => self_val.repr_raw(),
                 };
                 return Ok(Value::string(s));
             }
         }
-        Ok(Value::string(self_val.repr()))
+        Ok(Value::string(self_val.repr_raw()))
     }
 
     /// Issue #1256: `object.__eq__(self, other)` — default identity equality.
@@ -7477,7 +7477,7 @@ pyrust_module! {
                 return Ok(Value::string(name_val.to_string()));
             }
         }
-        Ok(Value::string(self_val.repr()))
+        Ok(Value::string(self_val.repr_raw()))
     }
 
     /// PEP 695: `TypeVar.__repr__` — returns the TypeVar name string.
@@ -7495,7 +7495,7 @@ pyrust_module! {
                 return Ok(Value::string(name_val.to_string()));
             }
         }
-        Ok(Value::string(self_val.repr()))
+        Ok(Value::string(self_val.repr_raw()))
     }
 }
 
@@ -9397,8 +9397,8 @@ fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Val
 /// (Unlike `int()`, which always renders the bytes repr; see that path.)
 fn float_bytes_like(v: &Value) -> Option<(Vec<u8>, String)> {
     match v.kind() {
-        ValueKind::Bytes(rc) => Some((rc.as_slice().to_vec(), v.repr())),
-        _ => pyrust_builtins::bytearray::as_bytearray_snapshot(v).map(|data| (data, v.repr())),
+        ValueKind::Bytes(rc) => Some((rc.as_slice().to_vec(), v.repr_raw())),
+        _ => pyrust_builtins::bytearray::as_bytearray_snapshot(v).map(|data| (data, v.repr_raw())),
     }
 }
 
@@ -9893,7 +9893,7 @@ fn min_max_impl(
 }
 
 /// Returns `true` when a container element (a `Value`) requires interpreter
-/// access during repr — i.e., when `Value::repr()` alone is insufficient.
+/// access during repr — i.e., when `Value::repr_raw()` alone is insufficient.
 ///
 /// The only cases that need interpreter dispatch are:
 /// - `PyInstance` — may have a user-defined `__repr__`
@@ -9933,7 +9933,7 @@ fn key_needs_interp_repr(k: &PyKey) -> bool {
 /// Shared by the `repr()` builtin and `render_instance_str` (for the container
 /// case, where `str(list)` is defined as `repr(list)` in CPython).
 ///
-/// Cycle detection mirrors `Value::repr()`: a per-call-stack thread-local
+/// Cycle detection mirrors `Value::repr_raw()`: a per-call-stack thread-local
 /// tracks which container object ids are currently being formatted; a second
 /// visit short-circuits to the CPython placeholder (`[...]` / `(...)` /
 /// `{...}`).
@@ -10003,7 +10003,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 | ValueKind::Bool(_)
                 | ValueKind::Float(_)
                 | ValueKind::Complex(_, _)
-                | ValueKind::Bytes(_) => return Ok(backing.repr()),
+                | ValueKind::Bytes(_) => return Ok(backing.repr_raw()),
                 ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                     return render_value_repr(interp, &backing);
                 }
@@ -10043,7 +10043,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                         pyrust_builtins::bytearray::as_bytearray_snapshot(&backing)
                     {
                         let class_name = class.borrow().name.clone();
-                        let inner = Value::bytes(data).repr();
+                        let inner = Value::bytes(data).repr_raw();
                         return Ok(format!("{class_name}({inner})"));
                     }
                 }
@@ -10053,12 +10053,12 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         // No __repr__ defined — fall back to default object repr (handles
         // exception instances via exception_repr() and plain instances via
         // the address-based format).
-        return Ok(value.repr());
+        return Ok(value.repr_raw());
     }
 
     // For containers, we need to recurse with interpreter access on each
     // element.  Use a thread-local cycle-detection stack identical in spirit
-    // to the one in `Value::repr()`.
+    // to the one in `Value::repr_raw()`.
     thread_local! {
         static REPR_IN_PROGRESS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
     }
@@ -10066,11 +10066,11 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
     match value.kind() {
         ValueKind::List(items) => {
             // Fast path: all elements are plain scalars — no interpreter
-            // dispatch needed.  `Value::repr()` handles cycle detection
+            // dispatch needed.  `Value::repr_raw()` handles cycle detection
             // internally and produces the same output without a snapshot.
             if !items.iter().any(value_needs_interp_repr) {
                 drop(items);
-                return Ok(value.repr());
+                return Ok(value.repr_raw());
             }
             let id = value.value_id();
             let already_in = id.is_some_and(|id| {
@@ -10104,7 +10104,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             // Fast path: all elements are plain scalars — no interpreter
             // dispatch needed.
             if !items.iter().any(value_needs_interp_repr) {
-                return Ok(value.repr());
+                return Ok(value.repr_raw());
             }
             let id = value.value_id();
             let already_in = id.is_some_and(|id| {
@@ -10145,7 +10145,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 .any(|(k, v)| key_needs_interp_repr(k) || value_needs_interp_repr(v))
             {
                 drop(items);
-                return Ok(value.repr());
+                return Ok(value.repr_raw());
             }
             let id = value.value_id();
             let already_in = id.is_some_and(|id| {
@@ -10192,7 +10192,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             // dispatch needed.
             if !items.iter().any(key_needs_interp_repr) {
                 drop(items);
-                return Ok(value.repr());
+                return Ok(value.repr_raw());
             }
             let id = value.value_id();
             let already_in = id.is_some_and(|id| {
@@ -10227,7 +10227,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         {
             let items = match pyrust_builtins::frozenset::as_items(value) {
                 Some(rc) => rc,
-                None => return Ok(value.repr()),
+                None => return Ok(value.repr_raw()),
             };
             if items.is_empty() {
                 return Ok("frozenset()".to_string());
@@ -10236,7 +10236,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             // dispatch needed.
             if !items.iter().any(key_needs_interp_repr) {
                 drop(items);
-                return Ok(value.repr());
+                return Ok(value.repr_raw());
             }
             let id = value.value_id();
             let already_in = id.is_some_and(|id| {
@@ -10265,7 +10265,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
             Ok(format!("frozenset({{{}}})", parts.join(", ")))
         }
         // Generators and built-in iterators (#2019): the pure
-        // `Value::repr()` cannot tell the concrete iterator kind apart
+        // `Value::repr_raw()` cannot tell the concrete iterator kind apart
         // (all are `ValueKind::Generator`), so it returns a fixed
         // `<generator object>`.  Reconstruct CPython's real repr here:
         //   - true generators (def-generator / genexpr):
@@ -10274,8 +10274,8 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         //         `<{type_name} object at 0x...>`
         ValueKind::Generator(_) => Ok(generator_repr(value)),
         // For all other value types (int, float, str, bool, None, …), the
-        // pure `Value::repr()` is correct and needs no interpreter.
-        _ => Ok(value.repr()),
+        // pure `Value::repr_raw()` is correct and needs no interpreter.
+        _ => Ok(value.repr_raw()),
     }
 }
 
@@ -10536,7 +10536,7 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             _ => {}
         }
     }
-    Ok(value.repr())
+    Ok(value.repr_raw())
 }
 
 /// Return the Python iterator type name for a builtin collection, matching

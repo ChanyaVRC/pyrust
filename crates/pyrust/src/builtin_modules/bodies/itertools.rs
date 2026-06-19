@@ -332,9 +332,9 @@ pyrust_module! {
             let omit_step =
                 matches!(step.kind(), ValueKind::Int(1) | ValueKind::Bool(true));
             if omit_step {
-                Ok(Value::string(format!("count({})", cur.repr())))
+                Ok(Value::string(format!("count({})", cur.repr_raw())))
             } else {
-                Ok(Value::string(format!("count({}, {})", cur.repr(), step.repr())))
+                Ok(Value::string(format!("count({}, {})", cur.repr_raw(), step.repr_raw())))
             }
         }
     }

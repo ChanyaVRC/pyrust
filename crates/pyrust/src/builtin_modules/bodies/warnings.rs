@@ -203,9 +203,9 @@ fn message_text(v: &Value) -> String {
                     _ => {}
                 }
             }
-            v.repr()
+            v.repr_raw()
         }
-        _ => v.repr(),
+        _ => v.repr_raw(),
     }
 }
 

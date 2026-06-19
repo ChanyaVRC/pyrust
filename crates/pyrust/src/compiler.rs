@@ -2531,7 +2531,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
                     ValueKind::BigInt(b) => Some(Value::bigint(-b)),
                     _ => None,
                 },
-                UnaryOp::Not => Some(Value::bool_(!val.truthy())),
+                UnaryOp::Not => Some(Value::bool_(!val.truthy_raw())),
                 UnaryOp::BitNot => match val.kind() {
                     ValueKind::Int(n) => Some(Value::int(!n)),
                     _ => None,
@@ -2552,7 +2552,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
                 let rhs = fold_constant(rhs_expr)?;
                 let op = BinaryOp::from(*cmp_op);
                 let result = fold_binop(&cur, op, &rhs)?;
-                if !result.truthy() {
+                if !result.truthy_raw() {
                     return Some(Value::bool_(false));
                 }
                 cur = rhs;
@@ -7150,7 +7150,7 @@ impl Compiler {
             let body_lns: &[u32] = branch_linenos.get(bi).map(|v| v.as_slice()).unwrap_or(&[]);
             // Constant-condition optimisation: fold at compile time.
             if let Some(val) = fold_constant(cond) {
-                if val.truthy() {
+                if val.truthy_raw() {
                     // Always-true branch: compile body unconditionally; skip rest.
                     self.compile_block_with_linenos(body, body_lns);
                     if self.failed {

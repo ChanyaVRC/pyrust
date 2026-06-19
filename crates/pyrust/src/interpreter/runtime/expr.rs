@@ -2920,7 +2920,7 @@ impl Interpreter {
         // PyInstance (either side) — dispatch `__eq__`/reflected
         // `__eq__`.  This is the original `values_user_eq` body.
         if let Some(r) = self.try_dunder_binary(a, b, "__eq__", "__eq__") {
-            return Ok(r?.truthy());
+            return Ok(r?.truthy_raw());
         }
         // Issue #1204: if a PyInstance has a scalar primitive backing
         // (e.g. MyInt subclass) and no user __eq__ was found, compare the
@@ -3352,7 +3352,7 @@ impl Interpreter {
         }
         let other = self.collect_iterable(&args[0])?;
         for item in other {
-            if self.eval_in(receiver.clone(), item)?.truthy() {
+            if self.eval_in(receiver.clone(), item)?.truthy_raw() {
                 return Ok(Value::bool_(false));
             }
         }
@@ -4111,7 +4111,7 @@ impl Interpreter {
                 Err(pyrust_core::type_err!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"))
             }
             BinaryOp::In => self.eval_in(right, left),
-            BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy())),
+            BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy_raw())),
             BinaryOp::Is    => Ok(Value::bool_(values_are_identical(&left, &right))),
             BinaryOp::IsNot => Ok(Value::bool_(!values_are_identical(&left, &right))),
             BinaryOp::And | BinaryOp::Or => unreachable!("short-circuit handled earlier"),
@@ -5550,7 +5550,7 @@ impl Interpreter {
                             value: item.clone(),
                         }],
                     )?;
-                    return Ok(Value::bool_(result.truthy()));
+                    return Ok(Value::bool_(result.truthy_raw()));
                 }
                 // list/dict/set subclass with no user-defined __contains__:
                 // delegate to the backing primitive, matching CPython's
@@ -5657,7 +5657,7 @@ impl Interpreter {
                         value: item.clone(),
                     }],
                 )?;
-                Ok(Value::bool_(result.truthy()))
+                Ok(Value::bool_(result.truthy_raw()))
             }
             // Scalar non-iterables (int/float/bool/bigint/complex/None …) reach
             // here.  CPython raises `TypeError: argument of type '<type>' is not

@@ -96,7 +96,7 @@ impl BuiltinTypeOps for DictValuesOps {
     fn repr(&self, state: &BuiltinState) -> String {
         let view = borrow_view(state).expect("dict_values state");
         let map = view.borrow();
-        let vals: Vec<String> = map.values().map(|v| v.repr()).collect();
+        let vals: Vec<String> = map.values().map(|v| v.repr_raw()).collect();
         format!("dict_values([{}])", vals.join(", "))
     }
 
@@ -150,7 +150,7 @@ impl BuiltinTypeOps for DictItemsOps {
         let map = view.borrow();
         let items: Vec<String> = map
             .iter()
-            .map(|(k, v)| format!("({}, {})", key_repr(k), v.repr()))
+            .map(|(k, v)| format!("({}, {})", key_repr(k), v.repr_raw()))
             .collect();
         format!("dict_items([{}])", items.join(", "))
     }

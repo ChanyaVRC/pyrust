@@ -5532,7 +5532,7 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
     try_value_to_float(v).ok_or_else(|| {
         PyError::named(
             "TypeError",
-            format!("{ctx}: a float is required, not {}", v.repr()),
+            format!("{ctx}: a float is required, not {}", v.repr_raw()),
         )
     })
 }
@@ -6697,7 +6697,7 @@ fn format_single_exc_line(interp: &mut crate::Interpreter, value: &Value) -> Str
                 format!("{class_name}: {msg}")
             }
         }
-        _ => format!("Uncaught exception: {}", value.repr()),
+        _ => format!("Uncaught exception: {}", value.repr_raw()),
     }
 }
 

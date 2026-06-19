@@ -882,7 +882,7 @@ fn encode_value(v: &Value, typed: bool) -> String {
         ValueKind::Int(n) => ("i", n.to_string()),
         ValueKind::Float(f) => ("f", f.to_string()),
         ValueKind::Str(s) => ("s", format!("{:?}", s.to_string())),
-        _ => ("o", v.repr()),
+        _ => ("o", v.repr_raw()),
     };
     if typed {
         // typed=True adds explicit type-name segmentation so subclass
@@ -1324,7 +1324,7 @@ fn cmp_key_compare(
         ],
     )?;
     let cmp_bool = interp.eval_binary(result, op, Value::int(0))?;
-    Ok(Value::bool_(cmp_bool.truthy()))
+    Ok(Value::bool_(cmp_bool.truthy_raw()))
 }
 
 // ── total_ordering helpers ───────────────────────────────────────────────────

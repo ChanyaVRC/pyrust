@@ -3444,7 +3444,7 @@ impl Interpreter {
         }
     }
 
-    /// Like `Value::truthy()` but dispatches `__bool__` / `__len__` for instances.
+    /// Like `Value::truthy_raw()` but dispatches `__bool__` / `__len__` for instances.
     pub(crate) fn truthy_value(&mut self, value: &Value) -> Result<bool> {
         if let ValueKind::PyInstance(inst) = value.kind() {
             let inst_rc = Rc::clone(inst);
@@ -3495,12 +3495,12 @@ impl Interpreter {
             // MyBytes), delegate truthiness to the backing value so that
             // `bool(MyInt(0))` returns False as CPython does.
             if let Some(backing) = instance_builtin_data(&inst_rc) {
-                return Ok(backing.truthy());
+                return Ok(backing.truthy_raw());
             }
             // Non-primitive PyInstance with no __bool__ / __len__: always truthy.
             return Ok(true);
         }
-        Ok(value.truthy())
+        Ok(value.truthy_raw())
     }
 
 }

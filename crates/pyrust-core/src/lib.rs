@@ -3261,7 +3261,7 @@ impl Value {
     ///
     /// `is_unset()` returns true only for this exact pattern.
     ///
-    /// Reading an unset slot through `kind()`, `truthy()`, or any accessor
+    /// Reading an unset slot through `kind()`, `truthy_raw()`, or any accessor
     /// that routes through `kind()` will panic in debug builds (via
     /// `debug_assert!`).  In release builds the assert is elided; the runtime
     /// tripwire is the compiler's `Insn::CheckLocal` emission.  Do not pass an
@@ -4645,7 +4645,14 @@ impl Value {
 
     // ── Existing Value methods rewritten with kind() ─────────────────────────
 
-    pub fn truthy(&self) -> bool {
+    /// Structural truthiness that bypasses `__bool__` / `__len__` dispatch.
+    ///
+    /// This is a *bypass* method: it never invokes user-defined dunder
+    /// methods.  It exists for `pyrust-core` / `pyrust-builtins` code that has
+    /// no `Interpreter` access.  From interpreter-layer code (including any
+    /// `pyrust_module!` body) use `Interpreter::truthy_value` instead, which
+    /// dispatches `__bool__` / `__len__` for user instances.
+    pub fn truthy_raw(&self) -> bool {
         match self.kind() {
             ValueKind::Bool(v) => v,
             ValueKind::Int(v) => v != 0,
@@ -4685,11 +4692,18 @@ impl Value {
                 exception_to_string(instance)
             }
             ValueKind::Str(s) => s.to_string(),
-            _ => self.repr(),
+            _ => self.repr_raw(),
         }
     }
 
-    pub fn repr(&self) -> String {
+    /// Structural `repr()` that bypasses `__repr__` dispatch.
+    ///
+    /// This is a *bypass* method: it never invokes a user-defined `__repr__`.
+    /// It exists for `pyrust-core` / `pyrust-builtins` code that has no
+    /// `Interpreter` access (e.g. error-message formatting, panic debug).
+    /// From interpreter-layer code (including any `pyrust_module!` body) use
+    /// the `repr()` builtin, which dispatches `__repr__` for user instances.
+    pub fn repr_raw(&self) -> String {
         match self.kind() {
             ValueKind::Int(v) => v.to_string(),
             ValueKind::BigInt(v) => v.to_string(),
@@ -4721,7 +4735,7 @@ impl Value {
                 };
                 let inner = items
                     .iter()
-                    .map(|v| v.repr())
+                    .map(|v| v.repr_raw())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{inner}]")
@@ -4745,7 +4759,7 @@ impl Value {
                     }
                     out.push_str(&key_repr(k));
                     out.push_str(": ");
-                    out.push_str(&v.repr());
+                    out.push_str(&v.repr_raw());
                 }
                 out.push('}');
                 out
@@ -4841,7 +4855,7 @@ impl Value {
                 // (issue #2389 — core-side renderers such as exception-arg
                 // formatting reach this without interpreter access).
                 if let Some(backing) = instance_backing_for_repr(instance) {
-                    return backing.repr();
+                    return backing.repr_raw();
                 }
                 let (qualname, module) = {
                     let inst = instance.borrow();
@@ -4878,7 +4892,7 @@ impl Value {
                 };
                 let inner = items
                     .iter()
-                    .map(|v| v.repr())
+                    .map(|v| v.repr_raw())
                     .collect::<Vec<_>>()
                     .join(", ");
                 if items.len() == 1 {
@@ -5296,7 +5310,7 @@ impl fmt::Display for Value {
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.repr())
+        write!(f, "{}", self.repr_raw())
     }
 }
 
@@ -5795,7 +5809,7 @@ pub fn key_repr(key: &PyKey) -> String {
         }
         PyKey::Bytes(b) => bytes_repr(b),
         PyKey::Complex(re, im) => complex_repr(*re, *im),
-        PyKey::Object { value, .. } => value.repr(),
+        PyKey::Object { value, .. } => value.repr_raw(),
     }
 }
 
@@ -5934,7 +5948,7 @@ fn format_exception_args(args: &[Value], repr_mode: bool) -> String {
         [] => String::new(),
         [value] => {
             if repr_mode {
-                value.repr()
+                value.repr_raw()
             } else {
                 value.to_py_str()
             }
@@ -5942,7 +5956,7 @@ fn format_exception_args(args: &[Value], repr_mode: bool) -> String {
         _ => {
             let inner = args
                 .iter()
-                .map(|value| value.repr())
+                .map(|value| value.repr_raw())
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("({inner})")
@@ -6072,10 +6086,10 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
             let base = format!("[Errno {}] {}", errno.to_py_str(), strerror.to_py_str());
             match filename_val {
                 Some(fname) if !fname.is_none() => {
-                    let with_fname = format!("{}: {}", base, fname.repr());
+                    let with_fname = format!("{}: {}", base, fname.repr_raw());
                     match filename2_val {
                         Some(fname2) if !fname2.is_none() => {
-                            return format!("{} -> {}", with_fname, fname2.repr());
+                            return format!("{} -> {}", with_fname, fname2.repr_raw());
                         }
                         _ => return with_fname,
                     }
@@ -6201,7 +6215,11 @@ fn exception_repr(instance: &Rc<RefCell<PyInstance>>) -> String {
         // Do NOT use `format_exception_args` here — its multi-arg branch wraps
         // in an extra pair of parens (`"(a, b)"`), which produces the wrong
         // `ExcName((a, b))` instead of `ExcName(a, b)`.
-        let inner = args.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+        let inner = args
+            .iter()
+            .map(|v| v.repr_raw())
+            .collect::<Vec<_>>()
+            .join(", ");
         format!("{class_name}({inner})")
     }
 }
@@ -6885,7 +6903,7 @@ impl PyError {
     /// CPython keeps the original key object as `args[0]` of the `KeyError`
     /// instance, so `e.args[0]` returns the key itself (not a repr string).
     /// Use this at every dict/set key-not-found raise site instead of
-    /// `PyError::named("KeyError", key.repr())`.
+    /// `PyError::named("KeyError", key.repr_raw())`.
     #[inline]
     pub fn key_error(key: Value) -> Self {
         PyError::KeyError(key)
@@ -7085,7 +7103,7 @@ impl fmt::Display for PyError {
             PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
             PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
             PyError::Class(cls, s) => write!(f, "{}: {s}", cls.borrow().name),
-            PyError::KeyError(key) => write!(f, "KeyError: {}", key.repr()),
+            PyError::KeyError(key) => write!(f, "KeyError: {}", key.repr_raw()),
             PyError::ImportError {
                 class_name,
                 message,
@@ -7136,7 +7154,7 @@ impl fmt::Display for PyError {
             PyError::AttributeError { message, .. } => {
                 write!(f, "AttributeError: {message}")
             }
-            PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
+            PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr_raw()),
         }
     }
 }
@@ -7344,7 +7362,7 @@ mod tests {
 
     #[test]
     fn not_implemented_repr_is_canonical() {
-        assert_eq!(Value::not_implemented().repr(), "NotImplemented");
+        assert_eq!(Value::not_implemented().repr_raw(), "NotImplemented");
     }
 
     #[test]
@@ -7392,7 +7410,7 @@ mod tests {
     #[should_panic(expected = "uninitialised register slot")]
     fn unset_truthy_panics_in_debug() {
         let v = Value::unset();
-        let _ = v.truthy();
+        let _ = v.truthy_raw();
     }
 
     // The direct NaN-box accessors bypass kind(), so they each need their own

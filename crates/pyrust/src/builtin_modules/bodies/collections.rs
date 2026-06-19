@@ -283,7 +283,7 @@ pyrust_module! {
             // else: leave in insertion order (CPython fallback for non-orderable values)
             let inner: Vec<String> = pairs
                 .iter()
-                .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr()))
+                .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr_raw()))
                 .collect();
             Ok(Value::string(format!(
                 "Counter({{{}}})",
@@ -645,11 +645,11 @@ pyrust_module! {
                 .borrow()
                 .attrs
                 .get("default_factory")
-                .map(|v| v.repr())
+                .map(|v| v.repr_raw())
                 .unwrap_or_else(|| "None".to_string());
             let body: Vec<String> = items
                 .iter()
-                .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr()))
+                .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr_raw()))
                 .collect();
             Ok(Value::string(format!(
                 "defaultdict({factory_repr}, {{{}}})",
@@ -1074,7 +1074,7 @@ pyrust_module! {
                 }
                 None => Err(PyError::named(
                     "ValueError",
-                    format!("{} is not in deque", target.repr()),
+                    format!("{} is not in deque", target.repr_raw()),
                 )),
             }
         }
@@ -1142,7 +1142,7 @@ pyrust_module! {
             }
             Err(PyError::named(
                 "ValueError",
-                format!("{} is not in deque", target.repr()),
+                format!("{} is not in deque", target.repr_raw()),
             ))
         }
 
@@ -1307,13 +1307,13 @@ pyrust_module! {
                             )?;
                             match result.kind() {
                                 ValueKind::Str(s) => s.to_string(),
-                                _ => v.repr(),
+                                _ => v.repr_raw(),
                             }
                         } else {
-                            v.repr()
+                            v.repr_raw()
                         }
                     }
-                    _ => v.repr(),
+                    _ => v.repr_raw(),
                 };
                 inner.push(r);
             }

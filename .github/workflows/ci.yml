@@ -39,6 +39,26 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  bypass-method-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # `Value::truthy()` / `Value::repr()` are *bypass* methods that skip
+      # `__bool__` / `__repr__` dispatch; they were renamed to `truthy_raw()` /
+      # `repr_raw()` so interpreter-layer code can't reach them by accident
+      # (issue #434). Guard against the bare names creeping back into
+      # `pyrust_module!` body files, which must dispatch user dunders.
+      - name: Forbid bypass methods in module bodies
+        run: |
+          if grep -rnE '\.(truthy|repr)\(\)' crates/pyrust/src/builtin_modules/bodies/; then
+            echo "::error::Found bypass .truthy()/.repr() in a pyrust_module! body."
+            echo "Use Interpreter::truthy_value / the repr() builtin (dunder-aware),"
+            echo "or the explicit Value::truthy_raw()/repr_raw() if dispatch is genuinely unwanted."
+            exit 1
+          fi
+
   unit_and_integration:
     runs-on: ${{ matrix.os }}
     strategy:
