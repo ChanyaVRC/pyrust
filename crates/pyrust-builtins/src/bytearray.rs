@@ -12,7 +12,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyDict, PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyBigIntSign, PyDict, PyError, PyKey, Result, Value, ValueKind,
+};
 
 pub const TYPE_NAME: &str = "bytearray";
 pub const BYTEARRAY_OPS: &ByteArrayOps = &ByteArrayOps;
@@ -695,6 +697,13 @@ fn resolve_slice_indices(len: i64, start: &Value, stop: &Value, step: &Value) ->
     let step_val: i64 = match step.kind() {
         ValueKind::Int(n) => n,
         ValueKind::Bool(b) => b as i64,
+        // A BigInt step never fits in an index range: a positive one saturates to
+        // i64::MAX (forward walk that takes at most the first element), a negative
+        // one to i64::MIN (reverse walk that takes at most the last element).
+        ValueKind::BigInt(b) => match b.sign() {
+            PyBigIntSign::Minus => i64::MIN,
+            _ => i64::MAX,
+        },
         _ => 1,
     };
     let step_val = if step_val == 0 { 1 } else { step_val };
@@ -707,42 +716,44 @@ fn resolve_slice_indices(len: i64, start: &Value, stop: &Value, step: &Value) ->
         (len - 1, -1i64)
     };
 
+    // Map a BigInt bound to an effective `i64` that lies strictly beyond every
+    // clamp boundary, so the shared Int clamping logic below produces the same
+    // result CPython does for an out-of-range index: a positive BigInt acts like
+    // an index past the end, a negative one like an index before the start.
+    let bigint_bound = |b: &pyrust_core::PyBigInt| match b.sign() {
+        PyBigIntSign::Minus => -len - 1,
+        _ => len + 1,
+    };
+    // Clamp an already-signed index value the way CPython does, given the slice
+    // direction. Negative values are first rebased by `+ len`.
+    let clamp_bound = |n: i64| {
+        if step_val > 0 {
+            if n < 0 {
+                clamp(n + len, 0, len)
+            } else {
+                clamp(n, 0, len)
+            }
+        } else if n < 0 {
+            // Backward slice: a bound below `-len` clamps to -1 (empty);
+            // otherwise to at most `len - 1` (the last valid index).
+            clamp(n + len, -1, len - 1)
+        } else {
+            clamp(n, -1, len - 1)
+        }
+    };
+
     let start_val: i64 = match start.kind() {
         ValueKind::None => default_start,
-        ValueKind::Int(n) => {
-            if step_val > 0 {
-                if n < 0 {
-                    clamp(n + len, 0, len)
-                } else {
-                    clamp(n, 0, len)
-                }
-            } else if n < 0 {
-                // Backward slice: a `start` below `-len` clamps to -1 (empty);
-                // otherwise to at most `len - 1` (the last valid index).
-                clamp(n + len, -1, len - 1)
-            } else {
-                clamp(n, -1, len - 1)
-            }
-        }
+        ValueKind::Int(n) => clamp_bound(n),
         ValueKind::Bool(b) => b as i64,
+        ValueKind::BigInt(b) => clamp_bound(bigint_bound(b)),
         _ => default_start,
     };
     let stop_val: i64 = match stop.kind() {
         ValueKind::None => default_stop,
-        ValueKind::Int(n) => {
-            if step_val > 0 {
-                if n < 0 {
-                    clamp(n + len, 0, len)
-                } else {
-                    clamp(n, 0, len)
-                }
-            } else if n < 0 {
-                clamp(n + len, -1, len - 1)
-            } else {
-                clamp(n, -1, len - 1)
-            }
-        }
+        ValueKind::Int(n) => clamp_bound(n),
         ValueKind::Bool(b) => b as i64,
+        ValueKind::BigInt(b) => clamp_bound(bigint_bound(b)),
         _ => default_stop,
     };
 
@@ -770,7 +781,13 @@ fn slice_indices(start: i64, stop: i64, step: i64) -> impl Iterator<Item = usize
                 || (self.step < 0 && self.current > self.stop);
             if in_range {
                 let c = self.current as usize;
-                self.current += self.step;
+                // `wrapping_add` rather than `+=`: a BigInt step saturates to
+                // i64::MIN/MAX, which would overflow-panic on the increment after
+                // the first (and only) element in debug builds. The wrapped value
+                // is never observed — the next `in_range` test is already false —
+                // and for ordinary steps no wrap ever occurs, so this stays a
+                // bare `add` with no perf cost on the common slice walk.
+                self.current = self.current.wrapping_add(self.step);
                 Some(c)
             } else {
                 None
