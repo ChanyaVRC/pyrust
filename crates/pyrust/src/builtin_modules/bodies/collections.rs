@@ -62,8 +62,8 @@ const COLLECTIONS_PY_EXPORTS: [&str; 6] = [
 ];
 
 /// Execute `COLLECTIONS_PY_SOURCE` once and copy its public names onto the
-/// `collections` module's attribute map.  Called from the `collections`
-/// post-load hook in `env.rs::load_module` after the native classes
+/// `collections` module's attribute map.  Called from the `@inject` post-load
+/// hook (`crate::builtin_modules::post_load_inject`) after the native classes
 /// (`Counter`, `defaultdict`, `deque`) and `Counter`/`defaultdict`'s `dict`
 /// re-parenting are in place, so the Python source can rely on the rest of
 /// the module being present.
@@ -84,7 +84,57 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
+    tag_public_classes(module);
     Ok(())
+}
+
+/// Tag each public `collections` class with `__module__ = "collections"` and a
+/// `__class_getitem__` sentinel (issues #2228 / #2603).
+///
+/// `__module__` makes the type repr render `<class 'collections.Counter'>` and
+/// `Counter.__module__ == "collections"`, matching CPython.  The native
+/// classes (macro-built) carry no `__module__`; the Python-source classes are
+/// exec'd in a private namespace and would otherwise pick up that namespace's
+/// `__name__`.  Done after the exec above so every class exists.  `namedtuple`
+/// is deliberately excluded — CPython gives namedtuple-created classes the
+/// *caller's* `__module__`, not `collections`.
+///
+/// PEP 585 (issue #2603): every public `collections` container class defines
+/// `__class_getitem__` in CPython 3.12, so `collections.OrderedDict[int]` etc.
+/// produce a `types.GenericAlias`.  We register the same
+/// `BuiltinFunction("<qualname>.__class_getitem__")` sentinel that
+/// `build_primitive_classes` puts on `list`/`dict`; `eval_index`'s `PyClass`
+/// arm detects the sentinel and builds the alias directly, while
+/// `call_function_expanded` handles the explicit `Cls.__class_getitem__(int)`
+/// call form.  The repr's `collections.` prefix comes from `__module__` set
+/// just above plus the class's `qualname`.
+fn tag_public_classes(module: &Rc<RefCell<crate::value::PyModule>>) {
+    for cls_name in [
+        "Counter",
+        "defaultdict",
+        "deque",
+        "OrderedDict",
+        "ChainMap",
+        "UserDict",
+        "UserList",
+        "UserString",
+    ] {
+        let cls = module.borrow().attrs.get(cls_name).cloned();
+        if let Some(cls_val) = cls
+            && let ValueKind::PyClass(cls_rc) = cls_val.kind()
+        {
+            cls_rc
+                .borrow_mut()
+                .attrs
+                .insert("__module__".to_string(), Value::string("collections"));
+            let sentinel: &'static str =
+                Box::leak(format!("{cls_name}.__class_getitem__").into_boxed_str());
+            cls_rc.borrow_mut().attrs.insert(
+                "__class_getitem__".to_string(),
+                Value::builtin_function(sentinel),
+            );
+        }
+    }
 }
 
 /// Attribute name under which `Counter` and `defaultdict` keep their backing

@@ -3179,134 +3179,17 @@ impl Interpreter {
                 }
             }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
-            // `collections` Python-source members (issue #1884): inject
-            // `namedtuple`, `OrderedDict`, `ChainMap`, `UserDict`,
-            // `UserList`, and `UserString` by exec'ing their Python source.
-            // Done *after* the module is in `module_cache` so the exec (which
+            // Python-source post-load injection: every `@inject` module in
+            // `pyrust_builtin_modules!` (collections, asyncio, string,
+            // operator, typing, abc, dataclasses, enum, json, …) exec's its
+            // `*_py.py` source onto the freshly imported module here.  Done
+            // *after* the module is in `module_cache` so each exec (which
             // resolves builtins like `dict`/`tuple`/`property`) sees a
-            // consistent import state.
-            if name == "collections"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::collections::inject_python_members(
-                    self, m,
-                )?;
-                // `collections` class repr (issue #2228): tag each public
-                // collections class with `__module__ = "collections"` so the
-                // type repr renders `<class 'collections.Counter'>` and
-                // `Counter.__module__ == "collections"`, matching CPython.
-                // The native classes (macro-built) carry no `__module__`; the
-                // Python-source classes are exec'd in a private namespace and
-                // pick up that namespace's `__name__` instead.  Done after
-                // `inject_python_members` so every class exists.  `namedtuple`
-                // is deliberately excluded — CPython gives namedtuple-created
-                // classes the *caller's* `__module__`, not `collections`.
-                for cls_name in [
-                    "Counter",
-                    "defaultdict",
-                    "deque",
-                    "OrderedDict",
-                    "ChainMap",
-                    "UserDict",
-                    "UserList",
-                    "UserString",
-                ] {
-                    let cls = m.borrow().attrs.get(cls_name).cloned();
-                    if let Some(cls_val) = cls
-                        && let ValueKind::PyClass(cls_rc) = cls_val.kind()
-                    {
-                        cls_rc.borrow_mut().attrs.insert(
-                            "__module__".to_string(),
-                            Value::string("collections"),
-                        );
-                        // PEP 585 (issue #2603): every public `collections`
-                        // container class defines `__class_getitem__` in
-                        // CPython 3.12, so `collections.OrderedDict[int]` etc.
-                        // produce a `types.GenericAlias`.  Register the same
-                        // `BuiltinFunction("<qualname>.__class_getitem__")`
-                        // sentinel that `build_primitive_classes` puts on
-                        // `list`/`dict`; `eval_index`'s `PyClass` arm detects
-                        // the sentinel and builds the alias directly, while
-                        // `call_function_expanded` handles the explicit
-                        // `Cls.__class_getitem__(int)` call form.  The repr's
-                        // `collections.` prefix comes from `__module__` set
-                        // just above plus the class's `qualname`.
-                        let sentinel: &'static str = Box::leak(
-                            format!("{cls_name}.__class_getitem__").into_boxed_str(),
-                        );
-                        cls_rc.borrow_mut().attrs.insert(
-                            "__class_getitem__".to_string(),
-                            Value::builtin_function(sentinel),
-                        );
-                    }
-                }
-            }
-            // `asyncio` Python-source members (issue #1039): inject `sleep`
-            // and `gather`, defined as real coroutines in `asyncio_py.py`, by
-            // exec'ing that source after the native `run` is registered.
-            if name == "asyncio"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::asyncio::inject_python_members(self, m)?;
-            }
-            // `string` Python-source members (issue #2515): inject
-            // `capwords`, `Template`, and `Formatter`, defined in
-            // `string_py.py`, after the native constants are registered.
-            if name == "string"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::string::inject_python_members(self, m)?;
-            }
-            // `operator` Python-source members (issue #2514): the whole module
-            // is defined in `operator_py.py` (itemgetter / attrgetter /
-            // methodcaller plus the operator-wrapper functions), exec'd here
-            // since the native body is empty.
-            if name == "operator"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::operator::inject_python_members(self, m)?;
-            }
-            // `typing` Python-source members (issue #2516): inject
-            // `get_type_hints`, `get_origin`, `get_args`, `runtime_checkable`,
-            // `reveal_type`, the special-form markers (`Self`, `Never`,
-            // `Annotated`, …), `ParamSpec`, `TypeVarTuple`, and the
-            // `NamedTuple` helper functions by exec'ing `typing_py.py`.
-            if name == "typing"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::typing::inject_python_members(self, m)?;
-            }
-            // `abc` Python-source members (issue #2612): the whole module
-            // (`ABCMeta`, `ABC`, `abstractmethod`, …) is defined in
-            // `abc_py.py`, exec'd here since the native body is empty.
-            if name == "abc"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::abc::inject_python_members(self, m)?;
-            }
-            // `dataclasses` Python-source members (issue #2610): `@dataclass`,
-            // `field`, `fields`, `asdict`, `astuple`, … are defined in
-            // `dataclasses_py.py`, exec'd here since the native body is empty.
-            if name == "dataclasses"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::dataclasses::inject_python_members(self, m)?;
-            }
-            // `enum` Python-source members (issue #2611): the whole module is
-            // defined in `enum_py.py` (`Enum` / `IntEnum` / `EnumMeta` /
-            // `EnumType` / `auto`), exec'd here since the native body is empty.
-            if name == "enum"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::enum_mod::inject_python_members(self, m)?;
-            }
-            // `json` Python-source members (issue #2620): the whole module is
-            // defined in `json_py.py` (`dumps` / `loads` / `JSONDecodeError`),
-            // exec'd here since the native body is empty.
-            if name == "json"
-                && let ValueKind::PyModule(m) = val.kind()
-            {
-                crate::builtin_modules::json::inject_python_members(self, m)?;
+            // consistent import state.  The macro-generated dispatcher keeps
+            // the per-module hook list in `mod.rs` — no edit to this site is
+            // needed when a new Python-source module is added.
+            if let ValueKind::PyModule(m) = val.kind() {
+                crate::builtin_modules::post_load_inject(name, self, m)?;
             }
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via
