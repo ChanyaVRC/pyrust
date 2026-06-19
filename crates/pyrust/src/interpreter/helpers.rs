@@ -1670,6 +1670,24 @@ pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Va
         .cloned()
 }
 
+/// The dunder-free core of [`effective_builtin_receiver`]: the backing builtin
+/// value of a builtin-subclass `PyInstance`, or `None` for any other value.
+///
+/// This is the version hot consumers (binary-op operand coercion, iteration,
+/// dict-merge / set-op extraction) want — they perform no override check, so
+/// they must not carry the override-gate tail (`lookup_class_attr` loop,
+/// `Rc::clone`) of [`effective_builtin_receiver`] into their inlined body.
+/// Keeping it a separate `#[inline]` fn lets the hot path collapse to the same
+/// two tag/attr fetches the open-coded sites used before #2386, so coercing a
+/// `class MyInt(int)` operand in a tight binary-op loop stays free of dead
+/// branches. Override-aware consumers must keep calling
+/// [`effective_builtin_receiver`] with their relevant dunder(s).
+#[inline]
+pub(crate) fn builtin_data_backing(v: &Value) -> Option<Value> {
+    let inst_rc = v.as_py_instance_rc()?;
+    instance_builtin_data(inst_rc)
+}
+
 /// The single representation-substitutability boundary (issue #2386).
 ///
 /// CPython gives builtin subclasses *structural* substitutability: a
@@ -1707,11 +1725,11 @@ pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Va
 /// primitive fast paths) so plain `int`/`str`/`list` operands pay nothing.
 #[inline]
 pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -> Option<Value> {
-    let inst_rc = v.as_py_instance_rc()?;
-    let backing = instance_builtin_data(inst_rc)?;
+    let backing = builtin_data_backing(v)?;
     if override_dunders.is_empty() {
         return Some(backing);
     }
+    let inst_rc = v.as_py_instance_rc()?;
     let base_type_name = pyrust_core::builtin_type_name(&backing);
     let class = Rc::clone(&inst_rc.borrow().class);
     for dunder in override_dunders {
