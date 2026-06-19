@@ -989,13 +989,17 @@ fn bytes_list_to_bytearray_list(v: Value) -> Value {
 /// `bytearray.partition` / `bytearray.rpartition` — returns a 3-tuple of
 /// bytearray values.
 fn bytearray_partition(bytes: &[u8], args: &[Value], reverse: bool) -> Result<Value> {
-    let sep_val = args.first().ok_or_else(|| {
-        let name = if reverse { "rpartition" } else { "partition" };
-        PyError::named(
+    let name = if reverse { "rpartition" } else { "partition" };
+    if args.len() != 1 {
+        return Err(PyError::named(
             "TypeError",
-            format!("bytearray.{name}() requires exactly 1 argument"),
-        )
-    })?;
+            format!(
+                "bytearray.{name}() takes exactly one argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let sep_val = &args[0];
     let sep: Vec<u8> = match sep_val.kind() {
         ValueKind::Bytes(rc) => rc.as_slice().to_vec(),
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
