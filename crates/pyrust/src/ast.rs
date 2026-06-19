@@ -398,12 +398,19 @@ pub enum Expr {
     Ellipsis,
     /// An f-string: `f"Hello, {name}!"`
     FString(Vec<FStringPart>),
-    /// A bare name reference.  The optional `(col_offset, end_col_offset)`
-    /// (0-based char columns within the name's source line) is the PEP 657
-    /// caret anchor (issue #2426), recorded by the parser when token column
-    /// information is available.  `None` for names synthesised by the parser
-    /// (desugaring temporaries) or built without column info.
-    Var(String, Option<(u32, u32)>),
+    /// A bare name reference.  The optional `(col_offset, end_col_offset,
+    /// lineno)` is the PEP 657 caret anchor (issue #2426): `col_offset` /
+    /// `end_col_offset` are 0-based char columns within the name's source line,
+    /// `lineno` is the name's own 1-based source line.  Recorded by the parser
+    /// when token position information is available.  `None` for names
+    /// synthesised by the parser (desugaring temporaries) or built without
+    /// position info.
+    ///
+    /// The `lineno` slot lets the compiler stamp the name-load instruction with
+    /// the line the *name itself* is on, not the enclosing statement's first
+    /// line — so a name on a continuation line of a multi-line expression
+    /// reports its own line in tracebacks, matching CPython 3.12 (issue #2632).
+    Var(String, Option<(u32, u32, u32)>),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
     Dict(Vec<DictItem>),

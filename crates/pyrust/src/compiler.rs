@@ -10829,8 +10829,22 @@ impl Compiler {
                 // span never leaks onto an unrelated instruction.  A bare name's
                 // anchor is whole-span (`^`), so widen the `(start, end)` form to
                 // the `(full, prim) = (start, start, end, end)` shape (#2411).
-                let span: Option<crate::ast::CaretSpan> = span.map(|(s, e)| (s, s, e, e));
-                if let Some(reg) = self.local_reg(name) {
+                //
+                // Multi-line line stamping (#2632): the parser also records the
+                // name's own 1-based line.  When it differs from the statement's
+                // `current_lineno` (the name sits on a continuation line of a
+                // multi-line expression), stamp the load instruction with the
+                // name's line so a NameError it raises reports that line and its
+                // source text — matching CPython 3.12, which gives each name node
+                // its own lineno.  We restore `current_lineno` afterwards so the
+                // override never leaks onto sibling instructions.
+                let name_lineno = span.and_then(|(_, _, ln)| (ln != 0).then_some(ln));
+                let span: Option<crate::ast::CaretSpan> = span.map(|(s, e, _)| (s, s, e, e));
+                let saved_lineno = self.current_lineno;
+                if let Some(ln) = name_lineno {
+                    self.set_lineno(ln);
+                }
+                let result = if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
                         // Issue #1411: at module scope, a name that is not yet
@@ -10846,6 +10860,7 @@ impl Compiler {
                             let dst = self.alloc_temp();
                             self.set_col_span_for_next(span);
                             self.emit(Insn::LoadGlobal(dst, name_idx));
+                            self.set_lineno(saved_lineno);
                             return dst;
                         }
                         let name_idx = self.intern_name(name);
@@ -10868,7 +10883,9 @@ impl Compiler {
                         self.emit(Insn::LoadGlobal(dst, name_idx));
                     }
                     dst
-                }
+                };
+                self.set_lineno(saved_lineno);
+                result
             }
             Expr::Unary { op, expr, span } => {
                 let src = self.compile_expr(expr);

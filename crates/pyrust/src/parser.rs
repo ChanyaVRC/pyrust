@@ -2981,11 +2981,16 @@ impl Parser {
             Some(Token::Ident(name)) => {
                 // PEP 657 caret anchor (#2426): the name's column span is
                 // `[col, col + len)` where `col` is the Ident token's start
-                // column and `len` its char length.  `self.pos` still points at
-                // the Ident here (before `bump`).
+                // column and `len` its char length.  Also record the name's own
+                // 1-based line (#2632) so the compiler can stamp the load with
+                // the line the name is on — not the enclosing statement's first
+                // line, which is wrong for a name on a continuation line of a
+                // multi-line expression.  `self.pos` still points at the Ident
+                // here (before `bump`).
+                let lineno = self.current_lineno();
                 let span = self
                     .current_col()
-                    .map(|col| (col, col + name.chars().count() as u32));
+                    .map(|col| (col, col + name.chars().count() as u32, lineno));
                 self.bump();
                 Ok(Expr::Var(name, span))
             }
