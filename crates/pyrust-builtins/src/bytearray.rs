@@ -791,13 +791,16 @@ fn slice_indices(start: i64, stop: i64, step: i64) -> impl Iterator<Item = usize
                 || (self.step < 0 && self.current > self.stop);
             if in_range {
                 let c = self.current as usize;
-                // `wrapping_add` rather than `+=`: a BigInt step saturates to
-                // i64::MIN/MAX, which would overflow-panic on the increment after
-                // the first (and only) element in debug builds. The wrapped value
-                // is never observed — the next `in_range` test is already false —
-                // and for ordinary steps no wrap ever occurs, so this stays a
-                // bare `add` with no perf cost on the common slice walk.
-                self.current = self.current.wrapping_add(self.step);
+                // `saturating_add` rather than `+=`: a BigInt step saturates to
+                // i64::MIN/MAX, and a non-zero `start` would overflow-panic on the
+                // increment after the first element in debug builds. Saturating
+                // pins `current` at i64::MAX/MIN, which fails the next `in_range`
+                // test (so the slice yields exactly the first element, matching
+                // CPython); a *wrapping* add would instead flip the sign and keep
+                // `current` in range, yielding a bogus second index. For ordinary
+                // steps no saturation ever occurs, so this stays a bare `add` with
+                // no perf cost on the common slice walk.
+                self.current = self.current.saturating_add(self.step);
                 Some(c)
             } else {
                 None
