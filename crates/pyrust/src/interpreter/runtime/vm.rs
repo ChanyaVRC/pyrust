@@ -1790,6 +1790,22 @@ impl Interpreter {
                 {
                     *slot = new_tb;
                 }
+            } else if inst.attrs.is_dict_backed() {
+                // Issue #1981: a dict-backed instance (its `__dict__` was replaced
+                // wholesale) cannot hand out a `&mut` into the external dict, so
+                // `get_mut` returns `None` even when `__traceback__` is present.
+                // Resolve through the live dict and write the result back via
+                // `insert`, preserving the re-raise frame-prepend chaining that the
+                // `get_mut` fast path performs for plain instances.
+                let existing = inst
+                    .attrs
+                    .get_cloned_or_slot("__traceback__")
+                    .unwrap_or_else(Value::none);
+                if let Some(new_tb) =
+                    self.caught_traceback_value(&existing, catch_lineno as i64, is_bare_reraise)
+                {
+                    inst.attrs.insert("__traceback__", new_tb);
+                }
             } else {
                 let tb = self.build_deferred_traceback(catch_lineno as i64);
                 inst.attrs.insert("__traceback__", tb);
@@ -3242,7 +3258,10 @@ impl Interpreter {
                     // a later `e.__traceback__` read.
                     let exc_val = vm_try!(vm_read(&regs, *exc, num_locals));
                     let tb = if let Some(inst) = exc_val.as_py_instance_rc() {
-                        let stored = inst.borrow().attrs.get("__traceback__").cloned();
+                        // `get_cloned_or_slot` routes through the live `__dict__` for a
+                        // dict-backed instance (#1981); `get` would miss it and
+                        // hand `__exit__` a `None` traceback.
+                        let stored = inst.borrow().attrs.get_cloned_or_slot("__traceback__");
                         match stored {
                             Some(v) => match self.materialize_deferred_traceback(&v) {
                                 Some(real) => {

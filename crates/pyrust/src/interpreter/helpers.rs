@@ -2844,57 +2844,53 @@ pub(crate) fn class_suppresses_instance_dict(class: &Rc<RefCell<PyClass>>) -> bo
         && !mro_has_unslotted_ancestor(class)
 }
 
-/// Handle `instance.__dict__ = value` (issue #1942).
+/// Handle `instance.__dict__ = value` (issues #1942 / #1981).
 ///
 /// CPython's `tp_setattro` routes assignment to the `__dict__` slot through a
 /// dedicated setter that *replaces* the instance dict wholesale (rather than
 /// storing an attribute literally named `__dict__`).  The value must be a
 /// `dict`; anything else raises `TypeError`.
 ///
-/// pyrust's instance attrs map is `IndexMap<String, Value>`, so only string
-/// keys are representable as attributes.  CPython accepts a dict with non-str
-/// keys here (they're simply never accessible as attributes); we mirror the
-/// observable attribute behaviour by keeping only the string-keyed entries.
+/// The assigned dict is stored **by reference** as the instance's live backing
+/// store (#1981): `obj.__dict__ is d` holds, later mutations of `d` are visible
+/// as attribute reads (and vice-versa), and non-str keys round-trip (they're
+/// just never attribute-accessible).
 ///
 /// `other.__dict__` evaluates to an `instance_dict` proxy in pyrust (CPython
-/// returns the backing dict itself), so we also accept a proxy here and copy
-/// its visible entries.  Live aliasing (`w.__dict__ is other.__dict__`) is not
-/// reproduced — that needs first-class dict-backed instance storage (#1942
-/// follow-up).
+/// returns the backing dict itself).  A proxy isn't a first-class dict Value,
+/// so we materialise a fresh dict from its visible entries and back the
+/// instance with that — live aliasing against the *source* instance is not
+/// reproduced for the proxy case (out of scope for #1981's criteria).
 pub(crate) fn replace_instance_dict(
     instance: &Rc<RefCell<PyInstance>>,
     value: &Value,
 ) -> Result<()> {
-    let entries = match value.as_dict() {
-        Some(map) => map
-            .iter()
-            .filter_map(|(k, v)| match k {
-                PyKey::Str(s) => s.as_str().map(|s| (s.to_string(), v.clone())),
-                _ => None,
-            })
-            .collect::<Vec<(String, Value)>>(),
-        None => match pyrust_builtins::instance_dict::as_instance_dict_items(value) {
-            Some(items) => items
-                .into_iter()
-                .filter_map(|(k, v)| match k {
-                    PyKey::Str(s) => s.as_str().map(|s| (s.to_string(), v)),
-                    _ => None,
-                })
-                .collect::<Vec<(String, Value)>>(),
-            None => {
-                let type_name = pyrust_core::builtin_type_name(value);
-                return Err(pyrust_core::type_err!(
-                    "__dict__ must be set to a dictionary, not a '{type_name}'"
-                ));
-            }
-        },
-    };
-    let mut borrow = instance.borrow_mut();
-    borrow.attrs.clear();
-    for (k, v) in entries {
-        borrow.attrs.insert(k, v);
+    // Real dict: store it verbatim so identity + aliasing are preserved.
+    if value.as_dict().is_some() {
+        instance.borrow_mut().attrs.set_dict_ref(value.clone());
+        return Ok(());
     }
-    Ok(())
+    // instance_dict proxy: no first-class dict to alias; snapshot its visible
+    // entries into a fresh dict and back the instance with that.
+    match pyrust_builtins::instance_dict::as_instance_dict_items(value) {
+        Some(items) => {
+            let mut map = pyrust_core::PyDict::default();
+            for (k, v) in items {
+                map.insert(k, v);
+            }
+            instance
+                .borrow_mut()
+                .attrs
+                .set_dict_ref(Value::dict(map));
+            Ok(())
+        }
+        None => {
+            let type_name = pyrust_core::builtin_type_name(value);
+            Err(pyrust_core::type_err!(
+                "__dict__ must be set to a dictionary, not a '{type_name}'"
+            ))
+        }
+    }
 }
 
 /// Return the errno-specific OSError subclass `Rc` for a given errno value,
@@ -6518,9 +6514,12 @@ pub(crate) fn format_exc_chain_prefix(
             break; // cycle guard
         }
         let borrow = inst.borrow();
+        // `get_cloned_or_slot` routes through the live `__dict__` for a dict-backed
+        // instance (#1981) so chained-exception display works after a `__dict__`
+        // replacement; `get` would miss these dunders entirely.
         let suppress = borrow
             .attrs
-            .get("__suppress_context__")
+            .get_cloned_or_slot("__suppress_context__")
             .and_then(|v| match v.kind() {
                 ValueKind::Bool(b) => Some(b),
                 _ => None,
@@ -6529,7 +6528,7 @@ pub(crate) fn format_exc_chain_prefix(
 
         if suppress {
             // raise X from Y: display __cause__ (if not None)
-            let cause = borrow.attrs.get("__cause__").cloned();
+            let cause = borrow.attrs.get_cloned_or_slot("__cause__");
             drop(borrow);
             match cause {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
@@ -6545,7 +6544,7 @@ pub(crate) fn format_exc_chain_prefix(
             }
         } else {
             // Implicit chaining: display __context__ (if not None)
-            let context = borrow.attrs.get("__context__").cloned();
+            let context = borrow.attrs.get_cloned_or_slot("__context__");
             drop(borrow);
             match context {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
@@ -6633,7 +6632,9 @@ fn chained_exc_frames(
     let ValueKind::PyInstance(inst) = exc.kind() else {
         return None;
     };
-    let stored = inst.borrow().attrs.get("__traceback__").cloned();
+    // `get_cloned_or_slot` routes through the live `__dict__` for a dict-backed instance
+    // (#1981); `get` would miss the chained exception's traceback.
+    let stored = inst.borrow().attrs.get_cloned_or_slot("__traceback__");
     let stored = stored.filter(|tb| !tb.is_none())?;
     // Materialise the deferred placeholder if needed (cold uncaught path).
     let tb = interp
