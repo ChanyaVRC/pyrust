@@ -2164,15 +2164,24 @@ impl Interpreter {
             ValueKind::BuiltinObject { ops, .. }
                 if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
             {
-                let cls_rc = pyrust_builtins::mapping_proxy::as_class_rc(kwargs_val).ok_or_else(
-                    || PyError::Runtime("internal: bad mappingproxy state in **kwargs".to_string()),
-                )?;
-                cls_rc
-                    .borrow()
-                    .attrs
-                    .iter()
-                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
-                    .collect()
+                if let Some(cls_rc) = pyrust_builtins::mapping_proxy::as_class_rc(kwargs_val) {
+                    cls_rc
+                        .borrow()
+                        .attrs
+                        .iter()
+                        .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                        .collect()
+                } else if let Some(dict_rc) =
+                    pyrust_builtins::mapping_proxy::as_dict_rc(kwargs_val)
+                {
+                    // Dict-backed mappingproxy (`d.keys().mapping`, #2679).
+                    // Non-string keys are rejected by the str-key check below.
+                    dict_rc.borrow().clone().into_iter().collect()
+                } else {
+                    return Err(PyError::Runtime(
+                        "internal: bad mappingproxy state in **kwargs".to_string(),
+                    ));
+                }
             }
             ValueKind::PyInstance(_) => mapping_pairs_via_protocol(self, kwargs_val)?
                 .ok_or_else(|| {

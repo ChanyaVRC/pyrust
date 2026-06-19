@@ -4323,6 +4323,12 @@ pyrust_module! {
                         for (k, v) in class.attrs.iter() {
                             result.insert(PyKey::str_from(k), v.clone());
                         }
+                    } else if let Some(dict_rc) =
+                        pyrust_builtins::mapping_proxy::as_dict_rc(&arg.value)
+                    {
+                        // Dict-backed mappingproxy (`d.keys().mapping`, #2679):
+                        // copy the parent dict's key/value pairs verbatim.
+                        result.extend(dict_rc.borrow().clone());
                     }
                 }
                 // PyInstance with a backing dict (dict subclass).

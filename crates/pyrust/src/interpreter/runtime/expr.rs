@@ -2608,6 +2608,11 @@ impl Interpreter {
                         .iter()
                         .map(|(k, v)| (PyKey::str_from(k), v.clone()))
                         .collect())
+                } else if let Some(dict_rc) =
+                    pyrust_builtins::mapping_proxy::as_dict_rc(src_val)
+                {
+                    // Dict-backed mappingproxy (`d.keys().mapping`, #2679).
+                    Ok(dict_rc.borrow().clone().into_iter().collect())
                 } else {
                     Err(PyError::Runtime(
                         "internal: bad mappingproxy state in DictUpdate".to_string(),
@@ -7372,6 +7377,11 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
                     .keys()
                     .map(|k| Value::string(k.clone()))
                     .collect());
+            }
+            // Dict-backed `mappingproxy` (`d.keys().mapping`, issue #2679):
+            // iterating yields the parent dict's keys, like iterating a dict.
+            if let Some(rc) = pyrust_builtins::mapping_proxy::as_dict_rc(value) {
+                return Ok(rc.borrow().keys().map(|k| key_to_value(k.clone())).collect());
             }
             let mut out = Vec::new();
             let ValueKind::BuiltinObject { ops, state } = value.kind() else {
