@@ -148,21 +148,40 @@ impl Interpreter {
     }
 
     fn slice_target_indices(len: i64, start: i64, end: i64, step: i64) -> Vec<usize> {
-        let mut targets = Vec::new();
-        let mut i = start;
-
-        if step > 0 {
-            while i < end {
-                if i >= 0 && i < len {
-                    targets.push(i as usize);
-                }
-                i += step;
+        // Compute the element count up front (CPython's PySlice_AdjustIndices
+        // formula) in `i128` to avoid the overflow that an in-loop `start + step`
+        // would hit, then walk a plain countable loop accumulating `i += step`.
+        // A BigInt step is clamped to i64::MIN/MAX by `slice_index_from_value`,
+        // which yields a count of at most 1; bounding the loop by that count
+        // means the accumulator never advances past the last valid index, so the
+        // old `wrapping_add` second-index bug cannot occur. Ordinary slices pay
+        // no perf cost: the inner loop stays a bare add over a known count.
+        let span = (end as i128) - (start as i128);
+        let step128 = step as i128;
+        let count = if step > 0 {
+            if span > 0 {
+                ((span - 1) / step128) + 1
+            } else {
+                0
             }
+        } else if span < 0 {
+            ((span + 1) / step128) + 1
         } else {
-            while i > end {
-                if i >= 0 && i < len {
-                    targets.push(i as usize);
-                }
+            0
+        };
+        let count = count.max(0);
+        let mut targets = Vec::with_capacity(count as usize);
+        let mut i = start;
+        // Bounded by the precomputed count, so the accumulator stops on the last
+        // valid index and never executes the overflowing `start + step` add that
+        // a saturated (BigInt) step would trigger. `last` lets us skip the final,
+        // unused increment entirely, keeping the body a bare i64 add.
+        let last = count - 1;
+        for k in 0..count {
+            if i >= 0 && i < len {
+                targets.push(i as usize);
+            }
+            if k != last {
                 i += step;
             }
         }
