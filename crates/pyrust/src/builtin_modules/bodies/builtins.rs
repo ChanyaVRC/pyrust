@@ -9489,6 +9489,54 @@ fn bytes_from_items(interp: &mut crate::Interpreter, items: Vec<Value>) -> Resul
     }
 }
 
+/// Resolve `int.from_bytes(source, ...)`'s `source` argument to a `Vec<u8>`.
+///
+/// CPython's `int.from_bytes` accepts any bytes-like object (bytes, bytearray,
+/// memoryview — the buffer protocol) or any iterable of ints in `0..=255`, via
+/// the same `PyBytes_FromObject` machinery the `bytes()` constructor uses.  It
+/// differs from `bytes()` in that a bare `int` is *not* a length count and a
+/// `str` is rejected: both raise `TypeError: cannot convert 'X' object to
+/// bytes` (an int/str is not, for this purpose, a valid byte source).
+pub(crate) fn from_bytes_source_to_bytes(
+    interp: &mut crate::Interpreter,
+    source: &Value,
+) -> Result<Vec<u8>> {
+    // bytes-like buffer objects (bytearray, and any future memoryview).
+    if let Some(data) = pyrust_builtins::bytearray::as_bytearray_snapshot(source) {
+        return Ok(data);
+    }
+    match source.kind() {
+        ValueKind::Bytes(rc) => Ok((**rc).clone()),
+        // `str` and bare numbers are iterable-shaped (or index-shaped) but
+        // rejected by CPython with the buffer-protocol message rather than the
+        // per-element message.
+        ValueKind::Str(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {
+            Err(PyError::named(
+                "TypeError",
+                format!(
+                    "cannot convert '{}' object to bytes",
+                    pyrust_core::builtin_type_name(source),
+                ),
+            ))
+        }
+        // General iterable of ints (list, tuple, range, generator, user iters).
+        _ => {
+            let type_name = pyrust_core::builtin_type_name(source).into_owned();
+            let items = interp.collect_iterable(source).map_err(|e| {
+                if e.class_name_is("TypeError") {
+                    PyError::named(
+                        "TypeError",
+                        format!("cannot convert '{type_name}' object to bytes"),
+                    )
+                } else {
+                    e
+                }
+            })?;
+            bytes_from_items(interp, items)
+        }
+    }
+}
+
 /// Convert a single element of a `bytes()` / `bytearray()` source iterable to a
 /// `u8`, honoring CPython 3.12's `__index__` protocol.  Plain `int` / `bool`
 /// short-circuit (the warm path); only a `PyInstance` triggers a `__index__`
