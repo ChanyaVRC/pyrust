@@ -37,3 +37,10 @@ class Empty:
 
 
 print(list(reversed(vars(Empty))) == list(reversed(list(vars(Empty).keys()))))  # True
+
+
+# Dict-backed mappingproxy (issue #2679) also supports reversed().
+d = {"a": 1, "b": 2, "c": 3}
+m = d.keys().mapping
+print(list(reversed(m)) == list(reversed(list(m.keys()))))  # True
+print(list(m.__reversed__()) == list(reversed(m)))  # True
