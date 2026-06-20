@@ -346,7 +346,9 @@ class _AnnotatedMarker:
     """Special form for `Annotated` (PEP 593).
 
     `Annotated[X, m1, ...]` builds an `_AnnotatedAlias`; it requires at least a
-    type plus one metadata element, matching CPython's `TypeError`.
+    type plus one metadata element, matching CPython's `TypeError`.  A nested
+    `Annotated[Annotated[X, a], b]` is flattened to `Annotated[X, a, b]` at
+    construction, mirroring CPython 3.12.
     """
 
     def __repr__(self):
@@ -358,7 +360,14 @@ class _AnnotatedMarker:
                 "Annotated[...] should be used with at least two arguments "
                 "(a type and an annotation)."
             )
-        return _AnnotatedAlias(params[0], params[1:])
+        origin = params[0]
+        metadata = params[1:]
+        # Flatten nested aliases: the underlying type collapses to its own
+        # origin and its metadata is prepended (CPython `Annotated.__class_getitem__`).
+        if isinstance(origin, _AnnotatedAlias):
+            metadata = origin.__metadata__ + metadata
+            origin = origin.__origin__
+        return _AnnotatedAlias(origin, metadata)
 
 
 Self = _SpecialMarker("Self")

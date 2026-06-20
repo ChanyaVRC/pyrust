@@ -38,6 +38,18 @@ hints_plain = get_type_hints(Model)
 print(hints_plain["name"])  # <class 'str'>
 print(hints_plain["age"])   # <class 'int'>
 
+# Nested aliases flatten at construction (PEP 593 / CPython 3.12)
+nested = Annotated[Annotated[int, "x"], "y"]
+print(repr(nested))            # typing.Annotated[int, 'x', 'y']
+print(get_args(nested))        # (int, 'x', 'y')
+print(nested.__origin__)       # <class 'int'>
+print(nested.__metadata__)     # ('x', 'y')
+print(nested == Annotated[int, "x", "y"])  # True
+
+deep = Annotated[Annotated[Annotated[str, 1], 2], 3]
+print(repr(deep))              # typing.Annotated[str, 1, 2, 3]
+print(get_args(deep))          # (str, 1, 2, 3)
+
 # Equality and hashing
 print(Annotated[int, "x"] == Annotated[int, "x"])
 print(Annotated[int, "x"] == Annotated[int, "y"])
