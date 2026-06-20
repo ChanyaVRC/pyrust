@@ -386,6 +386,21 @@ pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
     None
 }
 
+/// Read the `__args__` tuple of a `typing.Union[...]` alias, if `v` is one.
+///
+/// Returns `Some(args_tuple)` only when `v` is a `GenericAlias` whose origin is
+/// the `typing.Union` special-form class (`get_origin(v) is Union`).  Used by
+/// the `isinstance`/`issubclass` builtins to treat `typing.Union[int, str]`
+/// like the tuple `(int, str)`, matching CPython 3.12.
+pub fn as_typing_union_args(v: &Value) -> Option<Value> {
+    let (origin, args) = as_generic_alias_origin_args(v)?;
+    if is_union_origin(&origin) {
+        Some(args)
+    } else {
+        None
+    }
+}
+
 /// True if `origin` is the `typing.Union` special-form class — the origin
 /// every flattened `Union`/`Optional` alias carries.  Matched by
 /// `__qualname__ == "Union"` plus `__module__ == "typing"` so it does not also
