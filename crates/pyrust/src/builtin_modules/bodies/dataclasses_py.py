@@ -38,9 +38,10 @@ class Field:
     plain annotated attributes, synthesised by the ``@dataclass`` decorator.
     """
     __slots__ = ("name", "type", "default", "default_factory", "init", "repr",
-                 "compare", "hash")
+                 "compare", "hash", "kw_only")
 
-    def __init__(self, default, default_factory, init, repr, compare, hash):
+    def __init__(self, default, default_factory, init, repr, compare, hash,
+                 kw_only=MISSING):
         self.name = None
         self.type = None
         self.default = default
@@ -49,16 +50,18 @@ class Field:
         self.repr = repr
         self.compare = compare
         self.hash = hash
+        self.kw_only = kw_only
 
     def __repr__(self):
         return ("Field(name=%r,type=%r,default=%r,default_factory=%r,"
-                "init=%r,repr=%r,compare=%r,hash=%r)" % (
+                "init=%r,repr=%r,compare=%r,hash=%r,kw_only=%r)" % (
                     self.name, self.type, self.default, self.default_factory,
-                    self.init, self.repr, self.compare, self.hash))
+                    self.init, self.repr, self.compare, self.hash,
+                    self.kw_only))
 
 
 def field(*, default=MISSING, default_factory=MISSING, init=True, repr=True,
-          compare=True, hash=None):
+          compare=True, hash=None, kw_only=MISSING):
     """Return an object to identify dataclass fields.
 
     ``default`` and ``default_factory`` are mutually exclusive.  ``hash``
@@ -68,19 +71,22 @@ def field(*, default=MISSING, default_factory=MISSING, init=True, repr=True,
     """
     if default is not MISSING and default_factory is not MISSING:
         raise ValueError("cannot specify both default and default_factory")
-    return Field(default, default_factory, init, repr, compare, hash)
+    return Field(default, default_factory, init, repr, compare, hash, kw_only)
 
 
 # Name under which the per-class tuple of Field objects is stashed.
 _FIELDS = "__dataclass_fields__"
 
 
-def _collect_fields(cls):
+def _collect_fields(cls, cls_kw_only):
     """Build the ordered list of Field objects for ``cls``.
 
     Walks base classes first (reverse MRO, excluding ``object`` and ``cls``)
     so inherited fields precede this class's own, matching CPython's ordering.
     Later definitions override earlier ones by name.
+
+    ``cls_kw_only`` is the class-level ``kw_only`` flag; a field whose own
+    ``kw_only`` is left at ``MISSING`` inherits it.
     """
     fields = {}
     # Inherited fields, base-first.
@@ -99,6 +105,8 @@ def _collect_fields(cls):
             f = Field(default, MISSING, True, True, True, None)
         f.name = name
         f.type = atype
+        if f.kw_only is MISSING:
+            f.kw_only = cls_kw_only
         fields[name] = f
     return list(fields.values())
 
@@ -111,8 +119,12 @@ def _set_new_attribute(cls, name, value):
     return False
 
 
-def _process_class(cls, init, repr, eq, frozen, unsafe_hash):
-    flds = _collect_fields(cls)
+def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, match_args,
+                   kw_only, slots):
+    if order and not eq:
+        raise ValueError("eq must be true if order is true")
+
+    flds = _collect_fields(cls, kw_only)
     setattr(cls, _FIELDS, flds)
 
     if init:
@@ -121,12 +133,29 @@ def _process_class(cls, init, repr, eq, frozen, unsafe_hash):
         _set_new_attribute(cls, "__repr__", _make_repr(cls, flds))
     if eq:
         _set_new_attribute(cls, "__eq__", _make_eq(cls, flds))
+    if order:
+        for name, op in (("__lt__", "<"), ("__le__", "<="),
+                         ("__gt__", ">"), ("__ge__", ">=")):
+            if _set_new_attribute(cls, name, _make_cmp(name, op, flds)):
+                raise TypeError(
+                    "Cannot overwrite attribute %s in class %s. Consider "
+                    "using functools.total_ordering"
+                    % (name, cls.__name__))
     if frozen:
         # Always install the frozen guards (overriding any inherited setters).
         setattr(cls, "__setattr__", _frozen_setattr)
         setattr(cls, "__delattr__", _frozen_delattr)
 
     _set_hash(cls, flds, eq, frozen, unsafe_hash)
+
+    if match_args:
+        # __match_args__ lists the non-kw-only init fields, in order.
+        _set_new_attribute(
+            cls, "__match_args__",
+            tuple(f.name for f in flds if f.init and not f.kw_only))
+
+    if slots:
+        cls = _add_slots(cls, flds)
 
     return cls
 
@@ -190,17 +219,35 @@ def _make_hash(flds):
     # `hash` is left at the default None — when it participates in compare.
     names = [f.name for f in flds
              if (f.hash if f.hash is not None else f.compare)]
-    self_tuple = "(" + ", ".join("self.%s" % n for n in names)
-    self_tuple += "," if len(names) == 1 else ""
-    self_tuple += ")"
-    body = ["return hash(%s)" % self_tuple]
+    body = ["return hash(%s)" % _cmp_tuple("self", names)]
     return _create_fn("__hash__", ["self"], body, {})
+
+
+def _init_param(f, locals_ns):
+    """Render the ``__init__`` parameter spelling for an init field."""
+    if f.default_factory is not MISSING:
+        locals_ns["__df_" + f.name] = f.default_factory
+        return "%s=MISSING" % f.name
+    if f.default is not MISSING:
+        locals_ns["__def_" + f.name] = f.default
+        return "%s=__def_%s" % (f.name, f.name)
+    return f.name
+
+
+def _init_assign(f, body, frozen):
+    """Append the body statements assigning an init field from its param."""
+    if f.default_factory is not MISSING:
+        body.append("if %s is MISSING: %s = __df_%s()"
+                    % (f.name, f.name, f.name))
+    body.append(_assign(f.name, f.name, frozen))
 
 
 def _make_init(flds, frozen):
     # Build a parameter list with defaults, then the body assigning each field.
-    # Fields without defaults must precede those with defaults.
-    params = ["self"]
+    # Positional fields without defaults must precede those with defaults;
+    # keyword-only fields go after a ``*`` separator and have no such rule.
+    pos_params = []
+    kw_params = []
     body = []
     seen_default = False
     locals_ns = {"MISSING": MISSING}
@@ -214,25 +261,23 @@ def _make_init(flds, frozen):
                 locals_ns["__def_" + f.name] = f.default
                 body.append(_assign(f.name, "__def_%s" % f.name, frozen))
             continue
-        if f.default_factory is not MISSING:
-            locals_ns["__df_" + f.name] = f.default_factory
-            params.append("%s=MISSING" % f.name)
+        if f.kw_only:
+            kw_params.append(_init_param(f, locals_ns))
+            _init_assign(f, body, frozen)
+            continue
+        has_default = (f.default is not MISSING
+                       or f.default_factory is not MISSING)
+        if not has_default and seen_default:
+            raise TypeError(
+                "non-default argument %r follows default argument" % f.name)
+        if has_default:
             seen_default = True
-            body.append("if %s is MISSING: %s = __df_%s()"
-                        % (f.name, f.name, f.name))
-            body.append(_assign(f.name, f.name, frozen))
-        elif f.default is not MISSING:
-            locals_ns["__def_" + f.name] = f.default
-            params.append("%s=__def_%s" % (f.name, f.name))
-            seen_default = True
-            body.append(_assign(f.name, f.name, frozen))
-        else:
-            if seen_default:
-                raise TypeError(
-                    "non-default argument %r follows default argument"
-                    % f.name)
-            params.append(f.name)
-            body.append(_assign(f.name, f.name, frozen))
+        pos_params.append(_init_param(f, locals_ns))
+        _init_assign(f, body, frozen)
+    params = ["self"] + pos_params
+    if kw_params:
+        params.append("*")
+        params.extend(kw_params)
     if not body:
         body = ["pass"]
     return _create_fn("__init__", params, body, locals_ns)
@@ -252,20 +297,54 @@ def _make_repr(cls, flds):
     return _create_fn("__repr__", ["self"], body, {})
 
 
+def _cmp_tuple(receiver, names):
+    inner = ", ".join("%s.%s" % (receiver, n) for n in names)
+    if len(names) == 1:
+        inner += ","
+    return "(" + inner + ")"
+
+
 def _make_eq(cls, flds):
     names = [f.name for f in flds if f.compare]
-    self_tuple = "(" + ", ".join("self.%s" % n for n in names)
-    self_tuple += "," if len(names) == 1 else ""
-    self_tuple += ")"
-    other_tuple = "(" + ", ".join("other.%s" % n for n in names)
-    other_tuple += "," if len(names) == 1 else ""
-    other_tuple += ")"
     body = [
         "if other.__class__ is self.__class__:",
-        "    return %s == %s" % (self_tuple, other_tuple),
+        "    return %s == %s" % (_cmp_tuple("self", names),
+                                 _cmp_tuple("other", names)),
         "return NotImplemented",
     ]
     return _create_fn("__eq__", ["self", "other"], body, {})
+
+
+def _make_cmp(name, op, flds):
+    names = [f.name for f in flds if f.compare]
+    body = [
+        "if other.__class__ is self.__class__:",
+        "    return %s %s %s" % (_cmp_tuple("self", names), op,
+                                 _cmp_tuple("other", names)),
+        "return NotImplemented",
+    ]
+    return _create_fn(name, ["self", "other"], body, {})
+
+
+def _add_slots(cls, flds):
+    """Recreate ``cls`` with ``__slots__`` set to the field names.
+
+    ``__slots__`` cannot be added to an existing class, so build a fresh one
+    from the same bases / namespace, dropping the per-field class attributes
+    that would otherwise shadow the slot descriptors.
+    """
+    field_names = tuple(f.name for f in flds)
+    cls_dict = dict(cls.__dict__)
+    cls_dict["__slots__"] = field_names
+    for name in field_names:
+        cls_dict.pop(name, None)
+    # __dict__ / __weakref__ descriptors are recreated by the new class.
+    cls_dict.pop("__dict__", None)
+    cls_dict.pop("__weakref__", None)
+    qualname = getattr(cls, "__qualname__", cls.__name__)
+    new_cls = type(cls)(cls.__name__, cls.__bases__, cls_dict)
+    new_cls.__qualname__ = qualname
+    return new_cls
 
 
 def _frozen_setattr(self, name, value):
@@ -286,14 +365,16 @@ def _create_fn(name, params, body, locals_ns):
     return ns[name]
 
 
-def dataclass(cls=None, /, *, init=True, repr=True, eq=True, frozen=False,
-              unsafe_hash=False):
+def dataclass(cls=None, /, *, init=True, repr=True, eq=True, order=False,
+              unsafe_hash=False, frozen=False, match_args=True, kw_only=False,
+              slots=False, weakref_slot=False):
     """Add generated special methods to a class.
 
     Usable as ``@dataclass`` or ``@dataclass(frozen=True, ...)``.
     """
     def wrap(klass):
-        return _process_class(klass, init, repr, eq, frozen, unsafe_hash)
+        return _process_class(klass, init, repr, eq, order, unsafe_hash,
+                              frozen, match_args, kw_only, slots)
 
     # Called as @dataclass without parentheses.
     if cls is None:
