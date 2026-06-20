@@ -198,10 +198,22 @@ impl BuiltinTypeOps for MappingProxyOps {
         state: &BuiltinState,
         method: &str,
         args: Vec<Value>,
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let src = borrow_source(state)
             .ok_or_else(|| PyError::Runtime("internal: bad mappingproxy state".to_string()))?;
+        // None of mappingproxy's methods accept keyword arguments in CPython 3.12.
+        if !kwargs.is_empty()
+            && matches!(
+                method,
+                "keys" | "values" | "items" | "get" | "copy" | "__reversed__"
+            )
+        {
+            return Err(PyError::named(
+                "TypeError",
+                format!("mappingproxy.{method}() takes no keyword arguments"),
+            ));
+        }
         match method {
             "keys" => {
                 if !args.is_empty() {
@@ -263,26 +275,6 @@ impl BuiltinTypeOps for MappingProxyOps {
                     },
                 }
             }
-            "__reversed__" => {
-                if !_kwargs.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "mappingproxy.__reversed__() takes no keyword arguments".to_string(),
-                    ));
-                }
-                if !args.is_empty() {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "mappingproxy.__reversed__() takes no arguments ({} given)",
-                            args.len()
-                        ),
-                    ));
-                }
-                // Yield keys in reverse insertion order (CPython 3.12 #2684).
-                let keys = source_keys(&src);
-                Ok(crate::iter_helpers::reversed(Value::list(keys)))
-            }
             "copy" => {
                 if !args.is_empty() {
                     return Err(PyError::named(
@@ -301,6 +293,20 @@ impl BuiltinTypeOps for MappingProxyOps {
                     }
                     MappingProxySource::Dict(rc) => Ok(Value::dict(rc.borrow().clone())),
                 }
+            }
+            "__reversed__" => {
+                if !args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "mappingproxy.__reversed__() takes no arguments ({} given)",
+                            args.len()
+                        ),
+                    ));
+                }
+                // Yield keys in reverse insertion order (CPython 3.12 #2684).
+                let keys = source_keys(&src);
+                Ok(crate::iter_helpers::reversed(Value::list(keys)))
             }
             _ => Err(PyError::named(
                 "AttributeError",
