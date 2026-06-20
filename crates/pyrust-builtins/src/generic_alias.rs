@@ -233,10 +233,14 @@ fn repr_type_arg(v: &Value, lower_none: bool) -> String {
         // rather than its bare repr (`Ellipsis`), so `tuple[int, ...]` prints
         // as `tuple[int, ...]` instead of `tuple[int, Ellipsis]`.
         ValueKind::Ellipsis => "...".to_string(),
-        // A bare `None` renders as `None` everywhere except inside a
-        // `typing.Callable[...]` alias, where CPython substitutes `type(None)`
-        // at construction so it reprs as `NoneType` (`Callable[[], None]` →
-        // `typing.Callable[[], NoneType]`).  `lower_none` carries that context.
+        // A bare `None` renders as `None` for PEP 585 builtin aliases
+        // (`list[None]`) and `typing.Literal`, but lowers to `NoneType` for
+        // every other `typing.*` special form, which substitutes `type(None)`
+        // at construction (`typing.Final[None]` → `typing.Final[NoneType]`,
+        // `Callable[[], None]` → `typing.Callable[[], NoneType]`).  The caller
+        // sets `lower_none` accordingly (see the `lower_none` derivation in
+        // `repr`); it carries that context down here and into Callable's
+        // parameter list.
         ValueKind::None if lower_none => "NoneType".to_string(),
         ValueKind::None => "None".to_string(),
         ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
