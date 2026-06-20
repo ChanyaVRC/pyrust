@@ -9708,6 +9708,7 @@ impl Interpreter {
                 proto_qualname,
                 proto_global_names,
                 proto_nonlocal_names,
+                orig_bases,
             );
         }
 
@@ -9831,13 +9832,15 @@ impl Interpreter {
 
         let metaclass = vm_read(regs, meta_reg, num_locals)?;
 
-        // Build the bases tuple (used for __prepare__ and the metaclass call).
-        let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
-        for i in 0..bases_n as usize {
-            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
-            bases_vec.push(vm_read(regs, reg, num_locals)?);
-        }
-        let bases_tuple = Value::tuple(bases_vec);
+        // PEP 560: resolve `__mro_entries__` on any non-class base before the
+        // metaclass protocol runs (CPython's `__build_class__` resolves bases
+        // for every class statement, including those with an explicit
+        // `metaclass=`).  The resolved tuple drives `__prepare__` and the
+        // metaclass call; `orig_bases` is `Some` only when a base was
+        // substituted, recording `__orig_bases__` in the namespace.
+        let (resolved_bases, orig_bases) =
+            self.resolve_class_bases_mro_entries(regs, num_locals, bases_base, bases_n)?;
+        let bases_tuple = Value::tuple(resolved_bases);
 
         // Assemble the class keyword arguments (everything except `metaclass`,
         // which is not part of `keywords`).  Forwarded to both __prepare__ and
@@ -9865,6 +9868,7 @@ impl Interpreter {
             proto_qualname,
             proto_global_names,
             proto_nonlocal_names,
+            orig_bases,
         )
     }
 
@@ -9886,6 +9890,7 @@ impl Interpreter {
         proto_qualname: String,
         proto_global_names: Rc<HashSet<String>>,
         proto_nonlocal_names: Rc<HashSet<String>>,
+        orig_bases: Option<Vec<Value>>,
     ) -> Result<Value> {
         // 1. ns = metaclass.__prepare__(name, bases, **kwds).  __prepare__ is a
         //    classmethod resolved via the metaclass; `type.__prepare__` returns
@@ -9931,6 +9936,14 @@ impl Interpreter {
                 continue;
             }
             self.namespace_set_item(&namespace, k, v.clone())?;
+        }
+
+        // PEP 560: when any base went through `__mro_entries__`, record the
+        // *original* bases tuple in `__orig_bases__` so the metaclass sees it in
+        // the namespace (CPython sets it in `__build_class__` before the
+        // metaclass call).
+        if let Some(orig) = orig_bases {
+            self.namespace_set_item(&namespace, "__orig_bases__", Value::tuple(orig))?;
         }
 
         // 4. metaclass(name, bases_tuple, namespace, **kwds).

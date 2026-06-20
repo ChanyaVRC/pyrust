@@ -80,3 +80,52 @@ class H(r, Other):
 
 
 print(Recorder.seen == (r, Other))   # True
+
+
+# PEP 560: __mro_entries__ resolves under an explicit metaclass= too, and the
+# metaclass observes the resolved bases plus __orig_bases__ in its namespace.
+class Meta(type):
+    def __new__(mcs, name, bases, ns, **kw):
+        print(bases == (Base,))                       # True
+        print(ns.get('__orig_bases__') is not None)   # True
+        return super().__new__(mcs, name, bases, ns)
+
+
+p2 = Proxy()
+
+
+class I(p2, metaclass=Meta):
+    pass
+
+
+print(type(I) is Meta)                # True
+print(I.__bases__ == (Base,))         # True
+print(I.__orig_bases__ == (p2,))      # True
+print(isinstance(I(), Base))          # True
+
+
+# PEP 560: a base carrying an inherited custom metaclass via __mro_entries__
+# routes through that metaclass and still records __orig_bases__.
+class MetaB(type):
+    pass
+
+
+class HasMetaB(metaclass=MetaB):
+    pass
+
+
+class ProxyMeta:
+    def __mro_entries__(self, bases):
+        return (HasMetaB,)
+
+
+pm = ProxyMeta()
+
+
+class J(pm):
+    pass
+
+
+print(type(J) is MetaB)               # True
+print(J.__bases__ == (HasMetaB,))     # True
+print(J.__orig_bases__ == (pm,))      # True
