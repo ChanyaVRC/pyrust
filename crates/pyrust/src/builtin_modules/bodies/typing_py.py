@@ -43,6 +43,10 @@ def get_args(tp):
     `get_args(List[int])` is `(int,)`, `get_args(Optional[str])` is
     `(str, NoneType)`, `get_args(int)` is `()`.
     """
+    # `Annotated[X, *meta]` reports `(X, *meta)`, even though it stores only
+    # `(X,)` in `__args__` (PEP 593 / CPython `get_args`).
+    if isinstance(tp, _AnnotatedAlias):
+        return (tp.__origin__,) + tp.__metadata__
     args = getattr(tp, "__args__", None)
     if args is None:
         return ()
@@ -312,14 +316,15 @@ class _AnnotatedAlias:
     """Runtime form of `Annotated[X, m1, m2, ...]` (PEP 593).
 
     Carries the annotated type as `__origin__`, the metadata tuple as
-    `__metadata__`, and `(__origin__, *__metadata__)` as `__args__` so that
+    `__metadata__`, and `(__origin__,)` as `__args__` (the metadata is *not*
+    in `__args__`, matching CPython 3.12; `get_args` re-appends it) so that
     `get_origin`, `get_args`, and `repr` match CPython 3.12.
     """
 
     def __init__(self, origin, metadata):
         self.__origin__ = origin
         self.__metadata__ = tuple(metadata)
-        self.__args__ = (origin,) + tuple(metadata)
+        self.__args__ = (origin,)
 
     def __repr__(self):
         meta = ", ".join(_type_repr(m) for m in self.__metadata__)

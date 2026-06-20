@@ -7,11 +7,13 @@ print(get_args(a))    # (int, 'positive')
 print(get_origin(a) is Annotated)  # True
 print(a.__origin__)   # <class 'int'>
 print(a.__metadata__)  # ('positive',)
+print(a.__args__)     # (<class 'int'>,) -- metadata is NOT in __args__
 
 # Multiple metadata
 b = Annotated[str, "max_len=100", "utf-8"]
 print(repr(b))
 print(get_args(b))    # (str, 'max_len=100', 'utf-8')
+print(b.__args__)     # (<class 'str'>,)
 print(get_origin(b) is Annotated)  # True
 
 # Single argument is an error
