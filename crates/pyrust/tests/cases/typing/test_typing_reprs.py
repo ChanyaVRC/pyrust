@@ -1,4 +1,4 @@
-from typing import Final, ClassVar, Literal, Callable
+from typing import Final, ClassVar, Literal, Callable, List, Dict
 
 # PEP 585: `type` is subscriptable (issue #2723).
 print(type[int])
@@ -15,3 +15,15 @@ print(repr(Callable[[int], str]))
 print(repr(Callable[[], None]))
 print(repr(Callable[[int, str], bool]))
 print(repr(Callable[..., int]))
+print(repr(Callable[[None], None]))
+print(repr(Callable[[list[None]], int]))
+
+# A bare `None` argument: PEP 585 builtin aliases and `Literal` keep `None`;
+# every other `typing.*` special form lowers it to `NoneType` at construction.
+print(repr(list[None]))
+print(repr(dict[str, None]))
+print(repr(Literal[None]))
+print(repr(Literal[1, None]))
+print(repr(List[None]))
+print(repr(Dict[str, None]))
+print(repr(Final[None]))
