@@ -38,9 +38,9 @@ class Field:
     plain annotated attributes, synthesised by the ``@dataclass`` decorator.
     """
     __slots__ = ("name", "type", "default", "default_factory", "init", "repr",
-                 "compare")
+                 "compare", "hash")
 
-    def __init__(self, default, default_factory, init, repr, compare):
+    def __init__(self, default, default_factory, init, repr, compare, hash):
         self.name = None
         self.type = None
         self.default = default
@@ -48,23 +48,27 @@ class Field:
         self.init = init
         self.repr = repr
         self.compare = compare
+        self.hash = hash
 
     def __repr__(self):
         return ("Field(name=%r,type=%r,default=%r,default_factory=%r,"
-                "init=%r,repr=%r,compare=%r)" % (
+                "init=%r,repr=%r,compare=%r,hash=%r)" % (
                     self.name, self.type, self.default, self.default_factory,
-                    self.init, self.repr, self.compare))
+                    self.init, self.repr, self.compare, self.hash))
 
 
 def field(*, default=MISSING, default_factory=MISSING, init=True, repr=True,
-          compare=True):
+          compare=True, hash=None):
     """Return an object to identify dataclass fields.
 
-    ``default`` and ``default_factory`` are mutually exclusive.
+    ``default`` and ``default_factory`` are mutually exclusive.  ``hash``
+    defaults to ``None``, meaning "use the value of ``compare``"; set it
+    explicitly to include/exclude a field from the generated ``__hash__``
+    independently of ``__eq__`` (mirrors CPython's ``field(hash=...)``).
     """
     if default is not MISSING and default_factory is not MISSING:
         raise ValueError("cannot specify both default and default_factory")
-    return Field(default, default_factory, init, repr, compare)
+    return Field(default, default_factory, init, repr, compare, hash)
 
 
 # Name under which the per-class tuple of Field objects is stashed.
@@ -92,7 +96,7 @@ def _collect_fields(cls):
         if isinstance(default, Field):
             f = default
         else:
-            f = Field(default, MISSING, True, True, True)
+            f = Field(default, MISSING, True, True, True, None)
         f.name = name
         f.type = atype
         fields[name] = f
@@ -107,7 +111,7 @@ def _set_new_attribute(cls, name, value):
     return False
 
 
-def _process_class(cls, init, repr, eq, frozen):
+def _process_class(cls, init, repr, eq, frozen, unsafe_hash):
     flds = _collect_fields(cls)
     setattr(cls, _FIELDS, flds)
 
@@ -122,7 +126,75 @@ def _process_class(cls, init, repr, eq, frozen):
         setattr(cls, "__setattr__", _frozen_setattr)
         setattr(cls, "__delattr__", _frozen_delattr)
 
+    _set_hash(cls, flds, eq, frozen, unsafe_hash)
+
     return cls
+
+
+# Decisions for the ``__hash__`` slot, keyed by
+# ``(unsafe_hash, eq, frozen, has_explicit_hash)``.  Mirrors CPython 3.12's
+# ``dataclasses._hash_action`` table exactly; the value is one of:
+#   "add"   — generate a value-based ``__hash__`` over the hash fields,
+#   "none"  — set ``__hash__ = None`` (unhashable),
+#   "raise" — raise ``TypeError`` (can't overwrite an explicit ``__hash__``),
+#   None    — do nothing (keep whatever ``__hash__`` is inherited/defined).
+_HASH_ACTION = {
+    (False, False, False, False): None,
+    (False, False, False, True): None,
+    (False, False, True, False): None,
+    (False, False, True, True): None,
+    (False, True, False, False): "none",
+    (False, True, False, True): None,
+    (False, True, True, False): "add",
+    (False, True, True, True): None,
+    (True, False, False, False): "add",
+    (True, False, False, True): "raise",
+    (True, False, True, False): "add",
+    (True, False, True, True): "raise",
+    (True, True, False, False): "add",
+    (True, True, False, True): "raise",
+    (True, True, True, False): "add",
+    (True, True, True, True): "raise",
+}
+
+
+def _set_hash(cls, flds, eq, frozen, unsafe_hash):
+    """Install ``__hash__`` following CPython 3.12's ``_hash_action`` table.
+
+    The lookup is keyed on ``(unsafe_hash, eq, frozen, has_explicit_hash)``.
+    ``has_explicit_hash`` uses CPython's heuristic: a ``__hash__`` of ``None``
+    that was auto-installed by Python because the class body defines ``__eq__``
+    is *not* treated as explicit (so the table can still set it to ``None``).
+    """
+    # CPython evaluates this *after* __eq__ generation; at that point a
+    # class-body __eq__ has caused Python to auto-set __hash__ = None.
+    class_hash = cls.__dict__.get("__hash__", MISSING)
+    has_explicit_hash = not (
+        class_hash is MISSING
+        or (class_hash is None and "__eq__" in cls.__dict__)
+    )
+    action = _HASH_ACTION[(bool(unsafe_hash), bool(eq), bool(frozen),
+                           has_explicit_hash)]
+    if action == "add":
+        setattr(cls, "__hash__", _make_hash(flds))
+    elif action == "none":
+        setattr(cls, "__hash__", None)
+    elif action == "raise":
+        raise TypeError("Cannot overwrite attribute __hash__ in class %s"
+                        % cls.__name__)
+    # action is None → leave __hash__ untouched.
+
+
+def _make_hash(flds):
+    # A field participates in __hash__ when its `hash` is True, or — when
+    # `hash` is left at the default None — when it participates in compare.
+    names = [f.name for f in flds
+             if (f.hash if f.hash is not None else f.compare)]
+    self_tuple = "(" + ", ".join("self.%s" % n for n in names)
+    self_tuple += "," if len(names) == 1 else ""
+    self_tuple += ")"
+    body = ["return hash(%s)" % self_tuple]
+    return _create_fn("__hash__", ["self"], body, {})
 
 
 def _make_init(flds, frozen):
@@ -214,13 +286,14 @@ def _create_fn(name, params, body, locals_ns):
     return ns[name]
 
 
-def dataclass(cls=None, /, *, init=True, repr=True, eq=True, frozen=False):
+def dataclass(cls=None, /, *, init=True, repr=True, eq=True, frozen=False,
+              unsafe_hash=False):
     """Add generated special methods to a class.
 
     Usable as ``@dataclass`` or ``@dataclass(frozen=True, ...)``.
     """
     def wrap(klass):
-        return _process_class(klass, init, repr, eq, frozen)
+        return _process_class(klass, init, repr, eq, frozen, unsafe_hash)
 
     # Called as @dataclass without parentheses.
     if cls is None:
