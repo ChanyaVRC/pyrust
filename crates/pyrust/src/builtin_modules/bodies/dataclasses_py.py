@@ -280,12 +280,16 @@ def _apply_hash(cls, flds, eq, frozen, unsafe_hash):
     - not eq             -> leave whatever was inherited untouched.
     """
     if unsafe_hash:
+        if "__hash__" in cls.__dict__ and cls.__dict__["__hash__"] is not None:
+            raise TypeError(
+                "Cannot overwrite attribute __hash__ in class %s" % cls.__name__)
         setattr(cls, "__hash__", _make_hash(flds))
         return
     if eq and frozen:
         _set_new_attribute(cls, "__hash__", _make_hash(flds))
     elif eq:
-        setattr(cls, "__hash__", None)
+        if "__hash__" not in cls.__dict__:
+            setattr(cls, "__hash__", None)
 
 
 def _add_slots(cls, flds):
