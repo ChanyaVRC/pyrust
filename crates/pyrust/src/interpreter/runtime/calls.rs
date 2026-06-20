@@ -1535,7 +1535,6 @@ impl Interpreter {
         {
             let class = std::rc::Rc::clone(class);
             let obj = pos.first().cloned().unwrap_or_else(Value::none);
-            std::mem::take(pos);
             return self.bind_unbound_super(class, obj);
         }
         // `__slots__` member_descriptor's descriptor-protocol methods, invoked
