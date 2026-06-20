@@ -1228,6 +1228,24 @@ impl Interpreter {
             }
             ValueKind::PyClass(class_rc) => {
                 let class = Rc::clone(class_rc);
+                // PEP 585: `type[int]` → `types.GenericAlias`.  CPython does NOT
+                // expose `__class_getitem__` as an attribute on `type`, so the
+                // subscript is special-cased here by pointer-identity rather than
+                // via the sentinel-attribute path used by `list`/`dict`/…
+                // (`hasattr(type, '__class_getitem__')` stays False and
+                // `type.__class_getitem__(int)` raises AttributeError).
+                if Rc::ptr_eq(&class, &type_class_singleton()) {
+                    let index_is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
+                    let type_args = if index_is_tuple {
+                        index
+                    } else {
+                        Value::tuple(vec![index])
+                    };
+                    return Ok(pyrust_builtins::generic_alias::generic_alias(
+                        Value::py_class(class),
+                        type_args,
+                    ));
+                }
                 // A metaclass `__getitem__` (e.g. `EnumMeta.__getitem__`, which
                 // implements `Color['RED']` name lookup) is a type-level slot
                 // that takes precedence over the class's own
