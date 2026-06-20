@@ -177,7 +177,7 @@ def _build_typeddict_class(typename, annotations, total=True):
         "__optional_keys__": optional,
         "__total__": bool(total),
     }
-    return _TypedDictMeta(typename, (), namespace)
+    return _TypedDictMeta(typename, (dict,), namespace)
 
 
 def _typeddict_functional(typename, fields=None, /, *, total=True, **kwargs):

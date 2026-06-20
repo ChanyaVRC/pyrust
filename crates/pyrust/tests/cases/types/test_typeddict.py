@@ -25,6 +25,10 @@ print(sorted(Movie.__required_keys__))
 print(sorted(Movie.__optional_keys__))
 print(Movie.__total__)
 
+# A TypedDict class is a dict subclass (CPython: __bases__ == (dict,)).
+print(Movie.__bases__)
+print(issubclass(Movie, dict))
+
 
 # ── empty TypedDict ───────────────────────────────────────────────────────
 class Empty(TypedDict):
