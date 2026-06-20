@@ -627,6 +627,14 @@ impl Interpreter {
                     return Ok(Value::string(func_name));
                 }
                 if name == "__module__" {
+                    // `typing.TypedDict` is a real function in CPython 3.12 (not a
+                    // method_descriptor) with `__module__ == "typing"`; pyrust
+                    // registers it under the dotted name `typing.TypedDict`, so it
+                    // would otherwise fall into the method_descriptor arm below
+                    // (issue #2745).
+                    if func_name == "typing.TypedDict" {
+                        return Ok(Value::string("typing"));
+                    }
                     if func_name.contains('.') {
                         // Method descriptors (str.upper, list.append, …) do not
                         // expose __module__; CPython raises AttributeError with
