@@ -457,14 +457,24 @@ impl Interpreter {
                             } else {
                                 format!("{class_name}: {msg}")
                             };
-                            // PEP 678: append each note from `__notes__` on its own
-                            // line after the error message, matching CPython's
-                            // traceback printer (`add_note` / `__set_name__` notes).
+                            // PEP 678: append each note from `__notes__` after the
+                            // error message, matching CPython's traceback printer
+                            // (`add_note` / `__set_name__` notes). CPython iterates
+                            // `str()` of each item only when `__notes__` is a list or
+                            // tuple; any other object is printed once as `repr()`.
                             let notes = inst_rc.borrow().attrs.get_cloned("__notes__");
-                            if let Some(items) = notes.as_ref().and_then(|n| n.as_list()) {
-                                for note in items.iter() {
-                                    line.push('\n');
-                                    line.push_str(&note.to_py_str());
+                            if let Some(notes) = notes.as_ref() {
+                                match notes.as_list().or_else(|| notes.as_tuple()) {
+                                    Some(items) => {
+                                        for note in items.iter() {
+                                            line.push('\n');
+                                            line.push_str(&note.to_py_str());
+                                        }
+                                    }
+                                    None => {
+                                        line.push('\n');
+                                        line.push_str(&notes.repr_raw());
+                                    }
                                 }
                             }
                             line
