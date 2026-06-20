@@ -154,6 +154,44 @@ pub(crate) fn is_protocol_marker_class(class: &Rc<RefCell<PyClass>>) -> bool {
     PROTOCOL_CLASS.with(|p| Rc::ptr_eq(class, p))
 }
 
+/// Shared `__class_getitem__` body for the `Generic` / `Protocol` marker
+/// classes (issue #2698).  `args[0]` is the receiver class (`cls`), `args[1]`
+/// the subscript.
+///
+///   * If `cls` *is* the marker singleton (`Generic[T]` / `Protocol[T]`),
+///     return the marker class unchanged so it remains a valid class base
+///     (pyrust's `MakeClass` requires every base to be a `ValueKind::PyClass`).
+///   * Otherwise `cls` is a user subclass (`class Stack(Generic[T])`) being
+///     subscripted (`Stack[int]`); build a `GenericAlias` over the subclass so
+///     `type(Stack[int]).__name__` is a generic-alias and its repr is
+///     `__main__.Stack[int]`, matching CPython.
+fn special_class_getitem(
+    args: &[ExpandedCallArg],
+    marker: Rc<RefCell<PyClass>>,
+) -> Result<Value> {
+    let cls = args.first().map(|a| a.value.clone());
+    if let Some(cls_val) = &cls
+        && let ValueKind::PyClass(cls_rc) = cls_val.kind()
+        && Rc::ptr_eq(cls_rc, &marker)
+    {
+        return Ok(Value::py_class(Rc::clone(&marker)));
+    }
+    // Subclass subscript → GenericAlias over the subclass.
+    let cls_val = cls.unwrap_or_else(|| Value::py_class(Rc::clone(&marker)));
+    let index = args
+        .get(1)
+        .map(|a| a.value.clone())
+        .unwrap_or_else(Value::none);
+    let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+        index
+    } else {
+        Value::tuple(vec![index])
+    };
+    Ok(pyrust_builtins::generic_alias::generic_alias(
+        cls_val, type_args,
+    ))
+}
+
 /// (method-short, registry-name) pairs for `_Any`.
 const ANY_METHODS: &[(&str, &str)] = &[
     ("__repr__", "typing._Any.__repr__"),
@@ -271,21 +309,29 @@ pyrust_module! {
     //
     // The name "typing._generic_cgi" does NOT contain ".__class_getitem__", so
     // pyrust's expr.rs subscript handler calls our function rather than
-    // creating a sentinel GenericAlias.  We return the Generic class itself
-    // so that `Generic[T]` is a valid class base in `class Stack(Generic[T])`.
+    // creating a sentinel GenericAlias.  `args[0]` is the receiver class (`cls`)
+    // and `args[1]` is the subscript.
+    //
+    // Two cases (issue #2698):
+    //   * `Generic[T]` — `cls` is `Generic` itself.  Return the `Generic` class
+    //     so it stays a valid class base (`class Stack(Generic[T])`); pyrust's
+    //     `MakeClass` requires every base to be a `ValueKind::PyClass`.
+    //   * `Stack[int]` — a *subclass* of `Generic` inherits this method, so
+    //     `cls` is `Stack`.  Subscripting a user generic must yield a
+    //     `GenericAlias` (`__main__.Stack[int]`), matching CPython.
 
     #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
-        let _ = (_interp, args);
-        Ok(GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))))
+        let _ = _interp;
+        special_class_getitem(args, GENERIC_CLASS.with(Rc::clone))
     }
 
     // ── Protocol.__class_getitem__ ────────────────────────────────────────────
 
     #[py_name = "_protocol_cgi"]
     fn protocol_class_getitem(args) -> Result<Value> {
-        let _ = (_interp, args);
-        Ok(PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))))
+        let _ = _interp;
+        special_class_getitem(args, PROTOCOL_CLASS.with(Rc::clone))
     }
 
     // ── cast ─────────────────────────────────────────────────────────────────
@@ -578,14 +624,13 @@ thread_local! {
                 "__class_getitem__".to_string(),
                 Value::builtin_function(reg_name),
             );
-            // `Union`/`Optional` aliases must repr with a `typing.` prefix
-            // (`typing.Union[int, str]`).  The `GenericAlias` repr qualifies a
-            // class origin with its `__module__`, so seed it here.  The flatten
-            // helper always uses the `Union` class as the alias origin, so only
-            // these two need the module.
-            if matches!(*name, "Union" | "Optional") {
-                attrs.insert("__module__".to_string(), Value::string("typing"));
-            }
+            // Every special-form subscript reprs with a `typing.` prefix
+            // (`typing.Union[int, str]`, `typing.Final[int]`,
+            // `typing.Callable[[int], str]`, …).  The `GenericAlias` repr
+            // qualifies a class origin with its `__module__`, so seed it here
+            // for all special forms.  (The flatten helper always uses the
+            // `Union` class as the union alias origin.)
+            attrs.insert("__module__".to_string(), Value::string("typing"));
             let mut pyclass = PyClass::new(*name, *name, None, attrs);
             // The bare special form reprs as `typing.<name>` (e.g.
             // `repr(typing.Union) == "typing.Union"`), not the default

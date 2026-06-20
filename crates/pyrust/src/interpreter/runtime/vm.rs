@@ -1607,7 +1607,10 @@ impl Interpreter {
     /// `PyError::Break`, …) are not exceptions and are returned unchanged via
     /// `Err`, so a caller using `?` re-propagates them exactly as the inline
     /// match did before this was extracted (issue #2583).
-    fn materialize_pyerror(&mut self, e: PyError) -> std::result::Result<Value, PyError> {
+    pub(crate) fn materialize_pyerror(
+        &mut self,
+        e: PyError,
+    ) -> std::result::Result<Value, PyError> {
         Ok(match e {
             PyError::Raised(v) => v,
             PyError::Runtime(msg) => {

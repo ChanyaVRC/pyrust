@@ -1397,6 +1397,14 @@ pyrust_module! {
                 let frame = make_reversed_dict_iter(items, seq.0.clone());
                 return Ok(Value::generator(Box::new(frame)));
             }
+        // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,
+        // issue #2684) dispatch to it directly, matching CPython's protocol
+        // step 1.  `call_method` already returns the reverse-order iterator.
+        if let ValueKind::BuiltinObject { ops, state } = seq.0.kind()
+            && ops.has_method("__reversed__")
+        {
+            return ops.call_method(state, "__reversed__", Vec::new(), &indexmap::IndexMap::new());
+        }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
         // and all BuiltinObject iterator types are not sequences and must
@@ -4764,6 +4772,22 @@ pyrust_module! {
         let (cls_val, inst_val) = if args.is_empty() {
             // Zero-argument super() — resolve __class__ cell and first param.
             resolve_zero_arg_super(_interp)?
+        } else if args.len() == 1 {
+            // One-argument super(cls) — an *unbound* super object that acts as a
+            // descriptor (#2704).  `__get__(obj, owner)` binds it to a concrete
+            // super(cls, obj).
+            let cls_val = args[0].value.clone();
+            let class = match cls_val.kind() {
+                ValueKind::PyClass(c) => Rc::clone(c),
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{FN_NAME}() argument 1 must be a type, not {}",
+                        value_type_name_str(&cls_val),
+                    ),
+                )),
+            };
+            return Ok(Value::super_proxy_unbound(class));
         } else if args.len() == 2 {
             (args[0].value.clone(), args[1].value.clone())
         } else {
@@ -7676,9 +7700,9 @@ pub(crate) fn value_class(obj: &Value) -> Value {
             }
         }
         ValueKind::PyModule(_) => Value::builtin_function("module"),
-        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => {
-            Value::builtin_function("super")
-        }
+        ValueKind::SuperProxy { .. }
+        | ValueKind::SuperProxyClass { .. }
+        | ValueKind::SuperProxyUnbound { .. } => Value::builtin_function("super"),
         ValueKind::Generator(state_rc) => {
             let borrow = state_rc.borrow();
             if borrow.downcast_ref::<MapIter>().is_some() {

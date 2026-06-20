@@ -263,15 +263,10 @@ fn int_to_bytes(receiver: &Value, args: &[Value], kw: &PyDict) -> Result<Value> 
                 }
                 n as usize
             }
-            ValueKind::BigInt(b) => {
-                if b.sign() == PyBigIntSign::Minus {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "length argument must be non-negative".to_string(),
-                    ));
-                }
-                // A positive BigInt length is astronomically large — refuse.
-                // CPython converts `length` to a C ssize_t, which overflows here.
+            ValueKind::BigInt(_) => {
+                // A BigInt length (positive or negative) is astronomically large —
+                // CPython converts `length` to a C ssize_t first, which overflows
+                // before the non-negative check, so both signs raise OverflowError.
                 return Err(PyError::named(
                     "OverflowError",
                     "Python int too large to convert to C ssize_t".to_string(),

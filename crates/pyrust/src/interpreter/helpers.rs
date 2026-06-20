@@ -501,6 +501,13 @@ thread_local! {
             "__prepare__".to_string(),
             Value::builtin_function("type.__prepare__"),
         );
+        // PEP 585: `type` is subscriptable (`type[int]` → `types.GenericAlias`)
+        // in CPython 3.9+.  Unlike `list`/`dict`/…, CPython does NOT expose a
+        // `__class_getitem__` attribute on `type` (`hasattr(type,
+        // '__class_getitem__')` is False and `type.__class_getitem__(int)`
+        // raises AttributeError), so no sentinel is registered here.  The
+        // `type[int]` subscript is handled directly in `eval_index` by
+        // pointer-identity matching the `type` singleton.
         let cls = Rc::new(RefCell::new(PyClass::new(
             "type",
             "type",
@@ -5324,7 +5331,8 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         (ValueKind::BoundMethod { .. }, ValueKind::BoundMethod { .. })
         | (ValueKind::ClassBoundMethod { .. }, ValueKind::ClassBoundMethod { .. })
         | (ValueKind::SuperProxy { .. }, ValueKind::SuperProxy { .. })
-        | (ValueKind::SuperProxyClass { .. }, ValueKind::SuperProxyClass { .. }) => {
+        | (ValueKind::SuperProxyClass { .. }, ValueKind::SuperProxyClass { .. })
+        | (ValueKind::SuperProxyUnbound { .. }, ValueKind::SuperProxyUnbound { .. }) => {
             match (a.value_id(), b.value_id()) {
                 (Some(x), Some(y)) => x == y,
                 _ => false,
