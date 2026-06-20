@@ -1405,6 +1405,12 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
         None => -1,
+        Some(ValueKind::BigInt(_)) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t",
+            ));
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -1592,6 +1598,12 @@ fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
         None => -1,
+        Some(ValueKind::BigInt(_)) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t",
+            ));
+        }
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",

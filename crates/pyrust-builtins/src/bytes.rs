@@ -2254,6 +2254,12 @@ fn bytes_replace(bytes: &[u8], args: &[Value]) -> Result<Value> {
         None => -1,
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
+        Some(ValueKind::BigInt(_)) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t",
+            ));
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -2705,6 +2711,12 @@ fn bytes_split_args(args: &[Value]) -> Result<(Option<&[u8]>, i64)> {
         None => -1,
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
+        Some(ValueKind::BigInt(_)) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t",
+            ));
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
