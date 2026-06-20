@@ -83,12 +83,33 @@ thread_local! {
         )))
     };
 
+    // `_GenericAlias` is the runtime type of `Generic[T]` / `Generic.__class_getitem__(T)`
+    // (CPython's `typing._GenericAlias`).  Instances carry `_origin` (the
+    // `Generic` class) and `_args` (the raw subscript).  When used as a class
+    // base, the class-creation machinery unwraps the alias to its origin via
+    // `generic_alias_origin` (mirroring `__mro_entries__`).
+    static GENERIC_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        for (method, reg_name) in GENERIC_ALIAS_METHODS {
+            attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
+        }
+        attrs.insert("__module__".to_string(), Value::string("typing"));
+        Rc::new(RefCell::new(PyClass::new(
+            "_GenericAlias",
+            "_GenericAlias",
+            None,
+            attrs,
+        )))
+    };
+
     // `Generic` must be a real `PyClass` so that `class Stack(Generic[T]): pass`
     // can use it as a class base.  The `__class_getitem__` is registered under
     // the name "typing._generic_cgi" which does NOT contain ".__class_getitem__",
     // so expr.rs calls our function rather than creating a sentinel GenericAlias.
-    // Our function returns the Generic class itself, making `Generic[T]` a valid
-    // class base.
+    // Our function builds a `_GenericAlias` wrapping the subscript so both the
+    // direct call (`Generic.__class_getitem__(T)`) and the subscript form
+    // (`Generic[T]`) yield `typing.Generic[...]`; the class-base path unwraps it
+    // back to the `Generic` class via `generic_alias_origin`.
     static GENERIC_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert(
@@ -158,6 +179,12 @@ pub(crate) fn is_protocol_marker_class(class: &Rc<RefCell<PyClass>>) -> bool {
 const ANY_METHODS: &[(&str, &str)] = &[
     ("__repr__", "typing._Any.__repr__"),
     ("__init__", "typing._Any.__init__"),
+];
+
+/// (method-short, registry-name) pairs for `_GenericAlias`.
+const GENERIC_ALIAS_METHODS: &[(&str, &str)] = &[
+    ("__repr__", "typing._GenericAlias.__repr__"),
+    ("__init__", "typing._GenericAlias.__init__"),
 ];
 
 /// (method-short, registry-name) pairs for `_TypingAlias`.
@@ -267,17 +294,70 @@ pyrust_module! {
         Ok(make_typing_alias("_TypingAlias", subscript))
     }
 
+    // ── _GenericAlias dispatch fns ────────────────────────────────────────────
+
+    #[py_name = "_GenericAlias.__init__"]
+    fn generic_alias_init(args) -> Result<Value> {
+        let _ = (_interp, args);
+        Ok(Value::none())
+    }
+
+    #[py_name = "_GenericAlias.__repr__"]
+    fn generic_alias_repr(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        let (origin_name, sub) = {
+            let borrow = inst.borrow();
+            let origin_name = borrow
+                .attrs
+                .get("_origin")
+                .and_then(|v| match v.kind() {
+                    ValueKind::PyClass(rc) => Some(rc.borrow().qualname.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "Generic".to_string());
+            let sub = borrow.attrs.get("_args").cloned().unwrap_or_else(Value::none);
+            (origin_name, sub)
+        };
+        // The subscript may be a single arg (`Generic[T]`) or a tuple
+        // (`Generic[T, U]`).  Each element is rendered via the interpreter-aware
+        // repr so a `TypeVar` shows its variance prefix (`~T`).
+        let args_repr = match sub.kind() {
+            ValueKind::Tuple(items) => items
+                .iter()
+                .map(|v| crate::builtin_modules::builtins::render_value_repr(_interp, v))
+                .collect::<Result<Vec<_>>>()?
+                .join(", "),
+            _ => crate::builtin_modules::builtins::render_value_repr(_interp, &sub)?,
+        };
+        Ok(Value::string(format!("typing.{origin_name}[{args_repr}]")))
+    }
+
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────
     //
     // The name "typing._generic_cgi" does NOT contain ".__class_getitem__", so
     // pyrust's expr.rs subscript handler calls our function rather than
-    // creating a sentinel GenericAlias.  We return the Generic class itself
-    // so that `Generic[T]` is a valid class base in `class Stack(Generic[T])`.
+    // creating a sentinel GenericAlias.  Both the direct call
+    // (`Generic.__class_getitem__(T)`) and the subscript form (`Generic[T]`)
+    // route here and build a `_GenericAlias` wrapping the subscript, matching
+    // CPython (`typing.Generic[~T]`, type `_GenericAlias`).  The class-base path
+    // (`class Stack(Generic[T])`) unwraps the alias back to `Generic` via
+    // `generic_alias_origin`.
 
     #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
-        let _ = (_interp, args);
-        Ok(GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))))
+        let _ = _interp;
+        // The subscript is the last positional argument.  The subscript form
+        // `Generic[T]` calls us with the class prepended (`[Generic, T]`) while
+        // the direct call `Generic.__class_getitem__(T)` passes only `[T]`;
+        // taking the last positional handles both.
+        let subscript = args
+            .iter()
+            .rev()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .unwrap_or_else(Value::none);
+        let origin = GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c)));
+        Ok(make_generic_alias(origin, subscript))
     }
 
     // ── Protocol.__class_getitem__ ────────────────────────────────────────────
@@ -383,6 +463,17 @@ pyrust_module! {
                 .map(|a| a.value.clone())
                 .unwrap_or_else(Value::none);
 
+            // `covariant=`/`contravariant=` drive the variance prefix in
+            // `repr()` (`+T`/`-T`); invariant (the default) renders as `~T`.
+            let kw_flag = |name: &str| -> bool {
+                args.iter()
+                    .find(|a| a.name.as_deref() == Some(name))
+                    .map(|a| a.value.truthy_raw())
+                    .unwrap_or(false)
+            };
+            let covariant = kw_flag("covariant");
+            let contravariant = kw_flag("contravariant");
+
             let mut borrow = inst.borrow_mut();
             borrow
                 .attrs
@@ -391,6 +482,12 @@ pyrust_module! {
                 .attrs
                 .insert("__constraints__", Value::tuple(constraints));
             borrow.attrs.insert("__bound__", bound);
+            borrow
+                .attrs
+                .insert("__covariant__", Value::bool_(covariant));
+            borrow
+                .attrs
+                .insert("__contravariant__", Value::bool_(contravariant));
             Ok(Value::none())
         }
 
@@ -406,7 +503,23 @@ pyrust_module! {
                     _ => None,
                 })
                 .unwrap_or_else(|| "T".to_string());
-            Ok(Value::string(name))
+            // CPython prefixes the variance: `+` covariant, `-` contravariant,
+            // `~` invariant (the default).
+            let flag = |attr: &str| {
+                borrow
+                    .attrs
+                    .get(attr)
+                    .map(|v| v.truthy_raw())
+                    .unwrap_or(false)
+            };
+            let prefix = if flag("__covariant__") {
+                '+'
+            } else if flag("__contravariant__") {
+                '-'
+            } else {
+                '~'
+            };
+            Ok(Value::string(format!("{prefix}{name}")))
         }
     }
 }
@@ -433,6 +546,34 @@ fn make_typing_alias(form: &str, subscript: Value) -> Value {
             attrs,
         })))
     })
+}
+
+/// Construct a `_GenericAlias` instance wrapping `origin` (the `Generic` class)
+/// and the raw `subscript` argument.  Used by `Generic.__class_getitem__`.
+fn make_generic_alias(origin: Value, subscript: Value) -> Value {
+    GENERIC_ALIAS_CLASS.with(|class| {
+        let mut attrs = InstanceAttrs::new();
+        attrs.insert("_origin", origin);
+        attrs.insert("_args", subscript);
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class),
+            attrs,
+        })))
+    })
+}
+
+/// If `v` is a `_GenericAlias` instance (the runtime type of `Generic[T]`),
+/// return its `_origin` class value so the class-creation machinery can use it
+/// as an MRO entry (`class Stack(Generic[T])`).  Returns `None` otherwise.
+pub(crate) fn generic_alias_origin(v: &Value) -> Option<Value> {
+    let ValueKind::PyInstance(inst) = v.kind() else {
+        return None;
+    };
+    let is_ours = GENERIC_ALIAS_CLASS.with(|c| Rc::ptr_eq(&inst.borrow().class, c));
+    if !is_ours {
+        return None;
+    }
+    inst.borrow().attrs.get("_origin").cloned()
 }
 
 /// Construct the `Any` singleton as a PyInstance of `_Any`.
