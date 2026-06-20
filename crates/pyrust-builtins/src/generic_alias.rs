@@ -77,9 +77,22 @@ impl BuiltinTypeOps for GenericAliasOps {
             let none_pos = items.iter().position(is_none_type_class);
             if let Some(pos) = none_pos {
                 let other = &items[1 - pos];
-                return format!("typing.Optional[{}]", repr_type_arg(other));
+                return format!("typing.Optional[{}]", repr_type_arg(other, false));
             }
         }
+
+        // CPython's `typing` special forms run their args through `_type_check`
+        // at construction, which substitutes `type(None)` for a bare `None`.
+        // So every `typing.*` alias (`typing.List[None]`, `typing.Final[None]`,
+        // `typing.Callable[[], None]`, …) reprs the argument as `NoneType`.  The
+        // sole exception is `typing.Literal`, whose members are values, not
+        // types, and so keep a bare `None` (`typing.Literal[None]`).  PEP 585
+        // builtin aliases (`list[None]`, `dict[str, None]`) are not type-checked
+        // and likewise keep `None`.  The substitution only touches the alias's
+        // own direct args (and, for Callable, the elements of its parameter
+        // list); it does not recurse into nested aliases
+        // (`Callable[[list[None]], int]` keeps `list[None]`).
+        let lower_none = origin_name.starts_with("typing.") && origin_name != "typing.Literal";
 
         // args is a tuple; for `tuple[()]` it is empty, which CPython's
         // `ga_repr` renders as `()` (so `repr(tuple[()]) == "tuple[()]"`)
@@ -88,11 +101,11 @@ impl BuiltinTypeOps for GenericAliasOps {
             ValueKind::Tuple([]) => "()".to_string(),
             ValueKind::Tuple(items) => items
                 .iter()
-                .map(repr_type_arg)
+                .map(|a| repr_type_arg(a, lower_none))
                 .collect::<Vec<_>>()
                 .join(", "),
             // Fallback: shouldn't happen in normal use, but handle gracefully.
-            _ => repr_type_arg(&s.args),
+            _ => repr_type_arg(&s.args, lower_none),
         };
 
         format!("{origin_name}[{args_repr}]")
@@ -214,13 +227,36 @@ fn is_none_type_class(v: &Value) -> bool {
 /// PEP 695 `type X[T] = ...` syntax), we use the `__name__` string directly
 /// so that `list[T]` renders as `list[T]` rather than `list[<object at ...>]`.
 /// For anything else we fall back to the general `Value::repr_raw()`.
-fn repr_type_arg(v: &Value) -> String {
+fn repr_type_arg(v: &Value, lower_none: bool) -> String {
     match v.kind() {
         // CPython's `ga_repr_item` special-cases `Ellipsis` to render `...`
         // rather than its bare repr (`Ellipsis`), so `tuple[int, ...]` prints
         // as `tuple[int, ...]` instead of `tuple[int, Ellipsis]`.
         ValueKind::Ellipsis => "...".to_string(),
+        // A bare `None` renders as `None` for PEP 585 builtin aliases
+        // (`list[None]`) and `typing.Literal`, but lowers to `NoneType` for
+        // every other `typing.*` special form, which substitutes `type(None)`
+        // at construction (`typing.Final[None]` → `typing.Final[NoneType]`,
+        // `Callable[[], None]` → `typing.Callable[[], NoneType]`).  The caller
+        // sets `lower_none` accordingly (see the `lower_none` derivation in
+        // `repr`); it carries that context down here and into Callable's
+        // parameter list.
+        ValueKind::None if lower_none => "NoneType".to_string(),
+        ValueKind::None => "None".to_string(),
         ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
+        // The parameter-list of a `Callable[[int, str], ret]` subscript is
+        // stored as a `list` argument.  Render it as `[int, str]`, recursing
+        // so each element uses its type repr (`int`, not `<class 'int'>`).  The
+        // `lower_none` context propagates into the param list (Callable lowers
+        // `None` in its parameters too) but not into nested aliases below.
+        ValueKind::List(items) => {
+            let inner = items
+                .iter()
+                .map(|a| repr_type_arg(a, lower_none))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
         ValueKind::PyInstance(inst_rc) => {
             if let Some(name_val) = inst_rc.borrow().attrs.get("__name__")
@@ -348,6 +384,21 @@ pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
         return Some((s.origin.clone(), s.args.clone()));
     }
     None
+}
+
+/// Read the `__args__` tuple of a `typing.Union[...]` alias, if `v` is one.
+///
+/// Returns `Some(args_tuple)` only when `v` is a `GenericAlias` whose origin is
+/// the `typing.Union` special-form class (`get_origin(v) is Union`).  Used by
+/// the `isinstance`/`issubclass` builtins to treat `typing.Union[int, str]`
+/// like the tuple `(int, str)`, matching CPython 3.12.
+pub fn as_typing_union_args(v: &Value) -> Option<Value> {
+    let (origin, args) = as_generic_alias_origin_args(v)?;
+    if is_union_origin(&origin) {
+        Some(args)
+    } else {
+        None
+    }
 }
 
 /// True if `origin` is the `typing.Union` special-form class — the origin

@@ -39,3 +39,14 @@ s.push(2)
 print(s.items)
 print(Stack.__name__)
 print(issubclass(Stack, Generic))
+
+# Subscripting a user generic yields a module-qualified alias with the subclass
+# as origin, exposes __origin__ / __args__, and is callable (constructs the
+# origin, dropping the type args) — matching CPython's _GenericAlias.
+alias = Stack[int]
+print(alias)
+print(alias.__origin__ is Stack)
+print(alias.__args__)
+constructed = Stack[int]()
+print(type(constructed).__name__)
+print(constructed.items)

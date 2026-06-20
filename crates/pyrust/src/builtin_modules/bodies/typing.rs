@@ -175,6 +175,7 @@ pub(crate) fn is_protocol_marker_class(class: &Rc<RefCell<PyClass>>) -> bool {
     PROTOCOL_CLASS.with(|p| Rc::ptr_eq(class, p))
 }
 
+
 /// (method-short, registry-name) pairs for `_Any`.
 const ANY_METHODS: &[(&str, &str)] = &[
     ("__repr__", "typing._Any.__repr__"),
@@ -185,6 +186,7 @@ const ANY_METHODS: &[(&str, &str)] = &[
 const GENERIC_ALIAS_METHODS: &[(&str, &str)] = &[
     ("__repr__", "typing._GenericAlias.__repr__"),
     ("__init__", "typing._GenericAlias.__init__"),
+    ("__call__", "typing._GenericAlias.__call__"),
 ];
 
 /// (method-short, registry-name) pairs for `_TypingAlias`.
@@ -300,6 +302,22 @@ pyrust_module! {
     fn generic_alias_init(args) -> Result<Value> {
         let _ = (_interp, args);
         Ok(Value::none())
+    }
+
+    #[py_name = "_GenericAlias.__call__"]
+    fn generic_alias_call(args) -> Result<Value> {
+        // `Stack[int](...)` constructs an instance of the origin class, dropping
+        // the type arguments (CPython's `_GenericAlias.__call__`).  `args[0]` is
+        // the alias instance; the remaining positionals/keywords are forwarded
+        // to the origin constructor unchanged.
+        let inst = expect_self(args, FN_NAME)?;
+        let origin = inst
+            .borrow()
+            .attrs
+            .get("__origin__")
+            .cloned()
+            .unwrap_or_else(|| GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))));
+        _interp.call_function_expanded(origin, &args[1..])
     }
 
     #[py_name = "_GenericAlias.__repr__"]
@@ -590,11 +608,24 @@ fn make_typing_alias(form: &str, subscript: Value) -> Value {
 
 /// Construct a `_GenericAlias` instance wrapping `origin` (the `Generic` class)
 /// and the raw `subscript` argument.  Used by `Generic.__class_getitem__`.
+///
+/// `_origin` / `_args` keep the raw subscript for the repr (which distinguishes
+/// the single-arg `Generic[T]` from the tuple-arg `Generic[T, U]` spelling).
+/// `__origin__` / `__args__` expose CPython's public attributes: `__origin__`
+/// is the origin class and `__args__` is always a tuple, so `Stack[int].__args__
+/// == (int,)` and `Stack[int].__origin__ is Stack` (issue #2707).
 fn make_generic_alias(origin: Value, subscript: Value) -> Value {
+    let args_tuple = if matches!(subscript.kind(), ValueKind::Tuple(_)) {
+        subscript.clone()
+    } else {
+        Value::tuple(vec![subscript.clone()])
+    };
     GENERIC_ALIAS_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        attrs.insert("_origin", origin);
+        attrs.insert("_origin", origin.clone());
         attrs.insert("_args", subscript);
+        attrs.insert("__origin__", origin);
+        attrs.insert("__args__", args_tuple);
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
@@ -603,18 +634,27 @@ fn make_generic_alias(origin: Value, subscript: Value) -> Value {
 }
 
 /// Render the `_origin` class of a `_GenericAlias` for its repr, mirroring
-/// CPython's `_type_repr`: the `typing.Generic` / `typing.Protocol` singletons
-/// carry the `typing.` module prefix, while a user subclass shows its bare
-/// qualname (`Stack[int]`, not `typing.Stack[int]`).
+/// CPython's `_type_repr`: a class is shown as `{__module__}.{qualname}` unless
+/// its module is `builtins`.  The `typing.Generic` / `typing.Protocol`
+/// singletons keep the `typing.` prefix, while a user subclass shows its
+/// module-qualified name (`__main__.Stack[int]`, matching CPython).
 fn generic_origin_repr(origin: &Value) -> String {
     if let ValueKind::PyClass(rc) = origin.kind() {
         let is_typing_singleton = GENERIC_CLASS.with(|c| Rc::ptr_eq(rc, c))
             || PROTOCOL_CLASS.with(|c| Rc::ptr_eq(rc, c));
-        let qualname = rc.borrow().qualname.clone();
+        let borrow = rc.borrow();
+        let qualname = borrow.qualname.clone();
         if is_typing_singleton {
             return format!("typing.{qualname}");
         }
-        return qualname;
+        let module = borrow
+            .attrs
+            .get("__module__")
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        return match module.as_deref() {
+            Some("builtins") | None => qualname,
+            Some(m) => format!("{m}.{qualname}"),
+        };
     }
     "typing.Generic".to_string()
 }
@@ -787,15 +827,21 @@ thread_local! {
                 "__class_getitem__".to_string(),
                 Value::builtin_function(reg_name),
             );
-            // `Union`/`Optional` aliases must repr with a `typing.` prefix
-            // (`typing.Union[int, str]`).  The `GenericAlias` repr qualifies a
-            // class origin with its `__module__`, so seed it here.  The flatten
-            // helper always uses the `Union` class as the alias origin, so only
-            // these two need the module.
-            if matches!(*name, "Union" | "Optional") {
-                attrs.insert("__module__".to_string(), Value::string("typing"));
-            }
-            let class = Rc::new(RefCell::new(PyClass::new(*name, *name, None, attrs)));
+            // Every special-form subscript reprs with a `typing.` prefix
+            // (`typing.Union[int, str]`, `typing.Final[int]`,
+            // `typing.Callable[[int], str]`, …).  The `GenericAlias` repr
+            // qualifies a class origin with its `__module__`, so seed it here
+            // for all special forms.  (The flatten helper always uses the
+            // `Union` class as the union alias origin.)
+            attrs.insert("__module__".to_string(), Value::string("typing"));
+            let mut pyclass = PyClass::new(*name, *name, None, attrs);
+            // The bare special form reprs as `typing.<name>` (e.g.
+            // `repr(typing.Union) == "typing.Union"`), not the default
+            // `<class 'typing.Union'>`.  Set on the dedicated `override_repr`
+            // field, not in `attrs`, so it mirrors CPython's `_SpecialForm`
+            // repr without being hijackable via `__dict__` (issue #2608).
+            pyclass.override_repr = Some(format!("typing.{name}").into_boxed_str());
+            let class = Rc::new(RefCell::new(pyclass));
             map.insert(*name, class);
         }
         map
