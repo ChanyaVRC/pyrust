@@ -188,6 +188,13 @@ class _TypedDictMeta(type):
     def __call__(cls, *args, **kwargs):
         return dict(*args, **kwargs)
 
+    def __subclasscheck__(cls, other):
+        # A TypedDict is an annotation type, not a runtime class; CPython's
+        # `_TypedDictMeta.__subclasscheck__` rejects `issubclass()` (issue #2738).
+        raise TypeError("TypedDict does not support instance and class checks")
+
+    __instancecheck__ = __subclasscheck__
+
 
 def _build_typeddict_class(typename, annotations, total=True):
     """Build a TypedDict class from its annotations (issue #2718).
