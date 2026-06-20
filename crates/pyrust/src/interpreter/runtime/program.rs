@@ -460,12 +460,11 @@ impl Interpreter {
                             // PEP 678: append each note from `__notes__` on its own
                             // line after the error message, matching CPython's
                             // traceback printer (`add_note` / `__set_name__` notes).
-                            if let Some(notes) = inst_rc.borrow().attrs.get_cloned("__notes__") {
-                                if let Some(items) = notes.as_list() {
-                                    for note in items.iter() {
-                                        line.push('\n');
-                                        line.push_str(&note.to_py_str());
-                                    }
+                            let notes = inst_rc.borrow().attrs.get_cloned("__notes__");
+                            if let Some(items) = notes.as_ref().and_then(|n| n.as_list()) {
+                                for note in items.iter() {
+                                    line.push('\n');
+                                    line.push_str(&note.to_py_str());
                                 }
                             }
                             line
