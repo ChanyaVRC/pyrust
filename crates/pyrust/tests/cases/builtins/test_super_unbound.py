@@ -55,3 +55,35 @@ try:
     super(A).__get__(C(), C)
 except TypeError as e:
     print(e)                   # super(type, obj): obj must be an instance or subtype of type
+
+# --- unbound super stored as a class attribute acts as a descriptor (#2704) ---
+# Accessing it through an instance implicitly binds it via the descriptor
+# protocol; CPython's `super` sets tp_descr_get, so this is the primary use of
+# the one-argument form.
+class Base:
+    def who(self):
+        return "Base"
+    v = 7
+
+class Mid(Base):
+    def call_super(self):
+        return self.sup.who()
+    def read_super(self):
+        return self.sup.v
+
+Mid.sup = super(Mid)
+m = Mid()
+print(m.call_super())          # Base
+print(m.read_super())          # 7
+
+# class-level access returns the unbound super unchanged (instance is None)
+print(repr(Mid.sup))           # <super: <class 'Mid'>, NULL>
+
+# cooperative MI: a subclass instance walks its own MRO through the descriptor
+class Sub(Mid):
+    pass
+print(Sub().call_super())      # Base
+
+# a non-data descriptor loses to an instance-dict entry of the same name
+m.sup = "shadowed"
+print(m.sup)                   # shadowed

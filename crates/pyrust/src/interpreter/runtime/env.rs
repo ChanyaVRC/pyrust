@@ -3902,6 +3902,14 @@ fn is_data_descriptor(val: &Value) -> bool {
 /// to special-case it here — it would return `true` but is intercepted
 /// earlier.
 fn is_non_data_descriptor(val: &Value) -> bool {
+    // The one-argument `super(cls)` is an unbound super object whose type
+    // defines `tp_descr_get` but no `__set__`/`__delete__` — a non-data
+    // descriptor.  Stored as a class attribute, it binds to the instance on
+    // access (#2704), so it must flow through the generic descriptor protocol
+    // rather than only via an explicit `__get__` call.
+    if matches!(val.kind(), ValueKind::SuperProxyUnbound { .. }) {
+        return true;
+    }
     if let ValueKind::PyInstance(inst) = val.kind() {
         let class = Rc::clone(&inst.borrow().class);
         return lookup_class_attr(&class, "__get__").is_some()
@@ -4129,6 +4137,15 @@ fn call_descriptor_get(
     // name (`prop_name`) rather than the lookup name.
     _attr_name: &str,
 ) -> Result<Value> {
+    // Unbound `super(cls)` descriptor (#2704): binding it to the instance
+    // yields `super(cls, instance)` (mirroring CPython's `super_descr_get`).
+    // Class-level access (`instance is None`) leaves it unchanged.  `owner` is
+    // unused here because supercheck binds against the instance's own type.
+    if let ValueKind::SuperProxyUnbound { class } = descriptor.kind() {
+        let class = Rc::clone(class);
+        let _ = &owner;
+        return interp.bind_unbound_super(class, instance);
+    }
     // `__slots__` member_descriptor: read the instance's slot storage; an unset
     // slot raises AttributeError (issue #2084).  Class-level access (`S.x`)
     // never reaches here — get_attr_class returns the descriptor itself.

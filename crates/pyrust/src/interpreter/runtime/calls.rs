@@ -1396,7 +1396,7 @@ impl Interpreter {
     /// protocol, mirroring CPython's `super_descr_get` / `supercheck`.  A None
     /// `obj` returns the unbound super unchanged; an instance produces
     /// `super(cls, obj)`; a class produces the class-bound `super(cls, obj)`.
-    fn bind_unbound_super(
+    pub(crate) fn bind_unbound_super(
         &mut self,
         class: std::rc::Rc<std::cell::RefCell<pyrust_core::PyClass>>,
         obj: Value,
