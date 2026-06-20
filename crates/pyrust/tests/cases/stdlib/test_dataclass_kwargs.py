@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # order=True generates comparison methods
@@ -112,3 +112,36 @@ class NoEq:
 
 
 print(NoEq.__hash__ is not None)  # True
+
+
+# slots=True returns a new class with __slots__ and no instance __dict__
+@dataclass(slots=True)
+class Slotted:
+    x: int
+    y: int = 5
+
+
+sl = Slotted(1)
+print(Slotted.__slots__)            # ('x', 'y')
+print(hasattr(sl, "__dict__"))      # False
+print(sl.x, sl.y)                   # 1 5
+
+# field(kw_only=False) overrides a class-level kw_only=True
+@dataclass(kw_only=True)
+class Mixed:
+    a: int = field(kw_only=False)
+    b: int
+
+
+print(Mixed(1, b=2).a, Mixed(1, b=2).b)  # 1 2
+print(Mixed.__match_args__)               # ('a',)
+
+# field(hash=False) drops a field from __hash__ but keeps it in __eq__
+@dataclass(frozen=True)
+class HashField:
+    a: int
+    b: int = field(hash=False)
+
+
+print(hash(HashField(1, 2)) == hash(HashField(1, 9)))  # True
+print(HashField(1, 2) == HashField(1, 9))              # False
