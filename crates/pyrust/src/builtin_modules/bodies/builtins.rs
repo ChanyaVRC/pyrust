@@ -1397,6 +1397,14 @@ pyrust_module! {
                 let frame = make_reversed_dict_iter(items, seq.0.clone());
                 return Ok(Value::generator(Box::new(frame)));
             }
+        // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,
+        // issue #2684) dispatch to it directly, matching CPython's protocol
+        // step 1.  `call_method` already returns the reverse-order iterator.
+        if let ValueKind::BuiltinObject { ops, state } = seq.0.kind()
+            && ops.has_method("__reversed__")
+        {
+            return ops.call_method(state, "__reversed__", Vec::new(), &indexmap::IndexMap::new());
+        }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
         // and all BuiltinObject iterator types are not sequences and must
