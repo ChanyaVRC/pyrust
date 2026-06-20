@@ -10241,7 +10241,7 @@ impl Interpreter {
             let Some(set_name_fn) = lookup_class_attr(&inst_class, "__set_name__") else {
                 continue;
             };
-            invoke_class_method(
+            if let Err(e) = invoke_class_method(
                 self,
                 set_name_fn,
                 attr_val.clone(),
@@ -10252,7 +10252,33 @@ impl Interpreter {
                         value: Value::string(attr_name.clone()),
                     },
                 ],
-            )?;
+            ) {
+                // CPython type_new_set_names appends a note to the propagated
+                // exception naming the descriptor, attribute, and owning class:
+                //   "Error calling __set_name__ on 'D' instance 'd' in 'C'"
+                // (3.12 re-raises the original exception with the note rather
+                // than wrapping it in RuntimeError).
+                let descriptor_type = inst_class.borrow().name.clone();
+                let owner_name = class.borrow().name.clone();
+                let note = format!(
+                    "Error calling __set_name__ on '{descriptor_type}' instance '{attr_name}' in '{owner_name}'"
+                );
+                let exc_val = self.materialize_pyerror(e)?;
+                // Append `note` to the exception's `__notes__` list (PEP 678),
+                // mirroring `BaseException.add_note`.
+                if let ValueKind::PyInstance(exc_inst) = exc_val.kind() {
+                    {
+                        let mut inst = exc_inst.borrow_mut();
+                        if !inst.attrs.contains_key("__notes__") {
+                            inst.attrs.insert("__notes__", Value::list(vec![]));
+                        }
+                    }
+                    if let Some(notes) = exc_inst.borrow().attrs.get_cloned("__notes__") {
+                        let _ = notes.list_push(Value::string(note));
+                    }
+                }
+                return Err(PyError::Raised(exc_val));
+            }
         }
         Ok(())
     }

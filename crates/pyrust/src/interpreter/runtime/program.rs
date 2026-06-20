@@ -452,11 +452,23 @@ impl Interpreter {
                             let cls = Rc::clone(&inst_rc.borrow().class);
                             let msg = exception_str_with_dispatch(self, value, &inst_rc, &cls)
                                 .unwrap_or_else(|_| value.to_py_str());
-                            if msg.is_empty() {
+                            let mut line = if msg.is_empty() {
                                 class_name
                             } else {
                                 format!("{class_name}: {msg}")
+                            };
+                            // PEP 678: append each note from `__notes__` on its own
+                            // line after the error message, matching CPython's
+                            // traceback printer (`add_note` / `__set_name__` notes).
+                            if let Some(notes) = inst_rc.borrow().attrs.get_cloned("__notes__") {
+                                if let Some(items) = notes.as_list() {
+                                    for note in items.iter() {
+                                        line.push('\n');
+                                        line.push_str(&note.to_py_str());
+                                    }
+                                }
                             }
+                            line
                         }
                         _ => format!("Uncaught exception: {}", value.repr_raw()),
                     },
