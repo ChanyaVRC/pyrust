@@ -127,6 +127,25 @@ thread_local! {
             attrs,
         )))
     };
+
+    // `TypedDict` is a real `PyClass` so it can serve as a class base
+    // (`class Movie(TypedDict): title: str`).  Class creation detects the
+    // marker attr `__pyrust_typeddict_marker__` and rebuilds the class via the
+    // Python helper `typing._build_typeddict_class`; the functional call form
+    // is routed to `typing._typeddict_functional` (issue #2718).
+    static TYPEDDICT_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__pyrust_typeddict_marker__".to_string(),
+            Value::bool_(true),
+        );
+        Rc::new(RefCell::new(PyClass::new(
+            "TypedDict",
+            "TypedDict",
+            None,
+            attrs,
+        )))
+    };
 }
 
 /// Identity check: is `class` the `typing.NamedTuple` marker?  Used by the
@@ -139,6 +158,18 @@ pub(crate) fn is_namedtuple_marker(class: &Rc<RefCell<PyClass>>) -> bool {
 /// The `typing.NamedTuple` marker class value (for the module constant).
 pub(crate) fn namedtuple_marker_value() -> Value {
     NAMEDTUPLE_CLASS.with(|c| Value::py_class(Rc::clone(c)))
+}
+
+/// Identity check: is `class` the `typing.TypedDict` marker?  Used by the
+/// class-creation machinery (`calls.rs`) to detect `class X(TypedDict): ...`
+/// and the functional `TypedDict('X', ...)` call (issue #2718).
+pub(crate) fn is_typeddict_marker(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPEDDICT_CLASS.with(|td| Rc::ptr_eq(class, td))
+}
+
+/// The `typing.TypedDict` marker class value (for the module constant).
+pub(crate) fn typeddict_marker_value() -> Value {
+    TYPEDDICT_CLASS.with(|c| Value::py_class(Rc::clone(c)))
 }
 
 /// True if `class` is the `typing.Protocol` singleton or a subclass of it.
@@ -207,6 +238,11 @@ pyrust_module! {
         // `NamedTuple` marker class — usable as a class base and callable as a
         // factory.  Class creation rebuilds subclasses as namedtuples.
         "NamedTuple" => namedtuple_marker_value(),
+
+        // `TypedDict` marker class — usable as a class base and callable as a
+        // factory.  Class creation rebuilds subclasses as TypedDict classes
+        // (issue #2718).
+        "TypedDict" => typeddict_marker_value(),
 
         // `TYPE_CHECKING` is always `False` at runtime (PEP 563 / typing docs):
         // it is `True` only for static type checkers.  This lets the common
@@ -319,20 +355,6 @@ pyrust_module! {
                 "overload() requires 1 argument".to_string(),
             )),
         }
-    }
-
-    // ── TypedDict ─────────────────────────────────────────────────────────────
-    //
-    // Minimal stub: raises NotImplementedError.  Sufficient to allow imports
-    // without crashing when the module is imported but TypedDict is not called.
-
-    #[py_name = "TypedDict"]
-    fn typed_dict(args) -> Result<Value> {
-        let _ = (_interp, args);
-        Err(PyError::named(
-            "NotImplementedError",
-            "TypedDict is not yet fully implemented in pyrust".to_string(),
-        ))
     }
 
     // ── TypeVar class ─────────────────────────────────────────────────────────
@@ -775,6 +797,9 @@ pub(crate) fn inject_python_members(
     // Private helpers consumed by the native NamedTuple paths.
     exports.push("_namedtuple_functional");
     exports.push("_build_namedtuple_class");
+    // Private helpers consumed by the native TypedDict paths (issue #2718).
+    exports.push("_typeddict_functional");
+    exports.push("_build_typeddict_class");
     for name in exports {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module

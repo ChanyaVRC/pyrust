@@ -5112,6 +5112,25 @@ impl Interpreter {
             return self.call_function_expanded(func, args);
         }
 
+        // Functional `TypedDict('Movie', {...})` (issue #2718): the
+        // `typing.TypedDict` marker is not a constructible class — route the
+        // call to the Python helper `typing._typeddict_functional`.
+        if crate::builtin_modules::typing::is_typeddict_marker(&class) {
+            let func = self
+                .load_module("typing")
+                .ok()
+                .and_then(|m| match m.kind() {
+                    ValueKind::PyModule(rc) => {
+                        rc.borrow().attrs.get("_typeddict_functional").cloned()
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    PyError::Runtime("typing._typeddict_functional unavailable".into())
+                })?;
+            return self.call_function_expanded(func, args);
+        }
+
         // Issue #1956: `Cls(*args)` is uniformly `type(Cls).__call__(Cls, *args)`.
         // If the metaclass defines a *user* `__call__` override, route through
         // it; its `super().__call__(*args)` chains back to the default
@@ -9739,6 +9758,26 @@ impl Interpreter {
             return self.build_typing_namedtuple(&class_name, &attrs);
         }
 
+        // `class Movie(TypedDict): ...` (issue #2718): if any base is the
+        // `typing.TypedDict` marker, rebuild the class as a TypedDict class
+        // (instances are plain dicts; annotations recorded) via the Python
+        // helper `typing._build_typeddict_class`.  An optional `total=` class
+        // keyword controls per-key requiredness.
+        if base.as_ref().is_some_and(crate::builtin_modules::typing::is_typeddict_marker)
+            || extra_bases_vec
+                .iter()
+                .any(crate::builtin_modules::typing::is_typeddict_marker)
+        {
+            let total = self.read_class_kwarg(
+                regs,
+                "total",
+                kwarg_base,
+                &class_kwarg_names,
+                kwarg_n,
+            );
+            return self.build_typing_typeddict(&class_name, &attrs, total);
+        }
+
         let slots = make_class_extract_slots(&mut attrs, &class_name)?;
         let class = Rc::new(RefCell::new(PyClass {
             extra_bases: extra_bases_vec.clone(),
@@ -10130,6 +10169,65 @@ impl Interpreter {
             ExpandedCallArg { name: None, value: defaults },
             ExpandedCallArg { name: None, value: namespace },
         ];
+        self.call_function_expanded(builder, &args)
+    }
+
+    /// Read a class-statement keyword (e.g. `class C(Base, total=False)`) by
+    /// name from the `MakeClass` kwarg registers, returning `None` if absent.
+    fn read_class_kwarg(
+        &self,
+        regs: &RegSlice,
+        name: &str,
+        kwarg_base: crate::bytecode::Reg,
+        class_kwarg_names: &[String],
+        kwarg_n: u8,
+    ) -> Option<Value> {
+        class_kwarg_names
+            .iter()
+            .take(kwarg_n as usize)
+            .position(|k| k == name)
+            .map(|i| {
+                let reg = (kwarg_base as usize + i) as crate::bytecode::Reg;
+                regs[reg as usize].clone()
+            })
+    }
+
+    /// Rebuild a `class Movie(TypedDict): ...` body as a TypedDict class
+    /// (issue #2718).  Field order and types come from `__annotations__`; the
+    /// optional `total` keyword (default `True`) controls per-key requiredness.
+    /// Delegates the build to the Python helper `typing._build_typeddict_class`,
+    /// whose result's instances are plain dicts (CPython parity).
+    fn build_typing_typeddict(
+        &mut self,
+        class_name: &str,
+        attrs: &IndexMap<String, Value>,
+        total: Option<Value>,
+    ) -> Result<Value> {
+        let annotations = attrs
+            .get("__annotations__")
+            .cloned()
+            .unwrap_or_else(|| Value::dict(PyDict::default()));
+
+        let builder = self
+            .load_module("typing")
+            .ok()
+            .and_then(|m| match m.kind() {
+                ValueKind::PyModule(rc) => {
+                    rc.borrow().attrs.get("_build_typeddict_class").cloned()
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                PyError::Runtime("typing._build_typeddict_class unavailable".into())
+            })?;
+
+        let mut args = vec![
+            ExpandedCallArg { name: None, value: Value::string(class_name) },
+            ExpandedCallArg { name: None, value: annotations },
+        ];
+        if let Some(total) = total {
+            args.push(ExpandedCallArg { name: Some("total".to_string()), value: total });
+        }
         self.call_function_expanded(builder, &args)
     }
 
