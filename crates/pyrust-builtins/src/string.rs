@@ -1,7 +1,7 @@
 use pyrust_core::{
-    PyDict, PyError, PyKey, Result, Value, ValueKind, builtin_type_name, cesu8_codepoints,
-    cp_is_printable, expect_arg_count, extract_fill_char, extract_int, extract_optional_int,
-    py_value_display_name,
+    PyBigIntSign, PyDict, PyError, PyKey, Result, Value, ValueKind, builtin_type_name,
+    cesu8_codepoints, cp_is_printable, expect_arg_count, extract_fill_char, extract_int,
+    extract_optional_int, py_value_display_name,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -1654,6 +1654,7 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
         let start_char = match args.get(1).map(|v| v.kind()) {
             Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len),
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len),
+            Some(ValueKind::BigInt(n)) => bigint_start_idx(n, byte_len),
             Some(ValueKind::None) | None => 0,
             _ => {
                 return Err(PyError::named(
@@ -1665,6 +1666,7 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
         let end_char = match args.get(2).map(|v| v.kind()) {
             Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
+            Some(ValueKind::BigInt(n)) => bigint_end_idx(n, byte_len),
             Some(ValueKind::None) | None => byte_len,
             _ => {
                 return Err(PyError::named(
@@ -1684,6 +1686,7 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
     let start_char = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len),
+        Some(ValueKind::BigInt(n)) => bigint_start_idx(n, char_len),
         Some(ValueKind::None) | None => 0,
         _ => {
             return Err(PyError::named(
@@ -1695,6 +1698,7 @@ fn str_slice_args(s: &str, is_ascii: bool, args: &[Value]) -> Result<Option<(usi
     let end_char = match args.get(2).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len).min(char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len).min(char_len),
+        Some(ValueKind::BigInt(n)) => bigint_end_idx(n, char_len),
         Some(ValueKind::None) | None => char_len,
         _ => {
             return Err(PyError::named(
@@ -1730,6 +1734,26 @@ fn normalise_char_idx(idx: i64, len: usize) -> usize {
         len.saturating_sub(from_end)
     } else {
         idx as usize
+    }
+}
+
+/// Normalise a `BigInt` `start` bound for a search window. A BigInt never fits
+/// in an index range, so CPython clamps it: a negative one to the start (`0`), a
+/// positive one to just past the end (`len + 1`) so the inverted-window check in
+/// the caller reports "not found" rather than a zero-length window (#2688).
+fn bigint_start_idx(n: &pyrust_core::PyBigInt, len: usize) -> usize {
+    match n.sign() {
+        PyBigIntSign::Minus => 0,
+        _ => len + 1,
+    }
+}
+
+/// Normalise a `BigInt` `end` bound for a search window: a negative one clamps to
+/// the start (`0`), a positive one to the end (`len`) (#2688).
+fn bigint_end_idx(n: &pyrust_core::PyBigInt, len: usize) -> usize {
+    match n.sign() {
+        PyBigIntSign::Minus => 0,
+        _ => len,
     }
 }
 
