@@ -180,7 +180,6 @@ class _TypedDictMeta(type):
         ns["__required_keys__"] = frozenset(required)
         ns["__optional_keys__"] = frozenset(optional)
         ns["__total__"] = bool(total)
-        ns["__pyrust_typeddict_class__"] = True
         # CPython collapses the bases to `(dict,)`: a TypedDict is an annotation
         # type, so the runtime class is a plain dict subclass and the ancestor
         # TypedDicts do not appear in the MRO (their fields are merged above).
