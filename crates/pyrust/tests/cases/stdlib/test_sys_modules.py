@@ -37,3 +37,16 @@ import os.path
 
 print("os.path" in sys.modules)
 print(sys.modules["os.path"] is os.path)
+
+# sys.modules is the authoritative cache: a value injected directly by user
+# code makes the matching `import` a cache hit that returns the injected object
+# (issue #2727 review).
+class _FakeModule:
+    pass
+
+
+_fake = _FakeModule()
+sys.modules["fake_injected_2727"] = _fake
+import fake_injected_2727
+
+print(fake_injected_2727 is _fake)

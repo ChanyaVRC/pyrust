@@ -3077,9 +3077,32 @@ impl Interpreter {
         let _ = modules.dict_insert(pyrust_core::PyKey::str_from(name), module.clone());
     }
 
+    /// Look up `name` in the user-visible `sys.modules` dict (issue #2727).
+    /// `sys.modules` is the authoritative import cache in CPython: a direct
+    /// write (`sys.modules["x"] = obj`) makes `import x` a cache hit, and a
+    /// `del sys.modules["x"]` forces re-execution on the next import.  We honour
+    /// both by consulting it before the internal `module_cache`.
+    fn lookup_sys_modules(name: &str) -> Option<Value> {
+        let modules = crate::builtin_modules::sys::sys_modules_dict();
+        modules
+            .dict_with(|d| d.get(&pyrust_core::PyKey::str_from(name)).cloned())
+            .flatten()
+    }
+
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
-        if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
+        // `sys.modules` is the authoritative cache (CPython semantics): a value
+        // injected directly by user code (`sys.modules["x"] = obj`) wins, and a
+        // `del sys.modules["x"]` invalidates the internal `module_cache` so the
+        // module re-executes on the next import.
+        if let Some(cached) = Self::lookup_sys_modules(name) {
             return Ok(cached);
+        }
+        // Present internally but absent from `sys.modules` means it was
+        // `del`-eted there: drop the stale internal entry and fall through to a
+        // fresh load so the module body re-executes, matching CPython.
+        let present_internally = self.module_cache.borrow().contains_key(name);
+        if present_internally {
+            self.module_cache.borrow_mut().remove(name);
         }
         // Built-in modules — declared in
         // `crates/pyrust/src/builtin_modules/mod.rs::pyrust_builtin_modules!`.
