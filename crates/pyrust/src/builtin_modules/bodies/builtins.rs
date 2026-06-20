@@ -7766,6 +7766,13 @@ pub(crate) fn value_class(obj: &Value) -> Value {
             if pyrust_builtins::bound_method::is_method_wrapper(obj) {
                 return Value::builtin_function("method-wrapper");
             }
+            // Issue #2733: `type(list[int])` is the `types.GenericAlias` class
+            // (a proper PyClass singleton), not a `BuiltinFunction` sentinel, so
+            // its repr is `<class 'types.GenericAlias'>`, `__module__` is
+            // `'types'`, and `__name__` is `'GenericAlias'`.
+            if ops.type_name() == pyrust_builtins::generic_alias::TYPE_NAME {
+                return Value::py_class(crate::interpreter::generic_alias_class_singleton());
+            }
             Value::builtin_function(ops.type_name())
         }
         // Migrated primitives are handled above via
@@ -8860,6 +8867,13 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
                 if state_rc.borrow().downcast_ref::<ChainFromIterableIter>().is_some() =>
             {
                 crate::interpreter::itertools_chain_class()
+            }
+            // Issue #2733: `isinstance(list[int], type(list[int]))` is True —
+            // a PEP 585 alias is an instance of the `types.GenericAlias` class.
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::generic_alias::TYPE_NAME =>
+            {
+                Some(crate::interpreter::generic_alias_class_singleton())
             }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };
