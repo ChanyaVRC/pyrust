@@ -1261,13 +1261,18 @@ impl Interpreter {
                         }],
                     );
                 }
-                // Look up `__class_getitem__` in the class's own attrs (not
-                // the MRO).  Built-in collection types have a
+                // Look up `__class_getitem__` along the MRO (issue #2698).
+                // Built-in collection types have a
                 // `BuiltinFunction("<type>.__class_getitem__")` sentinel
                 // registered by `build_primitive_classes`.  User-defined
-                // classes may define it as a classmethod.  Classes without
-                // it raise TypeError (matching CPython 3.12).
-                let cgitem = class.borrow().attrs.get("__class_getitem__").cloned();
+                // classes may define it as a classmethod, or *inherit* one —
+                // e.g. `class Stack(Generic[T])` inherits
+                // `Generic.__class_getitem__`, and `class Sub(Base)` inherits a
+                // user-defined `Base.__class_getitem__`.  Walking the MRO (not
+                // just the class's own dict) is what makes those subscriptable.
+                // Classes without it anywhere in the MRO raise TypeError
+                // (matching CPython 3.12).
+                let cgitem = lookup_class_attr(&class, "__class_getitem__");
                 if let Some(method_val) = cgitem {
                     // Distinguish between the built-in sentinel and a
                     // user-defined classmethod, and pick out the `Union` /
