@@ -1243,13 +1243,16 @@ impl Interpreter {
                         }],
                     );
                 }
-                // Look up `__class_getitem__` in the class's own attrs (not
-                // the MRO).  Built-in collection types have a
+                // Look up `__class_getitem__` along the MRO (#2707).  Built-in
+                // collection types have a
                 // `BuiltinFunction("<type>.__class_getitem__")` sentinel
                 // registered by `build_primitive_classes`.  User-defined
-                // classes may define it as a classmethod.  Classes without
-                // it raise TypeError (matching CPython 3.12).
-                let cgitem = class.borrow().attrs.get("__class_getitem__").cloned();
+                // classes may define it as a classmethod, or inherit it from a
+                // base (e.g. `class Stack(Generic[T])` inherits
+                // `typing._generic_cgi` from `Generic`, so `Stack[int]` must
+                // resolve it through the base chain).  Classes without it raise
+                // TypeError (matching CPython 3.12).
+                let cgitem = lookup_class_attr(&class, "__class_getitem__");
                 if let Some(method_val) = cgitem {
                     // Distinguish between the built-in sentinel and a
                     // user-defined classmethod, and pick out the `Union` /

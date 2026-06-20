@@ -305,31 +305,33 @@ pyrust_module! {
     #[py_name = "_GenericAlias.__repr__"]
     fn generic_alias_repr(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
-        let (origin_name, sub) = {
+        let (origin_repr, sub) = {
             let borrow = inst.borrow();
-            let origin_name = borrow
+            // The origin is the receiver class.  CPython's `_type_repr` shows
+            // `typing.Generic` / `typing.Protocol` for the typing singletons but
+            // a bare class name for a user subclass (`Stack[int]`, not
+            // `typing.Stack[int]`).
+            let origin_repr = borrow
                 .attrs
                 .get("_origin")
-                .and_then(|v| match v.kind() {
-                    ValueKind::PyClass(rc) => Some(rc.borrow().qualname.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "Generic".to_string());
+                .map(generic_origin_repr)
+                .unwrap_or_else(|| "typing.Generic".to_string());
             let sub = borrow.attrs.get("_args").cloned().unwrap_or_else(Value::none);
-            (origin_name, sub)
+            (origin_repr, sub)
         };
         // The subscript may be a single arg (`Generic[T]`) or a tuple
-        // (`Generic[T, U]`).  Each element is rendered via the interpreter-aware
-        // repr so a `TypeVar` shows its variance prefix (`~T`).
+        // (`Generic[T, U]`).  Each element is rendered via `_type_repr` so a
+        // plain class shows its name (`int`, not `<class 'int'>`) and a
+        // `TypeVar` shows its variance prefix (`~T`).
         let args_repr = match sub.kind() {
             ValueKind::Tuple(items) => items
                 .iter()
-                .map(|v| crate::builtin_modules::builtins::render_value_repr(_interp, v))
+                .map(|v| generic_arg_repr(_interp, v))
                 .collect::<Result<Vec<_>>>()?
                 .join(", "),
-            _ => crate::builtin_modules::builtins::render_value_repr(_interp, &sub)?,
+            _ => generic_arg_repr(_interp, &sub)?,
         };
-        Ok(Value::string(format!("typing.{origin_name}[{args_repr}]")))
+        Ok(Value::string(format!("{origin_repr}[{args_repr}]")))
     }
 
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────
@@ -346,17 +348,28 @@ pyrust_module! {
     #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
         let _ = _interp;
-        // The subscript is the last positional argument.  The subscript form
-        // `Generic[T]` calls us with the class prepended (`[Generic, T]`) while
-        // the direct call `Generic.__class_getitem__(T)` passes only `[T]`;
-        // taking the last positional handles both.
-        let subscript = args
-            .iter()
-            .rev()
-            .find(|a| a.name.is_none())
-            .map(|a| a.value.clone())
-            .unwrap_or_else(Value::none);
-        let origin = GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c)));
+        // The subscript form `Generic[T]` (or `Stack[T]` inheriting via MRO)
+        // calls us with the receiver class prepended (`[Cls, T]`), while the
+        // direct call `Generic.__class_getitem__(T)` passes only `[T]`.  The
+        // origin of the resulting `_GenericAlias` must be the receiver class so
+        // `Stack[int]` reprs as `Stack[int]` (origin = `Stack`) rather than
+        // `Generic[int]`.  Fall back to `Generic` for the direct-call form.
+        let positionals: Vec<&ExpandedCallArg> =
+            args.iter().filter(|a| a.name.is_none()).collect();
+        let (origin, subscript) = if positionals.len() >= 2 {
+            (
+                positionals[0].value.clone(),
+                positionals[positionals.len() - 1].value.clone(),
+            )
+        } else {
+            (
+                GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+                positionals
+                    .first()
+                    .map(|a| a.value.clone())
+                    .unwrap_or_else(Value::none),
+            )
+        };
         Ok(make_generic_alias(origin, subscript))
     }
 
@@ -364,8 +377,27 @@ pyrust_module! {
 
     #[py_name = "_protocol_cgi"]
     fn protocol_class_getitem(args) -> Result<Value> {
-        let _ = (_interp, args);
-        Ok(PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))))
+        let _ = _interp;
+        // Mirror `_generic_cgi`: use the receiver class as the alias origin so a
+        // subclass `class P(Protocol[T])` / `P[int]` keeps `P` as origin.  The
+        // direct `Protocol.__class_getitem__(T)` form falls back to `Protocol`.
+        let positionals: Vec<&ExpandedCallArg> =
+            args.iter().filter(|a| a.name.is_none()).collect();
+        let (origin, subscript) = if positionals.len() >= 2 {
+            (
+                positionals[0].value.clone(),
+                positionals[positionals.len() - 1].value.clone(),
+            )
+        } else {
+            (
+                PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+                positionals
+                    .first()
+                    .map(|a| a.value.clone())
+                    .unwrap_or_else(Value::none),
+            )
+        };
+        Ok(make_generic_alias(origin, subscript))
     }
 
     // ── cast ─────────────────────────────────────────────────────────────────
@@ -568,6 +600,34 @@ fn make_generic_alias(origin: Value, subscript: Value) -> Value {
             attrs,
         })))
     })
+}
+
+/// Render the `_origin` class of a `_GenericAlias` for its repr, mirroring
+/// CPython's `_type_repr`: the `typing.Generic` / `typing.Protocol` singletons
+/// carry the `typing.` module prefix, while a user subclass shows its bare
+/// qualname (`Stack[int]`, not `typing.Stack[int]`).
+fn generic_origin_repr(origin: &Value) -> String {
+    if let ValueKind::PyClass(rc) = origin.kind() {
+        let is_typing_singleton = GENERIC_CLASS.with(|c| Rc::ptr_eq(rc, c))
+            || PROTOCOL_CLASS.with(|c| Rc::ptr_eq(rc, c));
+        let qualname = rc.borrow().qualname.clone();
+        if is_typing_singleton {
+            return format!("typing.{qualname}");
+        }
+        return qualname;
+    }
+    "typing.Generic".to_string()
+}
+
+/// Render one subscript argument of a `_GenericAlias`, mirroring CPython's
+/// `_type_repr`: a plain class shows its name (`int`) rather than its `repr`
+/// (`<class 'int'>`), while everything else (TypeVar, nested alias, …) uses the
+/// interpreter-aware repr so e.g. a `TypeVar` keeps its variance prefix (`~T`).
+fn generic_arg_repr(interp: &mut Interpreter, v: &Value) -> Result<String> {
+    if let ValueKind::PyClass(rc) = v.kind() {
+        return Ok(rc.borrow().qualname.clone());
+    }
+    crate::builtin_modules::builtins::render_value_repr(interp, v)
 }
 
 /// If `v` is a `_GenericAlias` instance (the runtime type of `Generic[T]`),
