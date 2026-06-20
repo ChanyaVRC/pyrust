@@ -17,6 +17,10 @@ def get_origin(tp):
     `get_origin(List[int])` is `list`, `get_origin(Optional[str])` is `Union`,
     `get_origin(int)` is `None`.  Mirrors CPython's `typing.get_origin`.
     """
+    # `Annotated[X, ...]` reports the `Annotated` marker as its origin, even
+    # though it stores `X` in `__origin__` (PEP 593 / CPython `get_origin`).
+    if isinstance(tp, _AnnotatedAlias):
+        return Annotated
     origin = getattr(tp, "__origin__", None)
     if origin is None:
         return None
@@ -39,6 +43,10 @@ def get_args(tp):
     `get_args(List[int])` is `(int,)`, `get_args(Optional[str])` is
     `(str, NoneType)`, `get_args(int)` is `()`.
     """
+    # `Annotated[X, *meta]` reports `(X, *meta)`, even though it stores only
+    # `(X,)` in `__args__` (PEP 593 / CPython `get_args`).
+    if isinstance(tp, _AnnotatedAlias):
+        return (tp.__origin__,) + tp.__metadata__
     args = getattr(tp, "__args__", None)
     if args is None:
         return ()
@@ -60,12 +68,24 @@ def _resolve(value, globalns):
     return value
 
 
+def _strip_annotated(value):
+    """Strip an `Annotated[X, ...]` alias down to its underlying type `X`.
+
+    Used by `get_type_hints` when `include_extras=False`, mirroring CPython,
+    which discards the metadata and keeps only the annotated type.
+    """
+    if isinstance(value, _AnnotatedAlias):
+        return value.__origin__
+    return value
+
+
 def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
     """Return a dict of type hints for a function, class, or module.
 
     String (forward-reference) annotations are evaluated against the object's
     globals.  For classes, annotations are collected across the MRO with base
-    classes contributing first (subclass annotations win on conflict).
+    classes contributing first (subclass annotations win on conflict).  Unless
+    `include_extras` is set, `Annotated[X, ...]` hints are stripped to `X`.
     """
     if isinstance(obj, type):
         hints = {}
@@ -78,14 +98,17 @@ def get_type_hints(obj, globalns=None, localns=None, include_extras=False):
             ann = base.__dict__.get("__annotations__", {})
             for name, value in ann.items():
                 hints[name] = _resolve(value, base_globals)
-        return hints
+    else:
+        ann = getattr(obj, "__annotations__", None)
+        if ann is None:
+            return {}
+        if globalns is None:
+            globalns = getattr(obj, "__globals__", {})
+        hints = {name: _resolve(value, globalns) for name, value in ann.items()}
 
-    ann = getattr(obj, "__annotations__", None)
-    if ann is None:
-        return {}
-    if globalns is None:
-        globalns = getattr(obj, "__globals__", {})
-    return {name: _resolve(value, globalns) for name, value in ann.items()}
+    if not include_extras:
+        hints = {name: _strip_annotated(value) for name, value in hints.items()}
+    return hints
 
 
 def _namedtuple_functional(typename, fields=None, /, **kwargs):
@@ -274,10 +297,83 @@ class _SpecialMarker:
         return self
 
 
+def _type_repr(obj):
+    """Render a type/metadata value as CPython's `typing._type_repr` would.
+
+    Plain classes show as their (qualified) name rather than `<class '...'>`;
+    everything else uses `repr`.  Used by `_AnnotatedAlias.__repr__`.
+    """
+    if isinstance(obj, type):
+        module = getattr(obj, "__module__", None)
+        qualname = getattr(obj, "__qualname__", obj.__name__)
+        if module in (None, "builtins"):
+            return qualname
+        return module + "." + qualname
+    return repr(obj)
+
+
+class _AnnotatedAlias:
+    """Runtime form of `Annotated[X, m1, m2, ...]` (PEP 593).
+
+    Carries the annotated type as `__origin__`, the metadata tuple as
+    `__metadata__`, and `(__origin__,)` as `__args__` (the metadata is *not*
+    in `__args__`, matching CPython 3.12; `get_args` re-appends it) so that
+    `get_origin`, `get_args`, and `repr` match CPython 3.12.
+    """
+
+    def __init__(self, origin, metadata):
+        self.__origin__ = origin
+        self.__metadata__ = tuple(metadata)
+        self.__args__ = (origin,)
+
+    def __repr__(self):
+        meta = ", ".join(_type_repr(m) for m in self.__metadata__)
+        return "typing.Annotated[" + _type_repr(self.__origin__) + ", " + meta + "]"
+
+    def __eq__(self, other):
+        if not isinstance(other, _AnnotatedAlias):
+            return NotImplemented
+        return (
+            self.__origin__ == other.__origin__
+            and self.__metadata__ == other.__metadata__
+        )
+
+    def __hash__(self):
+        return hash((self.__origin__, self.__metadata__))
+
+
+class _AnnotatedMarker:
+    """Special form for `Annotated` (PEP 593).
+
+    `Annotated[X, m1, ...]` builds an `_AnnotatedAlias`; it requires at least a
+    type plus one metadata element, matching CPython's `TypeError`.  A nested
+    `Annotated[Annotated[X, a], b]` is flattened to `Annotated[X, a, b]` at
+    construction, mirroring CPython 3.12.
+    """
+
+    def __repr__(self):
+        return "typing.Annotated"
+
+    def __getitem__(self, params):
+        if not isinstance(params, tuple) or len(params) < 2:
+            raise TypeError(
+                "Annotated[...] should be used with at least two arguments "
+                "(a type and an annotation)."
+            )
+        origin = params[0]
+        metadata = params[1:]
+        # Flatten nested aliases: the underlying type collapses to its own
+        # origin and its metadata is prepended (CPython `Annotated.__class_getitem__`).
+        if isinstance(origin, _AnnotatedAlias):
+            metadata = origin.__metadata__ + metadata
+            origin = origin.__origin__
+        return _AnnotatedAlias(origin, metadata)
+
+
 Self = _SpecialMarker("Self")
 Never = _SpecialMarker("Never")
 LiteralString = _SpecialMarker("LiteralString")
-Annotated = _SpecialMarker("Annotated")
+Annotated = _AnnotatedMarker()
 TypeAlias = _SpecialMarker("TypeAlias")
 Concatenate = _SpecialMarker("Concatenate")
 Unpack = _SpecialMarker("Unpack")
