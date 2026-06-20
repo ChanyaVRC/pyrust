@@ -437,6 +437,15 @@ pyrust_module! {
                 .attrs
                 .insert("__constraints__", Value::tuple(constraints));
             borrow.attrs.insert("__bound__", bound);
+            // CPython captures the *caller's* module on the TypeVar instance, so
+            // `T = TypeVar('T')` at top level has `T.__module__ == '__main__'`.
+            // The `TypeVar` *class* carries `__module__ == 'typing'` (#2745), so
+            // without an instance-level override the instance would inherit
+            // `'typing'`.  pyrust seeds every user class's `__module__` as
+            // `'__main__'` (see `run_class_body`), so mirror that here.
+            borrow
+                .attrs
+                .insert("__module__", Value::string("__main__"));
             Ok(Value::none())
         }
 

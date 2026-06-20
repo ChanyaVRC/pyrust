@@ -27,3 +27,10 @@ print(len.__module__)
 # TypeVar instances keep their __name__.
 T = TypeVar("T")
 print(T.__name__)
+
+# Regression guard: a TypeVar *instance* created at top level reports the
+# caller's module (__main__), NOT the class's 'typing' — seeding __module__ on
+# the class must not leak onto instances.
+print(T.__module__)
+print(TypeVar("TC", int, str).__module__)
+print(TypeVar("TB", bound=int).__module__)
