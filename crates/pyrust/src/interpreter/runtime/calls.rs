@@ -10159,12 +10159,14 @@ impl Interpreter {
     ///
     /// Reads the raw base values from `R[bases_base .. bases_base+bases_n]` and,
     /// for any entry that is not a class (and is not a generic alias, which has
-    /// its own `__origin__` handling downstream), looks up `__mro_entries__` on
-    /// its type and calls `entry.__mro_entries__(orig_bases)` with the *full*
-    /// original bases tuple.  The returned tuple is flattened into the resolved
-    /// bases.  Entries without `__mro_entries__` are passed through unchanged so
-    /// the downstream resolver still produces the proper "class base must be a
-    /// class" error for genuine non-class bases.
+    /// its own `__origin__` handling downstream), looks up `__mro_entries__` via
+    /// a regular attribute access (CPython's `_PyObject_LookupAttr`, so instance
+    /// attributes and `__getattr__` are honored — not just the type slot) and
+    /// calls `entry.__mro_entries__(orig_bases)` with the *full* original bases
+    /// tuple.  The returned tuple is flattened into the resolved bases.  Entries
+    /// whose `__mro_entries__` lookup raises `AttributeError` are passed through
+    /// unchanged so the downstream resolver still produces the proper "class
+    /// base must be a class" error for genuine non-class bases.
     ///
     /// Returns `(resolved_bases, orig_bases)` where `orig_bases` is `Some` only
     /// when at least one base went through `__mro_entries__`, in which case the
@@ -10204,24 +10206,24 @@ impl Interpreter {
                 resolved.push(base.clone());
                 continue;
             }
-            // Non-class base: look for `__mro_entries__` on its type.
-            let mro_entries_fn = match base.kind() {
-                ValueKind::PyInstance(inst) => {
-                    let class = Rc::clone(&inst.borrow().class);
-                    lookup_class_attr(&class, "__mro_entries__")
+            // Non-class base: look up `__mro_entries__` via a regular attribute
+            // access (CPython does `_PyObject_LookupAttr(base, ...)`), so that
+            // instance attributes and `__getattr__`-served values are honored,
+            // not only the type slot.  The lookup already binds any descriptor
+            // (a class-method `__mro_entries__` comes back as a bound method),
+            // so the result is called directly with just the original bases.
+            let mro_entries_fn = match self.get_attr(base, "__mro_entries__") {
+                Ok(f) => f,
+                Err(ref e) if e.class_name_is("AttributeError") => {
+                    // No `__mro_entries__`: pass through so the resolver raises
+                    // the proper "class base must be a class" error.
+                    resolved.push(base.clone());
+                    continue;
                 }
-                _ => None,
+                Err(e) => return Err(e),
             };
-            let Some(mro_entries_fn) = mro_entries_fn else {
-                // No `__mro_entries__`: pass through so the resolver raises the
-                // proper "class base must be a class" error.
-                resolved.push(base.clone());
-                continue;
-            };
-            let result = invoke_class_method(
-                self,
+            let result = self.call_function_expanded(
                 mro_entries_fn,
-                base.clone(),
                 &[ExpandedCallArg { name: None, value: orig_bases_tuple.clone() }],
             )?;
             let ValueKind::Tuple(entries) = result.kind() else {
