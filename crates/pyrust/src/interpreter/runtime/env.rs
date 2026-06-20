@@ -71,6 +71,16 @@ impl Interpreter {
             ValueKind::SuperProxy { class, instance } => {
                 let class = Rc::clone(class);
                 let instance = Rc::clone(instance);
+                // CPython exposes read-only `__thisclass__` / `__self__` /
+                // `__self_class__` on every super object (#2704).
+                match name {
+                    "__thisclass__" => return Ok(Value::py_class(class)),
+                    "__self__" => return Ok(Value::py_instance(instance)),
+                    "__self_class__" => {
+                        return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
+                    }
+                    _ => {}
+                }
                 // CPython super() semantics: look up `name` in the MRO of
                 // type(instance), starting from the class *after* `class`.
                 // This is necessary for cooperative multiple inheritance: when
@@ -156,6 +166,17 @@ impl Interpreter {
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);
                 let obj_class = Rc::clone(obj_class);
+                // CPython exposes read-only `__thisclass__` / `__self__` /
+                // `__self_class__` on every super object (#2704).  For the
+                // class-bound form `super(C, cls)`, `__self__` and
+                // `__self_class__` are both `cls`.
+                match name {
+                    "__thisclass__" => return Ok(Value::py_class(class)),
+                    "__self__" | "__self_class__" => {
+                        return Ok(Value::py_class(obj_class));
+                    }
+                    _ => {}
+                }
                 // Two cases (issue #1956):
                 //   1. classmethod super(): `class` is in `obj_class`'s own MRO.
                 //      Walk `obj_class`'s MRO starting after `class`.
@@ -273,6 +294,23 @@ impl Interpreter {
                     }
                 }
                 Err(pyrust_core::py_err!("AttributeError", "'super' object has no attribute '{name}'"))
+            }
+            ValueKind::SuperProxyUnbound { class } => {
+                // The unbound `super(cls)` (#2704). It exposes the introspection
+                // attributes (with `__self__` / `__self_class__` == None) and the
+                // descriptor `__get__`, but cannot resolve methods until bound.
+                match name {
+                    "__thisclass__" => Ok(Value::py_class(Rc::clone(class))),
+                    "__self__" | "__self_class__" => Ok(Value::none()),
+                    "__get__" => Ok(pyrust_builtins::bound_method::bound_method(
+                        "super.__get__",
+                        target.clone(),
+                    )),
+                    _ => Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'super' object has no attribute '{name}'"
+                    )),
+                }
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.
             // These return a new property with the respective accessor replaced.
@@ -3864,6 +3902,14 @@ fn is_data_descriptor(val: &Value) -> bool {
 /// to special-case it here — it would return `true` but is intercepted
 /// earlier.
 fn is_non_data_descriptor(val: &Value) -> bool {
+    // The one-argument `super(cls)` is an unbound super object whose type
+    // defines `tp_descr_get` but no `__set__`/`__delete__` — a non-data
+    // descriptor.  Stored as a class attribute, it binds to the instance on
+    // access (#2704), so it must flow through the generic descriptor protocol
+    // rather than only via an explicit `__get__` call.
+    if matches!(val.kind(), ValueKind::SuperProxyUnbound { .. }) {
+        return true;
+    }
     if let ValueKind::PyInstance(inst) = val.kind() {
         let class = Rc::clone(&inst.borrow().class);
         return lookup_class_attr(&class, "__get__").is_some()
@@ -4091,6 +4137,15 @@ fn call_descriptor_get(
     // name (`prop_name`) rather than the lookup name.
     _attr_name: &str,
 ) -> Result<Value> {
+    // Unbound `super(cls)` descriptor (#2704): binding it to the instance
+    // yields `super(cls, instance)` (mirroring CPython's `super_descr_get`).
+    // Class-level access (`instance is None`) leaves it unchanged.  `owner` is
+    // unused here because supercheck binds against the instance's own type.
+    if let ValueKind::SuperProxyUnbound { class } = descriptor.kind() {
+        let class = Rc::clone(class);
+        let _ = &owner;
+        return interp.bind_unbound_super(class, instance);
+    }
     // `__slots__` member_descriptor: read the instance's slot storage; an unset
     // slot raises AttributeError (issue #2084).  Class-level access (`S.x`)
     // never reaches here — get_attr_class returns the descriptor itself.
