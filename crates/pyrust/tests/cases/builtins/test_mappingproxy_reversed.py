@@ -44,3 +44,8 @@ d = {"a": 1, "b": 2, "c": 3}
 m = d.keys().mapping
 print(list(reversed(m)) == list(reversed(list(m.keys()))))  # True
 print(list(m.__reversed__()) == list(reversed(m)))  # True
+
+# Verify list(reversed(m)) matches list(reversed(list(m.keys()))) for
+# both empty and non-empty dict-backed proxies (issue #2684).
+empty_proxy = {}.keys().mapping
+print(list(reversed(empty_proxy)) == [])  # True
