@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use pyrust_core::{
-    PyDict, PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name,
+    PyBigIntSign, PyDict, PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name,
     py_value_display_name,
 };
 
@@ -2157,6 +2157,7 @@ fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>
         None | Some(ValueKind::None) => 0,
         Some(ValueKind::Int(i)) => normalise_idx(i, len),
         Some(ValueKind::Bool(b)) => normalise_idx(b as i64, len),
+        Some(ValueKind::BigInt(n)) => bigint_start_idx(n, len),
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -2168,6 +2169,7 @@ fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>
         None | Some(ValueKind::None) => len,
         Some(ValueKind::Int(i)) => normalise_idx(i, len).min(len),
         Some(ValueKind::Bool(b)) => normalise_idx(b as i64, len).min(len),
+        Some(ValueKind::BigInt(n)) => bigint_end_idx(n, len),
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -2194,6 +2196,26 @@ fn normalise_idx(idx: i64, len: usize) -> usize {
         len.saturating_sub(from_end)
     } else {
         idx as usize
+    }
+}
+
+/// Normalise a `BigInt` `start` bound for a search window. A BigInt never fits in
+/// an index range, so CPython clamps it: a negative one to the start (`0`), a
+/// positive one to just past the end (`len + 1`) so the inverted-window check in
+/// the caller reports "not found" rather than a zero-length window (#2688).
+fn bigint_start_idx(n: &pyrust_core::PyBigInt, len: usize) -> usize {
+    match n.sign() {
+        PyBigIntSign::Minus => 0,
+        _ => len + 1,
+    }
+}
+
+/// Normalise a `BigInt` `end` bound for a search window: a negative one clamps to
+/// the start (`0`), a positive one to the end (`len`) (#2688).
+fn bigint_end_idx(n: &pyrust_core::PyBigInt, len: usize) -> usize {
+    match n.sign() {
+        PyBigIntSign::Minus => 0,
+        _ => len,
     }
 }
 
