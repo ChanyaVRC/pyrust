@@ -60,3 +60,37 @@ print(hash(w1) == hash(w2))   # True (y excluded from hash)
 
 # Frozen hash matches the equivalent plain-tuple hash
 print(hash(FrozenPoint(3, 4)) == hash((3, 4)))  # True
+
+# unsafe_hash=True over an explicit __hash__ is an error (cannot overwrite).
+try:
+    @dataclass(unsafe_hash=True)
+    class Clash:
+        x: int
+        def __hash__(self):
+            return 1
+    print("no error")
+except TypeError:
+    print("cannot overwrite")  # cannot overwrite
+
+# field(hash=...) selects hash membership independently of compare.
+@dataclass(frozen=True)
+class FieldHash:
+    a: int
+    b: int = field(compare=False, hash=True)   # out of eq, in hash
+    c: int = field(compare=True, hash=False)    # in eq, out of hash
+
+h1 = FieldHash(1, 2, 3)
+h2 = FieldHash(1, 2, 9)   # c differs (excluded from hash) → same hash
+h3 = FieldHash(1, 8, 3)   # b differs (included in hash) → different hash
+print(hash(h1) == hash(h2))   # True
+print(hash(h1) == hash(h3))   # False
+print(hash(h1) == hash((1, 2)))  # True: only a and b
+
+# An explicit __hash__ survives the default eq=True/frozen=False case.
+@dataclass
+class KeepHash:
+    x: int
+    def __hash__(self):
+        return 1234
+
+print(hash(KeepHash(0)))  # 1234
