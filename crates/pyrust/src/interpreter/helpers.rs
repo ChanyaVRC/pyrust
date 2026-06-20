@@ -5324,7 +5324,8 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         (ValueKind::BoundMethod { .. }, ValueKind::BoundMethod { .. })
         | (ValueKind::ClassBoundMethod { .. }, ValueKind::ClassBoundMethod { .. })
         | (ValueKind::SuperProxy { .. }, ValueKind::SuperProxy { .. })
-        | (ValueKind::SuperProxyClass { .. }, ValueKind::SuperProxyClass { .. }) => {
+        | (ValueKind::SuperProxyClass { .. }, ValueKind::SuperProxyClass { .. })
+        | (ValueKind::SuperProxyUnbound { .. }, ValueKind::SuperProxyUnbound { .. }) => {
             match (a.value_id(), b.value_id()) {
                 (Some(x), Some(y)) => x == y,
                 _ => false,

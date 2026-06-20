@@ -1392,6 +1392,47 @@ impl Interpreter {
     /// positional-args buffer and hands it back on every exit path, so the
     /// inner method has a single owner-restore point instead of ~20 scattered
     /// `self.bound_method_pos_buf = pos;` lines.
+    /// Bind an unbound `super(cls)` (#2704) to `obj` via the descriptor
+    /// protocol, mirroring CPython's `super_descr_get` / `supercheck`.  A None
+    /// `obj` returns the unbound super unchanged; an instance produces
+    /// `super(cls, obj)`; a class produces the class-bound `super(cls, obj)`.
+    fn bind_unbound_super(
+        &mut self,
+        class: std::rc::Rc<std::cell::RefCell<pyrust_core::PyClass>>,
+        obj: Value,
+    ) -> Result<Value> {
+        if obj.is_none() {
+            return Ok(Value::super_proxy_unbound(class));
+        }
+        match obj.kind() {
+            ValueKind::PyInstance(i) => {
+                let instance = std::rc::Rc::clone(i);
+                if !class_is_subclass_of(&instance.borrow().class, &class) {
+                    return Err(pyrust_core::type_err!(
+                        "super(type, obj): obj must be an instance or subtype of type"
+                    ));
+                }
+                Ok(Value::super_proxy(class, instance))
+            }
+            ValueKind::PyClass(obj_class) => {
+                let obj_class = std::rc::Rc::clone(obj_class);
+                if class_is_subclass_of(&obj_class, &class) {
+                    return Ok(Value::super_proxy_class(class, obj_class));
+                }
+                let type_cls = type_class_singleton();
+                if class_is_subclass_of(&class, &type_cls) {
+                    return Ok(Value::super_proxy_class(class, obj_class));
+                }
+                Err(pyrust_core::type_err!(
+                    "super(type, obj): obj must be an instance or subtype of type"
+                ))
+            }
+            _ => Err(pyrust_core::type_err!(
+                "super(type, obj): obj must be an instance or subtype of type"
+            )),
+        }
+    }
+
     fn call_bound_method_dispatch(
         &mut self,
         name_rc: std::rc::Rc<String>,
@@ -1483,6 +1524,19 @@ impl Interpreter {
                 }
                 return apply_format_spec(&receiver, spec);
             }
+        }
+        // #2704: `super(cls).__get__(obj, owner)` — the unbound super object is
+        // a descriptor.  Binding it to a non-None `obj` yields the concrete
+        // `super(cls, obj)` (or `super(cls, obj)` when `obj` is a class);
+        // binding to None returns the unbound super unchanged (CPython
+        // super_descr_get).
+        if method == "super.__get__"
+            && let ValueKind::SuperProxyUnbound { class } = receiver.kind()
+        {
+            let class = std::rc::Rc::clone(class);
+            let obj = pos.first().cloned().unwrap_or_else(Value::none);
+            std::mem::take(pos);
+            return self.bind_unbound_super(class, obj);
         }
         // `__slots__` member_descriptor's descriptor-protocol methods, invoked
         // directly (`S.x.__get__(inst)`, `S.x.__set__(inst, v)`,
