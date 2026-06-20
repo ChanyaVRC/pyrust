@@ -8906,6 +8906,21 @@ fn isinstance_check(
         }
         return Ok(false);
     }
+    // `isinstance(x, typing.Union[int, str])` — CPython 3.12 accepts a
+    // `typing.Union[...]` alias as the second arg, treating it like the tuple
+    // of its `__args__`.  Detect the alias by its origin being the `Union`
+    // special form and recurse over its members.
+    if let Some(args) = pyrust_builtins::generic_alias::as_typing_union_args(cls) {
+        if let ValueKind::Tuple(items) = args.kind() {
+            let items: Vec<Value> = items.to_vec();
+            for item in &items {
+                if isinstance_check(fn_name, obj, item, interp)? {
+                    return Ok(true);
+                }
+            }
+        }
+        return Ok(false);
+    }
     // Issue #2525: when `cls` is a plain instance (not a class) whose *type*
     // defines `__instancecheck__`, CPython invokes
     // `type(cls).__instancecheck__(cls, obj)` rather than rejecting it.  The
@@ -9197,6 +9212,20 @@ fn issubclass_check(
     }
     // PEP 604: `issubclass(X, int | str)` — unwrap UnionType to its __args__.
     if let Some(args) = pyrust_builtins::union_type::union_type_args(classinfo) {
+        if let ValueKind::Tuple(items) = args.kind() {
+            let items: Vec<Value> = items.to_vec();
+            for item in &items {
+                if issubclass_check(fn_name, cls, item, interp)? {
+                    return Ok(true);
+                }
+            }
+        }
+        return Ok(false);
+    }
+    // `issubclass(X, typing.Union[int, str])` — accept a `typing.Union[...]`
+    // alias as the second arg, treating it like the tuple of its `__args__`
+    // (CPython 3.12).
+    if let Some(args) = pyrust_builtins::generic_alias::as_typing_union_args(classinfo) {
         if let ValueKind::Tuple(items) = args.kind() {
             let items: Vec<Value> = items.to_vec();
             for item in &items {

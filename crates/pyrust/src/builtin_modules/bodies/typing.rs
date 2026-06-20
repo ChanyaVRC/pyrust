@@ -586,7 +586,14 @@ thread_local! {
             if matches!(*name, "Union" | "Optional") {
                 attrs.insert("__module__".to_string(), Value::string("typing"));
             }
-            let class = Rc::new(RefCell::new(PyClass::new(*name, *name, None, attrs)));
+            let mut pyclass = PyClass::new(*name, *name, None, attrs);
+            // The bare special form reprs as `typing.<name>` (e.g.
+            // `repr(typing.Union) == "typing.Union"`), not the default
+            // `<class 'typing.Union'>`.  Set on the dedicated `override_repr`
+            // field, not in `attrs`, so it mirrors CPython's `_SpecialForm`
+            // repr without being hijackable via `__dict__` (issue #2608).
+            pyclass.override_repr = Some(format!("typing.{name}").into_boxed_str());
+            let class = Rc::new(RefCell::new(pyclass));
             map.insert(*name, class);
         }
         map
