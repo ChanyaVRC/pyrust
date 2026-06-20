@@ -16,6 +16,10 @@ print(repr(typing.Literal))
 print(typing.Callable.__module__)
 print(repr(typing.Callable))
 
+# NamedTuple is a real-class marker in pyrust; its __module__ is "typing"
+# (repr differs from CPython's function form, so only the module is asserted).
+print(typing.NamedTuple.__module__)
+
 
 # A user subclass keeps its own module / repr, not "typing".
 class Stack(typing.Generic[typing.TypeVar("T")]):

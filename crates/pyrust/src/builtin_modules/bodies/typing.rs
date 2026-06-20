@@ -128,6 +128,9 @@ thread_local! {
             "__pyrust_namedtuple_marker__".to_string(),
             Value::bool_(true),
         );
+        // `__module__ = "typing"` so `typing.NamedTuple.__module__ == "typing"`,
+        // matching `Generic` / `Protocol` (issue #2742).
+        attrs.insert("__module__".to_string(), Value::string("typing"));
         Rc::new(RefCell::new(PyClass::new(
             "NamedTuple",
             "NamedTuple",
