@@ -473,6 +473,14 @@ pyrust_module! {
             };
             let covariant = kw_flag("covariant");
             let contravariant = kw_flag("contravariant");
+            // CPython rejects a TypeVar that is both covariant and
+            // contravariant (`ValueError: Bivariant types are not supported.`).
+            if covariant && contravariant {
+                return Err(PyError::named(
+                    "ValueError",
+                    "Bivariant types are not supported.".to_string(),
+                ));
+            }
 
             let mut borrow = inst.borrow_mut();
             borrow
