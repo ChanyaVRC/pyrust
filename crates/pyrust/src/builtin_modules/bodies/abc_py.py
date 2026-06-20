@@ -128,10 +128,15 @@ class ABCMeta(type):
             raise TypeError("issubclass() arg 1 must be a class")
         # Structural subtyping hook: cls.__subclasshook__(subclass).  A True /
         # False result is authoritative; NotImplemented falls through to the
-        # MRO / registry checks below.  Mirrors CPython's _abc_subclasscheck.
+        # MRO / registry checks below.  Mirrors CPython's _abc_subclasscheck,
+        # which requires the hook to return exactly a bool or NotImplemented.
         ok = cls.__subclasshook__(subclass)
         if ok is not NotImplemented:
-            return bool(ok)
+            if not isinstance(ok, bool):
+                raise AssertionError(
+                    "__subclasshook__ must return either False, True, or "
+                    "NotImplemented")
+            return ok
         # Real subclass via the normal MRO.
         for klass in subclass.__mro__:
             if klass is cls:

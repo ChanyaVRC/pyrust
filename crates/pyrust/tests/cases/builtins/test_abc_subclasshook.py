@@ -82,3 +82,21 @@ print(issubclass(int, Plain))            # False
 from collections.abc import Iterable
 print(isinstance([1, 2, 3], Iterable))   # True
 print(isinstance(42, Iterable))          # False
+
+
+# A hook must return exactly bool or NotImplemented; a non-bool result raises
+# AssertionError, matching CPython's _abc_subclasscheck contract.
+class BadHook(ABC):
+    @classmethod
+    def __subclasshook__(cls, C):
+        return 1
+
+
+class Probe:
+    pass
+
+
+try:
+    issubclass(Probe, BadHook)
+except AssertionError as e:
+    print("AssertionError:", e)
