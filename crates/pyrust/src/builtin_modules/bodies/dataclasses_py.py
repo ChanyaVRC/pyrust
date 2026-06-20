@@ -107,7 +107,7 @@ def _set_new_attribute(cls, name, value):
     return False
 
 
-def _process_class(cls, init, repr, eq, frozen):
+def _process_class(cls, init, repr, eq, frozen, unsafe_hash):
     flds = _collect_fields(cls)
     setattr(cls, _FIELDS, flds)
 
@@ -122,7 +122,40 @@ def _process_class(cls, init, repr, eq, frozen):
         setattr(cls, "__setattr__", _frozen_setattr)
         setattr(cls, "__delattr__", _frozen_delattr)
 
+    _set_hash(cls, flds, eq, frozen, unsafe_hash)
+
     return cls
+
+
+def _set_hash(cls, flds, eq, frozen, unsafe_hash):
+    """Install ``__hash__`` following CPython 3.12's truth table.
+
+    - ``unsafe_hash=True``: always generate a value-based ``__hash__``.
+    - ``eq=True, frozen=True``: generate a value-based ``__hash__``.
+    - ``eq=True, frozen=False``: set ``__hash__ = None`` (unhashable).
+    - ``eq=False``: leave ``__hash__`` untouched (inherited / identity).
+
+    A ``__hash__`` defined explicitly in the class body is respected unless
+    ``unsafe_hash=True`` forced generation.
+    """
+    if unsafe_hash:
+        setattr(cls, "__hash__", _make_hash(flds))
+    elif eq and frozen:
+        _set_new_attribute(cls, "__hash__", _make_hash(flds))
+    elif eq:
+        # eq without frozen → instances are unhashable, matching the rule that
+        # adding __eq__ removes the inherited __hash__.
+        if "__hash__" not in cls.__dict__:
+            setattr(cls, "__hash__", None)
+
+
+def _make_hash(flds):
+    names = [f.name for f in flds if f.compare]
+    self_tuple = "(" + ", ".join("self.%s" % n for n in names)
+    self_tuple += "," if len(names) == 1 else ""
+    self_tuple += ")"
+    body = ["return hash(%s)" % self_tuple]
+    return _create_fn("__hash__", ["self"], body, {})
 
 
 def _make_init(flds, frozen):
@@ -214,13 +247,14 @@ def _create_fn(name, params, body, locals_ns):
     return ns[name]
 
 
-def dataclass(cls=None, /, *, init=True, repr=True, eq=True, frozen=False):
+def dataclass(cls=None, /, *, init=True, repr=True, eq=True, frozen=False,
+              unsafe_hash=False):
     """Add generated special methods to a class.
 
     Usable as ``@dataclass`` or ``@dataclass(frozen=True, ...)``.
     """
     def wrap(klass):
-        return _process_class(klass, init, repr, eq, frozen)
+        return _process_class(klass, init, repr, eq, frozen, unsafe_hash)
 
     # Called as @dataclass without parentheses.
     if cls is None:
