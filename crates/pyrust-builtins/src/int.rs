@@ -271,9 +271,10 @@ fn int_to_bytes(receiver: &Value, args: &[Value], kw: &PyDict) -> Result<Value> 
                     ));
                 }
                 // A positive BigInt length is astronomically large — refuse.
+                // CPython converts `length` to a C ssize_t, which overflows here.
                 return Err(PyError::named(
                     "OverflowError",
-                    "int too big to convert".to_string(),
+                    "Python int too large to convert to C ssize_t".to_string(),
                 ));
             }
             ValueKind::Bool(b) => b as usize,
