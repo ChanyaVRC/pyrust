@@ -578,14 +578,13 @@ thread_local! {
                 "__class_getitem__".to_string(),
                 Value::builtin_function(reg_name),
             );
-            // `Union`/`Optional` aliases must repr with a `typing.` prefix
-            // (`typing.Union[int, str]`).  The `GenericAlias` repr qualifies a
-            // class origin with its `__module__`, so seed it here.  The flatten
-            // helper always uses the `Union` class as the alias origin, so only
-            // these two need the module.
-            if matches!(*name, "Union" | "Optional") {
-                attrs.insert("__module__".to_string(), Value::string("typing"));
-            }
+            // Every special-form subscript reprs with a `typing.` prefix
+            // (`typing.Union[int, str]`, `typing.Final[int]`,
+            // `typing.Callable[[int], str]`, …).  The `GenericAlias` repr
+            // qualifies a class origin with its `__module__`, so seed it here
+            // for all special forms.  (The flatten helper always uses the
+            // `Union` class as the union alias origin.)
+            attrs.insert("__module__".to_string(), Value::string("typing"));
             let class = Rc::new(RefCell::new(PyClass::new(*name, *name, None, attrs)));
             map.insert(*name, class);
         }

@@ -220,7 +220,22 @@ fn repr_type_arg(v: &Value) -> String {
         // rather than its bare repr (`Ellipsis`), so `tuple[int, ...]` prints
         // as `tuple[int, ...]` instead of `tuple[int, Ellipsis]`.
         ValueKind::Ellipsis => "...".to_string(),
+        // A bare `None` argument lowers to `NoneType` (matching CPython's
+        // `_type_repr`), so `Callable[[], None]` reprs as
+        // `typing.Callable[[], NoneType]`.
+        ValueKind::None => "NoneType".to_string(),
         ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
+        // The parameter-list of a `Callable[[int, str], ret]` subscript is
+        // stored as a `list` argument.  Render it as `[int, str]`, recursing
+        // so each element uses its type repr (`int`, not `<class 'int'>`).
+        ValueKind::List(items) => {
+            let inner = items
+                .iter()
+                .map(repr_type_arg)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{inner}]")
+        }
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
         ValueKind::PyInstance(inst_rc) => {
             if let Some(name_val) = inst_rc.borrow().attrs.get("__name__")

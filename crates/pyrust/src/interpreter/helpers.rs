@@ -501,6 +501,15 @@ thread_local! {
             "__prepare__".to_string(),
             Value::builtin_function("type.__prepare__"),
         );
+        // PEP 585: `type` is subscriptable (`type[int]` → `types.GenericAlias`)
+        // in CPython 3.9+.  Register the same `__class_getitem__` sentinel used
+        // by `list`/`dict`/… so that both `type[int]` (via `eval_index`) and
+        // `type.__class_getitem__(int)` (via `call_function_expanded`) build a
+        // `GenericAlias` with `type` as origin.
+        attrs.insert(
+            "__class_getitem__".to_string(),
+            Value::builtin_function("type.__class_getitem__"),
+        );
         let cls = Rc::new(RefCell::new(PyClass::new(
             "type",
             "type",
@@ -1209,6 +1218,10 @@ pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
             "set" => &c.set_class,
             "str" => &c.str_class,
             "tuple" => &c.tuple_class,
+            // `type` lives in its own singleton (the metaclass), not in
+            // `PRIMITIVE_CLASSES`.  Recover it for the PEP 585
+            // `type.__class_getitem__(int)` direct-call path.
+            "type" => return Some(type_class_singleton()),
             _ => return None,
         }))
     })
