@@ -323,7 +323,7 @@ pyrust_module! {
     #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
         let _ = _interp;
-        special_class_getitem(args, GENERIC_CLASS.with(|c| Rc::clone(c)))
+        special_class_getitem(args, GENERIC_CLASS.with(Rc::clone))
     }
 
     // ── Protocol.__class_getitem__ ────────────────────────────────────────────
@@ -331,7 +331,7 @@ pyrust_module! {
     #[py_name = "_protocol_cgi"]
     fn protocol_class_getitem(args) -> Result<Value> {
         let _ = _interp;
-        special_class_getitem(args, PROTOCOL_CLASS.with(|c| Rc::clone(c)))
+        special_class_getitem(args, PROTOCOL_CLASS.with(Rc::clone))
     }
 
     // ── cast ─────────────────────────────────────────────────────────────────
