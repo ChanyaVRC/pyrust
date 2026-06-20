@@ -37,6 +37,9 @@ print(type(list[int]) is type(dict[str, int]))      # True
 print(type(list[int]) is type(tuple[int, ...]))     # True
 print(type(set[int]) is type(frozenset[int]))       # True
 
+# --- the GenericAlias type carries its own docstring ---
+print(repr(type(ga).__doc__))         # 'Represent a PEP 585 generic type...'
+
 # --- the alias value still proxies to its origin ---
 print(ga.__module__)                  # builtins  (forwarded to list)
 print(ga.__doc__ == list.__doc__)     # True

@@ -588,6 +588,18 @@ thread_local! {
         let obj = OBJECT_CLASS.with(Rc::clone);
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert("__module__".to_string(), Value::string("types"));
+        // Issue #2733: `type(list[int]).__doc__` is the GenericAlias docstring
+        // in CPython 3.12 (not the origin's docstring and not AttributeError).
+        // The singleton is not in `env.rs::is_builtin_class`, so without an
+        // explicit `__doc__` attr the class attribute lookup misses and raises
+        // AttributeError; store it on the class to match CPython.
+        attrs.insert(
+            "__doc__".to_string(),
+            Value::string(
+                "Represent a PEP 585 generic type\n\nE.g. for t = list[int], \
+                 t.__origin__ is list and t.__args__ is (int,).",
+            ),
+        );
         let cls = Rc::new(RefCell::new(PyClass::new(
             "GenericAlias",
             "GenericAlias",
