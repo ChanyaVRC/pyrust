@@ -195,10 +195,17 @@ impl BuiltinTypeOps for MappingProxyOps {
         state: &BuiltinState,
         method: &str,
         args: Vec<Value>,
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let src = borrow_source(state)
             .ok_or_else(|| PyError::Runtime("internal: bad mappingproxy state".to_string()))?;
+        // None of mappingproxy's methods accept keyword arguments in CPython 3.12.
+        if !kwargs.is_empty() && matches!(method, "keys" | "values" | "items" | "get" | "copy") {
+            return Err(PyError::named(
+                "TypeError",
+                format!("mappingproxy.{method}() takes no keyword arguments"),
+            ));
+        }
         match method {
             "keys" => {
                 if !args.is_empty() {
