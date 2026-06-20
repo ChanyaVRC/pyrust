@@ -49,10 +49,13 @@ pyrust_module! {
         // <https://docs.python.org/3/library/sys.html#sys.path>
         "path"         => Value::list(vec![Value::string("")]),
         // CPython: sys.modules — dictionary of already-imported modules.
-        // Starts empty; keeping it in sync with actual imports is out of
-        // scope for this implementation.
+        // Backed by a per-thread shared dict (issue #2727): the importer
+        // (`env.rs::load_module`) inserts each module into the same dict as
+        // it is loaded, and every `sys.modules` access returns that one dict
+        // (by Rc-shared identity), so reads and writes are stable and the
+        // import cache is observable from Python.
         // <https://docs.python.org/3/library/sys.html#sys.modules>
-        "modules"      => Value::dict(PyDict::default()),
+        "modules"      => sys_modules_dict(),
         // CPython: sys.executable — string giving the absolute path of the
         // Python interpreter binary.  pyrust uses an empty string because
         // there is no single well-defined binary path.
@@ -615,6 +618,25 @@ const fn sys_byteorder() -> &'static str {
     {
         "big"
     }
+}
+
+// ── sys.modules shared dict (issue #2727) ────────────────────────────────────
+//
+// `sys.modules` must be a single, interpreter-lifetime dict that the importer
+// writes into and that user code reads/mutates with stable identity.  We back
+// it with a per-thread `Value::dict` (an `Rc<RefCell<PyDict>>` under the hood),
+// so every `sys_modules_dict()` call hands back a clone of the *same* Value —
+// i.e. the same underlying dict.
+
+thread_local! {
+    static SYS_MODULES: Value = Value::dict(PyDict::default());
+}
+
+/// Return the per-thread shared `sys.modules` dict Value.  Cloning the Value
+/// shares the same underlying dict, so writes from the importer and reads from
+/// `sys.modules` see the same map.
+pub(crate) fn sys_modules_dict() -> Value {
+    SYS_MODULES.with(|d| d.clone())
 }
 
 // ── version_info helpers ─────────────────────────────────────────────────────

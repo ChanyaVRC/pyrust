@@ -3067,6 +3067,16 @@ impl Interpreter {
     }
 
 
+    /// Register a freshly loaded module in the shared `sys.modules` dict
+    /// (issue #2727), keyed by its dotted import name.  CPython exposes every
+    /// imported module here as the import cache; pyrust mirrors each
+    /// `module_cache` insertion into the per-thread `sys.modules` dict so user
+    /// code observes membership and identity.
+    fn register_in_sys_modules(name: &str, module: &Value) {
+        let modules = crate::builtin_modules::sys::sys_modules_dict();
+        let _ = modules.dict_insert(pyrust_core::PyKey::str_from(name), module.clone());
+    }
+
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
         if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
             return Ok(cached);
@@ -3224,6 +3234,7 @@ impl Interpreter {
                 }
             }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
+            Self::register_in_sys_modules(name, &val);
             // Python-source post-load injection: every `@inject` module in
             // `pyrust_builtin_modules!` (collections, asyncio, string,
             // operator, typing, abc, dataclasses, enum, json, …) exec's its
@@ -3331,6 +3342,7 @@ impl Interpreter {
                     attrs,
                 })));
                 self.module_cache.borrow_mut().insert(name.to_string(), module.clone());
+                Self::register_in_sys_modules(name, &module);
                 return Ok(module);
             }
         }
