@@ -76,10 +76,14 @@ def _is_sunder(name):
 
 
 def _flag_bin(num, max_bits):
-    # Mirror CPython ``enum.bin`` (non-negative branch): a leading sign group of
-    # ``0`` followed by the zero-padded binary digits, e.g. ``0b0 1000``.
+    # Mirror CPython ``enum.bin``: a leading sign group (``0b0`` positive /
+    # ``0b1`` negative two's-complement) followed by zero-padded binary digits,
+    # e.g. ``0b0 1000`` for 8 and ``0b1 0101`` for ~10 (-11).
     ceiling = 2 ** num.bit_length()
-    s = bin(num + ceiling).replace("1", "0", 1)
+    if num >= 0:
+        s = bin(num + ceiling).replace("1", "0", 1)
+    else:
+        s = bin(~num ^ (ceiling - 1) + ceiling)
     sign = s[:3]
     digits = s[3:]
     if len(digits) < max_bits:
@@ -261,7 +265,14 @@ class Flag(Enum):
         if not isinstance(value, int):
             raise ValueError("%r is not a valid %s" % (value, cls.__name__))
         all_bits = cls._all_bits_()
-        if value < 0 or (value & ~all_bits) != 0:
+        original = value
+        # CPython accepts a negative value in ``[-(all_bits+1), -1]`` and masks
+        # it to the defined bits (two's complement), e.g. with ``all_bits == 7``:
+        # ``Color(-1)`` -> 7, ``Color(-8)`` -> 0.  Positives with bits outside
+        # ``all_bits`` and negatives below that range are invalid.
+        if value < 0 and value >= -(all_bits + 1):
+            value = value & all_bits
+        elif (value & ~all_bits) != 0 or value < 0:
             max_bits = max(value.bit_length(), all_bits.bit_length())
             # ``<flag 'Name'>`` is built explicitly rather than via ``%r`` of the
             # class so the message is byte-exact even where ``repr(cls)`` does
@@ -270,15 +281,23 @@ class Flag(Enum):
                 "<flag %r> invalid value %r\n    given %s\n  allowed %s"
                 % (
                     cls.__name__,
-                    value,
-                    _flag_bin(value, max_bits),
+                    original,
+                    _flag_bin(original, max_bits),
                     _flag_bin(all_bits, max_bits),
                 )
             )
+        # The (possibly masked) value may already be a canonical/cached member.
+        existing = cls._value2member_map_.get(value)
+        if existing is not None:
+            if original != value:
+                cls._value2member_map_[original] = existing
+            return existing
         member = object.__new__(cls)
         member._name_ = None
         member._value_ = value
         cls._value2member_map_[value] = member
+        if original != value:
+            cls._value2member_map_[original] = member
         return member
 
     def _decompose_(self):
