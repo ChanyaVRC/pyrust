@@ -52,6 +52,24 @@ try:
 except TypeError:
     print("missing-arg")
 
+# ── GenericAlias (callable constructor) ────────────────────────────────────
+print(types.GenericAlias(list, int))
+print(types.GenericAlias(list, int).__args__)
+print(types.GenericAlias(dict, (str, int)))
+print(type(types.GenericAlias(list, (int,))) is types.GenericAlias)
+print(types.GenericAlias(dict, (str, types.GenericAlias(list, int))))
+
+for _bad in (
+    "types.GenericAlias(list)",
+    "types.GenericAlias()",
+    "types.GenericAlias(list, int, str)",
+    "types.GenericAlias(list, int, foo=1)",
+):
+    try:
+        eval(_bad)
+    except TypeError as _e:
+        print(type(_e).__name__, _e)
+
 # ── SimpleNamespace ────────────────────────────────────────────────────────
 ns = types.SimpleNamespace(x=1, y=2)
 print(repr(ns))
@@ -77,3 +95,12 @@ empty = types.SimpleNamespace()
 empty.first = "hello"
 print(empty.first)
 print(repr(empty))
+
+
+# Subclass repr uses the subclass name (base reprs as `namespace`).
+class _NS(types.SimpleNamespace):
+    pass
+
+
+print(repr(_NS(x=1)))
+print(_NS(x=1) == types.SimpleNamespace(x=1))

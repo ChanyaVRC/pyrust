@@ -23,7 +23,11 @@ class SimpleNamespace:
 
     def __repr__(self):
         items = (f"{k}={v!r}" for k, v in self.__dict__.items())
-        return "namespace({})".format(", ".join(items))
+        # CPython prefixes with the subclass name; the base class itself reprs
+        # as `namespace(...)` rather than `SimpleNamespace(...)`.
+        cls = type(self)
+        name = "namespace" if cls is SimpleNamespace else cls.__name__
+        return "{}({})".format(name, ", ".join(items))
 
     def __eq__(self, other):
         if isinstance(self, SimpleNamespace) and isinstance(other, SimpleNamespace):

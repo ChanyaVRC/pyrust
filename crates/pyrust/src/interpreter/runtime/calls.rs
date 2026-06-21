@@ -693,6 +693,34 @@ impl Interpreter {
                     type_args,
                 ))
             }
+            // `types.GenericAlias(origin, args)` — direct construction of a
+            // generic alias (the same value `list[int]` produces).  CPython:
+            // exactly two positional arguments, no keywords; a non-tuple
+            // `args` is wrapped into a one-element tuple so `__args__` is
+            // always a tuple.
+            ValueKind::BuiltinFunction(name)
+                if name == pyrust_builtins::generic_alias::TYPE_NAME =>
+            {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias() takes no keyword arguments"
+                    ));
+                }
+                if args.len() != 2 {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias expected 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                let origin = args[0].value.clone();
+                let index = args[1].value.clone();
+                let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+                    index
+                } else {
+                    Value::tuple(vec![index])
+                };
+                Ok(pyrust_builtins::generic_alias::generic_alias(origin, type_args))
+            }
             ValueKind::BuiltinFunction("str.format_map") => {
                 // `format_map` is implemented in Python in CPython, so its
                 // unbound-call diagnostics use the method_descriptor wording
