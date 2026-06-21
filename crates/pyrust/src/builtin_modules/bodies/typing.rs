@@ -551,6 +551,15 @@ pyrust_module! {
                 .attrs
                 .insert("__constraints__", Value::tuple(constraints));
             borrow.attrs.insert("__bound__", bound);
+            // CPython captures the *caller's* module on the TypeVar instance, so
+            // `T = TypeVar('T')` at top level has `T.__module__ == '__main__'`.
+            // The `TypeVar` *class* carries `__module__ == 'typing'` (#2745), so
+            // without an instance-level override the instance would inherit
+            // `'typing'`.  pyrust seeds every user class's `__module__` as
+            // `'__main__'` (see `run_class_body`), so mirror that here.
+            borrow
+                .attrs
+                .insert("__module__", Value::string("__main__"));
             borrow
                 .attrs
                 .insert("__covariant__", Value::bool_(covariant));
@@ -698,9 +707,17 @@ pub(crate) fn generic_alias_origin(v: &Value) -> Option<Value> {
 /// Construct the `Any` singleton as a PyInstance of `_Any`.
 fn make_any_instance() -> Value {
     ANY_CLASS.with(|class| {
+        let mut attrs = InstanceAttrs::new();
+        // `typing.Any.__module__ == "typing"` and `__name__`/`__qualname__` ==
+        // "Any" (issue #2745).  CPython 3.12 models `Any` as a class; pyrust
+        // models it as a singleton instance, so seed these introspection attrs
+        // on the instance rather than on the `_Any` class.
+        attrs.insert("__module__", Value::string("typing"));
+        attrs.insert("__name__", Value::string("Any"));
+        attrs.insert("__qualname__", Value::string("Any"));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
-            attrs: InstanceAttrs::new(),
+            attrs,
         })))
     })
 }
@@ -1032,6 +1049,19 @@ pub(crate) fn inject_python_members(
         if let Some(v) = v {
             ns.dict_insert(PyKey::str_from(name), v)?;
         }
+    }
+    // `typing.TypeVar` is a macro-built `PyClass` whose attrs only carry its
+    // methods; the macro has no facility to seed `__module__`.  Set it here so
+    // `typing.TypeVar.__module__ == "typing"` and the bare class reprs as
+    // `<class 'typing.TypeVar'>` (issue #2745), mirroring Generic/Protocol.
+    let type_var = module.borrow().attrs.get("TypeVar").cloned();
+    if let Some(tv) = type_var
+        && let ValueKind::PyClass(class) = tv.kind()
+    {
+        class
+            .borrow_mut()
+            .attrs
+            .insert("__module__".to_string(), Value::string("typing"));
     }
     interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
