@@ -292,6 +292,10 @@ class _Parser:
         if self.i >= self.n:
             self._err("missing -, : or )")
         c = self.s[self.i]
+        if c not in ')-:':
+            # A stray flag-letter-like char: alphabetic chars are an
+            # unrecognised flag, anything else is a structural error.
+            self._err("unknown flag" if c.isalpha() else "missing -, : or )")
         if c == ')':
             # Global flags: only valid before any atom, applied pattern-wide.
             if self._seen_atom:
@@ -308,15 +312,21 @@ class _Parser:
                 remove |= _FLAG_LETTERS[self.s[self.i]]
                 self.i += 1
             if self.i == rstart:
+                # No flag letters were consumed after '-'.
+                if self.i < self.n and self.s[self.i].isalpha():
+                    self._err("unknown flag")
                 self._err("missing flag")
             if remove & (ASCII | UNICODE | LOCALE):
                 self._err("bad inline flags: cannot turn off flags "
                           "'a', 'u' and 'L'")
             if self.i >= self.n or self.s[self.i] != ':':
-                self._err("missing :")
-        elif c != ':':
-            self._err("missing -, : or )")
+                self._err("unknown flag"
+                          if self.i < self.n and self.s[self.i].isalpha()
+                          else "missing :")
         # c == ':' (possibly after a '-flags' clause)
+        if add & remove:
+            # The same flag is both turned on and off.
+            self._err("bad inline flags: flag turned on and off")
         self.i += 1  # consume ':'
         self._seen_atom = True
         saved = self.flags

@@ -51,4 +51,24 @@ try:
 except re.error as e:
     print('err:', e)
 
+# Error parity: unrecognised flag letter (alpha vs non-alpha)
+try:
+    re.compile(r'(?iz)')
+except re.error as e:
+    print('err:', e)
+try:
+    re.compile(r'(?i-zm:y)')
+except re.error as e:
+    print('err:', e)
+try:
+    re.compile(r'(?i9)')
+except re.error as e:
+    print('err:', e)
+
+# Error parity: the same flag turned on and off
+try:
+    re.compile(r'(?i-i:y)')
+except re.error as e:
+    print('err:', e)
+
 print("re inline flags ok")
