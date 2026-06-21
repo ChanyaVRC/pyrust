@@ -10304,6 +10304,7 @@ impl Interpreter {
         let mut winner: Option<Rc<RefCell<PyClass>>> = None;
         for base_val in bases {
             let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
                 .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 continue;
@@ -10339,8 +10340,10 @@ impl Interpreter {
         for base_val in bases {
             // A generic alias used as a base (`class Sub[T](Base[T])` or
             // `class L(list[int])`) contributes its `__origin__` to the MRO,
-            // matching CPython's `__mro_entries__` protocol.
+            // matching CPython's `__mro_entries__` protocol.  `typing._GenericAlias`
+            // (`class Stack(Generic[T])`) unwraps to its `Generic` origin too.
             let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
                 .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 return Err(PyError::Runtime("class base must be a class".to_string()));
