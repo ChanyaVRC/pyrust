@@ -494,10 +494,13 @@ fn make_typing_alias(form: &str, subscript: Value) -> Value {
 fn make_any_instance() -> Value {
     ANY_CLASS.with(|class| {
         let mut attrs = InstanceAttrs::new();
-        // `typing.Any.__module__ == "typing"` (issue #2745).  `Any` is a
-        // singleton instance, so seed `__module__` on the instance rather than
-        // on the `_Any` class.
+        // `typing.Any.__module__ == "typing"` and `__name__`/`__qualname__` ==
+        // "Any" (issue #2745).  CPython 3.12 models `Any` as a class; pyrust
+        // models it as a singleton instance, so seed these introspection attrs
+        // on the instance rather than on the `_Any` class.
         attrs.insert("__module__", Value::string("typing"));
+        attrs.insert("__name__", Value::string("Any"));
+        attrs.insert("__qualname__", Value::string("Any"));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,

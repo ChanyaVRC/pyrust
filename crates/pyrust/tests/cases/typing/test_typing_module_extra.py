@@ -34,3 +34,11 @@ print(T.__name__)
 print(T.__module__)
 print(TypeVar("TC", int, str).__module__)
 print(TypeVar("TB", bound=int).__module__)
+
+# __name__ / __qualname__ parity for the three objects (issue #2745).
+print(typing.Any.__name__)
+print(typing.Any.__qualname__)
+print(typing.TypeVar.__name__)
+print(typing.TypeVar.__qualname__)
+print(typing.TypedDict.__name__)
+print(typing.TypedDict.__qualname__)

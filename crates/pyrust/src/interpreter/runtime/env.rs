@@ -624,6 +624,13 @@ impl Interpreter {
                     return Ok(Value::string(bare));
                 }
                 if name == "__qualname__" {
+                    // `typing.TypedDict` is a real function in CPython 3.12 with
+                    // `__qualname__ == "TypedDict"` (not the dotted form); pyrust
+                    // registers it under the dotted name `typing.TypedDict`, so
+                    // strip the module prefix here (issue #2745).
+                    if func_name == "typing.TypedDict" {
+                        return Ok(Value::string("TypedDict"));
+                    }
                     return Ok(Value::string(func_name));
                 }
                 if name == "__module__" {
