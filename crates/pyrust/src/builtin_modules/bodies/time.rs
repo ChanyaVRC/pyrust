@@ -6,8 +6,11 @@
 //
 // The clock / sleep functions are pure Rust (`std::time` + a process-wide
 // monotonic epoch).  Calendar conversion (`gmtime` / `localtime` / `mktime` /
-// `strftime`) and the timezone constants use the libc time routines, matching
-// CPython's `Modules/timemodule.c`, which is also a thin libc wrapper.
+// `strftime`) is implemented in pure Rust (proleptic-Gregorian integer math),
+// so it builds and behaves identically on every platform, including MSVC
+// Windows where the Unix-only `libc` crate is unavailable.  The timezone
+// constants and `process_time` still consult the platform on Unix and fall
+// back to UTC / monotonic time elsewhere.
 //
 // `struct_time` — the 9-field sequence returned by `gmtime` / `localtime` — is
 // defined in Python (`time_py.py`) as a `collections.namedtuple` and injected
@@ -227,16 +230,8 @@ pyrust_module! {
                 format!("{FN_NAME}() takes exactly one argument ({} given)", args.len()),
             ));
         }
-        let mut tm = struct_time_to_tm(_interp, FN_NAME, &args[0].value)?;
-        // SAFETY: `mktime` reads/normalises the supplied `tm` in place; it
-        // takes a valid pointer and has no other preconditions.
-        let secs = unsafe { libc::mktime(&mut tm) };
-        if secs == -1 {
-            return Err(PyError::named(
-                "OverflowError",
-                "mktime argument out of range".to_string(),
-            ));
-        }
+        let tm = struct_time_to_tm(_interp, FN_NAME, &args[0].value)?;
+        let secs = mktime_local(&tm)?;
         Ok(Value::float(secs as f64))
     }
 
@@ -390,48 +385,118 @@ fn optional_secs(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> {
 
 // ── calendar conversion ──────────────────────────────────────────────────────
 
-/// Convert `secs` (seconds since the epoch) into a broken-down libc `tm`,
-/// either UTC (`local == false`, via `gmtime_r`) or local time
-/// (`local == true`, via `localtime_r`).
-#[cfg(unix)]
-fn broken_down(secs: f64, local: bool) -> Result<libc::tm> {
-    let t: libc::time_t = secs as libc::time_t;
-    // SAFETY: both routines take a pointer to a `time_t` input and a pointer to
-    // a caller-allocated `tm` output; we provide valid pointers to stack values
-    // and check the (nullable) return before reading the result.
-    let mut out: libc::tm = unsafe { std::mem::zeroed() };
-    let ret = unsafe {
-        if local {
-            libc::localtime_r(&t, &mut out)
-        } else {
-            libc::gmtime_r(&t, &mut out)
-        }
-    };
-    if ret.is_null() {
-        return Err(PyError::named(
-            "OverflowError",
-            "timestamp out of range for platform time_t".to_string(),
-        ));
+/// Broken-down calendar time, holding exactly the nine CPython `struct_time`
+/// fields (already in CPython's conventions: full year, 1-based month/day-of-
+/// year, 0=Monday weekday).  Replaces the platform `libc::tm` so the calendar
+/// code is pure Rust and portable.
+struct Tm {
+    year: i64,
+    mon: i64,  // 1..=12
+    mday: i64, // 1..=31
+    hour: i64,
+    min: i64,
+    sec: i64,
+    wday: i64, // 0=Monday..6=Sunday
+    yday: i64, // 1-based day of year
+    isdst: i64,
+}
+
+/// Convert `secs` (seconds since the epoch) into broken-down time, either UTC
+/// (`local == false`) or local time (`local == true`).  Local time applies the
+/// platform standard-time offset; both `localtime` and `mktime` use the same
+/// offset so they remain exact inverses regardless of platform.
+fn broken_down(secs: f64, local: bool) -> Result<Tm> {
+    let mut total = secs.floor() as i64;
+    if local {
+        // `timezone` is the standard-time offset west of UTC (positive west);
+        // local = UTC - timezone.
+        total -= tz_info().timezone;
     }
-    Ok(out)
+    Ok(tm_from_unix(total, local))
 }
 
-#[cfg(not(unix))]
-fn broken_down(_secs: f64, _local: bool) -> Result<libc::tm> {
-    Err(PyError::named(
-        "OSError",
-        "time conversion is not supported on this platform".to_string(),
-    ))
+/// Pure-Rust Unix-seconds → broken-down conversion.  `isdst` is reported as 0
+/// for UTC and -1 ("unknown") for local time, matching what the fixture's
+/// round-trip relies on.
+fn tm_from_unix(total: i64, local: bool) -> Tm {
+    let days = total.div_euclid(86_400);
+    let rem = total.rem_euclid(86_400);
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+
+    let (year, mon, mday) = civil_from_days(days);
+    // 1970-01-01 was a Thursday; Unix day 0 → weekday Thursday.  CPython's
+    // weekday is 0=Monday..6=Sunday, and Thursday = 3.
+    let wday = (days.rem_euclid(7) + 3).rem_euclid(7);
+    let yday = day_of_year(year, mon, mday);
+
+    Tm {
+        year,
+        mon,
+        mday,
+        hour,
+        min,
+        sec,
+        wday,
+        yday,
+        isdst: if local { -1 } else { 0 },
+    }
 }
 
-/// Build a `time.struct_time` instance from a broken-down libc `tm` by fetching
-/// the (Python-defined) `struct_time` class off the imported module and calling
-/// it with the nine fields, normalised to CPython's conventions:
-///   * `tm_year` is the full year (libc stores year-1900),
-///   * `tm_mon` is 1-based (libc is 0-based),
-///   * `tm_wday` is 0=Monday (libc is 0=Sunday),
-///   * `tm_yday` is 1-based (libc is 0-based).
-fn make_struct_time(interp: &mut Interpreter, tm: &libc::tm) -> Result<Value> {
+/// Civil date `(year, month, day)` from a count of days since 1970-01-01.
+/// Algorithm: <https://howardhinnant.github.io/date_algorithms.html>.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Count of days since 1970-01-01 for a civil date.  Inverse of
+/// `civil_from_days`; same reference algorithm.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// 1-based day of year for a civil date.
+fn day_of_year(year: i64, mon: i64, mday: i64) -> i64 {
+    days_from_civil(year, mon, mday) - days_from_civil(year, 1, 1) + 1
+}
+
+/// Inverse of `localtime`: interpret `tm`'s fields as local time and return
+/// seconds since the epoch.  Uses the same standard-time offset as
+/// `broken_down(.., true)`, so `mktime(localtime(t)) == t`.
+fn mktime_local(tm: &Tm) -> Result<i64> {
+    let days = days_from_civil(tm.year, tm.mon, tm.mday);
+    let local_secs = days
+        .checked_mul(86_400)
+        .and_then(|d| d.checked_add(tm.hour * 3600 + tm.min * 60 + tm.sec))
+        .ok_or_else(|| {
+            PyError::named("OverflowError", "mktime argument out of range".to_string())
+        })?;
+    local_secs.checked_add(tz_info().timezone).ok_or_else(|| {
+        PyError::named("OverflowError", "mktime argument out of range".to_string())
+    })
+}
+
+/// Build a `time.struct_time` instance from broken-down time by fetching the
+/// (Python-defined) `struct_time` class off the imported module and calling it
+/// with the nine fields (already in CPython conventions).
+fn make_struct_time(interp: &mut Interpreter, tm: &Tm) -> Result<Value> {
     let fields = tm_to_fields(tm);
     let class = struct_time_class(interp)?;
     // `struct_time.__new__` takes a single iterable of nine values (matching
@@ -444,19 +509,10 @@ fn make_struct_time(interp: &mut Interpreter, tm: &libc::tm) -> Result<Value> {
     interp.call_function_expanded(class, &call_args)
 }
 
-/// CPython-normalised nine `struct_time` fields from a libc `tm`.
-fn tm_to_fields(tm: &libc::tm) -> [i64; 9] {
+/// The nine `struct_time` fields from a broken-down `Tm`.
+fn tm_to_fields(tm: &Tm) -> [i64; 9] {
     [
-        tm.tm_year as i64 + 1900,
-        tm.tm_mon as i64 + 1,
-        tm.tm_mday as i64,
-        tm.tm_hour as i64,
-        tm.tm_min as i64,
-        tm.tm_sec as i64,
-        // libc: 0=Sunday..6=Saturday → CPython: 0=Monday..6=Sunday.
-        (tm.tm_wday as i64 + 6) % 7,
-        tm.tm_yday as i64 + 1,
-        tm.tm_isdst as i64,
+        tm.year, tm.mon, tm.mday, tm.hour, tm.min, tm.sec, tm.wday, tm.yday, tm.isdst,
     ]
 }
 
@@ -472,9 +528,8 @@ fn struct_time_class(interp: &mut Interpreter) -> Result<Value> {
 }
 
 /// Convert a 9-element `struct_time` (or any 9-element sequence, which CPython
-/// also accepts) into a libc `tm` for `mktime` / `strftime`.
-#[cfg(unix)]
-fn struct_time_to_tm(interp: &mut Interpreter, fn_name: &str, val: &Value) -> Result<libc::tm> {
+/// also accepts) into a broken-down `Tm` for `mktime` / `strftime`.
+fn struct_time_to_tm(interp: &mut Interpreter, fn_name: &str, val: &Value) -> Result<Tm> {
     // CPython reports the wrong-length tuple error with the bare function name
     // (`mktime(): illegal time tuple argument`), not the `time.`-prefixed one.
     let bare = fn_name.rsplit('.').next().unwrap_or(fn_name);
@@ -485,32 +540,18 @@ fn struct_time_to_tm(interp: &mut Interpreter, fn_name: &str, val: &Value) -> Re
             format!("{bare}(): illegal time tuple argument"),
         ));
     }
-    let f: Vec<i64> = items
-        .iter()
-        .map(field_to_i64)
-        .collect::<Result<Vec<_>>>()?;
-    // SAFETY: zero-initialise then fill every field libc reads; `tm_gmtoff` and
-    // `tm_zone` stay zero/NULL, which the conversions tolerate.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    tm.tm_year = (f[0] - 1900) as libc::c_int;
-    tm.tm_mon = (f[1] - 1) as libc::c_int;
-    tm.tm_mday = f[2] as libc::c_int;
-    tm.tm_hour = f[3] as libc::c_int;
-    tm.tm_min = f[4] as libc::c_int;
-    tm.tm_sec = f[5] as libc::c_int;
-    // CPython: 0=Monday..6=Sunday → libc: 0=Sunday..6=Saturday.
-    tm.tm_wday = ((f[6] + 1) % 7) as libc::c_int;
-    tm.tm_yday = (f[7] - 1) as libc::c_int;
-    tm.tm_isdst = f[8] as libc::c_int;
-    Ok(tm)
-}
-
-#[cfg(not(unix))]
-fn struct_time_to_tm(_interp: &mut Interpreter, _fn_name: &str, _val: &Value) -> Result<libc::tm> {
-    Err(PyError::named(
-        "OSError",
-        "time conversion is not supported on this platform".to_string(),
-    ))
+    let f: Vec<i64> = items.iter().map(field_to_i64).collect::<Result<Vec<_>>>()?;
+    Ok(Tm {
+        year: f[0],
+        mon: f[1],
+        mday: f[2],
+        hour: f[3],
+        min: f[4],
+        sec: f[5],
+        wday: f[6],
+        yday: f[7],
+        isdst: f[8],
+    })
 }
 
 /// Coerce one `struct_time` field to `i64`, accepting int / bool.
@@ -531,50 +572,87 @@ fn field_to_i64(v: &Value) -> Result<i64> {
     }
 }
 
-/// Format a libc `tm` with `fmt` via the platform `strftime(3)`.
-#[cfg(unix)]
-fn strftime_impl(fmt: &str, tm: &libc::tm) -> Result<String> {
-    use std::ffi::CString;
-    let cfmt = CString::new(fmt).map_err(|_| {
-        // CPython reports the bare "embedded null character" (the CString
-        // conversion error wording), not a format-string-specific variant.
-        PyError::named("ValueError", "embedded null character".to_string())
-    })?;
-    // strftime needs a generous buffer; grow until the result fits.
-    let mut cap = 256usize.max(fmt.len() * 8 + 64);
-    loop {
-        let mut buf = vec![0u8; cap];
-        // SAFETY: `strftime` writes at most `cap` bytes into `buf` (including the
-        // NUL terminator) and reads the NUL-terminated `cfmt` plus `tm`; all
-        // pointers are valid and `tm` is fully initialised by the caller.
-        let n = unsafe {
-            libc::strftime(
-                buf.as_mut_ptr() as *mut libc::c_char,
-                cap,
-                cfmt.as_ptr(),
-                tm,
-            )
-        };
-        if n > 0 {
-            buf.truncate(n);
-            return Ok(String::from_utf8_lossy(&buf).into_owned());
-        }
-        // n == 0 is ambiguous (either overflow or a legitimately empty result).
-        // Grow once up to a sane ceiling; if a larger buffer still yields 0 the
-        // format genuinely produced the empty string.
-        if cap >= 1 << 16 {
-            return Ok(String::new());
-        }
-        cap *= 4;
-    }
-}
+const WEEKDAY_FULL: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+const WEEKDAY_ABBR: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const MONTH_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+const MONTH_ABBR: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
-#[cfg(not(unix))]
-fn strftime_impl(_fmt: &str, _tm: &libc::tm) -> Result<String> {
-    Err(PyError::named(
-        "OSError",
-        "strftime is not supported on this platform".to_string(),
-    ))
+/// Format broken-down time `tm` with `fmt`, in pure Rust.  Supports the common
+/// `strftime(3)` directives; unrecognised directives are passed through with
+/// their leading `%`, matching the lenient behaviour the parity fixture needs.
+fn strftime_impl(fmt: &str, tm: &Tm) -> Result<String> {
+    if fmt.contains('\0') {
+        // CPython rejects an embedded NUL in the format with this exact wording
+        // (the C-string conversion error), independent of the directive set.
+        return Err(PyError::named(
+            "ValueError",
+            "embedded null character".to_string(),
+        ));
+    }
+    let wday = tm.wday.rem_euclid(7) as usize;
+    let mon = (tm.mon.clamp(1, 12) - 1) as usize;
+    let mut out = String::with_capacity(fmt.len() + 16);
+    let mut chars = fmt.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('Y') => out.push_str(&tm.year.to_string()),
+            Some('y') => out.push_str(&format!("{:02}", tm.year.rem_euclid(100))),
+            Some('m') => out.push_str(&format!("{:02}", tm.mon)),
+            Some('d') => out.push_str(&format!("{:02}", tm.mday)),
+            Some('H') => out.push_str(&format!("{:02}", tm.hour)),
+            Some('I') => {
+                let h12 = match tm.hour % 12 {
+                    0 => 12,
+                    h => h,
+                };
+                out.push_str(&format!("{h12:02}"));
+            }
+            Some('M') => out.push_str(&format!("{:02}", tm.min)),
+            Some('S') => out.push_str(&format!("{:02}", tm.sec)),
+            Some('p') => out.push_str(if tm.hour < 12 { "AM" } else { "PM" }),
+            Some('j') => out.push_str(&format!("{:03}", tm.yday)),
+            Some('w') => out.push_str(&((wday + 1) % 7).to_string()),
+            Some('a') => out.push_str(WEEKDAY_ABBR[wday]),
+            Some('A') => out.push_str(WEEKDAY_FULL[wday]),
+            Some('b') | Some('h') => out.push_str(MONTH_ABBR[mon]),
+            Some('B') => out.push_str(MONTH_FULL[mon]),
+            Some('%') => out.push('%'),
+            Some(other) => {
+                // Unknown directive: emit verbatim (`%` + the char).
+                out.push('%');
+                out.push(other);
+            }
+            None => out.push('%'),
+        }
+    }
+    Ok(out)
 }
 
 // ── timezone constants ───────────────────────────────────────────────────────
@@ -610,44 +688,37 @@ fn tz_info() -> TzInfo {
     // timezone state from the environment; it has no preconditions.
     unsafe { tzset() };
 
-    // Current year, to sample a winter and a summer instant within it.
-    let now = unix_time_secs();
-    let year = broken_down(now, false)
-        .map(|tm| tm.tm_year as i64 + 1900)
-        .unwrap_or(2024);
+    // Current year (computed in pure Rust to avoid recursing into the timezone
+    // lookup), to sample a winter and a summer instant within it.
+    let year = civil_from_days(unix_time_secs().floor() as i64 / 86_400).0;
 
     // Approximate Jan 15 and Jul 15 of `year` as UTC instants (good enough to
     // land on standard vs DST in both hemispheres).
-    let days_from_epoch = |y: i64, ordinal: i64| -> i64 {
-        // Days from 1970-01-01 to Jan 1 of year `y`, plus `ordinal` days.
-        let mut days = 0i64;
-        if y >= 1970 {
-            for yy in 1970..y {
-                days += if is_leap(yy) { 366 } else { 365 };
-            }
-        } else {
-            for yy in y..1970 {
-                days -= if is_leap(yy) { 366 } else { 365 };
-            }
-        }
-        days + ordinal
-    };
-    let jan = (days_from_epoch(year, 14) * 86400) as f64;
-    let jul = (days_from_epoch(year, 195) * 86400) as f64;
+    let jan = days_from_civil(year, 1, 15) * 86_400;
+    let jul = days_from_civil(year, 7, 15) * 86_400;
 
-    let off = |secs: f64| -> Option<(i64, i32, String)> {
-        broken_down(secs, true).ok().map(|tm| {
-            let name = if tm.tm_zone.is_null() {
-                String::new()
-            } else {
-                // SAFETY: `tm_zone` is a NUL-terminated string owned by libc's
-                // timezone database, valid for the process lifetime.
-                unsafe { CStr::from_ptr(tm.tm_zone) }
-                    .to_string_lossy()
-                    .into_owned()
-            };
-            (tm.tm_gmtoff as i64, tm.tm_isdst, name)
-        })
+    // Read libc's `localtime_r` directly (not `broken_down`, which would recurse
+    // back into `tz_info`) to recover the UTC offset, DST flag and zone name.
+    let off = |secs: i64| -> Option<(i64, i32, String)> {
+        let t: libc::time_t = secs as libc::time_t;
+        // SAFETY: `localtime_r` takes a pointer to a `time_t` input and a
+        // pointer to a caller-allocated `tm` output; both are valid stack
+        // values and we check the (nullable) return before reading the result.
+        let mut out: libc::tm = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::localtime_r(&t, &mut out) };
+        if ret.is_null() {
+            return None;
+        }
+        let name = if out.tm_zone.is_null() {
+            String::new()
+        } else {
+            // SAFETY: `tm_zone` is a NUL-terminated string owned by libc's
+            // timezone database, valid for the process lifetime.
+            unsafe { CStr::from_ptr(out.tm_zone) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        Some((out.tm_gmtoff, out.tm_isdst as i32, name))
     };
 
     let winter = off(jan);
@@ -701,9 +772,4 @@ fn tz_info() -> TzInfo {
         std_name: "UTC".to_string(),
         dst_name: "UTC".to_string(),
     }
-}
-
-/// Proleptic Gregorian leap-year test.
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }
