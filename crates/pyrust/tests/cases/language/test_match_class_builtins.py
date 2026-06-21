@@ -90,6 +90,55 @@ match 5:
         print("real", r)
 # real 5
 
+# --- Subclasses of the built-ins self-capture too (no __match_args__) ---
+
+
+class MyInt(int):
+    pass
+
+
+match MyInt(7):
+    case MyInt(n):
+        print("MyInt", n, type(n).__name__)
+# MyInt 7 MyInt
+
+
+class MyStrPlain(str):
+    pass
+
+
+match MyStrPlain("yo"):
+    case MyStrPlain(v):
+        print("MyStrPlain", v)
+# MyStrPlain yo
+
+
+# --- A subclass that defines __match_args__ uses it (no self-capture) ---
+
+
+class MyIntMA(int):
+    __match_args__ = ("bit_length",)
+
+
+match MyIntMA(8):
+    case MyIntMA(m):
+        print("MyIntMA reads attr:", callable(m))
+# MyIntMA reads attr: True
+
+
+class MyIntEmpty(int):
+    __match_args__ = ()
+
+
+try:
+    match MyIntEmpty(5):
+        case MyIntEmpty(z):
+            print("matched", z)
+except TypeError as e:
+    print("TypeError:", e)
+# TypeError: MyIntEmpty() accepts 0 positional sub-patterns (1 given)
+
+
 # --- A user class named "int" does NOT self-capture ---
 
 _real_int = int
