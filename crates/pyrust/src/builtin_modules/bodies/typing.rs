@@ -1088,6 +1088,14 @@ pub(crate) fn inject_python_members(
             .attrs
             .insert("__module__".to_string(), Value::string("typing"));
     }
+    // `TypeAliasType` (the runtime type of PEP 695 `type X = ...` objects) lives
+    // as a thread-local singleton on the interpreter side, not as a typing.rs
+    // class.  Export the same singleton so `typing.TypeAliasType` exists and
+    // `type(my_alias) is typing.TypeAliasType` holds (issue #2779).
+    module.borrow_mut().attrs.insert(
+        "TypeAliasType".to_string(),
+        Value::py_class(crate::interpreter::type_alias_class_singleton()),
+    );
     interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()

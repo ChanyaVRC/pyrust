@@ -6183,6 +6183,10 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("builtins.TypeAliasType.__repr__"),
         );
+        // CPython exposes `TypeAliasType` from `typing`, so
+        // `type(my_alias).__module__ == "typing"` and the bare class reprs as
+        // `<class 'typing.TypeAliasType'>` (issue #2779).
+        attrs.insert("__module__".to_string(), Value::string("typing"));
         Rc::new(RefCell::new(PyClass::new(
             "TypeAliasType",
             "TypeAliasType",
@@ -6264,6 +6268,21 @@ pub(crate) fn make_type_alias_instance(name: String, value: Value, type_params: 
             attrs,
         })))
     })
+}
+
+/// The PEP 695 `TypeAliasType` class singleton, so the `typing` module can
+/// export it (`typing.TypeAliasType`) and `type(my_alias) is
+/// typing.TypeAliasType` holds (issue #2779).
+pub(crate) fn type_alias_class_singleton() -> Rc<RefCell<PyClass>> {
+    TYPE_ALIAS_CLASS.with(Rc::clone)
+}
+
+/// True if `class` is the PEP 695 `TypeAliasType` singleton.  Used by the
+/// subscript path to give `Pair[int]` a `types.GenericAlias` while a
+/// non-generic alias raises CPython's "Only generic type aliases are
+/// subscriptable" (issue #2779).
+pub(crate) fn is_type_alias_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPE_ALIAS_CLASS.with(|cls| Rc::ptr_eq(class, cls))
 }
 
 #[cfg(test)]
