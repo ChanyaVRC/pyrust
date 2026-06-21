@@ -1397,6 +1397,28 @@ pyrust_module! {
                 let frame = make_reversed_dict_iter(items, seq.0.clone());
                 return Ok(Value::generator(Box::new(frame)));
             }
+        // mappingproxy (`vars(C)` / `d.keys().mapping`): reverse like a dict, but
+        // with a size-mutation guard keyed to the live proxy so a change mid-walk
+        // raises `RuntimeError` (issue #2728).  Handled before the generic
+        // `__reversed__` dispatch below because `mapping_proxy::call_method`
+        // returns an unguarded list-reverse iterator with no interpreter access
+        // to install the guard.
+        if pyrust_builtins::mapping_proxy::as_class_rc(&seq.0).is_some()
+            || pyrust_builtins::mapping_proxy::as_dict_rc(&seq.0).is_some()
+        {
+            let mut items = iter_values(&seq.0)?;
+            items.reverse();
+            let frame = make_reversed_dict_iter(items, seq.0.clone());
+            return Ok(Value::generator(Box::new(frame)));
+        }
+        // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,
+        // issue #2684) dispatch to it directly, matching CPython's protocol
+        // step 1.  `call_method` already returns the reverse-order iterator.
+        if let ValueKind::BuiltinObject { ops, state } = seq.0.kind()
+            && ops.has_method("__reversed__")
+        {
+            return ops.call_method(state, "__reversed__", Vec::new(), &indexmap::IndexMap::new());
+        }
         // Non-PyInstance: only sequence types and Range are reversible.
         // Generators (including list_iterator, set_iterator, filter, map, …)
         // and all BuiltinObject iterator types are not sequences and must
@@ -1604,7 +1626,17 @@ pyrust_module! {
                             // `for`-loop path (vm.rs `GetIter`) and CPython's
                             // inherited tp_iter slot behaviour.  A dict subclass also
                             // gets a size-mutation guard, OrderedDict-aware (#2400).
-                            let type_name = builtin_iter_type_name(&backing);
+                            // CPython 3.12 tags `iter(OrderedDict(...))` as
+                            // "odict_iterator", not "dict_keyiterator" (#2748);
+                            // the backing primitive is a plain dict, so the
+                            // OrderedDict-ness must come from the class chain.
+                            let type_name = if backing.as_dict().is_some()
+                                && crate::interpreter::class_is_named_ordered_dict(&class)
+                            {
+                                "odict_iterator"
+                            } else {
+                                builtin_iter_type_name(&backing)
+                            };
                             // Pass the carrier (not the unwrapped backing) so a
                             // non-iterable base subclass (`class C(int): pass`)
                             // reports its own class name, not the base's (#2557).
@@ -4764,6 +4796,22 @@ pyrust_module! {
         let (cls_val, inst_val) = if args.is_empty() {
             // Zero-argument super() — resolve __class__ cell and first param.
             resolve_zero_arg_super(_interp)?
+        } else if args.len() == 1 {
+            // One-argument super(cls) — an *unbound* super object that acts as a
+            // descriptor (#2704).  `__get__(obj, owner)` binds it to a concrete
+            // super(cls, obj).
+            let cls_val = args[0].value.clone();
+            let class = match cls_val.kind() {
+                ValueKind::PyClass(c) => Rc::clone(c),
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{FN_NAME}() argument 1 must be a type, not {}",
+                        value_type_name_str(&cls_val),
+                    ),
+                )),
+            };
+            return Ok(Value::super_proxy_unbound(class));
         } else if args.len() == 2 {
             (args[0].value.clone(), args[1].value.clone())
         } else {
@@ -7676,9 +7724,9 @@ pub(crate) fn value_class(obj: &Value) -> Value {
             }
         }
         ValueKind::PyModule(_) => Value::builtin_function("module"),
-        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => {
-            Value::builtin_function("super")
-        }
+        ValueKind::SuperProxy { .. }
+        | ValueKind::SuperProxyClass { .. }
+        | ValueKind::SuperProxyUnbound { .. } => Value::builtin_function("super"),
         ValueKind::Generator(state_rc) => {
             let borrow = state_rc.borrow();
             if borrow.downcast_ref::<MapIter>().is_some() {
@@ -7741,6 +7789,13 @@ pub(crate) fn value_class(obj: &Value) -> Value {
             // CPython `method-wrapper`, not `builtin_function_or_method`.
             if pyrust_builtins::bound_method::is_method_wrapper(obj) {
                 return Value::builtin_function("method-wrapper");
+            }
+            // Issue #2733: `type(list[int])` is the `types.GenericAlias` class
+            // (a proper PyClass singleton), not a `BuiltinFunction` sentinel, so
+            // its repr is `<class 'types.GenericAlias'>`, `__module__` is
+            // `'types'`, and `__name__` is `'GenericAlias'`.
+            if ops.type_name() == pyrust_builtins::generic_alias::TYPE_NAME {
+                return Value::py_class(crate::interpreter::generic_alias_class_singleton());
             }
             Value::builtin_function(ops.type_name())
         }
@@ -8271,11 +8326,15 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
 /// before the guard (`exhaust_first`), plain dicts test the guard first.
 fn make_reversed_dict_iter(items: Vec<Value>, container: Value) -> NativeIterFrame {
     let recorded_len = items.len();
-    // CPython names these `dict_reversekeyiterator` etc.; pyrust currently
-    // reports the generic `list_reverseiterator` for all reversed iterators
-    // (a pre-existing type-name divergence, out of scope for #2448).
-    let mut frame = NativeIterFrame::new(items, "list_reverseiterator");
     let ordered = pyrust_builtins::dict_views::is_ordered_view(&container);
+    // CPython names reversed OrderedDict iterators `odict_iterator` — the same
+    // type as a forward OrderedDict iterator, shared across keys/values/items
+    // views (issue #2741).  Plain-dict reversed iterators are CPython's
+    // `dict_reversekeyiterator` etc.; pyrust still reports the generic
+    // `list_reverseiterator` for those (a pre-existing type-name divergence,
+    // out of scope for #2448 / #2741).
+    let type_name = if ordered { "odict_iterator" } else { "list_reverseiterator" };
+    let mut frame = NativeIterFrame::new(items, type_name);
     let (msg, exhaust_first) = if ordered {
         ("OrderedDict mutated during iteration", true)
     } else {
@@ -8837,6 +8896,13 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             {
                 crate::interpreter::itertools_chain_class()
             }
+            // Issue #2733: `isinstance(list[int], type(list[int]))` is True —
+            // a PEP 585 alias is an instance of the `types.GenericAlias` class.
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::generic_alias::TYPE_NAME =>
+            {
+                Some(crate::interpreter::generic_alias_class_singleton())
+            }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };
         if let Some(actual) = actual_class {
@@ -8896,6 +8962,21 @@ fn isinstance_check(
     }
     // PEP 604: `isinstance(x, int | str)` — unwrap UnionType to its __args__.
     if let Some(args) = pyrust_builtins::union_type::union_type_args(cls) {
+        if let ValueKind::Tuple(items) = args.kind() {
+            let items: Vec<Value> = items.to_vec();
+            for item in &items {
+                if isinstance_check(fn_name, obj, item, interp)? {
+                    return Ok(true);
+                }
+            }
+        }
+        return Ok(false);
+    }
+    // `isinstance(x, typing.Union[int, str])` — CPython 3.12 accepts a
+    // `typing.Union[...]` alias as the second arg, treating it like the tuple
+    // of its `__args__`.  Detect the alias by its origin being the `Union`
+    // special form and recurse over its members.
+    if let Some(args) = pyrust_builtins::generic_alias::as_typing_union_args(cls) {
         if let ValueKind::Tuple(items) = args.kind() {
             let items: Vec<Value> = items.to_vec();
             for item in &items {
@@ -9197,6 +9278,20 @@ fn issubclass_check(
     }
     // PEP 604: `issubclass(X, int | str)` — unwrap UnionType to its __args__.
     if let Some(args) = pyrust_builtins::union_type::union_type_args(classinfo) {
+        if let ValueKind::Tuple(items) = args.kind() {
+            let items: Vec<Value> = items.to_vec();
+            for item in &items {
+                if issubclass_check(fn_name, cls, item, interp)? {
+                    return Ok(true);
+                }
+            }
+        }
+        return Ok(false);
+    }
+    // `issubclass(X, typing.Union[int, str])` — accept a `typing.Union[...]`
+    // alias as the second arg, treating it like the tuple of its `__args__`
+    // (CPython 3.12).
+    if let Some(args) = pyrust_builtins::generic_alias::as_typing_union_args(classinfo) {
         if let ValueKind::Tuple(items) = args.kind() {
             let items: Vec<Value> = items.to_vec();
             for item in &items {
@@ -10604,6 +10699,14 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
         ValueKind::Bytes(_) => "bytes_iterator",
         // dict view iterators: "dict_keys" → "dict_keyiterator", etc.
         // CPython uses "set_iterator" for frozenset iteration as well.
+        // OrderedDict-backed views (keys/values/items, tagged `ordered`) all
+        // iterate as "odict_iterator" in CPython 3.12, regardless of the view
+        // kind (#2748) — matching `iter(od)` itself.
+        ValueKind::BuiltinObject { .. }
+            if pyrust_builtins::dict_views::is_ordered_view(v) =>
+        {
+            "odict_iterator"
+        }
         ValueKind::BuiltinObject { ops, .. } => match ops.type_name() {
             "dict_keys" => "dict_keyiterator",
             "dict_values" => "dict_valueiterator",

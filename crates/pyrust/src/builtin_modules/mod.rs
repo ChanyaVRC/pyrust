@@ -237,4 +237,10 @@ pyrust_builtin_modules! {
     // hook.  The Rust ident is `re_mod` because `re` is a keyword; its
     // Python-level name is `re`.
     "re" as re_mod @inject,
+    // `types` — the type objects for runtime objects without a built-in name
+    // binding (`NoneType`, `FunctionType`, `MappingProxyType`, …).  The native
+    // body supplies the type-object constants and `MappingProxyType`;
+    // `SimpleNamespace` is defined in `types_py.py` and injected by the
+    // `@inject` post-load hook.
+    types @inject,
 }

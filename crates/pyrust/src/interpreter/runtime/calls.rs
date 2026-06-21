@@ -693,6 +693,34 @@ impl Interpreter {
                     type_args,
                 ))
             }
+            // `types.GenericAlias(origin, args)` — direct construction of a
+            // generic alias (the same value `list[int]` produces).  CPython:
+            // exactly two positional arguments, no keywords; a non-tuple
+            // `args` is wrapped into a one-element tuple so `__args__` is
+            // always a tuple.
+            ValueKind::BuiltinFunction(name)
+                if name == pyrust_builtins::generic_alias::TYPE_NAME =>
+            {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias() takes no keyword arguments"
+                    ));
+                }
+                if args.len() != 2 {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias expected 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                let origin = args[0].value.clone();
+                let index = args[1].value.clone();
+                let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+                    index
+                } else {
+                    Value::tuple(vec![index])
+                };
+                Ok(pyrust_builtins::generic_alias::generic_alias(origin, type_args))
+            }
             ValueKind::BuiltinFunction("str.format_map") => {
                 // `format_map` is implemented in Python in CPython, so its
                 // unbound-call diagnostics use the method_descriptor wording
@@ -1188,6 +1216,20 @@ impl Interpreter {
                 if let Some(dispatch) = primitive_class_dispatch(class) {
                     return dispatch(self, args);
                 }
+                // `types.MappingProxyType(mapping)` — calling the real
+                // `mappingproxy` class constructs a proxy (CPython:
+                // `types.MappingProxyType` *is* the type, so calling it is a
+                // constructor).  It has no registry-backed constructor, so the
+                // fast path above misses.  Gate on the cheap `name` field first
+                // so user-class construction (`Foo()`) never pays the TLS
+                // singleton lookup; only confirm identity for the rare class
+                // actually named `mappingproxy`.
+                if class.borrow().name == "mappingproxy"
+                    && primitive_class_by_name("mappingproxy")
+                        .is_some_and(|mp| Rc::ptr_eq(&mp, class))
+                {
+                    return crate::builtin_modules::types::construct_mapping_proxy(args);
+                }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
             }
@@ -1392,6 +1434,47 @@ impl Interpreter {
     /// positional-args buffer and hands it back on every exit path, so the
     /// inner method has a single owner-restore point instead of ~20 scattered
     /// `self.bound_method_pos_buf = pos;` lines.
+    /// Bind an unbound `super(cls)` (#2704) to `obj` via the descriptor
+    /// protocol, mirroring CPython's `super_descr_get` / `supercheck`.  A None
+    /// `obj` returns the unbound super unchanged; an instance produces
+    /// `super(cls, obj)`; a class produces the class-bound `super(cls, obj)`.
+    pub(crate) fn bind_unbound_super(
+        &mut self,
+        class: std::rc::Rc<std::cell::RefCell<pyrust_core::PyClass>>,
+        obj: Value,
+    ) -> Result<Value> {
+        if obj.is_none() {
+            return Ok(Value::super_proxy_unbound(class));
+        }
+        match obj.kind() {
+            ValueKind::PyInstance(i) => {
+                let instance = std::rc::Rc::clone(i);
+                if !class_is_subclass_of(&instance.borrow().class, &class) {
+                    return Err(pyrust_core::type_err!(
+                        "super(type, obj): obj must be an instance or subtype of type"
+                    ));
+                }
+                Ok(Value::super_proxy(class, instance))
+            }
+            ValueKind::PyClass(obj_class) => {
+                let obj_class = std::rc::Rc::clone(obj_class);
+                if class_is_subclass_of(&obj_class, &class) {
+                    return Ok(Value::super_proxy_class(class, obj_class));
+                }
+                let type_cls = type_class_singleton();
+                if class_is_subclass_of(&class, &type_cls) {
+                    return Ok(Value::super_proxy_class(class, obj_class));
+                }
+                Err(pyrust_core::type_err!(
+                    "super(type, obj): obj must be an instance or subtype of type"
+                ))
+            }
+            _ => Err(pyrust_core::type_err!(
+                "super(type, obj): obj must be an instance or subtype of type"
+            )),
+        }
+    }
+
     fn call_bound_method_dispatch(
         &mut self,
         name_rc: std::rc::Rc<String>,
@@ -1484,6 +1567,18 @@ impl Interpreter {
                 return apply_format_spec(&receiver, spec);
             }
         }
+        // #2704: `super(cls).__get__(obj, owner)` — the unbound super object is
+        // a descriptor.  Binding it to a non-None `obj` yields the concrete
+        // `super(cls, obj)` (or `super(cls, obj)` when `obj` is a class);
+        // binding to None returns the unbound super unchanged (CPython
+        // super_descr_get).
+        if method == "super.__get__"
+            && let ValueKind::SuperProxyUnbound { class } = receiver.kind()
+        {
+            let class = std::rc::Rc::clone(class);
+            let obj = pos.first().cloned().unwrap_or_else(Value::none);
+            return self.bind_unbound_super(class, obj);
+        }
         // `__slots__` member_descriptor's descriptor-protocol methods, invoked
         // directly (`S.x.__get__(inst)`, `S.x.__set__(inst, v)`,
         // `S.x.__delete__(inst)`).  Issue #2084.
@@ -1548,6 +1643,27 @@ impl Interpreter {
                 let view_name = value_type_name_str(&receiver);
                 return Err(pyrust_core::type_err!(
                     "{view_name}.__reversed__() takes no arguments ({} given)",
+                    pos.len()
+                ));
+            }
+            let arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("reversed")
+                .expect("reversed must be in the registry");
+            return dispatch(self, &[arg]);
+        }
+        // issue #2728: route `mappingproxy.__reversed__()` back through the
+        // `reversed` builtin so the returned iterator carries the size-mutation
+        // guard.  `mapping_proxy::call_method` (in pyrust-builtins) can only
+        // return an unguarded list-reverse iterator; the guard needs interpreter
+        // access, so intercept here like the dict-view path above.
+        if !has_kw
+            && method == "__reversed__"
+            && (pyrust_builtins::mapping_proxy::as_class_rc(&receiver).is_some()
+                || pyrust_builtins::mapping_proxy::as_dict_rc(&receiver).is_some())
+        {
+            if !pos.is_empty() {
+                return Err(pyrust_core::type_err!(
+                    "mappingproxy.__reversed__() takes no arguments ({} given)",
                     pos.len()
                 ));
             }
@@ -10253,6 +10369,7 @@ impl Interpreter {
         let mut winner: Option<Rc<RefCell<PyClass>>> = None;
         for base_val in bases {
             let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
                 .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 continue;
@@ -10288,8 +10405,10 @@ impl Interpreter {
         for base_val in bases {
             // A generic alias used as a base (`class Sub[T](Base[T])` or
             // `class L(list[int])`) contributes its `__origin__` to the MRO,
-            // matching CPython's `__mro_entries__` protocol.
+            // matching CPython's `__mro_entries__` protocol.  `typing._GenericAlias`
+            // (`class Stack(Generic[T])`) unwraps to its `Generic` origin too.
             let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
                 .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 return Err(PyError::Runtime("class base must be a class".to_string()));
@@ -10333,7 +10452,7 @@ impl Interpreter {
             let Some(set_name_fn) = lookup_class_attr(&inst_class, "__set_name__") else {
                 continue;
             };
-            invoke_class_method(
+            if let Err(e) = invoke_class_method(
                 self,
                 set_name_fn,
                 attr_val.clone(),
@@ -10344,7 +10463,33 @@ impl Interpreter {
                         value: Value::string(attr_name.clone()),
                     },
                 ],
-            )?;
+            ) {
+                // CPython type_new_set_names appends a note to the propagated
+                // exception naming the descriptor, attribute, and owning class:
+                //   "Error calling __set_name__ on 'D' instance 'd' in 'C'"
+                // (3.12 re-raises the original exception with the note rather
+                // than wrapping it in RuntimeError).
+                let descriptor_type = inst_class.borrow().name.clone();
+                let owner_name = class.borrow().name.clone();
+                let note = format!(
+                    "Error calling __set_name__ on '{descriptor_type}' instance '{attr_name}' in '{owner_name}'"
+                );
+                let exc_val = self.materialize_pyerror(e)?;
+                // Append `note` to the exception's `__notes__` list (PEP 678),
+                // mirroring `BaseException.add_note`.
+                if let ValueKind::PyInstance(exc_inst) = exc_val.kind() {
+                    {
+                        let mut inst = exc_inst.borrow_mut();
+                        if !inst.attrs.contains_key("__notes__") {
+                            inst.attrs.insert("__notes__", Value::list(vec![]));
+                        }
+                    }
+                    if let Some(notes) = exc_inst.borrow().attrs.get_cloned("__notes__") {
+                        let _ = notes.list_push(Value::string(note));
+                    }
+                }
+                return Err(PyError::Raised(exc_val));
+            }
         }
         Ok(())
     }
