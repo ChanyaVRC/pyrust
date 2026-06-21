@@ -54,6 +54,18 @@ print(Fraction(1, 2) == Fraction(2, 4))# True
 print(Fraction(2, 1) == 2)             # True
 print(sorted([Fraction(1, 2), Fraction(1, 3), Fraction(1, 4)]))
 
+# Equality / comparison with bool (bool is a Rational in CPython)
+print(Fraction(1, 1) == True)          # True
+print(Fraction(0, 1) == False)         # True
+print(Fraction(3, 2) == True)          # False
+print(Fraction(1, 1) != True)          # False
+print(Fraction(1, 2) < True)           # True
+
+# __format__ (float-style spec parsing)
+print(format(Fraction(1, 3), '.4f'))   # 0.3333
+print(format(Fraction(22, 7), '.2e'))  # 3.14e+00
+print(format(Fraction(3, 2), '%'))     # 150.000000%
+
 # Conversions
 print(int(Fraction(7, 2)))             # 3
 print(float(Fraction(1, 4)))           # 0.25

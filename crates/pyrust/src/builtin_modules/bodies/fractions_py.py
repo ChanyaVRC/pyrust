@@ -678,7 +678,12 @@ class Fraction:
         """a == b"""
         if type(b) is int:
             return a._numerator == b and a._denominator == 1
-        if isinstance(b, Fraction):
+        # CPython uses ``isinstance(b, numbers.Rational)`` here, which covers
+        # ``int`` and ``bool`` (both registered as ``Rational``) as well as
+        # ``Fraction``.  pyrust ships no ``numbers`` ABC, so spell out the
+        # concrete rational types -- ``int`` here includes ``bool``, and an
+        # ``int``/``bool`` exposes ``.numerator`` / ``.denominator``.
+        if isinstance(b, (int, Fraction)):
             return (a._numerator == b.numerator and
                     a._denominator == b.denominator)
         if isinstance(b, complex) and b.imag == 0:
