@@ -76,6 +76,7 @@ fn insn_anchor_by_discriminant(insn: &Insn) -> bool {
             | Insn::CallMethodExpanded { .. }
             | Insn::CallMethodKw { .. }
             | Insn::RaiseValue(_)
+            | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(..)
             | Insn::RaiseAssert(_)
     )
@@ -2089,6 +2090,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     | Insn::Return(_)
                     | Insn::ReturnNone
                     | Insn::RaiseValue(_)
+                    | Insn::RaiseExceptStarResidual(_)
                     | Insn::RaiseFrom(..)
                     | Insn::RaiseReRaise
                     | Insn::RaiseAssert(_)
@@ -2265,6 +2267,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::Return(_)
             | Insn::ReturnNone
             | Insn::RaiseValue(_)
+            | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(..)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
@@ -2548,6 +2551,7 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             Insn::Return(_)
             | Insn::ReturnNone
             | Insn::RaiseValue(_)
+            | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseReRaise
             | Insn::RaiseFrom(_, _)
             | Insn::RaiseAssert(_)
@@ -3336,6 +3340,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | Return(s)
         | PrintExpr(s)
         | RaiseValue(s)
+        | RaiseExceptStarResidual(s)
         | RaiseAssert(s)
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
@@ -3512,6 +3517,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | Return(s)
         | PrintExpr(s)
         | RaiseValue(s)
+        | RaiseExceptStarResidual(s)
         | RaiseAssert(s)
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
@@ -4577,6 +4583,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | Return(..)
         | ReturnNone
         | RaiseValue(..)
+        | RaiseExceptStarResidual(..)
         | RaiseFrom(..)
         | RaiseReRaise
         | RaiseAssert(..)
@@ -5448,6 +5455,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::Return(_)
                 | Insn::ReturnNone
                 | Insn::RaiseValue(_)
+                | Insn::RaiseExceptStarResidual(_)
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
@@ -6319,6 +6327,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::Return(src) => Insn::Return(s(&copies, src)),
             Insn::PrintExpr(v) => Insn::PrintExpr(s(&copies, v)),
             Insn::RaiseValue(v) => Insn::RaiseValue(s(&copies, v)),
+            Insn::RaiseExceptStarResidual(v) => Insn::RaiseExceptStarResidual(s(&copies, v)),
             Insn::RaiseAssert(v) => Insn::RaiseAssert(s(&copies, v)),
             Insn::RaiseFrom(exc, cause) => Insn::RaiseFrom(s(&copies, exc), s(&copies, cause)),
             Insn::JumpIfFalse(cond, k) => Insn::JumpIfFalse(s(&copies, cond), k),
@@ -6617,6 +6626,7 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec
             Insn::Return(_)
             | Insn::ReturnNone
             | Insn::RaiseValue(_)
+            | Insn::RaiseExceptStarResidual(_)
             | Insn::RaiseFrom(_, _)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
@@ -8476,6 +8486,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | Return(s)
         | PrintExpr(s)
         | RaiseValue(s)
+        | RaiseExceptStarResidual(s)
         | RaiseAssert(s)
         | JumpIfFalse(s, _)
         | JumpIfTrue(s, _)
@@ -8905,6 +8916,7 @@ fn pass_cross_jump_once(insns: Vec<Insn>, linenos: Vec<u32>) -> (Vec<Insn>, Vec<
                 | Insn::Jump(_)
                 | Insn::TailCall { .. }
                 | Insn::RaiseValue(_)
+                | Insn::RaiseExceptStarResidual(_)
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
@@ -12016,6 +12028,7 @@ mod tests {
                     | Insn::Return(_)
                     | Insn::ReturnNone
                     | Insn::RaiseValue(_)
+                    | Insn::RaiseExceptStarResidual(_)
                     | Insn::RaiseFrom(..)
                     | Insn::RaiseReRaise
                     | Insn::RaiseAssert(_)
