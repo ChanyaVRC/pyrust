@@ -297,11 +297,17 @@ class Flag(Enum):
         member = cls._value2member_map_.get(value)
         if member is not None:
             return member
-        # Reject bits that do not belong to any defined member.
         all_bits = 0
         for m in cls._member_map_.values():
             all_bits |= m._value_
-        if value & ~all_bits:
+        # CPython 3.12 accepts negatives in [-(all_bits+1), -1] and masks them
+        # (two's complement): Color(-1) with all_bits=7 yields Color(7).
+        if value < 0 and value >= -(all_bits + 1):
+            value = value & all_bits
+            cached = cls._value2member_map_.get(value)
+            if cached is not None:
+                return cached
+        elif (value & ~all_bits) != 0 or value < 0:
             raise ValueError("%r is not a valid %s" % (value, cls.__name__))
         # Build an unnamed composite pseudo-member and cache it.
         pseudo = object.__new__(cls)
@@ -333,6 +339,13 @@ class Flag(Enum):
             if v and (v & (v - 1)) == 0 and (self._value_ & v) == v:
                 members.append(name)
         return members
+
+    def __iter__(self):
+        for name in self._decompose_():
+            yield self.__class__._member_map_[name]
+
+    def __len__(self):
+        return len(self._decompose_())
 
     def __bool__(self):
         return bool(self._value_)
