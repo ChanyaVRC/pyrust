@@ -33,9 +33,22 @@ print(Single[int])                        # Single[int]
 print(Pair[int] == Pair[int])             # True
 print(Pair[int] == Pair[str])             # False
 
+# ── Slice subscript keeps the (unresolved) slice as the type arg ──────────────
+sl = Pair[1:2]
+print(sl)                                 # Pair[slice(1, 2, None)]
+print(sl.__args__)                        # (slice(1, 2, None),)
+print(type(sl).__name__)                  # GenericAlias
+print(Pair[1:2:3])                        # Pair[slice(1, 2, 3)]
+print(Pair[:])                            # Pair[slice(None, None, None)]
+
 # ── Non-generic alias is not subscriptable ───────────────────────────────────
 try:
     Vector[int]
+except TypeError as e:
+    print("TypeError:", e)  # TypeError: Only generic type aliases are subscriptable
+
+try:
+    Vector[1:2]
 except TypeError as e:
     print("TypeError:", e)  # TypeError: Only generic type aliases are subscriptable
 
