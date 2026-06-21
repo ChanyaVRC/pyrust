@@ -93,13 +93,13 @@ def geometric_mean(data):
     n = len(data)
     if n < 1:
         raise StatisticsError(
-            "geometric_mean requires a non-empty dataset containing positive numbers"
+            "geometric mean requires a non-empty dataset containing positive numbers"
         )
     total = 0.0
     for x in data:
         if x <= 0:
             raise StatisticsError(
-                "geometric_mean requires a non-empty dataset containing positive numbers"
+                "geometric mean requires a non-empty dataset containing positive numbers"
             )
         total += math.log(x)
     return math.exp(total / n)
@@ -108,29 +108,35 @@ def geometric_mean(data):
 def harmonic_mean(data, weights=None):
     """Return the harmonic mean of *data*."""
     data = _coerce_data(data)
+    errmsg = "harmonic mean does not support negative values"
     n = len(data)
     if n < 1:
         raise StatisticsError("harmonic_mean requires at least one data point")
+    elif n == 1 and weights is None:
+        x = data[0]
+        if x < 0:
+            raise StatisticsError(errmsg)
+        return x
     if weights is None:
         weights = [1] * n
+        sum_weights = n
     else:
         weights = list(weights)
         if len(weights) != n:
             raise StatisticsError("Number of weights does not match data size")
-    sum_weights = math.fsum(weights)
-    if sum_weights <= 0:
-        raise StatisticsError("Weights must sum to a positive value.")
-    total = 0.0
-    for x, w in zip(data, weights):
+        for w in weights:
+            if w < 0:
+                raise StatisticsError(errmsg)
+        sum_weights = math.fsum(weights)
+    for x in data:
         if x < 0:
-            raise StatisticsError("harmonic mean does not support negative values")
-        if x == 0:
-            if w != 0:
-                return 0
-            continue
-        total += w / x
+            raise StatisticsError(errmsg)
+    try:
+        total = math.fsum(w / x if w else 0 for w, x in zip(weights, data))
+    except ZeroDivisionError:
+        return 0
     if total <= 0:
-        raise StatisticsError("Weighted sum must be positive.")
+        raise StatisticsError("Weighted sum must be positive")
     return sum_weights / total
 
 
@@ -172,8 +178,6 @@ def median_grouped(data, interval=1.0):
     n = len(data)
     if n == 0:
         raise StatisticsError("no median for empty data")
-    elif n == 1:
-        return data[0]
     x = data[n // 2]
     # Find the position of the leftmost x and the count of x.
     i = 0
@@ -181,6 +185,8 @@ def median_grouped(data, interval=1.0):
         i += 1
     cf = i
     f = data.count(x)
+    interval = float(interval)
+    x = float(x)
     l = x - interval / 2.0
     return l + interval * (n / 2.0 - cf) / f
 

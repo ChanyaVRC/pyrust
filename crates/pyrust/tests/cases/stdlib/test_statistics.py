@@ -33,6 +33,23 @@ print(round(statistics.pstdev([2, 4, 4, 4, 5, 5, 7, 9]), 5))  # 2.0
 # Geometric / harmonic means
 print(statistics.geometric_mean([1, 2, 4]))  # 2.0
 print(statistics.harmonic_mean([1, 2, 4]))  # 1.714...
+print(statistics.harmonic_mean([5]))  # 5 (single point returns input unchanged)
+print(statistics.harmonic_mean([40, 60], [5, 30]))  # 56.0 (weighted)
+print(statistics.median_grouped([1]))  # 1.0 (single point is a float)
+
+# Error-message wording parity
+try:
+    statistics.geometric_mean([1, -2, 3])
+except statistics.StatisticsError as e:
+    print(str(e))  # "geometric mean ..." (space, not underscore)
+try:
+    statistics.harmonic_mean([1, 2, 3], [-1, -1, -1])
+except statistics.StatisticsError as e:
+    print(str(e))  # negative-weight uses the negative-values message
+try:
+    statistics.harmonic_mean([1, 2, 3], [0, 0, 0])
+except statistics.StatisticsError as e:
+    print(str(e))  # "Weighted sum must be positive"
 
 # NormalDist
 nd = statistics.NormalDist(2, 3)
