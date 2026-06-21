@@ -172,7 +172,48 @@ class _TypedDictMeta(type):
     CPython's `_TypedDictMeta` does the same; the metaclass only carries the
     `__annotations__` / `__required_keys__` / `__optional_keys__` / `__total__`
     bookkeeping for static checkers and introspection.
+
+    `__new__` merges the fields declared in the class body with those of every
+    TypedDict base, so a subclass's `__annotations__` / `__required_keys__` /
+    `__optional_keys__` reflect the whole inheritance chain (issue #2732),
+    matching CPython's `_TypedDictMeta.__new__`.
     """
+
+    def __new__(mcls, name, bases, ns, total=True):
+        own = dict(ns.get("__annotations__", {}))
+
+        merged = {}
+        required = set()
+        optional = set()
+        # Merge ancestor TypedDict fields first; own fields override on conflict.
+        # A key's required/optional status follows the *last* base to declare it
+        # (each base moves the key between the two sets), matching CPython's
+        # `_TypedDictMeta.__new__`; the two sets must stay disjoint.
+        for base in bases:
+            merged.update(getattr(base, "__annotations__", {}))
+            base_required = getattr(base, "__required_keys__", ())
+            required.update(base_required)
+            optional.difference_update(base_required)
+            base_optional = getattr(base, "__optional_keys__", ())
+            required.difference_update(base_optional)
+            optional.update(base_optional)
+
+        merged.update(own)
+        if total:
+            required.update(own)
+            optional.difference_update(own)
+        else:
+            optional.update(own)
+            required.difference_update(own)
+
+        ns["__annotations__"] = merged
+        ns["__required_keys__"] = frozenset(required)
+        ns["__optional_keys__"] = frozenset(optional)
+        ns["__total__"] = bool(total)
+        # CPython collapses the bases to `(dict,)`: a TypedDict is an annotation
+        # type, so the runtime class is a plain dict subclass and the ancestor
+        # TypedDicts do not appear in the MRO (their fields are merged above).
+        return super().__new__(mcls, name, (dict,), ns)
 
     def __call__(cls, *args, **kwargs):
         return dict(*args, **kwargs)
@@ -186,21 +227,12 @@ def _build_typeddict_class(typename, annotations, total=True):
     backs both the class form (`class Movie(TypedDict): ...`) and the functional
     form (`TypedDict('Movie', {...})`).  Per-key `Required[]` / `NotRequired[]`
     is out of scope (issue #2718); all keys share the class-level `total`.
+
+    The key accounting lives in `_TypedDictMeta.__new__`, so subclassing one of
+    these classes (`class Child(Base): ...`) merges inherited fields (#2732).
     """
-    ann = dict(annotations)
-    if total:
-        required = frozenset(ann)
-        optional = frozenset()
-    else:
-        required = frozenset()
-        optional = frozenset(ann)
-    namespace = {
-        "__annotations__": ann,
-        "__required_keys__": required,
-        "__optional_keys__": optional,
-        "__total__": bool(total),
-    }
-    return _TypedDictMeta(typename, (dict,), namespace)
+    namespace = {"__annotations__": dict(annotations)}
+    return _TypedDictMeta(typename, (dict,), namespace, total=total)
 
 
 def _typeddict_functional(typename, fields=None, /, *, total=True, **kwargs):
