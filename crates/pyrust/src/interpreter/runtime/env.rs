@@ -167,13 +167,26 @@ impl Interpreter {
                 let class = Rc::clone(class);
                 let obj_class = Rc::clone(obj_class);
                 // CPython exposes read-only `__thisclass__` / `__self__` /
-                // `__self_class__` on every super object (#2704).  For the
-                // class-bound form `super(C, cls)`, `__self__` and
-                // `__self_class__` are both `cls`.
+                // `__self_class__` on every super object (#2704).  `__self__` is
+                // always `cls` (the second argument).  `__self_class__` mirrors
+                // CPython's `supercheck` `obj_type` (#2712): in the standard
+                // classmethod case `super(Base, Derived)` (Derived is a subclass
+                // of Base) it is `Derived` itself, but in the metaclass branch
+                // `super(Meta, cls)` (cls is an *instance* of Meta, so Meta is in
+                // `type(cls)`'s MRO, not `cls`'s own MRO) it is `type(cls)`.
                 match name {
                     "__thisclass__" => return Ok(Value::py_class(class)),
-                    "__self__" | "__self_class__" => {
-                        return Ok(Value::py_class(obj_class));
+                    "__self__" => return Ok(Value::py_class(obj_class)),
+                    "__self_class__" => {
+                        let in_own_mro = class_mro_items(&obj_class)?.iter().any(|v| {
+                            matches!(v.kind(), ValueKind::PyClass(c) if Rc::ptr_eq(c, &class))
+                        });
+                        let self_class = if in_own_mro {
+                            obj_class
+                        } else {
+                            metaclass_of(&obj_class)
+                        };
+                        return Ok(Value::py_class(self_class));
                     }
                     _ => {}
                 }
