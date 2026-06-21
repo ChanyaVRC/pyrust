@@ -34,6 +34,26 @@ try:
 except TypeError as e:
     print("TypeError:", e)
 
+# `|` with a mappingproxy on the RIGHT (left is a non-mapping) also reports the
+# proxy as `dict`, because its `__ror__` is `dict.__ror__` (CPython 3.12).
+for left in [[1, 2], "s", (1,), 3.0, {1, 2}, 5]:
+    try:
+        left | mp
+    except TypeError as e:
+        print("TypeError:", e)
+
+# Set-only operators (`&`, `-`, `^`) have no dict slot, so a mappingproxy
+# operand keeps its own name there (not renamed to `dict`).
+for sym, fn in [
+    ("&", lambda a, b: a & b),
+    ("-", lambda a, b: a - b),
+    ("^", lambda a, b: a ^ b),
+]:
+    try:
+        fn({1, 2}, mp)
+    except TypeError as e:
+        print("TypeError:", e)
+
 # mappingproxy is read-only: `|=` is rejected even though `|` works.
 m = mp
 try:
