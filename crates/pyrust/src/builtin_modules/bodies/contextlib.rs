@@ -66,11 +66,13 @@ pyrust_module! {
             let exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
             if exc_type.is_none() {
                 let _ = _interp;
-                return Ok(Value::bool_(false));
+                return Ok(Value::none());
             }
             let raised_class = match exc_type.kind() {
                 ValueKind::PyClass(c) => Rc::clone(c),
                 _ => {
+                    // An exception is present but exc_type is not a class:
+                    // CPython returns the (falsy) bool, not None.
                     let _ = _interp;
                     return Ok(Value::bool_(false));
                 }
@@ -87,6 +89,8 @@ pyrust_module! {
                         return Ok(Value::bool_(true));
                     }
             }
+            // Exception present but no stored type matched: CPython returns the
+            // (falsy) bool result of `issubclass`, i.e. False — not None.
             let _ = _interp;
             Ok(Value::bool_(false))
         }
@@ -156,6 +160,9 @@ pyrust_module! {
                     }
                     Err(e) if is_stop_iteration(&e) => {
                         // Generator finished normally — expected.
+                        // CPython's _GeneratorContextManager.__exit__ returns
+                        // `False` here (not None): it falls through to the
+                        // shared `return False` after the no-exception branch.
                         Ok(Value::bool_(false))
                     }
                     Err(e) => Err(e),
@@ -274,7 +281,7 @@ pyrust_module! {
             // Call thing.close() with no arguments.
             let close_method = _interp.get_attr(&thing, "close")?;
             _interp.call_function_expanded(close_method, &[])?;
-            Ok(Value::bool_(false))
+            Ok(Value::none())
         }
     }
 
@@ -319,7 +326,7 @@ pyrust_module! {
         fn __exit__(args) -> Result<Value> {
             let _ = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(Value::bool_(false))
+            Ok(Value::none())
         }
     }
 
@@ -679,7 +686,8 @@ fn redirect_enter(
 
 /// Shared `__exit__` for `redirect_stdout`/`redirect_stderr`.  Pops the saved
 /// stream off `_old_targets` and restores it as `sys.<stream>`.  Never
-/// suppresses exceptions (returns `False`).
+/// suppresses exceptions (returns `None`, matching CPython where `__exit__`
+/// falls off the end).
 fn redirect_exit(
     interp: &mut crate::Interpreter,
     inst: &Rc<RefCell<PyInstance>>,
@@ -696,7 +704,7 @@ fn redirect_exit(
         _ => Value::none(),
     };
     interp.set_std_stream(stream, restored)?;
-    Ok(Value::bool_(false))
+    Ok(Value::none())
 }
 
 /// Construct a `_ContextManagerFactory` instance seeding `_func`.
