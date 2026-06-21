@@ -3535,6 +3535,33 @@ impl Interpreter {
                         _ => "<class>".to_string(),
                     };
 
+                    // PEP 634 §3.4: for these built-in atomic types a single
+                    // positional sub-pattern captures the whole subject and
+                    // __match_args__ is not consulted.  Match by pointer identity
+                    // against the per-thread primitive singletons so a user class
+                    // named e.g. "int" does not get this behaviour.
+                    let is_self_capture = matches!(cls_val.kind(), ValueKind::PyClass(rc)
+                        if [
+                            "bool", "bytearray", "bytes", "dict", "float",
+                            "frozenset", "int", "list", "set", "str", "tuple",
+                        ]
+                        .iter()
+                        .any(|&prim| {
+                            crate::interpreter::primitive_class_by_name(prim)
+                                .is_some_and(|pc| Rc::ptr_eq(rc, &pc))
+                        }));
+                    if is_self_capture {
+                        // CPython 3.12 accepts exactly one positional sub-pattern
+                        // for these types and rejects more.
+                        if n > 1 {
+                            vm_try!(Err(pyrust_core::type_err!("{cls_name}() accepts 1 positional sub-pattern ({n} given)")));
+                        }
+                        if n == 1 {
+                            regs[*dst_base as usize] = subj_val.clone();
+                        }
+                        continue 'vm;
+                    }
+
                     // Load __match_args__ from the class.
                     let match_args = match self.get_attr(&cls_val, "__match_args__") {
                         Ok(v) => v,
