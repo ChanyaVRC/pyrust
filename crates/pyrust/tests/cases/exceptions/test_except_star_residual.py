@@ -83,4 +83,25 @@ try:
 except* TypeError as eg:
     print("outer caught", [type(x).__name__ for x in eg.exceptions])
 
+# Case 6: residual PRESERVES the context that was active when the group was
+# first raised.  The residual is the same object as the original group, so a
+# pre-existing `__context__` (here the handled KeyError) survives the re-raise;
+# only `__suppress_context__` is set.  Re-raising must NOT clobber it to None.
+def residual_keeps_prior_context():
+    try:
+        raise KeyError("prior")
+    except KeyError:
+        try:
+            raise ExceptionGroup("group", [ValueError(1), TypeError(2)])
+        except* ValueError:
+            pass
+
+
+try:
+    residual_keeps_prior_context()
+except BaseException as e:
+    print("ctx", repr(e.__context__))
+    print("suppress", e.__suppress_context__)
+    print("nsubs", len(e.exceptions))
+
 print("done")

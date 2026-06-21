@@ -468,8 +468,9 @@ pub enum Insn {
     /// PEP 654 (#2755): re-raise the residual `except*` group in R[exc].
     /// Behaves like a *bare* re-raise of the leftover group: it keeps the
     /// group's carried traceback without prepending the epilogue frame and
-    /// does not attach implicit `__context__` (the group surfaces with
-    /// `__context__ is None` / `__suppress_context__ is True`, matching CPython).
+    /// does not attach fresh implicit `__context__` (the residual preserves
+    /// whatever `__context__` the original group already carried, and surfaces
+    /// with `__suppress_context__ is True`, matching CPython).
     RaiseExceptStarResidual(Reg),
     /// Match positional sub-patterns of a class pattern.
     ///
