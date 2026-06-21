@@ -312,7 +312,15 @@ class Flag(Enum):
 
     @property
     def name(self):
-        return self._name_
+        # A canonical member carries its own name; an unnamed composite reports
+        # the joined names of its set bits (`Color.RED|GREEN`.name == 'RED|GREEN'),
+        # matching CPython 3.12.  The empty flag (no set bits) stays nameless.
+        if self._name_ is not None:
+            return self._name_
+        names = self._decompose_()
+        if names:
+            return "|".join(names)
+        return None
 
     def _decompose_(self):
         # Names of the canonical single-bit members contained in ``self``, in

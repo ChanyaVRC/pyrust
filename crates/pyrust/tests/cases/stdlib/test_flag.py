@@ -42,6 +42,11 @@ composite = Color.RED | Color.GREEN
 print(Color.RED in composite)              # True
 print(Color.BLUE in composite)             # False
 
+# ── composite .name ──────────────────────────────────────────────────────────
+print(Color.RED.name)             # RED
+print((Color.RED | Color.GREEN).name)  # RED|GREEN
+print(repr((Color.RED & Color.BLUE).name))  # None
+
 # ── invert / xor ─────────────────────────────────────────────────────────────
 print(repr(~Color.RED))           # <Color.GREEN|BLUE: 6>
 print(repr(Color.RED ^ Color.WHITE))  # <Color.GREEN|BLUE: 6>
@@ -77,6 +82,7 @@ class Permission(IntFlag):
 p = Permission.READ | Permission.WRITE
 print(p)                          # 3
 print(repr(p))                    # <Permission.READ|WRITE: 3>
+print(p.name)                     # READ|WRITE
 print(int(p))                     # 3
 print(p & Permission.READ)        # 1
 print(Permission.READ == 1)       # True
