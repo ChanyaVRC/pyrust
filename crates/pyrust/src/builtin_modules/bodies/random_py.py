@@ -166,8 +166,9 @@ class Random:
 
     def getrandbits(self, k):
         """Return a non-negative int with ``k`` random bits."""
-        if not isinstance(k, int):
-            raise TypeError("number of bits should be an integer")
+        # CPython routes k through the integer protocol, so non-int args raise
+        # the standard operator.index TypeError and __index__ objects work.
+        k = _index(k)
         if k < 0:
             raise ValueError("number of bits must be non-negative")
         if k == 0:
