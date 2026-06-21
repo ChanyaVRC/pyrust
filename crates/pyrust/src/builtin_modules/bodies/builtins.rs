@@ -8305,11 +8305,15 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
 /// before the guard (`exhaust_first`), plain dicts test the guard first.
 fn make_reversed_dict_iter(items: Vec<Value>, container: Value) -> NativeIterFrame {
     let recorded_len = items.len();
-    // CPython names these `dict_reversekeyiterator` etc.; pyrust currently
-    // reports the generic `list_reverseiterator` for all reversed iterators
-    // (a pre-existing type-name divergence, out of scope for #2448).
-    let mut frame = NativeIterFrame::new(items, "list_reverseiterator");
     let ordered = pyrust_builtins::dict_views::is_ordered_view(&container);
+    // CPython names reversed OrderedDict iterators `odict_iterator` — the same
+    // type as a forward OrderedDict iterator, shared across keys/values/items
+    // views (issue #2741).  Plain-dict reversed iterators are CPython's
+    // `dict_reversekeyiterator` etc.; pyrust still reports the generic
+    // `list_reverseiterator` for those (a pre-existing type-name divergence,
+    // out of scope for #2448 / #2741).
+    let type_name = if ordered { "odict_iterator" } else { "list_reverseiterator" };
+    let mut frame = NativeIterFrame::new(items, type_name);
     let (msg, exhaust_first) = if ordered {
         ("OrderedDict mutated during iteration", true)
     } else {
