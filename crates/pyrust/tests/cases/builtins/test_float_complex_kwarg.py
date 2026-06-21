@@ -35,6 +35,11 @@ show("float.as_integer_ratio unbound",
 show("complex.conjugate bound", lambda: (1 + 2j).conjugate(x=1))
 show("complex.conjugate unbound", lambda: complex.conjugate(1j, k=1))
 
+# --- float.fromhex classmethod rejects keyword args (before parsing) ----------
+show("float.fromhex bound", lambda: (1.0).fromhex("0x1", x=1))
+show("float.fromhex unbound", lambda: float.fromhex("0x1", x=1))
+show("float.fromhex garbage kwarg", lambda: float.fromhex("garbage", x=1))
+
 # --- builtin-subclass instances reject with the base type's wording ----------
 
 

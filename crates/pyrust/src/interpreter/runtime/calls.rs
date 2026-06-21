@@ -543,6 +543,14 @@ impl Interpreter {
             // `"float.*"` arm below so that the arg-0-is-receiver assumption
             // in that arm is not applied here.
             ValueKind::BuiltinFunction("float.fromhex") => {
+                // Issue #2767: `float.fromhex` takes no keyword arguments; the
+                // kwarg must be rejected before the string is parsed (CPython
+                // raises TypeError even for a garbage/absent string arg).
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "float.fromhex() takes no keyword arguments"
+                    ));
+                }
                 // Accept both `float.fromhex(s)` and `(1.0).fromhex(s)`.
                 // Filter out a leading float or class receiver if present, then
                 // enforce exactly one remaining positional argument.
