@@ -51,6 +51,14 @@ print(tuple.__getnewargs__((9,)))
 print(float.__getnewargs__(2.5))
 print(complex.__getnewargs__(4 + 5j))
 
+# --- unbound (type-qualified) no-keyword-argument guard ---
+for t, recv in [(int, 7), (str, "z"), (bytes, b"z"), (tuple, (9,)),
+                (float, 2.5), (complex, 4 + 5j)]:
+    try:
+        t.__getnewargs__(recv, bogus=1)
+    except TypeError as e:
+        print(t.__name__, "unbound-kw->", e)
+
 # --- unbound receiver guard (method_descriptor "doesn't apply to" wording) ---
 try:
     int.__getnewargs__("not an int")
