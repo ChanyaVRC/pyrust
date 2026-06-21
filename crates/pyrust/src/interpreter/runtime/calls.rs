@@ -8689,6 +8689,17 @@ impl Interpreter {
     /// normally.  Used by `str.format` for the `!s` conversion and the
     /// empty-spec path.
     fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
+        // Issue #2771: `str(cls)` dispatches `type(cls).__str__(cls)` (falling
+        // back to the metaclass `__repr__`) when the class's metaclass defines a
+        // user override.  Returns `None` for an ordinary class, so plain classes
+        // keep the default `<class '...'>` rendering via `to_py_str()` below.
+        if let ValueKind::PyClass(cls_rc) = value.kind() {
+            let cls_rc = Rc::clone(cls_rc);
+            if let Some(res) = crate::interpreter::dispatch_metaclass_repr_str(self, &cls_rc, "__str__")
+            {
+                return res;
+            }
+        }
         let ValueKind::PyInstance(inst) = value.kind() else {
             // gh-95778: enforce int_max_str_digits for base-10 int->str.  This
             // is the common `str(int)` / `f"{int}"` path; `check_int_str_conversion`
@@ -8869,6 +8880,18 @@ impl Interpreter {
                 ],
             );
         }
+        // Issue #2771: a bare `{cls}` field is `str(cls)`, which dispatches the
+        // metaclass `__str__`/`__repr__` when overridden.  Returns `None` for an
+        // ordinary class, so plain classes keep the fast `apply_format_spec`
+        // path below.
+        if let ValueKind::PyClass(cls_rc) = value.kind() {
+            let cls_rc = Rc::clone(cls_rc);
+            if let Some(res) =
+                crate::interpreter::dispatch_metaclass_repr_str(self, &cls_rc, "__str__")
+            {
+                return res.map(Value::string);
+            }
+        }
         // Non-instance: empty spec == str(value).
         apply_format_spec(value, "")
     }
@@ -8888,6 +8911,29 @@ impl Interpreter {
     ///
     /// For all other value kinds: delegate straight to `apply_format_spec`.
     pub(crate) fn dispatch_dunder_format(&mut self, value: &Value, spec: &str) -> Result<Value> {
+        // Issue #2771: `format(cls, spec)` runs `type(cls).__format__`, which is
+        // the inherited `object.__format__`: empty spec returns `str(cls)`
+        // (now honouring a metaclass `__str__`/`__repr__`), a non-empty spec
+        // raises `TypeError` naming the metaclass.  Only intercept here when the
+        // metaclass actually overrides `__str__`/`__repr__`; otherwise fall
+        // through to `apply_format_spec`, which already renders the default
+        // `<class '...'>` form and raises the correct `type.__format__` error.
+        if let ValueKind::PyClass(cls_rc) = value.kind() {
+            let cls_rc = Rc::clone(cls_rc);
+            let has_meta_override = crate::interpreter::metaclass_dunder(&cls_rc, "__str__")
+                .or_else(|| crate::interpreter::metaclass_dunder(&cls_rc, "__repr__"))
+                .is_some();
+            if has_meta_override {
+                if spec.is_empty() {
+                    return Ok(Value::string(self.render_value_as_str(value)?));
+                }
+                let meta = crate::interpreter::metaclass_of(&cls_rc);
+                let meta_name = meta.borrow().name.clone();
+                return Err(pyrust_core::type_err!(
+                    "unsupported format string passed to {meta_name}.__format__"
+                ));
+            }
+        }
         let ValueKind::PyInstance(inst) = value.kind() else {
             return apply_format_spec(value, spec);
         };
@@ -9298,6 +9344,18 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     // gh-95778: enforce int_max_str_digits for base-10 int->str (no-op unless
     // `value` is, or transitively contains, an over-limit BigInt).
     pyrust_core::check_int_str_conversion(value)?;
+    // Issue #2771: `repr(cls)` dispatches `type(cls).__repr__(cls)` when the
+    // class's metaclass defines a user `__repr__`.  Returns `None` for an
+    // ordinary class, so plain classes fall through to `repr_raw()`'s default
+    // `<class '...'>` format.
+    if let ValueKind::PyClass(cls_rc) = value.kind() {
+        let cls_rc = Rc::clone(cls_rc);
+        if let Some(res) =
+            crate::interpreter::dispatch_metaclass_repr_str(interp, &cls_rc, "__repr__")
+        {
+            return res;
+        }
+    }
     let ValueKind::PyInstance(inst) = value.kind() else {
         return Ok(value.repr_raw());
     };

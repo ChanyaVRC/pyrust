@@ -4023,7 +4023,17 @@ impl Interpreter {
                     // hot loop (issues #2357 / #2372).  `PyInstance` values may
                     // carry a user `__format__`, so they keep going through the
                     // full `dispatch_dunder_format` path unchanged.
-                    let s = if matches!(val.kind(), ValueKind::PyInstance(_)) {
+                    // Issue #2771: a class value with a custom metaclass routes
+                    // through `dispatch_dunder_format` so `f"{cls:spec}"` runs the
+                    // metaclass `__format__` semantics (empty spec -> metaclass
+                    // `__str__`; non-empty spec -> `TypeError` naming the
+                    // metaclass).  Ordinary classes (metatype is `type`) keep the
+                    // cached fast path below.
+                    let class_with_meta = matches!(
+                        val.kind(),
+                        ValueKind::PyClass(c) if c.borrow().metatype.is_some()
+                    );
+                    let s = if matches!(val.kind(), ValueKind::PyInstance(_)) || class_with_meta {
                         let spec = spec_val.as_str().unwrap_or("");
                         vm_try!(self.dispatch_dunder_format(&val, spec))
                     } else {
