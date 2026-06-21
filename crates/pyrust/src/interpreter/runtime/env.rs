@@ -3333,6 +3333,23 @@ impl Interpreter {
                 let (program, linenos) =
                     Parser::new_with_pos(tokens, line_nos, cols, cols_end)
                         .parse_program_with_linenos()?;
+                // Register the (initially empty) module object in both caches
+                // *before* executing its body, matching CPython: the module is
+                // visible in `sys.modules` while it is still being initialised,
+                // so a circular `import` reached from inside the body returns
+                // this partial object instead of recursing forever (#2727 — the
+                // previous ordering stack-overflowed on mutually-recursive
+                // imports).  `attrs` are populated on the same `Rc` after the
+                // body runs, so identity is preserved and the re-entrant
+                // importer's reference observes the fully-populated module once
+                // initialisation finishes.
+                let module_rc = Rc::new(RefCell::new(PyModule {
+                    name: name.to_string(),
+                    attrs: HashMap::new(),
+                }));
+                let module = Value::py_module(Rc::clone(&module_rc));
+                self.module_cache.borrow_mut().insert(name.to_string(), module.clone());
+                Self::register_in_sys_modules(name, &module);
                 // Subinterpreter shares the same module_cache so results are visible to parent
                 let mut sub = Interpreter {
                     script_dir: self.script_dir.clone(),
@@ -3341,8 +3358,20 @@ impl Interpreter {
                     ..Default::default()
                 };
                 // call_depth is thread_local — sub-interpreter automatically shares the same counter
-                sub.exec_program_with_linenos(&program, &linenos, &src, false)?;
-                // Harvest all top-level bindings as module attrs
+                if let Err(e) = sub.exec_program_with_linenos(&program, &linenos, &src, false) {
+                    // CPython removes a half-initialised module from sys.modules
+                    // (and thus the import cache) when its body raises, so a
+                    // later import retries from scratch instead of yielding a
+                    // partially-populated object.
+                    self.module_cache.borrow_mut().remove(name);
+                    let modules = crate::builtin_modules::sys::sys_modules_dict();
+                    let _ = modules.dict_with_mut(|d| {
+                        d.shift_remove(&pyrust_core::PyKey::str_from(name));
+                    });
+                    return Err(e);
+                }
+                // Harvest all top-level bindings as module attrs onto the same
+                // module object already registered in the caches.
                 let attrs: HashMap<String, Value> = sub
                     .env
                     .borrow()
@@ -3360,12 +3389,7 @@ impl Interpreter {
                     })
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect();
-                let module = Value::py_module(Rc::new(RefCell::new(PyModule {
-                    name: name.to_string(),
-                    attrs,
-                })));
-                self.module_cache.borrow_mut().insert(name.to_string(), module.clone());
-                Self::register_in_sys_modules(name, &module);
+                module_rc.borrow_mut().attrs = attrs;
                 return Ok(module);
             }
         }
