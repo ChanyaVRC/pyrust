@@ -243,4 +243,8 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `time` (issue #2787): native clock / sleep functions and the libc-backed
+    // calendar conversions; `struct_time` is defined in `time_py.py` and
+    // injected by the `@inject` post-load hook.
+    time @inject,
 }
