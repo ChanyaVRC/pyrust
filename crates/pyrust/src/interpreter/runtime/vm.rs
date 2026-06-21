@@ -3306,6 +3306,8 @@ impl Interpreter {
                             // Store matched sub-group into R[matched_dst].
                             regs[*matched_dst as usize] = matched_group;
                             // Update R[src_group] with remaining (None = exhausted).
+                            // The leftover group, if any, is re-raised by the
+                            // epilogue via `RaiseExceptStarResidual` (#2755).
                             regs[*src_group as usize] = remaining.unwrap_or_else(Value::none);
                         }
                     }
@@ -3404,6 +3406,45 @@ impl Interpreter {
                     // re-counted; the catch site links the carried chain on as
                     // the tail (see `caught_traceback_value`).
                     self.reraise_is_bare = false;
+                    self.reset_captured_frames_if_reraise(&exc);
+                    vm_try!(Err::<(), _>(PyError::Raised(exc)));
+                }
+                Insn::RaiseExceptStarResidual(src) => {
+                    // PEP 654 (#2755): re-raise the leftover `except*` group.
+                    // CPython re-raises the residual like a bare re-raise of the
+                    // original group: it does NOT attach the *handled* group as
+                    // fresh implicit `__context__`, and it does not prepend the
+                    // epilogue frame onto the traceback.  The residual's
+                    // `__context__` must equal the ORIGINAL group's `__context__`
+                    // (the context that was active before the group was first
+                    // raised — `None` in the common case, but a genuine prior
+                    // exception when the group was raised inside another handler).
+                    //
+                    // The residual is a *derived* object (split off the original),
+                    // so it does not necessarily carry that context as a key.
+                    // Without one, implicit chaining during propagation would
+                    // wrongly fill it with the handled group itself.  Copy the
+                    // handled group's `__context__` onto the residual explicitly
+                    // (establishing the key so implicit chaining is skipped), then
+                    // set `__suppress_context__ = True` for the bare-re-raise.
+                    let exc = vm_try!(vm_read(&regs, *src, num_locals));
+                    // The currently-handled exception is the original group.
+                    let orig_ctx = self.handled_exc_stack.last().and_then(|g| {
+                        if let ValueKind::PyInstance(gi) = g.kind() {
+                            gi.borrow().attrs.get_cloned_or_slot("__context__")
+                        } else {
+                            None
+                        }
+                    });
+                    if let ValueKind::PyInstance(inst) = exc.kind() {
+                        let mut b = inst.borrow_mut();
+                        b.attrs
+                            .insert("__context__", orig_ctx.unwrap_or_else(Value::none));
+                        b.attrs.insert("__suppress_context__", Value::bool_(true));
+                    }
+                    // Treat as a bare re-raise: keep the carried traceback and do
+                    // not prepend the re-raising (epilogue) frame.
+                    self.reraise_is_bare = true;
                     self.reset_captured_frames_if_reraise(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }

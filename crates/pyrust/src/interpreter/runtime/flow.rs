@@ -803,6 +803,16 @@ impl Interpreter {
                         dst_b.attrs.insert(key, v);
                     }
                 }
+                // CPython's `exceptiongroup_subset` builds every *derived*
+                // subgroup with `suppress_context = true` unconditionally — it
+                // does NOT copy the source group's flag.  A `.split()` / `.subgroup()`
+                // result (and the `except*` residual once an outer handler
+                // re-splits it, #2755) therefore surfaces with
+                // `__suppress_context__ is True` even when the source group's was
+                // the `False` default.  Only the whole-group match returns the
+                // source object unchanged (handled in `eg_split` before reaching
+                // here), so forcing the flag on the derived path is safe.
+                dst_b.attrs.insert("__suppress_context__", Value::bool_(true));
                 // `__notes__`, by contrast, is an ordinary `__dict__` attribute in
                 // CPython (`add_note` stores it there), so a `__dict__` swap drops
                 // it and the derived group must not inherit the stale pre-swap notes.

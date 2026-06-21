@@ -343,7 +343,28 @@ impl Interpreter {
                     None
                 };
                 match tb_inner {
-                    Some(tb_frames) => frames.extend(tb_frames),
+                    Some(tb_frames) => {
+                        // A *bare* re-raise (#2405) — including the PEP 654
+                        // `except*` residual re-raise, which re-raises the
+                        // leftover group like a bare `raise` (#2755) — adds no
+                        // node for the re-raising frame itself.  When that
+                        // re-raise sits at module scope the carried frame list
+                        // already begins with the `<module>` frame, so the
+                        // synthetic `<module>` frame built above (the current VM
+                        // line) duplicates it.  Drop the synthetic frame in that
+                        // case.  A bare re-raise inside a *function* keeps the
+                        // synthetic `<module>` frame: there the carried list
+                        // begins with the enclosing function, and `<module>` is a
+                        // genuine outer caller.
+                        if self.reraise_is_bare
+                            && tb_frames
+                                .first()
+                                .is_some_and(|f| f.funcname.as_ref() == "<module>")
+                        {
+                            frames.clear();
+                        }
+                        frames.extend(tb_frames);
+                    }
                     None => {
                         // Issue #2428: the captured snapshot records each call
                         // frame's `(filename, lineno)` but leaves `source_line`
