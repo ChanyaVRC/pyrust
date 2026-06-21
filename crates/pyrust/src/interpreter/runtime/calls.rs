@@ -693,6 +693,34 @@ impl Interpreter {
                     type_args,
                 ))
             }
+            // `types.GenericAlias(origin, args)` — direct construction of a
+            // generic alias (the same value `list[int]` produces).  CPython:
+            // exactly two positional arguments, no keywords; a non-tuple
+            // `args` is wrapped into a one-element tuple so `__args__` is
+            // always a tuple.
+            ValueKind::BuiltinFunction(name)
+                if name == pyrust_builtins::generic_alias::TYPE_NAME =>
+            {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias() takes no keyword arguments"
+                    ));
+                }
+                if args.len() != 2 {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias expected 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                let origin = args[0].value.clone();
+                let index = args[1].value.clone();
+                let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+                    index
+                } else {
+                    Value::tuple(vec![index])
+                };
+                Ok(pyrust_builtins::generic_alias::generic_alias(origin, type_args))
+            }
             ValueKind::BuiltinFunction("str.format_map") => {
                 // `format_map` is implemented in Python in CPython, so its
                 // unbound-call diagnostics use the method_descriptor wording
@@ -1188,6 +1216,20 @@ impl Interpreter {
                 if let Some(dispatch) = primitive_class_dispatch(class) {
                     return dispatch(self, args);
                 }
+                // `types.MappingProxyType(mapping)` — calling the real
+                // `mappingproxy` class constructs a proxy (CPython:
+                // `types.MappingProxyType` *is* the type, so calling it is a
+                // constructor).  It has no registry-backed constructor, so the
+                // fast path above misses.  Gate on the cheap `name` field first
+                // so user-class construction (`Foo()`) never pays the TLS
+                // singleton lookup; only confirm identity for the rare class
+                // actually named `mappingproxy`.
+                if class.borrow().name == "mappingproxy"
+                    && primitive_class_by_name("mappingproxy")
+                        .is_some_and(|mp| Rc::ptr_eq(&mp, class))
+                {
+                    return crate::builtin_modules::types::construct_mapping_proxy(args);
+                }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
             }
@@ -1601,6 +1643,27 @@ impl Interpreter {
                 let view_name = value_type_name_str(&receiver);
                 return Err(pyrust_core::type_err!(
                     "{view_name}.__reversed__() takes no arguments ({} given)",
+                    pos.len()
+                ));
+            }
+            let arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("reversed")
+                .expect("reversed must be in the registry");
+            return dispatch(self, &[arg]);
+        }
+        // issue #2728: route `mappingproxy.__reversed__()` back through the
+        // `reversed` builtin so the returned iterator carries the size-mutation
+        // guard.  `mapping_proxy::call_method` (in pyrust-builtins) can only
+        // return an unguarded list-reverse iterator; the guard needs interpreter
+        // access, so intercept here like the dict-view path above.
+        if !has_kw
+            && method == "__reversed__"
+            && (pyrust_builtins::mapping_proxy::as_class_rc(&receiver).is_some()
+                || pyrust_builtins::mapping_proxy::as_dict_rc(&receiver).is_some())
+        {
+            if !pos.is_empty() {
+                return Err(pyrust_core::type_err!(
+                    "mappingproxy.__reversed__() takes no arguments ({} given)",
                     pos.len()
                 ));
             }
@@ -10304,6 +10367,7 @@ impl Interpreter {
         let mut winner: Option<Rc<RefCell<PyClass>>> = None;
         for base_val in bases {
             let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
                 .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 continue;
@@ -10339,8 +10403,10 @@ impl Interpreter {
         for base_val in bases {
             // A generic alias used as a base (`class Sub[T](Base[T])` or
             // `class L(list[int])`) contributes its `__origin__` to the MRO,
-            // matching CPython's `__mro_entries__` protocol.
+            // matching CPython's `__mro_entries__` protocol.  `typing._GenericAlias`
+            // (`class Stack(Generic[T])`) unwraps to its `Generic` origin too.
             let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
                 .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 return Err(PyError::Runtime("class base must be a class".to_string()));
