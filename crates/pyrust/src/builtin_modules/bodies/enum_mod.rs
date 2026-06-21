@@ -1,4 +1,4 @@
-// `enum` module — `Enum`, `IntEnum`, `EnumMeta`/`EnumType`, and `auto`.
+// `enum` module — `Enum`, `IntEnum`, `Flag`, `EnumMeta`/`EnumType`, and `auto`.
 //
 // Included into `pub mod enum_mod { … }` declared by the
 // `pyrust_builtin_modules!` invocation in `builtin_modules/mod.rs`
@@ -33,7 +33,7 @@ use pyrust_derive::pyrust_module;
 const ENUM_PY_SOURCE: &str = include_str!("enum_py.py");
 
 /// Public names from `ENUM_PY_SOURCE` exported onto the `enum` module.
-const ENUM_PY_EXPORTS: [&str; 5] = ["EnumMeta", "EnumType", "Enum", "IntEnum", "auto"];
+const ENUM_PY_EXPORTS: [&str; 6] = ["EnumMeta", "EnumType", "Enum", "IntEnum", "Flag", "auto"];
 
 /// Execute `ENUM_PY_SOURCE` once and copy its public names onto the `enum`
 /// module's attribute map.  Wired from `env.rs::load_module`'s post-import
