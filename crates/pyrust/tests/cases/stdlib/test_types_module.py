@@ -173,6 +173,18 @@ print(type(NotImplemented) is types.NotImplementedType)
 print(types.NotImplementedType.__name__)
 print(repr(types.NotImplementedType))
 
+# isinstance against the runtime type constants (not just `is`/identity).
+print(isinstance(_g, types.GeneratorType))
+print(isinstance(_c, types.CoroutineType))
+print(isinstance(_ag, types.AsyncGeneratorType))
+print(isinstance(_Meth().m, types.MethodType))
+print(isinstance(int | str, types.UnionType))
+print(isinstance(..., types.EllipsisType))
+print(isinstance(NotImplemented, types.NotImplementedType))
+# A generator is not a coroutine and vice versa.
+print(isinstance(_g, types.CoroutineType))
+print(isinstance(_c, types.GeneratorType))
+
 # Secondary effect: get_origin / get_args on a runtime union.
 print(get_origin(int | str) is types.UnionType)
 print(get_args(int | str))
