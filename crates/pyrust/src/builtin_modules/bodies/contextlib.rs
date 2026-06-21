@@ -363,9 +363,17 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let old_cwd = inst.borrow().attrs.get("_old_cwd").cloned()
                 .unwrap_or_else(|| Value::list(vec![]));
+            // Mirror CPython: `os.chdir(self._old_cwd.pop())`. Popping an empty
+            // stack (e.g. __exit__ called without a paired __enter__) raises
+            // IndexError("pop from empty list"), not a chdir(None) TypeError.
             let restored = match old_cwd.list_len() {
-                Some(n) if n > 0 => old_cwd.list_pop_at(n - 1).unwrap_or_else(|_| Value::none()),
-                _ => Value::none(),
+                Some(n) if n > 0 => old_cwd.list_pop_at(n - 1)?,
+                _ => {
+                    return Err(PyError::named(
+                        "IndexError",
+                        "pop from empty list".to_string(),
+                    ));
+                }
             };
             os_call(_interp, "chdir", &[ExpandedCallArg { name: None, value: restored }])?;
             Ok(Value::bool_(false))
