@@ -243,4 +243,10 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `decimal` (issue #2806): a port of CPython 3.12's pure-Python
+    // `_pydecimal.py` (`decimal_py.py`) — `Decimal`, `Context`,
+    // `getcontext` / `setcontext` / `localcontext`, the `ROUND_*` constants,
+    // and the `DecimalException` hierarchy — injected by the `@inject`
+    // post-load hook.  The native body is empty.
+    decimal @inject,
 }
