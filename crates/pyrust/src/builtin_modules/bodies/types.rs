@@ -9,8 +9,12 @@
 //     the interpreter's internal type singletons / sentinels so that, e.g.,
 //     `type(len) is types.BuiltinFunctionType` and
 //     `type(lambda: 0) is types.FunctionType` hold.
-//   * `MappingProxyType(mapping)` — the read-only dict view (native, since it
-//     constructs a real `mappingproxy` value).
+//   * `MappingProxyType` — the real `mappingproxy` primitive class.  In
+//     CPython `types.MappingProxyType` *is* the type, so
+//     `type(int.__dict__) is types.MappingProxyType` holds and calling it
+//     constructs a proxy.  We bind the constant to the interpreter's
+//     `mappingproxy` class singleton; the construction call is intercepted in
+//     `calls.rs` and dispatched to `construct_mapping_proxy` below.
 //   * `SimpleNamespace` — a plain Python class injected from `types_py.py`.
 //
 // The `MODULE_NAME` constant is injected by the `pyrust_builtin_modules!`
@@ -24,10 +28,7 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::Interpreter;
-use crate::interpreter::{
-    function_type_singleton, primitive_class_by_name, reject_keyword_args_expanded,
-    value_type_name_str,
-};
+use crate::interpreter::{function_type_singleton, primitive_class_by_name, value_type_name_str};
 use crate::value::{PyDict, PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
@@ -52,6 +53,62 @@ fn none_type_value() -> Value {
     }
 }
 
+/// `Value` for the `mappingproxy` primitive class (`type(int.__dict__)`).  This
+/// is the *same object* `type(...)` of a live proxy resolves to, so
+/// `type(int.__dict__) is types.MappingProxyType` holds.  Falls back to the
+/// native `MappingProxyType` builtin sentinel if the class singleton is
+/// somehow unavailable (it never is at runtime).
+fn mapping_proxy_type_value() -> Value {
+    match primitive_class_by_name("mappingproxy") {
+        Some(rc) => Value::py_class(rc),
+        None => Value::builtin_function("MappingProxyType"),
+    }
+}
+
+/// Build a `mappingproxy` from `MappingProxyType(...)` / `mappingproxy(...)`
+/// call arguments.  Shared by the `types` constant's call interception in
+/// `calls.rs`.  CPython 3.12 (Argument Clinic): the single `mapping` parameter
+/// is positional-or-keyword, so `mappingproxy(d)` and `mappingproxy(mapping=d)`
+/// both work, while a 2nd argument or a wrong keyword raises the `mappingproxy`
+/// wording.  `mapping` must be a mapping (we accept `dict`).
+pub(crate) fn construct_mapping_proxy(args: &[ExpandedCallArg]) -> Result<Value> {
+    // More than one argument (positional and/or keyword) is always rejected.
+    if args.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "mappingproxy() takes at most 1 argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    // Resolve the single `mapping` argument: a lone positional, or the keyword
+    // `mapping=`.  A missing positional / wrong keyword name is "missing
+    // required argument 'mapping' (pos 1)" (CPython ignores the stray keyword
+    // and reports the unfilled positional).
+    let mapping = match args.first() {
+        Some(a) if a.name.as_deref().is_none_or(|n| n == "mapping") => &a.value,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "mappingproxy() missing required argument 'mapping' (pos 1)".to_string(),
+            ));
+        }
+    };
+    match mapping.get_dict_rc() {
+        Some(rc) => Ok(pyrust_builtins::mapping_proxy::mapping_proxy_dict(
+            Rc::clone(rc),
+        )),
+        None => Err(PyError::named(
+            "TypeError",
+            format!(
+                "mappingproxy() argument must be a mapping, not {}",
+                value_type_name_str(mapping)
+            ),
+        )),
+    }
+}
+
 pyrust_module! {
     constants {
         // CPython: types.NoneType — `type(None)`.
@@ -70,39 +127,10 @@ pyrust_module! {
         "BuiltinMethodType"   => Value::builtin_function("builtin_function_or_method"),
         // CPython: types.GenericAlias — `type(list[int])`.
         "GenericAlias"        => Value::builtin_function(pyrust_builtins::generic_alias::TYPE_NAME),
-    }
-
-    /// CPython: types.MappingProxyType(mapping) — a read-only proxy of a
-    /// mapping.  `mapping` must be a mapping (we accept `dict`); anything
-    /// else raises `TypeError: mappingproxy() argument must be a mapping, …`.
-    /// <https://docs.python.org/3/library/types.html#types.MappingProxyType>
-    #[py_name = "MappingProxyType"]
-    fn mapping_proxy_type(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                if args.is_empty() {
-                    "mappingproxy() missing required argument 'mapping' (pos 1)".to_string()
-                } else {
-                    format!(
-                        "mappingproxy() takes at most 1 argument ({} given)",
-                        args.len()
-                    )
-                },
-            ));
-        }
-        let arg = &args[0].value;
-        match arg.get_dict_rc() {
-            Some(rc) => Ok(pyrust_builtins::mapping_proxy::mapping_proxy_dict(Rc::clone(rc))),
-            None => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "mappingproxy() argument must be a mapping, not {}",
-                    value_type_name_str(arg)
-                ),
-            )),
-        }
+        // CPython: types.MappingProxyType — `type(int.__dict__)`; the real
+        // `mappingproxy` class.  Calling it constructs a proxy (intercepted in
+        // `calls.rs`), and `type(int.__dict__) is types.MappingProxyType`.
+        "MappingProxyType"    => mapping_proxy_type_value(),
     }
 }
 

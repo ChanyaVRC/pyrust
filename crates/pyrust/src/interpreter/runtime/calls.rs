@@ -1216,6 +1216,20 @@ impl Interpreter {
                 if let Some(dispatch) = primitive_class_dispatch(class) {
                     return dispatch(self, args);
                 }
+                // `types.MappingProxyType(mapping)` — calling the real
+                // `mappingproxy` class constructs a proxy (CPython:
+                // `types.MappingProxyType` *is* the type, so calling it is a
+                // constructor).  It has no registry-backed constructor, so the
+                // fast path above misses.  Gate on the cheap `name` field first
+                // so user-class construction (`Foo()`) never pays the TLS
+                // singleton lookup; only confirm identity for the rare class
+                // actually named `mappingproxy`.
+                if class.borrow().name == "mappingproxy"
+                    && primitive_class_by_name("mappingproxy")
+                        .is_some_and(|mp| Rc::ptr_eq(&mp, class))
+                {
+                    return crate::builtin_modules::types::construct_mapping_proxy(args);
+                }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
             }

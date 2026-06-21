@@ -52,6 +52,22 @@ try:
 except TypeError:
     print("missing-arg")
 
+# MappingProxyType IS the runtime mappingproxy type (identity), not a
+# lookalike: `type(<proxy>) is types.MappingProxyType` and it is the same
+# object as `type(<class>.__dict__)`.
+print(type(mp) is types.MappingProxyType)
+print(type(int.__dict__) is types.MappingProxyType)
+print(type(types.MappingProxyType({})) is types.MappingProxyType)
+
+# `mapping` is positional-or-keyword.
+print(repr(types.MappingProxyType(mapping={"k": 1})))
+
+# A second argument is rejected with the at-most-1 wording.
+try:
+    types.MappingProxyType({}, {})
+except TypeError as e:
+    print(e)
+
 # ── GenericAlias (callable constructor) ────────────────────────────────────
 print(types.GenericAlias(list, int))
 print(types.GenericAlias(list, int).__args__)
