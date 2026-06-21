@@ -639,6 +639,14 @@ impl Interpreter {
                         return Err(pyrust_core::type_err!("descriptor '{method}' for 'float' objects doesn't apply to a '{actual}' object",));
                     }
                 };
+                // Issue #2767: float method_descriptors take no keyword
+                // arguments; the receiver-only `float::call` discards them, so
+                // guard here before delegating.
+                if args[1..].iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "float.{method}() takes no keyword arguments"
+                    ));
+                }
                 let pos: Vec<Value> = args[1..]
                     .iter()
                     .filter(|a| a.name.is_none())
@@ -1163,7 +1171,17 @@ impl Interpreter {
                         }
                         self.call_set_method(method, self_val, pos)
                     }
-                    "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
+                    "complex" => {
+                        // Issue #2767: complex methods take no keyword
+                        // arguments; the receiver-only `complex::call` discards
+                        // `kw`, so guard here before delegating.
+                        if !kw.is_empty() {
+                            return Err(pyrust_core::type_err!(
+                                "complex.{method}() takes no keyword arguments"
+                            ));
+                        }
+                        pyrust_builtins::complex::call(method, &self_val, pos)
+                    }
                     "frozenset" => {
                         // Issue #2500: frozenset methods take no keyword arguments.
                         if let Some(err) = reject_container_method_kwargs("frozenset", method, &kw) {
@@ -1370,17 +1388,20 @@ impl Interpreter {
             _ if pyrust_builtins::numeric_attrs_descriptor::as_method_descriptor(&function)
                 .is_some() =>
             {
-                let (attr_name, _class_name) =
+                let (attr_name, class_name) =
                     pyrust_builtins::numeric_attrs_descriptor::as_method_descriptor(&function)
                         .expect("guard checked above");
                 // Reject keyword arguments — CPython's method_descriptor does not
-                // accept them.
+                // accept them.  Issue #2767: the message is qualified with the
+                // owning type (`float.conjugate() takes no keyword arguments`),
+                // matching CPython 3.12.
                 if args.iter().any(|a| a.name.is_some()) {
-                    return Err(pyrust_core::type_err!("{}() takes no keyword arguments",
-                            attr_name));
+                    return Err(pyrust_core::type_err!(
+                        "{class_name}.{attr_name}() takes no keyword arguments"
+                    ));
                 }
                 if args.is_empty() {
-                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, _class_name, method));
+                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, class_name, method));
                 }
                 // Re-dispatch as attribute access on the first argument.
                 let remaining = &args[1..];
@@ -1784,6 +1805,13 @@ impl Interpreter {
                     ValueKind::Float(f) => f,
                     _ => unreachable!("kind_tag guard above"),
                 };
+                // Issue #2767: float methods take no keyword arguments; the
+                // receiver-only `float::call` discards `kw`, so guard here.
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "float.{method}() takes no keyword arguments"
+                    ));
+                }
                 pyrust_builtins::float::call(method, f, pos)
             }
             Kind::Bytes => {
@@ -1965,6 +1993,13 @@ impl Interpreter {
                 }
             }
             ValueKind::Complex(_, _) => {
+                // Issue #2767: complex methods take no keyword arguments; the
+                // receiver-only `complex::call` discards `kw`, so guard here.
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "complex.{method}() takes no keyword arguments"
+                    ));
+                }
                 let args_vec: Vec<Value> = std::mem::take(pos);
                 pyrust_builtins::complex::call(method, &receiver, args_vec)
             }
@@ -2391,6 +2426,13 @@ impl Interpreter {
                                         ValueKind::Float(f) => f,
                                         _ => unreachable!("BkKind::Float guard above"),
                                     };
+                                    // Issue #2767: float methods take no keyword
+                                    // arguments (subclass-receiver path).
+                                    if !kw.is_empty() {
+                                        return Err(pyrust_core::type_err!(
+                                            "float.{method}() takes no keyword arguments"
+                                        ));
+                                    }
                                     pyrust_builtins::float::call(method, f, &args_vec)
                                 }
                                 BkKind::Bytes => {
