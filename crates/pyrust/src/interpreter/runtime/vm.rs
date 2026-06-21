@@ -3306,6 +3306,8 @@ impl Interpreter {
                             // Store matched sub-group into R[matched_dst].
                             regs[*matched_dst as usize] = matched_group;
                             // Update R[src_group] with remaining (None = exhausted).
+                            // The leftover group, if any, is re-raised by the
+                            // epilogue via `RaiseExceptStarResidual` (#2755).
                             regs[*src_group as usize] = remaining.unwrap_or_else(Value::none);
                         }
                     }
@@ -3404,6 +3406,26 @@ impl Interpreter {
                     // re-counted; the catch site links the carried chain on as
                     // the tail (see `caught_traceback_value`).
                     self.reraise_is_bare = false;
+                    self.reset_captured_frames_if_reraise(&exc);
+                    vm_try!(Err::<(), _>(PyError::Raised(exc)));
+                }
+                Insn::RaiseExceptStarResidual(src) => {
+                    // PEP 654 (#2755): re-raise the leftover `except*` group.
+                    // CPython re-raises the residual without (a) chaining the
+                    // original group as its `__context__` and (b) prepending the
+                    // epilogue frame onto its traceback.  The leftover group
+                    // therefore surfaces with `__context__ is None`,
+                    // `__suppress_context__ is True`, and its original traceback
+                    // intact.
+                    let exc = vm_try!(vm_read(&regs, *src, num_locals));
+                    if let ValueKind::PyInstance(inst) = exc.kind() {
+                        let mut b = inst.borrow_mut();
+                        b.attrs.insert("__context__", Value::none());
+                        b.attrs.insert("__suppress_context__", Value::bool_(true));
+                    }
+                    // Treat as a bare re-raise: keep the carried traceback and do
+                    // not prepend the re-raising (epilogue) frame.
+                    self.reraise_is_bare = true;
                     self.reset_captured_frames_if_reraise(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }

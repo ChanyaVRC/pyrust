@@ -10156,7 +10156,9 @@ impl Compiler {
         // Restore the try-body lineno so the re-raise is attributed to the
         // failing statement in the try block, not to handler body code.
         self.set_lineno(try_body_lineno_star);
-        self.emit(Insn::RaiseValue(group_reg));
+        // PEP 654 (#2755): re-raise the residual group without spurious
+        // implicit-context chaining or an extra epilogue traceback frame.
+        self.emit(Insn::RaiseExceptStarResidual(group_reg));
         self.patch_jump(remaining_check);
 
         // No remaining exceptions — clean up normally.
