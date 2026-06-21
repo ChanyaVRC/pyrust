@@ -117,3 +117,13 @@ class Callable(metaclass=CallMeta):
 
 
 print(repr(Callable).startswith("<class "))  # True
+# format(cls, spec) names the metaclass in the error even when it does not
+# override __repr__/__str__ (CPython's object.__format__ uses type(cls)).
+try:
+    format(Callable, ">5")
+except TypeError as e:
+    print(e)  # unsupported format string passed to CallMeta.__format__
+try:
+    f"{Callable:>5}"
+except TypeError as e:
+    print(e)  # unsupported format string passed to CallMeta.__format__
