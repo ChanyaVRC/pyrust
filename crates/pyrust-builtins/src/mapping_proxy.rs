@@ -399,6 +399,18 @@ pub fn as_dict_rc(value: &Value) -> Option<Rc<RefCell<PyDict>>> {
     }
 }
 
+/// Live element count of any (class- or dict-backed) mappingproxy `Value`, or
+/// `None` if `value` is not a mappingproxy.  Used by the interpreter's
+/// `live_collection_len` so iterators over a mappingproxy install a size-mutation
+/// guard (issue #2728): the count is re-read each `next()` step and a change
+/// raises `RuntimeError: dictionary changed size during iteration`.
+pub fn live_len(value: &Value) -> Option<usize> {
+    match borrow_source_of(value)? {
+        MappingProxySource::Class(cls) => Some(cls.borrow().attrs.len()),
+        MappingProxySource::Dict(rc) => Some(rc.borrow().len()),
+    }
+}
+
 fn borrow_source_of(value: &Value) -> Option<MappingProxySource> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;

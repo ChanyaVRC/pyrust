@@ -1397,6 +1397,20 @@ pyrust_module! {
                 let frame = make_reversed_dict_iter(items, seq.0.clone());
                 return Ok(Value::generator(Box::new(frame)));
             }
+        // mappingproxy (`vars(C)` / `d.keys().mapping`): reverse like a dict, but
+        // with a size-mutation guard keyed to the live proxy so a change mid-walk
+        // raises `RuntimeError` (issue #2728).  Handled before the generic
+        // `__reversed__` dispatch below because `mapping_proxy::call_method`
+        // returns an unguarded list-reverse iterator with no interpreter access
+        // to install the guard.
+        if pyrust_builtins::mapping_proxy::as_class_rc(&seq.0).is_some()
+            || pyrust_builtins::mapping_proxy::as_dict_rc(&seq.0).is_some()
+        {
+            let mut items = iter_values(&seq.0)?;
+            items.reverse();
+            let frame = make_reversed_dict_iter(items, seq.0.clone());
+            return Ok(Value::generator(Box::new(frame)));
+        }
         // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,
         // issue #2684) dispatch to it directly, matching CPython's protocol
         // step 1.  `call_method` already returns the reverse-order iterator.
