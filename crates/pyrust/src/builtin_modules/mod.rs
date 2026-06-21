@@ -243,4 +243,9 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `csv` (issue #2808): a pure-Python module (`csv_py.py`) — the
+    // `reader` / `writer` factories, `DictReader` / `DictWriter`, the
+    // `Dialect` family, the dialect registry, and the `QUOTE_*` constants —
+    // injected by the `@inject` post-load hook; the native body is empty.
+    csv @inject,
 }
