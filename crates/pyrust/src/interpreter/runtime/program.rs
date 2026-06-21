@@ -127,6 +127,11 @@ impl Interpreter {
             .borrow_mut()
             .entry("builtins".to_string())
             .or_insert_with(|| builtins_val.clone());
+        // Mirror into the shared `sys.modules` dict (issue #2727) so that
+        // `builtins` shows up in the import cache as it does in CPython, even
+        // before any explicit `import builtins`.
+        let _ = crate::builtin_modules::sys::sys_modules_dict()
+            .dict_insert(pyrust_core::PyKey::str_from("builtins"), builtins_val.clone());
 
         let me_ref = module_env(&self.env);
         let mut me = me_ref.borrow_mut();
