@@ -219,7 +219,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("keys() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.keys() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
                 Ok(Value::list(source_keys(&src)))
@@ -228,7 +231,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("values() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.values() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
                 Ok(Value::list(source_values(&src)))
@@ -237,7 +243,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("items() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.items() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
                 let items: Vec<Value> = source_keys(&src)
@@ -248,10 +257,16 @@ impl BuiltinTypeOps for MappingProxyOps {
                 Ok(Value::list(items))
             }
             "get" => {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("get() takes 1 or 2 arguments ({} given)", args.len()),
+                        "get expected at least 1 argument, got 0".to_string(),
+                    ));
+                }
+                if args.len() > 2 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("get expected at most 2 arguments, got {}", args.len()),
                     ));
                 }
                 let default = || args.get(1).cloned().unwrap_or(Value::none());
@@ -279,7 +294,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("copy() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.copy() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
                 match &src {
