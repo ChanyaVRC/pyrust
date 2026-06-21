@@ -125,8 +125,11 @@ pyrust_module! {
         // same object.
         "BuiltinFunctionType" => Value::builtin_function("builtin_function_or_method"),
         "BuiltinMethodType"   => Value::builtin_function("builtin_function_or_method"),
-        // CPython: types.GenericAlias — `type(list[int])`.
-        "GenericAlias"        => Value::builtin_function(pyrust_builtins::generic_alias::TYPE_NAME),
+        // CPython: types.GenericAlias — `type(list[int])`.  This must be the
+        // SAME object `type(list[int])` returns (issue #2733), so identity
+        // (`type(list[int]) is types.GenericAlias`) holds.  Calling it
+        // constructs an alias (intercepted in `calls.rs`).
+        "GenericAlias"        => Value::py_class(crate::interpreter::generic_alias_class_singleton()),
         // CPython: types.MappingProxyType — `type(int.__dict__)`; the real
         // `mappingproxy` class.  Calling it constructs a proxy (intercepted in
         // `calls.rs`), and `type(int.__dict__) is types.MappingProxyType`.
