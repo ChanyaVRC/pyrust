@@ -95,6 +95,9 @@ thread_local! {
             "__class_getitem__".to_string(),
             Value::builtin_function("typing._generic_cgi"),
         );
+        // `__module__ = "typing"` so `typing.Generic.__module__ == "typing"`
+        // and the bare class reprs as `<class 'typing.Generic'>` (issue #2742).
+        attrs.insert("__module__".to_string(), Value::string("typing"));
         Rc::new(RefCell::new(PyClass::new("Generic", "Generic", None, attrs)))
     };
 
@@ -105,7 +108,12 @@ thread_local! {
             "__class_getitem__".to_string(),
             Value::builtin_function("typing._protocol_cgi"),
         );
-        Rc::new(RefCell::new(PyClass::new("Protocol", "Protocol", None, attrs)))
+        // `__module__ = "typing"` so `typing.Protocol.__module__ == "typing"`
+        // and the bare class reprs as `<class 'typing.Protocol'>` (issue #2742).
+        attrs.insert("__module__".to_string(), Value::string("typing"));
+        Rc::new(RefCell::new(PyClass::new(
+            "Protocol", "Protocol", None, attrs,
+        )))
     };
 
     // `NamedTuple` is a real `PyClass` so it can serve as a class base
@@ -120,6 +128,9 @@ thread_local! {
             "__pyrust_namedtuple_marker__".to_string(),
             Value::bool_(true),
         );
+        // `__module__ = "typing"` so `typing.NamedTuple.__module__ == "typing"`,
+        // matching `Generic` / `Protocol` (issue #2742).
+        attrs.insert("__module__".to_string(), Value::string("typing"));
         Rc::new(RefCell::new(PyClass::new(
             "NamedTuple",
             "NamedTuple",
