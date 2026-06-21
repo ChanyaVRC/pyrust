@@ -164,6 +164,61 @@ def _build_namedtuple_class(typename, fields, defaults, namespace):
     return cls
 
 
+class _TypedDictMeta(type):
+    """Metaclass for `TypedDict` classes (PEP 589, issue #2718).
+
+    A TypedDict is an *annotation* type: at runtime its instances are plain
+    `dict`s, so calling the class (`Movie(title='x')`) just builds a dict.
+    CPython's `_TypedDictMeta` does the same; the metaclass only carries the
+    `__annotations__` / `__required_keys__` / `__optional_keys__` / `__total__`
+    bookkeeping for static checkers and introspection.
+    """
+
+    def __call__(cls, *args, **kwargs):
+        return dict(*args, **kwargs)
+
+
+def _build_typeddict_class(typename, annotations, total=True):
+    """Build a TypedDict class from its annotations (issue #2718).
+
+    `annotations` is an ordered mapping of field name -> type.  `total` controls
+    whether the keys are required (`total=True`, the default) or optional.  This
+    backs both the class form (`class Movie(TypedDict): ...`) and the functional
+    form (`TypedDict('Movie', {...})`).  Per-key `Required[]` / `NotRequired[]`
+    is out of scope (issue #2718); all keys share the class-level `total`.
+    """
+    ann = dict(annotations)
+    if total:
+        required = frozenset(ann)
+        optional = frozenset()
+    else:
+        required = frozenset()
+        optional = frozenset(ann)
+    namespace = {
+        "__annotations__": ann,
+        "__required_keys__": required,
+        "__optional_keys__": optional,
+        "__total__": bool(total),
+    }
+    return _TypedDictMeta(typename, (dict,), namespace)
+
+
+def _typeddict_functional(typename, fields=None, /, *, total=True, **kwargs):
+    """Functional form of `typing.TypedDict` (issue #2718).
+
+    `TypedDict('Movie', {'title': str, 'year': int})` and the keyword form
+    `TypedDict('Movie', title=str, year=int)` both build a TypedDict class.
+    The class form `class Movie(TypedDict): ...` is handled natively.
+    """
+    if fields is None:
+        fields = kwargs
+    elif kwargs:
+        raise TypeError(
+            "TypedDict takes either a dict or keyword arguments, but not both"
+        )
+    return _build_typeddict_class(typename, fields, total)
+
+
 # Names that CPython's `_get_protocol_attrs` never treats as protocol members:
 # typing/Protocol bookkeeping attrs and `object` infrastructure, not
 # user-declared requirements (issue #2526).
