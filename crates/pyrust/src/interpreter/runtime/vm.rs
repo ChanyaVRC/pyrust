@@ -712,6 +712,12 @@ pub(crate) fn live_collection_len(container: &Value) -> Option<usize> {
     if let Some(backing) = builtin_data_backing(container) {
         return backing.as_dict().map(|d| d.len());
     }
+    // mappingproxy (issue #2728): both class-backed (`vars(C)`) and dict-backed
+    // (`d.keys().mapping`) proxies re-read their live source size so iterators
+    // over them detect a size change and raise the dict guard, like a plain dict.
+    if let Some(n) = pyrust_builtins::mapping_proxy::live_len(container) {
+        return Some(n);
+    }
     pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| rc.borrow().len())
 }
 

@@ -1609,6 +1609,27 @@ impl Interpreter {
                 .expect("reversed must be in the registry");
             return dispatch(self, &[arg]);
         }
+        // issue #2728: route `mappingproxy.__reversed__()` back through the
+        // `reversed` builtin so the returned iterator carries the size-mutation
+        // guard.  `mapping_proxy::call_method` (in pyrust-builtins) can only
+        // return an unguarded list-reverse iterator; the guard needs interpreter
+        // access, so intercept here like the dict-view path above.
+        if !has_kw
+            && method == "__reversed__"
+            && (pyrust_builtins::mapping_proxy::as_class_rc(&receiver).is_some()
+                || pyrust_builtins::mapping_proxy::as_dict_rc(&receiver).is_some())
+        {
+            if !pos.is_empty() {
+                return Err(pyrust_core::type_err!(
+                    "mappingproxy.__reversed__() takes no arguments ({} given)",
+                    pos.len()
+                ));
+            }
+            let arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("reversed")
+                .expect("reversed must be in the registry");
+            return dispatch(self, &[arg]);
+        }
         enum Kind {
             Int,
             Float,
