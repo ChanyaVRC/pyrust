@@ -318,8 +318,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                     ));
                 }
                 // Yield keys in reverse insertion order (CPython 3.12 #2684).
+                // Reported as `dict_reversekeyiterator` to match CPython's
+                // kind-specific iterator type name (#2702).
                 let keys = source_keys(&src);
-                Ok(crate::iter_helpers::reversed(Value::list(keys)))
+                Ok(crate::iter_helpers::reversed_dict_keys(Value::list(keys)))
             }
             _ => Err(PyError::named(
                 "AttributeError",

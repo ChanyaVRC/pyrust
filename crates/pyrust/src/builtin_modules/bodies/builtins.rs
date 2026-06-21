@@ -1374,7 +1374,8 @@ pyrust_module! {
         if let ValueKind::Dict(map) = seq.0.kind() {
             let mut items: Vec<Value> = map.keys().map(|k| key_to_value(k.clone())).collect();
             items.reverse();
-            let frame = make_reversed_dict_iter(items, seq.0.clone());
+            // Bare `reversed(d)` iterates keys: `dict_reversekeyiterator` (#2702).
+            let frame = make_reversed_dict_iter(items, seq.0.clone(), "dict_reversekeyiterator");
             return Ok(Value::generator(Box::new(frame)));
         }
         if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0)
@@ -1394,7 +1395,14 @@ pyrust_module! {
                     }
                 };
                 items.reverse();
-                let frame = make_reversed_dict_iter(items, seq.0.clone());
+                // CPython names the reverse iterator by view kind (#2702):
+                // 0=keys, 1=values, else items.
+                let type_name = match kind {
+                    0 => "dict_reversekeyiterator",
+                    1 => "dict_reversevalueiterator",
+                    _ => "dict_reverseitemiterator",
+                };
+                let frame = make_reversed_dict_iter(items, seq.0.clone(), type_name);
                 return Ok(Value::generator(Box::new(frame)));
             }
         // mappingproxy (`vars(C)` / `d.keys().mapping`): reverse like a dict, but
@@ -1408,7 +1416,9 @@ pyrust_module! {
         {
             let mut items = iter_values(&seq.0)?;
             items.reverse();
-            let frame = make_reversed_dict_iter(items, seq.0.clone());
+            // mappingproxy reverses its keys: `dict_reversekeyiterator` (#2702).
+            let frame =
+                make_reversed_dict_iter(items, seq.0.clone(), "dict_reversekeyiterator");
             return Ok(Value::generator(Box::new(frame)));
         }
         // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,
@@ -8324,16 +8334,25 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
 /// check-ordering follow the OrderedDict-aware convention shared with the
 /// forward path (`is_ordered_view`): OrderedDict-backed views test exhaustion
 /// before the guard (`exhaust_first`), plain dicts test the guard first.
-fn make_reversed_dict_iter(items: Vec<Value>, container: Value) -> NativeIterFrame {
+///
+/// `type_name` is the CPython iterator type name for the view kind (#2702):
+/// `dict_reversekeyiterator` / `dict_reversevalueiterator` /
+/// `dict_reverseitemiterator`.  It drives both `type(...).__name__` and the
+/// iterator's repr.
+fn make_reversed_dict_iter(
+    items: Vec<Value>,
+    container: Value,
+    type_name: &'static str,
+) -> NativeIterFrame {
     let recorded_len = items.len();
     let ordered = pyrust_builtins::dict_views::is_ordered_view(&container);
     // CPython names reversed OrderedDict iterators `odict_iterator` — the same
     // type as a forward OrderedDict iterator, shared across keys/values/items
-    // views (issue #2741).  Plain-dict reversed iterators are CPython's
-    // `dict_reversekeyiterator` etc.; pyrust still reports the generic
-    // `list_reverseiterator` for those (a pre-existing type-name divergence,
-    // out of scope for #2448 / #2741).
-    let type_name = if ordered { "odict_iterator" } else { "list_reverseiterator" };
+    // views (issue #2741).  Plain-dict reversed iterators use CPython's
+    // kind-specific names (`dict_reversekeyiterator` /
+    // `dict_reversevalueiterator` / `dict_reverseitemiterator`), passed in by
+    // the caller via `type_name` (#2702).
+    let type_name = if ordered { "odict_iterator" } else { type_name };
     let mut frame = NativeIterFrame::new(items, type_name);
     let (msg, exhaust_first) = if ordered {
         ("OrderedDict mutated during iteration", true)
