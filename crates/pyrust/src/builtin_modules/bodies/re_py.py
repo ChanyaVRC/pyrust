@@ -75,6 +75,7 @@ class error(Exception):
 #   ('backref', idx)             \1 .. \99
 #   ('backref_name', name)       (?P=name)
 #   ('lookahead', positive, node)   (?=...) / (?!...)
+#   ('lookbehind', positive, node, width)   (?<=...) / (?<!...) (fixed width)
 
 
 class _Parser:
@@ -249,6 +250,20 @@ class _Parser:
                 node = self._parse_alt()
                 self._expect(')')
                 return ('lookahead', kind == '=', node)
+            if kind == '<':
+                self.i += 1
+                if self.i >= self.n:
+                    self._err("unexpected end of pattern")
+                sub = self.s[self.i]
+                if sub == '=' or sub == '!':
+                    self.i += 1
+                    node = self._parse_alt()
+                    self._expect(')')
+                    width = _fixed_width(node)
+                    if width < 0:
+                        raise error("look-behind requires fixed-width pattern")
+                    return ('lookbehind', sub == '=', node, width)
+                self._err("unknown extension ?<" + sub)
             self._err("unknown extension ?" + kind)
         # plain capturing group
         idx = self._register_group(None)
@@ -402,6 +417,57 @@ def _decode_class_escape(c):
 # --------------------------------------------------------------------------- #
 
 
+def _fixed_width(node):
+    """Return the constant character width matched by ``node``, or -1 if the
+    width is variable (so lookbehind can reject it)."""
+    tag = node[0]
+    if tag == 'lit' or tag == 'any' or tag == 'cat' or tag == 'class':
+        return 1
+    if tag == 'backref' or tag == 'backref_name':
+        return -1
+    if tag in ('start', 'end', 'bol_a', 'eol_z', 'wordb',
+               'lookahead', 'lookbehind'):
+        return 0
+    if tag == 'seq':
+        total = 0
+        for child in node[1]:
+            w = _fixed_width(child)
+            if w < 0:
+                return -1
+            total += w
+        return total
+    if tag == 'group':
+        return _fixed_width(node[3])
+    if tag == 'alt':
+        width = None
+        for branch in node[1]:
+            w = _fixed_width(branch)
+            if w < 0:
+                return -1
+            if width is None:
+                width = w
+            elif width != w:
+                return -1
+        return width if width is not None else 0
+    if tag == 'opt':
+        # node? — variable unless the inner width is 0.
+        return -1
+    if tag == 'star':
+        return -1
+    if tag == 'plus':
+        return -1
+    if tag == 'repeat':
+        lo = node[2]
+        hi = node[3]
+        if hi is None or lo != hi:
+            return -1
+        w = _fixed_width(node[1])
+        if w < 0:
+            return -1
+        return w * lo
+    return -1
+
+
 def _is_word(ch):
     return ch == '_' or ch.isalnum()
 
@@ -543,6 +609,23 @@ class _Matcher:
             positive = node[1]
             saved = list(self.groups)
             matched = self._m(node[2], pos, lambda p: p) is not None
+            if not positive:
+                self.groups = saved
+            if matched == positive:
+                return cont(pos)
+            self.groups = saved
+            return None
+        if tag == 'lookbehind':
+            positive = node[1]
+            width = node[3]
+            start = pos - width
+            saved = list(self.groups)
+            if start < 0:
+                matched = False
+            else:
+                matched = self._m(
+                    node[2], start,
+                    lambda p: p if p == pos else None) is not None
             if not positive:
                 self.groups = saved
             if matched == positive:
