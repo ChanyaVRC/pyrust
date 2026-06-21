@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::PyKey;
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `dataclasses` member.  Exec'd
@@ -52,22 +52,13 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(DATACLASSES_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
         .ok_or_else(|| PyError::Runtime("dataclasses: exec namespace not a dict".into()))?;
     for name in DATACLASSES_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            // The exec namespace's `__name__` defaults to `__main__`; override
-            // `__module__` to `dataclasses` so `Field.__module__` and friends
-            // read `dataclasses`, matching CPython.
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
-                cls_rc
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("dataclasses"));
-            }
             module
                 .borrow_mut()
                 .attrs
