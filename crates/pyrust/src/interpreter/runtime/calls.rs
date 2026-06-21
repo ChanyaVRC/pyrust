@@ -8914,16 +8914,16 @@ impl Interpreter {
         // Issue #2771: `format(cls, spec)` runs `type(cls).__format__`, which is
         // the inherited `object.__format__`: empty spec returns `str(cls)`
         // (now honouring a metaclass `__str__`/`__repr__`), a non-empty spec
-        // raises `TypeError` naming the metaclass.  Only intercept here when the
-        // metaclass actually overrides `__str__`/`__repr__`; otherwise fall
-        // through to `apply_format_spec`, which already renders the default
-        // `<class '...'>` form and raises the correct `type.__format__` error.
+        // raises `TypeError` naming the *metaclass* (`type(cls).__name__`).
+        // CPython names the metaclass regardless of whether it overrides
+        // `__repr__`/`__str__`, so intercept here for any class carrying a
+        // custom metatype.  A plain class (metatype is the built-in `type`)
+        // falls through to `apply_format_spec`, which renders the default
+        // `<class '...'>` form and already raises `type.__format__`.
         if let ValueKind::PyClass(cls_rc) = value.kind() {
-            let cls_rc = Rc::clone(cls_rc);
-            let has_meta_override = crate::interpreter::metaclass_dunder(&cls_rc, "__str__")
-                .or_else(|| crate::interpreter::metaclass_dunder(&cls_rc, "__repr__"))
-                .is_some();
-            if has_meta_override {
+            let has_custom_meta = cls_rc.borrow().metatype.is_some();
+            if has_custom_meta {
+                let cls_rc = Rc::clone(cls_rc);
                 if spec.is_empty() {
                     return Ok(Value::string(self.render_value_as_str(value)?));
                 }
