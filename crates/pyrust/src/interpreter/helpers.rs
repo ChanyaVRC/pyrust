@@ -1043,6 +1043,7 @@ const INT_METHODS: &[&str] = &[
     "is_integer",
     "to_bytes",
     "as_integer_ratio",
+    "__getnewargs__",
 ];
 const BYTES_METHODS: &[&str] = pyrust_builtins::bytes::METHODS;
 const BYTEARRAY_METHODS: &[&str] = pyrust_builtins::bytearray::METHODS;
@@ -1058,7 +1059,7 @@ const STR_METHODS: &[&str] = &[
     "startswith", "endswith",
     "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric",
     "islower", "isupper", "istitle", "isascii", "isidentifier", "isprintable",
-    "translate",
+    "translate", "__getnewargs__",
     // Issue #2276: `str.encode` is a method_descriptor whose implementation
     // already exists (`pyrust_builtins::string::str_encode`); it was simply not
     // exposed unbound, so `str.encode()` raised `AttributeError` instead of the
@@ -1074,7 +1075,7 @@ const LIST_METHODS: &[&str] = &[
     "sort",
 ];
 
-const TUPLE_METHODS: &[&str] = &["index", "count"];
+const TUPLE_METHODS: &[&str] = &["index", "count", "__getnewargs__"];
 
 // `fromkeys` is a classmethod registered via `populate_primitive_methods`
 // so that `BuiltinFunction("dict.fromkeys")` ends up in the dict class
@@ -1092,7 +1093,7 @@ const SET_METHODS: &[&str] = &[
     "issubset", "issuperset", "isdisjoint",
 ];
 
-const COMPLEX_METHODS: &[&str] = &["conjugate"];
+const COMPLEX_METHODS: &[&str] = &["conjugate", "__getnewargs__"];
 
 const FROZENSET_METHODS: &[&str] = &[
     "copy", "union", "intersection", "difference", "symmetric_difference",
