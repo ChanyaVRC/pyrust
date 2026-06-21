@@ -104,4 +104,36 @@ except BaseException as e:
     print("suppress", e.__suppress_context__)
     print("nsubs", len(e.exceptions))
 
+# Case 7: when the residual is re-split by an outer `except*`, the matched
+# subgroup is a *derived* group.  CPython's `exceptiongroup_subset` builds every
+# derived subgroup with `__suppress_context__ is True` unconditionally, so the
+# outer handler's bound group surfaces with `suppress True` (and `__context__`
+# copied from the residual, here `None`).
+def residual_suppress_after_outer_resplit():
+    try:
+        try:
+            raise ExceptionGroup("g", [ValueError(1), TypeError(2)])
+        except* ValueError:
+            print("inner caught VE")
+    except* TypeError as eg:
+        print("outer subtypes", [type(x).__name__ for x in eg.exceptions])
+        print("outer suppress", eg.__suppress_context__)
+        print("outer ctx", repr(eg.__context__))
+
+
+residual_suppress_after_outer_resplit()
+
+# Case 8: a direct `.split()` / `.subgroup()` builds derived subgroups, each of
+# which carries `__suppress_context__ is True` even when the source group's flag
+# was the `False` default.  A whole-group match returns the source object
+# unchanged, so it keeps the source's flag.
+eg8 = ExceptionGroup("g", [ValueError(1), TypeError(2)])
+m8, r8 = eg8.split(ValueError)
+print("split match suppress", m8.__suppress_context__)
+print("split rest suppress", r8.__suppress_context__)
+print("subgroup suppress", eg8.subgroup(ValueError).__suppress_context__)
+whole = eg8.split(Exception)[0]
+print("whole-match is source", whole is eg8)
+print("whole-match suppress", whole.__suppress_context__)
+
 print("done")
