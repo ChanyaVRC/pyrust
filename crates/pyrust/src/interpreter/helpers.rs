@@ -575,6 +575,41 @@ thread_local! {
         cls
     };
 
+    /// Per-thread `PyClass` singleton for the `types.GenericAlias` type — the
+    /// type of `list[int]`, `dict[str, int]`, etc. (PEP 585).  In CPython 3.12
+    /// `type(list[int])` is `<class 'types.GenericAlias'>`, with
+    /// `__name__ == "GenericAlias"`, `__qualname__ == "GenericAlias"`, and
+    /// `__module__ == "types"`.  Issue #2733: previously `type(list[int])`
+    /// returned a `BuiltinFunction("types.GenericAlias")` sentinel, so the repr
+    /// read `<built-in function types.GenericAlias>` and `__module__` raised
+    /// `AttributeError`.  `__module__` is stored as a dict attribute so the
+    /// PyClass repr in `pyrust-core` renders the `types.` qualifier.
+    static GENERIC_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
+        let obj = OBJECT_CLASS.with(Rc::clone);
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert("__module__".to_string(), Value::string("types"));
+        // Issue #2733: `type(list[int]).__doc__` is the GenericAlias docstring
+        // in CPython 3.12 (not the origin's docstring and not AttributeError).
+        // The singleton is not in `env.rs::is_builtin_class`, so without an
+        // explicit `__doc__` attr the class attribute lookup misses and raises
+        // AttributeError; store it on the class to match CPython.
+        attrs.insert(
+            "__doc__".to_string(),
+            Value::string(
+                "Represent a PEP 585 generic type\n\nE.g. for t = list[int], \
+                 t.__origin__ is list and t.__args__ is (int,).",
+            ),
+        );
+        let cls = Rc::new(RefCell::new(PyClass::new(
+            "GenericAlias",
+            "GenericAlias",
+            Some(Rc::clone(&obj)),
+            attrs,
+        )));
+        obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
+        cls
+    };
+
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
     /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
     /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
@@ -1188,6 +1223,14 @@ pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
 /// Issues #1793, #1800.
 pub(crate) fn range_class_singleton() -> Rc<RefCell<PyClass>> {
     RANGE_CLASS.with(Rc::clone)
+}
+
+/// Returns the singleton `types.GenericAlias` class.  In CPython 3.12,
+/// `type(list[int])` is `<class 'types.GenericAlias'>` — a proper class with
+/// `__name__ == "GenericAlias"` and `__module__ == "types"`, so
+/// `type(type(list[int])) is type` holds.  Issue #2733.
+pub(crate) fn generic_alias_class_singleton() -> Rc<RefCell<PyClass>> {
+    GENERIC_ALIAS_CLASS.with(Rc::clone)
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the migrated

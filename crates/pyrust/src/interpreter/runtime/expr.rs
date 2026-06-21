@@ -4184,8 +4184,10 @@ impl Interpreter {
                 // Covers plain `dict` and PyInstance dict subclasses; PyInstance subclasses
                 // with a custom `__or__` were already handled by the dunder path above.
                 if let Some(lhs_entries) = dict_entries_from_value(&left) {
-                    let left_type = value_type_name_str(&left);
-                    let right_type = value_type_name_str(&right);
+                    // A mappingproxy's `|` is `dict.__or__`, so a failing merge
+                    // reports a mappingproxy operand as `dict` (CPython 3.12).
+                    let left_type = bitor_operand_type_name(&left);
+                    let right_type = bitor_operand_type_name(&right);
                     let Some(rhs_entries) = dict_entries_from_value(&right) else {
                         return Err(pyrust_core::type_err!("unsupported operand type(s) for |: '{left_type}' and '{right_type}'"));
                     };
@@ -4228,8 +4230,10 @@ impl Interpreter {
                     return Ok(Value::bool_(a | b));
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = value_type_name_str(&left);
-                let rt = value_type_name_str(&right);
+                // A mappingproxy's `|` / `__ror__` is `dict.__or__`, so a failing
+                // merge names it `dict` on either side (CPython 3.12).
+                let lt = bitor_operand_type_name(&left);
+                let rt = bitor_operand_type_name(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
                 // Canonical numeric `|` via the NumericOps slot table (#458).
@@ -4687,6 +4691,13 @@ impl Interpreter {
         // `list + non-list` raises TypeError instead of extending).  See issue #1874.
         if !is_augmented_assign {
             return Ok(None);
+        }
+        // mappingproxy is read-only: `mp |= x` is rejected (CPython 3.12), even
+        // though `mp | x` produces a merged dict (PEP 584).
+        if op == BinaryOp::BitOr && is_mapping_proxy(left) {
+            return Err(pyrust_core::type_err!(
+                "'|=' is not supported by mappingproxy; use '|' instead"
+            ));
         }
         let is_list = matches!(left.kind(), ValueKind::List(_));
         let is_set = matches!(left.kind(), ValueKind::Set(_));
@@ -7719,11 +7730,46 @@ fn multiple_values_kw_error(func_name: Option<&str>, kw: &str) -> PyError {
     }
 }
 
+/// Operand type name for `|` TypeError messages.  A `mappingproxy` reports as
+/// `dict` because its `__or__` / `__ror__` slots are `dict.__or__` /
+/// `dict.__ror__` in CPython 3.12, so a failed merge names the operand `dict`.
+fn bitor_operand_type_name(v: &Value) -> std::borrow::Cow<'static, str> {
+    if is_mapping_proxy(v) {
+        std::borrow::Cow::Borrowed("dict")
+    } else {
+        value_type_name_str(v)
+    }
+}
+
+/// True if `v` is a `mappingproxy` (either class- or dict-backed).
+fn is_mapping_proxy(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME
+    )
+}
+
 fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
     if let Some(entries) = v.dict_with(|d| {
         d.iter().map(|(k, val)| (k.clone(), val.clone())).collect::<Vec<_>>()
     }) {
         return Some(entries);
+    }
+    // `mappingproxy` participates in PEP 584 `|` like a dict (CPython 3.12).
+    // Extract entries from the underlying source (class attrs or live dict).
+    if let Some(cls_rc) = pyrust_builtins::mapping_proxy::as_class_rc(v) {
+        return Some(
+            cls_rc
+                .borrow()
+                .attrs
+                .iter()
+                .map(|(k, val)| (PyKey::str_from(k), val.clone()))
+                .collect(),
+        );
+    }
+    if let Some(dict_rc) = pyrust_builtins::mapping_proxy::as_dict_rc(v) {
+        return Some(dict_rc.borrow().clone().into_iter().collect());
     }
     if let Some(backing) = builtin_data_backing(v) {
         return dict_entries_from_value(&backing);
@@ -7871,8 +7917,14 @@ fn set_binary_op(
         Some(Ok(items)) => items,
         Some(Err(e)) => return Some(Err(e)),
         None => {
-            let lt = value_type_name_str(left);
-            let rt = value_type_name_str(right);
+            // Only `|` delegates to dict's PEP 584 slots, so a mappingproxy
+            // operand reports as `dict` for `|` but keeps its own name for the
+            // set-only operators `&` / `-` / `^` (CPython 3.12).
+            let (lt, rt) = if op_sym == "|" {
+                (bitor_operand_type_name(left), bitor_operand_type_name(right))
+            } else {
+                (value_type_name_str(left), value_type_name_str(right))
+            };
             return Some(Err(pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")));
         }
     };

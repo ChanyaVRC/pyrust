@@ -219,39 +219,49 @@ impl BuiltinTypeOps for MappingProxyOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("keys() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.keys() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
-                Ok(Value::list(source_keys(&src)))
+                Ok(crate::dict_views::dict_keys(source_dict_rc(&src)))
             }
             "values" => {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("values() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.values() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
-                Ok(Value::list(source_values(&src)))
+                Ok(crate::dict_views::dict_values(source_dict_rc(&src)))
             }
             "items" => {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("items() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.items() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
-                let items: Vec<Value> = source_keys(&src)
-                    .into_iter()
-                    .zip(source_values(&src))
-                    .map(|(k, v)| Value::tuple(vec![k, v]))
-                    .collect();
-                Ok(Value::list(items))
+                Ok(crate::dict_views::dict_items(source_dict_rc(&src)))
             }
             "get" => {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("get() takes 1 or 2 arguments ({} given)", args.len()),
+                        "get expected at least 1 argument, got 0".to_string(),
+                    ));
+                }
+                if args.len() > 2 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("get expected at most 2 arguments, got {}", args.len()),
                     ));
                 }
                 let default = || args.get(1).cloned().unwrap_or(Value::none());
@@ -279,7 +289,10 @@ impl BuiltinTypeOps for MappingProxyOps {
                 if !args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("copy() takes no arguments ({} given)", args.len()),
+                        format!(
+                            "mappingproxy.copy() takes no arguments ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
                 match &src {
@@ -316,6 +329,31 @@ impl BuiltinTypeOps for MappingProxyOps {
     }
 }
 
+/// A live `Rc<RefCell<PyDict>>` over the proxy source, for vending `dict_keys` /
+/// `dict_values` / `dict_items` views (issue #2751).  Matches CPython 3.12,
+/// where `mappingproxy.keys()/values()/items()` return the underlying dict's
+/// own view types rather than snapshot lists.
+///
+/// - `Dict`: returns the live backing rc, so the view reflects later mutations
+///   and carries the size-mutation guard.
+/// - `Class`: a class's attribute store is an `IndexMap<String, Value>`, not a
+///   `PyDict`, so there is no live rc to share; we snapshot the current attrs
+///   into a fresh dict rc.  The resulting view still has the correct
+///   `dict_keys`/`dict_values`/`dict_items` type identity and mutation guard.
+fn source_dict_rc(src: &MappingProxySource) -> Rc<RefCell<PyDict>> {
+    match src {
+        MappingProxySource::Dict(rc) => Rc::clone(rc),
+        MappingProxySource::Class(cls) => {
+            let class = cls.borrow();
+            let mut dict = PyDict::default();
+            for (k, v) in class.attrs.iter() {
+                dict.insert(PyKey::str_from(k), v.clone());
+            }
+            Rc::new(RefCell::new(dict))
+        }
+    }
+}
+
 /// The keys of a proxy source as `Value`s, preserving insertion order.
 fn source_keys(src: &MappingProxySource) -> Vec<Value> {
     match src {
@@ -326,14 +364,6 @@ fn source_keys(src: &MappingProxySource) -> Vec<Value> {
             .map(|k| Value::string(k.clone()))
             .collect(),
         MappingProxySource::Dict(rc) => rc.borrow().keys().map(key_to_value).collect(),
-    }
-}
-
-/// The values of a proxy source, preserving insertion order.
-fn source_values(src: &MappingProxySource) -> Vec<Value> {
-    match src {
-        MappingProxySource::Class(cls) => cls.borrow().attrs.values().cloned().collect(),
-        MappingProxySource::Dict(rc) => rc.borrow().values().cloned().collect(),
     }
 }
 
@@ -396,6 +426,18 @@ pub fn as_dict_rc(value: &Value) -> Option<Rc<RefCell<PyDict>>> {
     match borrow_source_of(value)? {
         MappingProxySource::Dict(d) => Some(d),
         MappingProxySource::Class(_) => None,
+    }
+}
+
+/// Live element count of any (class- or dict-backed) mappingproxy `Value`, or
+/// `None` if `value` is not a mappingproxy.  Used by the interpreter's
+/// `live_collection_len` so iterators over a mappingproxy install a size-mutation
+/// guard (issue #2728): the count is re-read each `next()` step and a change
+/// raises `RuntimeError: dictionary changed size during iteration`.
+pub fn live_len(value: &Value) -> Option<usize> {
+    match borrow_source_of(value)? {
+        MappingProxySource::Class(cls) => Some(cls.borrow().attrs.len()),
+        MappingProxySource::Dict(rc) => Some(rc.borrow().len()),
     }
 }
 
