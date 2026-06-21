@@ -1051,6 +1051,8 @@ const TYPING_PY_EXPORTS: &[&str] = &[
     "NotRequired",
     "TypeGuard",
     "ParamSpec",
+    "ParamSpecArgs",
+    "ParamSpecKwargs",
     "TypeVarTuple",
 ];
 
