@@ -693,34 +693,6 @@ impl Interpreter {
                     type_args,
                 ))
             }
-            // `types.GenericAlias(origin, args)` — direct construction of a
-            // generic alias (the same value `list[int]` produces).  CPython:
-            // exactly two positional arguments, no keywords; a non-tuple
-            // `args` is wrapped into a one-element tuple so `__args__` is
-            // always a tuple.
-            ValueKind::BuiltinFunction(name)
-                if name == pyrust_builtins::generic_alias::TYPE_NAME =>
-            {
-                if args.iter().any(|a| a.name.is_some()) {
-                    return Err(pyrust_core::type_err!(
-                        "GenericAlias() takes no keyword arguments"
-                    ));
-                }
-                if args.len() != 2 {
-                    return Err(pyrust_core::type_err!(
-                        "GenericAlias expected 2 arguments, got {}",
-                        args.len()
-                    ));
-                }
-                let origin = args[0].value.clone();
-                let index = args[1].value.clone();
-                let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
-                    index
-                } else {
-                    Value::tuple(vec![index])
-                };
-                Ok(pyrust_builtins::generic_alias::generic_alias(origin, type_args))
-            }
             ValueKind::BuiltinFunction("str.format_map") => {
                 // `format_map` is implemented in Python in CPython, so its
                 // unbound-call diagnostics use the method_descriptor wording
@@ -1229,6 +1201,36 @@ impl Interpreter {
                         .is_some_and(|mp| Rc::ptr_eq(&mp, class))
                 {
                     return crate::builtin_modules::types::construct_mapping_proxy(args);
+                }
+                // `types.GenericAlias(origin, args)` — calling the GenericAlias
+                // type (the same object `type(list[int])` returns, issue #2733)
+                // constructs an alias, the value `list[int]` produces.  CPython:
+                // exactly two positional args, no keywords; a non-tuple `args` is
+                // wrapped into a one-element tuple so `__args__` is always a
+                // tuple.  Gate on the cheap `name` field before the TLS lookup so
+                // user-class construction never pays for it.
+                if class.borrow().name == "GenericAlias"
+                    && Rc::ptr_eq(class, &crate::interpreter::generic_alias_class_singleton())
+                {
+                    if args.iter().any(|a| a.name.is_some()) {
+                        return Err(pyrust_core::type_err!(
+                            "GenericAlias() takes no keyword arguments"
+                        ));
+                    }
+                    if args.len() != 2 {
+                        return Err(pyrust_core::type_err!(
+                            "GenericAlias expected 2 arguments, got {}",
+                            args.len()
+                        ));
+                    }
+                    let origin = args[0].value.clone();
+                    let index = args[1].value.clone();
+                    let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+                        index
+                    } else {
+                        Value::tuple(vec![index])
+                    };
+                    return Ok(pyrust_builtins::generic_alias::generic_alias(origin, type_args));
                 }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
