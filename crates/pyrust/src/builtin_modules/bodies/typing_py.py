@@ -163,10 +163,17 @@ class _TypedDictMeta(type):
         required = set()
         optional = set()
         # Merge ancestor TypedDict fields first; own fields override on conflict.
+        # A key's required/optional status follows the *last* base to declare it
+        # (each base moves the key between the two sets), matching CPython's
+        # `_TypedDictMeta.__new__`; the two sets must stay disjoint.
         for base in bases:
             merged.update(getattr(base, "__annotations__", {}))
-            required.update(getattr(base, "__required_keys__", ()))
-            optional.update(getattr(base, "__optional_keys__", ()))
+            base_required = getattr(base, "__required_keys__", ())
+            required.update(base_required)
+            optional.difference_update(base_required)
+            base_optional = getattr(base, "__optional_keys__", ())
+            required.difference_update(base_optional)
+            optional.update(base_optional)
 
         merged.update(own)
         if total:
