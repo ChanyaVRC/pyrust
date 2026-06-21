@@ -2905,6 +2905,15 @@ pub enum Opaque {
         /// Monotonic allocation id for identity semantics (#722).
         obj_id: u64,
     },
+    /// Proxy returned by the one-argument form `super(cls)` (#2704). It is an
+    /// *unbound* super object: `__self__` / `__self_class__` are `None`. It acts
+    /// as a descriptor — `super(cls).__get__(obj, owner)` returns a bound
+    /// `super(cls, obj)` (or `super(cls, owner)` when `obj` is a class).
+    SuperProxyUnbound {
+        class: Rc<RefCell<PyClass>>,
+        /// Monotonic allocation id for identity semantics (#722).
+        obj_id: u64,
+    },
     /// A live generator object.  The concrete execution state (registers, pc,
     /// iterator slots, etc.) is stored as a type-erased `Box<dyn Any>` so that
     /// `pyrust-core` does not need to depend on `pyrust`'s bytecode types.
@@ -3046,6 +3055,10 @@ impl Clone for Opaque {
                 obj_class: Rc::clone(obj_class),
                 obj_id: *obj_id,
             },
+            Opaque::SuperProxyUnbound { class, obj_id } => Opaque::SuperProxyUnbound {
+                class: Rc::clone(class),
+                obj_id: *obj_id,
+            },
             Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
             Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
@@ -3126,6 +3139,9 @@ pub enum ValueKind<'a> {
     SuperProxyClass {
         class: &'a Rc<RefCell<PyClass>>,
         obj_class: &'a Rc<RefCell<PyClass>>,
+    },
+    SuperProxyUnbound {
+        class: &'a Rc<RefCell<PyClass>>,
     },
     Generator(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
     /// Synthesized view of the [`NotImplemented`] sentinel.  No backing
@@ -3778,6 +3794,14 @@ impl Value {
         })
     }
 
+    /// Construct the unbound super object produced by `super(cls)` (#2704).
+    pub fn super_proxy_unbound(class: Rc<RefCell<PyClass>>) -> Self {
+        Value::opaque(Opaque::SuperProxyUnbound {
+            class,
+            obj_id: next_obj_id(),
+        })
+    }
+
     /// Create a generator value.  `state` is the type-erased `GeneratorFrame`
     /// managed by the VM.
     pub fn generator(state: Box<dyn std::any::Any>) -> Self {
@@ -3976,6 +4000,7 @@ impl Value {
                 Opaque::ClassBoundMethod { obj_id, .. } => Some(*obj_id as i64),
                 Opaque::SuperProxy { obj_id, .. } => Some(*obj_id as i64),
                 Opaque::SuperProxyClass { obj_id, .. } => Some(*obj_id as i64),
+                Opaque::SuperProxyUnbound { obj_id, .. } => Some(*obj_id as i64),
                 // BuiltinObject: the Rc<RefCell<...>> state is shared across
                 // clones; its address is a stable, per-object id (#722).
                 Opaque::BuiltinObject { state, .. } => Some(Rc::as_ptr(state) as i64),
@@ -4627,6 +4652,7 @@ impl Value {
                 Opaque::SuperProxyClass {
                     class, obj_class, ..
                 } => ValueKind::SuperProxyClass { class, obj_class },
+                Opaque::SuperProxyUnbound { class, .. } => ValueKind::SuperProxyUnbound { class },
                 Opaque::Generator(state) => ValueKind::Generator(state),
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
                 Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
@@ -4675,6 +4701,7 @@ impl Value {
             ValueKind::ClassBoundMethod { .. } => true,
             ValueKind::SuperProxy { .. } => true,
             ValueKind::SuperProxyClass { .. } => true,
+            ValueKind::SuperProxyUnbound { .. } => true,
             ValueKind::Generator(_) => true,
             ValueKind::NotImplemented => true,
             ValueKind::Ellipsis => true,
@@ -4909,6 +4936,9 @@ impl Value {
             }
             ValueKind::SuperProxyClass { class, .. } => {
                 format!("<super: <class '{}'>>", class.borrow().name)
+            }
+            ValueKind::SuperProxyUnbound { class, .. } => {
+                format!("<super: <class '{}'>, NULL>", class.borrow().name)
             }
             ValueKind::Generator(_) => "<generator object>".to_string(),
             ValueKind::NotImplemented => "NotImplemented".to_string(),
@@ -5653,7 +5683,9 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::PyClass(_) => Cow::Borrowed("type"),
         ValueKind::PyInstance(inst) => Cow::Owned(inst.borrow().class.borrow().name.clone()),
         ValueKind::PyModule(_) => Cow::Borrowed("module"),
-        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Cow::Borrowed("super"),
+        ValueKind::SuperProxy { .. }
+        | ValueKind::SuperProxyClass { .. }
+        | ValueKind::SuperProxyUnbound { .. } => Cow::Borrowed("super"),
         ValueKind::Generator(_) => Cow::Borrowed("generator"),
         ValueKind::NotImplemented => Cow::Borrowed("NotImplementedType"),
         ValueKind::Ellipsis => Cow::Borrowed("ellipsis"),

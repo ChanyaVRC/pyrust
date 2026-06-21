@@ -62,6 +62,29 @@ print(sorted(E.__annotations__))
 print(sorted(E.__required_keys__))
 
 
+# A key required in one base and optional in another resolves by *last* base
+# (each base moves the key between the required/optional sets); the two sets
+# must stay disjoint.
+class Req(TypedDict):
+    k: int
+
+
+class Opt(TypedDict, total=False):
+    k: int
+
+
+class MIa(Req, Opt):
+    pass
+
+
+class MIb(Opt, Req):
+    pass
+
+
+print(sorted(MIa.__required_keys__), sorted(MIa.__optional_keys__))
+print(sorted(MIb.__required_keys__), sorted(MIb.__optional_keys__))
+
+
 # ── field override ──────────────────────────────────────────────────────────
 class F(A):
     a: str

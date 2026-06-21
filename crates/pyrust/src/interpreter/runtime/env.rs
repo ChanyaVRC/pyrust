@@ -71,6 +71,16 @@ impl Interpreter {
             ValueKind::SuperProxy { class, instance } => {
                 let class = Rc::clone(class);
                 let instance = Rc::clone(instance);
+                // CPython exposes read-only `__thisclass__` / `__self__` /
+                // `__self_class__` on every super object (#2704).
+                match name {
+                    "__thisclass__" => return Ok(Value::py_class(class)),
+                    "__self__" => return Ok(Value::py_instance(instance)),
+                    "__self_class__" => {
+                        return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
+                    }
+                    _ => {}
+                }
                 // CPython super() semantics: look up `name` in the MRO of
                 // type(instance), starting from the class *after* `class`.
                 // This is necessary for cooperative multiple inheritance: when
@@ -156,6 +166,30 @@ impl Interpreter {
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);
                 let obj_class = Rc::clone(obj_class);
+                // CPython exposes read-only `__thisclass__` / `__self__` /
+                // `__self_class__` on every super object (#2704).  `__self__` is
+                // always `cls` (the second argument).  `__self_class__` mirrors
+                // CPython's `supercheck` `obj_type` (#2712): in the standard
+                // classmethod case `super(Base, Derived)` (Derived is a subclass
+                // of Base) it is `Derived` itself, but in the metaclass branch
+                // `super(Meta, cls)` (cls is an *instance* of Meta, so Meta is in
+                // `type(cls)`'s MRO, not `cls`'s own MRO) it is `type(cls)`.
+                match name {
+                    "__thisclass__" => return Ok(Value::py_class(class)),
+                    "__self__" => return Ok(Value::py_class(obj_class)),
+                    "__self_class__" => {
+                        let in_own_mro = class_mro_items(&obj_class)?.iter().any(|v| {
+                            matches!(v.kind(), ValueKind::PyClass(c) if Rc::ptr_eq(c, &class))
+                        });
+                        let self_class = if in_own_mro {
+                            obj_class
+                        } else {
+                            metaclass_of(&obj_class)
+                        };
+                        return Ok(Value::py_class(self_class));
+                    }
+                    _ => {}
+                }
                 // Two cases (issue #1956):
                 //   1. classmethod super(): `class` is in `obj_class`'s own MRO.
                 //      Walk `obj_class`'s MRO starting after `class`.
@@ -273,6 +307,23 @@ impl Interpreter {
                     }
                 }
                 Err(pyrust_core::py_err!("AttributeError", "'super' object has no attribute '{name}'"))
+            }
+            ValueKind::SuperProxyUnbound { class } => {
+                // The unbound `super(cls)` (#2704). It exposes the introspection
+                // attributes (with `__self__` / `__self_class__` == None) and the
+                // descriptor `__get__`, but cannot resolve methods until bound.
+                match name {
+                    "__thisclass__" => Ok(Value::py_class(Rc::clone(class))),
+                    "__self__" | "__self_class__" => Ok(Value::none()),
+                    "__get__" => Ok(pyrust_builtins::bound_method::bound_method(
+                        "super.__get__",
+                        target.clone(),
+                    )),
+                    _ => Err(pyrust_core::py_err!(
+                        "AttributeError",
+                        "'super' object has no attribute '{name}'"
+                    )),
+                }
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.
             // These return a new property with the respective accessor replaced.
@@ -586,9 +637,24 @@ impl Interpreter {
                     return Ok(Value::string(bare));
                 }
                 if name == "__qualname__" {
+                    // `typing.TypedDict` is a real function in CPython 3.12 with
+                    // `__qualname__ == "TypedDict"` (not the dotted form); pyrust
+                    // registers it under the dotted name `typing.TypedDict`, so
+                    // strip the module prefix here (issue #2745).
+                    if func_name == "typing.TypedDict" {
+                        return Ok(Value::string("TypedDict"));
+                    }
                     return Ok(Value::string(func_name));
                 }
                 if name == "__module__" {
+                    // `typing.TypedDict` is a real function in CPython 3.12 (not a
+                    // method_descriptor) with `__module__ == "typing"`; pyrust
+                    // registers it under the dotted name `typing.TypedDict`, so it
+                    // would otherwise fall into the method_descriptor arm below
+                    // (issue #2745).
+                    if func_name == "typing.TypedDict" {
+                        return Ok(Value::string("typing"));
+                    }
                     if func_name.contains('.') {
                         // Method descriptors (str.upper, list.append, …) do not
                         // expose __module__; CPython raises AttributeError with
@@ -3029,9 +3095,42 @@ impl Interpreter {
     }
 
 
+    /// Register a freshly loaded module in the shared `sys.modules` dict
+    /// (issue #2727), keyed by its dotted import name.  CPython exposes every
+    /// imported module here as the import cache; pyrust mirrors each
+    /// `module_cache` insertion into the per-thread `sys.modules` dict so user
+    /// code observes membership and identity.
+    fn register_in_sys_modules(name: &str, module: &Value) {
+        let modules = crate::builtin_modules::sys::sys_modules_dict();
+        let _ = modules.dict_insert(pyrust_core::PyKey::str_from(name), module.clone());
+    }
+
+    /// Look up `name` in the user-visible `sys.modules` dict (issue #2727).
+    /// `sys.modules` is the authoritative import cache in CPython: a direct
+    /// write (`sys.modules["x"] = obj`) makes `import x` a cache hit, and a
+    /// `del sys.modules["x"]` forces re-execution on the next import.  We honour
+    /// both by consulting it before the internal `module_cache`.
+    fn lookup_sys_modules(name: &str) -> Option<Value> {
+        let modules = crate::builtin_modules::sys::sys_modules_dict();
+        modules
+            .dict_with(|d| d.get(&pyrust_core::PyKey::str_from(name)).cloned())
+            .flatten()
+    }
+
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
-        if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
+        // `sys.modules` is the authoritative cache (CPython semantics): a value
+        // injected directly by user code (`sys.modules["x"] = obj`) wins, and a
+        // `del sys.modules["x"]` invalidates the internal `module_cache` so the
+        // module re-executes on the next import.
+        if let Some(cached) = Self::lookup_sys_modules(name) {
             return Ok(cached);
+        }
+        // Present internally but absent from `sys.modules` means it was
+        // `del`-eted there: drop the stale internal entry and fall through to a
+        // fresh load so the module body re-executes, matching CPython.
+        let present_internally = self.module_cache.borrow().contains_key(name);
+        if present_internally {
+            self.module_cache.borrow_mut().remove(name);
         }
         // Built-in modules — declared in
         // `crates/pyrust/src/builtin_modules/mod.rs::pyrust_builtin_modules!`.
@@ -3186,6 +3285,7 @@ impl Interpreter {
                 }
             }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
+            Self::register_in_sys_modules(name, &val);
             // Python-source post-load injection: every `@inject` module in
             // `pyrust_builtin_modules!` (collections, asyncio, string,
             // operator, typing, abc, dataclasses, enum, json, …) exec's its
@@ -3261,6 +3361,23 @@ impl Interpreter {
                 let (program, linenos) =
                     Parser::new_with_pos(tokens, line_nos, cols, cols_end)
                         .parse_program_with_linenos()?;
+                // Register the (initially empty) module object in both caches
+                // *before* executing its body, matching CPython: the module is
+                // visible in `sys.modules` while it is still being initialised,
+                // so a circular `import` reached from inside the body returns
+                // this partial object instead of recursing forever (#2727 — the
+                // previous ordering stack-overflowed on mutually-recursive
+                // imports).  `attrs` are populated on the same `Rc` after the
+                // body runs, so identity is preserved and the re-entrant
+                // importer's reference observes the fully-populated module once
+                // initialisation finishes.
+                let module_rc = Rc::new(RefCell::new(PyModule {
+                    name: name.to_string(),
+                    attrs: HashMap::new(),
+                }));
+                let module = Value::py_module(Rc::clone(&module_rc));
+                self.module_cache.borrow_mut().insert(name.to_string(), module.clone());
+                Self::register_in_sys_modules(name, &module);
                 // Subinterpreter shares the same module_cache so results are visible to parent
                 let mut sub = Interpreter {
                     script_dir: self.script_dir.clone(),
@@ -3269,8 +3386,20 @@ impl Interpreter {
                     ..Default::default()
                 };
                 // call_depth is thread_local — sub-interpreter automatically shares the same counter
-                sub.exec_program_with_linenos(&program, &linenos, &src, false)?;
-                // Harvest all top-level bindings as module attrs
+                if let Err(e) = sub.exec_program_with_linenos(&program, &linenos, &src, false) {
+                    // CPython removes a half-initialised module from sys.modules
+                    // (and thus the import cache) when its body raises, so a
+                    // later import retries from scratch instead of yielding a
+                    // partially-populated object.
+                    self.module_cache.borrow_mut().remove(name);
+                    let modules = crate::builtin_modules::sys::sys_modules_dict();
+                    let _ = modules.dict_with_mut(|d| {
+                        d.shift_remove(&pyrust_core::PyKey::str_from(name));
+                    });
+                    return Err(e);
+                }
+                // Harvest all top-level bindings as module attrs onto the same
+                // module object already registered in the caches.
                 let attrs: HashMap<String, Value> = sub
                     .env
                     .borrow()
@@ -3288,11 +3417,7 @@ impl Interpreter {
                     })
                     .map(|(k, v)| (k.to_string(), v.clone()))
                     .collect();
-                let module = Value::py_module(Rc::new(RefCell::new(PyModule {
-                    name: name.to_string(),
-                    attrs,
-                })));
-                self.module_cache.borrow_mut().insert(name.to_string(), module.clone());
+                module_rc.borrow_mut().attrs = attrs;
                 return Ok(module);
             }
         }
@@ -3864,6 +3989,14 @@ fn is_data_descriptor(val: &Value) -> bool {
 /// to special-case it here — it would return `true` but is intercepted
 /// earlier.
 fn is_non_data_descriptor(val: &Value) -> bool {
+    // The one-argument `super(cls)` is an unbound super object whose type
+    // defines `tp_descr_get` but no `__set__`/`__delete__` — a non-data
+    // descriptor.  Stored as a class attribute, it binds to the instance on
+    // access (#2704), so it must flow through the generic descriptor protocol
+    // rather than only via an explicit `__get__` call.
+    if matches!(val.kind(), ValueKind::SuperProxyUnbound { .. }) {
+        return true;
+    }
     if let ValueKind::PyInstance(inst) = val.kind() {
         let class = Rc::clone(&inst.borrow().class);
         return lookup_class_attr(&class, "__get__").is_some()
@@ -4091,6 +4224,15 @@ fn call_descriptor_get(
     // name (`prop_name`) rather than the lookup name.
     _attr_name: &str,
 ) -> Result<Value> {
+    // Unbound `super(cls)` descriptor (#2704): binding it to the instance
+    // yields `super(cls, instance)` (mirroring CPython's `super_descr_get`).
+    // Class-level access (`instance is None`) leaves it unchanged.  `owner` is
+    // unused here because supercheck binds against the instance's own type.
+    if let ValueKind::SuperProxyUnbound { class } = descriptor.kind() {
+        let class = Rc::clone(class);
+        let _ = &owner;
+        return interp.bind_unbound_super(class, instance);
+    }
     // `__slots__` member_descriptor: read the instance's slot storage; an unset
     // slot raises AttributeError (issue #2084).  Class-level access (`S.x`)
     // never reaches here — get_attr_class returns the descriptor itself.

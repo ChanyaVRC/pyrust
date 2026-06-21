@@ -239,25 +239,67 @@ impl BuiltinTypeOps for ReversedOps {
     }
 
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
-        let borrow = state.borrow();
-        let s = borrow
-            .downcast_ref::<ReversedState>()
-            .ok_or_else(|| PyError::Runtime("internal: bad reversed state".to_string()))?;
-        if s.items.borrow().is_none() {
-            let items = iter_values_via_registry(&s.source)?;
-            let len = items.len();
-            *s.items.borrow_mut() = Some(items);
-            *s.pos.borrow_mut() = len;
-        }
-        let items_ref = s.items.borrow();
-        let items = items_ref.as_ref().unwrap();
-        let mut pos = s.pos.borrow_mut();
-        if *pos > 0 {
-            *pos -= 1;
-            Ok(Some(items[*pos].clone()))
-        } else {
-            Ok(None)
-        }
+        reversed_iter_next(state)
+    }
+}
+
+/// Shared `iter_next` for the reversed-iterator ops (`ReversedOps` and
+/// `DictReverseKeyOps`): both wrap a [`ReversedState`] and walk it from the
+/// end.  Only the type name / repr differ between them, so the cursor logic
+/// lives here once.
+fn reversed_iter_next(state: &BuiltinState) -> Result<Option<Value>> {
+    let borrow = state.borrow();
+    let s = borrow
+        .downcast_ref::<ReversedState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad reversed state".to_string()))?;
+    if s.items.borrow().is_none() {
+        let items = iter_values_via_registry(&s.source)?;
+        let len = items.len();
+        *s.items.borrow_mut() = Some(items);
+        *s.pos.borrow_mut() = len;
+    }
+    let items_ref = s.items.borrow();
+    let items = items_ref.as_ref().unwrap();
+    let mut pos = s.pos.borrow_mut();
+    if *pos > 0 {
+        *pos -= 1;
+        Ok(Some(items[*pos].clone()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Reverse iterator over a mapping's keys (`reversed(mappingproxy)` /
+/// `mappingproxy.__reversed__()`).  CPython names this `dict_reversekeyiterator`
+/// rather than the generic `list_reverseiterator` (#2702).
+pub struct DictReverseKeyOps;
+pub const DICT_REVERSE_KEY_OPS: &DictReverseKeyOps = &DictReverseKeyOps;
+pub const DICT_REVERSE_KEY_TYPE_NAME: &str = "dict_reversekeyiterator";
+
+impl BuiltinTypeOps for DictReverseKeyOps {
+    fn type_name(&self) -> &'static str {
+        DICT_REVERSE_KEY_TYPE_NAME
+    }
+
+    fn repr(&self, state: &BuiltinState) -> String {
+        let addr = std::rc::Rc::as_ptr(state) as usize;
+        format!("<{DICT_REVERSE_KEY_TYPE_NAME} object at 0x{addr:x}>")
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn is_iterator(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        reversed_iter_next(state)
     }
 }
 
@@ -270,6 +312,18 @@ pub fn reversed(source: Value) -> Value {
         pos: RefCell::new(0),
     };
     Value::builtin_object(REVERSED_OPS, Box::new(state))
+}
+
+/// `reversed()` over a mapping's keys, reported as `dict_reversekeyiterator`
+/// (#2702).  `source` must already be the forward-ordered key list; it is
+/// drained and walked from the end on first `iter_next`.
+pub fn reversed_dict_keys(source: Value) -> Value {
+    let state = ReversedState {
+        source,
+        items: RefCell::new(None),
+        pos: RefCell::new(0),
+    };
+    Value::builtin_object(DICT_REVERSE_KEY_OPS, Box::new(state))
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
