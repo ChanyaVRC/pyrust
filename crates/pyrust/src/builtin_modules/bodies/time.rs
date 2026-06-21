@@ -227,7 +227,7 @@ pyrust_module! {
                 format!("{FN_NAME}() takes exactly one argument ({} given)", args.len()),
             ));
         }
-        let mut tm = struct_time_to_tm(_interp, &args[0].value)?;
+        let mut tm = struct_time_to_tm(_interp, FN_NAME, &args[0].value)?;
         // SAFETY: `mktime` reads/normalises the supplied `tm` in place; it
         // takes a valid pointer and has no other preconditions.
         let secs = unsafe { libc::mktime(&mut tm) };
@@ -267,7 +267,7 @@ pyrust_module! {
             }
         };
         let tm = if args.len() == 2 {
-            struct_time_to_tm(_interp, &args[1].value)?
+            struct_time_to_tm(_interp, FN_NAME, &args[1].value)?
         } else {
             broken_down(unix_time_secs(), true)?
         };
@@ -474,12 +474,15 @@ fn struct_time_class(interp: &mut Interpreter) -> Result<Value> {
 /// Convert a 9-element `struct_time` (or any 9-element sequence, which CPython
 /// also accepts) into a libc `tm` for `mktime` / `strftime`.
 #[cfg(unix)]
-fn struct_time_to_tm(interp: &mut Interpreter, val: &Value) -> Result<libc::tm> {
+fn struct_time_to_tm(interp: &mut Interpreter, fn_name: &str, val: &Value) -> Result<libc::tm> {
+    // CPython reports the wrong-length tuple error with the bare function name
+    // (`mktime(): illegal time tuple argument`), not the `time.`-prefixed one.
+    let bare = fn_name.rsplit('.').next().unwrap_or(fn_name);
     let items = interp.collect_iterable(val)?;
     if items.len() != 9 {
         return Err(PyError::named(
             "TypeError",
-            "argument must be a sequence of length 9".to_string(),
+            format!("{bare}(): illegal time tuple argument"),
         ));
     }
     let f: Vec<i64> = items
@@ -503,7 +506,7 @@ fn struct_time_to_tm(interp: &mut Interpreter, val: &Value) -> Result<libc::tm> 
 }
 
 #[cfg(not(unix))]
-fn struct_time_to_tm(_interp: &mut Interpreter, _val: &Value) -> Result<libc::tm> {
+fn struct_time_to_tm(_interp: &mut Interpreter, _fn_name: &str, _val: &Value) -> Result<libc::tm> {
     Err(PyError::named(
         "OSError",
         "time conversion is not supported on this platform".to_string(),
@@ -533,10 +536,9 @@ fn field_to_i64(v: &Value) -> Result<i64> {
 fn strftime_impl(fmt: &str, tm: &libc::tm) -> Result<String> {
     use std::ffi::CString;
     let cfmt = CString::new(fmt).map_err(|_| {
-        PyError::named(
-            "ValueError",
-            "embedded null character in format string".to_string(),
-        )
+        // CPython reports the bare "embedded null character" (the CString
+        // conversion error wording), not a format-string-specific variant.
+        PyError::named("ValueError", "embedded null character".to_string())
     })?;
     // strftime needs a generous buffer; grow until the result fits.
     let mut cap = 256usize.max(fmt.len() * 8 + 64);

@@ -95,6 +95,22 @@ try:
 except TypeError:
     print("strftime non-str -> TypeError")
 
+# Wrong-length time tuples report CPython's exact wording (bare fn name).
+try:
+    time.mktime((1, 2, 3))
+except TypeError as e:
+    print("mktime short:", e)            # mktime(): illegal time tuple argument
+try:
+    time.strftime("%Y", (1, 2, 3))
+except TypeError as e:
+    print("strftime short:", e)          # strftime(): illegal time tuple argument
+
+# An embedded NUL in the format string is the bare CString wording.
+try:
+    time.strftime("%Y\x00", time.gmtime(0))
+except ValueError as e:
+    print("strftime nul:", e)            # embedded null character
+
 # ── timezone constants ───────────────────────────────────────────────────────
 print(isinstance(time.timezone, int))   # True
 print(isinstance(time.altzone, int))    # True
