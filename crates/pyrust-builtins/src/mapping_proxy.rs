@@ -252,10 +252,16 @@ impl BuiltinTypeOps for MappingProxyOps {
                 Ok(crate::dict_views::dict_items(source_dict_rc(&src)))
             }
             "get" => {
-                if args.is_empty() || args.len() > 2 {
+                if args.is_empty() {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("get() takes 1 or 2 arguments ({} given)", args.len()),
+                        "get expected at least 1 argument, got 0".to_string(),
+                    ));
+                }
+                if args.len() > 2 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("get expected at most 2 arguments, got {}", args.len()),
                     ));
                 }
                 let default = || args.get(1).cloned().unwrap_or(Value::none());
