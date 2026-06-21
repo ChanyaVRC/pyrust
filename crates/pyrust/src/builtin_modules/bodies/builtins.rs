@@ -1612,7 +1612,17 @@ pyrust_module! {
                             // `for`-loop path (vm.rs `GetIter`) and CPython's
                             // inherited tp_iter slot behaviour.  A dict subclass also
                             // gets a size-mutation guard, OrderedDict-aware (#2400).
-                            let type_name = builtin_iter_type_name(&backing);
+                            // CPython 3.12 tags `iter(OrderedDict(...))` as
+                            // "odict_iterator", not "dict_keyiterator" (#2748);
+                            // the backing primitive is a plain dict, so the
+                            // OrderedDict-ness must come from the class chain.
+                            let type_name = if backing.as_dict().is_some()
+                                && crate::interpreter::class_is_named_ordered_dict(&class)
+                            {
+                                "odict_iterator"
+                            } else {
+                                builtin_iter_type_name(&backing)
+                            };
                             // Pass the carrier (not the unwrapped backing) so a
                             // non-iterable base subclass (`class C(int): pass`)
                             // reports its own class name, not the base's (#2557).
@@ -10657,6 +10667,14 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
         ValueKind::Bytes(_) => "bytes_iterator",
         // dict view iterators: "dict_keys" → "dict_keyiterator", etc.
         // CPython uses "set_iterator" for frozenset iteration as well.
+        // OrderedDict-backed views (keys/values/items, tagged `ordered`) all
+        // iterate as "odict_iterator" in CPython 3.12, regardless of the view
+        // kind (#2748) — matching `iter(od)` itself.
+        ValueKind::BuiltinObject { .. }
+            if pyrust_builtins::dict_views::is_ordered_view(v) =>
+        {
+            "odict_iterator"
+        }
         ValueKind::BuiltinObject { ops, .. } => match ops.type_name() {
             "dict_keys" => "dict_keyiterator",
             "dict_values" => "dict_valueiterator",
