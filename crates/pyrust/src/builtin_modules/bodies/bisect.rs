@@ -29,7 +29,8 @@ use pyrust_derive::pyrust_module;
 const BISECT_PY_SOURCE: &str = include_str!("bisect_py.py");
 
 /// Public names from `BISECT_PY_SOURCE` exported onto the `bisect` module.
-/// Matches CPython 3.12's `bisect.__all__` exactly.
+/// CPython 3.12's `bisect` module defines no `__all__`; this list is its set
+/// of public (non-underscore) names.
 const BISECT_PY_EXPORTS: [&str; 6] = [
     "bisect",
     "bisect_left",
