@@ -693,6 +693,34 @@ impl Interpreter {
                     type_args,
                 ))
             }
+            // `types.GenericAlias(origin, args)` — direct construction of a
+            // generic alias (the same value `list[int]` produces).  CPython:
+            // exactly two positional arguments, no keywords; a non-tuple
+            // `args` is wrapped into a one-element tuple so `__args__` is
+            // always a tuple.
+            ValueKind::BuiltinFunction(name)
+                if name == pyrust_builtins::generic_alias::TYPE_NAME =>
+            {
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias() takes no keyword arguments"
+                    ));
+                }
+                if args.len() != 2 {
+                    return Err(pyrust_core::type_err!(
+                        "GenericAlias expected 2 arguments, got {}",
+                        args.len()
+                    ));
+                }
+                let origin = args[0].value.clone();
+                let index = args[1].value.clone();
+                let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+                    index
+                } else {
+                    Value::tuple(vec![index])
+                };
+                Ok(pyrust_builtins::generic_alias::generic_alias(origin, type_args))
+            }
             ValueKind::BuiltinFunction("str.format_map") => {
                 // `format_map` is implemented in Python in CPython, so its
                 // unbound-call diagnostics use the method_descriptor wording
@@ -1188,6 +1216,20 @@ impl Interpreter {
                 if let Some(dispatch) = primitive_class_dispatch(class) {
                     return dispatch(self, args);
                 }
+                // `types.MappingProxyType(mapping)` — calling the real
+                // `mappingproxy` class constructs a proxy (CPython:
+                // `types.MappingProxyType` *is* the type, so calling it is a
+                // constructor).  It has no registry-backed constructor, so the
+                // fast path above misses.  Gate on the cheap `name` field first
+                // so user-class construction (`Foo()`) never pays the TLS
+                // singleton lookup; only confirm identity for the rare class
+                // actually named `mappingproxy`.
+                if class.borrow().name == "mappingproxy"
+                    && primitive_class_by_name("mappingproxy")
+                        .is_some_and(|mp| Rc::ptr_eq(&mp, class))
+                {
+                    return crate::builtin_modules::types::construct_mapping_proxy(args);
+                }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
             }
@@ -1601,6 +1643,27 @@ impl Interpreter {
                 let view_name = value_type_name_str(&receiver);
                 return Err(pyrust_core::type_err!(
                     "{view_name}.__reversed__() takes no arguments ({} given)",
+                    pos.len()
+                ));
+            }
+            let arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("reversed")
+                .expect("reversed must be in the registry");
+            return dispatch(self, &[arg]);
+        }
+        // issue #2728: route `mappingproxy.__reversed__()` back through the
+        // `reversed` builtin so the returned iterator carries the size-mutation
+        // guard.  `mapping_proxy::call_method` (in pyrust-builtins) can only
+        // return an unguarded list-reverse iterator; the guard needs interpreter
+        // access, so intercept here like the dict-view path above.
+        if !has_kw
+            && method == "__reversed__"
+            && (pyrust_builtins::mapping_proxy::as_class_rc(&receiver).is_some()
+                || pyrust_builtins::mapping_proxy::as_dict_rc(&receiver).is_some())
+        {
+            if !pos.is_empty() {
+                return Err(pyrust_core::type_err!(
+                    "mappingproxy.__reversed__() takes no arguments ({} given)",
                     pos.len()
                 ));
             }
@@ -9721,6 +9784,14 @@ impl Interpreter {
         let class_docstring = proto.docstring.clone();
         let class_kwarg_names = proto.class_kwarg_names.clone();
 
+        // PEP 560: resolve `__mro_entries__` on any non-class base before any
+        // other base inspection.  `resolved_bases` is the flattened list that
+        // drives the metaclass winner, the MRO, and `type.__new__`; `orig_bases`
+        // is `Some` only when at least one base went through `__mro_entries__`,
+        // in which case the new class records `__orig_bases__`.
+        let (resolved_bases, orig_bases) =
+            self.resolve_class_bases_mro_entries(regs, num_locals, bases_base, bases_n)?;
+
         // No explicit `metaclass=`, but a base may carry a custom metatype that
         // must drive class creation (CPython computes the "winner" metaclass as
         // the most-derived metatype of the bases).  Detect that here, before
@@ -9729,14 +9800,8 @@ impl Interpreter {
         // `class Color(Enum)` invokes `EnumMeta.__new__`.  When every base is a
         // plain `type`-metatyped class (the common case), fall through to the
         // fast native build below.
-        if let Some(winner) = self.inherited_metaclass_winner(regs, num_locals, bases_base, bases_n)?
-        {
-            let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
-            for i in 0..bases_n as usize {
-                let reg = (bases_base as usize + i) as crate::bytecode::Reg;
-                bases_vec.push(vm_read(regs, reg, num_locals)?);
-            }
-            let bases_tuple = Value::tuple(bases_vec);
+        if let Some(winner) = self.inherited_metaclass_winner(&resolved_bases)? {
+            let bases_tuple = Value::tuple(resolved_bases);
             let kwargs: ExpandedArgBuf = class_kwarg_names
                 .iter()
                 .take(kwarg_n as usize)
@@ -9759,6 +9824,7 @@ impl Interpreter {
                 proto_qualname,
                 proto_global_names,
                 proto_nonlocal_names,
+                orig_bases,
             );
         }
 
@@ -9776,9 +9842,16 @@ impl Interpreter {
         let qualname =
             make_class_finalize_attrs(&mut attrs, proto_qualname, class_docstring.as_deref())?;
 
-        // Resolve and validate the base classes.
-        let (base, extra_bases_vec) =
-            self.make_class_resolve_bases(regs, num_locals, bases_base, bases_n)?;
+        // Resolve and validate the base classes (already `__mro_entries__`-
+        // flattened above).
+        let (base, extra_bases_vec) = self.make_class_resolve_bases(&resolved_bases)?;
+
+        // PEP 560: when any base went through `__mro_entries__`, record the
+        // *original* bases tuple in `__orig_bases__` (set before the class is
+        // built so it is part of the namespace, matching CPython).
+        if let Some(orig) = orig_bases {
+            attrs.insert("__orig_bases__".to_string(), Value::tuple(orig));
+        }
 
         // `class X(NamedTuple): ...` (issue #2516): if any base is the
         // `typing.NamedTuple` marker, rebuild the class as a
@@ -9875,13 +9948,15 @@ impl Interpreter {
 
         let metaclass = vm_read(regs, meta_reg, num_locals)?;
 
-        // Build the bases tuple (used for __prepare__ and the metaclass call).
-        let mut bases_vec: Vec<Value> = Vec::with_capacity(bases_n as usize);
-        for i in 0..bases_n as usize {
-            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
-            bases_vec.push(vm_read(regs, reg, num_locals)?);
-        }
-        let bases_tuple = Value::tuple(bases_vec);
+        // PEP 560: resolve `__mro_entries__` on any non-class base before the
+        // metaclass protocol runs (CPython's `__build_class__` resolves bases
+        // for every class statement, including those with an explicit
+        // `metaclass=`).  The resolved tuple drives `__prepare__` and the
+        // metaclass call; `orig_bases` is `Some` only when a base was
+        // substituted, recording `__orig_bases__` in the namespace.
+        let (resolved_bases, orig_bases) =
+            self.resolve_class_bases_mro_entries(regs, num_locals, bases_base, bases_n)?;
+        let bases_tuple = Value::tuple(resolved_bases);
 
         // Assemble the class keyword arguments (everything except `metaclass`,
         // which is not part of `keywords`).  Forwarded to both __prepare__ and
@@ -9909,6 +9984,7 @@ impl Interpreter {
             proto_qualname,
             proto_global_names,
             proto_nonlocal_names,
+            orig_bases,
         )
     }
 
@@ -9930,6 +10006,7 @@ impl Interpreter {
         proto_qualname: String,
         proto_global_names: Rc<HashSet<String>>,
         proto_nonlocal_names: Rc<HashSet<String>>,
+        orig_bases: Option<Vec<Value>>,
     ) -> Result<Value> {
         // 1. ns = metaclass.__prepare__(name, bases, **kwds).  __prepare__ is a
         //    classmethod resolved via the metaclass; `type.__prepare__` returns
@@ -9975,6 +10052,14 @@ impl Interpreter {
                 continue;
             }
             self.namespace_set_item(&namespace, k, v.clone())?;
+        }
+
+        // PEP 560: when any base went through `__mro_entries__`, record the
+        // *original* bases tuple in `__orig_bases__` so the metaclass sees it in
+        // the namespace (CPython sets it in `__build_class__` before the
+        // metaclass call).
+        if let Some(orig) = orig_bases {
+            self.namespace_set_item(&namespace, "__orig_bases__", Value::tuple(orig))?;
         }
 
         // 4. metaclass(name, bases_tuple, namespace, **kwds).
@@ -10186,6 +10271,86 @@ impl Interpreter {
         self.call_function_expanded(builder, &args)
     }
 
+    /// PEP 560: resolve `__mro_entries__` on non-class bases.
+    ///
+    /// Reads the raw base values from `R[bases_base .. bases_base+bases_n]` and,
+    /// for any entry that is not a class (and is not a generic alias, which has
+    /// its own `__origin__` handling downstream), looks up `__mro_entries__` on
+    /// its type and calls `entry.__mro_entries__(orig_bases)` with the *full*
+    /// original bases tuple.  The returned tuple is flattened into the resolved
+    /// bases.  Entries without `__mro_entries__` are passed through unchanged so
+    /// the downstream resolver still produces the proper "class base must be a
+    /// class" error for genuine non-class bases.
+    ///
+    /// Returns `(resolved_bases, orig_bases)` where `orig_bases` is `Some` only
+    /// when at least one base went through `__mro_entries__`, in which case the
+    /// created class records the original bases tuple in `__orig_bases__`.
+    fn resolve_class_bases_mro_entries(
+        &mut self,
+        regs: &RegSlice,
+        num_locals: crate::bytecode::Reg,
+        bases_base: crate::bytecode::Reg,
+        bases_n: u8,
+    ) -> Result<(Vec<Value>, Option<Vec<Value>>)> {
+        // Read the raw bases first.
+        let mut raw: Vec<Value> = Vec::with_capacity(bases_n as usize);
+        for i in 0..bases_n as usize {
+            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
+            raw.push(vm_read(regs, reg, num_locals)?);
+        }
+
+        // Fast path: every entry is already a class (or a generic alias, which
+        // is resolved to its origin downstream).  No `__mro_entries__` to run,
+        // and no `__orig_bases__` to record.
+        let needs_mro_entries = raw.iter().any(|b| {
+            !matches!(b.kind(), ValueKind::PyClass(_))
+                && pyrust_builtins::generic_alias::as_generic_alias_origin(b).is_none()
+        });
+        if !needs_mro_entries {
+            return Ok((raw, None));
+        }
+
+        let orig_bases_tuple = Value::tuple(raw.clone());
+        let mut resolved: Vec<Value> = Vec::with_capacity(raw.len());
+        let mut used_mro_entries = false;
+        for base in &raw {
+            if matches!(base.kind(), ValueKind::PyClass(_))
+                || pyrust_builtins::generic_alias::as_generic_alias_origin(base).is_some()
+            {
+                resolved.push(base.clone());
+                continue;
+            }
+            // Non-class base: look for `__mro_entries__` on its type.
+            let mro_entries_fn = match base.kind() {
+                ValueKind::PyInstance(inst) => {
+                    let class = Rc::clone(&inst.borrow().class);
+                    lookup_class_attr(&class, "__mro_entries__")
+                }
+                _ => None,
+            };
+            let Some(mro_entries_fn) = mro_entries_fn else {
+                // No `__mro_entries__`: pass through so the resolver raises the
+                // proper "class base must be a class" error.
+                resolved.push(base.clone());
+                continue;
+            };
+            let result = invoke_class_method(
+                self,
+                mro_entries_fn,
+                base.clone(),
+                &[ExpandedCallArg { name: None, value: orig_bases_tuple.clone() }],
+            )?;
+            let ValueKind::Tuple(entries) = result.kind() else {
+                return Err(pyrust_core::type_err!("__mro_entries__ must return a tuple"));
+            };
+            resolved.extend(entries.iter().cloned());
+            used_mro_entries = true;
+        }
+
+        let orig = if used_mro_entries { Some(raw) } else { None };
+        Ok((resolved, orig))
+    }
+
     /// Compute the metaclass "winner" inherited from the bases for a `class`
     /// statement with no explicit `metaclass=`.  CPython picks the most-derived
     /// metatype among the bases (`type` is the floor).  Returns `Some(winner)`
@@ -10197,17 +10362,13 @@ impl Interpreter {
     /// unrelated is a metaclass conflict, matching CPython.
     fn inherited_metaclass_winner(
         &mut self,
-        regs: &RegSlice,
-        num_locals: crate::bytecode::Reg,
-        bases_base: crate::bytecode::Reg,
-        bases_n: u8,
+        bases: &[Value],
     ) -> Result<Option<Rc<RefCell<PyClass>>>> {
         let mut winner: Option<Rc<RefCell<PyClass>>> = None;
-        for i in 0..bases_n as usize {
-            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
-            let base_val = vm_read(regs, reg, num_locals)?;
-            let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(&base_val)
-                .unwrap_or(base_val);
+        for base_val in bases {
+            let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
+                .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 continue;
             };
@@ -10234,24 +10395,19 @@ impl Interpreter {
         Ok(winner)
     }
 
-    /// Resolve `R[bases_base .. bases_base+bases_n]` into (primary, extras),
-    /// rejecting non-class and non-subclassable bases, and incompatible layouts.
-    fn make_class_resolve_bases(
-        &mut self,
-        regs: &RegSlice,
-        num_locals: crate::bytecode::Reg,
-        bases_base: crate::bytecode::Reg,
-        bases_n: u8,
-    ) -> Result<ResolvedBases> {
-        let mut classes: Vec<Rc<RefCell<PyClass>>> = Vec::with_capacity(bases_n as usize);
-        for i in 0..bases_n as usize {
-            let reg = (bases_base as usize + i) as crate::bytecode::Reg;
-            let base_val = vm_read(regs, reg, num_locals)?;
+    /// Resolve the (already `__mro_entries__`-flattened) base values into
+    /// (primary, extras), rejecting non-class and non-subclassable bases, and
+    /// incompatible layouts.
+    fn make_class_resolve_bases(&mut self, bases: &[Value]) -> Result<ResolvedBases> {
+        let mut classes: Vec<Rc<RefCell<PyClass>>> = Vec::with_capacity(bases.len());
+        for base_val in bases {
             // A generic alias used as a base (`class Sub[T](Base[T])` or
             // `class L(list[int])`) contributes its `__origin__` to the MRO,
-            // matching CPython's `__mro_entries__` protocol.
-            let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(&base_val)
-                .unwrap_or(base_val);
+            // matching CPython's `__mro_entries__` protocol.  `typing._GenericAlias`
+            // (`class Stack(Generic[T])`) unwraps to its `Generic` origin too.
+            let base_val = pyrust_builtins::generic_alias::as_generic_alias_origin(base_val)
+                .or_else(|| crate::builtin_modules::typing::generic_alias_origin(base_val))
+                .unwrap_or_else(|| base_val.clone());
             let ValueKind::PyClass(c) = base_val.kind() else {
                 return Err(PyError::Runtime("class base must be a class".to_string()));
             };
@@ -10294,7 +10450,7 @@ impl Interpreter {
             let Some(set_name_fn) = lookup_class_attr(&inst_class, "__set_name__") else {
                 continue;
             };
-            invoke_class_method(
+            if let Err(e) = invoke_class_method(
                 self,
                 set_name_fn,
                 attr_val.clone(),
@@ -10305,7 +10461,33 @@ impl Interpreter {
                         value: Value::string(attr_name.clone()),
                     },
                 ],
-            )?;
+            ) {
+                // CPython type_new_set_names appends a note to the propagated
+                // exception naming the descriptor, attribute, and owning class:
+                //   "Error calling __set_name__ on 'D' instance 'd' in 'C'"
+                // (3.12 re-raises the original exception with the note rather
+                // than wrapping it in RuntimeError).
+                let descriptor_type = inst_class.borrow().name.clone();
+                let owner_name = class.borrow().name.clone();
+                let note = format!(
+                    "Error calling __set_name__ on '{descriptor_type}' instance '{attr_name}' in '{owner_name}'"
+                );
+                let exc_val = self.materialize_pyerror(e)?;
+                // Append `note` to the exception's `__notes__` list (PEP 678),
+                // mirroring `BaseException.add_note`.
+                if let ValueKind::PyInstance(exc_inst) = exc_val.kind() {
+                    {
+                        let mut inst = exc_inst.borrow_mut();
+                        if !inst.attrs.contains_key("__notes__") {
+                            inst.attrs.insert("__notes__", Value::list(vec![]));
+                        }
+                    }
+                    if let Some(notes) = exc_inst.borrow().attrs.get_cloned("__notes__") {
+                        let _ = notes.list_push(Value::string(note));
+                    }
+                }
+                return Err(PyError::Raised(exc_val));
+            }
         }
         Ok(())
     }
