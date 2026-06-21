@@ -51,4 +51,9 @@ print(m.group(), m.group(1))                      # b a
 m = re.search(r'(?<!(x))b', 'ab')
 print(m.group(), m.group(1))                      # b None
 
+# A capture set inside a positive lookbehind whose branch later fails must be
+# rolled back, not leaked into the final match.
+m = re.search(r'(?:(?<=(a))bz|(?<=(a))bc)', 'abc')
+print(m.group(), m.group(1), m.group(2))          # bc None a
+
 print("re lookbehind ok")

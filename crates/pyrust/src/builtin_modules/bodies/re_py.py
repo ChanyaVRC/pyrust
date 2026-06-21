@@ -612,7 +612,9 @@ class _Matcher:
             if not positive:
                 self.groups = saved
             if matched == positive:
-                return cont(pos)
+                r = cont(pos)
+                if r is not None:
+                    return r
             self.groups = saved
             return None
         if tag == 'lookbehind':
@@ -629,7 +631,9 @@ class _Matcher:
             if not positive:
                 self.groups = saved
             if matched == positive:
-                return cont(pos)
+                r = cont(pos)
+                if r is not None:
+                    return r
             self.groups = saved
             return None
         return None
