@@ -243,4 +243,9 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `pprint` (issue #2812): a pure-Python pretty-printer (`pprint_py.py`,
+    // transcribed from CPython 3.12's `Lib/pprint.py`) — `pprint`, `pformat`,
+    // `PrettyPrinter`, `isreadable`, `isrecursive`, `saferepr`, `pp` — injected
+    // by the `@inject` post-load hook.  The native body is empty.
+    pprint @inject,
 }
