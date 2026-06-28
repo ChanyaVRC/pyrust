@@ -90,6 +90,12 @@ print(Permission.READ | 2)        # 3
 print(2 | Permission.READ)        # 3
 print(Permission.READ in p)       # True
 
+# ── IntFlag negative values mask into the named-bit range (two's complement) ──
+print(int(Permission(-1)))        # 7
+print(repr(Permission(-1)))       # <Permission.READ|WRITE|EXECUTE: 7>
+print(int(Permission(-2)))        # 6
+print(repr(Permission(-2)))       # <Permission.WRITE|EXECUTE: 6>
+
 
 class Direction(StrEnum):
     NORTH = "north"
@@ -102,3 +108,15 @@ print(repr(Direction.NORTH))          # <Direction.NORTH: 'north'>
 print(Direction("north") is Direction.NORTH)  # True
 print("%s" % Direction.NORTH)         # north
 print(f"{Direction.NORTH}")           # north
+
+
+# ── StrEnum auto() lowercases the member name ────────────────────────────────
+class Side(StrEnum):
+    LEFT = auto()
+    RIGHT = auto()
+    BACK = "rear"
+
+
+print(Side.LEFT.value, Side.RIGHT.value, Side.BACK.value)  # left right rear
+print(repr(Side.LEFT))                # <Side.LEFT: 'left'>
+print(Side("left") is Side.LEFT)      # True

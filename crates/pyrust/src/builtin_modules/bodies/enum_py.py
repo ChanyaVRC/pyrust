@@ -39,7 +39,7 @@ class _EnumDict(dict):
     ``_EnumDict``.
     """
 
-    def __init__(self, is_flag=False):
+    def __init__(self, is_flag=False, is_str=False):
         super().__init__()
         self._member_names = []
         self._last_value = 0
@@ -47,13 +47,19 @@ class _EnumDict(dict):
         # for ``auto()`` instead of the sequential 1, 2, 3, ... of a plain
         # ``Enum``; the OR of every value seen so far drives the next bit.
         self._is_flag = is_flag
+        # ``StrEnum`` resolves ``auto()`` to the lowercased member name
+        # (CPython's ``StrEnum._generate_next_value_`` returns ``name.lower()``).
+        self._is_str = is_str
 
     def __setitem__(self, key, value):
         if not _is_sunder(key) and not _is_dunder(key) and not _is_descriptor(value):
             # A genuine enum member.
             if isinstance(value, auto):
-                value = self._generate_next_value()
-            if self._is_flag:
+                value = self._generate_next_value(key)
+            if self._is_str:
+                # String members carry no numeric accumulator.
+                pass
+            elif self._is_flag:
                 # Track the OR of every flag value so the next ``auto()``
                 # picks the next free bit (mirrors CPython's accumulator).
                 self._last_value |= value
@@ -62,7 +68,10 @@ class _EnumDict(dict):
             self._member_names.append(key)
         super().__setitem__(key, value)
 
-    def _generate_next_value(self):
+    def _generate_next_value(self, name):
+        if self._is_str:
+            # CPython's ``StrEnum._generate_next_value_`` lowercases the name.
+            return name.lower()
         if not self._is_flag:
             return self._last_value + 1
         # Next power of two strictly above the highest bit seen so far.
@@ -112,7 +121,11 @@ class EnumType(type):
         is_flag = flag_base is not None and any(
             isinstance(base, type) and issubclass(base, flag_base) for base in bases
         )
-        return _EnumDict(is_flag=is_flag)
+        str_base = globals().get("StrEnum")
+        is_str = str_base is not None and any(
+            isinstance(base, type) and issubclass(base, str_base) for base in bases
+        )
+        return _EnumDict(is_flag=is_flag, is_str=is_str)
 
     def __new__(mcls, cls, bases, classdict, **kwds):
         member_names = classdict._member_names
@@ -429,6 +442,17 @@ class IntFlag(int, Flag):
         member = cls._value2member_map_.get(value)
         if member is not None:
             return member
+        # CPython 3.12 ``IntFlag`` is lenient on positive out-of-range values
+        # (extra bits are kept), but masks negatives into the named-bit range
+        # via two's complement: ``P(-1)`` with all_bits=7 yields ``P(7)``.
+        if value < 0:
+            all_bits = 0
+            for m in cls._member_map_.values():
+                all_bits |= m._value_
+            value = value & all_bits
+            cached = cls._value2member_map_.get(value)
+            if cached is not None:
+                return cached
         pseudo = int.__new__(cls, value)
         pseudo._name_ = None
         pseudo._value_ = value
