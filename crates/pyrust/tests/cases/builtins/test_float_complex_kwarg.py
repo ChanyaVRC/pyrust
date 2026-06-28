@@ -50,6 +50,15 @@ class MyFloat(float):
 show("MyFloat().hex", lambda: MyFloat(3.14).hex(x=1))
 show("MyFloat().is_integer", lambda: MyFloat(3.14).is_integer(x=1))
 
+# Issue #2767: numeric slot-wrapper dunders on a float subclass reject keyword
+# arguments with the *base* type's qualified wording (`float.__round__()`),
+# matching the plain-float path — the subclass-receiver path previously emitted
+# the unqualified `__round__() takes no keyword arguments`.
+show("MyFloat().__round__", lambda: MyFloat(2.5).__round__(n=1))
+show("MyFloat().__trunc__", lambda: MyFloat(2.5).__trunc__(n=1))
+show("MyFloat().__floor__", lambda: MyFloat(2.5).__floor__(n=1))
+show("MyFloat().__ceil__", lambda: MyFloat(2.5).__ceil__(n=1))
+
 
 # --- happy paths keep working ------------------------------------------------
 print("conjugate:", (3.14).conjugate())

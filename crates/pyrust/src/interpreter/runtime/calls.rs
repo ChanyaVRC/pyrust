@@ -2103,7 +2103,24 @@ impl Interpreter {
                                     method,
                                 )
                             {
-                                reject_kwargs!(kw, "{}", method);
+                                // Issue #2767: keyword-rejection wording on a
+                                // builtin-subclass instance must match the
+                                // plain-primitive paths — named method-wrappers
+                                // (`float.__round__()`, `list.__getitem__()`)
+                                // use the type-qualified form, anonymous slot
+                                // wrappers (`wrapper __len__()`) use the bare
+                                // form (issue #2291).
+                                if !kw.is_empty() {
+                                    let type_name =
+                                        pyrust_core::builtin_type_name(&backing);
+                                    return Err(if is_named_protocol_wrapper(
+                                        method, &type_name,
+                                    ) {
+                                        pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                                    } else {
+                                        pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                                    });
+                                }
                                 let args_vec: Vec<Value> = std::mem::take(pos);
                                 return self.dispatch_builtin_protocol_dunder(
                                     method, backing, args_vec,
