@@ -8880,17 +8880,16 @@ impl Interpreter {
                 ],
             );
         }
-        // Issue #2771: a bare `{cls}` field is `str(cls)`, which dispatches the
-        // metaclass `__str__`/`__repr__` when overridden.  Returns `None` for an
-        // ordinary class, so plain classes keep the fast `apply_format_spec`
-        // path below.
-        if let ValueKind::PyClass(cls_rc) = value.kind() {
-            let cls_rc = Rc::clone(cls_rc);
-            if let Some(res) =
-                crate::interpreter::dispatch_metaclass_repr_str(self, &cls_rc, "__str__")
-            {
-                return res.map(Value::string);
-            }
+        // Issue #2771: a bare `{cls}` field is `format(cls, "")`, which runs
+        // `type(cls).__format__(cls, "")` — a metaclass `__format__` override
+        // wins, otherwise the inherited `object.__format__` returns `str(cls)`
+        // (honouring a metaclass `__str__`/`__repr__`).  Only classes with a
+        // custom metatype can carry such an override, so plain classes keep the
+        // fast `apply_format_spec` path below.
+        if let ValueKind::PyClass(cls_rc) = value.kind()
+            && cls_rc.borrow().metatype.is_some()
+        {
+            return self.dispatch_dunder_format(value, "");
         }
         // Non-instance: empty spec == str(value).
         apply_format_spec(value, "")
@@ -8924,6 +8923,34 @@ impl Interpreter {
             let has_custom_meta = cls_rc.borrow().metatype.is_some();
             if has_custom_meta {
                 let cls_rc = Rc::clone(cls_rc);
+                // A metaclass `__format__` override wins outright — CPython runs
+                // `type(cls).__format__(cls, spec)` for *any* spec, not just the
+                // inherited `object.__format__`.
+                if let Some(method_val) =
+                    crate::interpreter::metaclass_dunder(&cls_rc, "__format__")
+                {
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_class(Rc::clone(&cls_rc)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: Value::string(spec),
+                        }],
+                    )?;
+                    return if is_str_or_str_subclass(&result) {
+                        Ok(result)
+                    } else {
+                        Err(pyrust_core::type_err!(
+                            "__format__ must return a str, not {}",
+                            value_type_name_str(&result),
+                        ))
+                    };
+                }
+                // No metaclass `__format__`: inherited `object.__format__` —
+                // empty spec returns `str(cls)` (honouring a metaclass
+                // `__str__`/`__repr__`), a non-empty spec raises `TypeError`
+                // naming the metaclass regardless of any repr/str override.
                 if spec.is_empty() {
                     return Ok(Value::string(self.render_value_as_str(value)?));
                 }

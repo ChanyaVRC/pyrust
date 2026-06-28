@@ -127,3 +127,24 @@ try:
     f"{Callable:>5}"
 except TypeError as e:
     print(e)  # unsupported format string passed to CallMeta.__format__
+
+
+# A metaclass __format__ override is invoked by format()/f-string for any spec.
+class FmtMeta(type):
+    def __format__(cls, spec):
+        return f"FMT({cls.__name__}|{spec})"
+
+
+class Formatted(metaclass=FmtMeta):
+    pass
+
+
+print(format(Formatted, "abc"))  # FMT(Formatted|abc)
+print(format(Formatted, ""))     # FMT(Formatted|)
+print(f"{Formatted:>10}")        # FMT(Formatted|>10)
+print("{}".format(Formatted))    # FMT(Formatted|)
+# A bare {cls} field is format(cls, ""), which calls __format__ (not str()).
+print(f"{Formatted}")            # FMT(Formatted|)
+# str(cls) does NOT call __format__; FmtMeta has no __str__/__repr__ so the
+# default class formatting is used.
+print(str(Formatted).startswith("<class "))  # True
