@@ -7577,6 +7577,46 @@ pyrust_module! {
         Ok(Value::string(self_val.repr_raw()))
     }
 
+    /// PEP 695: `TypeAliasType.__getitem__` — subscripting a generic alias
+    /// (`Pair.__getitem__(int)`) returns a `types.GenericAlias` with the alias
+    /// as origin, matching the operator path in `eval_index`.  A non-generic
+    /// alias raises CPython's "Only generic type aliases are subscriptable".
+    /// The operator form `Pair[int]` is served by the inline fast path; this
+    /// slot exists so `hasattr(alias, "__getitem__")` is True and the explicit
+    /// `alias.__getitem__(x)` call works, matching CPython 3.12 (issue #2779).
+    #[py_name = "builtins.TypeAliasType.__getitem__"]
+    fn type_alias_type_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "TypeAliasType")
+        })?;
+        let key = args
+            .get(1)
+            .map(|a| a.value.clone())
+            .ok_or_else(|| pyrust_core::type_err!("__getitem__ expected 1 argument, got 0"))?;
+        let is_generic_alias = match self_val.kind() {
+            ValueKind::PyInstance(inst_rc) => inst_rc
+                .borrow()
+                .attrs
+                .get("__type_params__")
+                .is_some_and(|p| matches!(p.kind(), ValueKind::Tuple(t) if !t.is_empty())),
+            _ => false,
+        };
+        if !is_generic_alias {
+            return Err(pyrust_core::type_err!(
+                "Only generic type aliases are subscriptable"
+            ));
+        }
+        let type_args = if matches!(key.kind(), ValueKind::Tuple(_)) {
+            key
+        } else {
+            Value::tuple(vec![key])
+        };
+        Ok(pyrust_builtins::generic_alias::generic_alias(
+            self_val, type_args,
+        ))
+    }
+
     /// PEP 695: `TypeVar.__repr__` — returns the TypeVar name string.
     /// CPython: `repr(T)` outputs `~T` for invariant TypeVars, but the
     /// `__name__` attribute is just the bare name `T`.

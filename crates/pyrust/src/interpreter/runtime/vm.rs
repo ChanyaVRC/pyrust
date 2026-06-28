@@ -5215,7 +5215,23 @@ impl Interpreter {
                     };
                     let value_val = vm_try!(vm_read(&regs, *value_reg, num_locals)).clone();
                     let params_val = vm_try!(vm_read(&regs, *params_reg, num_locals)).clone();
-                    let inst = make_type_alias_instance(name_str, value_val, params_val);
+                    // CPython sets the alias instance's `__module__` to the
+                    // defining module's `__name__` (e.g. `__main__`, or the
+                    // imported module's name), distinct from
+                    // `type(alias).__module__ == "typing"` (issue #2779).
+                    // `__name__` lives in the active module env (mirrored into
+                    // module_globals_dict only after globals() is touched,
+                    // #706), so resolve it through the env chain first.
+                    let module_name = vm_try!(self.lookup_name_inner("__name__", false))
+                        .or_else(|| {
+                            self.module_globals_dict
+                                .dict_with(|d| d.get(&StrKey("__name__")).cloned())
+                                .flatten()
+                        })
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "__main__".to_string());
+                    let inst =
+                        make_type_alias_instance(name_str, value_val, params_val, module_name);
                     regs[*dst as usize] = inst;
                 }
 
@@ -6183,6 +6199,14 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("builtins.TypeAliasType.__repr__"),
         );
+        // PEP 695: generic aliases are subscriptable.  The operator form
+        // `Pair[int]` is served by the inline fast path in `eval_index`; this
+        // slot makes `hasattr(alias, "__getitem__")` True and lets an explicit
+        // `alias.__getitem__(x)` call work, matching CPython 3.12 (issue #2779).
+        attrs.insert(
+            "__getitem__".to_string(),
+            Value::builtin_function("builtins.TypeAliasType.__getitem__"),
+        );
         // CPython exposes `TypeAliasType` from `typing`, so
         // `type(my_alias).__module__ == "typing"` and the bare class reprs as
         // `<class 'typing.TypeAliasType'>` (issue #2779).
@@ -6254,15 +6278,21 @@ pub(crate) fn typevar_readonly_attr_error(name: &str) -> Option<String> {
     }
 }
 
-/// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`, and
-/// `__type_params__` attributes, matching the observable behaviour of CPython's
-/// `typing.TypeAliasType`.
-pub(crate) fn make_type_alias_instance(name: String, value: Value, type_params: Value) -> Value {
+/// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`,
+/// `__type_params__`, and `__module__` attributes, matching the observable
+/// behaviour of CPython's `typing.TypeAliasType`.
+pub(crate) fn make_type_alias_instance(
+    name: String,
+    value: Value,
+    type_params: Value,
+    module: String,
+) -> Value {
     TYPE_ALIAS_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__", Value::string(name));
         attrs.insert("__value__", value);
         attrs.insert("__type_params__", type_params);
+        attrs.insert("__module__", Value::string(module));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,

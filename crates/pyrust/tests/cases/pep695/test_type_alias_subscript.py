@@ -3,6 +3,7 @@ import typing
 
 # ── __module__ and typing.TypeAliasType export ───────────────────────────────
 type Vector = list[float]
+print(Vector.__module__)                  # __main__ (alias instance's module)
 print(type(Vector).__module__)            # typing
 print(hasattr(typing, "TypeAliasType"))   # True
 print(type(Vector) is typing.TypeAliasType)  # True
@@ -20,6 +21,16 @@ print(repr(result))                       # Pair[int]
 print(type(result))                       # <class 'types.GenericAlias'>
 print(result.__origin__ is Pair)          # True
 print(result.__args__)                    # (<class 'int'>,)
+
+# __getitem__ slot exists and the explicit call matches the operator form
+print(hasattr(Pair, "__getitem__"))       # True
+print(hasattr(Vector, "__getitem__"))     # True
+print(Pair.__getitem__(int))              # Pair[int]
+print(Pair.__getitem__((int,)))           # Pair[int]
+try:
+    Vector.__getitem__(int)
+except TypeError as e:
+    print("TypeError:", e)  # Only generic type aliases are subscriptable
 
 # Multiple parameters
 type Triple[T, U] = tuple[T, U, T]
