@@ -7,6 +7,10 @@ T = TypeVar('T')
 print(type(P.args).__name__)     # ParamSpecArgs
 print(type(P.kwargs).__name__)   # ParamSpecKwargs
 
+# Module (CPython exposes these as typing.ParamSpecArgs)
+print(type(P.args).__module__)    # typing
+print(type(P.kwargs).__module__)  # typing
+
 # Repr
 print(repr(P.args))    # P.args
 print(repr(P.kwargs))  # P.kwargs
