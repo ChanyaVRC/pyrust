@@ -62,6 +62,14 @@ pub(crate) fn inject_python_members(
     let dict = ns
         .as_dict()
         .ok_or_else(|| PyError::Runtime("fractions: exec namespace not a dict".into()))?;
+    // Propagate the source's `__all__` so `fractions.__all__ == ['Fraction']`
+    // matches CPython (used by `from fractions import *` and tooling).
+    if let Some(all_val) = dict.get(&PyKey::str_from("__all__")) {
+        module
+            .borrow_mut()
+            .attrs
+            .insert("__all__".to_string(), all_val.clone());
+    }
     for name in FRACTIONS_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             // The exec namespace's `__name__` defaults to `__main__`; override

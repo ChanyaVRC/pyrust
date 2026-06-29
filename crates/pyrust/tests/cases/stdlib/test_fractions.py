@@ -1,4 +1,9 @@
+import fractions
 from fractions import Fraction
+
+# Module surface
+print(fractions.__all__)               # ['Fraction']
+print(Fraction.__module__)             # fractions
 
 # Construction
 print(Fraction(1, 3))                  # 1/3
