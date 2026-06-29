@@ -30,7 +30,7 @@ use std::time::Instant;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{CoroStep, ExpandedCallArg, Interpreter};
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 /// Python-level members of the module, defined as real `async def` coroutines /
@@ -67,7 +67,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Pre-seed the exec namespace with the native bridge helpers so the
     // Python source can call them by bare name (`_step`, `_monotonic`, …).
     // They are registered as attributes of this module by `pyrust_module!`.

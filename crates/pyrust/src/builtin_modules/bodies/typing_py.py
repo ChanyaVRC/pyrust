@@ -517,6 +517,12 @@ class ParamSpec:
     def __init__(self, name, *, bound=None, covariant=False, contravariant=False):
         self.__name__ = name
         self.__bound__ = bound
+        # CPython captures the caller's module on the instance, so
+        # `P = ParamSpec('P')` at top level has `P.__module__ == '__main__'`.
+        # The `ParamSpec` *class* carries `__module__ == 'typing'` (#2801), so
+        # without this instance override the instance would inherit `'typing'`.
+        # Mirror the native `TypeVar` path (typing.rs), which seeds `'__main__'`.
+        self.__module__ = "__main__"
 
     @property
     def args(self):
@@ -535,6 +541,9 @@ class TypeVarTuple:
 
     def __init__(self, name):
         self.__name__ = name
+        # See `ParamSpec.__init__`: the instance captures the caller's module
+        # (`'__main__'` at top level), not the `TypeVarTuple` class's `'typing'`.
+        self.__module__ = "__main__"
 
     def __iter__(self):
         return iter((Unpack[self],))

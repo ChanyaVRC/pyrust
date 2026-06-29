@@ -1066,7 +1066,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
-    let ns = Value::dict(crate::value::PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     // Seed the exec namespace with the native special-form names the helpers
     // reference by identity.
     for name in [

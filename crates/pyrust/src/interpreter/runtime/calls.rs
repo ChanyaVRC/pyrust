@@ -10416,8 +10416,19 @@ impl Interpreter {
         seed_class_reg(&mut class_regs, qualname_slot, || {
             Value::string(proto_qualname)
         });
+        // CPython sets the class body's pre-injected `__module__` to the value
+        // of the global `__name__` (the compiler emits `__module__ = __name__`).
+        // Resolve it from the current module namespace so classes defined inside
+        // `@inject`-backed Python body files (e.g. `typing_py.py`) report the
+        // correct module (`typing`, `dataclasses`, …) rather than `__main__`
+        // (issue #2801).  A top-level script's module env seeds `__name__` to
+        // `"__main__"`, preserving the previous default there.
+        let module_name = lookup_name_in_module(&self.env, "__name__")
+            .filter(|v| matches!(v.kind(), ValueKind::Str(_)));
         seed_class_reg(&mut class_regs, module_slot, || {
-            Value::string("__main__")
+            module_name
+                .clone()
+                .unwrap_or_else(|| Value::string("__main__"))
         });
         seed_class_reg(&mut class_regs, annotations_slot, || {
             Value::dict(PyDict::default())
