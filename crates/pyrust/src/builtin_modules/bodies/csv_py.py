@@ -278,7 +278,15 @@ class _writer:
 
     def writerow(self, row):
         d = self.dialect
-        out = d.delimiter.join(self._format_field(field) for field in row)
+        cols = [self._format_field(field) for field in row]
+        # CPython special case (csv_writerow): a record of a single field whose
+        # rendered form is empty must be quoted, otherwise the line would read
+        # back as an empty record ([]).  QUOTE_NONE cannot quote, so it raises.
+        if len(cols) == 1 and cols[0] == "":
+            if d.quoting == QUOTE_NONE or d.quotechar is None:
+                raise Error("single empty field record must be quoted")
+            cols[0] = d.quotechar + d.quotechar
+        out = d.delimiter.join(cols)
         out += d.lineterminator
         return self._file.write(out)
 
@@ -316,23 +324,37 @@ class _writer:
                 escaped.append(c)
             return "".join(escaped)
 
+        # Mirror CPython's `join_append_data` (Modules/_csv.c): walk the field a
+        # character at a time, deciding per-character whether to force quoting
+        # and whether to escape.  QUOTE_ALL / QUOTE_NONNUMERIC seed `quoted`;
+        # QUOTE_MINIMAL starts unquoted and only the delimiter / CR / LF (and a
+        # quotechar handled by doubling) force it.
+        doublequote = d.doublequote
         if quoting == QUOTE_ALL:
-            need_quote = True
+            quoted = True
         elif quoting == QUOTE_NONNUMERIC:
-            need_quote = not is_numeric
+            quoted = not is_numeric
         else:  # QUOTE_MINIMAL
-            need_quote = False
-            if quotechar is not None:
-                for c in text:
-                    if c == delimiter or c == quotechar or c == "\r" or c == "\n":
-                        need_quote = True
-                        break
+            quoted = False
 
-        if need_quote and quotechar is not None:
-            if d.doublequote:
-                text = text.replace(quotechar, quotechar + quotechar)
-            elif escapechar is not None:
-                text = text.replace(quotechar, escapechar + quotechar)
+        out = []
+        for c in text:
+            if c == delimiter or c == "\r" or c == "\n":
+                quoted = True
+            elif quotechar is not None and c == quotechar:
+                if doublequote:
+                    quoted = True
+                    out.append(quotechar)
+                else:
+                    if escapechar is None:
+                        raise Error("need to escape, but no escapechar set")
+                    out.append(escapechar)
+            elif escapechar is not None and c == escapechar:
+                out.append(escapechar)
+            out.append(c)
+
+        text = "".join(out)
+        if quoted and quotechar is not None:
             return quotechar + text + quotechar
         return text
 

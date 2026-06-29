@@ -29,7 +29,7 @@ use pyrust_derive::pyrust_module;
 const CSV_PY_SOURCE: &str = include_str!("csv_py.py");
 
 /// Public names from `CSV_PY_SOURCE` exported onto the `csv` module.
-const CSV_PY_EXPORTS: [&str; 16] = [
+const CSV_PY_EXPORTS: [&str; 17] = [
     "QUOTE_MINIMAL",
     "QUOTE_ALL",
     "QUOTE_NONNUMERIC",
@@ -45,6 +45,7 @@ const CSV_PY_EXPORTS: [&str; 16] = [
     "DictWriter",
     "register_dialect",
     "unregister_dialect",
+    "get_dialect",
     "list_dialects",
 ];
 

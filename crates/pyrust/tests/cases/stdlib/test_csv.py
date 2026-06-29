@@ -119,6 +119,16 @@ print(csv.QUOTE_NONE)        # 3
 # list_dialects includes 'excel'
 print('excel' in csv.list_dialects())  # True
 
+# get_dialect is part of the public surface
+print(csv.get_dialect('excel').delimiter)  # ,
+csv.register_dialect('pipes', delimiter='|')
+print(csv.get_dialect('pipes').delimiter)  # |
+csv.unregister_dialect('pipes')
+try:
+    csv.get_dialect('pipes')
+except csv.Error:
+    print('pipes gone')  # pipes gone
+
 # Tab delimiter via fmtparams
 out6 = io.StringIO()
 csv.writer(out6, delimiter='\t').writerow(['a', 'b'])
@@ -127,5 +137,54 @@ print(repr(out6.getvalue()))  # 'a\tb\r\n'
 # reader dialect attribute
 r = csv.reader(['a'])
 print(r.dialect.delimiter)  # ,
+
+# writer doublequote=False + escapechar: embedded quotechar is escaped inline,
+# the field is NOT force-quoted (CPython join_append_data semantics).
+out_dqf = io.StringIO()
+csv.writer(out_dqf, doublequote=False, escapechar='\\').writerow(['a"b'])
+print(repr(out_dqf.getvalue()))  # 'a\\"b\r\n'
+
+# writer always escapes a bare escapechar in the field (any quoting mode),
+# without forcing the field to be quoted.
+out_esc = io.StringIO()
+csv.writer(out_esc, escapechar='\\').writerow(['a\\b'])
+print(repr(out_esc.getvalue()))  # 'a\\\\b\r\n'
+
+# escapechar inside a force-quoted field is still doubled.
+out_escq = io.StringIO()
+csv.writer(out_escq, escapechar='\\').writerow(['a,\\b'])
+print(repr(out_escq.getvalue()))  # '"a,\\\\b"\r\n'
+
+# doublequote=False + escapechar, quotechar inside a comma-quoted field.
+out_cq = io.StringIO()
+csv.writer(out_cq, doublequote=False, escapechar='\\').writerow(['a,"b'])
+print(repr(out_cq.getvalue()))  # '"a,\\"b"\r\n'
+
+# doublequote=False with NO escapechar and a quotechar in the field raises.
+try:
+    csv.writer(io.StringIO(), doublequote=False).writerow(['a"b'])
+except csv.Error as e:
+    print('DQF-ERR', type(e).__name__)  # DQF-ERR Error
+
+# A single empty field must be quoted so the line round-trips to [''] not [].
+out_se = io.StringIO()
+csv.writer(out_se).writerow([''])
+print(repr(out_se.getvalue()))  # '""\r\n'
+
+# ... including a single None field.
+out_sn = io.StringIO()
+csv.writer(out_sn).writerow([None])
+print(repr(out_sn.getvalue()))  # '""\r\n'
+
+# Two empty fields are NOT quoted (only the single-field case is special).
+out_te = io.StringIO()
+csv.writer(out_te).writerow(['', ''])
+print(repr(out_te.getvalue()))  # ',\r\n'
+
+# QUOTE_NONE cannot quote the single empty field, so it raises.
+try:
+    csv.writer(io.StringIO(), quoting=csv.QUOTE_NONE).writerow([''])
+except csv.Error as e:
+    print('SEF-ERR', type(e).__name__)  # SEF-ERR Error
 
 print("csv ok")
