@@ -51,6 +51,7 @@ pub const METHODS: &[&str] = &[
     "istitle",
     // Added in #1170
     "expandtabs",
+    "__getnewargs__",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `bytes` method.
@@ -73,6 +74,22 @@ pub fn call(method: &str, receiver: &Value, args: &[Value], kwargs: &PyDict) -> 
             ));
         }
     };
+    // __getnewargs__ supports the pickle protocol: it returns a 1-tuple
+    // containing the bytes itself, i.e. b'hi'.__getnewargs__() == (b'hi',).
+    // Handled here (not in `call_on_slice`) so `bytearray` — which reuses
+    // `call_on_slice` but has no `__getnewargs__` in CPython — never reaches it.
+    if method == "__getnewargs__" {
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "bytes.__getnewargs__() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        return Ok(Value::tuple(vec![receiver.clone()]));
+    }
     call_on_slice(method, bytes, args, kwargs)
 }
 

@@ -626,6 +626,13 @@ impl Interpreter {
                 if name.split_once('.').is_some_and(|(t, _)| t == "float") =>
             {
                 let (_, method) = name.split_once('.').unwrap();
+                // Issue #2760: `__getnewargs__` takes no keyword arguments; the
+                // unbound float arm below drops kwargs silently otherwise.
+                if method == "__getnewargs__" && args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "float.__getnewargs__() takes no keyword arguments"
+                    ));
+                }
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())
@@ -911,6 +918,13 @@ impl Interpreter {
                         // to" receiver-guard wording); `int.__index__` stays a
                         // slot wrapper.
                         | ("int", "__round__" | "__trunc__" | "__floor__" | "__ceil__")
+                        // Issue #2760: `__getnewargs__` is a method_descriptor on
+                        // every numeric/immutable-sequence primitive, so its
+                        // receiver-guard uses the "doesn't apply to" wording.
+                        | (
+                            "int" | "bool" | "float" | "complex" | "str" | "bytes" | "tuple",
+                            "__getnewargs__"
+                        )
                 );
                 let is_dunder =
                     method.starts_with("__") && method.ends_with("__") && !is_method_descriptor_dunder;
@@ -1170,7 +1184,17 @@ impl Interpreter {
                         }
                         self.call_set_method(method, self_val, pos)
                     }
-                    "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
+                    "complex" => {
+                        // Issue #2760: `__getnewargs__` takes no keyword
+                        // arguments; the receiver-only `complex::call` discards
+                        // `kw` otherwise.
+                        if method == "__getnewargs__" && !kw.is_empty() {
+                            return Err(pyrust_core::type_err!(
+                                "complex.__getnewargs__() takes no keyword arguments"
+                            ));
+                        }
+                        pyrust_builtins::complex::call(method, &self_val, pos)
+                    }
                     "frozenset" => {
                         // Issue #2500: frozenset methods take no keyword arguments.
                         if let Some(err) = reject_container_method_kwargs("frozenset", method, &kw) {
@@ -1824,6 +1848,13 @@ impl Interpreter {
                 pyrust_builtins::int::call(method, &receiver, &pos[..], &kw)
             }
             Kind::Float => {
+                // Issue #2760: `__getnewargs__` takes no keyword arguments
+                // (the receiver-only `float::call` discards `kw`).
+                if method == "__getnewargs__" && !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "float.__getnewargs__() takes no keyword arguments"
+                    ));
+                }
                 let f = match receiver.kind() {
                     ValueKind::Float(f) => f,
                     _ => unreachable!("kind_tag guard above"),
@@ -2009,6 +2040,13 @@ impl Interpreter {
                 }
             }
             ValueKind::Complex(_, _) => {
+                // Issue #2760: `__getnewargs__` takes no keyword arguments
+                // (the receiver-only `complex::call` discards `kw`).
+                if method == "__getnewargs__" && !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "complex.__getnewargs__() takes no keyword arguments"
+                    ));
+                }
                 let args_vec: Vec<Value> = std::mem::take(pos);
                 pyrust_builtins::complex::call(method, &receiver, args_vec)
             }
@@ -8705,9 +8743,10 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     // (intercepted in `get_attr`) and `float.fromhex` (a classmethod
     // registered in helpers.rs); none are in the `METHODS` slice.  These all
     // resolve via `hasattr`, so listing them keeps `dir()` consistent with
-    // attribute access.  CPython also advertises `__int__`/`__float__`/
-    // `__getformat__`/`__getnewargs__` (float) and `__complex__`/
-    // `__getnewargs__` (complex), but those slots are not yet resolvable on
+    // attribute access.  `__getnewargs__` IS in the `METHODS` slice now
+    // (issue #2760), so it surfaces automatically above.  CPython also
+    // advertises `__int__`/`__float__`/`__getformat__` (float) and
+    // `__complex__` (complex), but those slots are not yet resolvable on
     // pyrust instances — omitting them keeps `dir()` in lock-step with
     // `hasattr` (the invariant the bug report is about).
     if type_name == "float" {

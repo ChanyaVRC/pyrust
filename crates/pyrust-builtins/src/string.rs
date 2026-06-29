@@ -82,6 +82,7 @@ pub const METHODS: &[&str] = &[
     "isprintable",
     "encode",
     "translate",
+    "__getnewargs__",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `str` method.
@@ -354,6 +355,20 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             "TypeError",
             "'str' __iter__ must be dispatched by the interpreter",
         )),
+        // __getnewargs__ supports the pickle protocol: it returns a 1-tuple
+        // containing the str itself, i.e. 'hello'.__getnewargs__() == ('hello',).
+        "__getnewargs__" => {
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "str.__getnewargs__() takes no arguments ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            Ok(Value::tuple(vec![src.clone()]))
+        }
         _ => Err(PyError::named(
             "AttributeError",
             format!("'str' object has no attribute '{method}'"),

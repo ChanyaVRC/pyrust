@@ -4686,6 +4686,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
             pyrust_builtins::int::has_method(name)
         }
         ValueKind::Float(_) => pyrust_builtins::float::has_method(name),
+        ValueKind::Complex(_, _) => pyrust_builtins::complex::has_method(name),
         ValueKind::Bytes(_) => pyrust_builtins::bytes::has_method(name),
         ValueKind::Str(_) => pyrust_builtins::string::has_method(name),
         ValueKind::List(_) => pyrust_builtins::list::has_method(name),
