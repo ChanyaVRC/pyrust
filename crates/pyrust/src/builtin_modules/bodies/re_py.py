@@ -23,9 +23,22 @@ the public names are copied onto the module by ``re.rs::inject_python_members``
 
 A = ASCII = 256
 I = IGNORECASE = 2
+L = LOCALE = 4
 M = MULTILINE = 8
 S = DOTALL = 16
+U = UNICODE = 32
 X = VERBOSE = 64
+
+# Single-letter inline flag characters, e.g. ``(?i)`` -> IGNORECASE.
+_FLAG_LETTERS = {
+    'i': IGNORECASE,
+    'm': MULTILINE,
+    's': DOTALL,
+    'x': VERBOSE,
+    'a': ASCII,
+    'u': UNICODE,
+    'L': LOCALE,
+}
 
 # --------------------------------------------------------------------------- #
 # Exception
@@ -75,6 +88,7 @@ class error(Exception):
 #   ('backref', idx)             \1 .. \99
 #   ('backref_name', name)       (?P=name)
 #   ('lookahead', positive, node)   (?=...) / (?!...)
+#   ('lookbehind', positive, node, width)   (?<=...) / (?<!...) (fixed width)
 
 
 class _Parser:
@@ -85,6 +99,9 @@ class _Parser:
         self.flags = flags
         self.group_count = 0
         self.groupindex = {}
+        # Tracks whether any real atom has been parsed yet; global inline
+        # flags ``(?i)`` are only valid before the first atom (CPython rule).
+        self._seen_atom = False
 
     def _err(self, msg, pos=None):
         if pos is None:
@@ -193,7 +210,10 @@ class _Parser:
     def _parse_atom(self):
         c = self.s[self.i]
         if c == '(':
+            # _parse_group sets _seen_atom itself (a global ``(?i)`` flag
+            # group must not count as an atom).
             return self._parse_group()
+        self._seen_atom = True
         if c == '[':
             return self._parse_class()
         if c == '.':
@@ -219,6 +239,16 @@ class _Parser:
             if self.i >= self.n:
                 self._err("unexpected end of pattern")
             kind = self.s[self.i]
+            if kind in _FLAG_LETTERS or kind == '-':
+                return self._parse_flag_group()
+            if kind == '#':
+                # A comment is not an atom and may precede global flags.
+                self.i += 1
+                while self.i < self.n and self.s[self.i] != ')':
+                    self.i += 1
+                self._expect(')')
+                return ('seq', [])
+            self._seen_atom = True
             if kind == ':':
                 self.i += 1
                 node = self._parse_alt()
@@ -238,23 +268,89 @@ class _Parser:
                     name = self._read_group_name(')')
                     return ('backref_name', name)
                 self._err("unknown extension ?P")
-            if kind == '#':
-                self.i += 1
-                while self.i < self.n and self.s[self.i] != ')':
-                    self.i += 1
-                self._expect(')')
-                return ('seq', [])
             if kind == '=' or kind == '!':
                 self.i += 1
                 node = self._parse_alt()
                 self._expect(')')
                 return ('lookahead', kind == '=', node)
+            if kind == '<':
+                self.i += 1
+                if self.i >= self.n:
+                    self._err("unexpected end of pattern")
+                sub = self.s[self.i]
+                if sub == '=' or sub == '!':
+                    self.i += 1
+                    node = self._parse_alt()
+                    self._expect(')')
+                    width = _fixed_width(node)
+                    if width < 0:
+                        raise error("look-behind requires fixed-width pattern")
+                    return ('lookbehind', sub == '=', node, width)
+                self._err("unknown extension ?<" + sub)
             self._err("unknown extension ?" + kind)
         # plain capturing group
+        self._seen_atom = True
         idx = self._register_group(None)
         node = self._parse_alt()
         self._expect(')')
         return ('group', idx, None, node)
+
+    def _parse_flag_group(self):
+        # self.i points at the first flag letter or '-' after '(?'.
+        # Handles global flags ``(?i)`` and scoped flag groups
+        # ``(?i:...)`` / ``(?i-m:...)`` / ``(?-m:...)``.
+        start = self.i
+        add = 0
+        while self.i < self.n and self.s[self.i] in _FLAG_LETTERS:
+            add |= _FLAG_LETTERS[self.s[self.i]]
+            self.i += 1
+        if self.i >= self.n:
+            self._err("missing -, : or )")
+        c = self.s[self.i]
+        if c not in ')-:':
+            # A stray flag-letter-like char: alphabetic chars are an
+            # unrecognised flag, anything else is a structural error.
+            self._err("unknown flag" if c.isalpha() else "missing -, : or )")
+        if c == ')':
+            # Global flags: only valid before any atom, applied pattern-wide.
+            if self._seen_atom:
+                self._err("global flags not at the start of the expression",
+                          start - 2)
+            self.i += 1
+            self.flags |= add
+            return ('seq', [])
+        remove = 0
+        if c == '-':
+            self.i += 1
+            rstart = self.i
+            while self.i < self.n and self.s[self.i] in _FLAG_LETTERS:
+                remove |= _FLAG_LETTERS[self.s[self.i]]
+                self.i += 1
+            if self.i == rstart:
+                # No flag letters were consumed after '-'.
+                if self.i < self.n and self.s[self.i].isalpha():
+                    self._err("unknown flag")
+                self._err("missing flag")
+            if remove & (ASCII | UNICODE | LOCALE):
+                self._err("bad inline flags: cannot turn off flags "
+                          "'a', 'u' and 'L'")
+            if self.i >= self.n or self.s[self.i] != ':':
+                self._err("unknown flag"
+                          if self.i < self.n and self.s[self.i].isalpha()
+                          else "missing :")
+        # c == ':' (possibly after a '-flags' clause)
+        if add & remove:
+            # The same flag is both turned on and off.
+            self._err("bad inline flags: flag turned on and off")
+        self.i += 1  # consume ':'
+        self._seen_atom = True
+        saved = self.flags
+        self.flags = (self.flags | add) & ~remove
+        node = self._parse_alt()
+        scoped_flags = self.flags
+        self.flags = saved
+        self._expect(')')
+        return ('scoped', scoped_flags, node)
 
     def _register_group(self, name):
         self.group_count += 1
@@ -402,6 +498,57 @@ def _decode_class_escape(c):
 # --------------------------------------------------------------------------- #
 
 
+def _fixed_width(node):
+    """Return the constant character width matched by ``node``, or -1 if the
+    width is variable (so lookbehind can reject it)."""
+    tag = node[0]
+    if tag == 'lit' or tag == 'any' or tag == 'cat' or tag == 'class':
+        return 1
+    if tag == 'backref' or tag == 'backref_name':
+        return -1
+    if tag in ('start', 'end', 'bol_a', 'eol_z', 'wordb',
+               'lookahead', 'lookbehind'):
+        return 0
+    if tag == 'seq':
+        total = 0
+        for child in node[1]:
+            w = _fixed_width(child)
+            if w < 0:
+                return -1
+            total += w
+        return total
+    if tag == 'group':
+        return _fixed_width(node[3])
+    if tag == 'alt':
+        width = None
+        for branch in node[1]:
+            w = _fixed_width(branch)
+            if w < 0:
+                return -1
+            if width is None:
+                width = w
+            elif width != w:
+                return -1
+        return width if width is not None else 0
+    if tag == 'opt':
+        # node? — variable unless the inner width is 0.
+        return -1
+    if tag == 'star':
+        return -1
+    if tag == 'plus':
+        return -1
+    if tag == 'repeat':
+        lo = node[2]
+        hi = node[3]
+        if hi is None or lo != hi:
+            return -1
+        w = _fixed_width(node[1])
+        if w < 0:
+            return -1
+        return w * lo
+    return -1
+
+
 def _is_word(ch):
     return ch == '_' or ch.isalnum()
 
@@ -518,6 +665,8 @@ class _Matcher:
             if at_boundary != negated:
                 return cont(pos)
             return None
+        if tag == 'scoped':
+            return self._m_scoped(node, pos, cont)
         if tag == 'group':
             return self._m_group(node, pos, cont)
         if tag == 'alt':
@@ -546,7 +695,28 @@ class _Matcher:
             if not positive:
                 self.groups = saved
             if matched == positive:
-                return cont(pos)
+                r = cont(pos)
+                if r is not None:
+                    return r
+            self.groups = saved
+            return None
+        if tag == 'lookbehind':
+            positive = node[1]
+            width = node[3]
+            start = pos - width
+            saved = list(self.groups)
+            if start < 0:
+                matched = False
+            else:
+                matched = self._m(
+                    node[2], start,
+                    lambda p: p if p == pos else None) is not None
+            if not positive:
+                self.groups = saved
+            if matched == positive:
+                r = cont(pos)
+                if r is not None:
+                    return r
             self.groups = saved
             return None
         return None
@@ -559,6 +729,35 @@ class _Matcher:
             return self._m_seq(nodes, idx + 1, p, cont)
 
         return self._m(nodes[idx], pos, next_cont)
+
+    def _m_scoped(self, node, pos, cont):
+        # ('scoped', flags, subnode): the flag overrides apply only to the
+        # enclosed subpattern; the continuation runs under the outer flags.
+        flags = node[1]
+        sub = node[2]
+        outer = (self.ignorecase, self.multiline, self.dotall,
+                 self.ascii_only)
+
+        def set_flags(ic, ml, da, ao):
+            self.ignorecase = ic
+            self.multiline = ml
+            self.dotall = da
+            self.ascii_only = ao
+
+        def restore_cont(end):
+            set_flags(*outer)
+            r = cont(end)
+            if r is None:
+                # Re-enter the scope for further backtracking inside `sub`.
+                set_flags(bool(flags & IGNORECASE), bool(flags & MULTILINE),
+                          bool(flags & DOTALL), bool(flags & ASCII))
+            return r
+
+        set_flags(bool(flags & IGNORECASE), bool(flags & MULTILINE),
+                  bool(flags & DOTALL), bool(flags & ASCII))
+        r = self._m(sub, pos, restore_cont)
+        set_flags(*outer)
+        return r
 
     def _m_group(self, node, pos, cont):
         idx = node[1]
@@ -764,6 +963,9 @@ class Pattern:
         self.flags = flags
         parser = _Parser(pattern, flags)
         self._ast = parser.parse()
+        # Global inline flags ``(?i)`` update the parser's flags in place;
+        # pick them up so the matcher sees the effective pattern-wide flags.
+        self.flags = parser.flags
         self.groups = parser.group_count
         self.groupindex = parser.groupindex
 

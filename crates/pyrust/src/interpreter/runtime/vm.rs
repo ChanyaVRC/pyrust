@@ -3539,6 +3539,45 @@ impl Interpreter {
                     let match_args = match self.get_attr(&cls_val, "__match_args__") {
                         Ok(v) => v,
                         Err(e) if e.class_name_is("AttributeError") => {
+                            // PEP 634 §3.4: a fixed set of built-in atomic types
+                            // (and their subclasses) treat a single positional
+                            // sub-pattern as capturing the whole subject *when the
+                            // class does not define its own __match_args__* — i.e.
+                            // exactly this arm.  CPython tests the type's tp_flags
+                            // (`_Py_TPFLAGS_MATCH_SELF`); we approximate it with the
+                            // MRO-walking `class_is_subclass_of` against the
+                            // per-thread primitive singletons rather than pointer
+                            // identity: a user class merely *named* "int" is not a
+                            // subclass of the real int and takes the no-match_args
+                            // TypeError path below, while a genuine `class
+                            // MyInt(int)` self-captures.  A subclass that *does*
+                            // define __match_args__ never reaches this arm, so it
+                            // correctly uses the attribute path (verified against
+                            // CPython 3.12 with `class MyInt(int): __match_args__ =
+                            // ('bit_length',)`).  Computed lazily here so the common
+                            // case (a class that *has* __match_args__) pays nothing.
+                            let is_special_subtype = matches!(cls_val.kind(), ValueKind::PyClass(rc)
+                                if [
+                                    "bool", "bytearray", "bytes", "dict", "float",
+                                    "frozenset", "int", "list", "set", "str", "tuple",
+                                ]
+                                .iter()
+                                .any(|&prim| {
+                                    crate::interpreter::primitive_class_by_name(prim)
+                                        .is_some_and(|pc| class_is_subclass_of(rc, &pc))
+                                }));
+                            if is_special_subtype {
+                                // No __match_args__ on a special built-in (or one of
+                                // its subclasses): single positional sub-pattern
+                                // captures the subject; CPython 3.12 rejects n > 1.
+                                if n > 1 {
+                                    vm_try!(Err(pyrust_core::type_err!("{cls_name}() accepts 1 positional sub-pattern ({n} given)")));
+                                }
+                                if n == 1 {
+                                    regs[*dst_base as usize] = subj_val.clone();
+                                }
+                                continue 'vm;
+                            }
                             vm_try!(Err(pyrust_core::type_err!("{cls_name}() accepts 0 positional sub-patterns ({n} given)")));
                             unreachable!()
                         }
@@ -4023,7 +4062,17 @@ impl Interpreter {
                     // hot loop (issues #2357 / #2372).  `PyInstance` values may
                     // carry a user `__format__`, so they keep going through the
                     // full `dispatch_dunder_format` path unchanged.
-                    let s = if matches!(val.kind(), ValueKind::PyInstance(_)) {
+                    // Issue #2771: a class value with a custom metaclass routes
+                    // through `dispatch_dunder_format` so `f"{cls:spec}"` runs the
+                    // metaclass `__format__` semantics (empty spec -> metaclass
+                    // `__str__`; non-empty spec -> `TypeError` naming the
+                    // metaclass).  Ordinary classes (metatype is `type`) keep the
+                    // cached fast path below.
+                    let class_with_meta = matches!(
+                        val.kind(),
+                        ValueKind::PyClass(c) if c.borrow().metatype.is_some()
+                    );
+                    let s = if matches!(val.kind(), ValueKind::PyInstance(_)) || class_with_meta {
                         let spec = spec_val.as_str().unwrap_or("");
                         vm_try!(self.dispatch_dunder_format(&val, spec))
                     } else {
@@ -5215,7 +5264,23 @@ impl Interpreter {
                     };
                     let value_val = vm_try!(vm_read(&regs, *value_reg, num_locals)).clone();
                     let params_val = vm_try!(vm_read(&regs, *params_reg, num_locals)).clone();
-                    let inst = make_type_alias_instance(name_str, value_val, params_val);
+                    // CPython sets the alias instance's `__module__` to the
+                    // defining module's `__name__` (e.g. `__main__`, or the
+                    // imported module's name), distinct from
+                    // `type(alias).__module__ == "typing"` (issue #2779).
+                    // `__name__` lives in the active module env (mirrored into
+                    // module_globals_dict only after globals() is touched,
+                    // #706), so resolve it through the env chain first.
+                    let module_name = vm_try!(self.lookup_name_inner("__name__", false))
+                        .or_else(|| {
+                            self.module_globals_dict
+                                .dict_with(|d| d.get(&StrKey("__name__")).cloned())
+                                .flatten()
+                        })
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "__main__".to_string());
+                    let inst =
+                        make_type_alias_instance(name_str, value_val, params_val, module_name);
                     regs[*dst as usize] = inst;
                 }
 
@@ -6183,6 +6248,18 @@ thread_local! {
             "__repr__".to_string(),
             Value::builtin_function("builtins.TypeAliasType.__repr__"),
         );
+        // PEP 695: generic aliases are subscriptable.  The operator form
+        // `Pair[int]` is served by the inline fast path in `eval_index`; this
+        // slot makes `hasattr(alias, "__getitem__")` True and lets an explicit
+        // `alias.__getitem__(x)` call work, matching CPython 3.12 (issue #2779).
+        attrs.insert(
+            "__getitem__".to_string(),
+            Value::builtin_function("builtins.TypeAliasType.__getitem__"),
+        );
+        // CPython exposes `TypeAliasType` from `typing`, so
+        // `type(my_alias).__module__ == "typing"` and the bare class reprs as
+        // `<class 'typing.TypeAliasType'>` (issue #2779).
+        attrs.insert("__module__".to_string(), Value::string("typing"));
         Rc::new(RefCell::new(PyClass::new(
             "TypeAliasType",
             "TypeAliasType",
@@ -6250,20 +6327,41 @@ pub(crate) fn typevar_readonly_attr_error(name: &str) -> Option<String> {
     }
 }
 
-/// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`, and
-/// `__type_params__` attributes, matching the observable behaviour of CPython's
-/// `typing.TypeAliasType`.
-pub(crate) fn make_type_alias_instance(name: String, value: Value, type_params: Value) -> Value {
+/// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`,
+/// `__type_params__`, and `__module__` attributes, matching the observable
+/// behaviour of CPython's `typing.TypeAliasType`.
+pub(crate) fn make_type_alias_instance(
+    name: String,
+    value: Value,
+    type_params: Value,
+    module: String,
+) -> Value {
     TYPE_ALIAS_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__", Value::string(name));
         attrs.insert("__value__", value);
         attrs.insert("__type_params__", type_params);
+        attrs.insert("__module__", Value::string(module));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(cls),
             attrs,
         })))
     })
+}
+
+/// The PEP 695 `TypeAliasType` class singleton, so the `typing` module can
+/// export it (`typing.TypeAliasType`) and `type(my_alias) is
+/// typing.TypeAliasType` holds (issue #2779).
+pub(crate) fn type_alias_class_singleton() -> Rc<RefCell<PyClass>> {
+    TYPE_ALIAS_CLASS.with(Rc::clone)
+}
+
+/// True if `class` is the PEP 695 `TypeAliasType` singleton.  Used by the
+/// subscript path to give `Pair[int]` a `types.GenericAlias` while a
+/// non-generic alias raises CPython's "Only generic type aliases are
+/// subscriptable" (issue #2779).
+pub(crate) fn is_type_alias_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    TYPE_ALIAS_CLASS.with(|cls| Rc::ptr_eq(class, cls))
 }
 
 #[cfg(test)]

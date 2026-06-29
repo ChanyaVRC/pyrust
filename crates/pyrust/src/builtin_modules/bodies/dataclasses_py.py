@@ -27,6 +27,15 @@ class _MISSING_TYPE:
 MISSING = _MISSING_TYPE()
 
 
+# Sentinel used as a *type annotation* in a class body: a bare ``_: KW_ONLY``
+# marks every field defined after it as keyword-only (CPython 3.10+).
+class _KW_ONLY_TYPE:
+    pass
+
+
+KW_ONLY = _KW_ONLY_TYPE()
+
+
 class FrozenInstanceError(AttributeError):
     """Raised when assigning to a field of a frozen dataclass instance."""
 
@@ -95,9 +104,19 @@ def _collect_fields(cls, cls_kw_only):
         if base_fields:
             for f in base_fields:
                 fields[f.name] = f
-    # This class's own annotations.
+    # This class's own annotations.  A bare ``_: KW_ONLY`` pseudo-field flips
+    # every subsequent field in this class body to keyword-only.
     cls_annotations = cls.__dict__.get("__annotations__", {})
+    kw_only_seen = False
     for name, atype in cls_annotations.items():
+        if atype is KW_ONLY or isinstance(atype, _KW_ONLY_TYPE):
+            if kw_only_seen:
+                raise TypeError(
+                    "%r is KW_ONLY, but KW_ONLY has already been specified"
+                    % name)
+            kw_only_seen = True
+            cls_kw_only = True
+            continue
         default = getattr(cls, name, MISSING)
         if isinstance(default, Field):
             f = default
@@ -128,7 +147,7 @@ def _process_class(cls, init, repr, eq, order, unsafe_hash, frozen, match_args,
     setattr(cls, _FIELDS, flds)
 
     if init:
-        _set_new_attribute(cls, "__init__", _make_init(flds, frozen))
+        _set_new_attribute(cls, "__init__", _make_init(cls, flds, frozen))
     if repr:
         _set_new_attribute(cls, "__repr__", _make_repr(cls, flds))
     if eq:
@@ -242,7 +261,7 @@ def _init_assign(f, body, frozen):
     body.append(_assign(f.name, f.name, frozen))
 
 
-def _make_init(flds, frozen):
+def _make_init(cls, flds, frozen):
     # Build a parameter list with defaults, then the body assigning each field.
     # Positional fields without defaults must precede those with defaults;
     # keyword-only fields go after a ``*`` separator and have no such rule.
@@ -278,6 +297,11 @@ def _make_init(flds, frozen):
     if kw_params:
         params.append("*")
         params.extend(kw_params)
+    # CPython calls __post_init__ at the end of the generated __init__ when the
+    # class defines it.  InitVar fields would be forwarded as arguments; we do
+    # not model InitVar yet, so the call takes no arguments.
+    if hasattr(cls, "__post_init__"):
+        body.append("self.__post_init__()")
     if not body:
         body = ["pass"]
     return _create_fn("__init__", params, body, locals_ns)

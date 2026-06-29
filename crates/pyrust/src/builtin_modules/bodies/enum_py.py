@@ -3,15 +3,29 @@
 # `operator` / `string` modules).
 #
 # A close port of the core of CPython 3.12's `Lib/enum.py`, restricted to the
-# minimum viable surface: `Enum`, `IntEnum`, `EnumMeta` (aka `EnumType`), and
-# `auto`.  `Flag`, `StrEnum`, `_generate_next_value_` overrides, functional
-# construction, pickling support, and `_missing_` are intentionally omitted.
+# minimum viable surface: `Enum`, `IntEnum`, `Flag`, `IntFlag`, `StrEnum`,
+# `EnumMeta` (aka `EnumType`), and `auto`.  `_generate_next_value_` overrides,
+# functional construction, pickling support, and `_missing_` are intentionally
+# omitted.
+#
+# Known limitation: a *named* flag composite that references other members
+# inside the class body via ``auto()`` (``WHITE = RED | GREEN`` where the
+# operands are ``auto()`` members) is not supported, because the interpreter
+# flushes ``_EnumDict.__setitem__`` after the class body runs rather than
+# interleaving it (so the operands are still unresolved sentinels when the
+# expression evaluates).  Spell such composites with explicit integer values
+# (``WHITE = 7``) instead; bitwise composition of *finished* members
+# (``Color.RED | Color.GREEN``) works as expected.
 #
 # Reference: <https://docs.python.org/3/library/enum.html>
 
 
 class auto:
-    """Placeholder for a value auto-assigned by ``EnumMeta`` (1, 2, 3, ...)."""
+    """Placeholder for a value auto-assigned by ``EnumMeta`` (1, 2, 3, ...).
+
+    For a plain ``Enum`` the metaclass fills in 1, 2, 3, ...; for a ``Flag`` /
+    ``IntFlag`` subclass it fills in successive powers of two (1, 2, 4, ...).
+    """
 
     def __init__(self):
         self.value = None
@@ -25,21 +39,46 @@ class _EnumDict(dict):
     ``_EnumDict``.
     """
 
-    def __init__(self):
+    def __init__(self, is_flag=False, is_str=False):
         super().__init__()
         self._member_names = []
         self._last_value = 0
+        # `Flag` / `IntFlag` subclasses generate powers of two (1, 2, 4, ...)
+        # for ``auto()`` instead of the sequential 1, 2, 3, ... of a plain
+        # ``Enum``; the OR of every value seen so far drives the next bit.
+        self._is_flag = is_flag
+        # ``StrEnum`` resolves ``auto()`` to the lowercased member name
+        # (CPython's ``StrEnum._generate_next_value_`` returns ``name.lower()``).
+        self._is_str = is_str
 
     def __setitem__(self, key, value):
         if not _is_sunder(key) and not _is_dunder(key) and not _is_descriptor(value):
             # A genuine enum member.
             if isinstance(value, auto):
-                self._last_value += 1
-                value = self._last_value
+                value = self._generate_next_value(key)
+            if self._is_str:
+                # String members carry no numeric accumulator.
+                pass
+            elif self._is_flag:
+                # Track the OR of every flag value so the next ``auto()``
+                # picks the next free bit (mirrors CPython's accumulator).
+                self._last_value |= value
             else:
                 self._last_value = value
             self._member_names.append(key)
         super().__setitem__(key, value)
+
+    def _generate_next_value(self, name):
+        if self._is_str:
+            # CPython's ``StrEnum._generate_next_value_`` lowercases the name.
+            return name.lower()
+        if not self._is_flag:
+            return self._last_value + 1
+        # Next power of two strictly above the highest bit seen so far.
+        if self._last_value <= 0:
+            return 1
+        high_bit = self._last_value.bit_length() - 1
+        return 2 ** (high_bit + 1)
 
 
 def _is_dunder(name):
@@ -75,7 +114,18 @@ class EnumType(type):
 
     @classmethod
     def __prepare__(mcls, cls, bases, **kwds):
-        return _EnumDict()
+        # ``Flag`` is defined later in this module; during its own creation it
+        # is not yet bound, so fall back to ``False`` (a bare ``Flag`` has no
+        # members anyway).
+        flag_base = globals().get("Flag")
+        is_flag = flag_base is not None and any(
+            isinstance(base, type) and issubclass(base, flag_base) for base in bases
+        )
+        str_base = globals().get("StrEnum")
+        is_str = str_base is not None and any(
+            isinstance(base, type) and issubclass(base, str_base) for base in bases
+        )
+        return _EnumDict(is_flag=is_flag, is_str=is_str)
 
     def __new__(mcls, cls, bases, classdict, **kwds):
         member_names = classdict._member_names
@@ -91,6 +141,9 @@ class EnumType(type):
         enum_class._member_map_ = {}
         enum_class._value2member_map_ = {}
 
+        flag_base = globals().get("Flag")
+        is_flag = flag_base is not None and issubclass(enum_class, flag_base)
+
         for name in member_names:
             value = classdict[name]
             # First-seen value wins as the canonical member; a later member with
@@ -98,8 +151,20 @@ class EnumType(type):
             # is accessible by name (`Shape.DIAMOND`) and via `_member_map_`,
             # but is not iterated and does not appear in `_member_names_` (it is
             # `Shape.SQUARE`).  Matches CPython's alias semantics.
+            #
+            # For `Flag`, a value that is not a single set bit -- a named
+            # composite (`WHITE = RED | GREEN | BLUE`) or the all-zero flag
+            # (`NONE = 0`) -- is accessible by name but is not a canonical
+            # member: it is not iterated and does not occupy `_member_names_`,
+            # matching CPython's flag aliasing.
+            is_non_canonical_flag = (
+                is_flag and isinstance(value, int) and (value == 0 or (value & (value - 1)) != 0)
+            )
             if value in enum_class._value2member_map_:
                 member = enum_class._value2member_map_[value]
+            elif is_non_canonical_flag:
+                member = enum_class._new_member_(name, value)
+                enum_class._value2member_map_[value] = member
             else:
                 member = enum_class._new_member_(name, value)
                 enum_class._member_names_.append(name)
@@ -115,7 +180,13 @@ class EnumType(type):
         try:
             return cls._value2member_map_[value]
         except KeyError:
-            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
+            pass
+        # ``Flag`` accepts composite integer values (the OR of one or more
+        # members), synthesising a pseudo-member on demand.
+        flag_base = globals().get("Flag")
+        if flag_base is not None and issubclass(cls, flag_base):
+            return cls._missing_(value)
+        raise ValueError("%r is not a valid %s" % (value, cls.__name__))
 
     def __getitem__(cls, name):
         return cls._member_map_[name]
@@ -186,6 +257,236 @@ class IntEnum(int, Enum):
     def __str__(self):
         # `int.__str__` defers to `__repr__`, which `Enum` overrides; format the
         # underlying integer directly so `str(Status.OK) == '200'`.
+        return "%d" % int(self)
+
+    def __format__(self, format_spec):
+        return format(int(self), format_spec)
+
+
+class StrEnum(str, Enum):
+    """Enum where members are also (and comparable to) ``str``.
+
+    Like ``IntEnum`` but for strings: ``str(Direction.NORTH) == 'north'`` and
+    ``Direction.NORTH == 'north'``.
+    """
+
+    @classmethod
+    def _new_member_(cls, name, value):
+        if not isinstance(value, str):
+            raise TypeError("%r is not a string" % (value,))
+        member = str.__new__(cls, value)
+        member._name_ = name
+        member._value_ = value
+        return member
+
+    def __str__(self):
+        # The member *is* its string value; format that directly (`Enum`
+        # overrides `__repr__`, so deferring to it would print the repr form).
+        return self._value_
+
+    def __format__(self, format_spec):
+        return format(self._value_, format_spec)
+
+
+class Flag(Enum):
+    """Base class for creating enumerated bit-flag constants.
+
+    Members are powers of two and compose through the bitwise operators
+    (``|``, ``&``, ``^``, ``~``); an empty flag (value ``0``) is falsy.
+    """
+
+    @classmethod
+    def _new_member_(cls, name, value):
+        member = object.__new__(cls)
+        member._name_ = name
+        member._value_ = value
+        return member
+
+    @classmethod
+    def _missing_(cls, value):
+        # Resolve / synthesise the member for an arbitrary composite value.
+        if not isinstance(value, int):
+            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
+        member = cls._value2member_map_.get(value)
+        if member is not None:
+            return member
+        all_bits = 0
+        for m in cls._member_map_.values():
+            all_bits |= m._value_
+        # CPython 3.12 accepts negatives in [-(all_bits+1), -1] and masks them
+        # (two's complement): Color(-1) with all_bits=7 yields Color(7).
+        if value < 0 and value >= -(all_bits + 1):
+            value = value & all_bits
+            cached = cls._value2member_map_.get(value)
+            if cached is not None:
+                return cached
+        elif (value & ~all_bits) != 0 or value < 0:
+            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
+        # Build an unnamed composite pseudo-member and cache it.
+        pseudo = object.__new__(cls)
+        pseudo._name_ = None
+        pseudo._value_ = value
+        cls._value2member_map_[value] = pseudo
+        return pseudo
+
+    @property
+    def name(self):
+        # A canonical member carries its own name; an unnamed composite reports
+        # the joined names of its set bits (`Color.RED|GREEN`.name == 'RED|GREEN'),
+        # matching CPython 3.12.  The empty flag (no set bits) stays nameless.
+        if self._name_ is not None:
+            return self._name_
+        names = self._decompose_()
+        if names:
+            return "|".join(names)
+        return None
+
+    def _decompose_(self):
+        # Names of the canonical single-bit members contained in ``self``, in
+        # definition order.  Used by ``__str__`` / ``__repr__``.
+        members = []
+        for name in self.__class__._member_names_:
+            member = self.__class__._member_map_[name]
+            v = member._value_
+            # Single-bit members whose bit is set.
+            if v and (v & (v - 1)) == 0 and (self._value_ & v) == v:
+                members.append(name)
+        return members
+
+    def __iter__(self):
+        for name in self._decompose_():
+            yield self.__class__._member_map_[name]
+
+    def __len__(self):
+        return len(self._decompose_())
+
+    def __bool__(self):
+        return bool(self._value_)
+
+    def __or__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.__class__(self._value_ | other._value_)
+
+    def __and__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.__class__(self._value_ & other._value_)
+
+    def __xor__(self, other):
+        if not isinstance(other, self.__class__):
+            return NotImplemented
+        return self.__class__(self._value_ ^ other._value_)
+
+    def __invert__(self):
+        all_bits = 0
+        for member in self.__class__._member_map_.values():
+            all_bits |= member._value_
+        return self.__class__(all_bits & ~self._value_)
+
+    def __contains__(self, other):
+        if not isinstance(other, self.__class__):
+            raise TypeError(
+                "unsupported operand type(s) for 'in': %r and %r"
+                % (type(other).__name__, self.__class__.__name__)
+            )
+        if other._value_ == 0:
+            return self._value_ == 0
+        return (self._value_ & other._value_) == other._value_
+
+    def __hash__(self):
+        return hash(self._value_)
+
+    def __eq__(self, other):
+        if isinstance(other, self.__class__):
+            return self._value_ == other._value_
+        return NotImplemented
+
+    def __repr__(self):
+        cls_name = self.__class__.__name__
+        if self._name_ is not None:
+            return "<%s.%s: %r>" % (cls_name, self._name_, self._value_)
+        names = self._decompose_()
+        if names:
+            return "<%s.%s: %r>" % (cls_name, "|".join(names), self._value_)
+        return "<%s: %r>" % (cls_name, self._value_)
+
+    def __str__(self):
+        cls_name = self.__class__.__name__
+        if self._name_ is not None:
+            return "%s.%s" % (cls_name, self._name_)
+        names = self._decompose_()
+        if names:
+            return "%s.%s" % (cls_name, "|".join(names))
+        return "%s(%r)" % (cls_name, self._value_)
+
+
+class IntFlag(int, Flag):
+    """``Flag`` whose members are also (and comparable to) ints.
+
+    Bitwise operations with plain ``int`` operands are supported and the
+    ``str`` / ``format`` of a member is its underlying integer value.
+    """
+
+    @classmethod
+    def _new_member_(cls, name, value):
+        member = int.__new__(cls, value)
+        member._name_ = name
+        member._value_ = value
+        return member
+
+    @classmethod
+    def _missing_(cls, value):
+        if not isinstance(value, int):
+            raise ValueError("%r is not a valid %s" % (value, cls.__name__))
+        member = cls._value2member_map_.get(value)
+        if member is not None:
+            return member
+        # CPython 3.12 ``IntFlag`` is lenient on positive out-of-range values
+        # (extra bits are kept), but masks negatives into the named-bit range
+        # via two's complement: ``P(-1)`` with all_bits=7 yields ``P(7)``.
+        if value < 0:
+            all_bits = 0
+            for m in cls._member_map_.values():
+                all_bits |= m._value_
+            value = value & all_bits
+            cached = cls._value2member_map_.get(value)
+            if cached is not None:
+                return cached
+        pseudo = int.__new__(cls, value)
+        pseudo._name_ = None
+        pseudo._value_ = value
+        cls._value2member_map_[value] = pseudo
+        return pseudo
+
+    def __or__(self, other):
+        return self.__class__(int(self) | int(other))
+
+    def __and__(self, other):
+        return self.__class__(int(self) & int(other))
+
+    def __xor__(self, other):
+        return self.__class__(int(self) ^ int(other))
+
+    def __ror__(self, other):
+        return self.__class__(int(self) | int(other))
+
+    def __rand__(self, other):
+        return self.__class__(int(self) & int(other))
+
+    def __rxor__(self, other):
+        return self.__class__(int(self) ^ int(other))
+
+    def __invert__(self):
+        all_bits = 0
+        for member in self.__class__._member_map_.values():
+            all_bits |= member._value_
+        return self.__class__(all_bits & ~int(self))
+
+    def __hash__(self):
+        return hash(self._value_)
+
+    def __str__(self):
         return "%d" % int(self)
 
     def __format__(self, format_spec):
