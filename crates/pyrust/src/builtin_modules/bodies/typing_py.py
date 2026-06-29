@@ -9,6 +9,7 @@
 
 import collections as _collections
 import sys as _sys
+import types as _types
 
 
 def get_origin(tp):
@@ -21,6 +22,10 @@ def get_origin(tp):
     # though it stores `X` in `__origin__` (PEP 593 / CPython `get_origin`).
     if isinstance(tp, _AnnotatedAlias):
         return Annotated
+    # PEP 604 union (`int | str`): a `types.UnionType` instance has no
+    # `__origin__`, but CPython's `get_origin` reports `types.UnionType` itself.
+    if isinstance(tp, _types.UnionType):
+        return _types.UnionType
     origin = getattr(tp, "__origin__", None)
     if origin is None:
         return None

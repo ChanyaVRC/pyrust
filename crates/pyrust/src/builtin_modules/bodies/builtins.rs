@@ -8943,6 +8943,14 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
             ops.type_name() == name
         }
+        // Generators / coroutines / async generators (and built-in iterators
+        // such as `zip`, `enumerate`, …) report their CPython type via the
+        // by-name `BuiltinFunction` sentinel that `type()` returns.  Match the
+        // same name so `isinstance(g, types.GeneratorType)`,
+        // `isinstance(c, types.CoroutineType)`, etc. hold (#2777).
+        (ValueKind::Generator(_), ValueKind::BuiltinFunction(name)) => {
+            full_type_name_str(obj) == *name
+        }
         _ => false,
     }
 }
