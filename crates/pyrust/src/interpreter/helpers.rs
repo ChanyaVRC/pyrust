@@ -1200,6 +1200,52 @@ fn lookup_user_metaclass_attr(meta: &Rc<RefCell<PyClass>>, name: &str) -> Option
     None
 }
 
+/// Dispatch a metaclass `__repr__` / `__str__` for a class *value* (issue
+/// #2771).  `repr(cls)` / `str(cls)` must invoke `type(cls).__repr__(cls)` /
+/// `type(cls).__str__(cls)` when the metaclass defines a user override —
+/// CPython runs the type's metatype slot, not the default `<class '...'>`
+/// format.
+///
+/// Returns `None` for an ordinary class (metatype is the built-in `type`
+/// singleton, so `metaclass_dunder` finds nothing), letting the caller fall
+/// through to the default class-repr format and keeping the common path free
+/// of any interpreter dispatch.  `Some(Ok(s))` is the rendered string from the
+/// metaclass method; `Some(Err(..))` propagates a non-string return or a raise
+/// from inside the metaclass method.
+///
+/// `name` is `"__repr__"` or `"__str__"`.  For `__str__`, CPython's
+/// `type.__str__` delegates to `type.__repr__`, so a metaclass that overrides
+/// only `__repr__` still affects `str(cls)`; we mirror that by falling back to
+/// the metaclass `__repr__` when `__str__` has no user override.
+pub(crate) fn dispatch_metaclass_repr_str(
+    interp: &mut Interpreter,
+    class: &Rc<RefCell<PyClass>>,
+    name: &str,
+) -> Option<Result<String>> {
+    let method_val = metaclass_dunder(class, name).or_else(|| {
+        // `str(cls)` with no metaclass `__str__` falls back to the metaclass
+        // `__repr__` (CPython: `type.__str__` calls `type.__repr__`).
+        if name == "__str__" {
+            metaclass_dunder(class, "__repr__")
+        } else {
+            None
+        }
+    })?;
+    let cls_value = Value::py_class(Rc::clone(class));
+    let result = match invoke_class_method(interp, method_val, cls_value, &[]) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(match result.kind() {
+        ValueKind::Str(s) => Ok(s.to_string()),
+        _ => Err(pyrust_core::type_err!(
+            "__{}__ returned non-string (type {})",
+            if name == "__str__" { "str" } else { "repr" },
+            pyrust_core::builtin_type_name(&result)
+        )),
+    })
+}
+
 /// Returns the singleton `method` class.  In CPython, `type(instance.method)`
 /// returns `<class 'method'>` and `type(type(c.m)) is type` holds because
 /// `method` is a proper `PyClass` (not a `BuiltinFunction` sentinel).

@@ -10067,15 +10067,21 @@ fn min_max_impl(
 /// `Complex`, `Ellipsis`, `NotImplemented`) always return `false`.
 #[inline]
 fn value_needs_interp_repr(v: &Value) -> bool {
-    matches!(
-        v.kind(),
+    match v.kind() {
         ValueKind::PyInstance(_)
-            | ValueKind::BuiltinObject { .. }
-            | ValueKind::List(_)
-            | ValueKind::Tuple(_)
-            | ValueKind::Dict(_)
-            | ValueKind::Set(_)
-    )
+        | ValueKind::BuiltinObject { .. }
+        | ValueKind::List(_)
+        | ValueKind::Tuple(_)
+        | ValueKind::Dict(_)
+        | ValueKind::Set(_) => true,
+        // Issue #2771: a class whose metaclass overrides `__repr__` needs the
+        // interpreter to dispatch it (e.g. `[Color]` -> `[<enum 'Color'>]`).
+        // Only classes with a *custom* metatype can carry such an override, so
+        // the common case (`[int, str]`, metatype is the built-in `type`) keeps
+        // the pure `repr_raw()` fast path.
+        ValueKind::PyClass(cls) => cls.borrow().metatype.is_some(),
+        _ => false,
+    }
 }
 
 /// Returns `true` when a container key (`PyKey`) requires interpreter access
@@ -10434,6 +10440,20 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         //   - everything else (map/filter/zip/enumerate/list_iterator/…):
         //         `<{type_name} object at 0x...>`
         ValueKind::Generator(_) => Ok(generator_repr(value)),
+        // Issue #2771: `repr(cls)` dispatches `type(cls).__repr__(cls)` when the
+        // class's metaclass defines a user `__repr__`.  `dispatch_metaclass_repr_str`
+        // returns `None` for an ordinary class (metatype is the built-in `type`),
+        // so the common case still uses the default `<class '...'>` format from
+        // `Value::repr_raw()` with no interpreter dispatch.
+        ValueKind::PyClass(cls_rc) => {
+            let cls_rc = Rc::clone(cls_rc);
+            if let Some(res) =
+                crate::interpreter::dispatch_metaclass_repr_str(interp, &cls_rc, "__repr__")
+            {
+                return res;
+            }
+            Ok(value.repr_raw())
+        }
         // For all other value types (int, float, str, bool, None, …), the
         // pure `Value::repr_raw()` is correct and needs no interpreter.
         _ => Ok(value.repr_raw()),
@@ -10565,6 +10585,18 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                 if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
             {
                 render_value_repr(interp, value)
+            }
+            // Issue #2771: `str(cls)` / `print(cls)` dispatches the metaclass
+            // `__str__` (falling back to `__repr__`) when overridden; returns
+            // `None` for an ordinary class so plain classes keep `to_py_str()`.
+            ValueKind::PyClass(cls_rc) => {
+                let cls_rc = Rc::clone(cls_rc);
+                if let Some(res) =
+                    crate::interpreter::dispatch_metaclass_repr_str(interp, &cls_rc, "__str__")
+                {
+                    return res;
+                }
+                Ok(value.to_py_str())
             }
             _ => Ok(value.to_py_str()),
         };
