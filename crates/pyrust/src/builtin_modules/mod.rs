@@ -261,4 +261,8 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `fractions` (issue #2810): a pure-Python module (`fractions_py.py`) — the
+    // `Fraction` rational-number class — injected by the `@inject` post-load
+    // hook.  The native body is empty.
+    fractions @inject,
 }
