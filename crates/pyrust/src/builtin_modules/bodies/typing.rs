@@ -1051,6 +1051,8 @@ const TYPING_PY_EXPORTS: &[&str] = &[
     "NotRequired",
     "TypeGuard",
     "ParamSpec",
+    "ParamSpecArgs",
+    "ParamSpecKwargs",
     "TypeVarTuple",
 ];
 
@@ -1088,6 +1090,14 @@ pub(crate) fn inject_python_members(
             .attrs
             .insert("__module__".to_string(), Value::string("typing"));
     }
+    // `TypeAliasType` (the runtime type of PEP 695 `type X = ...` objects) lives
+    // as a thread-local singleton on the interpreter side, not as a typing.rs
+    // class.  Export the same singleton so `typing.TypeAliasType` exists and
+    // `type(my_alias) is typing.TypeAliasType` holds (issue #2779).
+    module.borrow_mut().attrs.insert(
+        "TypeAliasType".to_string(),
+        Value::py_class(crate::interpreter::type_alias_class_singleton()),
+    );
     interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
@@ -1101,6 +1111,23 @@ pub(crate) fn inject_python_members(
     exports.push("_build_typeddict_class");
     for name in exports {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
+            // `ParamSpecArgs` / `ParamSpecKwargs` are exec'd into a throwaway
+            // namespace whose module name defaults to `__main__`, so their class
+            // `__module__` would wrongly report `__main__`.  CPython exposes them
+            // as `typing.<Name>` (`type(P.args).__module__ == "typing"`, issue
+            // #2796).  Seed `__module__ = "typing"` on these two classes to match.
+            // (Limited to the proxy classes on purpose: `ParamSpec` /
+            // `TypeVarTuple` instances capture the *caller's* module like
+            // `TypeVar`, so retagging their class to "typing" would make
+            // `P.__module__` wrongly report "typing" instead of "__main__".)
+            if matches!(name, "ParamSpecArgs" | "ParamSpecKwargs")
+                && let ValueKind::PyClass(class) = val.kind()
+            {
+                class
+                    .borrow_mut()
+                    .attrs
+                    .insert("__module__".to_string(), Value::string("typing"));
+            }
             module
                 .borrow_mut()
                 .attrs
