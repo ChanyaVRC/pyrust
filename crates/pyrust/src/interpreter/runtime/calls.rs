@@ -891,7 +891,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "int" | "bool" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
+                    .is_some_and(|(t, _)| matches!(t, "int" | "bool" | "bytes" | "bytearray" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 // CPython exposes most dunders (`str.__getitem__`, `list.__add__`,
@@ -945,7 +945,7 @@ impl Interpreter {
                 let mut receiver_ordered = false;
                 let self_val =
                     if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple"
-                        | "str" | "int" | "float" | "bytes" | "complex") {
+                        | "str" | "int" | "float" | "bytes" | "bytearray" | "complex") {
                         // Extract the Rc before kind() drops its borrow.
                         let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
                             Some(Rc::clone(inst))
@@ -974,6 +974,13 @@ impl Interpreter {
                     // slot wrappers only accept a `bool` receiver in CPython.
                     ("bool", ValueKind::Bool(_)) => true,
                     ("bytes", ValueKind::Bytes(_)) => true,
+                    // Issue #2770: `bytearray` is a `BuiltinObject`, not a
+                    // dedicated `ValueKind`; gate on its ops `type_name` so the
+                    // unbound form (`bytearray.replace(ba, …)`) accepts a real
+                    // bytearray receiver and rejects everything else with the
+                    // descriptor TypeError.
+                    ("bytearray", ValueKind::BuiltinObject { ops, .. })
+                        if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME => true,
                     ("str", ValueKind::Str(_)) => true,
                     ("list", ValueKind::List(_)) => true,
                     ("tuple", ValueKind::Tuple(_)) => true,
@@ -1170,6 +1177,43 @@ impl Interpreter {
                             return Err(err);
                         }
                         self.call_frozenset_method(method, self_val, pos)
+                    }
+                    // Issue #2770: the unbound `bytearray.<method>(ba, …)` form.
+                    // `bytearray` is a `BuiltinObject`, so dispatch through its
+                    // ops table exactly like the bound `ba.<method>(…)` path
+                    // (kwarg rejection + bytes-subclass arg coercion + lazy
+                    // iterator driving for `join`/`extend`).
+                    "bytearray" => {
+                        if let Some(err) =
+                            reject_container_method_kwargs("bytearray", method, &kw)
+                        {
+                            return Err(err);
+                        }
+                        let mut args_vec = pos;
+                        if method == "join" {
+                            args_vec = self.prepare_bytearray_join_args(args_vec)?;
+                        } else {
+                            args_vec = coerce_bytes_subclass_method_args(method, args_vec);
+                        }
+                        if method == "extend" {
+                            args_vec = self.prepare_bytearray_extend_args(args_vec)?;
+                        }
+                        let kw_str: indexmap::IndexMap<String, Value> = kw
+                            .iter()
+                            .map(|(k, v)| {
+                                let key = match k {
+                                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                                    _ => String::new(),
+                                };
+                                (key, v.clone())
+                            })
+                            .collect();
+                        match self_val.kind() {
+                            ValueKind::BuiltinObject { ops, state } => {
+                                ops.call_method(state, method, args_vec, &kw_str)
+                            }
+                            _ => unreachable!("kind_ok guard above"),
+                        }
                     }
                     _ => unreachable!("guard matched type_name above"),
                 }
