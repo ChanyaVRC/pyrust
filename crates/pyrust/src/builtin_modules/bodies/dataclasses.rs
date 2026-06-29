@@ -31,8 +31,9 @@ const DATACLASSES_PY_SOURCE: &str = include_str!("dataclasses_py.py");
 
 /// Public names from `DATACLASSES_PY_SOURCE` exported onto the `dataclasses`
 /// module.  A minimal subset of CPython 3.12's `dataclasses.__all__`.
-const DATACLASSES_PY_EXPORTS: [&str; 11] = [
+const DATACLASSES_PY_EXPORTS: [&str; 13] = [
     "MISSING",
+    "KW_ONLY",
     "Field",
     "FrozenInstanceError",
     "asdict",
@@ -43,6 +44,7 @@ const DATACLASSES_PY_EXPORTS: [&str; 11] = [
     "is_dataclass",
     "replace",
     "_MISSING_TYPE",
+    "_KW_ONLY_TYPE",
 ];
 
 /// Execute `DATACLASSES_PY_SOURCE` once and copy its public names onto the
