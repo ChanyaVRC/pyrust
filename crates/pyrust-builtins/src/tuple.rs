@@ -3,7 +3,7 @@ use pyrust_core::{PyError, Result, Value};
 use crate::sequence;
 
 /// Canonical list of method names dispatched by `call`.
-pub const METHODS: &[&str] = &["__iter__", "index", "count"];
+pub const METHODS: &[&str] = &["__iter__", "index", "count", "__getnewargs__"];
 
 /// Returns `true` if `method` is the name of a built-in `tuple` method.
 pub fn has_method(method: &str) -> bool {
@@ -24,6 +24,20 @@ pub fn call(method: &str, items: &[Value], args: Vec<Value>) -> Result<Value> {
     match method {
         "index" => sequence::seq_index(items, &args, "tuple"),
         "count" => sequence::seq_count(items, &args, "tuple"),
+        // __getnewargs__ supports the pickle protocol: it returns a 1-tuple
+        // containing the tuple itself, i.e. (1, 2).__getnewargs__() == ((1, 2),).
+        "__getnewargs__" => {
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "tuple.__getnewargs__() takes no arguments ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            Ok(Value::tuple(vec![Value::tuple(items.to_vec())]))
+        }
         // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
         "__iter__" => Err(PyError::named(
             "TypeError",

@@ -33,7 +33,9 @@ use pyrust_derive::pyrust_module;
 const ENUM_PY_SOURCE: &str = include_str!("enum_py.py");
 
 /// Public names from `ENUM_PY_SOURCE` exported onto the `enum` module.
-const ENUM_PY_EXPORTS: [&str; 5] = ["EnumMeta", "EnumType", "Enum", "IntEnum", "auto"];
+const ENUM_PY_EXPORTS: [&str; 8] = [
+    "EnumMeta", "EnumType", "Enum", "IntEnum", "auto", "Flag", "IntFlag", "StrEnum",
+];
 
 /// Execute `ENUM_PY_SOURCE` once and copy its public names onto the `enum`
 /// module's attribute map.  Wired from `env.rs::load_module`'s post-import
