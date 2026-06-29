@@ -77,6 +77,15 @@ print(max(Decimal('1'), Decimal('2'), Decimal('1.5')))   # 2
 print(sorted([Decimal('3'), Decimal('1'), Decimal('2')]))  # [1, 2, 3]
 print(hash(Decimal('1.5')) == hash(Decimal('1.50')))     # True
 
+# format() — exercises _insert_thousands_sep, whose default grouping [3, 0]
+# drives `chain([3], repeat(3))`; this hung until chain() was made lazy.
+print(format(Decimal('1.5'), '.3f'))            # 1.500
+print(format(Decimal('1234.5678'), ',.2f'))     # 1,234.57
+print(format(Decimal('0.5'), 'e'))              # 5e-1
+print(format(Decimal('-1234567'), ',f'))        # -1,234,567
+print(format(Decimal('1.5'), '>10.2f'))         # padded
+print("{:,.2f}".format(Decimal('1234567.891'))) # 1,234,567.89
+
 # Exception type / hierarchy (message text differs between CPython's C and
 # pure-Python implementations, so only the type is asserted here).
 try:
