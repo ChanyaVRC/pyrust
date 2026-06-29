@@ -481,6 +481,36 @@ NotRequired = _SpecialMarker("NotRequired")
 TypeGuard = _SpecialMarker("TypeGuard")
 
 
+class ParamSpecArgs:
+    """Proxy for a `ParamSpec`'s ``args`` attribute."""
+
+    def __init__(self, origin):
+        self.__origin__ = origin
+
+    def __repr__(self):
+        return f"{self.__origin__.__name__}.args"
+
+    def __eq__(self, other):
+        if not isinstance(other, ParamSpecArgs):
+            return NotImplemented
+        return self.__origin__ is other.__origin__
+
+
+class ParamSpecKwargs:
+    """Proxy for a `ParamSpec`'s ``kwargs`` attribute."""
+
+    def __init__(self, origin):
+        self.__origin__ = origin
+
+    def __repr__(self):
+        return f"{self.__origin__.__name__}.kwargs"
+
+    def __eq__(self, other):
+        if not isinstance(other, ParamSpecKwargs):
+            return NotImplemented
+        return self.__origin__ is other.__origin__
+
+
 class ParamSpec:
     """Minimal `ParamSpec` stub: stores its name and exposes `args`/`kwargs`."""
 
@@ -490,11 +520,11 @@ class ParamSpec:
 
     @property
     def args(self):
-        return self
+        return ParamSpecArgs(self)
 
     @property
     def kwargs(self):
-        return self
+        return ParamSpecKwargs(self)
 
     def __repr__(self):
         return "~" + self.__name__
