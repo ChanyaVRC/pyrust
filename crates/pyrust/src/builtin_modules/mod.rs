@@ -266,6 +266,11 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `random` (issue #2785): a pure-Python MT19937 generator and the full
+    // public API live in `random_py.py`, injected by the `@inject` post-load
+    // hook.  The native body is an empty `pyrust_module!` so `import random`
+    // resolves to a real `PyModule`.
+    random @inject,
     // `time` (issue #2787): native clock / sleep functions and the libc-backed
     // calendar conversions; `struct_time` is defined in `time_py.py` and
     // injected by the `@inject` post-load hook.
