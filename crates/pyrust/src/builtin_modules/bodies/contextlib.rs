@@ -30,8 +30,92 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::class_is_subclass_of;
-use crate::value::{InstanceAttrs, PyInstance, Value, ValueKind};
+use crate::interpreter::Interpreter;
+use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
+
+/// Python-source definitions for the contextlib members most naturally
+/// expressed in Python (issue #2795): `AbstractContextManager`,
+/// `AbstractAsyncContextManager`, `ContextDecorator`, `AsyncContextDecorator`,
+/// `asynccontextmanager`, `aclosing`, and `AsyncExitStack`.  Exec'd once into a
+/// throwaway namespace at first import and the public names copied onto the
+/// module.  See `inject_python_members`.
+const CONTEXTLIB_PY_SOURCE: &str = include_str!("contextlib_py.py");
+
+/// Public names defined by `CONTEXTLIB_PY_SOURCE` to export onto the module.
+/// `_check_methods` and `_AsyncGeneratorContextManager` are private helpers and
+/// are intentionally omitted.
+const CONTEXTLIB_PY_EXPORTS: [&str; 7] = [
+    "AbstractContextManager",
+    "AbstractAsyncContextManager",
+    "ContextDecorator",
+    "AsyncContextDecorator",
+    "asynccontextmanager",
+    "aclosing",
+    "AsyncExitStack",
+];
+
+/// Exec `CONTEXTLIB_PY_SOURCE` once and copy its public names onto the
+/// `contextlib` module's attribute map.  Called from the `@inject` post-load
+/// hook (`crate::builtin_modules::post_load_inject`).
+pub(crate) fn inject_python_members(
+    interp: &mut Interpreter,
+    module: &Rc<RefCell<crate::value::PyModule>>,
+) -> Result<()> {
+    let ns = Value::dict(PyDict::default());
+    // Seed the exec namespace with the names the Python source references at
+    // class-definition time (`ABC`, `abstractmethod`, `wraps`).  pyrust's
+    // `exec(src, globals)` does not make an `import` executed inside `src`
+    // visible to module-level name resolution within the same exec, so a bare
+    // `from abc import ABC` in the source would NameError when used as a class
+    // base; pre-binding the dependencies sidesteps that.
+    seed_dependency(interp, &ns, "abc", &["ABC", "abstractmethod"])?;
+    seed_dependency(interp, &ns, "functools", &["wraps"])?;
+    seed_dependency(interp, &ns, "types", &["GenericAlias"])?;
+    interp.exec_source(CONTEXTLIB_PY_SOURCE, Some(ns.clone()), None)?;
+    let dict = ns
+        .as_dict()
+        .ok_or_else(|| PyError::Runtime("contextlib: exec namespace not a dict".into()))?;
+    for name in CONTEXTLIB_PY_EXPORTS {
+        if let Some(val) = dict.get(&PyKey::str_from(name)) {
+            module
+                .borrow_mut()
+                .attrs
+                .insert(name.to_string(), val.clone());
+            if let ValueKind::PyClass(class) = val.kind() {
+                class
+                    .borrow_mut()
+                    .attrs
+                    .insert("__module__".to_string(), Value::string("contextlib"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Import `module_name` and copy the requested attributes into the exec
+/// namespace `ns`, so the Python source can reference them by bare name at
+/// class-definition time.
+fn seed_dependency(
+    interp: &mut Interpreter,
+    ns: &Value,
+    module_name: &str,
+    names: &[&str],
+) -> Result<()> {
+    let module = interp.load_module(module_name)?;
+    let ValueKind::PyModule(m) = module.kind() else {
+        return Err(PyError::Runtime(format!(
+            "contextlib: {module_name} is not a module",
+        )));
+    };
+    for name in names {
+        let val = m.borrow().attrs.get(*name).cloned().ok_or_else(|| {
+            PyError::Runtime(format!("contextlib: {module_name}.{name} missing"))
+        })?;
+        ns.dict_insert(PyKey::str_from(name), val)?;
+    }
+    Ok(())
+}
 
 pyrust_module! {
     // ── suppress ─────────────────────────────────────────────────────────────
