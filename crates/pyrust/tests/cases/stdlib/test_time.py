@@ -111,6 +111,40 @@ try:
 except ValueError as e:
     print("strftime nul:", e)            # embedded null character
 
+# mktime / strftime require a tuple or struct_time; a list or str (iterable but
+# not a tuple) is rejected with CPython's wording, not coerced.
+try:
+    time.mktime([2021, 1, 1, 12, 34, 56, 4, 1, 0])
+except TypeError as e:
+    print("mktime list:", e)             # Tuple or struct_time argument required
+try:
+    time.mktime(5)
+except TypeError as e:
+    print("mktime int:", e)              # Tuple or struct_time argument required
+try:
+    time.strftime("%Y", [2021, 1, 1, 12, 34, 56, 4, 1, 0])
+except TypeError as e:
+    print("strftime list:", e)           # Tuple or struct_time argument required
+
+# A non-numeric clock / sleep argument reports CPython's integer-coercion wording.
+try:
+    time.sleep("x")
+except TypeError as e:
+    print("sleep str:", e)               # 'str' object cannot be interpreted as an integer
+try:
+    time.gmtime("x")
+except TypeError as e:
+    print("gmtime str:", e)              # 'str' object cannot be interpreted as an integer
+try:
+    time.gmtime(float("nan"))
+except ValueError as e:
+    print("gmtime nan:", e)              # Invalid value NaN (not a number)
+
+# struct_time reprs with the fully-qualified time. prefix.
+print(repr(time.gmtime(0)))
+# struct_time built by mktime(localtime(...)) round-trips through repr too.
+print(repr(time.struct_time((2020, 6, 15, 1, 2, 3, 0, 167, 0))))
+
 # ── timezone constants ───────────────────────────────────────────────────────
 print(isinstance(time.timezone, int))   # True
 print(isinstance(time.altzone, int))    # True

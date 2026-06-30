@@ -341,7 +341,7 @@ fn arg_to_f64(v: &Value) -> Result<f64> {
         _ => Err(PyError::named(
             "TypeError",
             format!(
-                "must be real number, not {}",
+                "'{}' object cannot be interpreted as an integer",
                 crate::interpreter::value_type_name_str(v)
             ),
         )),
@@ -379,7 +379,17 @@ fn optional_secs(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> {
     }
     match args.first().map(|a| a.value.kind()) {
         None | Some(ValueKind::None) => Ok(unix_time_secs()),
-        Some(_) => arg_to_f64(&args[0].value),
+        Some(_) => {
+            let secs = arg_to_f64(&args[0].value)?;
+            if secs.is_nan() {
+                // CPython: gmtime(nan) / localtime(nan) raise ValueError.
+                return Err(PyError::named(
+                    "ValueError",
+                    "Invalid value NaN (not a number)".to_string(),
+                ));
+            }
+            Ok(secs)
+        }
     }
 }
 
@@ -527,12 +537,20 @@ fn struct_time_class(interp: &mut Interpreter) -> Result<Value> {
     Err(PyError::Runtime("time: struct_time not loaded".into()))
 }
 
-/// Convert a 9-element `struct_time` (or any 9-element sequence, which CPython
-/// also accepts) into a broken-down `Tm` for `mktime` / `strftime`.
+/// Convert a `struct_time` (or any other `tuple` / `tuple` subclass) into a
+/// broken-down `Tm` for `mktime` / `strftime`.  CPython's `gettmarg` requires a
+/// genuine tuple (or `struct_time`) here — a `list` or `str` is rejected even
+/// though it is iterable — so we gate on `PyTuple_Check` semantics first.
 fn struct_time_to_tm(interp: &mut Interpreter, fn_name: &str, val: &Value) -> Result<Tm> {
     // CPython reports the wrong-length tuple error with the bare function name
     // (`mktime(): illegal time tuple argument`), not the `time.`-prefixed one.
     let bare = fn_name.rsplit('.').next().unwrap_or(fn_name);
+    if !crate::interpreter::is_tuple_or_tuple_subclass(val) {
+        return Err(PyError::named(
+            "TypeError",
+            "Tuple or struct_time argument required".to_string(),
+        ));
+    }
     let items = interp.collect_iterable(val)?;
     if items.len() != 9 {
         return Err(PyError::named(

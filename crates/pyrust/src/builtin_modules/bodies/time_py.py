@@ -48,3 +48,11 @@ class struct_time(_struct_time_base):
                 "(%d-sequence given)" % len(values)
             )
         return _struct_time_base.__new__(cls, *values)
+
+    def __repr__(self):
+        # CPython prints the fully-qualified `time.struct_time(...)` form, not
+        # the bare namedtuple name.
+        inner = ", ".join(
+            "%s=%r" % (name, getattr(self, name)) for name in self._fields
+        )
+        return "time.struct_time(%s)" % inner
