@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::Interpreter;
-use crate::value::{PyDict, PyKey, Value};
+use crate::value::PyKey;
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `enum` member.  Exec'd once at
@@ -33,7 +33,9 @@ use pyrust_derive::pyrust_module;
 const ENUM_PY_SOURCE: &str = include_str!("enum_py.py");
 
 /// Public names from `ENUM_PY_SOURCE` exported onto the `enum` module.
-const ENUM_PY_EXPORTS: [&str; 5] = ["EnumMeta", "EnumType", "Enum", "IntEnum", "auto"];
+const ENUM_PY_EXPORTS: [&str; 8] = [
+    "EnumMeta", "EnumType", "Enum", "IntEnum", "auto", "Flag", "IntFlag", "StrEnum",
+];
 
 /// Execute `ENUM_PY_SOURCE` once and copy its public names onto the `enum`
 /// module's attribute map.  Wired from `env.rs::load_module`'s post-import
@@ -42,7 +44,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(ENUM_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()

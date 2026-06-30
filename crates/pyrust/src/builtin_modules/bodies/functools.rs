@@ -1063,6 +1063,15 @@ fn cache_info_class(interp: &mut Interpreter) -> Result<Value> {
         .as_dict()
         .and_then(|d| d.get(&PyKey::str_from("CacheInfo")).cloned())
         .ok_or_else(|| internal("cache_info"))?;
+    // The exec namespace's `__name__` defaults to `__main__`; override
+    // `__module__` to `functools` so `type(cache_info()).__module__ ==
+    // "functools"`, matching CPython.
+    if let ValueKind::PyClass(cls_rc) = cls.kind() {
+        cls_rc
+            .borrow_mut()
+            .attrs
+            .insert("__module__".to_string(), Value::string("functools"));
+    }
     CACHE_INFO_CLASS.with(|c| *c.borrow_mut() = Some(cls.clone()));
     Ok(cls)
 }

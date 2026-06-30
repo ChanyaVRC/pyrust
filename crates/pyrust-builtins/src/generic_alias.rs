@@ -61,6 +61,15 @@ impl BuiltinTypeOps for GenericAliasOps {
                     _ => c.qualname.clone(),
                 }
             }
+            // A PEP 695 `TypeAliasType` origin (`type Pair[T] = ...; Pair[int]`)
+            // is a `PyInstance` carrying a `__name__` string; CPython reprs the
+            // parameterized alias as `Pair[int]` using that name (issue #2779).
+            ValueKind::PyInstance(rc) => rc
+                .borrow()
+                .attrs
+                .get("__name__")
+                .and_then(|n| n.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| pyrust_core::builtin_type_name(&s.origin).into_owned()),
             _ => pyrust_core::builtin_type_name(&s.origin).into_owned(),
         };
 
