@@ -261,6 +261,11 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `statistics` (issue #2811): a float-based adaptation of CPython's pure-
+    // Python `statistics` module — `mean` / `median` / `mode` / `variance` /
+    // `stdev` / `NormalDist` / … — defined in `statistics_py.py` and injected
+    // by the `@inject` post-load hook; the native body is empty.
+    statistics @inject,
     // `csv` (issue #2808): a pure-Python module (`csv_py.py`) — the
     // `reader` / `writer` factories, `DictReader` / `DictWriter`, the
     // `Dialect` family, the dialect registry, and the `QUOTE_*` constants —
