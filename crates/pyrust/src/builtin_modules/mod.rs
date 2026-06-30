@@ -266,6 +266,10 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `textwrap` (issue #2786): a pure-Python module (`textwrap_py.py`) —
+    // `TextWrapper`, `wrap`, `fill`, `shorten`, `dedent`, `indent` — injected
+    // by the `@inject` post-load hook; the native body is empty.
+    textwrap @inject,
     // `bisect` (issue #2784): array-bisection algorithms — a pure-Python
     // module (`bisect_py.py`) injected by the `@inject` post-load hook; the
     // native body is empty.
