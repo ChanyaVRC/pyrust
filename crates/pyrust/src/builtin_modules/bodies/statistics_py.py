@@ -236,6 +236,11 @@ def _ss_integral(data):
     return n * sum(x * x for x in data) - sum(data) ** 2
 
 
+def _ss_integral_c(data, c):
+    """Return ``sum((x - c)**2)`` exactly for integral *data* and center *c*."""
+    return sum((x - c) ** 2 for x in data)
+
+
 def _exact_or_float(num, den):
     """Return ``num // den`` when it divides evenly, else ``num / den``."""
     if num % den == 0:
@@ -249,8 +254,11 @@ def variance(data, xbar=None):
     n = len(data)
     if n < 2:
         raise StatisticsError("variance requires at least two data points")
-    if xbar is None and _all_integral(data):
-        return _exact_or_float(_ss_integral(data), n * (n - 1))
+    if _all_integral(data):
+        if xbar is None:
+            return _exact_or_float(_ss_integral(data), n * (n - 1))
+        if isinstance(xbar, int):
+            return _exact_or_float(_ss_integral_c(data, xbar), n - 1)
     return _ss(data, xbar) / (n - 1)
 
 
@@ -260,8 +268,11 @@ def pvariance(data, mu=None):
     n = len(data)
     if n < 1:
         raise StatisticsError("pvariance requires at least one data point")
-    if mu is None and _all_integral(data):
-        return _exact_or_float(_ss_integral(data), n * n)
+    if _all_integral(data):
+        if mu is None:
+            return _exact_or_float(_ss_integral(data), n * n)
+        if isinstance(mu, int):
+            return _exact_or_float(_ss_integral_c(data, mu), n)
     return _ss(data, mu) / n
 
 

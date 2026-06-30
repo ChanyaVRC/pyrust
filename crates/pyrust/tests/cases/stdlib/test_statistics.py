@@ -29,6 +29,10 @@ print(statistics.variance([1, 2, 3, 4, 5]))  # 2.5
 print(statistics.pvariance([1, 2, 3, 4, 5]))  # 2 (exact int)
 print(round(statistics.stdev([2, 4, 4, 4, 5, 5, 7, 9]), 5))  # 2.13809
 print(round(statistics.pstdev([2, 4, 4, 4, 5, 5, 7, 9]), 5))  # 2.0
+# Explicit integral center keeps the exact-int path (int center -> int result)
+print(statistics.pvariance([1, 2, 3, 4, 5], 3))  # 2 (exact int)
+print(statistics.variance([0, 0, 0, 0, 4], 0))  # 4 (exact int)
+print(statistics.pvariance([1, 2, 3, 4, 5], 3.0))  # 2.0 (float center -> float)
 
 # Geometric / harmonic means
 print(statistics.geometric_mean([1, 2, 4]))  # 2.0
