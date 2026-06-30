@@ -407,6 +407,63 @@ pyrust_module! {
         }
     }
 
+    // ── chdir ───────────────────────────────────────────────────────────────────
+
+    /// CPython: contextlib.chdir(path).
+    /// Non-reentrant context manager that temporarily changes the current
+    /// working directory to `path`, restoring the previous directory on exit
+    /// (whether or not an exception propagated).
+    /// <https://docs.python.org/3/library/contextlib.html#contextlib.chdir>
+    class chdir {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            if user.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 1 argument"),
+                ));
+            }
+            inst.borrow_mut().attrs.insert("path", user[0].value.clone());
+            // Stack of saved directories, matching CPython's `_old_cwd` list.
+            inst.borrow_mut().attrs.insert("_old_cwd", Value::list(vec![]));
+            let _ = _interp;
+            Ok(Value::none())
+        }
+
+        fn __enter__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let path = inst.borrow().attrs.get("path").cloned().unwrap_or_else(Value::none);
+            // Snapshot the current directory, then change to the target.
+            let cwd = os_call(_interp, "getcwd", &[])?;
+            let old_cwd = inst.borrow().attrs.get("_old_cwd").cloned()
+                .unwrap_or_else(|| Value::list(vec![]));
+            old_cwd.list_push(cwd)?;
+            os_call(_interp, "chdir", &[ExpandedCallArg { name: None, value: path }])?;
+            Ok(Value::none())
+        }
+
+        fn __exit__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let old_cwd = inst.borrow().attrs.get("_old_cwd").cloned()
+                .unwrap_or_else(|| Value::list(vec![]));
+            // Mirror CPython: `os.chdir(self._old_cwd.pop())`. Popping an empty
+            // stack (e.g. __exit__ called without a paired __enter__) raises
+            // IndexError("pop from empty list"), not a chdir(None) TypeError.
+            let restored = match old_cwd.list_len() {
+                Some(n) if n > 0 => old_cwd.list_pop_at(n - 1)?,
+                _ => {
+                    return Err(PyError::named(
+                        "IndexError",
+                        "pop from empty list".to_string(),
+                    ));
+                }
+            };
+            os_call(_interp, "chdir", &[ExpandedCallArg { name: None, value: restored }])?;
+            Ok(Value::bool_(false))
+        }
+    }
+
     // ── redirect_stdout / redirect_stderr ──────────────────────────────────────
 
     /// CPython: contextlib.redirect_stdout(new_target).
@@ -781,6 +838,18 @@ fn redirect_exit(
     };
     interp.set_std_stream(stream, restored)?;
     Ok(Value::bool_(false))
+}
+
+/// Call `os.<func>(*args)` from the contextlib runtime.  Used by `chdir` to
+/// reach `os.getcwd()` / `os.chdir(path)` without duplicating their logic.
+fn os_call(
+    interp: &mut crate::Interpreter,
+    func: &str,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    let os_module = interp.load_module("os")?;
+    let callable = interp.get_attr(&os_module, func)?;
+    interp.call_function_expanded(callable, args)
 }
 
 /// Construct a `_ContextManagerFactory` instance seeding `_func`.
