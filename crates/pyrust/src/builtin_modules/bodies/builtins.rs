@@ -1192,8 +1192,9 @@ pyrust_module! {
     ///
     /// Migrated to the typed-signature dialect (#400).  `iterable` is
     /// `PyValue` (not `PyIterable`) so that user-defined `PyInstance`
-    /// iterables reach `materialize_user_iter` — the registry-only path
-    /// cannot dispatch `__iter__` dunders.  `start` is `Option<PyValue>`
+    /// iterables reach `make_iterator` (which dispatches `__iter__`) — the
+    /// registry-only path cannot dispatch `__iter__` dunders.  `start` is
+    /// `Option<PyValue>`
     /// so the body can handle both `int` and `bool` inputs (CPython
     /// accepts both; `bool ⊆ int` in CPython) and produce the
     /// exact CPython `TypeError` wording for non-integer `start`.
@@ -8228,28 +8229,6 @@ fn parse_complex_str(s: &str) -> Option<(f64, f64)> {
     }
 }
 
-/// If `v` is a user `PyInstance` (which needs `__iter__` / `__getitem__`
-/// dispatch via the interpreter) or a `Generator` (which needs the
-/// interpreter to drive the `GeneratorFrame`), drain it eagerly into a
-/// `Value::list` so downstream lazy iter helpers (`enumerate` / `zip` /
-/// `reversed` / `chain`) can reach its items through
-/// `iter_values_via_registry` — that callback can't dispatch dunders or
-/// resume generators by itself.  Non-user sources are passed through
-/// unchanged, preserving lazy evaluation for builtin iterables (e.g.
-/// `enumerate(open(path))` still defers file-reading until iter).
-///
-/// Issue #446.
-pub(super) fn materialize_user_iter(
-    interp: &mut crate::Interpreter,
-    v: Value,
-) -> Result<Value> {
-    if matches!(v.kind(), ValueKind::PyInstance(_) | ValueKind::Generator(_)) {
-        let items = interp.collect_iterable(&v)?;
-        Ok(Value::list(items))
-    } else {
-        Ok(v)
-    }
-}
 
 /// Convert an arbitrary Python iterable value into an iterator object without
 /// consuming any elements.
