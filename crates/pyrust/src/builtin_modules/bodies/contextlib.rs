@@ -71,6 +71,7 @@ pub(crate) fn inject_python_members(
     // base; pre-binding the dependencies sidesteps that.
     seed_dependency(interp, &ns, "abc", &["ABC", "abstractmethod"])?;
     seed_dependency(interp, &ns, "functools", &["wraps"])?;
+    seed_dependency(interp, &ns, "types", &["GenericAlias"])?;
     interp.exec_source(CONTEXTLIB_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()

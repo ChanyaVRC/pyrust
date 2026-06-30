@@ -54,6 +54,13 @@ class NotACtx:
 print(isinstance(NotACtx(), AbstractContextManager))
 
 
+# subscription yields a types.GenericAlias (not the bare class)
+from types import GenericAlias
+
+print(type(AbstractContextManager[int]) is GenericAlias)
+print(AbstractContextManager[int])
+
+
 # ── AbstractAsyncContextManager ─────────────────────────────────────────────
 class AsyncSimple:
     async def __aenter__(self):
@@ -65,6 +72,7 @@ class AsyncSimple:
 
 print(issubclass(AsyncSimple, AbstractAsyncContextManager))
 print(issubclass(SimpleCtx, AbstractAsyncContextManager))
+print(type(AbstractAsyncContextManager[str]) is GenericAlias)
 
 
 # ── ContextDecorator ────────────────────────────────────────────────────────

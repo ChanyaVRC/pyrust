@@ -16,9 +16,9 @@ written in Python (issue #2795):
 
 Mirrors CPython 3.12's `Lib/contextlib.py`.
 
-`ABC`, `abstractmethod` (from `abc`) and `wraps` (from `functools`) are
-pre-seeded into the exec namespace by `inject_python_members`, so this source
-does not import them itself.
+`ABC`, `abstractmethod` (from `abc`), `wraps` (from `functools`) and
+`GenericAlias` (from `types`) are pre-seeded into the exec namespace by
+`inject_python_members`, so this source does not import them itself.
 """
 
 
@@ -38,7 +38,7 @@ def _check_methods(C, *methods):
 class AbstractContextManager(ABC):
     """An abstract base class for context managers."""
 
-    __class_getitem__ = classmethod(lambda cls, item: cls)
+    __class_getitem__ = classmethod(lambda cls, item: GenericAlias(cls, item))
 
     def __enter__(self):
         """Return `self` upon entering the runtime context."""
@@ -59,7 +59,7 @@ class AbstractContextManager(ABC):
 class AbstractAsyncContextManager(ABC):
     """An abstract base class for asynchronous context managers."""
 
-    __class_getitem__ = classmethod(lambda cls, item: cls)
+    __class_getitem__ = classmethod(lambda cls, item: GenericAlias(cls, item))
 
     async def __aenter__(self):
         """Return `self` upon entering the runtime context."""
