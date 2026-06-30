@@ -1600,6 +1600,20 @@ pub(crate) fn non_subclassable_builtin_name(
     })
 }
 
+/// Returns `true` if `val` is a `tuple` or an instance of a `tuple` subclass
+/// (e.g. a `namedtuple` such as `time.struct_time`).  Mirrors CPython's
+/// `PyTuple_Check`, which several stdlib functions (`time.mktime` /
+/// `time.strftime`) use to reject non-tuple sequences like `list` / `str`.
+pub(crate) fn is_tuple_or_tuple_subclass(val: &Value) -> bool {
+    match val.kind() {
+        ValueKind::Tuple(_) => true,
+        ValueKind::PyInstance(inst) => {
+            PRIMITIVE_CLASSES.with(|c| class_is_subclass_of(&inst.borrow().class, &c.tuple_class))
+        }
+        _ => false,
+    }
+}
+
 /// Returns `true` if `class` is one of the built-in types that carry a
 /// non-trivial C-level instance layout (`int`, `str`, `float`, `bytes`,
 /// `tuple`, `list`, `dict`, `set`, `frozenset`).  CPython raises
