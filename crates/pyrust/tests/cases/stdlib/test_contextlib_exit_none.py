@@ -44,4 +44,69 @@ m = cm()
 m.__enter__()
 print(m.__exit__(None, None, None))  # False
 
+
+# @contextmanager re-raising the *same* exception (or not catching it) is a
+# non-suppressing exit: __exit__ returns False rather than re-raising, so a
+# direct call observes False.
+@contextlib.contextmanager
+def cm_reraise():
+    try:
+        yield
+    except ValueError:
+        raise
+
+
+r = cm_reraise()
+r.__enter__()
+print(r.__exit__(ValueError, ValueError("x"), None))  # False
+
+
+@contextlib.contextmanager
+def cm_nocatch():
+    yield
+
+
+nc = cm_nocatch()
+nc.__enter__()
+print(nc.__exit__(ValueError, ValueError("x"), None))  # False
+
+
+# Same non-suppressing path with exc_val=None: CPython materialises typ() and
+# returns False when the generator lets it propagate.
+nc2 = cm_nocatch()
+nc2.__enter__()
+print(nc2.__exit__(ValueError, None, None))  # False
+
+
+# @contextmanager swallowing a matching exception suppresses it (returns True).
+@contextlib.contextmanager
+def cm_swallow():
+    try:
+        yield
+    except ValueError:
+        pass
+
+
+sw = cm_swallow()
+sw.__enter__()
+print(sw.__exit__(ValueError, ValueError("x"), None))  # True
+
+
+# @contextmanager raising a *different* exception propagates it (not suppressed).
+@contextlib.contextmanager
+def cm_transform():
+    try:
+        yield
+    except ValueError:
+        raise KeyError("t")
+
+
+t = cm_transform()
+t.__enter__()
+try:
+    t.__exit__(ValueError, ValueError("x"), None)
+    print("no raise")
+except KeyError:
+    print("transform propagated KeyError")
+
 print("contextlib exit None ok")

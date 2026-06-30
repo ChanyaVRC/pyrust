@@ -170,13 +170,19 @@ pyrust_module! {
             } else {
                 // Exception exit: throw into the generator.
                 // `exc_val` may be a PyInstance or None; `exc_type` is a PyClass.
-                // We throw the instance (exc_val) if it is one, otherwise exc_type.
+                // Materialise a concrete exception *instance* to throw, mirroring
+                // CPython's `if value is None: value = typ()`.  Throwing the
+                // instance (not the class) means the same object propagates back
+                // out when the generator re-raises, so the identity check below
+                // can recognise the non-suppressing path.
                 let to_throw = if !exc_val.is_none() {
                     exc_val
+                } else if let ValueKind::PyClass(c) = exc_type.kind() {
+                    crate::interpreter::instantiate_exception(Rc::clone(c), Vec::new())
                 } else {
                     exc_type
                 };
-                match _interp.call_generator_method(generator, "throw", vec![to_throw]) {
+                match _interp.call_generator_method(generator, "throw", vec![to_throw.clone()]) {
                     Ok(_) => {
                         // Generator yielded again — that means it caught the exception
                         // and yielded a new value, which is forbidden by the protocol.
@@ -190,8 +196,17 @@ pyrust_module! {
                         Ok(Value::bool_(true))
                     }
                     Err(e) => {
-                        // Generator re-raised the exception or raised a new one.
-                        // Let it propagate.
+                        // CPython's `_GeneratorContextManager.__exit__` distinguishes
+                        // the generator *re-raising the same exception* (it didn't
+                        // suppress) from it raising a *new* one.  In the first case
+                        // `__exit__` returns `False` (non-suppressing) rather than
+                        // re-raising, so a direct `cm.__exit__(typ, val, tb)` call
+                        // observes `False`; only a genuinely different exception
+                        // propagates.  Match on instance identity (`exc is value`).
+                        if is_same_raised_exception(&e, &to_throw) {
+                            return Ok(Value::bool_(false));
+                        }
+                        // Generator raised a *new* exception — let it propagate.
                         Err(e)
                     }
                 }
@@ -727,4 +742,19 @@ fn pop_all_callbacks(inst: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
         .unwrap_or_default();
     let _ = callbacks_val.list_clear();
     result
+}
+
+/// True when `err` is a propagated exception whose instance is the *same*
+/// object that was thrown into the generator (`thrown`).  Mirrors CPython's
+/// `_GeneratorContextManager.__exit__` `if exc is value: return False` branch:
+/// the generator re-raised the exact exception it received, which is *not*
+/// suppression, so `__exit__` returns `False` instead of re-raising.
+fn is_same_raised_exception(err: &PyError, thrown: &Value) -> bool {
+    let PyError::Raised(raised) = err else {
+        return false;
+    };
+    match (raised.kind(), thrown.kind()) {
+        (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
 }
