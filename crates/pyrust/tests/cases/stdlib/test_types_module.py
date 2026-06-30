@@ -120,3 +120,74 @@ class _NS(types.SimpleNamespace):
 
 print(repr(_NS(x=1)))
 print(_NS(x=1) == types.SimpleNamespace(x=1))
+
+# ── Runtime-object type constants (issue #2777) ────────────────────────────
+# These reference the interpreter's runtime type for generators, coroutines,
+# async generators, bound methods, unions, Ellipsis, and NotImplemented, so
+# identity with `type(...)` of a live object of that kind holds.
+from typing import get_origin, get_args  # noqa: E402
+
+
+def _gen():
+    yield 1
+
+
+async def _coro():
+    pass
+
+
+async def _agen():
+    yield 1
+
+
+_g = _gen()
+_c = _coro()
+_ag = _agen()
+
+print(type(_g) is types.GeneratorType)
+print(types.GeneratorType.__name__)
+print(type(_c) is types.CoroutineType)
+print(types.CoroutineType.__name__)
+print(type(_ag) is types.AsyncGeneratorType)
+print(types.AsyncGeneratorType.__name__)
+
+
+class _Meth:
+    def m(self):
+        return 0
+
+
+print(type(_Meth().m) is types.MethodType)
+print(types.MethodType.__name__)
+print(repr(types.MethodType))
+
+# PEP 604 unions.
+print(type(int | str) is types.UnionType)
+print(types.UnionType.__name__)
+
+# EllipsisType / NotImplementedType are the real primitive classes.
+print(type(...) is types.EllipsisType)
+print(types.EllipsisType.__name__)
+print(repr(types.EllipsisType))
+print(type(NotImplemented) is types.NotImplementedType)
+print(types.NotImplementedType.__name__)
+print(repr(types.NotImplementedType))
+
+# isinstance against the runtime type constants (not just `is`/identity).
+print(isinstance(_g, types.GeneratorType))
+print(isinstance(_c, types.CoroutineType))
+print(isinstance(_ag, types.AsyncGeneratorType))
+print(isinstance(_Meth().m, types.MethodType))
+print(isinstance(int | str, types.UnionType))
+print(isinstance(..., types.EllipsisType))
+print(isinstance(NotImplemented, types.NotImplementedType))
+# A generator is not a coroutine and vice versa.
+print(isinstance(_g, types.CoroutineType))
+print(isinstance(_c, types.GeneratorType))
+
+# Secondary effect: get_origin / get_args on a runtime union.
+print(get_origin(int | str) is types.UnionType)
+print(get_args(int | str))
+print(get_origin(int) is None)
+
+_c.close()

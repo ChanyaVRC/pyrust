@@ -9,6 +9,7 @@
 
 import collections as _collections
 import sys as _sys
+import types as _types
 
 
 def get_origin(tp):
@@ -21,6 +22,10 @@ def get_origin(tp):
     # though it stores `X` in `__origin__` (PEP 593 / CPython `get_origin`).
     if isinstance(tp, _AnnotatedAlias):
         return Annotated
+    # PEP 604 union (`int | str`): a `types.UnionType` instance has no
+    # `__origin__`, but CPython's `get_origin` reports `types.UnionType` itself.
+    if isinstance(tp, _types.UnionType):
+        return _types.UnionType
     origin = getattr(tp, "__origin__", None)
     if origin is None:
         return None
@@ -476,20 +481,56 @@ NotRequired = _SpecialMarker("NotRequired")
 TypeGuard = _SpecialMarker("TypeGuard")
 
 
+class ParamSpecArgs:
+    """Proxy for a `ParamSpec`'s ``args`` attribute."""
+
+    def __init__(self, origin):
+        self.__origin__ = origin
+
+    def __repr__(self):
+        return f"{self.__origin__.__name__}.args"
+
+    def __eq__(self, other):
+        if not isinstance(other, ParamSpecArgs):
+            return NotImplemented
+        return self.__origin__ is other.__origin__
+
+
+class ParamSpecKwargs:
+    """Proxy for a `ParamSpec`'s ``kwargs`` attribute."""
+
+    def __init__(self, origin):
+        self.__origin__ = origin
+
+    def __repr__(self):
+        return f"{self.__origin__.__name__}.kwargs"
+
+    def __eq__(self, other):
+        if not isinstance(other, ParamSpecKwargs):
+            return NotImplemented
+        return self.__origin__ is other.__origin__
+
+
 class ParamSpec:
     """Minimal `ParamSpec` stub: stores its name and exposes `args`/`kwargs`."""
 
     def __init__(self, name, *, bound=None, covariant=False, contravariant=False):
         self.__name__ = name
         self.__bound__ = bound
+        # CPython captures the caller's module on the instance, so
+        # `P = ParamSpec('P')` at top level has `P.__module__ == '__main__'`.
+        # The `ParamSpec` *class* carries `__module__ == 'typing'` (#2801), so
+        # without this instance override the instance would inherit `'typing'`.
+        # Mirror the native `TypeVar` path (typing.rs), which seeds `'__main__'`.
+        self.__module__ = "__main__"
 
     @property
     def args(self):
-        return self
+        return ParamSpecArgs(self)
 
     @property
     def kwargs(self):
-        return self
+        return ParamSpecKwargs(self)
 
     def __repr__(self):
         return "~" + self.__name__
@@ -500,6 +541,9 @@ class TypeVarTuple:
 
     def __init__(self, name):
         self.__name__ = name
+        # See `ParamSpec.__init__`: the instance captures the caller's module
+        # (`'__main__'` at top level), not the `TypeVarTuple` class's `'typing'`.
+        self.__module__ = "__main__"
 
     def __iter__(self):
         return iter((Unpack[self],))
