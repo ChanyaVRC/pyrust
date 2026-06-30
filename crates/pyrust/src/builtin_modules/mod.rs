@@ -17,6 +17,24 @@
 use crate::builtin_registry::BuiltinReg;
 use crate::value::Value;
 
+/// Build a fresh exec namespace dict for a built-in module's Python body file,
+/// pre-seeded with `__name__` set to the module's name.
+///
+/// `inject_python_members` exec's a Python source (e.g. `typing_py.py`) into a
+/// throwaway dict.  CPython's class machinery reads the global `__name__` to set
+/// `__module__` on classes defined in that source; without it every such class
+/// would report `__module__ == "__main__"` (issue #2801).  Seeding `__name__`
+/// here makes `typing.ParamSpec.__module__ == "typing"`, etc.
+pub(crate) fn make_module_exec_ns(
+    module: &std::rc::Rc<std::cell::RefCell<crate::value::PyModule>>,
+) -> crate::error::Result<Value> {
+    use pyrust_core::PyKey;
+    let name = module.borrow().name.clone();
+    let ns = Value::dict(crate::value::PyDict::default());
+    ns.dict_insert(PyKey::str_from("__name__"), Value::string(&name))?;
+    Ok(ns)
+}
+
 /// Declares the set of built-in modules.
 ///
 /// Syntax:
@@ -248,4 +266,14 @@ pyrust_builtin_modules! {
     // `Dialect` family, the dialect registry, and the `QUOTE_*` constants —
     // injected by the `@inject` post-load hook; the native body is empty.
     csv @inject,
+    // `decimal` (issue #2806): a port of CPython 3.12's pure-Python
+    // `_pydecimal.py` (`decimal_py.py`) — `Decimal`, `Context`,
+    // `getcontext` / `setcontext` / `localcontext`, the `ROUND_*` constants,
+    // and the `DecimalException` hierarchy — injected by the `@inject`
+    // post-load hook.  The native body is empty.
+    decimal @inject,
+    // `fractions` (issue #2810): a pure-Python module (`fractions_py.py`) — the
+    // `Fraction` rational-number class — injected by the `@inject` post-load
+    // hook.  The native body is empty.
+    fractions @inject,
 }

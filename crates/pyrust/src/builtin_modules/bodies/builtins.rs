@@ -1192,8 +1192,9 @@ pyrust_module! {
     ///
     /// Migrated to the typed-signature dialect (#400).  `iterable` is
     /// `PyValue` (not `PyIterable`) so that user-defined `PyInstance`
-    /// iterables reach `materialize_user_iter` — the registry-only path
-    /// cannot dispatch `__iter__` dunders.  `start` is `Option<PyValue>`
+    /// iterables reach `make_iterator` (which dispatches `__iter__`) — the
+    /// registry-only path cannot dispatch `__iter__` dunders.  `start` is
+    /// `Option<PyValue>`
     /// so the body can handle both `int` and `bool` inputs (CPython
     /// accepts both; `bool ⊆ int` in CPython) and produce the
     /// exact CPython `TypeError` wording for non-integer `start`.
@@ -7577,6 +7578,46 @@ pyrust_module! {
         Ok(Value::string(self_val.repr_raw()))
     }
 
+    /// PEP 695: `TypeAliasType.__getitem__` — subscripting a generic alias
+    /// (`Pair.__getitem__(int)`) returns a `types.GenericAlias` with the alias
+    /// as origin, matching the operator path in `eval_index`.  A non-generic
+    /// alias raises CPython's "Only generic type aliases are subscriptable".
+    /// The operator form `Pair[int]` is served by the inline fast path; this
+    /// slot exists so `hasattr(alias, "__getitem__")` is True and the explicit
+    /// `alias.__getitem__(x)` call works, matching CPython 3.12 (issue #2779).
+    #[py_name = "builtins.TypeAliasType.__getitem__"]
+    fn type_alias_type_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            pyrust_core::descriptor_needs_arg!("__getitem__", "TypeAliasType")
+        })?;
+        let key = args
+            .get(1)
+            .map(|a| a.value.clone())
+            .ok_or_else(|| pyrust_core::type_err!("__getitem__ expected 1 argument, got 0"))?;
+        let is_generic_alias = match self_val.kind() {
+            ValueKind::PyInstance(inst_rc) => inst_rc
+                .borrow()
+                .attrs
+                .get("__type_params__")
+                .is_some_and(|p| matches!(p.kind(), ValueKind::Tuple(t) if !t.is_empty())),
+            _ => false,
+        };
+        if !is_generic_alias {
+            return Err(pyrust_core::type_err!(
+                "Only generic type aliases are subscriptable"
+            ));
+        }
+        let type_args = if matches!(key.kind(), ValueKind::Tuple(_)) {
+            key
+        } else {
+            Value::tuple(vec![key])
+        };
+        Ok(pyrust_builtins::generic_alias::generic_alias(
+            self_val, type_args,
+        ))
+    }
+
     /// PEP 695: `TypeVar.__repr__` — returns the TypeVar name string.
     /// CPython: `repr(T)` outputs `~T` for invariant TypeVars, but the
     /// `__name__` attribute is just the bare name `T`.
@@ -8188,28 +8229,6 @@ fn parse_complex_str(s: &str) -> Option<(f64, f64)> {
     }
 }
 
-/// If `v` is a user `PyInstance` (which needs `__iter__` / `__getitem__`
-/// dispatch via the interpreter) or a `Generator` (which needs the
-/// interpreter to drive the `GeneratorFrame`), drain it eagerly into a
-/// `Value::list` so downstream lazy iter helpers (`enumerate` / `zip` /
-/// `reversed` / `chain`) can reach its items through
-/// `iter_values_via_registry` — that callback can't dispatch dunders or
-/// resume generators by itself.  Non-user sources are passed through
-/// unchanged, preserving lazy evaluation for builtin iterables (e.g.
-/// `enumerate(open(path))` still defers file-reading until iter).
-///
-/// Issue #446.
-pub(super) fn materialize_user_iter(
-    interp: &mut crate::Interpreter,
-    v: Value,
-) -> Result<Value> {
-    if matches!(v.kind(), ValueKind::PyInstance(_) | ValueKind::Generator(_)) {
-        let items = interp.collect_iterable(&v)?;
-        Ok(Value::list(items))
-    } else {
-        Ok(v)
-    }
-}
 
 /// Convert an arbitrary Python iterable value into an iterator object without
 /// consuming any elements.
@@ -10067,15 +10086,21 @@ fn min_max_impl(
 /// `Complex`, `Ellipsis`, `NotImplemented`) always return `false`.
 #[inline]
 fn value_needs_interp_repr(v: &Value) -> bool {
-    matches!(
-        v.kind(),
+    match v.kind() {
         ValueKind::PyInstance(_)
-            | ValueKind::BuiltinObject { .. }
-            | ValueKind::List(_)
-            | ValueKind::Tuple(_)
-            | ValueKind::Dict(_)
-            | ValueKind::Set(_)
-    )
+        | ValueKind::BuiltinObject { .. }
+        | ValueKind::List(_)
+        | ValueKind::Tuple(_)
+        | ValueKind::Dict(_)
+        | ValueKind::Set(_) => true,
+        // Issue #2771: a class whose metaclass overrides `__repr__` needs the
+        // interpreter to dispatch it (e.g. `[Color]` -> `[<enum 'Color'>]`).
+        // Only classes with a *custom* metatype can carry such an override, so
+        // the common case (`[int, str]`, metatype is the built-in `type`) keeps
+        // the pure `repr_raw()` fast path.
+        ValueKind::PyClass(cls) => cls.borrow().metatype.is_some(),
+        _ => false,
+    }
 }
 
 /// Returns `true` when a container key (`PyKey`) requires interpreter access
@@ -10434,6 +10459,20 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         //   - everything else (map/filter/zip/enumerate/list_iterator/…):
         //         `<{type_name} object at 0x...>`
         ValueKind::Generator(_) => Ok(generator_repr(value)),
+        // Issue #2771: `repr(cls)` dispatches `type(cls).__repr__(cls)` when the
+        // class's metaclass defines a user `__repr__`.  `dispatch_metaclass_repr_str`
+        // returns `None` for an ordinary class (metatype is the built-in `type`),
+        // so the common case still uses the default `<class '...'>` format from
+        // `Value::repr_raw()` with no interpreter dispatch.
+        ValueKind::PyClass(cls_rc) => {
+            let cls_rc = Rc::clone(cls_rc);
+            if let Some(res) =
+                crate::interpreter::dispatch_metaclass_repr_str(interp, &cls_rc, "__repr__")
+            {
+                return res;
+            }
+            Ok(value.repr_raw())
+        }
         // For all other value types (int, float, str, bool, None, …), the
         // pure `Value::repr_raw()` is correct and needs no interpreter.
         _ => Ok(value.repr_raw()),
@@ -10565,6 +10604,18 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                 if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
             {
                 render_value_repr(interp, value)
+            }
+            // Issue #2771: `str(cls)` / `print(cls)` dispatches the metaclass
+            // `__str__` (falling back to `__repr__`) when overridden; returns
+            // `None` for an ordinary class so plain classes keep `to_py_str()`.
+            ValueKind::PyClass(cls_rc) => {
+                let cls_rc = Rc::clone(cls_rc);
+                if let Some(res) =
+                    crate::interpreter::dispatch_metaclass_repr_str(interp, &cls_rc, "__str__")
+                {
+                    return res;
+                }
+                Ok(value.to_py_str())
             }
             _ => Ok(value.to_py_str()),
         };

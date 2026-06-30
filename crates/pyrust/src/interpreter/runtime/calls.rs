@@ -543,6 +543,14 @@ impl Interpreter {
             // `"float.*"` arm below so that the arg-0-is-receiver assumption
             // in that arm is not applied here.
             ValueKind::BuiltinFunction("float.fromhex") => {
+                // Issue #2767: `float.fromhex` takes no keyword arguments; the
+                // kwarg must be rejected before the string is parsed (CPython
+                // raises TypeError even for a garbage/absent string arg).
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "float.fromhex() takes no keyword arguments"
+                    ));
+                }
                 // Accept both `float.fromhex(s)` and `(1.0).fromhex(s)`.
                 // Filter out a leading float or class receiver if present, then
                 // enforce exactly one remaining positional argument.
@@ -626,6 +634,13 @@ impl Interpreter {
                 if name.split_once('.').is_some_and(|(t, _)| t == "float") =>
             {
                 let (_, method) = name.split_once('.').unwrap();
+                // Issue #2760: `__getnewargs__` takes no keyword arguments; the
+                // unbound float arm below drops kwargs silently otherwise.
+                if method == "__getnewargs__" && args.iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "float.__getnewargs__() takes no keyword arguments"
+                    ));
+                }
                 let self_val = args
                     .first()
                     .map(|a| a.value.clone())
@@ -639,6 +654,14 @@ impl Interpreter {
                         return Err(pyrust_core::type_err!("descriptor '{method}' for 'float' objects doesn't apply to a '{actual}' object",));
                     }
                 };
+                // Issue #2767: float method_descriptors take no keyword
+                // arguments; the receiver-only `float::call` discards them, so
+                // guard here before delegating.
+                if args[1..].iter().any(|a| a.name.is_some()) {
+                    return Err(pyrust_core::type_err!(
+                        "float.{method}() takes no keyword arguments"
+                    ));
+                }
                 let pos: Vec<Value> = args[1..]
                     .iter()
                     .filter(|a| a.name.is_none())
@@ -911,6 +934,13 @@ impl Interpreter {
                         // to" receiver-guard wording); `int.__index__` stays a
                         // slot wrapper.
                         | ("int", "__round__" | "__trunc__" | "__floor__" | "__ceil__")
+                        // Issue #2760: `__getnewargs__` is a method_descriptor on
+                        // every numeric/immutable-sequence primitive, so its
+                        // receiver-guard uses the "doesn't apply to" wording.
+                        | (
+                            "int" | "bool" | "float" | "complex" | "str" | "bytes" | "tuple",
+                            "__getnewargs__"
+                        )
                 );
                 let is_dunder =
                     method.starts_with("__") && method.ends_with("__") && !is_method_descriptor_dunder;
@@ -1170,7 +1200,25 @@ impl Interpreter {
                         }
                         self.call_set_method(method, self_val, pos)
                     }
-                    "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
+                    "complex" => {
+                        // Issue #2760: `__getnewargs__` takes no keyword
+                        // arguments; the receiver-only `complex::call` discards
+                        // `kw` otherwise.
+                        if method == "__getnewargs__" && !kw.is_empty() {
+                            return Err(pyrust_core::type_err!(
+                                "complex.__getnewargs__() takes no keyword arguments"
+                            ));
+                        }
+                        // Issue #2767: complex methods take no keyword
+                        // arguments; the receiver-only `complex::call` discards
+                        // `kw`, so guard here before delegating.
+                        if !kw.is_empty() {
+                            return Err(pyrust_core::type_err!(
+                                "complex.{method}() takes no keyword arguments"
+                            ));
+                        }
+                        pyrust_builtins::complex::call(method, &self_val, pos)
+                    }
                     "frozenset" => {
                         // Issue #2500: frozenset methods take no keyword arguments.
                         if let Some(err) = reject_container_method_kwargs("frozenset", method, &kw) {
@@ -1414,17 +1462,20 @@ impl Interpreter {
             _ if pyrust_builtins::numeric_attrs_descriptor::as_method_descriptor(&function)
                 .is_some() =>
             {
-                let (attr_name, _class_name) =
+                let (attr_name, class_name) =
                     pyrust_builtins::numeric_attrs_descriptor::as_method_descriptor(&function)
                         .expect("guard checked above");
                 // Reject keyword arguments — CPython's method_descriptor does not
-                // accept them.
+                // accept them.  Issue #2767: the message is qualified with the
+                // owning type (`float.conjugate() takes no keyword arguments`),
+                // matching CPython 3.12.
                 if args.iter().any(|a| a.name.is_some()) {
-                    return Err(pyrust_core::type_err!("{}() takes no keyword arguments",
-                            attr_name));
+                    return Err(pyrust_core::type_err!(
+                        "{class_name}.{attr_name}() takes no keyword arguments"
+                    ));
                 }
                 if args.is_empty() {
-                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, _class_name, method));
+                    return Err(pyrust_core::descriptor_needs_arg!(attr_name, class_name, method));
                 }
                 // Re-dispatch as attribute access on the first argument.
                 let remaining = &args[1..];
@@ -1824,10 +1875,24 @@ impl Interpreter {
                 pyrust_builtins::int::call(method, &receiver, &pos[..], &kw)
             }
             Kind::Float => {
+                // Issue #2760: `__getnewargs__` takes no keyword arguments
+                // (the receiver-only `float::call` discards `kw`).
+                if method == "__getnewargs__" && !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "float.__getnewargs__() takes no keyword arguments"
+                    ));
+                }
                 let f = match receiver.kind() {
                     ValueKind::Float(f) => f,
                     _ => unreachable!("kind_tag guard above"),
                 };
+                // Issue #2767: float methods take no keyword arguments; the
+                // receiver-only `float::call` discards `kw`, so guard here.
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "float.{method}() takes no keyword arguments"
+                    ));
+                }
                 pyrust_builtins::float::call(method, f, pos)
             }
             Kind::Bytes => {
@@ -2009,6 +2074,20 @@ impl Interpreter {
                 }
             }
             ValueKind::Complex(_, _) => {
+                // Issue #2760: `__getnewargs__` takes no keyword arguments
+                // (the receiver-only `complex::call` discards `kw`).
+                if method == "__getnewargs__" && !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "complex.__getnewargs__() takes no keyword arguments"
+                    ));
+                }
+                // Issue #2767: complex methods take no keyword arguments; the
+                // receiver-only `complex::call` discards `kw`, so guard here.
+                if !kw.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "complex.{method}() takes no keyword arguments"
+                    ));
+                }
                 let args_vec: Vec<Value> = std::mem::take(pos);
                 pyrust_builtins::complex::call(method, &receiver, args_vec)
             }
@@ -2104,7 +2183,24 @@ impl Interpreter {
                                     method,
                                 )
                             {
-                                reject_kwargs!(kw, "{}", method);
+                                // Issue #2767: keyword-rejection wording on a
+                                // builtin-subclass instance must match the
+                                // plain-primitive paths — named method-wrappers
+                                // (`float.__round__()`, `list.__getitem__()`)
+                                // use the type-qualified form, anonymous slot
+                                // wrappers (`wrapper __len__()`) use the bare
+                                // form (issue #2291).
+                                if !kw.is_empty() {
+                                    let type_name =
+                                        pyrust_core::builtin_type_name(&backing);
+                                    return Err(if is_named_protocol_wrapper(
+                                        method, &type_name,
+                                    ) {
+                                        pyrust_core::type_err!("{type_name}.{method}() takes no keyword arguments")
+                                    } else {
+                                        pyrust_core::type_err!("wrapper {method}() takes no keyword arguments")
+                                    });
+                                }
                                 let args_vec: Vec<Value> = std::mem::take(pos);
                                 return self.dispatch_builtin_protocol_dunder(
                                     method, backing, args_vec,
@@ -2435,6 +2531,13 @@ impl Interpreter {
                                         ValueKind::Float(f) => f,
                                         _ => unreachable!("BkKind::Float guard above"),
                                     };
+                                    // Issue #2767: float methods take no keyword
+                                    // arguments (subclass-receiver path).
+                                    if !kw.is_empty() {
+                                        return Err(pyrust_core::type_err!(
+                                            "float.{method}() takes no keyword arguments"
+                                        ));
+                                    }
                                     pyrust_builtins::float::call(method, f, &args_vec)
                                 }
                                 BkKind::Bytes => {
@@ -8705,9 +8808,10 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     // (intercepted in `get_attr`) and `float.fromhex` (a classmethod
     // registered in helpers.rs); none are in the `METHODS` slice.  These all
     // resolve via `hasattr`, so listing them keeps `dir()` consistent with
-    // attribute access.  CPython also advertises `__int__`/`__float__`/
-    // `__getformat__`/`__getnewargs__` (float) and `__complex__`/
-    // `__getnewargs__` (complex), but those slots are not yet resolvable on
+    // attribute access.  `__getnewargs__` IS in the `METHODS` slice now
+    // (issue #2760), so it surfaces automatically above.  CPython also
+    // advertises `__int__`/`__float__`/`__getformat__` (float) and
+    // `__complex__` (complex), but those slots are not yet resolvable on
     // pyrust instances — omitting them keeps `dir()` in lock-step with
     // `hasattr` (the invariant the bug report is about).
     if type_name == "float" {
@@ -8733,6 +8837,17 @@ impl Interpreter {
     /// normally.  Used by `str.format` for the `!s` conversion and the
     /// empty-spec path.
     fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
+        // Issue #2771: `str(cls)` dispatches `type(cls).__str__(cls)` (falling
+        // back to the metaclass `__repr__`) when the class's metaclass defines a
+        // user override.  Returns `None` for an ordinary class, so plain classes
+        // keep the default `<class '...'>` rendering via `to_py_str()` below.
+        if let ValueKind::PyClass(cls_rc) = value.kind() {
+            let cls_rc = Rc::clone(cls_rc);
+            if let Some(res) = crate::interpreter::dispatch_metaclass_repr_str(self, &cls_rc, "__str__")
+            {
+                return res;
+            }
+        }
         let ValueKind::PyInstance(inst) = value.kind() else {
             // gh-95778: enforce int_max_str_digits for base-10 int->str.  This
             // is the common `str(int)` / `f"{int}"` path; `check_int_str_conversion`
@@ -8913,6 +9028,17 @@ impl Interpreter {
                 ],
             );
         }
+        // Issue #2771: a bare `{cls}` field is `format(cls, "")`, which runs
+        // `type(cls).__format__(cls, "")` — a metaclass `__format__` override
+        // wins, otherwise the inherited `object.__format__` returns `str(cls)`
+        // (honouring a metaclass `__str__`/`__repr__`).  Only classes with a
+        // custom metatype can carry such an override, so plain classes keep the
+        // fast `apply_format_spec` path below.
+        if let ValueKind::PyClass(cls_rc) = value.kind()
+            && cls_rc.borrow().metatype.is_some()
+        {
+            return self.dispatch_dunder_format(value, "");
+        }
         // Non-instance: empty spec == str(value).
         apply_format_spec(value, "")
     }
@@ -8932,6 +9058,57 @@ impl Interpreter {
     ///
     /// For all other value kinds: delegate straight to `apply_format_spec`.
     pub(crate) fn dispatch_dunder_format(&mut self, value: &Value, spec: &str) -> Result<Value> {
+        // Issue #2771: `format(cls, spec)` runs `type(cls).__format__`, which is
+        // the inherited `object.__format__`: empty spec returns `str(cls)`
+        // (now honouring a metaclass `__str__`/`__repr__`), a non-empty spec
+        // raises `TypeError` naming the *metaclass* (`type(cls).__name__`).
+        // CPython names the metaclass regardless of whether it overrides
+        // `__repr__`/`__str__`, so intercept here for any class carrying a
+        // custom metatype.  A plain class (metatype is the built-in `type`)
+        // falls through to `apply_format_spec`, which renders the default
+        // `<class '...'>` form and already raises `type.__format__`.
+        if let ValueKind::PyClass(cls_rc) = value.kind() {
+            let has_custom_meta = cls_rc.borrow().metatype.is_some();
+            if has_custom_meta {
+                let cls_rc = Rc::clone(cls_rc);
+                // A metaclass `__format__` override wins outright — CPython runs
+                // `type(cls).__format__(cls, spec)` for *any* spec, not just the
+                // inherited `object.__format__`.
+                if let Some(method_val) =
+                    crate::interpreter::metaclass_dunder(&cls_rc, "__format__")
+                {
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_class(Rc::clone(&cls_rc)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: Value::string(spec),
+                        }],
+                    )?;
+                    return if is_str_or_str_subclass(&result) {
+                        Ok(result)
+                    } else {
+                        Err(pyrust_core::type_err!(
+                            "__format__ must return a str, not {}",
+                            value_type_name_str(&result),
+                        ))
+                    };
+                }
+                // No metaclass `__format__`: inherited `object.__format__` —
+                // empty spec returns `str(cls)` (honouring a metaclass
+                // `__str__`/`__repr__`), a non-empty spec raises `TypeError`
+                // naming the metaclass regardless of any repr/str override.
+                if spec.is_empty() {
+                    return Ok(Value::string(self.render_value_as_str(value)?));
+                }
+                let meta = crate::interpreter::metaclass_of(&cls_rc);
+                let meta_name = meta.borrow().name.clone();
+                return Err(pyrust_core::type_err!(
+                    "unsupported format string passed to {meta_name}.__format__"
+                ));
+            }
+        }
         let ValueKind::PyInstance(inst) = value.kind() else {
             return apply_format_spec(value, spec);
         };
@@ -9342,6 +9519,18 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     // gh-95778: enforce int_max_str_digits for base-10 int->str (no-op unless
     // `value` is, or transitively contains, an over-limit BigInt).
     pyrust_core::check_int_str_conversion(value)?;
+    // Issue #2771: `repr(cls)` dispatches `type(cls).__repr__(cls)` when the
+    // class's metaclass defines a user `__repr__`.  Returns `None` for an
+    // ordinary class, so plain classes fall through to `repr_raw()`'s default
+    // `<class '...'>` format.
+    if let ValueKind::PyClass(cls_rc) = value.kind() {
+        let cls_rc = Rc::clone(cls_rc);
+        if let Some(res) =
+            crate::interpreter::dispatch_metaclass_repr_str(interp, &cls_rc, "__repr__")
+        {
+            return res;
+        }
+    }
     let ValueKind::PyInstance(inst) = value.kind() else {
         return Ok(value.repr_raw());
     };
@@ -10227,8 +10416,19 @@ impl Interpreter {
         seed_class_reg(&mut class_regs, qualname_slot, || {
             Value::string(proto_qualname)
         });
+        // CPython sets the class body's pre-injected `__module__` to the value
+        // of the global `__name__` (the compiler emits `__module__ = __name__`).
+        // Resolve it from the current module namespace so classes defined inside
+        // `@inject`-backed Python body files (e.g. `typing_py.py`) report the
+        // correct module (`typing`, `dataclasses`, …) rather than `__main__`
+        // (issue #2801).  A top-level script's module env seeds `__name__` to
+        // `"__main__"`, preserving the previous default there.
+        let module_name = lookup_name_in_module(&self.env, "__name__")
+            .filter(|v| matches!(v.kind(), ValueKind::Str(_)));
         seed_class_reg(&mut class_regs, module_slot, || {
-            Value::string("__main__")
+            module_name
+                .clone()
+                .unwrap_or_else(|| Value::string("__main__"))
         });
         seed_class_reg(&mut class_regs, annotations_slot, || {
             Value::dict(PyDict::default())

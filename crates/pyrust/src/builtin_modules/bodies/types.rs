@@ -31,7 +31,7 @@ use crate::interpreter::Interpreter;
 use crate::interpreter::{
     function_type_singleton, method_type_singleton, primitive_class_by_name, value_type_name_str,
 };
-use crate::value::{PyDict, PyKey, Value, ValueKind};
+use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 /// Python-source members (`SimpleNamespace`) injected at first import.
@@ -191,22 +191,13 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(TYPES_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
         .ok_or_else(|| PyError::Runtime("types: exec namespace not a dict".into()))?;
     for name in TYPES_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            // `SimpleNamespace`'s repr / unhashable-type message qualify with
-            // `__module__`; the exec namespace defaults `__module__` to
-            // `__main__`, so override it to `types` to match CPython.
-            if let ValueKind::PyClass(cls_rc) = val.kind() {
-                cls_rc
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("types"));
-            }
             module.borrow_mut().attrs.insert(name.to_string(), val.clone());
         }
     }

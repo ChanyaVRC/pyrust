@@ -19,7 +19,7 @@ use std::rc::Rc;
 
 use crate::error::Result;
 use crate::interpreter::Interpreter;
-use crate::value::{PyDict, PyKey, Value};
+use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 /// Python-level members of the module (`capwords`, `Template`,
@@ -36,7 +36,7 @@ pub(crate) fn inject_python_members(
     interp: &mut Interpreter,
     module: &Rc<RefCell<crate::value::PyModule>>,
 ) -> Result<()> {
-    let ns = Value::dict(PyDict::default());
+    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(STRING_PY_SOURCE, Some(ns.clone()), None)?;
     let dict = ns
         .as_dict()
