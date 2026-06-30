@@ -1,6 +1,6 @@
 # itertools.chain / islice — both lazy iterators in pyrust.
 
-from itertools import chain, islice
+from itertools import chain, islice, repeat, count, cycle
 
 
 # Helper for the laziness probe below — counts how many `__next__` calls
@@ -62,3 +62,26 @@ print("islice-step-pulled", src2.pulled)        # 6 (pulled 1,2,3,4,5,6; yielded
 src3 = CountingSource()
 print("islice-start-vals", list(islice(src3, 5, 8)))
 print("islice-start-pulled", src3.pulled)       # 8 (skipped 5, then yielded 6,7,8)
+
+# --- chain over INFINITE sources must stay lazy (regression) ---
+# chain() must not drain its arguments at construction time; an infinite
+# itertools source (repeat / count / cycle) as a tail used to hang forever.
+print("chain-next-inf", next(chain([3], repeat(3))))
+print("chain-repeat", list(islice(chain([3], repeat(3)), 3)))
+print("chain-count", list(islice(chain([0], count(1)), 5)))
+print("chain-cycle", list(islice(chain("ab", cycle("xy")), 6)))
+
+
+# for/break over a chain whose tail is infinite must terminate on break.
+def grouped(digits):
+    groups = []
+    for length in chain([3], repeat(3)):
+        length = min(len(digits), length)
+        groups.append(digits[-length:])
+        digits = digits[:-length]
+        if not digits:
+            break
+    return groups
+
+
+print("chain-for-break", grouped("1234567"))

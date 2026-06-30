@@ -5,7 +5,13 @@ use pyrust_core::{PyBigInt, PyError, PyToPrimitive, PyZero, Result, Value};
 /// `fromhex` is a classmethod and is registered separately in `helpers.rs`.
 /// Note: `real` and `imag` are read-only properties intercepted in `get_attr`;
 /// `conjugate` is a zero-arg method and lives here.
-pub const METHODS: &[&str] = &["conjugate", "is_integer", "as_integer_ratio", "hex"];
+pub const METHODS: &[&str] = &[
+    "conjugate",
+    "is_integer",
+    "as_integer_ratio",
+    "hex",
+    "__getnewargs__",
+];
 
 pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
@@ -81,6 +87,20 @@ pub fn call(method: &str, receiver: f64, args: &[Value]) -> Result<Value> {
                 ));
             }
             Ok(Value::string(float_to_hex(receiver)))
+        }
+
+        "__getnewargs__" => {
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "float.__getnewargs__() takes no arguments ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            // __getnewargs__ returns a 1-tuple containing the float itself.
+            Ok(Value::tuple(vec![Value::float(receiver)]))
         }
 
         _ => Err(PyError::Runtime(format!(
