@@ -103,6 +103,11 @@ pyrust_module! {
         // implementation.
         // <https://docs.python.org/3/library/sys.html#sys.int_info>
         "int_info"     => make_int_info(),
+        // CPython: sys.hash_info — struct-sequence describing the hash
+        // implementation.  64-bit build values; consumed by `decimal` for its
+        // `Decimal.__hash__` reduction.
+        // <https://docs.python.org/3/library/sys.html#sys.hash_info>
+        "hash_info"    => make_hash_info(),
         // CPython: sys.implementation — namespace describing the running
         // interpreter (name / version / hexversion / cache_tag).
         // <https://docs.python.org/3/library/sys.html#sys.implementation>
@@ -820,6 +825,25 @@ fn make_int_info() -> Value {
             ("sizeof_digit", Value::int(4)),
             ("default_max_str_digits", Value::int(4300)),
             ("str_digits_check_threshold", Value::int(640)),
+        ],
+    )
+}
+
+/// Build `sys.hash_info` — 64-bit CPython hashing parameters.  Matches the
+/// CPython 3.12 64-bit build (`modulus = 2**61 - 1`, SipHash-1-3).
+fn make_hash_info() -> Value {
+    make_named_struct(
+        "sys.hash_info",
+        vec![
+            ("width", Value::int(64)),
+            ("modulus", Value::int(2_305_843_009_213_693_951)),
+            ("inf", Value::int(314_159)),
+            ("nan", Value::int(0)),
+            ("imag", Value::int(1_000_003)),
+            ("algorithm", Value::string("siphash13")),
+            ("hash_bits", Value::int(64)),
+            ("seed_bits", Value::int(128)),
+            ("cutoff", Value::int(0)),
         ],
     )
 }
