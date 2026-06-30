@@ -266,6 +266,14 @@ pyrust_builtin_modules! {
     // `SimpleNamespace` is defined in `types_py.py` and injected by the
     // `@inject` post-load hook.
     types @inject,
+    // `bisect` (issue #2784): array-bisection algorithms — a pure-Python
+    // module (`bisect_py.py`) injected by the `@inject` post-load hook; the
+    // native body is empty.
+    bisect @inject,
+    // `heapq` (issue #2784): heap-queue (priority-queue) algorithms — a
+    // pure-Python module (`heapq_py.py`) injected by the `@inject` post-load
+    // hook; the native body is empty.
+    heapq @inject,
     // `pprint` (issue #2812): a pure-Python pretty-printer (`pprint_py.py`,
     // transcribed from CPython 3.12's `Lib/pprint.py`) — `pprint`, `pformat`,
     // `PrettyPrinter`, `isreadable`, `isrecursive`, `saferepr`, `pp` — injected
