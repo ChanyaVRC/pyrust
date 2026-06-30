@@ -271,6 +271,18 @@ pyrust_builtin_modules! {
     // hook.  The native body is an empty `pyrust_module!` so `import random`
     // resolves to a real `PyModule`.
     random @inject,
+    // `textwrap` (issue #2786): a pure-Python module (`textwrap_py.py`) —
+    // `TextWrapper`, `wrap`, `fill`, `shorten`, `dedent`, `indent` — injected
+    // by the `@inject` post-load hook; the native body is empty.
+    textwrap @inject,
+    // `bisect` (issue #2784): array-bisection algorithms — a pure-Python
+    // module (`bisect_py.py`) injected by the `@inject` post-load hook; the
+    // native body is empty.
+    bisect @inject,
+    // `heapq` (issue #2784): heap-queue (priority-queue) algorithms — a
+    // pure-Python module (`heapq_py.py`) injected by the `@inject` post-load
+    // hook; the native body is empty.
+    heapq @inject,
     // `pprint` (issue #2812): a pure-Python pretty-printer (`pprint_py.py`,
     // transcribed from CPython 3.12's `Lib/pprint.py`) — `pprint`, `pformat`,
     // `PrettyPrinter`, `isreadable`, `isrecursive`, `saferepr`, `pp` — injected
