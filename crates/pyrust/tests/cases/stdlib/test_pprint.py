@@ -75,6 +75,16 @@ print(pprint.isrecursive(d))
 rd = pprint.pformat(d)
 print(rd.startswith("{'self': <Recursion on dict with id="), rd.endswith('>}'))
 
+# Wide bytearray / mappingproxy must wrap (not infinitely recurse).  In pyrust
+# `bytearray.__repr__` and `mappingproxy.__repr__` share the single
+# `object.__repr__` slot wrapper, so they collide as `_dispatch` keys; `_format`
+# resolves these two by exact type to avoid mis-dispatching bytearray to the
+# mappingproxy handler (which would recurse without bound).
+import types as _types
+
+print(pprint.pformat(bytearray(range(40))))
+print(pprint.pformat(_types.MappingProxyType({i: str(i) * 5 for i in range(10)})))
+
 # A short dataclass fits on one line, so both CPython and pyrust emit the
 # plain repr (pyrust does not yet special-case wrapping dataclasses).
 import dataclasses

@@ -216,7 +216,17 @@ class PrettyPrinter:
         rep = self._repr(object, context, level)
         max_width = self._width - indent - allowance
         if len(rep) > max_width:
-            p = self._dispatch.get(type(object).__repr__, None)
+            # pyrust adaptation: `bytearray` and `mappingproxy` do not yet have
+            # their own `__repr__` slot wrappers — both fall back to the single
+            # `object.__repr__` object, so they collide as keys in `_dispatch`
+            # (the later `mappingproxy` registration overwrites `bytearray`).
+            # That mis-dispatches a wrapped `bytearray` to `_pprint_mappingproxy`,
+            # which calls `.copy()` and recurses without bound (stack overflow).
+            # Resolve those two by exact type first; everything else keeps the
+            # CPython slot-wrapper dispatch.  (Core follow-up below.)
+            p = _TYPE_DISPATCH.get(type(object), None)
+            if p is None:
+                p = self._dispatch.get(type(object).__repr__, None)
             if p is not None:
                 context[objid] = 1
                 p(self, object, stream, indent, allowance, context, level + 1)
@@ -679,6 +689,15 @@ class PrettyPrinter:
 
 _builtin_scalars = frozenset({str, bytes, bytearray, float, complex,
                               bool, type(None)})
+
+
+# pyrust adaptation: exact-type dispatch for the builtins whose `__repr__` slot
+# wrappers collide on the shared `object.__repr__` (see `_format`).  Consulted
+# before the CPython slot-wrapper `_dispatch` table.
+_TYPE_DISPATCH = {
+    bytearray: PrettyPrinter._pprint_bytearray,
+    _types.MappingProxyType: PrettyPrinter._pprint_mappingproxy,
+}
 
 
 def _recursion(object):
