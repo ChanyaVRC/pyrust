@@ -42,14 +42,20 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
             reject_keyword_args_expanded("chain", user)?;
-            // Pre-materialise user `PyInstance` AND `Generator` sources so
-            // user `__iter__` dispatch / generator resumption (both of
-            // which need the interpreter) happen here instead of mid-walk
-            // (#446).  Built-in containers stay un-materialised — each is
-            // wrapped in an iterator lazily, only when `__next__` reaches it.
+            // Turn each source into an *iterator* up-front via `make_iterator`
+            // (the same primitive `chain.from_iterable` uses).  This invokes a
+            // user `__iter__` at construction time — preserving the #446
+            // timing requirement that user `__iter__` dispatch / generator
+            // resumption happen here rather than mid-walk — WITHOUT draining
+            // the source.  Draining (the old `materialize_user_iter`) hung
+            // forever on infinite iterators such as `itertools.repeat` /
+            // `count` / `cycle` (e.g. `chain([3], repeat(3))`, which the
+            // `decimal` formatter relies on).  `__next__` calls `make_iter`
+            // (i.e. `iter()`) on each stored source again; `iter()` of an
+            // already-iterator returns it unchanged, so iteration stays lazy.
             let sources: Vec<Value> = user
                 .iter()
-                .map(|a| super::builtins::materialize_user_iter(_interp, a.value.clone()))
+                .map(|a| super::builtins::make_iterator(_interp, &a.value))
                 .collect::<Result<_>>()?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_sources", Value::list(sources));

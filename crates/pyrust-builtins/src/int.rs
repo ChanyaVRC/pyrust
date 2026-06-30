@@ -15,6 +15,7 @@ pub const METHODS: &[&str] = &[
     "to_bytes",
     "from_bytes",
     "as_integer_ratio",
+    "__getnewargs__",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `int` method.
@@ -188,6 +189,40 @@ pub fn call(method: &str, receiver: &Value, args: &[Value], kw: &PyDict) -> Resu
                 }
             };
             Ok(Value::tuple(vec![self_val, Value::int(1)]))
+        }
+        "__getnewargs__" => {
+            if !kw.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "int.__getnewargs__() takes no keyword arguments".to_string(),
+                ));
+            }
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "int.__getnewargs__() takes no arguments ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            // __getnewargs__ returns a 1-tuple containing the int itself.
+            // bool subclasses int but CPython returns the int value (0/1), not
+            // the bool, so True.__getnewargs__() == (1,).
+            let self_val = match receiver.kind() {
+                ValueKind::Bool(b) => Value::int(b as i64),
+                ValueKind::Int(_) | ValueKind::BigInt(_) => receiver.clone(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "descriptor '__getnewargs__' for 'int' objects doesn't apply to a '{}' object",
+                            pyrust_core::builtin_type_name(receiver)
+                        ),
+                    ));
+                }
+            };
+            Ok(Value::tuple(vec![self_val]))
         }
         _ => Err(PyError::named(
             "AttributeError",

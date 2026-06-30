@@ -1374,6 +1374,32 @@ impl Interpreter {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
+                // PEP 695: a generic `type X[T] = ...` alias is subscriptable —
+                // `Pair[int]` returns a `types.GenericAlias` with the alias as
+                // origin (CPython 3.12 reprs it `Pair[int]`, not the substituted
+                // value).  A non-generic alias raises CPython's specific
+                // "Only generic type aliases are subscriptable" (issue #2779).
+                if is_type_alias_class(&class) {
+                    let has_params = inst_rc
+                        .borrow()
+                        .attrs
+                        .get("__type_params__")
+                        .is_some_and(|p| matches!(p.kind(), ValueKind::Tuple(t) if !t.is_empty()));
+                    if !has_params {
+                        return Err(pyrust_core::type_err!(
+                            "Only generic type aliases are subscriptable"
+                        ));
+                    }
+                    let type_args = if matches!(index.kind(), ValueKind::Tuple(_)) {
+                        index
+                    } else {
+                        Value::tuple(vec![index])
+                    };
+                    return Ok(pyrust_builtins::generic_alias::generic_alias(
+                        Value::py_instance(inst_rc),
+                        type_args,
+                    ));
+                }
                 // Issue #1134: check for a user-defined __getitem__ on the
                 // class *before* falling back to the backing primitive fast
                 // path.  A dict subclass that overrides __getitem__ must have
@@ -5323,6 +5349,28 @@ impl Interpreter {
             // matching the same ordering fix in eval_index.  The builtin
             // sentinels for the base types are not overrides.
             let class = Rc::clone(&inst_rc.borrow().class);
+            // PEP 695: a generic `type X[T] = ...` alias is subscriptable with a
+            // slice too — `Pair[1:2]` returns a `types.GenericAlias` whose single
+            // arg is the (unresolved) `slice` object, repr `Pair[slice(1, 2,
+            // None)]`.  A non-generic alias raises the same TypeError as the
+            // integer-index path (issue #2779).  Mirrors `eval_index`.
+            if is_type_alias_class(&class) {
+                let has_params = inst_rc
+                    .borrow()
+                    .attrs
+                    .get("__type_params__")
+                    .is_some_and(|p| matches!(p.kind(), ValueKind::Tuple(t) if !t.is_empty()));
+                if !has_params {
+                    return Err(pyrust_core::type_err!(
+                        "Only generic type aliases are subscriptable"
+                    ));
+                }
+                let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
+                return Ok(pyrust_builtins::generic_alias::generic_alias(
+                    Value::py_instance(inst_rc),
+                    Value::tuple(vec![slice_val]),
+                ));
+            }
             let user_getitem = lookup_class_attr(&class, "__getitem__").filter(|v| {
                 !matches!(
                     v.kind(),
