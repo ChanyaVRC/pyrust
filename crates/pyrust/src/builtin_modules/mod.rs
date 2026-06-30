@@ -216,7 +216,10 @@ pyrust_builtin_modules! {
     // with `__module__` / `__class_getitem__` (issues #2228 / #2603).
     collections @inject,
     "collections.abc" as collections_abc,
-    io,
+    // `io` Python-source supplements (issue #2778): SEEK_* constants,
+    // DEFAULT_BUFFER_SIZE, `open` alias, and the IOBase ABC family injected via
+    // `@inject` (`io_py.py`); the native body provides StringIO / BytesIO.
+    io @inject,
     // `typing` Python-source members (issue #2516) injected via `@inject`.
     typing @inject,
     copy,
