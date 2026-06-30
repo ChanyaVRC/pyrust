@@ -150,11 +150,13 @@ pyrust_module! {
             let exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
             if exc_type.is_none() {
                 let _ = _interp;
-                return Ok(Value::bool_(false));
+                return Ok(Value::none());
             }
             let raised_class = match exc_type.kind() {
                 ValueKind::PyClass(c) => Rc::clone(c),
                 _ => {
+                    // An exception is present but exc_type is not a class:
+                    // CPython returns the (falsy) bool, not None.
                     let _ = _interp;
                     return Ok(Value::bool_(false));
                 }
@@ -171,6 +173,8 @@ pyrust_module! {
                         return Ok(Value::bool_(true));
                     }
             }
+            // Exception present but no stored type matched: CPython returns the
+            // (falsy) bool result of `issubclass`, i.e. False — not None.
             let _ = _interp;
             Ok(Value::bool_(false))
         }
@@ -240,6 +244,9 @@ pyrust_module! {
                     }
                     Err(e) if is_stop_iteration(&e) => {
                         // Generator finished normally — expected.
+                        // CPython's _GeneratorContextManager.__exit__ returns
+                        // `False` here (not None): it falls through to the
+                        // shared `return False` after the no-exception branch.
                         Ok(Value::bool_(false))
                     }
                     Err(e) => Err(e),
@@ -247,13 +254,19 @@ pyrust_module! {
             } else {
                 // Exception exit: throw into the generator.
                 // `exc_val` may be a PyInstance or None; `exc_type` is a PyClass.
-                // We throw the instance (exc_val) if it is one, otherwise exc_type.
+                // Materialise a concrete exception *instance* to throw, mirroring
+                // CPython's `if value is None: value = typ()`.  Throwing the
+                // instance (not the class) means the same object propagates back
+                // out when the generator re-raises, so the identity check below
+                // can recognise the non-suppressing path.
                 let to_throw = if !exc_val.is_none() {
                     exc_val
+                } else if let ValueKind::PyClass(c) = exc_type.kind() {
+                    crate::interpreter::instantiate_exception(Rc::clone(c), Vec::new())
                 } else {
                     exc_type
                 };
-                match _interp.call_generator_method(generator, "throw", vec![to_throw]) {
+                match _interp.call_generator_method(generator, "throw", vec![to_throw.clone()]) {
                     Ok(_) => {
                         // Generator yielded again — that means it caught the exception
                         // and yielded a new value, which is forbidden by the protocol.
@@ -267,8 +280,17 @@ pyrust_module! {
                         Ok(Value::bool_(true))
                     }
                     Err(e) => {
-                        // Generator re-raised the exception or raised a new one.
-                        // Let it propagate.
+                        // CPython's `_GeneratorContextManager.__exit__` distinguishes
+                        // the generator *re-raising the same exception* (it didn't
+                        // suppress) from it raising a *new* one.  In the first case
+                        // `__exit__` returns `False` (non-suppressing) rather than
+                        // re-raising, so a direct `cm.__exit__(typ, val, tb)` call
+                        // observes `False`; only a genuinely different exception
+                        // propagates.  Match on instance identity (`exc is value`).
+                        if is_same_raised_exception(&e, &to_throw) {
+                            return Ok(Value::bool_(false));
+                        }
+                        // Generator raised a *new* exception — let it propagate.
                         Err(e)
                     }
                 }
@@ -358,7 +380,7 @@ pyrust_module! {
             // Call thing.close() with no arguments.
             let close_method = _interp.get_attr(&thing, "close")?;
             _interp.call_function_expanded(close_method, &[])?;
-            Ok(Value::bool_(false))
+            Ok(Value::none())
         }
     }
 
@@ -403,7 +425,7 @@ pyrust_module! {
         fn __exit__(args) -> Result<Value> {
             let _ = expect_self(args, FN_NAME)?;
             let _ = _interp;
-            Ok(Value::bool_(false))
+            Ok(Value::none())
         }
     }
 
@@ -820,7 +842,8 @@ fn redirect_enter(
 
 /// Shared `__exit__` for `redirect_stdout`/`redirect_stderr`.  Pops the saved
 /// stream off `_old_targets` and restores it as `sys.<stream>`.  Never
-/// suppresses exceptions (returns `False`).
+/// suppresses exceptions (returns `None`, matching CPython where `__exit__`
+/// falls off the end).
 fn redirect_exit(
     interp: &mut crate::Interpreter,
     inst: &Rc<RefCell<PyInstance>>,
@@ -837,7 +860,7 @@ fn redirect_exit(
         _ => Value::none(),
     };
     interp.set_std_stream(stream, restored)?;
-    Ok(Value::bool_(false))
+    Ok(Value::none())
 }
 
 /// Call `os.<func>(*args)` from the contextlib runtime.  Used by `chdir` to
@@ -872,4 +895,19 @@ fn pop_all_callbacks(inst: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
         .unwrap_or_default();
     let _ = callbacks_val.list_clear();
     result
+}
+
+/// True when `err` is a propagated exception whose instance is the *same*
+/// object that was thrown into the generator (`thrown`).  Mirrors CPython's
+/// `_GeneratorContextManager.__exit__` `if exc is value: return False` branch:
+/// the generator re-raised the exact exception it received, which is *not*
+/// suppression, so `__exit__` returns `False` instead of re-raising.
+fn is_same_raised_exception(err: &PyError, thrown: &Value) -> bool {
+    let PyError::Raised(raised) = err else {
+        return false;
+    };
+    match (raised.kind(), thrown.kind()) {
+        (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
 }
