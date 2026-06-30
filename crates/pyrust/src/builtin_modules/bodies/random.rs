@@ -7,10 +7,11 @@
 // documented public API (`random`, `randint`, `choice`, `shuffle`, `sample`,
 // `gauss`, …).  Default (None) seeding draws OS entropy via `os.urandom`.
 //
-// The numeric draws do NOT match CPython for the same seed (CPython seeds via
-// `init_by_array`; pyrust uses scalar `init_genrand`), but the API contract —
-// types, ranges, reproducibility with a fixed seed, uniqueness of `sample` — is
-// preserved.  Parity fixtures assert the contract, not the exact bytes.
+// For `int`/`float`/`None` seeds the numeric draws are bit-identical to CPython
+// (the core uses CPython's exact `init_by_array` seeding over the seed's 32-bit
+// words).  Only `str`/`bytes` seeds diverge, because CPython folds those through
+// SHA-512 and this import graph has no `hashlib`.  Parity fixtures assert the
+// exact bytes for the int-seed path plus the full API contract.
 //
 // The native `pyrust_module!` block is intentionally empty — it exists only so
 // the `pyrust_builtin_modules!` plumbing (`module()` / `regs()`) is generated

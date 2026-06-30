@@ -1,10 +1,35 @@
-# random module — API-contract parity (issue #2785).
+# random module — parity (issue #2785).
 #
-# pyrust ships a pure-Python MT19937 generator, so the *numeric draws* differ
-# from CPython for a given seed.  This fixture therefore asserts only the
-# version-stable contract: types, ranges, reproducibility, uniqueness, and the
-# error wording — never a raw random value.
+# pyrust ships a pure-Python MT19937 with CPython's exact int-seed algorithm, so
+# for int/float/None seeds the numeric stream is bit-identical to CPython.  This
+# fixture asserts the exact draws for fixed int seeds (the critical guarantee),
+# plus the version-stable contract: types, ranges, reproducibility, uniqueness,
+# and the error wording.
 import random
+
+# --- bit-exact MT19937 stream (must byte-match CPython 3.12) ----------------
+random.seed(42)
+print(random.random())
+random.seed(42)
+print(random.getrandbits(32))
+random.seed(42)
+print(random.getrandbits(64))
+random.seed(42)
+print(random.randint(1, 100))
+random.seed(42)
+print(random.sample(range(100), 5))
+random.seed(42)
+_sh = list(range(10))
+random.shuffle(_sh)
+print(_sh)
+random.seed(0)
+print(random.random())
+random.seed(1099511627783)
+print([random.random() for _ in range(3)])
+random.seed(0.5)
+print(random.random())
+print(random.Random(99).random())
+print([random.Random(7).randint(0, 1000000) for _ in range(3)])
 
 # --- reproducibility: same seed -> same sequence ---------------------------
 random.seed(42)

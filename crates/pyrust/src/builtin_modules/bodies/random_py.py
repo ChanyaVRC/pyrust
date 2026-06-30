@@ -6,12 +6,17 @@ extension layer, so this module embeds a pure-Python MT19937 generator and
 builds the full public API (``random``, ``randint``, ``choice``, ``shuffle``,
 ``sample``, ``gauss``, …) on top of it.
 
-The algorithm is the reference MT19937, so a given integer seed produces a
-deterministic, reproducible sequence.  The numeric values do NOT match
-CPython's ``random`` for the same seed: CPython seeds MT19937 through
-``init_by_array`` over the key derived from the seed, and pyrust uses the
-classic scalar ``init_genrand`` seeding.  Parity is therefore on the API
-contract (types, ranges, reproducibility, uniqueness), not on exact draws.
+The algorithm is the reference MT19937 with CPython's exact seeding, so for an
+``int`` (or ``None``) seed the numeric stream is **bit-identical** to CPython's
+``random`` module: ``random.seed(N); random.random()`` matches CPython
+byte-for-byte.  CPython seeds an integer by splitting ``abs(N)`` into 32-bit
+little-endian words and running ``init_by_array``; this module does the same.
+
+The only divergence is ``str``/``bytes``/``bytearray`` seeds: CPython folds
+those through SHA-512 (``a + sha512(a).digest()``) before seeding, and pyrust's
+import graph has no ``hashlib`` here, so the folded int — and therefore the
+stream — differs for those seed types.  Their result is still deterministic per
+input.  ``int``/``None`` seeds, which are the common case, are exact.
 
 Reference: <https://docs.python.org/3/library/random.html>
 """
@@ -93,6 +98,40 @@ class Random:
         self._mt = mt
         self._mti = _N
 
+    def _init_by_array(self, key):
+        # CPython's MT19937 seeding for int/None seeds (init_by_array in
+        # _randommodule.c).  Produces a stream bit-identical to CPython's.
+        self._init_genrand(19650218)
+        mt = self._mt
+        klen = len(key)
+        i = 1
+        j = 0
+        k = _N if _N > klen else klen
+        while k:
+            prev = mt[i - 1]
+            mt[i] = (
+                (mt[i] ^ ((prev ^ (prev >> 30)) * 1664525)) + key[j] + j
+            ) & _MASK32
+            i += 1
+            j += 1
+            if i >= _N:
+                mt[0] = mt[_N - 1]
+                i = 1
+            if j >= klen:
+                j = 0
+            k -= 1
+        k = _N - 1
+        while k:
+            prev = mt[i - 1]
+            mt[i] = ((mt[i] ^ ((prev ^ (prev >> 30)) * 1566083941)) - i) & _MASK32
+            i += 1
+            if i >= _N:
+                mt[0] = mt[_N - 1]
+                i = 1
+            k -= 1
+        mt[0] = 0x80000000  # MSB is 1, assuring a non-zero initial array
+        self._mti = _N
+
     def _genrand_uint32(self):
         mt = self._mt
         if self._mti >= _N:
@@ -123,24 +162,30 @@ class Random:
         ``str``/``bytes``/``bytearray`` are folded into an int seed.
         """
         if a is None:
-            a = int.from_bytes(_urandom(8), "big")
+            a = int.from_bytes(_urandom(32), "big")
         elif isinstance(a, (str, bytes, bytearray)):
-            # CPython folds str/bytes through SHA-512; pyrust has no hashlib in
-            # the import graph here, so fold the raw bytes to an int instead.
-            # The exact value differs from CPython (the whole MT seeding does),
-            # but it is deterministic per input, which is the contract.
+            # CPython folds str/bytes through SHA-512 (a + sha512(a).digest())
+            # before seeding.  pyrust has no hashlib in this import graph, so we
+            # fold the raw bytes to an int instead.  This is deterministic per
+            # input but, unlike the int/None path, does NOT match CPython's
+            # stream byte-for-byte (the SHA-512 mixing is unavailable).
             if isinstance(a, str):
                 a = a.encode()
             a = int.from_bytes(a, "big") if a else 0
         elif isinstance(a, float):
-            # CPython accepts floats; fold the value to a deterministic int.
+            # CPython folds a float seed through hash(a) (an int) before
+            # seeding.  pyrust's float hash matches CPython's, so this keeps the
+            # float-seed stream bit-identical to CPython too.
             a = hash(a)
         elif not isinstance(a, int):
             raise TypeError(
                 "The only supported seed types are: None,\n"
                 "int, float, str, bytes, and bytearray."
             )
-        self._init_genrand(abs(int(a)))
+        # CPython splits abs(seed) into 32-bit little-endian words and runs
+        # init_by_array; reproduce that exactly so int/None/float seeds yield a
+        # stream identical to CPython's MT19937.
+        self._init_by_array(_int_to_key(int(a)))
         self.gauss_next = None
 
     def getstate(self):
@@ -453,6 +498,23 @@ class Random:
 
 
 # -- small helpers (module-private) -------------------------------------
+
+
+def _int_to_key(n):
+    """Split ``abs(n)`` into 32-bit little-endian words for ``init_by_array``.
+
+    Mirrors CPython's ``random_seed``: the absolute value of the integer seed is
+    decomposed into base-2**32 limbs (least-significant first), with zero mapped
+    to ``[0]``.
+    """
+    n = abs(n)
+    if n == 0:
+        return [0]
+    key = []
+    while n:
+        key.append(n & _MASK32)
+        n >>= 32
+    return key
 
 
 def _floor(x):
