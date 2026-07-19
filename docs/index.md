@@ -33,3 +33,4 @@ print(nums[::-1])        # [3, 2, 1]
 | [Limitations](limitations) | What is not yet supported |
 | [Optimizer](optimizer) | Details of the 15-pass peephole pipeline |
 | [Benchmarks](benchmark) | Performance comparison with CPython |
+| [Profiling](profiling) | Finding hot spots with perf / valgrind / flamegraph |
