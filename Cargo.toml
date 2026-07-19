@@ -6,5 +6,5 @@ resolver = "2"
 # thin LTO + single codegen unit: lets LLVM see across crate boundaries and
 # inline Value::int/as_int, int_int_fast, and other hot-path helpers from
 # pyrust-core / pyrust-builtins into the VM's main dispatch loop.
-lto = "thin"
+lto = "fat"
 codegen-units = 1
