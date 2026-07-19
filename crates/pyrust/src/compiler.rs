@@ -2817,9 +2817,9 @@ fn expr_is_side_effect_free(expr: &Expr) -> bool {
         | Expr::Ellipsis
         | Expr::Var(_, _) => true,
         Expr::Unary { expr, .. } => expr_is_side_effect_free(expr),
-        Expr::Binary {
-            left, right, op: _, ..
-        } => expr_is_side_effect_free(left) && expr_is_side_effect_free(right),
+        Expr::Binary { left, right, .. } => {
+            expr_is_side_effect_free(left) && expr_is_side_effect_free(right)
+        }
         Expr::Compare { left, ops } => {
             expr_is_side_effect_free(left) && ops.iter().all(|(_, e)| expr_is_side_effect_free(e))
         }

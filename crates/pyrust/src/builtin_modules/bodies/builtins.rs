@@ -10821,12 +10821,8 @@ fn parse_exec_eval_args(
         ));
     }
     let source_val = args[0].value.clone();
-    let globals_opt = args.get(1).map(|a| a.value.clone()).and_then(|v| {
-        if matches!(v.kind(), ValueKind::None) { None } else { Some(v) }
-    });
-    let locals_opt = args.get(2).map(|a| a.value.clone()).and_then(|v| {
-        if matches!(v.kind(), ValueKind::None) { None } else { Some(v) }
-    });
+    let globals_opt = args.get(1).map(|a| a.value.clone()).filter(|v| !matches!(v.kind(), ValueKind::None));
+    let locals_opt = args.get(2).map(|a| a.value.clone()).filter(|v| !matches!(v.kind(), ValueKind::None));
     Ok((source_val, globals_opt, locals_opt))
 }
 
