@@ -8,3 +8,13 @@ resolver = "2"
 # pyrust-core / pyrust-builtins into the VM's main dispatch loop.
 lto = "thin"
 codegen-units = 1
+
+# Profiling profile: identical codegen to `release` (same LTO / codegen-units,
+# so the hot paths inline exactly as they ship), plus full DWARF debug info and
+# no symbol stripping so `perf` / `valgrind` / flamegraphs can attribute samples
+# to real function names and source lines. Build with `cargo build --profile
+# profiling` (binary lands in target/profiling/), or use `tools/profile.sh`.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
