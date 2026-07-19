@@ -180,6 +180,18 @@ pub(crate) fn compare_values_with_op(
         (ValueKind::Bool(x), ValueKind::Bool(y)) => Ok(x.cmp(&y)),
         (ValueKind::Bool(x), ValueKind::Int(y)) => Ok((x as i64).cmp(&y)),
         (ValueKind::Int(x), ValueKind::Bool(y)) => Ok(x.cmp(&(y as i64))),
+        // bool is a subclass of int, so it must also order against float and
+        // BigInt (the plain `<` operator folds bool->int before dispatching;
+        // this internal comparator — used by sort/min/max/list ordering — must
+        // do the same or `sorted([1.5, True])` raises a spurious TypeError).
+        (ValueKind::Bool(x), ValueKind::Float(y)) => {
+            Ok(int_float_cmp(x as i64, y).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        (ValueKind::Float(x), ValueKind::Bool(y)) => Ok(int_float_cmp(y as i64, x)
+            .map(|o| o.reverse())
+            .unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Bool(x), ValueKind::BigInt(y)) => Ok(PyBigInt::from(x as i64).cmp(y)),
+        (ValueKind::BigInt(x), ValueKind::Bool(y)) => Ok((*x).cmp(&PyBigInt::from(y as i64))),
         (ValueKind::BigInt(x), ValueKind::BigInt(y)) => Ok(x.cmp(y)),
         (ValueKind::BigInt(x), ValueKind::Int(y)) => Ok((*x).cmp(&PyBigInt::from(y))),
         (ValueKind::Int(x), ValueKind::BigInt(y)) => Ok(PyBigInt::from(x).cmp(y)),

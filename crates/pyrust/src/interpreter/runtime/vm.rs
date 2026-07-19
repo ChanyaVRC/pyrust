@@ -1487,7 +1487,7 @@ impl Interpreter {
                         .col_table
                         .get(saved.saved_pc.wrapping_sub(1))
                         .copied()
-                        .and_then(|s| if s == (0, 0, 0, 0) { None } else { Some(s) })
+                        .filter(|&s| s != (0, 0, 0, 0))
                 };
                 if let Some(view) = self.vm_frame_views.pop()
                     && let Some(func) = view.function
@@ -1577,7 +1577,7 @@ impl Interpreter {
                         .col_table
                         .get(foriter_pc)
                         .copied()
-                        .and_then(|s| if s == (0, 0, 0, 0) { None } else { Some(s) });
+                        .filter(|&s| s != (0, 0, 0, 0));
                     continue;
                 }
             }

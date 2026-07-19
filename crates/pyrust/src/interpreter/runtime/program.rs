@@ -608,15 +608,15 @@ impl Interpreter {
                 // Thread the lexer line table into the bytecode (issue #2245)
                 // so errors inside the exec'd source report correct internal
                 // line numbers.
-                let code = match crate::compiler::compile_script_with_linenos(
+                let code = {
+                    let c = crate::compiler::compile_script_with_linenos(
                     &program,
                     Rc::clone(&local_index),
                     false,
                     &linenos,
                     "<string>",
-                ) {
-                    Ok(c) => Rc::new(crate::optimizer::optimize(c)),
-                    Err(e) => return Err(e),
+                )?;
+                    Rc::new(crate::optimizer::optimize(c))
                 };
                 let num_regs = code.num_regs as usize;
                 let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
@@ -674,14 +674,14 @@ impl Interpreter {
         let (program, linenos) = Self::parse_source_to_stmts_with_linenos(trimmed)?;
         let local_index: Rc<HashMap<String, crate::bytecode::Reg>> =
             Rc::new(HashMap::new());
-        let code = match crate::compiler::compile_eval_expr_with_linenos(
+        let code = {
+            let c = crate::compiler::compile_eval_expr_with_linenos(
             &program,
             Rc::clone(&local_index),
             &linenos,
             "<string>",
-        ) {
-            Ok(c) => Rc::new(crate::optimizer::optimize(c)),
-            Err(e) => return Err(e),
+        )?;
+            Rc::new(crate::optimizer::optimize(c))
         };
         match globals_dict {
             None => {
@@ -751,15 +751,15 @@ impl Interpreter {
             };
         // Thread the lexer line table into the bytecode (issue #2245) so errors
         // inside the exec'd source report correct internal line numbers.
-        let code = match crate::compiler::compile_script_with_linenos(
+        let code = {
+            let c = crate::compiler::compile_script_with_linenos(
             program,
             Rc::clone(&local_index),
             false,
             linenos,
             "<string>",
-        ) {
-            Ok(c) => Rc::new(crate::optimizer::optimize(c)),
-            Err(e) => return Err(e),
+        )?;
+            Rc::new(crate::optimizer::optimize(c))
         };
 
         // Build a fresh env pre-seeded with values from globals_dict (and

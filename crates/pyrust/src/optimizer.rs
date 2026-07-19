@@ -1138,12 +1138,9 @@ fn build_inline_plan(proto: &FnProto, caller_consts: &mut Vec<Value>) -> Option<
     // Then rewrite every const-referencing instruction in the body.
     let mut const_map: Vec<u16> = Vec::with_capacity(code.consts.len());
     for c in &code.consts {
-        match intern_const_in_pool(caller_consts, c.clone()) {
-            Some(idx) => const_map.push(idx),
-            // Const pool full — abandon this inline (no partial state leaks
-            // because we only mutate `caller_consts` via interning, which is
-            // idempotent for already-present values).
-            None => return None,
+        {
+            let idx = intern_const_in_pool(caller_consts, c.clone())?;
+            const_map.push(idx)
         }
     }
     // Callee frame provenance shared by every spliced instruction (issue #2569).
@@ -12610,7 +12607,7 @@ mod tests {
         assert_eq!(
             sync_in_loop, 0,
             "no SyncModuleGlobal in loop body after sink: {:?}",
-            &out
+            out
         );
         // SyncModuleGlobal should appear at BOTH exit points.
         let total_syncs = out
