@@ -36,6 +36,14 @@ use crate::value::Value;
 /// `abs` or `math.sqrt` ignore it.
 pub type BuiltinDispatchFn = fn(&mut Interpreter, &[ExpandedCallArg]) -> Result<Value>;
 
+/// "Vectorcall"-style fast dispatch for a typed built-in with no `*args` /
+/// `**kwargs` / keyword-only parameters: the caller (a positional `Insn::Call`)
+/// passes the argument *values* directly as a slice, so the fast entry skips
+/// the `ExpandedCallArg` buffer, the keyword-argument validation, and the arity
+/// pre-check that the general [`BuiltinDispatchFn`] pays on every call. The
+/// caller guarantees `min_arity <= args.len() <= max_arity`.
+pub type BuiltinFastDispatchFn = fn(&mut Interpreter, &[Value]) -> Result<Value>;
+
 /// One entry in the registry — emitted by `pyrust_module!` (one per fn
 /// inside the macro body) or by `#[pyfunction(name = …)]`.
 ///
@@ -52,6 +60,13 @@ pub struct BuiltinReg {
     pub name: &'static str,
     pub dispatch: BuiltinDispatchFn,
     pub is_pure: bool,
+    /// Optional fast entry for a positional call (see [`BuiltinFastDispatchFn`]).
+    /// `None` for legacy-dialect builtins and any typed builtin with `*args` /
+    /// `**kwargs` / keyword-only params. Valid only for `min_arity..=max_arity`
+    /// positional arguments.
+    pub fast: Option<BuiltinFastDispatchFn>,
+    pub min_arity: u8,
+    pub max_arity: u8,
 }
 
 /// Look up the dispatcher for a Python-level built-in name.  Returns
@@ -73,6 +88,19 @@ pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
 /// `&'static str` from a heap-leaked `Box<str>`.
 ///
 /// Returns `None` if no built-in by that name is registered.
+/// Look up the fast positional dispatch for a built-in, plus its arity bounds.
+/// Returns `None` when the name is unregistered or has no fast entry.
+#[inline]
+pub fn lookup_fast(name: &str) -> Option<(BuiltinFastDispatchFn, u8, u8)> {
+    REGISTRY
+        .binary_search_by_key(&name, |r| r.name)
+        .ok()
+        .and_then(|i| {
+            let r = &REGISTRY[i];
+            r.fast.map(|f| (f, r.min_arity, r.max_arity))
+        })
+}
+
 #[inline]
 pub fn lookup_name(name: &str) -> Option<&'static str> {
     REGISTRY

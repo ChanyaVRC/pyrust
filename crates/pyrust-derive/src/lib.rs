@@ -119,6 +119,9 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
                 name: #py_name,
                 dispatch: #fn_ident,
                 is_pure: #is_pure,
+                fast: None,
+                min_arity: 0,
+                max_arity: 0,
             };
     };
 
@@ -820,6 +823,42 @@ fn emit_fn_artefacts(
         ),
     };
 
+    // Optional "vectorcall" fast entry (issue #builtin-fast-dispatch): a typed
+    // signature with no keyword-only params can be filled straight from a
+    // positional `&[Value]`, skipping the `ExpandedCallArg` buffer, the kwarg
+    // validation, and the arity pre-check.  Legacy-dialect fns keep the general
+    // path only.
+    let (fast_fn_item, fast_reg_fields) = match &f.args {
+        ModuleFnArgs::Typed { params } if params.iter().all(|p| !p.keyword_only) => {
+            let fast_ident =
+                format_ident!("__pyfn_{}_fast", rust_ident_suffix, span = short.span());
+            let min_arity = params.iter().filter(|p| p.default.is_none()).count() as u8;
+            let max_arity = params.len() as u8;
+            let fast_prelude = emit_typed_fast_prelude(params, f.bare_name, &bare_lit);
+            let item = quote! {
+                #[allow(non_snake_case)]
+                #(#attrs)*
+                fn #fast_ident(
+                    _interp: &mut crate::Interpreter,
+                    __pyrust_fast_args: &[Value],
+                ) -> Result<Value> {
+                    #[allow(non_snake_case)]
+                    let FN_NAME: &'static str = *#name_static_ident;
+                    let _ = FN_NAME;
+                    #fast_prelude
+                    #(#body_stmts)*
+                }
+            };
+            let fields = quote! {
+                fast: Some(#fast_ident),
+                min_arity: #min_arity,
+                max_arity: #max_arity,
+            };
+            (item, fields)
+        }
+        _ => (quote!(), quote! { fast: None, min_arity: 0, max_arity: 0, }),
+    };
+
     let fn_item = quote! {
         #[allow(non_upper_case_globals)]
         static #name_static_ident: std::sync::LazyLock<&'static str> =
@@ -845,6 +884,8 @@ fn emit_fn_artefacts(
             #typed_prelude
             #(#body_stmts)*
         }
+
+        #fast_fn_item
     };
 
     let is_pure_lit = f.is_pure;
@@ -853,6 +894,7 @@ fn emit_fn_artefacts(
             name: *#name_static_ident,
             dispatch: #rust_fn_ident,
             is_pure: #is_pure_lit,
+            #fast_reg_fields
         }
     };
 
@@ -1102,6 +1144,47 @@ fn emit_typed_prelude_positional_only(
         #msg_name_binding
         crate::interpreter::builtin_args::reject_named_args(__pyrust_args, __pyrust_msg_name)?;
         #arity_check
+        #(#per_param)*
+    }
+}
+
+/// Prelude for the "vectorcall" fast entry: bind each typed parameter directly
+/// from `__pyrust_fast_args: &[Value]` (positional, no names).  The caller has
+/// already guaranteed `min_arity <= len <= max_arity`, so there is no
+/// keyword-argument scan and no arity check — just per-slot `FromValue`
+/// conversion (defaults fill the trailing missing slots).
+fn emit_typed_fast_prelude(
+    params: &[TypedParam],
+    bare_name: bool,
+    bare_lit: &LitStr,
+) -> proc_macro2::TokenStream {
+    let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (idx, p) in params.iter().enumerate() {
+        let name_ident = &p.name;
+        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let ty = &p.ty;
+        let default_branch = match &p.default {
+            Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
+            None => {
+                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(__pyrust_msg_name, #name_lit) }
+            }
+        };
+        per_param.push(quote! {
+            let #name_ident: #ty = {
+                match __pyrust_fast_args.get(#idx) {
+                    Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
+                        __v, __pyrust_msg_name, #name_lit,
+                    )?,
+                    None => (#default_branch)?,
+                }
+            };
+        });
+    }
+    let msg_name_binding = emit_msg_name_binding(bare_name, bare_lit);
+    quote! {
+        #[allow(unused_imports)]
+        use crate::interpreter::builtin_args::FromValue as _;
+        #msg_name_binding
         #(#per_param)*
     }
 }
@@ -1436,11 +1519,58 @@ fn emit_overload_set_artefacts(
             ));
         }
     }
+    // Optional vectorcall fast entry: an overload set with no keyword-only
+    // params (the CPython-builtin shape — `abs`, `ord`, …) can be dispatched
+    // straight from a positional `&[Value]`, reusing the same per-overload
+    // predicate/convert branches with the args bound by index.  Overload sets
+    // disallow defaults, so `min == max == arity`.
+    let (fast_fn_item, fast_reg_fields) =
+        if !ref_params.is_empty() && ref_params.iter().all(|p| !p.keyword_only) {
+            let fast_ident = format_ident!("{}_fast", dispatcher_ident, span = head_span);
+            let arity = ref_params.len() as u8;
+            let fast_locate: Vec<proc_macro2::TokenStream> = ref_params
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
+                    quote! {
+                        let #__arg_ident: &crate::value::Value = &__pyrust_fast_args[#i];
+                    }
+                })
+                .collect();
+            let item = quote! {
+                #[allow(non_snake_case)]
+                fn #fast_ident(
+                    _interp: &mut crate::Interpreter,
+                    __pyrust_fast_args: &[Value],
+                ) -> crate::error::Result<crate::value::Value> {
+                    #[allow(non_snake_case)]
+                    let FN_NAME: &'static str = *#name_static_ident;
+                    let _ = FN_NAME;
+                    #msg_name_binding
+                    #(#fast_locate)*
+                    #(#dispatch_branches)*
+                    let __actuals: &[std::borrow::Cow<'static, str>] = &[#(#no_match_args),*];
+                    crate::interpreter::builtin_args::no_overload_matched::<crate::value::Value>(
+                        __pyrust_msg_name, __actuals,
+                    )
+                }
+            };
+            (
+                item,
+                quote! { fast: Some(#fast_ident), min_arity: #arity, max_arity: #arity, },
+            )
+        } else {
+            (quote!(), quote! { fast: None, min_arity: 0, max_arity: 0, })
+        };
+    items.push(fast_fn_item);
+
     let reg_entry = quote! {
         crate::builtin_registry::BuiltinReg {
             name: *#name_static_ident,
             dispatch: #dispatcher_ident,
             is_pure: #head_is_pure,
+            #fast_reg_fields
         }
     };
 
