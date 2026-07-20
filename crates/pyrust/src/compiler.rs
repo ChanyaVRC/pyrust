@@ -5669,10 +5669,16 @@ impl Compiler {
             comp_enclosing_locals: self.comp_enclosing_locals.clone(),
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
+            builtin_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
+            name_is_builtin: RefCell::new(vec![0u8; names_len]),
             binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
             kwcall_cache: RefCell::new(vec![KwCallCacheEntry::Empty; insns_len]),
             fmt_spec_cache: RefCell::new(vec![
                 crate::interpreter::FmtSpecCacheEntry::Empty;
+                insns_len
+            ]),
+            call_builtin_cache: RefCell::new(vec![
+                crate::interpreter::CallBuiltinCacheEntry::Empty;
                 insns_len
             ]),
             // Empty until the optimizer's `build_exc_table` pass runs; while

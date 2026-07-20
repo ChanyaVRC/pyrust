@@ -6752,6 +6752,31 @@ pub(crate) enum FmtSpecCacheEntry {
 unsafe impl Send for FmtSpecCacheEntry {}
 unsafe impl Sync for FmtSpecCacheEntry {}
 
+/// Per-call-site inline cache for a plain (dot-free) built-in callee, so a hot
+/// `len(x)` / `ord(c)` / `abs(n)` call skips the `call_function_expanded`
+/// dispatch cascade and the registry binary search on every iteration.  A
+/// dot-free `BuiltinFunction` name always resolves through
+/// `builtin_registry::lookup` (every pre-registry special arm keys on a *dotted*
+/// name), so caching that resolved `fn` pointer at the call site is exactly
+/// equivalent to the full path (#2832 follow-up).  `Copy` (a `&'static str` and
+/// a `fn` pointer) so the `Vec` initialises with `vec![Empty; n]`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CallBuiltinCacheEntry {
+    Empty,
+    Cached {
+        /// Canonical name that resolved to `dispatch`; compared by content so a
+        /// polymorphic call site (`(len if c else ord)(x)`) re-resolves when the
+        /// callee changes rather than mis-dispatching.
+        name: &'static str,
+        dispatch: crate::builtin_registry::BuiltinDispatchFn,
+        /// Optional "vectorcall" fast entry + inclusive positional-arity bounds
+        /// `(min, max)`.  When present and the call's `argc` is in range, the VM
+        /// passes the argument values as a register subslice and skips the
+        /// `ExpandedCallArg` buffer + kwarg/arity validation entirely.
+        fast: Option<(crate::builtin_registry::BuiltinFastDispatchFn, u8, u8)>,
+    },
+}
+
 /// Apply a (usually constant) f-string format spec to `value`, consulting a
 /// per-pc parse cache so a constant spec is parsed only once.  Mirrors
 /// [`apply_format_spec`] for non-`PyInstance` values; `PyInstance` values must

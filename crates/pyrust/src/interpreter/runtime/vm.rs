@@ -2147,7 +2147,7 @@ impl Interpreter {
                             // frame's base env before running the handler.
                             if !Rc::ptr_eq(&self.env, &frame_base_env) {
                                 self.env = Rc::clone(&frame_base_env);
-                                bump_global_env_version(self);
+                                bump_global_struct_version(self);
                             }
                             pc = h;
                             continue 'vm;
@@ -2521,7 +2521,27 @@ impl Interpreter {
                             }
                         }
                     }
+                    // Built-in fast path: validated against the *structure*
+                    // version, which a hot value reassignment (`n += …`) does
+                    // NOT bump — so a `len`/`ord`/… call in a module-scope loop
+                    // keeps hitting this instead of re-resolving every iteration.
+                    {
+                        let bver = self.global_struct_version.get();
+                        let bc = code.builtin_cache.borrow();
+                        if (*name_idx as usize) < bc.len() {
+                            let entry = &bc[*name_idx as usize];
+                            if entry.0 == bver {
+                                regs[*dst as usize] = entry.1.clone();
+                                continue;
+                            }
+                        }
+                    }
                     // ── Slow path: full name resolution ──────────────────
+                    // `from_builtin` records whether the value resolved through
+                    // the built-in table (below), so the cache write routes it to
+                    // `builtin_cache` (structure-versioned) rather than
+                    // `global_cache` (value-versioned).
+                    let mut from_builtin = false;
                     let name = pool_get!(code.names, *name_idx, "name");
                     // Issue #706: look up the name through the env chain first
                     // (this covers function-level cell vars, nonlocal bindings,
@@ -2621,16 +2641,25 @@ impl Interpreter {
                         // Keeping this in a separate function avoids growing
                         // run_bytecode_inner_impl's I-cache footprint on the
                         // common (cache-hit) path.
+                        from_builtin = true;
                         vm_try!(resolve_global_via_builtins(
                             &self.module_globals_dict,
                             name,
                             cur_ver,
                         ))
                     };
-                    // Update the cache slot.
+                    // Update the cache slot.  A built-in resolution is cached
+                    // against the structure version (so a hot value reassignment
+                    // does not evict it); a value global against the value version.
                     if cache_ver != GLOBAL_CACHE_EMPTY {
-                        code.global_cache.borrow_mut()[*name_idx as usize] =
-                            (cache_ver, val.clone());
+                        if from_builtin {
+                            let bver = self.global_struct_version.get();
+                            code.builtin_cache.borrow_mut()[*name_idx as usize] =
+                                (bver, val.clone());
+                        } else {
+                            code.global_cache.borrow_mut()[*name_idx as usize] =
+                                (cache_ver, val.clone());
+                        }
                     }
                     regs[*dst as usize] = val;
                 }
@@ -3027,7 +3056,7 @@ impl Interpreter {
                     // env_assign_local, which does not bump the version).  Without
                     // this, an annotation `x: T` that follows a module-level
                     // `T = ...` would read the stale enclosing value from the cache.
-                    bump_global_env_version(self);
+                    bump_global_struct_version(self);
                 }
                 Insn::PopTypeParamEnv => {
                     // PEP 695: leave the type-parameter scope, restoring the
@@ -3045,7 +3074,7 @@ impl Interpreter {
                     // Re-invalidate the cache so the enclosing frame's later
                     // references to a name that was shadowed by a type param
                     // re-resolve against the restored enclosing scope.
-                    bump_global_env_version(self);
+                    bump_global_struct_version(self);
                 }
                 Insn::DeleteLocal(reg, name_idx) => {
                     // Raise NameError / UnboundLocalError when deleting an
@@ -3104,15 +3133,33 @@ impl Interpreter {
                     }
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
-                    // Always bump global_env_version: this instruction fires on
-                    // every module-scope assignment that uses a fastlocal register.
-                    // Without the bump, a `LoadGlobal` inline cache that resolved
-                    // a name to a builtin at `cur_ver` would never be invalidated
-                    // when the same name is later shadowed at module scope
-                    // (e.g. `len = my_fn`), because `SyncModuleGlobal` is the
-                    // only store instruction executed — `StoreGlobal` (which also
-                    // bumps the version) is only used for `global`-declared names.
+                    // Fires on every module-scope assignment that uses a fastlocal
+                    // register — including a hot `n += …` loop.  Always bump the
+                    // value version so `LoadGlobal` value caches stay coherent.
                     bump_global_env_version(self);
+                    // Bump the *structure* version (which the built-in cache is
+                    // keyed on) ONLY when the assigned name is itself a built-in,
+                    // i.e. this write actually shadows one.  A non-built-in like
+                    // `n` therefore no longer evicts the `len`/`ord`/… built-in
+                    // cache on every iteration.  The `resolve_builtin` check is
+                    // memoised per name_idx (built-in-ness never changes).
+                    let ni = *name_idx as usize;
+                    let memo = code.name_is_builtin.borrow().get(ni).copied().unwrap_or(0);
+                    let shadows_builtin = match memo {
+                        2 => true,
+                        1 => false,
+                        _ => {
+                            let name = pool_get!(code.names, *name_idx, "name");
+                            let b = resolve_builtin(name).is_some();
+                            if let Some(slot) = code.name_is_builtin.borrow_mut().get_mut(ni) {
+                                *slot = if b { 2 } else { 1 };
+                            }
+                            b
+                        }
+                    };
+                    if shadows_builtin {
+                        bump_global_struct_version(self);
+                    }
                     if self.globals_accessed {
                         let name = pool_get!(code.names, *name_idx, "name");
                         let val = regs[*reg as usize].clone();
@@ -3143,7 +3190,7 @@ impl Interpreter {
                         .ok()
                         .flatten();
                     // Invalidate the LoadGlobal inline cache.
-                    bump_global_env_version(self);
+                    bump_global_struct_version(self);
                     // The preceding DeleteLocal already cleared the fastlocal
                     // register.  Now that env.values and module_globals_dict have
                     // also been cleared, check whether this was the last
@@ -3662,6 +3709,41 @@ impl Interpreter {
                                 continue 'vm;
                             }
                         }
+                    // Vectorcall fast path: a warm-cached built-in with a fast
+                    // entry whose positional arity matches is dispatched straight
+                    // from the argument registers — no `ExpandedCallArg` buffer,
+                    // no kwarg/arity validation.  Only fires on a warm cache
+                    // (populated by the general path below on the first call), so
+                    // rebinding / polymorphic sites re-resolve correctly.
+                    if let ValueKind::BuiltinFunction(name) = func_val.kind() {
+                        let fast_hit = {
+                            let cache = code.call_builtin_cache.borrow();
+                            match cache[pc - 1] {
+                                CallBuiltinCacheEntry::Cached {
+                                    name: cn,
+                                    fast: Some((f, min, max)),
+                                    ..
+                                } if cn == name && (min..=max).contains(argc) =>
+                                {
+                                    Some(f)
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(f) = fast_hit {
+                            let base = (*func_reg + 1) as usize;
+                            let n = *argc as usize;
+                            // Positional `Call` always fills these slots; guard
+                            // against an unset register so an error matches the
+                            // general path's `vm_read` rather than reading garbage.
+                            // `RegSlice` has no range `Index`; deref to `[Value]`.
+                            if !(*regs)[base..base + n].iter().any(|v| v.is_unset()) {
+                                let result = f(self, &(*regs)[base..base + n]);
+                                regs[*func_reg as usize] = vm_try!(result);
+                                continue 'vm;
+                            }
+                        }
+                    }
                     tramp_try!(*func_reg, *argc, func_val);
                     // Bound-method trampoline (#2345): `f = o.m; f()` calls a
                     // BoundMethod through Insn::Call.  Trampoline the underlying
@@ -3741,7 +3823,48 @@ impl Interpreter {
                     {
                         pyrust_core::set_current_vm_line(cur_line);
                     }
-                    let call_result = self.call_function_expanded(func_val, &buf);
+                    // Per-call-site inline cache for plain built-ins (#2832
+                    // follow-up): a dot-free `BuiltinFunction` name always
+                    // resolves through `builtin_registry::lookup` (every
+                    // pre-registry special arm in `call_function_expanded` keys
+                    // on a *dotted* name), so once resolved we dispatch straight
+                    // through the cached `fn` pointer — skipping the dispatch
+                    // cascade and the registry binary search that `len(x)` /
+                    // `ord(c)` otherwise paid on every call.  `call_pc` is this
+                    // `Call`'s own position (pc was already advanced past it).
+                    let call_pc = pc - 1;
+                    let call_result = 'call: {
+                        if let ValueKind::BuiltinFunction(name) = func_val.kind() {
+                            // Hit: same plain builtin at this site as last time.
+                            let hit = {
+                                let cache = code.call_builtin_cache.borrow();
+                                match cache[call_pc] {
+                                    CallBuiltinCacheEntry::Cached { name: cn, dispatch, .. }
+                                        if cn == name =>
+                                    {
+                                        Some(dispatch)
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            if let Some(dispatch) = hit {
+                                break 'call dispatch(self, &buf);
+                            }
+                            // Miss: resolve + cache dot-free names via the registry.
+                            if !name.as_bytes().contains(&b'.')
+                                && let Some(dispatch) = crate::builtin_registry::lookup(name)
+                            {
+                                code.call_builtin_cache.borrow_mut()[call_pc] =
+                                    CallBuiltinCacheEntry::Cached {
+                                        name,
+                                        dispatch,
+                                        fast: crate::builtin_registry::lookup_fast(name),
+                                    };
+                                break 'call dispatch(self, &buf);
+                            }
+                        }
+                        self.call_function_expanded(func_val, &buf)
+                    };
                     if lend_by_move {
                         // Move the borrowed args back into their registers before
                         // anything else can observe them (the result write below
@@ -6508,10 +6631,16 @@ mod vm_tests {
             comp_enclosing_locals: None,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(Vec::new()),
+            builtin_cache: std::cell::RefCell::new(Vec::new()),
+            name_is_builtin: std::cell::RefCell::new(Vec::new()),
             binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
             kwcall_cache: std::cell::RefCell::new(vec![KwCallCacheEntry::Empty; n]),
             fmt_spec_cache: std::cell::RefCell::new(vec![
                 crate::interpreter::FmtSpecCacheEntry::Empty;
+                n
+            ]),
+            call_builtin_cache: std::cell::RefCell::new(vec![
+                crate::interpreter::CallBuiltinCacheEntry::Empty;
                 n
             ]),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
