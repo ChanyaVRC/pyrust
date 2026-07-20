@@ -6727,17 +6727,20 @@ pub(crate) fn apply_format_spec_named(
 pub(crate) enum FmtSpecCacheEntry {
     Empty,
     Cached {
-        /// Backing-byte pointer of the spec string that produced `parsed`.
-        spec_ptr: *const u8,
-        /// Byte length of that spec string (cheap extra guard).
+        /// Byte length of the spec string that produced `parsed` — a cheap
+        /// fast-reject before the content compare.
         spec_len: usize,
         /// The parsed spec.  Parsing is value-independent (it depends only on
         /// the spec text), so the same parse is reused for every value rendered
         /// through this site; only `render_format_spec` re-runs per value.
         parsed: Rc<FormatSpec>,
-        /// Keeps the spec string's backing allocation alive while cached so the
-        /// `spec_ptr` identity check cannot alias a freed-then-reused buffer.
-        _keep: Value,
+        /// The spec string that produced `parsed`.  The cache hit is decided by
+        /// comparing its *content* against the current spec — NOT by backing
+        /// pointer: a small (inline / SSO) spec string carries its bytes in the
+        /// NaN-box, so `as_ptr()` points at the transient stack/register slot
+        /// the value currently occupies, which is reused across iterations and
+        /// would false-hit when the spec changes (e.g. `.1f` → `.2f`, #2832).
+        spec: Value,
     },
 }
 
@@ -6779,18 +6782,18 @@ pub(crate) fn apply_format_spec_cached(
 
     let type_name = pyrust_core::builtin_type_name(value);
 
-    // Fast path: the spec string is the same backing buffer we last parsed at
-    // this pc.  Clone the parsed `Rc` out under a short borrow so the cache
-    // `RefCell` is released before `render_format_spec` runs.
-    let spec_ptr = spec.as_ptr();
+    // Fast path: the spec string has the same *content* we last parsed at this
+    // pc.  `spec_len` fast-rejects most misses without a byte compare; only a
+    // same-length spec pays the (short) content comparison.  Clone the parsed
+    // `Rc` out under a short borrow so the cache `RefCell` is released before
+    // `render_format_spec` runs.
     let spec_len = spec.len();
     let cached_parsed = match &cache.borrow()[idx] {
         FmtSpecCacheEntry::Cached {
-            spec_ptr: cp,
             spec_len: cl,
             parsed,
-            ..
-        } if *cp == spec_ptr && *cl == spec_len => Some(Rc::clone(parsed)),
+            spec: cached_spec,
+        } if *cl == spec_len && cached_spec.as_str() == Some(spec) => Some(Rc::clone(parsed)),
         _ => None,
     };
     if let Some(parsed) = cached_parsed {
@@ -6798,14 +6801,13 @@ pub(crate) fn apply_format_spec_cached(
         return Ok(Value::string(formatted));
     }
 
-    // Miss: parse once, render, and cache against this spec buffer.
+    // Miss: parse once, render, and cache against this spec's content.
     let parsed = Rc::new(parse_format_spec(spec, &type_name)?);
     let formatted = render_format_spec(value, &parsed, &type_name)?;
     cache.borrow_mut()[idx] = FmtSpecCacheEntry::Cached {
-        spec_ptr,
         spec_len,
         parsed,
-        _keep: spec_val.clone(),
+        spec: spec_val.clone(),
     };
     Ok(Value::string(formatted))
 }
