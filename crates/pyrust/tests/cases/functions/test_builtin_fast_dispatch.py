@@ -79,3 +79,25 @@ for expr in [
         print(expr, "-> ok")
     except (TypeError, ValueError) as e:
         print(expr, "->", type(e).__name__)
+
+# len / isinstance were converted from the legacy dialect to typed so they too
+# get the fast entry — behaviour (incl. dunder dispatch and errors) unchanged.
+print(len("hello"), len([1, 2, 3]), len({1: 2}), len(range(9)), len(b"xy"))
+class Sized:
+    def __len__(self):
+        return 7
+print(len(Sized()))
+print(isinstance(5, int), isinstance("x", (int, str)), isinstance(True, int))
+class Base: pass
+class Derived(Base): pass
+print(isinstance(Derived(), Base), isinstance(Base(), Derived))
+for i in range(3):
+    print(len(str(i)), isinstance(i, int))
+try:
+    len()
+except TypeError as e:
+    print("len():", e)
+try:
+    isinstance(5)
+except TypeError as e:
+    print("isinstance(5):", e)
