@@ -901,6 +901,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
             crate::interpreter::FmtSpecCacheEntry::Empty;
             insns_len
         ]),
+        call_builtin_cache: RefCell::new(vec![
+            crate::interpreter::CallBuiltinCacheEntry::Empty;
+            insns_len
+        ]),
         exc_table,
         has_exc_handlers,
         inline_frames,

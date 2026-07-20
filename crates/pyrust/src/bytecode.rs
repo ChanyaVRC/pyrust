@@ -1108,6 +1108,12 @@ pub struct FnCode {
     /// iteration) and is never cached.  Pc-keyed, so it is immune to the const
     /// remapping `pass_compact_consts` performs.  See [`FmtSpecCacheEntry`].
     pub(crate) fmt_spec_cache: RefCell<Vec<crate::interpreter::FmtSpecCacheEntry>>,
+    /// Per-call-site inline cache for plain built-in callees (`len`, `ord`,
+    /// `abs`, …).  Parallel to `insns` (indexed by the `Call` instruction's pc);
+    /// a hit dispatches straight through the cached registry `fn` pointer,
+    /// skipping the `call_function_expanded` cascade and registry binary search.
+    /// See [`crate::interpreter::CallBuiltinCacheEntry`].
+    pub(crate) call_builtin_cache: RefCell<Vec<crate::interpreter::CallBuiltinCacheEntry>>,
     /// Zero-cost exception table (CPython 3.11 model).  Parallel to `insns`:
     /// `exc_table[pc]` is the absolute target PC of the innermost `try` handler
     /// active when an exception is raised at `pc`, or [`EXC_NO_HANDLER`] for

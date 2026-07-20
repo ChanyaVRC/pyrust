@@ -5675,6 +5675,10 @@ impl Compiler {
                 crate::interpreter::FmtSpecCacheEntry::Empty;
                 insns_len
             ]),
+            call_builtin_cache: RefCell::new(vec![
+                crate::interpreter::CallBuiltinCacheEntry::Empty;
+                insns_len
+            ]),
             // Empty until the optimizer's `build_exc_table` pass runs; while
             // empty the VM uses the dynamic SetupExcept/PopExcept handler stack.
             exc_table: Vec::new(),

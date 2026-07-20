@@ -3741,7 +3741,44 @@ impl Interpreter {
                     {
                         pyrust_core::set_current_vm_line(cur_line);
                     }
-                    let call_result = self.call_function_expanded(func_val, &buf);
+                    // Per-call-site inline cache for plain built-ins (#2832
+                    // follow-up): a dot-free `BuiltinFunction` name always
+                    // resolves through `builtin_registry::lookup` (every
+                    // pre-registry special arm in `call_function_expanded` keys
+                    // on a *dotted* name), so once resolved we dispatch straight
+                    // through the cached `fn` pointer — skipping the dispatch
+                    // cascade and the registry binary search that `len(x)` /
+                    // `ord(c)` otherwise paid on every call.  `call_pc` is this
+                    // `Call`'s own position (pc was already advanced past it).
+                    let call_pc = pc - 1;
+                    let call_result = 'call: {
+                        if let ValueKind::BuiltinFunction(name) = func_val.kind() {
+                            // Hit: same plain builtin at this site as last time.
+                            let hit = {
+                                let cache = code.call_builtin_cache.borrow();
+                                match cache[call_pc] {
+                                    CallBuiltinCacheEntry::Cached { name: cn, dispatch }
+                                        if cn == name =>
+                                    {
+                                        Some(dispatch)
+                                    }
+                                    _ => None,
+                                }
+                            };
+                            if let Some(dispatch) = hit {
+                                break 'call dispatch(self, &buf);
+                            }
+                            // Miss: resolve + cache dot-free names via the registry.
+                            if !name.as_bytes().contains(&b'.')
+                                && let Some(dispatch) = crate::builtin_registry::lookup(name)
+                            {
+                                code.call_builtin_cache.borrow_mut()[call_pc] =
+                                    CallBuiltinCacheEntry::Cached { name, dispatch };
+                                break 'call dispatch(self, &buf);
+                            }
+                        }
+                        self.call_function_expanded(func_val, &buf)
+                    };
                     if lend_by_move {
                         // Move the borrowed args back into their registers before
                         // anything else can observe them (the result write below
@@ -6512,6 +6549,10 @@ mod vm_tests {
             kwcall_cache: std::cell::RefCell::new(vec![KwCallCacheEntry::Empty; n]),
             fmt_spec_cache: std::cell::RefCell::new(vec![
                 crate::interpreter::FmtSpecCacheEntry::Empty;
+                n
+            ]),
+            call_builtin_cache: std::cell::RefCell::new(vec![
+                crate::interpreter::CallBuiltinCacheEntry::Empty;
                 n
             ]),
             // Empty: these hand-built test fixtures run unoptimized, so the VM
