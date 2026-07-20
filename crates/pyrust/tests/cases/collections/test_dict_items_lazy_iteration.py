@@ -90,3 +90,35 @@ try:
         od.clear()
 except RuntimeError as e:
     print("od clear:", e)
+
+# ── unpack-target shapes (the 2-target case is fused; others must still work) ─
+dd = {"a": 1, "b": 2}
+# parenthesized 2-target (fused, identical to `k, v`)
+for (k, v) in dd.items():
+    print("paren", k, v)
+# wrong arity -> ValueError (not fused)
+try:
+    for x, y, z in dd.items():
+        print(x, y, z)
+except ValueError as e:
+    print("3targets:", e)
+try:
+    for (only,) in dd.items():
+        print(only)
+except ValueError as e:
+    print("1target:", e)
+# extended `*` unpack -> UnpackEx, not fused
+for k, *rest in dd.items():
+    print("star", k, rest)
+for *init, last in dd.items():
+    print("star2", init, last)
+# nested targets: keys are themselves 2-tuples
+dn = {(1, 2): "x", (3, 4): "y"}
+for (a, b), c in dn.items():
+    print("nested", a, b, c)
+# loop variables survive after the loop
+for k, v in dd.items():
+    pass
+print("last", k, v)
+# unpack inside a comprehension
+print({v: k for k, v in dd.items()})

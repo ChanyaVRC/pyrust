@@ -4901,10 +4901,33 @@ impl Interpreter {
                             let cur_pos = *pos;
                             if cur_pos < pairs.len() {
                                 // SAFETY: cur_pos < pairs.len() checked just above.
-                                let (k, v) = unsafe { pairs.get_unchecked(cur_pos) };
-                                let tup = Value::tuple(vec![k.clone(), v.clone()]);
+                                let (kc, vc) = {
+                                    let (k, v) = unsafe { pairs.get_unchecked(cur_pos) };
+                                    (k.clone(), v.clone())
+                                };
                                 *pos = cur_pos + 1;
-                                regs[*dst as usize] = tup;
+                                // Fused unpack (#2830 opt2): when this item is
+                                // consumed by a 2-target tuple unpack — the
+                                // `for k, v in d.items()` shape — the compiler emits
+                                // `Unpack(dst+1, dst, 2)` right after this `ForIter`.
+                                // Write the key/value straight into those two
+                                // destination registers and skip both the tuple
+                                // allocation and the `Unpack` instruction (bump pc).
+                                // A dict item is always a 2-tuple, so the arity check
+                                // `Unpack` performs is vacuous. Any other shape
+                                // (n != 2, extended `*` unpack via `UnpackEx`, or a
+                                // plain `for t in`) does not match and falls through
+                                // to the normal tuple build.
+                                if let Some(Insn::Unpack(base, src, 2)) = code.insns.get(pc)
+                                    && *src == *dst
+                                {
+                                    let base = *base as usize;
+                                    regs[base] = kc;
+                                    regs[base + 1] = vc;
+                                    pc += 1;
+                                } else {
+                                    regs[*dst as usize] = Value::tuple(vec![kc, vc]);
+                                }
                             } else {
                                 pc = jump_pc!(*offset);
                             }
