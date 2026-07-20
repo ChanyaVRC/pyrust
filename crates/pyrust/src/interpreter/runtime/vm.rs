@@ -686,6 +686,22 @@ pub(crate) enum IterState {
         /// `clear()` during *this* iteration.  Zero for plain dict / set.
         od_seq: u64,
     },
+    /// Like [`MaterializedGuarded`] but for a dict `.items()` view (issue
+    /// #2830).  Snapshots the key/value **pairs** into one contiguous `Vec`
+    /// (cheap) and builds the `(k, v)` Python tuple lazily on each `ForIter`
+    /// step, instead of allocating and holding all `N` tuples up front — which
+    /// made `for k, v in d.items()` the one iteration pattern slower than
+    /// CPython.  The size-mutation guard is identical to `MaterializedGuarded`
+    /// (the snapshot is over `pairs`, so the observable semantics are the same).
+    ItemsGuarded {
+        pairs: Vec<(Value, Value)>,
+        pos: usize,
+        container: Value,
+        recorded_len: usize,
+        msg: &'static str,
+        exhaust_first: bool,
+        od_seq: u64,
+    },
 }
 
 /// Read the live element count of a `dict` / `set` / dict-view `container`,
@@ -4674,6 +4690,46 @@ impl Interpreter {
                                     IterState::UserDefined(src_val)
                                 }
                             }
+                            IterTag::Other
+                                if pyrust_builtins::dict_views::view_kind(&src_val)
+                                    == Some(2) =>
+                            {
+                                // dict `.items()` view (#2830): snapshot the
+                                // key/value PAIRS (one contiguous Vec) and build
+                                // each `(k, v)` tuple lazily per `ForIter` step,
+                                // instead of allocating N tuples up front. Same
+                                // size-mutation guard as the general dict-view
+                                // path below; only the tuple lifetime changes.
+                                let rc = pyrust_builtins::dict_views::as_dict_rc(&src_val)
+                                    .expect("items view has a backing dict");
+                                let pairs: Vec<(Value, Value)> = {
+                                    let map = rc.borrow();
+                                    map.iter()
+                                        .map(|(k, v)| {
+                                            (crate::interpreter::key_to_value(k.clone()), v.clone())
+                                        })
+                                        .collect()
+                                };
+                                let recorded_len = pairs.len();
+                                let is_ordered_view =
+                                    pyrust_builtins::dict_views::is_ordered_view(&src_val);
+                                let (msg, exhaust_first) = if is_ordered_view {
+                                    ("OrderedDict mutated during iteration", true)
+                                } else {
+                                    ("dictionary changed size during iteration", false)
+                                };
+                                let od_seq =
+                                    if is_ordered_view { od_clear_seq_now() } else { 0 };
+                                IterState::ItemsGuarded {
+                                    pairs,
+                                    pos: 0,
+                                    container: src_val,
+                                    recorded_len,
+                                    msg,
+                                    exhaust_first,
+                                    od_seq,
+                                }
+                            }
                             IterTag::Other => {
                                 // dict / set / dict-views: snapshot but guard
                                 // against size mutation during iteration (#1988).
@@ -4813,6 +4869,65 @@ impl Interpreter {
                                 let v = unsafe { items.get_unchecked(cur_pos).clone() };
                                 *pos = cur_pos + 1;
                                 regs[*dst as usize] = v;
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::ItemsGuarded {
+                            pairs,
+                            pos,
+                            container,
+                            recorded_len,
+                            msg,
+                            exhaust_first,
+                            od_seq,
+                        }) => {
+                            // Same size-mutation guard as MaterializedGuarded
+                            // (#1988/#2436/#2465); the only difference is that the
+                            // `(k, v)` tuple is built here, lazily, rather than
+                            // eagerly for all N pairs at iterator creation (#2830).
+                            if *exhaust_first && *pos >= pairs.len() {
+                                pc = jump_pc!(*offset);
+                                continue;
+                            }
+                            if live_collection_len(container) != Some(*recorded_len) {
+                                let fire_msg = if *od_seq != 0 {
+                                    ordered_dict_guard_msg(container, *recorded_len, *od_seq)
+                                } else {
+                                    *msg
+                                };
+                                vm_try!(Err(PyError::Runtime(fire_msg.to_string())));
+                            }
+                            let cur_pos = *pos;
+                            if cur_pos < pairs.len() {
+                                // SAFETY: cur_pos < pairs.len() checked just above.
+                                let (kc, vc) = {
+                                    let (k, v) = unsafe { pairs.get_unchecked(cur_pos) };
+                                    (k.clone(), v.clone())
+                                };
+                                *pos = cur_pos + 1;
+                                // Fused unpack (#2830 opt2): when this item is
+                                // consumed by a 2-target tuple unpack — the
+                                // `for k, v in d.items()` shape — the compiler emits
+                                // `Unpack(dst+1, dst, 2)` right after this `ForIter`.
+                                // Write the key/value straight into those two
+                                // destination registers and skip both the tuple
+                                // allocation and the `Unpack` instruction (bump pc).
+                                // A dict item is always a 2-tuple, so the arity check
+                                // `Unpack` performs is vacuous. Any other shape
+                                // (n != 2, extended `*` unpack via `UnpackEx`, or a
+                                // plain `for t in`) does not match and falls through
+                                // to the normal tuple build.
+                                if let Some(Insn::Unpack(base, src, 2)) = code.insns.get(pc)
+                                    && *src == *dst
+                                {
+                                    let base = *base as usize;
+                                    regs[base] = kc;
+                                    regs[base + 1] = vc;
+                                    pc += 1;
+                                } else {
+                                    regs[*dst as usize] = Value::tuple(vec![kc, vc]);
+                                }
                             } else {
                                 pc = jump_pc!(*offset);
                             }
