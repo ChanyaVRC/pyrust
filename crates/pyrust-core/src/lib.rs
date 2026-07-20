@@ -487,6 +487,12 @@ thread_local! {
 /// [`intern_string_value`] when a pre-built `Value::string` is already
 /// available to avoid a redundant allocation on the long-string path.
 pub fn intern_string(s: &str) -> Value {
+    // Inline (SSO, #2832): ≤ 5-byte strings carry their bytes in the NaN-box —
+    // there is no heap allocation to dedup, and identical content already maps
+    // to identical bits, so interning is pure overhead.  Skip the table.
+    if s.len() <= STR_INLINE_MAX {
+        return make_inline_str(s);
+    }
     if s.len() > INTERN_MAX_BYTES {
         // Long string: interning would bloat the table without meaningful
         // reuse.  Caller must allocate a fresh Value here.
@@ -518,6 +524,11 @@ pub fn intern_string(s: &str) -> Value {
 /// content equals `s`.  The const-pool `LoadConst` path satisfies this
 /// by passing both the borrowed `&str` from `cv.kind()` and `cv` itself.
 pub fn intern_string_value(s: &str, val: &Value) -> Value {
+    // Inline (SSO, #2832): `val` is already an inline value for ≤ 5 bytes; a
+    // clone is a bit-copy and interning would only pollute the table.
+    if s.len() <= STR_INLINE_MAX {
+        return val.clone();
+    }
     if s.len() > INTERN_MAX_BYTES {
         // Long string: not interned; return a cheap clone of the existing
         // const-pool Value rather than allocating a second copy.
@@ -2467,6 +2478,52 @@ const STR_IS_ASCII: u32 = 0b010; // bit 1 — cached ASCII-ness
 const STR_ASCII_COMPUTED: u32 = 0b100; // bit 2 — flag has been computed
 const STR_RC_ONE: u32 = 0b1000; // rc in bits 31:3; one reference
 
+// ── Small-string optimisation (SSO), issue #2832 ─────────────────────────────
+//
+// A TAG_STR value whose payload low bit is set stores its bytes *inline* in the
+// NaN-box payload instead of pointing at a heap buffer.  Heap string pointers
+// come from `alloc(…, align 8)` / `pool_b_alloc` (also align 8), so their low 3
+// bits are always 0 — bit 0 is therefore a free, unambiguous inline marker.
+//
+// Inline payload layout (48 payload bits, little-endian):
+//   bit 0      — 1 = inline (0 = heap pointer)
+//   bits 1:3   — byte length (0..=STR_INLINE_MAX)
+//   bytes 1..6 — up to 5 bytes of UTF-8 data (payload bytes 1..5 = bits 8..47)
+//
+// Inline strings never touch the heap: `clone` is a bit-copy, `drop` is a
+// no-op, and identical content always yields identical bits (so short strings
+// are implicitly interned and `is` / bit-equality stay consistent — every
+// constructor routes the ≤ MAX case through `make_inline_str`).
+const STR_INLINE_MARK: u64 = 1; // payload bit 0
+const STR_INLINE_MAX: usize = 5; // bytes storable inline
+
+// The inline byte layout reads bytes directly out of the payload's little-endian
+// image; a big-endian target would need the offsets flipped.  All supported
+// targets (x86-64 / aarch64 on linux, macos, windows) are little-endian.
+#[cfg(target_endian = "big")]
+compile_error!("small-string optimisation assumes a little-endian target");
+
+/// True when a TAG_STR value stores its bytes inline (see [`STR_INLINE_MARK`]).
+/// Only meaningful once `top16(bits) == TAG_STR` has been established.
+#[inline(always)]
+fn str_is_inline_bits(bits: u64) -> bool {
+    bits & STR_INLINE_MARK != 0
+}
+
+/// Encode `s` (which must be `≤ STR_INLINE_MAX` bytes) as an inline TAG_STR
+/// value.  Zero allocations.
+#[inline]
+fn make_inline_str(s: &str) -> Value {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    debug_assert!(len <= STR_INLINE_MAX);
+    let mut bits: u64 = TAG_STR_BITS | STR_INLINE_MARK | ((len as u64) << 1);
+    for (i, &b) in bytes.iter().enumerate() {
+        bits |= (b as u64) << (8 + i * 8);
+    }
+    Value(bits)
+}
+
 /// Convert a ryu decimal string like `"0.00009999"` (or `"-0.00001"`) to
 /// CPython-style scientific notation like `"9.999e-05"`.  Only called when
 /// the value's absolute magnitude is known to be in (0, 1e-4), so the string
@@ -3331,6 +3388,11 @@ impl Value {
     pub fn string(s: impl AsRef<str>) -> Self {
         let s = s.as_ref();
         let len = s.len();
+        // Small-string optimisation (#2832): store ≤ 5 bytes inline in the
+        // NaN-box payload, skipping the heap allocation entirely.
+        if len <= STR_INLINE_MAX {
+            return make_inline_str(s);
+        }
         // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes: u8 × len]
         //            offset 0     offset 4     offset 8     offset 16
         let layout = Layout::from_size_align(16 + len, 8).unwrap();
@@ -3377,6 +3439,17 @@ impl Value {
         total: usize,
         fill: impl FnOnce(&mut [u8]) -> Option<bool>,
     ) -> Self {
+        // Small-string optimisation (#2832): a ≤ 5-byte result goes inline.
+        // Route through the same path as every other constructor so identical
+        // content always has identical bits (interning / `is` consistency).
+        if total <= STR_INLINE_MAX {
+            let mut buf = [0u8; STR_INLINE_MAX];
+            fill(&mut buf[..total]);
+            // SAFETY: `fill`'s contract is that it writes valid UTF-8 into the
+            // whole buffer (callers join already-validated `&str` parts).
+            let s = unsafe { std::str::from_utf8_unchecked(&buf[..total]) };
+            return make_inline_str(s);
+        }
         let layout = Layout::from_size_align(16 + total, 8).unwrap();
         unsafe {
             let ptr = alloc(layout);
@@ -3432,6 +3505,17 @@ impl Value {
             "string_slice: byte_start ({byte_start}) > byte_end ({byte_end})"
         );
         let sub_len = byte_end - byte_start;
+        // Small-string optimisation (#2832): a ≤ 5-byte result (every single
+        // character, so this is the hot `s[i]` / char-iteration path) goes
+        // inline — no Layout B pool allocation.  This is also *required* when
+        // `self` is itself inline: its bytes live in the (movable) NaN-box, so
+        // there is no stable address for a Layout B `ref` to point at.  An
+        // inline source is always ≤ 5 bytes, so `sub_len <= STR_INLINE_MAX`
+        // already covers it.
+        if sub_len <= STR_INLINE_MAX {
+            let s = unsafe { self.str_as_str() };
+            return make_inline_str(&s[byte_start..byte_end]);
+        }
         let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
         let rc_type = unsafe { *(hdr as *const u32) };
         // self.ref (offset 8) points to self's bytes[0]; add byte_start for new slice
@@ -4017,6 +4101,17 @@ impl Value {
     }
 
     unsafe fn str_as_str(&self) -> &str {
+        // Inline (SSO, #2832): the bytes live in this value's own NaN-box
+        // payload, starting one byte in (past the marker/length byte).  The
+        // returned `&str` borrows from `self`, so its lifetime is bounded by
+        // `&self` — sound because a moved value can't be borrowed concurrently.
+        if str_is_inline_bits(self.0) {
+            let len = ((self.0 >> 1) & 0b111) as usize;
+            unsafe {
+                let ptr = (&self.0 as *const u64 as *const u8).add(1);
+                return std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+            }
+        }
         unsafe {
             let hdr = self.str_hdr();
             let sub_len = *(hdr.add(4) as *const u32) as usize;
@@ -4116,6 +4211,10 @@ impl Value {
         );
         if !self.is_str() {
             return false;
+        }
+        // Inline (SSO, #2832): no header flag; scan the ≤ 5 bytes directly.
+        if str_is_inline_bits(self.0) {
+            return unsafe { self.str_as_str() }.is_ascii();
         }
         let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
         let rc_type = unsafe { *hdr };
@@ -4998,6 +5097,11 @@ impl Clone for Value {
             t if t <= TAG_INT => Value(self.0),
             // Str
             TAG_STR => {
+                // Inline (SSO, #2832): no heap buffer, no refcount — a clone is
+                // just a bit-copy.
+                if str_is_inline_bits(self.0) {
+                    return Value(self.0);
+                }
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
                 unsafe {
                     // rc is stored in bits 31:3; increment by `STR_RC_ONE` (the type and
@@ -5046,6 +5150,9 @@ impl Drop for Value {
     fn drop(&mut self) {
         match top16(self.0) {
             t if t <= TAG_INT => {} // primitives: no heap
+            TAG_STR if str_is_inline_bits(self.0) => {
+                // Inline (SSO, #2832): bytes live in the NaN-box, nothing to free.
+            }
             TAG_STR => unsafe {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
                 let rc_type_ptr = hdr as *mut u32;
