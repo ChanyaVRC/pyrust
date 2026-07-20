@@ -226,6 +226,16 @@ pub struct Interpreter {
     /// because the dict-only path is already guarded by `globals_accessed`
     /// and is not on the hot path of normal code.
     pub(crate) global_env_version: Cell<u32>,
+    /// Coarse "global namespace structure" version, bumped only when the *set*
+    /// of module globals changes in a way that can shadow/unshadow a built-in —
+    /// i.e. on `del`, on the cold assign paths, and (in `SyncModuleGlobal`) only
+    /// when the assigned name is itself a built-in.  Built-in `LoadGlobal`
+    /// resolutions are cached against THIS counter in `FnCode::builtin_cache`,
+    /// so a hot module-scope value reassignment (`n += …`, which bumps
+    /// `global_env_version` every iteration) no longer thrashes the built-in
+    /// cache — the dominant reason `len`/`ord`/… calls in a top-level loop were
+    /// several times slower than CPython.
+    pub(crate) global_struct_version: Cell<u32>,
     /// Tracks the nesting depth of `PushExcContext` instructions currently
     /// in progress.  Incremented by `PushExcContext`, decremented by
     /// `PopExcContext`.  While non-zero, `handle_vm_error` must NOT perform
@@ -409,6 +419,7 @@ impl Default for Interpreter {
             module_globals_dict: Value::dict(PyDict::default()),
             globals_accessed: false,
             global_env_version: Cell::new(0),
+            global_struct_version: Cell::new(0),
             push_exc_ctx_depth: 0,
             reraise_is_bare: false,
         }

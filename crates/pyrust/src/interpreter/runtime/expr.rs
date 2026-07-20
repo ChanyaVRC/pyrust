@@ -8884,7 +8884,7 @@ impl Interpreter {
             });
         }
         if let (Some(name), Some(synced_val)) = (globals_sync_name, val_for_fastlocal) {
-            bump_global_env_version(self);
+            bump_global_struct_version(self);
             if let Some(script_view) = self
                 .vm_frame_views
                 .iter()
@@ -9001,7 +9001,7 @@ impl Interpreter {
                 }
             }
             if let Some(name) = globals_del_name {
-                bump_global_env_version(self);
+                bump_global_struct_version(self);
                 if let Some(script_view) = self
                     .vm_frame_views
                     .iter()

@@ -3449,7 +3449,7 @@ impl Interpreter {
             module_env(&self.env).borrow_mut().values.insert(name, value.clone());
             // Invalidate the LoadGlobal inline cache: any function that cached
             // this global under the current version will re-fetch on its next call.
-            bump_global_env_version(self);
+            bump_global_struct_version(self);
             // Mirror into the live module globals dict only when globals() has
             // been called (globals_accessed == true).  Without this guard,
             // every StoreGlobal pays an extra IndexMap write even for scripts
@@ -3500,7 +3500,7 @@ impl Interpreter {
         let is_module_scope = self.env.borrow().parent.is_none();
         if is_module_scope {
             // Invalidate the LoadGlobal inline cache for module-scope writes.
-            bump_global_env_version(self);
+            bump_global_struct_version(self);
             if self.globals_accessed {
                 let _ = self.module_globals_dict.dict_insert(
                     PyKey::str_from(name),
@@ -3953,6 +3953,20 @@ pub(crate) fn bump_global_env_version(interp: &Interpreter) {
     // Skip GLOBAL_CACHE_EMPTY (u32::MAX - 1); wrap back to 0.
     let v = if v == GLOBAL_CACHE_EMPTY { 0 } else { v };
     interp.global_env_version.set(v);
+}
+
+/// Bump the global-namespace *structure* version (invalidating every cached
+/// built-in resolution) AND the value version.  Used for `del`, the cold
+/// assign paths, and built-in-shadowing `SyncModuleGlobal` writes — any change
+/// that can make a name resolve to a different built-in-vs-global than before.
+#[inline]
+pub(crate) fn bump_global_struct_version(interp: &Interpreter) {
+    let v = interp.global_struct_version.get().wrapping_add(1);
+    let v = if v == GLOBAL_CACHE_EMPTY { 0 } else { v };
+    interp.global_struct_version.set(v);
+    // A structural change is also a value change, so keep the value caches
+    // coherent too.
+    bump_global_env_version(interp);
 }
 
 /// Returns `true` if `val` is a data descriptor: it defines `__set__` or
@@ -4830,7 +4844,7 @@ impl Interpreter {
                     Some(name.to_string()),
                 ));
             }
-            bump_global_env_version(self);
+            bump_global_struct_version(self);
             // SAFETY: same as SetItem / DeleteItem (issue #547, PR #646).
             if let Some(script_view) = self
                 .vm_frame_views
@@ -4869,7 +4883,7 @@ impl Interpreter {
                 ));
             }
             if is_module_scope {
-                bump_global_env_version(self);
+                bump_global_struct_version(self);
             }
             let del_candidate = from_env.or(from_dict);
             if let Some(val) = del_candidate {

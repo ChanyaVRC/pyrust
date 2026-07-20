@@ -1076,6 +1076,17 @@ pub struct FnCode {
     /// Shared across all invocations of this function via `Rc<FnCode>` — the
     /// cache is function-granular, not call-granular.
     pub(crate) global_cache: RefCell<Vec<(u32, Value)>>,
+    /// Parallel `LoadGlobal` cache for names that resolved to a **built-in**.
+    /// Indexed by `name_idx`; each entry is `(cached_struct_version, value)`.
+    /// Validated against `interpreter.global_struct_version` (NOT the value
+    /// version), so a hot module-scope value reassignment does not evict cached
+    /// built-ins — only a structural change that could shadow the name does.
+    pub(crate) builtin_cache: RefCell<Vec<(u32, Value)>>,
+    /// Memoised "is `names[name_idx]` a built-in name?" — `0` = unknown, `1` =
+    /// no, `2` = yes.  Filled lazily on the first `SyncModuleGlobal` for each
+    /// name so the shadowing check costs one `resolve_builtin` per name, not
+    /// per iteration.  A name's built-in-ness never changes, so this is stable.
+    pub(crate) name_is_builtin: RefCell<Vec<u8>>,
     /// Adaptive inline cache for binary operations (PEP 659 style).
     ///
     /// Indexed by instruction position (`pc`) — same length as `insns`.
