@@ -1822,15 +1822,16 @@ pyrust_module! {
 
     /// CPython: isinstance(obj, classinfo) — type check.
     /// <https://docs.python.org/3/library/functions.html#isinstance>
-    fn isinstance(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
-            ));
-        }
-        let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
+    // Typed dialect (#builtin-fast-dispatch): two positional-only args, so
+    // `isinstance(x, C)` gets the vectorcall fast entry.  `expected_got` arity
+    // style reproduces the `isinstance expected 2 arguments, got N` wording the
+    // legacy body spelled out.
+    #[arity_style(expected_got)]
+    fn isinstance(
+        #[positional_only] obj: PyValue,
+        #[positional_only] classinfo: PyValue,
+    ) -> Result<Value> {
+        let result = isinstance_check(FN_NAME, &obj.0, &classinfo.0, _interp)?;
         Ok(Value::bool_(result))
     }
 
@@ -2475,15 +2476,13 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#len>
     /// Not marked `#[pure]`: the `PyInstance` arm dispatches user `__len__` via
     /// `invoke_class_method`, which can run arbitrary user code (issue #1526).
-    fn len(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes exactly one argument ({} given)", args.len()),
-            ));
-        }
-        let value = &args[0].value;
+    // Typed dialect (#builtin-fast-dispatch): a single positional-only arg, so
+    // `len(x)` gets the vectorcall fast entry.  The typed prelude supplies the
+    // "takes exactly one argument" arity guard and the "takes no keyword
+    // arguments" rejection that the legacy body used to spell out by hand.
+    #[arity_style(takes_exactly_one)]
+    fn len(#[positional_only] obj: PyValue) -> Result<Value> {
+        let value = &obj.0;
         let size = match value.kind() {
             ValueKind::Str(text) => text.chars().count() as i64,
             ValueKind::List(items) => items.len() as i64,
