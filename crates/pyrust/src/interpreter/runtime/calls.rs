@@ -6769,6 +6769,11 @@ pub(crate) enum CallBuiltinCacheEntry {
         /// callee changes rather than mis-dispatching.
         name: &'static str,
         dispatch: crate::builtin_registry::BuiltinDispatchFn,
+        /// Optional "vectorcall" fast entry + inclusive positional-arity bounds
+        /// `(min, max)`.  When present and the call's `argc` is in range, the VM
+        /// passes the argument values as a register subslice and skips the
+        /// `ExpandedCallArg` buffer + kwarg/arity validation entirely.
+        fast: Option<(crate::builtin_registry::BuiltinFastDispatchFn, u8, u8)>,
     },
 }
 

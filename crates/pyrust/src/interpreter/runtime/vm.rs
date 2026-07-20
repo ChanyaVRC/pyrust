@@ -3709,6 +3709,41 @@ impl Interpreter {
                                 continue 'vm;
                             }
                         }
+                    // Vectorcall fast path: a warm-cached built-in with a fast
+                    // entry whose positional arity matches is dispatched straight
+                    // from the argument registers — no `ExpandedCallArg` buffer,
+                    // no kwarg/arity validation.  Only fires on a warm cache
+                    // (populated by the general path below on the first call), so
+                    // rebinding / polymorphic sites re-resolve correctly.
+                    if let ValueKind::BuiltinFunction(name) = func_val.kind() {
+                        let fast_hit = {
+                            let cache = code.call_builtin_cache.borrow();
+                            match cache[pc - 1] {
+                                CallBuiltinCacheEntry::Cached {
+                                    name: cn,
+                                    fast: Some((f, min, max)),
+                                    ..
+                                } if cn == name && (min..=max).contains(argc) =>
+                                {
+                                    Some(f)
+                                }
+                                _ => None,
+                            }
+                        };
+                        if let Some(f) = fast_hit {
+                            let base = (*func_reg + 1) as usize;
+                            let n = *argc as usize;
+                            // Positional `Call` always fills these slots; guard
+                            // against an unset register so an error matches the
+                            // general path's `vm_read` rather than reading garbage.
+                            // `RegSlice` has no range `Index`; deref to `[Value]`.
+                            if !(*regs)[base..base + n].iter().any(|v| v.is_unset()) {
+                                let result = f(self, &(*regs)[base..base + n]);
+                                regs[*func_reg as usize] = vm_try!(result);
+                                continue 'vm;
+                            }
+                        }
+                    }
                     tramp_try!(*func_reg, *argc, func_val);
                     // Bound-method trampoline (#2345): `f = o.m; f()` calls a
                     // BoundMethod through Insn::Call.  Trampoline the underlying
@@ -3804,7 +3839,7 @@ impl Interpreter {
                             let hit = {
                                 let cache = code.call_builtin_cache.borrow();
                                 match cache[call_pc] {
-                                    CallBuiltinCacheEntry::Cached { name: cn, dispatch }
+                                    CallBuiltinCacheEntry::Cached { name: cn, dispatch, .. }
                                         if cn == name =>
                                     {
                                         Some(dispatch)
@@ -3820,7 +3855,11 @@ impl Interpreter {
                                 && let Some(dispatch) = crate::builtin_registry::lookup(name)
                             {
                                 code.call_builtin_cache.borrow_mut()[call_pc] =
-                                    CallBuiltinCacheEntry::Cached { name, dispatch };
+                                    CallBuiltinCacheEntry::Cached {
+                                        name,
+                                        dispatch,
+                                        fast: crate::builtin_registry::lookup_fast(name),
+                                    };
                                 break 'call dispatch(self, &buf);
                             }
                         }
