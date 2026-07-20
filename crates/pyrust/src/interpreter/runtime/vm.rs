@@ -659,6 +659,13 @@ pub(crate) enum IterState {
     /// and cannot be accessed by slot index).  Avoids the extra Vec allocation
     /// and N element clones that `Materialized` would incur via `iter_values`.
     ValueIndexed { value: Value, pos: usize },
+    /// Lazy iteration over an all-ASCII string: holds the string Value and a
+    /// byte offset, yielding one single-byte character per step (a cheap inline
+    /// SSO string) instead of materialising a `Vec` of N char strings on every
+    /// `for ch in s` entry.  Only used for ASCII strings, where byte index ==
+    /// char boundary; non-ASCII / CESU-8 strings keep the `Materialized` path.
+    /// Strings are immutable, so no mutation guard is needed.
+    StrAsciiIndexed { value: Value, pos: usize },
     /// User-defined iterator: holds the iterator object (result of __iter__).
     /// Each ForIter call invokes __next__() on it and stops on StopIteration.
     UserDefined(Value),
@@ -4730,6 +4737,20 @@ impl Interpreter {
                                     od_seq,
                                 }
                             }
+                            IterTag::Other
+                                if matches!(src_val.kind(), ValueKind::Str(_))
+                                    && src_val.str_is_ascii() =>
+                            {
+                                // Lazy ASCII string iteration: yield one inline
+                                // single-byte char per step instead of building
+                                // a Vec of N char strings on every `for` entry.
+                                // ASCII ⇒ byte offset == char boundary; strings
+                                // are immutable ⇒ no mutation guard.
+                                IterState::StrAsciiIndexed {
+                                    value: src_val,
+                                    pos: 0,
+                                }
+                            }
                             IterTag::Other => {
                                 // dict / set / dict-views: snapshot but guard
                                 // against size mutation during iteration (#1988).
@@ -4819,6 +4840,28 @@ impl Interpreter {
                                     regs[*dst as usize] = v;
                                 }
                                 _ => pc = jump_pc!(*offset),
+                            }
+                        }
+                        Some(IterState::StrAsciiIndexed { value, pos }) => {
+                            let cur_pos = *pos;
+                            // Build the next 1-byte char (inline, no heap) in a
+                            // scope that borrows `value`, then release it before
+                            // mutating `pos` / `regs`.  `value` is all-ASCII, so
+                            // `cur_pos` is always a char boundary.
+                            let next = {
+                                let s = value.as_str().unwrap_or("");
+                                if cur_pos < s.len() {
+                                    Some(Value::string(&s[cur_pos..cur_pos + 1]))
+                                } else {
+                                    None
+                                }
+                            };
+                            match next {
+                                Some(ch) => {
+                                    *pos = cur_pos + 1;
+                                    regs[*dst as usize] = ch;
+                                }
+                                None => pc = jump_pc!(*offset),
                             }
                         }
                         Some(IterState::Materialized(items, pos)) => {
