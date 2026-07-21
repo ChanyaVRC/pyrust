@@ -3618,6 +3618,21 @@ impl Value {
         // is avoided.  These shapes dominate hot sites (`dict.items()`,
         // `enumerate()`, `divmod()`, `str.partition()`, …).
         match v.len() {
+            0 => {
+                // Empty tuple: share one immutable singleton, so `() is ()` is
+                // True (CPython parity, where `()` is a singleton) and an empty
+                // `*args` collection costs no allocation.
+                thread_local! {
+                    static EMPTY_TUPLE: Value = {
+                        let inner = Rc::new(TupleInner {
+                            items: Vec::new(),
+                            obj_id: next_obj_id(),
+                        });
+                        unsafe { Value::tuple_from_rc(inner) }
+                    };
+                }
+                EMPTY_TUPLE.with(|t| t.clone())
+            }
             2 => {
                 let b = v.pop().unwrap();
                 let a = v.pop().unwrap();
