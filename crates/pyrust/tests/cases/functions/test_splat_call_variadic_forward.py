@@ -107,3 +107,31 @@ def fixed(a, b, c):
 
 for fn in (inner, fixed, inner, fixed):
     print(fn(*[10, 20, 30]))
+
+
+# A param filled by BOTH a positional (via the splat) and a keyword (via **kw)
+# is "got multiple values for argument" — the shared variadic binder must raise
+# this exactly like CPython, in GIVEN-keyword order (not param order), ahead of
+# unexpected-keyword and missing-arg diagnostics.
+def mv(a, b, *rest, **kw):
+    return (a, b, rest, sorted(kw.items()))
+
+
+def fwd(fn, *args, **kwargs):
+    return fn(*args, **kwargs)
+
+
+try:
+    fwd(mv, 1, a=9)  # a filled by positional 1 and keyword a=9
+except TypeError as exc:
+    print("TypeError:", exc)
+try:
+    fwd(mv, 1, 2, b=9, a=9)  # both collide; keyword order -> report 'b'
+except TypeError as exc:
+    print("TypeError:", exc)
+try:
+    fwd(mv, 1, 2, a=9, zzz=3)  # multiple-values beats unexpected-keyword
+except TypeError as exc:
+    print("TypeError:", exc)
+# No collision: 'c' named by keyword is never positionally filled here.
+print(fwd(mv, 1, c=9, b=8))
