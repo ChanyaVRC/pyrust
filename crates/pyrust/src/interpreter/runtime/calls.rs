@@ -4978,7 +4978,26 @@ impl Interpreter {
                 positional_vals.push(arg.value.clone());
             }
         }
+        self.call_user_function_variadic_split(function, positional_vals, keyword_vals, has_args_param)
+    }
 
+    /// Bind pre-split positional / keyword argument vectors into a variadic
+    /// callee's frame and run it.  The tail of `call_user_function_variadic`,
+    /// factored out (#2841 follow-up) so the `CallExArgs` positional-splat
+    /// handler can feed `positional_vals` (leading positionals + `*args` splat
+    /// elements) and `keyword_vals` (the `**kw` dict entries) STRAIGHT in —
+    /// skipping the `ExpandedCallArg` buffer and the second per-arg clone the
+    /// general path pays to split that buffer back into these two vectors.
+    ///
+    /// `has_args_param` is whether the callee has a `*args` parameter (drives the
+    /// excess-positional pre-check ordering, matching CPython).
+    fn call_user_function_variadic_split(
+        &mut self,
+        function: Rc<UserFunction>,
+        positional_vals: Vec<Value>,
+        keyword_vals: Vec<(String, Value)>,
+        has_args_param: bool,
+    ) -> Result<Value> {
         // Pre-check: reject excess positional arguments before binding when
         // there is no *args to absorb them. This matches CPython's error ordering.
         if !has_args_param {
