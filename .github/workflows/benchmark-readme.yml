@@ -57,19 +57,6 @@ jobs:
             -f ref=refs/heads/benchmark-data \
             -f sha=$(git rev-parse HEAD)
 
-      - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: customSmallerIsBetter
-          output-file-path: benchmark-output.json
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: true
-          gh-pages-branch: benchmark-data
-          benchmark-data-dir-path: dev/bench
-          alert-threshold: "130%"
-          comment-on-alert: true
-          summary-always: true
-
       - name: Checkout benchmark-data for Pages
         uses: actions/checkout@v4
         with:
