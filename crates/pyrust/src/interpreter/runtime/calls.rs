@@ -5108,19 +5108,20 @@ impl Interpreter {
             let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
 
             // Bind non-cell params into register file using precomputed slots
-            // (#1918).  Cell-var params are inserted into the env below.
-            for ((param, bind), val) in function
-                .params
-                .iter()
-                .zip(function.param_binds.iter())
-                .zip(param_vals.iter())
-            {
+            // (#1918).  Cell-var params are inserted into the env below.  Each
+            // param binds to EITHER a register OR a cell, so we move the value
+            // out of `param_vals` (leaving `unset`) instead of cloning — the
+            // second clone (source -> param_vals -> regs) was pure overhead on
+            // every variadic call.  The cell loop below moves the remaining
+            // (cell) entries.
+            for (param_index, bind) in function.param_binds.iter().enumerate() {
                 if let pyrust_core::ParamBind::Reg(slot) = *bind {
                     if (slot as usize) >= num_regs {
                         return Err(pyrust_core::py_err!("SystemError", "parameter '{}' register index {} out of range (num_regs={})",
-                                param.name, slot, num_regs));
+                                function.params[param_index].name, slot, num_regs));
                     }
-                    regs[slot as usize] = val.clone();
+                    regs[slot as usize] =
+                        std::mem::replace(&mut param_vals[param_index], Value::unset());
                 }
             }
             // Self-reference for recursive calls (only if not a cell var).
@@ -5160,15 +5161,16 @@ impl Interpreter {
                     e.local_names = Rc::clone(&function.local_names);
                     e.global_names = Rc::clone(&function.global_names);
                     e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                    // Store cell var params in the env so inner closures can capture them.
-                    for ((param, bind), val) in function
-                        .params
-                        .iter()
-                        .zip(function.param_binds.iter())
-                        .zip(param_vals.iter())
-                    {
+                    // Store cell var params in the env so inner closures can
+                    // capture them.  Move out of `param_vals` (the reg loop above
+                    // only consumed the `Reg`-bound entries, so cell entries are
+                    // still intact) to avoid the redundant clone.
+                    for (param_index, bind) in function.param_binds.iter().enumerate() {
                         if *bind == pyrust_core::ParamBind::Cell {
-                            e.values.insert(&param.name, val.clone());
+                            e.values.insert(
+                                &function.params[param_index].name,
+                                std::mem::replace(&mut param_vals[param_index], Value::unset()),
+                            );
                         }
                     }
                 }
