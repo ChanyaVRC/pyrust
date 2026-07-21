@@ -13,6 +13,11 @@ pub type CellVar = String;
 
 pub type Reg = u32;
 
+/// Sentinel `Reg` marking an absent operand — currently the missing `**kw`
+/// mapping of an [`Insn::CallExArgs`] with no double-splat.  No real register is
+/// ever allocated at `u32::MAX`, so it can never collide with a live operand.
+pub const NO_KWARGS: Reg = Reg::MAX;
+
 /// How a `DictMergeKwCall` / `SetItemKwCall` recovers the callee's qualified
 /// name for the `… got multiple values for keyword argument …` error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -359,6 +364,33 @@ pub enum Insn {
     /// no literal keywords, non-method callee; every other variadic shape keeps
     /// the generic path.
     CallEx { func: Reg, npos: u8, kwargs: Reg },
+    /// Positional-splat expansion call `f(<pos…>, *args[, **kw])` (the
+    /// decorator/wrapper shape).  `npos` plain leading positionals occupy
+    /// `R[func+1 .. func+1+npos]` contiguously; `R[args_splat]` holds the single
+    /// `*args` iterable; `R[kwargs]` holds the single `**kw` mapping, or the
+    /// sentinel [`NO_KWARGS`] when the call has no `**kw`.  Result is written back
+    /// to `R[func]`.
+    ///
+    /// This replaces the old `BuildList`+`ListExtend`+`BuildDict`+`DictMergeKwCall`
+    /// +`LoadGlobal(__vcall__)`+`Move`×3+`Call` lowering for the common
+    /// single-`*args`(+optional single-`**kw`) shape, which allocated a list and a
+    /// dict, copied every splatted element and every kwarg into them, looked up
+    /// the `__vcall__` global, and round-tripped through the builtin on every
+    /// call.  The runtime handler ([`Interpreter::exec_call_ex_args`]) reads the
+    /// splat iterable and the `**kw` mapping directly.  A per-call-site cache
+    /// ([`KwCallCacheEntry::ExArgs`]) records the callee prototype + total
+    /// positional count + `**kw` key-set → parameter-slot mapping for a
+    /// monomorphic plain-`UserFunction` callee, so on a hit the values bind
+    /// straight into their slots with no intermediate list/dict and no name scan.
+    /// Only emitted for a single `*args` (as the last positional group), an
+    /// optional single trailing `**kw`, no literal keywords, non-method callee;
+    /// every other variadic shape keeps the generic `__vcall__` lowering.
+    CallExArgs {
+        func: Reg,
+        npos: u8,
+        args_splat: Reg,
+        kwargs: Reg,
+    },
     /// Keyword-argument method call `R[obj].name(<pos…>, k=v…)` with no
     /// `*args` / `**kwargs` splats (issue #2392).  The receiver lives in
     /// `R[obj]`; the `total` argument values occupy `R[args_base ..
@@ -853,6 +885,24 @@ pub enum KwCallCacheEntry {
         /// One param index per key in `keyset` order.
         slots: SmallVec<[u32; 4]>,
     },
+    /// `Insn::CallExArgs` (`f(<pos…>, *args[, **kw])`) monomorphic shape cache.
+    /// Both the `*args` length and the `**kw` keys are dynamic, so alongside the
+    /// `param_binds_ptr` callee identity this records the exact `total_pos`
+    /// (leading positionals + splat length) and `**kw` `keyset` last observed.  On
+    /// a hit — same callee prototype, same `total_pos`, and the dict's keys equal
+    /// `keyset` in order — the positional and keyword values bind straight into
+    /// `slots`.  A `total_pos` or key-set change re-resolves (re-fills) rather than
+    /// pinning `Fallback`, so a wrapper forwarding a varying number of positionals
+    /// still fast-binds on the arity it most recently saw.  `keyset` is empty when
+    /// the call has no `**kw`.
+    ExArgs {
+        param_binds_ptr: *const (),
+        total_pos: u32,
+        /// The `**kw` dict's `str` keys, in iteration order (empty if no `**kw`).
+        keyset: SmallVec<[Box<str>; 4]>,
+        /// One param index per keyword in `keyset` order.
+        slots: SmallVec<[u32; 4]>,
+    },
 }
 
 // SAFETY: pyrust's interpreter is single-threaded.  `KwCallCacheEntry` is only
@@ -878,6 +928,17 @@ impl std::fmt::Debug for KwCallCacheEntry {
                 write!(
                     f,
                     "ExSimple {{ npos: {npos}, keyset: {keyset:?}, slots: {slots:?} }}"
+                )
+            }
+            KwCallCacheEntry::ExArgs {
+                total_pos,
+                keyset,
+                slots,
+                ..
+            } => {
+                write!(
+                    f,
+                    "ExArgs {{ total_pos: {total_pos}, keyset: {keyset:?}, slots: {slots:?} }}"
                 )
             }
         }

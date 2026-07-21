@@ -3999,6 +3999,20 @@ impl Interpreter {
                     regs[*func as usize] = vm_try!(res);
                 }
 
+                Insn::CallExArgs { func, npos, args_splat, kwargs } => {
+                    // Positional-splat expansion call `f(<pos…>, *args[, **kw])`
+                    // (the decorator/wrapper shape).  `R[func+1 .. func+1+npos]`
+                    // are leading positionals; `R[args_splat]` is the `*args`
+                    // iterable; `R[kwargs]` is the `**kw` mapping or `NO_KWARGS`.
+                    // Result is written back to `R[func]`.  Full body (shape-cache
+                    // lookup / fill + fast bind + slow-path fallback) lives in
+                    // fast_path.rs::exec_call_ex_args.
+                    let res = self.exec_call_ex_args(
+                        &regs, code, pc, *func, *npos, *args_splat, *kwargs, num_locals,
+                    );
+                    regs[*func as usize] = vm_try!(res);
+                }
+
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
                     // Method-call trampoline (#2345): on an inline-cache hit for
                     // a plain Python method, bind the receiver to `self` and loop

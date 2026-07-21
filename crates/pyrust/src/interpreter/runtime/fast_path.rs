@@ -2108,6 +2108,254 @@ impl Interpreter {
         call_result
     }
 
+    /// Full body of `Insn::CallExArgs` — a positional-splat expansion call
+    /// `f(<pos…>, *args[, **kw])` (the decorator/wrapper shape).  Leading
+    /// positionals occupy `R[func+1 .. func+1+npos]`; `R[args_splat]` is the
+    /// single `*args` iterable; `R[kwargs]` is the single `**kw` mapping, or
+    /// [`crate::bytecode::NO_KWARGS`] when the call has no `**kw`.  Returns the
+    /// call result.
+    ///
+    /// Fast path: a plain `Regular` `UserFunction` callee whose fixed-arity
+    /// binding is simple, a `*args` splat that is a plain `tuple`/`list` (directly
+    /// indexable — no user `__iter__`), and a `**kw` that is a plain `dict` (or
+    /// absent).  A per-call-site shape cache ([`KwCallCacheEntry::ExArgs`]) keyed
+    /// on `(param_binds identity, total positional count, dict key-set)` records
+    /// the key→slot mapping; on a hit the leading positionals, splat elements, and
+    /// dict values bind straight into their parameter slots via the #2382
+    /// `call_user_function_kw_cached`, with no intermediate list/dict and no name
+    /// scan.  A variadic (`*args`/`**kwargs`) callee, or any other non-simple
+    /// binding shape, pins the site to `Fallback`; a non-tuple/list splat,
+    /// non-dict `**kw`, non-`Regular` callee, or overridden `__defaults__` skips
+    /// the fast path for that call without pinning.
+    ///
+    /// Slow path: materialise the leading positionals, the splat elements
+    /// (honouring user `__iter__` / `__getitem__`, exactly as the old `ListExtend`
+    /// lowering did), and the `**kw` entries into an `ExpandedCallArg` buffer — no
+    /// intermediate list/dict, no `__vcall__` global lookup or builtin dispatch —
+    /// and dispatch through `call_function_expanded`, which owns every
+    /// CPython-parity binding diagnostic.  The argument order is exactly the
+    /// source order the compiler guarantees for this shape: leading positionals,
+    /// then the splat elements, then the `**kw` entries.
+    #[allow(clippy::too_many_arguments)]
+    fn exec_call_ex_args(
+        &mut self,
+        regs: &RegSlice,
+        code: &crate::bytecode::FnCode,
+        pc: usize,
+        func: crate::bytecode::Reg,
+        npos: u8,
+        args_splat: crate::bytecode::Reg,
+        kwargs: crate::bytecode::Reg,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        use crate::bytecode::KwCallCacheEntry;
+        let func_val = vm_read(regs, func, num_locals)?;
+        let args_splat_val = vm_read(regs, args_splat, num_locals)?;
+        let kwargs_val = if kwargs != crate::bytecode::NO_KWARGS {
+            Some(vm_read(regs, kwargs, num_locals)?)
+        } else {
+            None
+        };
+
+        // Fast path requires a plain user function (Regular kind), a directly
+        // indexable `*args` (plain tuple/list, whose iteration can't be user
+        // overridden), and a plain `dict` (or absent) `**kw`.
+        let user_fn = match func_val.kind() {
+            ValueKind::UserFunction(f)
+                if matches!(f.kind, pyrust_core::UserFunctionKind::Regular) =>
+            {
+                Some(Rc::clone(f))
+            }
+            _ => None,
+        };
+        let splat_len = args_splat_val
+            .as_tuple()
+            .map(|s| s.len())
+            .or_else(|| args_splat_val.list_len());
+        let kw_is_plain = kwargs_val
+            .as_ref()
+            .is_none_or(|v| matches!(v.kind(), ValueKind::Dict(_)));
+
+        // #2395: bypass the kw-call cache when __defaults__ has been overridden.
+        if let (Some(f), Some(slen), true) = (
+            user_fn.filter(|f| f.defaults_override.borrow().is_none()),
+            splat_len,
+            kw_is_plain,
+        ) {
+            {
+                let total_pos = npos as u32 + slen as u32;
+                let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
+
+                // A hit reuses `slots`; a `total_pos`/key-set/identity miss
+                // re-resolves (unless pinned to `Fallback`).  With no `**kw` the
+                // cached `keyset` must be empty.
+                enum Action {
+                    Hit(smallvec::SmallVec<[u32; 4]>),
+                    Resolve,
+                    Fallback,
+                }
+                let kw_keys_match = |keyset: &[Box<str>]| match &kwargs_val {
+                    Some(d) => dict_keys_match(d, keyset),
+                    None => keyset.is_empty(),
+                };
+                let action = {
+                    let cache = code.kwcall_cache.borrow();
+                    match &cache[pc - 1] {
+                        KwCallCacheEntry::ExArgs { param_binds_ptr, total_pos: ctp, keyset, slots }
+                            if *param_binds_ptr == pbptr
+                                && *ctp == total_pos
+                                && kw_keys_match(keyset) =>
+                        {
+                            Action::Hit(slots.clone())
+                        }
+                        KwCallCacheEntry::Fallback => Action::Fallback,
+                        _ => Action::Resolve,
+                    }
+                };
+
+                match action {
+                    Action::Hit(slots) => {
+                        return self.call_ex_args_fast_bind(
+                            &f,
+                            regs,
+                            func,
+                            npos,
+                            &args_splat_val,
+                            total_pos as usize,
+                            kwargs_val.as_ref(),
+                            &slots,
+                            num_locals,
+                        );
+                    }
+                    Action::Resolve => {
+                        // Read the `**kw` keys (in iteration order) as a kwnames
+                        // vec to feed the shared resolver (empty when no `**kw`).
+                        // Bail to the slow path on any non-`str` key.
+                        let kwnames: Option<Vec<Value>> = match &kwargs_val {
+                            Some(d) => d
+                                .dict_with(|dict| {
+                                    let mut names: Vec<Value> = Vec::with_capacity(dict.len());
+                                    for k in dict.keys() {
+                                        match k {
+                                            pyrust_core::PyKey::Str(s) => names.push(s.clone()),
+                                            _ => return None,
+                                        }
+                                    }
+                                    Some(names)
+                                })
+                                .flatten(),
+                            None => Some(Vec::new()),
+                        };
+
+                        if let Some(kwnames) = kwnames {
+                            if let Some(slots) =
+                                Self::kwcall_resolve_simple(&f, total_pos as usize, &kwnames)
+                            {
+                                let keyset: smallvec::SmallVec<[Box<str>; 4]> = kwnames
+                                    .iter()
+                                    .map(|v| Box::<str>::from(v.as_str().unwrap_or("")))
+                                    .collect();
+                                code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::ExArgs {
+                                    param_binds_ptr: pbptr,
+                                    total_pos,
+                                    keyset,
+                                    slots: slots.clone(),
+                                };
+                                return self.call_ex_args_fast_bind(
+                                    &f,
+                                    regs,
+                                    func,
+                                    npos,
+                                    &args_splat_val,
+                                    total_pos as usize,
+                                    kwargs_val.as_ref(),
+                                    &slots,
+                                    num_locals,
+                                );
+                            }
+                            // Structurally not simple for this callee (variadic
+                            // `*args`/`**kwargs` receiver, missing required, etc.):
+                            // pin Fallback so we don't rebuild kwnames every call.
+                            code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                        }
+                        // Non-str key → slow path; do NOT pin Fallback, the general
+                        // binder raises the right TypeError.
+                    }
+                    Action::Fallback => {}
+                }
+            }
+        }
+
+        // Slow path: materialise positionals + splat elements + `**kw` entries into
+        // an `ExpandedCallArg` buffer and dispatch through the general binder.
+        let mut buf = std::mem::take(&mut self.call_arg_buf);
+        buf.clear();
+        for i in 0..npos as u32 {
+            buf.push(ExpandedCallArg { name: None, value: vm_read(regs, func + 1 + i, num_locals)? });
+        }
+        let result = self.collect_iterable(&args_splat_val).and_then(|items| {
+            for value in items {
+                buf.push(ExpandedCallArg { name: None, value });
+            }
+            if let Some(kwargs_val) = &kwargs_val {
+                self.expand_kwargs_into(kwargs_val, &mut buf)?;
+            }
+            self.call_function_expanded(func_val, &buf)
+        });
+        self.call_arg_buf = buf;
+        result
+    }
+
+    /// Read the `npos` leading positionals, the `*args` splat elements (a plain
+    /// tuple/list), and the `**kw` dict values (in iteration order, aligned with
+    /// the cached `slots`) and bind them straight into the callee frame via the
+    /// #2382 fast bind.  Caller guarantees the cache entry was a validated
+    /// `ExArgs` hit for this `(callee, total_pos, key-set)`, so no per-call
+    /// diagnostics are needed.
+    #[allow(clippy::too_many_arguments)]
+    fn call_ex_args_fast_bind(
+        &mut self,
+        f: &Rc<UserFunction>,
+        regs: &RegSlice,
+        func: crate::bytecode::Reg,
+        npos: u8,
+        args_splat_val: &Value,
+        total_pos: usize,
+        kwargs_val: Option<&Value>,
+        slots: &[u32],
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Value> {
+        let Some(callee_code) = self.get_or_compile_bytecode(f) else {
+            return Err(PyError::Runtime(format!("no bytecode for '{}'", f.name)));
+        };
+        // Positionals, in source order: leading fixed positionals, then the splat
+        // elements (a plain tuple/list — cloned, not the same Rc, so the callee's
+        // `*args` keeps CPython's fresh-tuple identity when it is variadic; a
+        // variadic callee never reaches this fast bind anyway).
+        let mut pos_vals: smallvec::SmallVec<[Value; 8]> =
+            smallvec::SmallVec::with_capacity(total_pos);
+        for i in 0..npos as u32 {
+            pos_vals.push(vm_read(regs, func + 1 + i, num_locals)?);
+        }
+        if let Some(s) = args_splat_val.as_tuple() {
+            pos_vals.extend(s.iter().cloned());
+        } else if let Some(items) = args_splat_val.list_with(|v| v.clone()) {
+            pos_vals.extend(items);
+        }
+        // Dict values in iteration order (aligned with `slots` / the cached keyset).
+        let kw_vals: smallvec::SmallVec<[Value; 4]> = kwargs_val
+            .and_then(|v| v.dict_with(|d| d.values().cloned().collect()))
+            .unwrap_or_default();
+        self.call_user_function_kw_cached(
+            f,
+            &callee_code,
+            total_pos,
+            &mut pos_vals.into_iter(),
+            slots,
+            &mut kw_vals.into_iter(),
+        )
+    }
+
     /// Read the `npos` positional registers and the `**d` dict values (in
     /// iteration order, aligned with the cached `slots`) and bind them straight
     /// into the callee frame via the #2382 fast bind.  Caller guarantees the

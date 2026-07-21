@@ -2297,6 +2297,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::CallMemo(..)
             | Insn::CallKw { .. }
             | Insn::CallEx { .. }
+            | Insn::CallExArgs { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodKw { .. }
             | Insn::CallMethodExpanded { .. }
@@ -2375,6 +2376,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | CallMemo(r, _)
         | CallKw { func: r, .. }
         | CallEx { func: r, .. }
+        | CallExArgs { func: r, .. }
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
@@ -3407,6 +3409,16 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         // CallEx reads the callee + `npos` positional registers (contiguous) and
         // the separate `kwargs` (`**d`) register.
         CallEx { func, npos, kwargs } => (r >= *func && r <= *func + *npos as u32) || r == *kwargs,
+        CallExArgs {
+            func,
+            npos,
+            args_splat,
+            kwargs,
+        } => {
+            (r >= *func && r <= *func + *npos as u32)
+                || r == *args_splat
+                || (*kwargs != crate::bytecode::NO_KWARGS && r == *kwargs)
+        }
         // args_base is always >= 1 (compiler sets it to func_reg + 1, func_reg >= 0),
         // so args_base - 1 is the callee register and the subtraction never underflows.
         TailCall { args_base, nargs } => {
@@ -3611,6 +3623,20 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
                 reads.insert(r);
             }
             reads.insert(*kwargs);
+        }
+        CallExArgs {
+            func,
+            npos,
+            args_splat,
+            kwargs,
+        } => {
+            for r in *func..=(*func + *npos as u32) {
+                reads.insert(r);
+            }
+            reads.insert(*args_splat);
+            if *kwargs != crate::bytecode::NO_KWARGS {
+                reads.insert(*kwargs);
+            }
         }
         TailCall { args_base, nargs } => {
             reads.insert(*args_base - 1);
@@ -4143,6 +4169,7 @@ fn numeric_inplace_sites(insns: &[Insn], consts: &[Value]) -> HashSet<usize> {
             | Insn::CallMemo(..)
             | Insn::CallKw { .. }
             | Insn::CallEx { .. }
+            | Insn::CallExArgs { .. }
             | Insn::CallMethod { .. }
             | Insn::CallMethodKw { .. }
             | Insn::CallMethodExpanded { .. }
@@ -4506,6 +4533,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | CallMemo(r, _)
         | CallKw { func: r, .. }
         | CallEx { func: r, .. }
+        | CallExArgs { func: r, .. }
         | Move(r, _)
         | CopyReg(r, _)
         | DeleteLocal(r, _) => {
@@ -5399,6 +5427,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallMemo(..)
                 | Insn::CallKw { .. }
                 | Insn::CallEx { .. }
+                | Insn::CallExArgs { .. }
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodKw { .. }
                 | Insn::CallMethodExpanded { .. }
@@ -6042,6 +6071,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                     | Insn::CallMemo(_, _)
                     | Insn::CallKw { .. }
                     | Insn::CallEx { .. }
+                    | Insn::CallExArgs { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodKw { .. }
                     | Insn::CallMethodExpanded { .. }
@@ -6063,6 +6093,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
                     | Insn::CallMemo(_, _)
                     | Insn::CallKw { .. }
                     | Insn::CallEx { .. }
+                    | Insn::CallExArgs { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodKw { .. }
                     | Insn::CallMethodExpanded { .. }
@@ -6465,6 +6496,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::CallMemo(..)
                 | Insn::CallKw { .. }
                 | Insn::CallEx { .. }
+                | Insn::CallExArgs { .. }
                 | Insn::CallMethod { .. }
                 | Insn::CallMethodKw { .. }
                 | Insn::CallMethodExpanded { .. }
@@ -8578,6 +8610,20 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
                 f(r);
             }
             f(*kwargs);
+        }
+        CallExArgs {
+            func,
+            npos,
+            args_splat,
+            kwargs,
+        } => {
+            for r in *func..=(*func + *npos as u32) {
+                f(r);
+            }
+            f(*args_splat);
+            if *kwargs != crate::bytecode::NO_KWARGS {
+                f(*kwargs);
+            }
         }
         TailCall { args_base, nargs } => {
             f(args_base - 1);
@@ -11980,6 +12026,7 @@ mod tests {
                     | Insn::CallMemo(..)
                     | Insn::CallKw { .. }
                     | Insn::CallEx { .. }
+                    | Insn::CallExArgs { .. }
                     | Insn::CallMethod { .. }
                     | Insn::CallMethodKw { .. }
                     | Insn::CallMethodExpanded { .. }
