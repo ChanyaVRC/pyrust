@@ -23,8 +23,8 @@ use crate::interpreter::{
     AsyncGenASend, BigRangeIter, CallableIter, ChainFromIterableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_hash_inherits_builtin_none, class_is_subclass_of,
     class_suppresses_instance_dict,
-    classify_sort, compare_values, compare_values_with_op, coerce_numeric,
-    coerce_subclass_backing, dir_names, dispatch_numeric_binop, SortKind,
+    compare_values, compare_values_with_op, coerce_numeric,
+    coerce_subclass_backing, dir_names, dispatch_numeric_binop,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     builtin_data_backing, extract_str_value, float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
@@ -36,7 +36,7 @@ use crate::interpreter::{
     unicode_exc_set_attrs,
     value_to_float, value_type_name_str,
 };
-use crate::value::{InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
+use crate::value::{InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, SortKind, UserFunctionKind, Value, ValueKind, classify_sort, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
