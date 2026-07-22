@@ -2747,6 +2747,16 @@ impl Interpreter {
                         regs[*dst as usize] = result;
                         continue;
                     }
+                    // In-place `s += t` for plain str += str (issue #2850): grow
+                    // the LHS backing in place when uniquely owned, else fresh
+                    // concat. Sits after the int fast path so int `+=` is
+                    // untouched. Requires reading the RHS reg by reference first.
+                    if regs[*lhs as usize].is_str() && regs[*rhs as usize].is_str() {
+                        let r = regs[*rhs as usize].clone();
+                        if try_str_inplace_concat(&mut regs, *dst, *lhs, *op, &r) {
+                            continue;
+                        }
+                    }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, true)) {
@@ -2767,6 +2777,15 @@ impl Interpreter {
                     {
                         regs[*dst as usize] = result;
                         continue;
+                    }
+                    // In-place `s += "lit"` for plain str += str (issue #2850).
+                    // Only on a genuine augmented assignment (`is_aug`); a
+                    // const-folded plain binary `+` must not mutate the LHS.
+                    if *is_aug && regs[*lhs as usize].is_str() && cv.is_str() {
+                        let r = cv.clone();
+                        if try_str_inplace_concat(&mut regs, *dst, *lhs, *op, &r) {
+                            continue;
+                        }
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
@@ -6252,6 +6271,57 @@ fn comp_read_is_free(code: &crate::bytecode::FnCode, name: &str) -> bool {
         Some(locals) => !locals.contains(name),
         None => true,
     }
+}
+
+/// CPython `unicode_concatenate` fast path for `s += t` (issue #2850).
+///
+/// When an augmented `+=` stores back into the same register as its left
+/// operand and both operands are plain `str`, append `t`'s bytes into `s`'s
+/// backing in place (relying on `realloc` for amortised O(1)) instead of
+/// building a brand-new concatenated string every iteration — turning the
+/// classic `s += "x"` loop from O(n²) into O(n).
+///
+/// Returns `true` when it handled the op (the result is already stored in
+/// `regs[dst]`); `false` when the shape doesn't qualify (op isn't `Add`,
+/// `dst != lhs`, or either operand isn't a plain `str`), in which case the
+/// caller proceeds with its existing path unchanged.
+///
+/// Str-subclasses are `PyInstance` values (not `TAG_STR`), so `is_str()`
+/// naturally excludes them; bytes are `TAG_OPAQUE`, so `bytes += bytes` never
+/// reaches here.
+#[inline]
+fn try_str_inplace_concat(
+    regs: &mut RegSlice,
+    dst: crate::bytecode::Reg,
+    lhs: crate::bytecode::Reg,
+    op: BinaryOp,
+    rhs: &Value,
+) -> bool {
+    // In-place mutation only applies to `+` that stores back into the LHS reg.
+    if op != BinaryOp::Add || dst != lhs {
+        return false;
+    }
+    // Both operands must be plain `str` (excludes str-subclasses and bytes).
+    if !regs[lhs as usize].is_str() || !rhs.is_str() {
+        return false;
+    }
+    let rhs_str = rhs.as_str().unwrap();
+    // Take the left value out of its register so its backing is observed with
+    // its true refcount — if any alias (or the intern table) holds it, the
+    // refcount is > 1 and `str_append_in_place` bails, preserving `t = s; s += x`.
+    let mut left = std::mem::replace(&mut regs[lhs as usize], Value::unset());
+    if left.str_append_in_place(rhs_str) {
+        // Grown in place (uniquely owned): store the grown value back.
+        regs[dst as usize] = left;
+    } else {
+        // Shared / inline / not eligible: build a fresh concat, exactly as the
+        // non-mutating `str + str` path would. `left` drops, releasing its ref.
+        let mut s = String::with_capacity(left.as_str().unwrap().len() + rhs_str.len());
+        s.push_str(left.as_str().unwrap());
+        s.push_str(rhs_str);
+        regs[dst as usize] = Value::string(s);
+    }
+    true
 }
 
 fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecode::Reg) -> crate::interpreter::Result<Value> {

@@ -1,4 +1,4 @@
-use std::alloc::{Layout, alloc, dealloc};
+use std::alloc::{Layout, alloc, dealloc, realloc};
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -4247,6 +4247,102 @@ impl Value {
         };
         unsafe { *hdr = rc_type | new_flag };
         is_ascii
+    }
+
+    /// Grow this string in place by appending `other`'s bytes, the pyrust
+    /// equivalent of CPython's `_PyUnicode_Append` fast path (issue #2850).
+    ///
+    /// Returns `true` when the append happened in place (the value's backing was
+    /// `realloc`'d and this `Value` now denotes the concatenation); returns
+    /// `false` — leaving `self` untouched — whenever the string does not qualify,
+    /// in which case the caller must fall back to a fresh `Value::string` concat:
+    ///
+    ///   * inline (SSO) strings — no heap backing, no refcount to check;
+    ///   * Layout B slice descriptors — the backing is shared with the parent;
+    ///   * strings with refcount > 1 — another live `Value` (an alias, or the
+    ///     intern table) shares the backing, so mutating in place would corrupt
+    ///     it (this is the whole aliasing-safety mechanism, and it also covers
+    ///     interned strings, which the table holds a second reference to).
+    ///
+    /// This is what makes `s += t` in a loop O(n) instead of O(n²): the backing
+    /// is `realloc`'d (typically in place, amortised O(1)) rather than a brand
+    /// new buffer being allocated and the whole left operand copied every time.
+    ///
+    /// SAFETY: `self` must be a live TAG_STR value. The single-threaded runtime
+    /// guarantees no concurrent access to the header, and the refcount==1 check
+    /// guarantees this is the only `Value` referencing the backing.
+    pub fn str_append_in_place(&mut self, other: &str) -> bool {
+        debug_assert!(self.is_str());
+        // Inline (SSO): bytes live in the NaN-box, no heap backing to grow.
+        if str_is_inline_bits(self.0) {
+            return false;
+        }
+        let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
+        let rc_type = unsafe { *(hdr as *const u32) };
+        // Layout B (slice descriptor) shares the parent's byte buffer — never
+        // mutate it in place.
+        if rc_type & STR_TYPE_B != 0 {
+            return false;
+        }
+        // Refcount must be exactly 1 (bits 31:3). Any alias or the intern table
+        // holding a second reference bumps this above 1 → bail to fresh concat.
+        if rc_type >> 3 != 1 {
+            return false;
+        }
+        // Appending nothing keeps the value bit-identical; treat as a no-op
+        // success so the caller stores `self` back unchanged.
+        if other.is_empty() {
+            return true;
+        }
+        let old_len = unsafe { *(hdr.add(4) as *const u32) } as usize;
+        let add_len = other.len();
+        let new_len = old_len + add_len;
+        // Guard against the u32 sub_len field overflowing (pathological only).
+        if new_len > u32::MAX as usize {
+            return false;
+        }
+        let old_layout = Layout::from_size_align(16 + old_len, 8).unwrap();
+        let new_size = 16 + new_len;
+        let new_ptr = unsafe { realloc(hdr, old_layout, new_size) };
+        if new_ptr.is_null() {
+            // realloc failure leaves the original block intact; fall back.
+            return false;
+        }
+        unsafe {
+            // The `ref` field is self-referential (points at the block's own
+            // bytes); it must be repointed after realloc may have moved us.
+            (new_ptr.add(8) as *mut *const u8).write(new_ptr.add(16));
+            new_ptr
+                .add(16 + old_len)
+                .copy_from_nonoverlapping(other.as_bytes().as_ptr(), add_len);
+            (new_ptr.add(4) as *mut u32).write(new_len as u32);
+            // Update the cached ASCII flag: the result is ASCII iff the old
+            // string's flag was ASCII (or unknown/uncomputed and rescanned) and
+            // the appended bytes are ASCII. Simplest correct rule: recompute the
+            // combined flag from the old flag and `other`.
+            let old_rc_type = *(new_ptr as *const u32);
+            let old_ascii =
+                (old_rc_type & STR_ASCII_COMPUTED != 0) && (old_rc_type & STR_IS_ASCII != 0);
+            let old_computed = old_rc_type & STR_ASCII_COMPUTED != 0;
+            // Preserve rc/type bits, clear the ascii bits, then set fresh ones.
+            let base = old_rc_type & !(STR_IS_ASCII | STR_ASCII_COMPUTED);
+            let new_flag = if old_computed {
+                // Old ASCII-ness was known: combine with `other`'s ASCII-ness.
+                if old_ascii && other.is_ascii() {
+                    STR_IS_ASCII | STR_ASCII_COMPUTED
+                } else {
+                    STR_ASCII_COMPUTED
+                }
+            } else {
+                // Old flag was never computed (a slice of a non-ASCII parent
+                // that was later grown — rare). Leave it uncomputed for a lazy
+                // resolve on first query.
+                0
+            };
+            *(new_ptr as *mut u32) = base | new_flag;
+        }
+        self.0 = TAG_STR_BITS | (new_ptr as u64 & PAYLOAD_MASK);
+        true
     }
 
     /// Borrow the list's elements as a shared slice.
