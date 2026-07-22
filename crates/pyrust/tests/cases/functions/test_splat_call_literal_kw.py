@@ -88,3 +88,20 @@ def sink(*a, **k):
 
 
 print(sink(trace("p0", 0), *trace("splat", [1, 2]), kw=trace("kw", 9)))
+
+
+# Evaluation order when the splat is a GENERATOR whose ITERATION has side effects:
+# with a leading positional, CPython materialises (iterates) the splat into the
+# positional tuple BEFORE evaluating the literal keyword values (`BUILD_LIST` +
+# `LIST_EXTEND` + `LIST_TO_TUPLE`), so `iter 0` / `iter 1` print before `eval kw`.
+# With no leading positional CPython instead defers the splat into
+# CALL_FUNCTION_EX, so the keyword value is evaluated first.
+def side_gen(n):
+    for i in range(n):
+        print("iter", i)
+        yield i
+
+
+print(sink(trace("lead", 0), *side_gen(2), kw=trace("kw", 9)))
+print(sink(*side_gen(2), kw=trace("kw", 9)))
+print(sink(trace("lead", 0), trace("lead2", 1), *side_gen(1), a=trace("a", 8), b=trace("b", 9)))

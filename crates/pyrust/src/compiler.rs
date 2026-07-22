@@ -5090,6 +5090,19 @@ fn positional_splat_fast_shape(args: &[crate::ast::CallArg]) -> Option<(usize, u
     if nkw > 0 && ndsplat == 1 {
         return None;
     }
+    // Leading positionals *before* the splat together with literal keywords *after*
+    // it (`f(p, *a, kw=v)`) force CPython to materialise and ITERATE the splat while
+    // building the positional tuple (`BUILD_LIST` + `LIST_EXTEND` + `LIST_TO_TUPLE`)
+    // BEFORE it evaluates the keyword values — the iteration side effects of a
+    // generator / iterator `*a` are observable in that order.  The `CallExArgs`
+    // lowering instead defers splat iteration to call time (after the keyword values
+    // are already evaluated), so it would reorder those side effects.  Keep this
+    // shape on the `__vcall__` path, which preserves the ordering.  (With no leading
+    // positional, CPython also defers the splat into `CALL_FUNCTION_EX`, so
+    // `f(*a, kw=v)` stays on the fast path and matches.)
+    if npos > 0 && nkw > 0 {
+        return None;
+    }
     // u8-encodable counts (the opcode stores `npos` and `nkw` as `u8`).
     if npos > u8::MAX as usize || nkw > u8::MAX as usize {
         return None;
