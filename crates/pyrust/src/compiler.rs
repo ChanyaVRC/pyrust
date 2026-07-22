@@ -5044,6 +5044,72 @@ fn double_splat_fast_shape(args: &[crate::ast::CallArg]) -> Option<usize> {
     Some(n - 1)
 }
 
+/// Recognise the `f(<pos…>, *args[, **kw])` shape eligible for the `CallExArgs`
+/// fast lowering (the decorator/wrapper shape): exactly one `*args` splat, an
+/// optional trailing literal `kw=v` keyword args and one optional `**kw`
+/// double-splat, preceded only by plain positional args (no positional after the
+/// splat).  Returns `(npos, nkw)` — leading-positional count and literal-keyword
+/// count — on a match, else `None`.
+fn positional_splat_fast_shape(args: &[crate::ast::CallArg]) -> Option<(usize, usize)> {
+    let n = args.len();
+    if n == 0 {
+        return None;
+    }
+    // Exactly one `*args` splat.
+    if args.iter().filter(|a| a.splat).count() != 1 {
+        return None;
+    }
+    // At most one `**kw`, and if present it must be the final arg.
+    let ndsplat = args.iter().filter(|a| a.double_splat).count();
+    if ndsplat > 1 || (ndsplat == 1 && !args[n - 1].double_splat) {
+        return None;
+    }
+    let splat_pos = args.iter().position(|a| a.splat)?;
+    // Every arg before the splat must be a plain positional.
+    for a in &args[..splat_pos] {
+        if a.splat || a.double_splat || a.name.is_some() {
+            return None;
+        }
+    }
+    // Between the splat and the optional trailing `**kw`, every arg must be a
+    // literal `name=value` keyword (no second splat, no bare positional).
+    let kw_end = if ndsplat == 1 { n - 1 } else { n };
+    for a in &args[splat_pos + 1..kw_end] {
+        if a.splat || a.double_splat || a.name.is_none() {
+            return None;
+        }
+    }
+    let npos = splat_pos;
+    let nkw = kw_end - (splat_pos + 1);
+    // A literal keyword together with a `**kw` splat can name the SAME key (e.g.
+    // `f(*a, x=1, **{'x': 2})`), which CPython rejects as "got multiple values for
+    // keyword argument 'x'" at merge time.  Detecting that cross-source collision
+    // is the `__vcall__` path's job (DICT_MERGE) — keep that shape on it rather
+    // than silently letting one value win.  Literal keywords alone are unique
+    // (duplicate `kw=` is a syntax error) and never collide with each other.
+    if nkw > 0 && ndsplat == 1 {
+        return None;
+    }
+    // Leading positionals *before* the splat together with literal keywords *after*
+    // it (`f(p, *a, kw=v)`) force CPython to materialise and ITERATE the splat while
+    // building the positional tuple (`BUILD_LIST` + `LIST_EXTEND` + `LIST_TO_TUPLE`)
+    // BEFORE it evaluates the keyword values — the iteration side effects of a
+    // generator / iterator `*a` are observable in that order.  The `CallExArgs`
+    // lowering instead defers splat iteration to call time (after the keyword values
+    // are already evaluated), so it would reorder those side effects.  Keep this
+    // shape on the `__vcall__` path, which preserves the ordering.  (With no leading
+    // positional, CPython also defers the splat into `CALL_FUNCTION_EX`, so
+    // `f(*a, kw=v)` stays on the fast path and matches.)
+    if npos > 0 && nkw > 0 {
+        return None;
+    }
+    // u8-encodable counts (the opcode stores `npos` and `nkw` as `u8`).
+    if npos > u8::MAX as usize || nkw > u8::MAX as usize {
+        return None;
+    }
+    Some((npos, nkw))
+}
+
 impl Compiler {
     fn new(
         local_index: Rc<HashMap<String, Reg>>,
@@ -12417,6 +12483,18 @@ impl Compiler {
             return self.compile_double_splat_call(func, args, npos);
         }
 
+        // Positional-splat expansion `f(<pos…>, *args[, **kw])` (the
+        // decorator/wrapper shape): one `*args`, an optional trailing `**kw`,
+        // preceded only by plain positionals, non-method callee.  Lower to
+        // `CallExArgs`, which reads the splat iterable and the `**kw` mapping
+        // directly instead of building a list + dict and round-tripping through
+        // `__vcall__`.
+        if let Some((npos, nkw)) = positional_splat_fast_shape(args)
+            && !matches!(func, Expr::Attr { .. })
+        {
+            return self.compile_positional_splat_call(func, args, npos, nkw);
+        }
+
         if has_splat || has_kwargs {
             // Variadic call: build separate positional and keyword lists, then
             // use the ExpandedCall instruction.
@@ -13099,6 +13177,103 @@ impl Compiler {
         self.emit(Insn::CallEx {
             func: func_reg,
             npos: npos as u8,
+            kwargs: kwargs_reg,
+        });
+        self.next_temp = func_reg + 1;
+        func_reg
+    }
+
+    /// Compile a positional-splat call `f(<pos…>, *args, kw=v…[, **kw])` (shape
+    /// vetted by [`positional_splat_fast_shape`]) into a `CallExArgs` instruction.
+    /// Register frame: `R[func]` = callee; `R[func+1 .. func+1+npos]` = leading
+    /// positionals; `R[func+1+npos .. func+1+npos+nkw]` = the `nkw` literal
+    /// keyword VALUES (names in the `kwnames_idx` const tuple); then the `*args`
+    /// iterable and the optional `**kw` mapping in their own registers (`**kw`
+    /// absent ⇒ `NO_KWARGS`).  Argument sub-expressions are compiled in source
+    /// (evaluation) order: positionals, `*args`, literal keyword values, `**kw`.
+    fn compile_positional_splat_call(
+        &mut self,
+        func: &Expr,
+        args: &[crate::ast::CallArg],
+        npos: usize,
+        nkw: usize,
+    ) -> Reg {
+        let has_kw = args.last().is_some_and(|a| a.double_splat);
+        let func_reg = self.next_temp;
+        // Reserve func + npos positionals + nkw literal-keyword values + one for
+        // `*args` + one more for `**kw` when present.
+        let frame_top = func_reg
+            .wrapping_add(1)
+            .wrapping_add(npos as Reg)
+            .wrapping_add(nkw as Reg)
+            .wrapping_add(1)
+            .wrapping_add(if has_kw { 1 } else { 0 });
+        if frame_top < func_reg {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("call frame register overflow".to_string());
+            }
+            return 0;
+        }
+        self.next_temp = frame_top;
+        if frame_top > 0 && frame_top - 1 > self.max_reg {
+            self.max_reg = frame_top - 1;
+        }
+        // Compile one argument sub-expression into its reserved `dst` slot,
+        // reusing the retarget-last / Move dance shared by the whole frame.
+        let compile_into_slot = |this: &mut Self, value: &Expr, dst: Reg| {
+            let saved = this.next_temp;
+            let insn_before = this.insns.len();
+            let r = this.compile_expr(value);
+            if r != dst {
+                let single = this.insns.len() == insn_before + 1;
+                if single && r >= this.base_temp && this.retarget_last(r, dst) {
+                    // retargeted in place — no Move needed
+                } else {
+                    this.emit(Insn::Move(dst, r));
+                }
+            }
+            this.next_temp = saved;
+        };
+
+        let saved = self.next_temp;
+        self.compile_expr_into(func, func_reg);
+        self.next_temp = saved;
+
+        // Leading positionals (source order; all plain positionals per the shape).
+        for (i, arg) in (0u32..).zip(args[..npos].iter()) {
+            compile_into_slot(self, &arg.value, func_reg + 1 + i);
+        }
+        // `*args` iterable.
+        let args_splat_reg = func_reg + 1 + npos as Reg + nkw as Reg;
+        compile_into_slot(self, &args[npos].value, args_splat_reg);
+        // Literal keyword values into `R[func+1+npos .. +nkw]`, names collected for
+        // the const-pool tuple.  (Evaluated after `*args`, matching Python order.)
+        let litkw_base = func_reg + 1 + npos as Reg;
+        let mut kw_names: Vec<Value> = Vec::with_capacity(nkw);
+        for (i, arg) in (0u32..).zip(args[npos + 1..npos + 1 + nkw].iter()) {
+            let name = arg
+                .name
+                .as_ref()
+                .expect("literal keyword after splat (shape-checked)");
+            kw_names.push(Value::string(name.clone()));
+            compile_into_slot(self, &arg.value, litkw_base + i);
+        }
+        let kwnames_idx = self.intern_const(Value::tuple(kw_names));
+        // Optional `**kw` source mapping.
+        let kwargs_reg = if has_kw {
+            let kwargs_reg = args_splat_reg + 1;
+            compile_into_slot(self, &args[npos + 1 + nkw].value, kwargs_reg);
+            kwargs_reg
+        } else {
+            crate::bytecode::NO_KWARGS
+        };
+        self.emit(Insn::CallExArgs {
+            func: func_reg,
+            npos: npos as u8,
+            nkw: nkw as u8,
+            kwnames_idx,
+            args_splat: args_splat_reg,
             kwargs: kwargs_reg,
         });
         self.next_temp = func_reg + 1;

@@ -4978,7 +4978,26 @@ impl Interpreter {
                 positional_vals.push(arg.value.clone());
             }
         }
+        self.call_user_function_variadic_split(function, positional_vals, keyword_vals, has_args_param)
+    }
 
+    /// Bind pre-split positional / keyword argument vectors into a variadic
+    /// callee's frame and run it.  The tail of `call_user_function_variadic`,
+    /// factored out (#2841 follow-up) so the `CallExArgs` positional-splat
+    /// handler can feed `positional_vals` (leading positionals + `*args` splat
+    /// elements) and `keyword_vals` (the `**kw` dict entries) STRAIGHT in —
+    /// skipping the `ExpandedCallArg` buffer and the second per-arg clone the
+    /// general path pays to split that buffer back into these two vectors.
+    ///
+    /// `has_args_param` is whether the callee has a `*args` parameter (drives the
+    /// excess-positional pre-check ordering, matching CPython).
+    fn call_user_function_variadic_split(
+        &mut self,
+        function: Rc<UserFunction>,
+        positional_vals: Vec<Value>,
+        keyword_vals: Vec<(String, Value)>,
+        has_args_param: bool,
+    ) -> Result<Value> {
         // Pre-check: reject excess positional arguments before binding when
         // there is no *args to absorb them. This matches CPython's error ordering.
         if !has_args_param {
@@ -5017,6 +5036,33 @@ impl Interpreter {
         }
 
         let has_kwargs = function.params.iter().any(|p| p.is_kwargs);
+
+        // "got multiple values for argument" (CPython 3.12): a keyword that names
+        // a param already filled by a positional argument.  Positionals fill the
+        // leading non-keyword-only params left-to-right, so the j-th such param is
+        // positionally filled iff `j < positional_vals.len()`.  CPython checks the
+        // GIVEN keywords in order (not param order) and reports the first colliding
+        // one, ahead of the missing-arg and unexpected-keyword diagnostics below.
+        for (name, _) in &keyword_vals {
+            let mut pos_slot = 0usize;
+            for param in &function.params {
+                if param.is_args || param.is_kwargs || param.is_keyword_only {
+                    continue;
+                }
+                if &param.name == name {
+                    if !param.is_positional_only && pos_slot < positional_vals.len() {
+                        return Err(pyrust_core::type_err!(
+                            "{}() got multiple values for argument '{}'",
+                            function.effective_qualname(),
+                            name
+                        ));
+                    }
+                    break;
+                }
+                pos_slot += 1;
+            }
+        }
+
         let mut consumed_keywords = std::collections::HashSet::new();
         let mut pos_idx = 0;
         let mut param_vals: Vec<Value> = Vec::with_capacity(function.params.len());
