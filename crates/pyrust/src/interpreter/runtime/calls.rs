@@ -5119,6 +5119,10 @@ impl Interpreter {
         // Report positional missing args first; only report kwonly if all
         // positional params were satisfied (matching CPython 3.12 behaviour).
         check_missing_args(&function.effective_qualname(), &missing_positional, &missing_kwonly)?;
+        // These hold `&str` borrows of `function.params`; drop them so `function`
+        // can be moved into `bind_and_run_variadic_frame` at the tail.
+        drop(missing_positional);
+        drop(missing_kwonly);
 
         if !has_kwargs {
             // First pass: collect all positional-only violations so the error
@@ -5148,6 +5152,24 @@ impl Interpreter {
             }
         }
 
+        // Bind the resolved per-param values into the callee frame and run it.
+        self.bind_and_run_variadic_frame(function, &mut param_vals)
+    }
+
+    /// Bind an already-resolved, param-index-aligned `param_vals` slice into a
+    /// variadic callee's register file / local env and run the frame.  This is
+    /// the shared frame-run tail of `call_user_function_variadic_split` (the
+    /// argument-resolution loop precedes it) and of the #2852 pure-forward
+    /// direct-bind path (which fills a stack `param_vals` — just the `*A` tuple
+    /// and optional `**K` dict — without that loop, so no heap `Vec`).
+    /// `param_vals[i]` is the bound value for `function.params[i]`; each is MOVED
+    /// into its `Reg`/`Cell` destination (leaving `unset`), so the caller must
+    /// not reuse it after.
+    fn bind_and_run_variadic_frame(
+        &mut self,
+        function: Rc<UserFunction>,
+        param_vals: &mut [Value],
+    ) -> Result<Value> {
         // Now run via VM (same as non-variadic Tier-0 path)
         if let Some(code) = self.get_or_compile_bytecode(&function) {
             let num_regs = code.num_regs as usize;

@@ -2233,7 +2233,9 @@ impl Interpreter {
                 // cached `keyset` must be empty.
                 enum Action {
                     Hit(smallvec::SmallVec<[u32; 4]>),
-                    VariadicHit,
+                    /// Cached variadic callee; `pure_forward` selects the #2852
+                    /// direct tuple/dict bind over the generic split forward.
+                    VariadicHit { pure_forward: bool },
                     Resolve,
                     Fallback,
                 }
@@ -2251,10 +2253,10 @@ impl Interpreter {
                         {
                             Action::Hit(slots.clone())
                         }
-                        KwCallCacheEntry::ExArgsVariadic { param_binds_ptr }
+                        KwCallCacheEntry::ExArgsVariadic { param_binds_ptr, pure_forward }
                             if *param_binds_ptr == pbptr =>
                         {
-                            Action::VariadicHit
+                            Action::VariadicHit { pure_forward: *pure_forward }
                         }
                         KwCallCacheEntry::Fallback => Action::Fallback,
                         _ => Action::Resolve,
@@ -2275,21 +2277,40 @@ impl Interpreter {
                             num_locals,
                         );
                     }
-                    Action::VariadicHit => {
-                        if let Some(v) = self.call_ex_args_variadic_bind(
-                            &f,
-                            regs,
-                            func,
-                            npos,
-                            &lit_kw,
-                            &args_splat_val,
-                            kwargs_val.as_ref(),
-                            num_locals,
-                        )? {
+                    Action::VariadicHit { pure_forward } => {
+                        // Pure `def inner(*A[, **K])` forward → build the tuple +
+                        // dict directly (#2852); any other variadic shape → the
+                        // generic split forward.  Both return `Ok(None)` on a
+                        // non-`str` `**kw` key / unexpected-keyword, falling to the
+                        // slow path for the CPython diagnostic.
+                        let bound = if pure_forward {
+                            self.call_ex_args_pure_forward_bind(
+                                &f,
+                                regs,
+                                func,
+                                npos,
+                                &lit_kw,
+                                &args_splat_val,
+                                kwargs_val.as_ref(),
+                                num_locals,
+                            )?
+                        } else {
+                            self.call_ex_args_variadic_bind(
+                                &f,
+                                regs,
+                                func,
+                                npos,
+                                &lit_kw,
+                                &args_splat_val,
+                                kwargs_val.as_ref(),
+                                num_locals,
+                            )?
+                        };
+                        if let Some(v) = bound {
                             return Ok(v);
                         }
-                        // Non-str `**kw` key at this call → fall to the slow path,
-                        // which raises the "keywords must be strings" TypeError.
+                        // Fell through → slow path (non-str `**kw` key, or a pure
+                        // `*A`-only callee handed unexpected keywords).
                     }
                     Action::Resolve => {
                         // Read the `**kw` keys (in iteration order) as a kwnames
@@ -2344,23 +2365,42 @@ impl Interpreter {
                             // a fixed-arity binding error (missing/dup/posonly) whose
                             // diagnostics the general binder owns — pin Fallback.
                             if f.params.iter().any(|p| p.is_args || p.is_kwargs) {
+                                // Detect the pure `def inner(*A[, **K])` forward
+                                // shape once and cache it, so the shape check is
+                                // paid only on this (cold) resolve, not per call.
+                                let pure_forward = Self::is_pure_variadic_forward(&f);
                                 code.kwcall_cache.borrow_mut()[pc - 1] =
                                     KwCallCacheEntry::ExArgsVariadic {
                                         param_binds_ptr: pbptr,
+                                        pure_forward,
                                     };
-                                if let Some(v) = self.call_ex_args_variadic_bind(
-                                    &f,
-                                    regs,
-                                    func,
-                                    npos,
-                                    &lit_kw,
-                                    &args_splat_val,
-                                    kwargs_val.as_ref(),
-                                    num_locals,
-                                )? {
+                                let bound = if pure_forward {
+                                    self.call_ex_args_pure_forward_bind(
+                                        &f,
+                                        regs,
+                                        func,
+                                        npos,
+                                        &lit_kw,
+                                        &args_splat_val,
+                                        kwargs_val.as_ref(),
+                                        num_locals,
+                                    )?
+                                } else {
+                                    self.call_ex_args_variadic_bind(
+                                        &f,
+                                        regs,
+                                        func,
+                                        npos,
+                                        &lit_kw,
+                                        &args_splat_val,
+                                        kwargs_val.as_ref(),
+                                        num_locals,
+                                    )?
+                                };
+                                if let Some(v) = bound {
                                     return Ok(v);
                                 }
-                                // Non-str `**kw` key → fall to the slow path.
+                                // Non-str `**kw` key / unexpected-keyword → slow path.
                             } else {
                                 code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
                             }
@@ -2446,6 +2486,154 @@ impl Interpreter {
             slots,
             &mut kw_vals.into_iter(),
         )
+    }
+
+    /// Is `f` a PURE variadic-forward target — params exactly a single `*args`
+    /// plus an optional `**kwargs` and nothing else?  That is the only shape the
+    /// #2852 direct-bind path (`call_ex_args_pure_forward_bind`) handles: with no
+    /// fixed positional / keyword-only / positional-only param, the callee's `*A`
+    /// is just "all positionals given" and `**K` is just "all keywords given", so
+    /// the tuple + dict can be built without the general per-param resolution.
+    ///
+    /// Also excludes callees that need the generic frame machinery in ways the
+    /// direct path still routes through `bind_and_run_variadic_frame` correctly —
+    /// generators / coroutines / cell / closure / global-using callees are all
+    /// handled by that shared tail (identical to the generic split path), so they
+    /// stay eligible; only the *param shape* is restrictive here.
+    fn is_pure_variadic_forward(f: &Rc<UserFunction>) -> bool {
+        let mut seen_args = false;
+        let mut seen_kwargs = false;
+        for p in &f.params {
+            if p.is_args {
+                if seen_args {
+                    return false;
+                }
+                seen_args = true;
+            } else if p.is_kwargs {
+                if seen_kwargs {
+                    return false;
+                }
+                seen_kwargs = true;
+            } else {
+                // Any fixed positional / keyword-only / positional-only param
+                // disqualifies the shape.
+                return false;
+            }
+        }
+        seen_args
+    }
+
+    /// Direct-bind a positional-splat call into a PURE-VARIADIC-FORWARD callee —
+    /// one whose params are exactly a single `*A` plus an optional `**K` and
+    /// nothing else (`def inner(*A)` / `def inner(*A, **K)`).  For that shape the
+    /// callee's `*A` is simply "every positional given" and `**K` is "every
+    /// keyword given", so the tuple + dict are built DIRECTLY here and bound into
+    /// the two param registers — skipping the `positional_vals` / `keyword_vals` /
+    /// `param_vals` intermediate vectors and the whole per-param binding loop in
+    /// `call_user_function_variadic_split`.
+    ///
+    /// Identity / freshness landmines (both required for CPython parity):
+    /// - `*A` is a FRESH `Value::tuple` built from the elements; the caller's
+    ///   splat `Rc` is never reused (`def f(*a): f(*t)` gives `a is not t`).
+    /// - `**K` is a FRESH dict; a callee mutating `kwargs` must not touch the
+    ///   caller's dict.
+    ///
+    /// Returns `Ok(None)` (→ caller slow path) when a `**kw` key is non-`str`
+    /// (CPython "keywords must be strings"), or when there is no `**K` param but
+    /// keywords were passed (CPython "unexpected keyword argument"): the general
+    /// binder in `call_user_function_variadic_split` owns those diagnostics.
+    #[allow(clippy::too_many_arguments)]
+    fn call_ex_args_pure_forward_bind(
+        &mut self,
+        f: &Rc<UserFunction>,
+        regs: &RegSlice,
+        func: crate::bytecode::Reg,
+        npos: u8,
+        lit_kw: &[(String, Value)],
+        args_splat_val: &Value,
+        kwargs_val: Option<&Value>,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Option<Value>> {
+        // Build the callee's `*A` tuple directly: leading positionals, then the
+        // splat elements (a plain tuple/list — cloned, so the fresh-tuple identity
+        // holds).  A single allocation, no intermediate positional Vec.
+        let splat_len = args_splat_val
+            .as_tuple()
+            .map(|s| s.len())
+            .or_else(|| args_splat_val.list_len())
+            .unwrap_or(0);
+        let mut args_elems: Vec<Value> = Vec::with_capacity(npos as usize + splat_len);
+        for i in 0..npos as u32 {
+            args_elems.push(vm_read(regs, func + 1 + i, num_locals)?);
+        }
+        if let Some(s) = args_splat_val.as_tuple() {
+            args_elems.extend(s.iter().cloned());
+        } else if let Some(items) = args_splat_val.list_with(|v| v.clone()) {
+            args_elems.extend(items);
+        }
+        let args_tuple = Value::tuple(args_elems);
+
+        // Does the callee have a `**K` param?  (The shape guarantees at most one.)
+        let has_kwargs_param = f.params.iter().any(|p| p.is_kwargs);
+
+        // Build the callee's `**K` dict directly from the keywords: literal `kw=v`
+        // first, then the `**kw` dict entries (rejecting non-`str` keys → slow
+        // path).  Literal keywords and `**kw` never co-occur (shape check).
+        let kwargs_value: Value = if !has_kwargs_param {
+            // No `**K`: any keyword is an error whose CPython diagnostic the general
+            // binder owns → fall back.  A non-`str` `**kw` key is likewise a slow
+            // path (the general binder still forwards, then raises there).
+            if !lit_kw.is_empty() {
+                return Ok(None);
+            }
+            if let Some(v) = kwargs_val {
+                let non_empty = v.dict_with(|d| !d.is_empty()).unwrap_or(true);
+                if non_empty {
+                    return Ok(None);
+                }
+            }
+            Value::unset()
+        } else {
+            let mut dict: PyDict = PyDict::default();
+            for (k, v) in lit_kw {
+                if let Some(key) = Value::string(k.clone()).to_key() {
+                    dict.insert(key, v.clone());
+                }
+            }
+            if let Some(v) = kwargs_val {
+                // Reject a non-plain-dict or non-`str` key → slow path.
+                let ok = match v.dict_with(|d| {
+                    for (k, val) in d.iter() {
+                        match k {
+                            pyrust_core::PyKey::Str(_) => {
+                                dict.insert(k.clone(), val.clone());
+                            }
+                            _ => return false,
+                        }
+                    }
+                    true
+                }) {
+                    Some(true) => true,
+                    // Non-str key (Some(false)) or not a plain dict (None): slow path.
+                    _ => false,
+                };
+                if !ok {
+                    return Ok(None);
+                }
+            }
+            Value::dict(dict)
+        };
+
+        // Fill `param_vals` in param-index order on the STACK (no heap `Vec`).
+        // Python syntax fixes the order for this shape: `*A` first, then the
+        // optional `**K`, so `params` is exactly `[*A]` or `[*A, **K]`.  Each
+        // value is moved into its register by the shared frame tail.
+        let mut param_vals: smallvec::SmallVec<[Value; 2]> = smallvec::SmallVec::new();
+        param_vals.push(args_tuple);
+        if has_kwargs_param {
+            param_vals.push(kwargs_value);
+        }
+        self.bind_and_run_variadic_frame(Rc::clone(f), &mut param_vals).map(Some)
     }
 
     /// Forward a positional-splat call straight into a VARIADIC callee's binder,

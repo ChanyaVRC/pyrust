@@ -924,7 +924,20 @@ pub enum KwCallCacheEntry {
     /// `param_binds_ptr` callee identity is cached (the arg counts / keys are
     /// re-read each call); a polymorphic site whose callee prototype changes
     /// re-resolves.
-    ExArgsVariadic { param_binds_ptr: *const () },
+    ///
+    /// `pure_forward` records the once-detected callee shape: `true` iff the
+    /// callee's params are exactly a single `*args` plus an optional `**kwargs`
+    /// and NOTHING else (no fixed positional / keyword-only / positional-only
+    /// params) — the pure `def inner(*A)` / `def inner(*A, **K)` forward target.
+    /// On a hit the splat handler builds the callee's `*A` tuple and `**K` dict
+    /// DIRECTLY and binds them into the two param registers, skipping the
+    /// `positional_vals` / `keyword_vals` / `param_vals` intermediate vectors
+    /// (#2852).  `false` keeps the generic `call_user_function_variadic_split`
+    /// forward.
+    ExArgsVariadic {
+        param_binds_ptr: *const (),
+        pure_forward: bool,
+    },
 }
 
 // SAFETY: pyrust's interpreter is single-threaded.  `KwCallCacheEntry` is only
