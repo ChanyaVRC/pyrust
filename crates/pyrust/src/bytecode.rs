@@ -382,12 +382,23 @@ pub enum Insn {
     /// positional count + `**kw` key-set → parameter-slot mapping for a
     /// monomorphic plain-`UserFunction` callee, so on a hit the values bind
     /// straight into their slots with no intermediate list/dict and no name scan.
-    /// Only emitted for a single `*args` (as the last positional group), an
-    /// optional single trailing `**kw`, no literal keywords, non-method callee;
-    /// every other variadic shape keeps the generic `__vcall__` lowering.
+    /// Emitted for a single `*args` (as the last positional group), followed by
+    /// zero or more literal `kw=v` keyword arguments and an optional single
+    /// trailing `**kw`, non-method callee; every other variadic shape keeps the
+    /// generic `__vcall__` lowering.
+    ///
+    /// The `nkw` literal keyword VALUES occupy `R[func+1+npos ..
+    /// func+1+npos+nkw]` (contiguously, right after the leading positionals);
+    /// their NAMES are the strings in the constant-pool tuple
+    /// `consts[kwnames_idx]` (in the same order).  The fixed-arity slot fast bind
+    /// only engages when `nkw == 0`; with literal keywords the call takes the
+    /// variadic fast path or the slow path (both fold the literals into the
+    /// keyword arguments), so no additional slot-cache shape is needed.
     CallExArgs {
         func: Reg,
         npos: u8,
+        nkw: u8,
+        kwnames_idx: u16,
         args_splat: Reg,
         kwargs: Reg,
     },
@@ -903,6 +914,17 @@ pub enum KwCallCacheEntry {
         /// One param index per keyword in `keyset` order.
         slots: SmallVec<[u32; 4]>,
     },
+    /// `Insn::CallExArgs` where the callee is a VARIADIC (`*args`/`**kwargs`)
+    /// plain user function — the decorator-chain forward shape
+    /// `wrapper(*a,**k) -> inner(*args, **kw)`.  Such callees can't fast-bind into
+    /// fixed slots (the general `kwcall_resolve_simple` rejects them), but the
+    /// splat handler can still skip the `ExpandedCallArg` buffer + the second
+    /// per-arg clone by feeding the leading positionals + splat elements and the
+    /// `**kw` entries STRAIGHT into `call_user_function_variadic_split`.  Only the
+    /// `param_binds_ptr` callee identity is cached (the arg counts / keys are
+    /// re-read each call); a polymorphic site whose callee prototype changes
+    /// re-resolves.
+    ExArgsVariadic { param_binds_ptr: *const () },
 }
 
 // SAFETY: pyrust's interpreter is single-threaded.  `KwCallCacheEntry` is only
@@ -941,6 +963,7 @@ impl std::fmt::Debug for KwCallCacheEntry {
                     "ExArgs {{ total_pos: {total_pos}, keyset: {keyset:?}, slots: {slots:?} }}"
                 )
             }
+            KwCallCacheEntry::ExArgsVariadic { .. } => write!(f, "ExArgsVariadic"),
         }
     }
 }

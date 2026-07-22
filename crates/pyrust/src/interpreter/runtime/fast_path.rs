@@ -2144,6 +2144,8 @@ impl Interpreter {
         pc: usize,
         func: crate::bytecode::Reg,
         npos: u8,
+        nkw: u8,
+        kwnames_idx: u16,
         args_splat: crate::bytecode::Reg,
         kwargs: crate::bytecode::Reg,
         num_locals: crate::bytecode::Reg,
@@ -2155,6 +2157,26 @@ impl Interpreter {
             Some(vm_read(regs, kwargs, num_locals)?)
         } else {
             None
+        };
+        // Literal `kw=v` keyword arguments: values in `R[func+1+npos .. +nkw]`,
+        // names in the `consts[kwnames_idx]` tuple.  Empty when `nkw == 0`.  The
+        // shape check guarantees literal keywords never co-occur with a `**kw`
+        // splat (a cross-source key collision needs DICT_MERGE), so these are the
+        // only keywords when present.
+        let lit_kw: smallvec::SmallVec<[(String, Value); 4]> = if nkw == 0 {
+            smallvec::SmallVec::new()
+        } else {
+            let names = code.consts.get(kwnames_idx as usize).and_then(|c| c.as_tuple());
+            let mut v = smallvec::SmallVec::with_capacity(nkw as usize);
+            for i in 0..nkw as u32 {
+                let name = names
+                    .and_then(|n| n.get(i as usize))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                v.push((name, vm_read(regs, func + 1 + npos as u32 + i, num_locals)?));
+            }
+            v
         };
 
         // Fast path requires a plain user function (Regular kind), a directly
@@ -2182,7 +2204,27 @@ impl Interpreter {
             splat_len,
             kw_is_plain,
         ) {
-            {
+            if nkw != 0 {
+                // Literal keyword args present (and, per the shape check, no `**kw`
+                // splat).  The fixed-arity slot cache keys on the `**kw` key-set, so
+                // rather than fold static literal names into it, only the variadic
+                // fast path applies here; a fixed-arity callee falls to the slow
+                // path (which still skips the `__vcall__` round-trip).
+                if f.params.iter().any(|p| p.is_args || p.is_kwargs)
+                    && let Some(v) = self.call_ex_args_variadic_bind(
+                        &f,
+                        regs,
+                        func,
+                        npos,
+                        &lit_kw,
+                        &args_splat_val,
+                        None,
+                        num_locals,
+                    )?
+                {
+                    return Ok(v);
+                }
+            } else {
                 let total_pos = npos as u32 + slen as u32;
                 let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
 
@@ -2191,6 +2233,7 @@ impl Interpreter {
                 // cached `keyset` must be empty.
                 enum Action {
                     Hit(smallvec::SmallVec<[u32; 4]>),
+                    VariadicHit,
                     Resolve,
                     Fallback,
                 }
@@ -2207,6 +2250,11 @@ impl Interpreter {
                                 && kw_keys_match(keyset) =>
                         {
                             Action::Hit(slots.clone())
+                        }
+                        KwCallCacheEntry::ExArgsVariadic { param_binds_ptr }
+                            if *param_binds_ptr == pbptr =>
+                        {
+                            Action::VariadicHit
                         }
                         KwCallCacheEntry::Fallback => Action::Fallback,
                         _ => Action::Resolve,
@@ -2226,6 +2274,22 @@ impl Interpreter {
                             &slots,
                             num_locals,
                         );
+                    }
+                    Action::VariadicHit => {
+                        if let Some(v) = self.call_ex_args_variadic_bind(
+                            &f,
+                            regs,
+                            func,
+                            npos,
+                            &lit_kw,
+                            &args_splat_val,
+                            kwargs_val.as_ref(),
+                            num_locals,
+                        )? {
+                            return Ok(v);
+                        }
+                        // Non-str `**kw` key at this call → fall to the slow path,
+                        // which raises the "keywords must be strings" TypeError.
                     }
                     Action::Resolve => {
                         // Read the `**kw` keys (in iteration order) as a kwnames
@@ -2273,10 +2337,33 @@ impl Interpreter {
                                     num_locals,
                                 );
                             }
-                            // Structurally not simple for this callee (variadic
-                            // `*args`/`**kwargs` receiver, missing required, etc.):
-                            // pin Fallback so we don't rebuild kwnames every call.
-                            code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                            // `kwcall_resolve_simple` rejected this callee.  If it
+                            // is VARIADIC (`*args`/`**kwargs`), forward straight
+                            // into `call_user_function_variadic_split` (skipping the
+                            // buffer + second clone) and cache that; otherwise it is
+                            // a fixed-arity binding error (missing/dup/posonly) whose
+                            // diagnostics the general binder owns — pin Fallback.
+                            if f.params.iter().any(|p| p.is_args || p.is_kwargs) {
+                                code.kwcall_cache.borrow_mut()[pc - 1] =
+                                    KwCallCacheEntry::ExArgsVariadic {
+                                        param_binds_ptr: pbptr,
+                                    };
+                                if let Some(v) = self.call_ex_args_variadic_bind(
+                                    &f,
+                                    regs,
+                                    func,
+                                    npos,
+                                    &lit_kw,
+                                    &args_splat_val,
+                                    kwargs_val.as_ref(),
+                                    num_locals,
+                                )? {
+                                    return Ok(v);
+                                }
+                                // Non-str `**kw` key → fall to the slow path.
+                            } else {
+                                code.kwcall_cache.borrow_mut()[pc - 1] = KwCallCacheEntry::Fallback;
+                            }
                         }
                         // Non-str key → slow path; do NOT pin Fallback, the general
                         // binder raises the right TypeError.
@@ -2296,6 +2383,11 @@ impl Interpreter {
         let result = self.collect_iterable(&args_splat_val).and_then(|items| {
             for value in items {
                 buf.push(ExpandedCallArg { name: None, value });
+            }
+            // Literal `kw=v` keyword args (empty unless `nkw > 0`; never co-occur
+            // with `**kw` per the shape check).
+            for (name, value) in &lit_kw {
+                buf.push(ExpandedCallArg { name: Some(name.clone()), value: value.clone() });
             }
             if let Some(kwargs_val) = &kwargs_val {
                 self.expand_kwargs_into(kwargs_val, &mut buf)?;
@@ -2354,6 +2446,78 @@ impl Interpreter {
             slots,
             &mut kw_vals.into_iter(),
         )
+    }
+
+    /// Forward a positional-splat call straight into a VARIADIC callee's binder,
+    /// skipping the `ExpandedCallArg` buffer.  Builds `positional_vals` (leading
+    /// positionals + `*args` splat elements, a plain tuple/list) and
+    /// `keyword_vals` (the `**kw` dict entries) DIRECTLY and hands them to
+    /// `call_user_function_variadic_split`, which owns every binding diagnostic
+    /// (arity, missing, unexpected-keyword, `*args` absorption, `**kwargs`
+    /// residual).  The callee's `*args` tuple is built fresh from the splat
+    /// elements (the caller's `Rc` is never reused — CPython gives a distinct
+    /// tuple, so `a is caller_tuple` stays `False`).
+    ///
+    /// Returns `Ok(None)` when the `**kw` dict has a non-`str` key — the caller
+    /// then takes the slow path, which raises "keywords must be strings".
+    #[allow(clippy::too_many_arguments)]
+    fn call_ex_args_variadic_bind(
+        &mut self,
+        f: &Rc<UserFunction>,
+        regs: &RegSlice,
+        func: crate::bytecode::Reg,
+        npos: u8,
+        lit_kw: &[(String, Value)],
+        args_splat_val: &Value,
+        kwargs_val: Option<&Value>,
+        num_locals: crate::bytecode::Reg,
+    ) -> Result<Option<Value>> {
+        // Keyword entries as (name, value): the literal `kw=v` arguments first,
+        // then the `**kw` dict entries (rejecting non-`str` keys → None, slow path
+        // raises the CPython TypeError).  Literal keywords and `**kw` never co-occur
+        // (shape check), so no cross-source collision is possible here.
+        let mut keyword_vals: Vec<(String, Value)> = Vec::with_capacity(lit_kw.len());
+        keyword_vals.extend(lit_kw.iter().cloned());
+        if let Some(v) = kwargs_val {
+            match v.dict_with(|d| {
+                let mut kv: Vec<(String, Value)> = Vec::with_capacity(d.len());
+                for (k, val) in d.iter() {
+                    match k {
+                        pyrust_core::PyKey::Str(s) => {
+                            kv.push((s.as_str().unwrap_or("").to_owned(), val.clone()))
+                        }
+                        _ => return None,
+                    }
+                }
+                Some(kv)
+            }) {
+                Some(Some(kv)) => keyword_vals.extend(kv),
+                // Non-str key (Some(None)) or not a plain dict (None): slow path.
+                _ => return Ok(None),
+            }
+        }
+
+        // Positionals in source order: leading fixed positionals, then the splat
+        // elements (plain tuple/list — cloned; the callee's `*args` tuple is built
+        // fresh inside the binder, so no identity leak).
+        let mut positional_vals: Vec<Value> = Vec::with_capacity(npos as usize + 4);
+        for i in 0..npos as u32 {
+            positional_vals.push(vm_read(regs, func + 1 + i, num_locals)?);
+        }
+        if let Some(s) = args_splat_val.as_tuple() {
+            positional_vals.extend(s.iter().cloned());
+        } else if let Some(items) = args_splat_val.list_with(|v| v.clone()) {
+            positional_vals.extend(items);
+        }
+
+        let has_args_param = f.params.iter().any(|p| p.is_args);
+        self.call_user_function_variadic_split(
+            Rc::clone(f),
+            positional_vals,
+            keyword_vals,
+            has_args_param,
+        )
+        .map(Some)
     }
 
     /// Read the `npos` positional registers and the `**d` dict values (in
