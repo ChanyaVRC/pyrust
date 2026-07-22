@@ -1045,6 +1045,14 @@ fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
         BinaryOp::Add    => a.checked_add(b).map(Value::int),
         BinaryOp::Sub    => a.checked_sub(b).map(Value::int),
         BinaryOp::Mul    => a.checked_mul(b).map(Value::int),
+        // `%` / `//`: `None` on `b == 0` (ZeroDivisionError) and on the sole
+        // `i64::MIN // -1` overflow — eval_binary handles those. Every other
+        // case matches `nb_mod` / `nb_floordiv`'s int-int arm exactly.
+        BinaryOp::Mod    => (b != 0).then(|| Value::int(py_mod_i64(a, b))),
+        BinaryOp::FloorDiv => (b != 0)
+            .then(|| py_mod_i64(a, b))
+            .and_then(|m| a.checked_sub(m)?.checked_div(b))
+            .map(Value::int),
         BinaryOp::BitAnd => Some(Value::int(a & b)),
         BinaryOp::BitOr  => Some(Value::int(a | b)),
         BinaryOp::BitXor => Some(Value::int(a ^ b)),
