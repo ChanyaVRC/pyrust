@@ -3412,10 +3412,12 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         CallExArgs {
             func,
             npos,
+            nkw,
             args_splat,
             kwargs,
+            ..
         } => {
-            (r >= *func && r <= *func + *npos as u32)
+            (r >= *func && r <= *func + *npos as u32 + *nkw as u32)
                 || r == *args_splat
                 || (*kwargs != crate::bytecode::NO_KWARGS && r == *kwargs)
         }
@@ -3627,10 +3629,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         CallExArgs {
             func,
             npos,
+            nkw,
             args_splat,
             kwargs,
+            ..
         } => {
-            for r in *func..=(*func + *npos as u32) {
+            for r in *func..=(*func + *npos as u32 + *nkw as u32) {
                 reads.insert(r);
             }
             reads.insert(*args_splat);
@@ -7790,6 +7794,7 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
             Insn::MakeTypeVar(_, name_idx) => mark(&mut used, *name_idx),
             Insn::CallKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
             Insn::CallMethodKw { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
+            Insn::CallExArgs { kwnames_idx, .. } => mark(&mut used, *kwnames_idx),
             _ => {}
         }
     }
@@ -7855,6 +7860,21 @@ fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<
                 total,
                 nkw,
                 kwnames_idx: remap(kwnames_idx),
+            },
+            Insn::CallExArgs {
+                func,
+                npos,
+                nkw,
+                kwnames_idx,
+                args_splat,
+                kwargs,
+            } => Insn::CallExArgs {
+                func,
+                npos,
+                nkw,
+                kwnames_idx: remap(kwnames_idx),
+                args_splat,
+                kwargs,
             },
             other => other,
         })
@@ -8614,10 +8634,12 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         CallExArgs {
             func,
             npos,
+            nkw,
             args_splat,
             kwargs,
+            ..
         } => {
-            for r in *func..=(*func + *npos as u32) {
+            for r in *func..=(*func + *npos as u32 + *nkw as u32) {
                 f(r);
             }
             f(*args_splat);

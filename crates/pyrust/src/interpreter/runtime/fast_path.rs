@@ -2144,6 +2144,8 @@ impl Interpreter {
         pc: usize,
         func: crate::bytecode::Reg,
         npos: u8,
+        nkw: u8,
+        kwnames_idx: u16,
         args_splat: crate::bytecode::Reg,
         kwargs: crate::bytecode::Reg,
         num_locals: crate::bytecode::Reg,
@@ -2155,6 +2157,26 @@ impl Interpreter {
             Some(vm_read(regs, kwargs, num_locals)?)
         } else {
             None
+        };
+        // Literal `kw=v` keyword arguments: values in `R[func+1+npos .. +nkw]`,
+        // names in the `consts[kwnames_idx]` tuple.  Empty when `nkw == 0`.  The
+        // shape check guarantees literal keywords never co-occur with a `**kw`
+        // splat (a cross-source key collision needs DICT_MERGE), so these are the
+        // only keywords when present.
+        let lit_kw: smallvec::SmallVec<[(String, Value); 4]> = if nkw == 0 {
+            smallvec::SmallVec::new()
+        } else {
+            let names = code.consts.get(kwnames_idx as usize).and_then(|c| c.as_tuple());
+            let mut v = smallvec::SmallVec::with_capacity(nkw as usize);
+            for i in 0..nkw as u32 {
+                let name = names
+                    .and_then(|n| n.get(i as usize))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                v.push((name, vm_read(regs, func + 1 + npos as u32 + i, num_locals)?));
+            }
+            v
         };
 
         // Fast path requires a plain user function (Regular kind), a directly
@@ -2182,7 +2204,27 @@ impl Interpreter {
             splat_len,
             kw_is_plain,
         ) {
-            {
+            if nkw != 0 {
+                // Literal keyword args present (and, per the shape check, no `**kw`
+                // splat).  The fixed-arity slot cache keys on the `**kw` key-set, so
+                // rather than fold static literal names into it, only the variadic
+                // fast path applies here; a fixed-arity callee falls to the slow
+                // path (which still skips the `__vcall__` round-trip).
+                if f.params.iter().any(|p| p.is_args || p.is_kwargs)
+                    && let Some(v) = self.call_ex_args_variadic_bind(
+                        &f,
+                        regs,
+                        func,
+                        npos,
+                        &lit_kw,
+                        &args_splat_val,
+                        None,
+                        num_locals,
+                    )?
+                {
+                    return Ok(v);
+                }
+            } else {
                 let total_pos = npos as u32 + slen as u32;
                 let pbptr = Rc::as_ptr(&f.param_binds) as *const ();
 
@@ -2239,6 +2281,7 @@ impl Interpreter {
                             regs,
                             func,
                             npos,
+                            &lit_kw,
                             &args_splat_val,
                             kwargs_val.as_ref(),
                             num_locals,
@@ -2310,6 +2353,7 @@ impl Interpreter {
                                     regs,
                                     func,
                                     npos,
+                                    &lit_kw,
                                     &args_splat_val,
                                     kwargs_val.as_ref(),
                                     num_locals,
@@ -2339,6 +2383,11 @@ impl Interpreter {
         let result = self.collect_iterable(&args_splat_val).and_then(|items| {
             for value in items {
                 buf.push(ExpandedCallArg { name: None, value });
+            }
+            // Literal `kw=v` keyword args (empty unless `nkw > 0`; never co-occur
+            // with `**kw` per the shape check).
+            for (name, value) in &lit_kw {
+                buf.push(ExpandedCallArg { name: Some(name.clone()), value: value.clone() });
             }
             if let Some(kwargs_val) = &kwargs_val {
                 self.expand_kwargs_into(kwargs_val, &mut buf)?;
@@ -2418,33 +2467,35 @@ impl Interpreter {
         regs: &RegSlice,
         func: crate::bytecode::Reg,
         npos: u8,
+        lit_kw: &[(String, Value)],
         args_splat_val: &Value,
         kwargs_val: Option<&Value>,
         num_locals: crate::bytecode::Reg,
     ) -> Result<Option<Value>> {
-        // `**kw` entries as (name, value), rejecting non-`str` keys (→ None, slow
-        // path raises the CPython TypeError).  Empty when there is no `**kw`.
-        let keyword_vals: Vec<(String, Value)> = match kwargs_val {
-            Some(v) => {
-                match v.dict_with(|d| {
-                    let mut kv: Vec<(String, Value)> = Vec::with_capacity(d.len());
-                    for (k, val) in d.iter() {
-                        match k {
-                            pyrust_core::PyKey::Str(s) => {
-                                kv.push((s.as_str().unwrap_or("").to_owned(), val.clone()))
-                            }
-                            _ => return None,
+        // Keyword entries as (name, value): the literal `kw=v` arguments first,
+        // then the `**kw` dict entries (rejecting non-`str` keys → None, slow path
+        // raises the CPython TypeError).  Literal keywords and `**kw` never co-occur
+        // (shape check), so no cross-source collision is possible here.
+        let mut keyword_vals: Vec<(String, Value)> = Vec::with_capacity(lit_kw.len());
+        keyword_vals.extend(lit_kw.iter().cloned());
+        if let Some(v) = kwargs_val {
+            match v.dict_with(|d| {
+                let mut kv: Vec<(String, Value)> = Vec::with_capacity(d.len());
+                for (k, val) in d.iter() {
+                    match k {
+                        pyrust_core::PyKey::Str(s) => {
+                            kv.push((s.as_str().unwrap_or("").to_owned(), val.clone()))
                         }
+                        _ => return None,
                     }
-                    Some(kv)
-                }) {
-                    Some(Some(kv)) => kv,
-                    // Non-str key (Some(None)) or not a plain dict (None): slow path.
-                    _ => return Ok(None),
                 }
+                Some(kv)
+            }) {
+                Some(Some(kv)) => keyword_vals.extend(kv),
+                // Non-str key (Some(None)) or not a plain dict (None): slow path.
+                _ => return Ok(None),
             }
-            None => Vec::new(),
-        };
+        }
 
         // Positionals in source order: leading fixed positionals, then the splat
         // elements (plain tuple/list — cloned; the callee's `*args` tuple is built
