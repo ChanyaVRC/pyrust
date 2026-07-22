@@ -23,8 +23,8 @@ use crate::interpreter::{
     AsyncGenASend, BigRangeIter, CallableIter, ChainFromIterableIter, EnumerateIter, FilterIter, GeneratorFrame, GetItemIter, GuardVersion, IterSrcBuf, MapIter, NativeIterFrame, NativeIterGuard, ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_hash_inherits_builtin_none, class_is_subclass_of,
     class_suppresses_instance_dict,
-    compare_values, compare_values_with_op, coerce_numeric, coerce_subclass_backing, dir_names,
-    dispatch_numeric_binop,
+    classify_sort, compare_values, compare_values_with_op, coerce_numeric,
+    coerce_subclass_backing, dir_names, dispatch_numeric_binop, SortKind,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     builtin_data_backing, extract_str_value, float_divmod, float_to_bigint, instance_builtin_data,
     invoke_class_method,
@@ -2696,61 +2696,87 @@ pyrust_module! {
                 )?;
                 keyed.push((k, v));
             }
-            // Pre-scan: if no key is a PyInstance, all comparisons are
-            // primitive — skip the interpreter-dispatch overhead entirely.
-            let has_instance =
-                keyed.iter().any(|(k, _)| matches!(k.kind(), ValueKind::PyInstance(_)));
-            let mut sort_err: Option<PyError> = None;
-            if has_instance {
-                keyed.sort_by(|(a, _), (b, _)| {
-                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+            // Classify by key (one pass, no alloc): homogeneous all-int / all-str
+            // keys sort with a native comparator; a `PyInstance` key routes
+            // through the interpreter; every other primitive mix uses
+            // `compare_values`.
+            match classify_sort(keyed.iter().map(|(k, _)| k)) {
+                SortKind::AllInt => keyed.sort_by(|(a, _), (b, _)| {
                     let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-                    match _interp.richcmp_order(lhs, rhs) {
-                        Ok(ord) => ord,
-                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
-                    }
-                });
-            } else {
-                keyed.sort_by(|(a, _), (b, _)| {
-                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                    lhs.as_int().unwrap_or(0).cmp(&rhs.as_int().unwrap_or(0))
+                }),
+                SortKind::AllStr => keyed.sort_by(|(a, _), (b, _)| {
                     let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-                    match compare_values(lhs, rhs) {
-                        Ok(ord) => ord,
-                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
-                    }
-                });
+                    lhs.as_str().unwrap_or("").cmp(rhs.as_str().unwrap_or(""))
+                }),
+                SortKind::HasInstance => {
+                    let mut sort_err: Option<PyError> = None;
+                    keyed.sort_by(|(a, _), (b, _)| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                        match _interp.richcmp_order(lhs, rhs) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
+                }
+                SortKind::General => {
+                    let mut sort_err: Option<PyError> = None;
+                    keyed.sort_by(|(a, _), (b, _)| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                        match compare_values(lhs, rhs) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
+                }
             }
-            if let Some(e) = sort_err { return Err(e); }
             // Reuse the `items` buffer (now empty after `take`) to avoid
             // a fresh allocation when extracting values from the keyed pairs.
             items.extend(keyed.into_iter().map(|(_, v)| v));
         } else {
-            // Pre-scan: if no item is a PyInstance, use compare_values
-            // directly — zero interpreter-dispatch overhead for the common
-            // all-primitive case (ints, strings, …).
-            let has_instance =
-                items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_)));
-            let mut sort_err: Option<PyError> = None;
-            if has_instance {
-                items.sort_by(|a, b| {
-                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+            // Classify once: a homogeneous all-int / all-str slice sorts with a
+            // native comparator (CPython's `unsafe_long_compare` /
+            // `unsafe_latin_compare`) — no per-pair type dispatch, no `Result`,
+            // cannot raise.  A `PyInstance` routes through the interpreter (user
+            // `__lt__`); every other primitive mix uses `compare_values`.
+            match classify_sort(items.iter()) {
+                SortKind::AllInt => items.sort_by(|a, b| {
                     let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-                    match _interp.richcmp_order(lhs, rhs) {
-                        Ok(ord) => ord,
-                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
-                    }
-                });
-            } else {
-                items.sort_by(|a, b| {
-                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                    lhs.as_int().unwrap_or(0).cmp(&rhs.as_int().unwrap_or(0))
+                }),
+                SortKind::AllStr => items.sort_by(|a, b| {
                     let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-                    match compare_values(lhs, rhs) {
-                        Ok(ord) => ord,
-                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
-                    }
-                });
+                    lhs.as_str().unwrap_or("").cmp(rhs.as_str().unwrap_or(""))
+                }),
+                SortKind::HasInstance => {
+                    let mut sort_err: Option<PyError> = None;
+                    items.sort_by(|a, b| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                        match _interp.richcmp_order(lhs, rhs) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
+                }
+                SortKind::General => {
+                    let mut sort_err: Option<PyError> = None;
+                    items.sort_by(|a, b| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                        match compare_values(lhs, rhs) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
+                }
             }
-            if let Some(e) = sort_err { return Err(e); }
         }
         // `reverse=True` is applied by inverting the comparison inside the
         // stable `sort_by` (operand swap above), matching `list.sort`'s

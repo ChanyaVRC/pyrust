@@ -132,6 +132,58 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
     compare_values_with_op(a, b, "<")
 }
 
+/// Type homogeneity of a to-be-sorted slice, used to pick a specialized native
+/// comparator (CPython's `unsafe_long_compare` / `unsafe_latin_compare`) over the
+/// general `compare_values` type dispatch.
+pub(crate) enum SortKind {
+    /// Every element is a small `int` — compare via `as_int` (no type dispatch,
+    /// no `Result`, cannot raise).
+    AllInt,
+    /// Every element is a `str` — compare via `as_str`.
+    AllStr,
+    /// At least one `PyInstance` — comparisons may fire user `__lt__`, so the
+    /// caller must route through the interpreter (`richcmp_order`).
+    HasInstance,
+    /// Mixed / other primitives — use `compare_values`.
+    General,
+}
+
+/// One pass over the sort elements (or keys) to classify them for [`SortKind`].
+/// A `PyInstance` anywhere forces `HasInstance` (user comparisons); otherwise the
+/// result is `AllInt` / `AllStr` only if *every* element is that exact primitive
+/// kind.  Takes an iterator so a keyed sort can classify by key with no alloc.
+pub(crate) fn classify_sort<'a>(items: impl Iterator<Item = &'a Value>) -> SortKind {
+    let mut all_int = true;
+    let mut all_str = true;
+    let mut has_instance = false;
+    let mut any = false;
+    for v in items {
+        any = true;
+        match v.kind() {
+            ValueKind::Int(_) => all_str = false,
+            ValueKind::Str(_) => all_int = false,
+            ValueKind::PyInstance(_) => {
+                has_instance = true;
+                all_int = false;
+                all_str = false;
+            }
+            _ => {
+                all_int = false;
+                all_str = false;
+            }
+        }
+    }
+    if has_instance {
+        SortKind::HasInstance
+    } else if any && all_int {
+        SortKind::AllInt
+    } else if any && all_str {
+        SortKind::AllStr
+    } else {
+        SortKind::General
+    }
+}
+
 /// Like `compare_values` but uses `op_name` in the `TypeError` message when
 /// the operand types are incompatible.  CPython's `do_richcompare` emits the
 /// operator token that was actually requested (`<`, `>`, `<=`, `>=`), so
