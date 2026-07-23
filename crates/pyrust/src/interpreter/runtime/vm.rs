@@ -2828,6 +2828,24 @@ impl Interpreter {
                 }
                 Insn::UnaryOp(dst, op, src) => {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    // Fast path: unary -/+/~ on a tagged int (incl. bool), before
+                    // the PyInstance dunder dispatch (primitive fast pass first).
+                    // PyInstance values — including int subclasses with a user
+                    // __neg__/__pos__/__invert__ — are not tagged ints, so as_int()
+                    // returns None and their overrides are preserved below.
+                    if let Some(v) = val.as_int() {
+                        let fast = match op {
+                            // -i64::MIN overflows: None → slow path promotes to BigInt.
+                            UnaryOp::Neg => v.checked_neg().map(Value::int),
+                            UnaryOp::BitNot => Some(Value::int(!v)),
+                            UnaryOp::Pos => Some(Value::int(v)),
+                            UnaryOp::Not => None,
+                        };
+                        if let Some(result) = fast {
+                            regs[*dst as usize] = result;
+                            continue;
+                        }
+                    }
                     let result = if *op == UnaryOp::Not {
                         // Dispatch __bool__ for instances before falling back to truthy().
                         Value::bool_(!vm_try!(self.truthy_value(&val)))
