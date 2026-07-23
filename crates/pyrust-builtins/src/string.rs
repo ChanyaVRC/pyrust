@@ -107,9 +107,8 @@ pub fn requires_vm_template(method: &str) -> bool {
     matches!(method, "format" | "format_map" | "maketrans")
 }
 
-pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
+pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
     let s: &str = src.as_str().unwrap();
-    let args = args.as_slice();
     match method {
         // Common Sequence Operations (via char indexing).  ASCII-ness is cached
         // O(1) on the string header (#2124), so the find/index/count fast paths
@@ -1275,8 +1274,9 @@ where
         return Ok(Value::string(String::new()));
     }
     // Validate every element up front, stashing the borrowed slice and summing
-    // byte lengths.  Borrowing into a Vec keeps the build pass infallible.
-    let mut slices: Vec<&str> = Vec::with_capacity(n);
+    // byte lengths.  Borrowing keeps the build pass infallible; a SmallVec keeps
+    // the common small join off the heap (no allocation for up to 16 parts).
+    let mut slices: smallvec::SmallVec<[&str; 16]> = smallvec::SmallVec::with_capacity(n);
     let mut body_len = 0usize;
     for part in parts {
         let s = part?;
@@ -1436,11 +1436,34 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
             ));
         }
     };
-    if count < 0 {
-        Ok(Value::string(s.replace(old, new)))
+    let max = if count < 0 {
+        usize::MAX
     } else {
-        Ok(Value::string(s.replacen(old, new, count as usize)))
+        count as usize
+    };
+    Ok(Value::string(replace_fill(s, old, new, max)))
+}
+
+/// Single-pass `str.replace`/`replacen` that seeds the result buffer with
+/// `s.len()` capacity.  Rust's `str::replace` starts from an empty `String` and
+/// reallocates as it grows (several allocation events per call); most replaces
+/// keep the length close to the source, so one up-front reservation avoids those
+/// intermediate reallocations without the extra counting pass a *precise* size
+/// would need.  Semantics are identical to `s.replacen(from, to, max)`
+/// (`max == usize::MAX` for replace-all), including empty-`from` behaviour.
+fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> String {
+    if max == 0 {
+        return s.to_string();
     }
+    let mut result = String::with_capacity(s.len());
+    let mut last_end = 0;
+    for (start, part) in s.match_indices(from).take(max) {
+        result.push_str(&s[last_end..start]);
+        result.push_str(to);
+        last_end = start + part.len();
+    }
+    result.push_str(&s[last_end..]);
+    result
 }
 
 fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {

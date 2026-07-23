@@ -3795,7 +3795,7 @@ impl Interpreter {
                 // common all-exact-str list pays nothing but a scan.
                 coerce_str_subclass_join_iterable(iterable)
             };
-            return pyrust_builtins::string::call("join", &receiver, vec![iterable]);
+            return pyrust_builtins::string::call("join", &receiver, std::slice::from_ref(&iterable));
         }
         if method == "translate" {
             // Dict fast path: delegate to pyrust-builtins which handles the
@@ -3835,7 +3835,7 @@ impl Interpreter {
                     }
                 });
                 let table = coerced.flatten().unwrap_or(table);
-                return pyrust_builtins::string::call("translate", &receiver, vec![table]);
+                return pyrust_builtins::string::call("translate", &receiver, std::slice::from_ref(&table));
             }
             // General mapping protocol: call table[ordinal] per codepoint.
             // KeyError / IndexError / LookupError → keep character;
@@ -3915,7 +3915,7 @@ impl Interpreter {
             }
             return Ok(Value::string(out));
         }
-        pyrust_builtins::string::call(method, &receiver, args)
+        pyrust_builtins::string::call(method, &receiver, &args)
     }
 
     /// Dispatch `bytes.join()` with support for generators and arbitrary iterables.

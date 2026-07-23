@@ -124,7 +124,7 @@ mod method_table_drift_guard {
     fn string_methods_dispatched() {
         let src = Value::string("");
         for &name in super::string::METHODS {
-            let r = super::string::call(name, &src, vec![]);
+            let r = super::string::call(name, &src, &[]);
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "string::call({name}) hit fallback: {e:?}");
             }
