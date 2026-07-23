@@ -1260,6 +1260,36 @@ fn num_mixed_fast(a: &Value, b: &Value, op: BinaryOp) -> Option<Value> {
     }
 }
 
+/// Unconditional float / mixed-numeric fast path for the `BinOpInPlace` /
+/// `BinOpConst` / `BinOpImm` handlers, which don't carry an adaptive inline
+/// cache (only `BinOp` does) and otherwise fall straight to `eval_binary` once
+/// the int-int fast path misses.  Floats are immutable, so this is identical
+/// for augmented (`s += x`) and const-folded plain ops.
+///
+/// Restricted to the coercion-safe arithmetic ops (same set as `num_mixed_fast`):
+/// `Pow` (complex for a negative base) and comparisons fall through to
+/// `eval_binary` unchanged.  Returns `None` for any non-float/non-mixed operands
+/// so list/set/str in-place handling downstream is untouched.
+#[inline(always)]
+fn num_binop_fast(a: &Value, b: &Value, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::FloorDiv
+        | BinaryOp::Mod => {}
+        _ => return None,
+    }
+    if a.is_float() && b.is_float() {
+        return float_float_fast(a.as_float_raw(), b.as_float_raw(), op);
+    }
+    if (a.is_float() && b.as_int().is_some()) || (a.as_int().is_some() && b.is_float()) {
+        return num_mixed_fast(a, b, op);
+    }
+    None
+}
+
 #[inline(always)]
 fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
     match op {
