@@ -2747,6 +2747,15 @@ impl Interpreter {
                         regs[*dst as usize] = result;
                         continue;
                     }
+                    // Float / mixed-numeric fast path (immutable, so aug and plain
+                    // share the result). After the int fast path; floats never take
+                    // the str/in-place branches below.
+                    if let Some(result) =
+                        num_binop_fast(&regs[*lhs as usize], &regs[*rhs as usize], *op)
+                    {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
                     // In-place `s += t` for plain str += str (issue #2850): grow
                     // the LHS backing in place when uniquely owned, else fresh
                     // concat. Sits after the int fast path so int `+=` is
@@ -2775,6 +2784,12 @@ impl Interpreter {
                         cv.as_int(),
                     ) && let Some(result) = int_int_fast(a, b, *op)
                     {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
+                    // Float / mixed-numeric fast path (immutable → aug and plain
+                    // share the result; comparisons/Pow fall through).
+                    if let Some(result) = num_binop_fast(&regs[*lhs as usize], cv, *op) {
                         regs[*dst as usize] = result;
                         continue;
                     }
@@ -2808,6 +2823,14 @@ impl Interpreter {
                     let imm_i64 = *imm as i64;
                     if let Some(a) = regs[*lhs as usize].as_int()
                         && let Some(result) = int_int_fast(a, imm_i64, *op)
+                    {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
+                    // Float lhs with an int immediate → mixed-numeric fast path
+                    // (comparisons/Pow fall through).
+                    if let Some(result) =
+                        num_binop_fast(&regs[*lhs as usize], &Value::int(imm_i64), *op)
                     {
                         regs[*dst as usize] = result;
                         continue;
