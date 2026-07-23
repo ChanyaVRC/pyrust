@@ -293,6 +293,72 @@ pub(crate) struct EnumerateIter {
     pub(crate) done: bool,
 }
 
+/// Attempt to build a native [`IterState::Enumerate`] for `value` (the object
+/// a `for` loop is about to iterate).
+///
+/// Succeeds only for a **pristine** `enumerate(seq)`: the enumerate object must
+/// not yet have yielded anything (`!done`, `counter` a plain `i64`) and its
+/// inner source must be an unguarded [`NativeIterFrame`] still at `pos == 0`
+/// (list / tuple / range / str iterators — collections with no per-step Python
+/// dispatch and no mutation guard).  In that case the frame's element snapshot
+/// is *moved* into the returned state (leaving the enumerate and its source
+/// marked exhausted, so re-iterating the same object yields nothing — matching
+/// CPython's single-pass enumerate), and the loop can walk it directly.
+///
+/// Returns `None` — leaving the caller on the generic `UserDefined` /
+/// `call_next` path — for every other shape: a partly-consumed enumerate, a
+/// `BigInt`/near-overflow `start`, or a source that is a generator / map /
+/// user iterator / guarded dict-set iterator (whose lazy side effects and
+/// mutation guards must be preserved).
+fn try_enumerate_fastpath(value: &Value) -> Option<IterState> {
+    let ValueKind::Generator(enum_rc) = value.kind() else {
+        return None;
+    };
+    // Snapshot the enumerate's source Rc + start under a short immutable borrow.
+    let (source, start) = {
+        let b = enum_rc.try_borrow().ok()?;
+        let e = b.downcast_ref::<EnumerateIter>()?;
+        if e.done {
+            return None;
+        }
+        let start = e.counter.as_int()?;
+        (e.source.clone(), start)
+    };
+    let ValueKind::Generator(src_rc) = source.kind() else {
+        return None;
+    };
+    // The source must be an unguarded, not-yet-advanced NativeIterFrame.
+    let items = {
+        let mut sb = src_rc.try_borrow_mut().ok()?;
+        let frame = sb.downcast_mut::<NativeIterFrame>()?;
+        if frame.guard.is_some() || frame.pos != 0 || frame.exhausted {
+            return None;
+        }
+        // `start + (len - 1)` must fit i64 (the last index we produce).  A start
+        // near i64::MAX (only reachable via a huge explicit `start=`) falls back
+        // to the generic path, which promotes the counter to BigInt.
+        if start.checked_add(frame.items.len() as i64).is_none() {
+            return None;
+        }
+        // Move the snapshot out and mark the source exhausted so any later
+        // `next()` on it (e.g. a second `iter()` of the same enumerate) is inert.
+        let items = std::mem::take(&mut frame.items);
+        frame.exhausted = true;
+        items
+    };
+    // Mark the enumerate object itself exhausted (single-pass parity).
+    if let Ok(mut b) = enum_rc.try_borrow_mut()
+        && let Some(e) = b.downcast_mut::<EnumerateIter>()
+    {
+        e.done = true;
+    }
+    Some(IterState::Enumerate {
+        items,
+        pos: 0,
+        start,
+    })
+}
+
 /// Lazy iterator over an arbitrary-precision `range` (#2118).  Produced by
 /// `iter()` / `enumerate()` / `zip()` on a big-bound range so those callers do
 /// not materialize the (potentially enormous) sequence.  `cur` advances by
@@ -708,6 +774,25 @@ pub(crate) enum IterState {
         msg: &'static str,
         exhaust_first: bool,
         od_seq: u64,
+    },
+    /// Native `enumerate(...)` iterator (`for i, x in enumerate(L)`).  Holds the
+    /// element snapshot `items` (taken from the enumerate's inner
+    /// `NativeIterFrame` — exactly what the generic path would have iterated, so
+    /// the observable semantics are identical), a running index `pos`, and the
+    /// enumerate `start` offset.  On each `ForIter` step it reads `items[pos]`
+    /// directly (no `call_next` dispatch) and, when the loop target is the
+    /// common `i, x` 2-tuple unpack, writes the index and element straight into
+    /// the destination registers — skipping both the per-step `(i, x)` tuple
+    /// allocation and the following `Unpack` instruction (mirrors the
+    /// `ItemsGuarded` fused unpack, #2830 opt2).  Only produced when the
+    /// enumerate object is pristine and its inner source is an unguarded
+    /// `NativeIterFrame` (list / tuple / range / str iterators); every other
+    /// enumerate shape (generator/map/user source, a guarded dict/set iterator,
+    /// or a `BigInt` start) stays on `UserDefined`.
+    Enumerate {
+        items: Vec<Value>,
+        pos: usize,
+        start: i64,
     },
 }
 
@@ -4777,7 +4862,20 @@ impl Interpreter {
                                     step,
                                 }))
                             }
-                            IterTag::Generator => IterState::UserDefined(src_val),
+                            IterTag::Generator => {
+                                // Native `enumerate(seq)` fast path: when `src_val`
+                                // is a pristine `enumerate` object whose inner source
+                                // is an unguarded `NativeIterFrame` (list / tuple /
+                                // range / str iterator), take its element snapshot
+                                // and drive it directly — skipping the per-step
+                                // `call_next` dispatch, the `(i, x)` tuple allocation,
+                                // and (when `for i, x in …`) the trailing `Unpack`.
+                                if let Some(st) = try_enumerate_fastpath(&src_val) {
+                                    st
+                                } else {
+                                    IterState::UserDefined(src_val)
+                                }
+                            }
                             IterTag::ListOrTuple => {
                                 // Temp-register list/tuple: own the value directly instead
                                 // of materializing via iter_values (which allocates a new Vec
@@ -5170,6 +5268,37 @@ impl Interpreter {
                                     pc += 1;
                                 } else {
                                     regs[*dst as usize] = Value::tuple(vec![kc, vc]);
+                                }
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::Enumerate { items, pos, start }) => {
+                            let cur_pos = *pos;
+                            if cur_pos < items.len() {
+                                // SAFETY: cur_pos < items.len() checked just above.
+                                let elem = unsafe { items.get_unchecked(cur_pos).clone() };
+                                let idx = Value::int(*start + cur_pos as i64);
+                                *pos = cur_pos + 1;
+                                // Fused unpack (mirrors ItemsGuarded, #2830 opt2):
+                                // `for i, x in enumerate(L)` compiles to a `ForIter`
+                                // immediately followed by `Unpack(dst+1, dst, 2)`.
+                                // Write the index and element straight into the two
+                                // destination registers and skip both the `(i, x)`
+                                // tuple allocation and the `Unpack` (bump pc).  An
+                                // enumerate item is always a 2-tuple, so the arity
+                                // check `Unpack` performs is vacuous.  Any other
+                                // shape (single-var `for t in`, `*`-unpack) falls
+                                // through to the tuple build.
+                                if let Some(Insn::Unpack(base, src, 2)) = code.insns.get(pc)
+                                    && *src == *dst
+                                {
+                                    let base = *base as usize;
+                                    regs[base] = idx;
+                                    regs[base + 1] = elem;
+                                    pc += 1;
+                                } else {
+                                    regs[*dst as usize] = Value::tuple(vec![idx, elem]);
                                 }
                             } else {
                                 pc = jump_pc!(*offset);
