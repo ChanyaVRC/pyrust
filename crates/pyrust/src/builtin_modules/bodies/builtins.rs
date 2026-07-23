@@ -9973,6 +9973,38 @@ fn format_oct_i64(v: i64) -> String {
 /// Shared implementation for `min` / `max` — both accept the same
 /// argument shapes (single-iterable or 2+ positionals, plus a `key=`
 /// kwarg) and only differ in the ordering direction.
+/// `min`/`max` reduction over a borrowed all-primitive slice — the fast path for
+/// `min(list)` / `max(list)` without a key.  Returns:
+/// - `Some(Ok(winner))` when the slice is non-empty and contains no `PyInstance`
+///   (comparisons via `compare_values_with_op` need no interpreter dispatch);
+/// - `Some(Err(_))` on a comparison TypeError (mixed unorderable primitives);
+/// - `None` when the slice is empty or contains a `PyInstance`, so the caller
+///   falls back to the generic collect-and-reduce path.
+fn min_max_primitive_slice(items: &[Value], is_max: bool) -> Option<Result<Value>> {
+    if items.is_empty() || items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_))) {
+        return None;
+    }
+    // CPython max() emits '>' in its TypeError; min() emits '<'.
+    let op = if is_max { ">" } else { "<" };
+    let mut best = &items[0];
+    for v in &items[1..] {
+        match compare_values_with_op(v, best, op) {
+            Ok(ord) => {
+                let take = if is_max {
+                    ord == std::cmp::Ordering::Greater
+                } else {
+                    ord == std::cmp::Ordering::Less
+                };
+                if take {
+                    best = v;
+                }
+            }
+            Err(e) => return Some(Err(e)),
+        }
+    }
+    Some(Ok(best.clone()))
+}
+
 fn min_max_impl(
     interp: &mut crate::Interpreter,
     args: &[ExpandedCallArg],
@@ -10000,6 +10032,19 @@ fn min_max_impl(
                 "TypeError",
                 format!("'{}' is an invalid keyword argument for {fn_name}()", a.name.as_ref().unwrap()),
             ));
+        }
+    }
+    // Fast path: `min(list)` / `max(list)` with no key.  Reduce over the list's
+    // borrowed backing slice instead of `collect_iterable`, which clones every
+    // element into a fresh Vec.  Only engages for an all-primitive list (no
+    // PyInstance element), so comparisons need no interpreter dispatch and the
+    // borrow can be held; only the winning element is cloned.
+    if key_fn.is_none() && positional.len() == 1 {
+        if let Some(res) =
+            positional[0].value.list_with(|items| min_max_primitive_slice(items, is_max))
+            && let Some(out) = res
+        {
+            return out;
         }
     }
     let items: Vec<Value> = if positional.len() == 1 {
