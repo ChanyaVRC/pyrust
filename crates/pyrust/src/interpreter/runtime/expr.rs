@@ -42,13 +42,29 @@ fn seq_repeat_str(text: &str, n: i64) -> Result<Value> {
         // char_count * n fits, but byte_total doesn't — OOM.
         return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
-    // Use try_reserve to catch OOM rather than letting the allocator abort,
-    // then delegate to str::repeat for its O(log n) doubling strategy.
-    let mut probe = String::new();
-    if probe.try_reserve(byte_total).is_err() {
+    // Reserve the result buffer once (try_reserve catches OOM rather than
+    // letting the allocator abort), then fill it in place with str::repeat's
+    // O(log n) doubling.  The previous version reserved a throwaway `probe`
+    // and *then* let `str::repeat` allocate a second buffer — a wasted
+    // allocation per call (issue: str repeat ~2.2x slower than CPython).
+    let mut result = String::new();
+    if result.try_reserve_exact(byte_total).is_err() {
         return Err(pyrust_core::py_err!("MemoryError", String::new()));
     }
-    Ok(Value::string(text.repeat(n)))
+    result.push_str(text);
+    while result.len() < byte_total {
+        // Both `byte_total` and `result.len()` are multiples of `text.len()`,
+        // so `copy` is too.
+        let copy = (byte_total - result.len()).min(result.len());
+        // SAFETY: `result` currently holds a whole number of `text` copies and
+        // `copy` is a multiple of `text.len()`, so appending the first `copy`
+        // bytes keeps the buffer valid UTF-8.  No reallocation: `byte_total`
+        // capacity was reserved above.
+        unsafe {
+            result.as_mut_vec().extend_from_within(..copy);
+        }
+    }
+    Ok(Value::string(result))
 }
 
 fn seq_repeat_list(items: &[Value], n: i64) -> Result<Value> {
@@ -3947,6 +3963,15 @@ impl Interpreter {
                 self.sub(left, right)
             }
             BinaryOp::Mul => {
+                // Fast path: tagged `str * int` / `int * str` (the common
+                // `"x" * n`).  Tagged `Str`/`Int` are never `PyInstance`, so no
+                // user `__mul__`/`__rmul__` can apply — skip the dunder dispatch,
+                // subclass-backing coercion, and numeric-slot probing entirely.
+                match (left.kind(), right.kind()) {
+                    (ValueKind::Str(t), ValueKind::Int(n))
+                    | (ValueKind::Int(n), ValueKind::Str(t)) => return seq_repeat_str(t, n),
+                    _ => {}
+                }
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__mul__", "__rmul__") {
                     return r;
                 }
