@@ -3036,7 +3036,7 @@ fn pass_str_method_const_fold(
                         let arg_idx = *const_regs.get(&(args_base + j))?;
                         arg_vals.push(consts[arg_idx as usize].clone());
                     }
-                    let result = pyrust_builtins::string::call(method, obj_val, arg_vals).ok()?;
+                    let result = pyrust_builtins::string::call(method, obj_val, &arg_vals).ok()?;
                     // Exclude mutable containers to avoid aliasing the pool.
                     let immutable = matches!(
                         result.kind(),

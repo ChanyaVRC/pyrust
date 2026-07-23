@@ -277,6 +277,7 @@ dependencies = [
  "indexmap",
  "pyrust-core",
  "rustc-hash",
+ "smallvec",
  "unicode-properties",
  "unicode_names2",
 ]
