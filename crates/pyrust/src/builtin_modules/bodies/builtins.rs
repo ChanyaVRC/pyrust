@@ -10039,13 +10039,13 @@ fn min_max_impl(
     // element into a fresh Vec.  Only engages for an all-primitive list (no
     // PyInstance element), so comparisons need no interpreter dispatch and the
     // borrow can be held; only the winning element is cloned.
-    if key_fn.is_none() && positional.len() == 1 {
-        if let Some(res) =
+    if key_fn.is_none()
+        && positional.len() == 1
+        && let Some(res) =
             positional[0].value.list_with(|items| min_max_primitive_slice(items, is_max))
-            && let Some(out) = res
-        {
-            return out;
-        }
+        && let Some(out) = res
+    {
+        return out;
     }
     let items: Vec<Value> = if positional.len() == 1 {
         interp.collect_iterable(&positional[0].value)?
