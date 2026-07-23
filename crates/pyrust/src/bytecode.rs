@@ -992,6 +992,9 @@ impl std::fmt::Debug for KwCallCacheEntry {
 pub(crate) enum BinopTypeTag {
     Int,
     Float,
+    /// One `int`/`bool` operand and one `float` operand — arithmetic computed by
+    /// coercing the int to `f64` (matches CPython's own coercion).
+    NumMixed,
     Str,
     Other,
 }
