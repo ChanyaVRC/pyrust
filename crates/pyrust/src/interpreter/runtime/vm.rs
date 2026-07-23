@@ -4237,6 +4237,17 @@ impl Interpreter {
                     }
                     regs[*dst as usize] = Value::list(items);
                 }
+                Insn::BuildListReserve(dst, src) => {
+                    // Fresh empty list pre-sized to the source's length hint.
+                    // Only queries lengths that never run user code; an
+                    // unknown-length source (generator, user iterable, …)
+                    // reserves nothing.  Behaviour is identical to an empty
+                    // `BuildList` — this is a capacity hint only.
+                    let src_val = vm_try!(vm_read(&regs, *src, num_locals));
+                    let cap = list_reserve_hint(&src_val);
+                    let items: Vec<Value> = Vec::with_capacity(cap);
+                    regs[*dst as usize] = Value::list(items);
+                }
                 Insn::BuildTuple(dst, base, n) => {
                     let mut items = Vec::with_capacity(*n as usize);
                     for i in 0..*n {
@@ -6408,6 +6419,37 @@ fn vm_read_ref(
         }
     }
     Ok(v)
+}
+
+/// Length hint for pre-sizing a list-comprehension accumulator (`BuildListReserve`).
+///
+/// Returns the number of elements a single-clause unconditional comprehension
+/// over `src` will produce — i.e. `len(src)` — but ONLY for source kinds whose
+/// length is known without running any user Python code (`__len__` /
+/// `__length_hint__` must never fire, since pre-sizing has to be free of
+/// observable side effects). Unknown-length sources (generators, user iterables,
+/// builtin iterator objects) return 0 so the list starts empty and grows as
+/// before. The result is a capacity hint only; it never changes semantics.
+fn list_reserve_hint(src: &Value) -> usize {
+    use pyrust_core::range_len;
+    match src.kind() {
+        ValueKind::List(items) => items.len(),
+        ValueKind::Tuple(items) => items.len(),
+        ValueKind::Set(items) => items.len(),
+        ValueKind::Dict(items) => items.len(),
+        ValueKind::Bytes(rc) => rc.len(),
+        // `str` iterates by Unicode scalar. The byte length is a cheap upper
+        // bound on the scalar count (equal for ASCII, a slight over-reserve for
+        // multibyte) — a valid capacity hint without an O(n) counting pass.
+        ValueKind::Str(text) => text.len(),
+        ValueKind::Range { start, stop, step } => {
+            let n = range_len(start, stop, step);
+            if n > 0 { n as usize } else { 0 }
+        }
+        // BigRange, generators, user iterables, builtin iterators: unknown or
+        // potentially user-code-invoking length — reserve nothing.
+        _ => 0,
+    }
 }
 
 /// Canonical unary `-`/`+`/`~`/`not` evaluation for built-in operands.

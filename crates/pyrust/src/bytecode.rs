@@ -434,6 +434,17 @@ pub enum Insn {
     ReturnNone,
     /// R[dst] = [R[base], R[base+1], ..., R[base+n-1]]
     BuildList(Reg, Reg, u32),
+    /// R[dst] = a fresh empty list, pre-sized to the length hint of R[src].
+    ///
+    /// Emitted only for the accumulator of a single-clause, unconditional list
+    /// comprehension (`[f(x) for x in src]`) where the element count equals the
+    /// source length, so the result list can be reserved up front and skip the
+    /// geometric-growth reallocations. The hint is read from the source register
+    /// (`.0`, the comprehension's iterable parameter) using only length queries
+    /// that never invoke user code; an unknown-length source reserves nothing.
+    /// Semantically identical to `BuildList(dst, _, 0)` (always an empty list) —
+    /// the reservation is purely a capacity optimisation.
+    BuildListReserve(Reg, Reg),
     /// R[dst] = (R[base], R[base+1], ..., R[base+n-1])
     BuildTuple(Reg, Reg, u32),
     /// R[dst] = R[base] ++ R[base+1] ++ ... ++ R[base+n-1]

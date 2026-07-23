@@ -4370,6 +4370,14 @@ struct Compiler {
     /// instead of a full attribute-lookup + method-call dispatch, mirroring
     /// CPython's dedicated `LIST_APPEND` opcode (issue #1862).
     is_list_comp: bool,
+    /// True when this Compiler is a **list comprehension** body whose single
+    /// unconditional clause lets the accumulator be pre-sized from the source
+    /// length (`[f(x) for x in src]`): the element count equals `len(src)`, so
+    /// the synthesized `.acc = []` init is lowered to `Insn::BuildListReserve`,
+    /// reserving capacity up front to skip the geometric-growth reallocations.
+    /// Set only when there is exactly one clause, no `if` condition, and the
+    /// comprehension is not async (see `compile_list_comp`).
+    list_comp_presize: bool,
     /// True when this Compiler is producing the implicit function body of a
     /// list / set / dict comprehension — the forms CPython 3.12 *inlines* into
     /// the enclosing frame (PEP 709).  pyrust still runs them as a separate
@@ -5173,6 +5181,7 @@ impl Compiler {
             has_dead_yield: false,
             is_set_comp: false,
             is_list_comp: false,
+            list_comp_presize: false,
             is_inlined_comp: false,
             comp_enclosing_locals: None,
         }
@@ -6427,6 +6436,20 @@ impl Compiler {
         match target {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
+                    // List-comprehension accumulator init (`.acc = []`) in a
+                    // single-clause, unconditional comp: reserve the result list
+                    // to the source length up front (`BuildListReserve`), skipping
+                    // the geometric-growth reallocations of repeated `append`.
+                    // `.acc` and `.0` are compiler-internal names that cannot
+                    // appear in user source, so this never intercepts user code.
+                    if self.list_comp_presize
+                        && name == ".acc"
+                        && matches!(expr, Expr::List(items) if items.is_empty())
+                        && let Some(src_reg) = self.local_reg(".0")
+                    {
+                        self.emit(Insn::BuildListReserve(reg, src_reg));
+                        return;
+                    }
                     self.compile_expr_into(expr, reg);
                     // Class-body `x = expr` is the common case; record the store
                     // for class-namespace insertion order.  (Outside class
@@ -11765,6 +11788,7 @@ impl Compiler {
         fn_body: Vec<Stmt>,
         comp_name: &str,
         is_async: bool,
+        presize_acc: bool,
     ) -> Reg {
         const IT_PARAM: &str = ".0";
 
@@ -11883,6 +11907,9 @@ impl Compiler {
         sub.is_set_comp = comp_name == "setcomp";
         // List comprehensions lower `.acc.append(elt)` to `Insn::ListAppend` (issue #1862).
         sub.is_list_comp = comp_name == "listcomp";
+        // Only a single-clause, unconditional, non-async list comp reaches here
+        // with `presize_acc` — see `compile_list_comp`.
+        sub.list_comp_presize = presize_acc;
         // list / set / dict comprehensions are CPython-3.12-inlined scopes; an
         // unbound enclosing-local read inside them is `UnboundLocalError`, not the
         // free-variable `NameError` (issue #2340).  Generator expressions
@@ -12043,7 +12070,13 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp", is_async)
+        // Pre-size the accumulator when the produced element count is exactly the
+        // source length: a single clause with no `if` condition and not async.
+        // With a condition or a second `for`, the count is unknown, so we cannot
+        // reserve.  The reserve reads the source length from `.0` without running
+        // user code (see `list_reserve_hint`), so it never changes semantics.
+        let presize = clauses.len() == 1 && clauses[0].cond.is_none() && !is_async;
+        self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp", is_async, presize)
     }
 
     fn compile_dict_comp(&mut self, key: &Expr, val: &Expr, clauses: &[CompClause]) -> Reg {
@@ -12085,7 +12118,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async)
+        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp", is_async, false)
     }
 
     /// When compiling the implicit function body of a set comprehension
@@ -12216,7 +12249,7 @@ impl Compiler {
         fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
         fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string(), None))));
 
-        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async)
+        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp", is_async, false)
     }
 
     /// Compile a generator expression `(elt for target in iter ...)`.
