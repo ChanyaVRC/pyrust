@@ -1210,10 +1210,47 @@ fn classify_binop_tag(a: &Value, b: &Value) -> crate::bytecode::BinopTypeTag {
     if a.as_int().is_some() && b.as_int().is_some() {
         return BinopTypeTag::Int;
     }
+    // Exactly one float + one int/bool: coercing numeric fast path.  (Both-float
+    // and both-int are already handled above, so this only fires for the mixed
+    // case.)
+    if (a.is_float() && b.as_int().is_some()) || (a.as_int().is_some() && b.is_float()) {
+        return BinopTypeTag::NumMixed;
+    }
     if a.is_str() && b.is_str() {
         return BinopTypeTag::Str;
     }
     BinopTypeTag::Other
+}
+
+/// Coerce a numeric `Value` to `f64` for the mixed int/float fast path: floats
+/// pass through; ints/bools convert via `as_int()` (round-to-nearest, matching
+/// CPython's `PyLong_AsDouble`).  Returns `None` for non-numeric values and for
+/// BigInts beyond i64 range (the caller falls through to `eval_binary`).
+#[inline(always)]
+fn coerce_num_f64(v: &Value) -> Option<f64> {
+    if v.is_float() {
+        Some(v.as_float_raw())
+    } else {
+        v.as_int().map(|i| i as f64)
+    }
+}
+
+/// Mixed int/float fast path.  Only the arithmetic ops CPython itself computes
+/// by coercing the int operand to `f64` are inlined — the coerced result is
+/// byte-identical to CPython for every finite i64.  Comparisons (which need
+/// exact int/float ordering for `|int| >= 2^53`) and `Pow` (which can yield a
+/// complex result for a negative base) return `None` and fall through.
+#[inline(always)]
+fn num_mixed_fast(a: &Value, b: &Value, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::FloorDiv
+        | BinaryOp::Mod => float_float_fast(coerce_num_f64(a)?, coerce_num_f64(b)?, op),
+        _ => None,
+    }
 }
 
 #[inline(always)]
@@ -1331,6 +1368,28 @@ impl Interpreter {
                     // Fast path returned None (e.g. div-by-zero, unsupported
                     // op): site is still Float/Float, so keep the Specialized
                     // state and fall through to eval_binary for this edge case.
+                } else {
+                    // Actual type mismatch: deopt to Megamorphic.
+                    code.binop_cache.borrow_mut()[cache_slot] = BinOpCacheEntry::Megamorphic;
+                }
+                let l = vm_read(regs, lhs, num_locals)?;
+                let r = vm_read(regs, rhs, num_locals)?;
+                regs[dst as usize] = self.eval_binary(l, op, r)?;
+            }
+            BinOpCacheEntry::Specialized(BinopTypeTag::NumMixed) => {
+                let lv = &regs[lhs as usize];
+                let rv = &regs[rhs as usize];
+                // Still one int/bool + one float?
+                if (lv.is_float() && rv.as_int().is_some())
+                    || (lv.as_int().is_some() && rv.is_float())
+                {
+                    if let Some(result) = num_mixed_fast(lv, rv, op) {
+                        regs[dst as usize] = result;
+                        return Ok(());
+                    }
+                    // Unsupported op (comparison / Pow) or a div-by-zero edge:
+                    // site is still mixed-numeric, so keep Specialized and fall
+                    // through to eval_binary for this invocation.
                 } else {
                     // Actual type mismatch: deopt to Megamorphic.
                     code.binop_cache.borrow_mut()[cache_slot] = BinOpCacheEntry::Megamorphic;
