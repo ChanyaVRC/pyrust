@@ -1457,15 +1457,10 @@ fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> String {
     }
     let mut result = String::with_capacity(s.len());
     let mut last_end = 0;
-    let mut done = 0;
-    for (start, part) in s.match_indices(from) {
-        if done >= max {
-            break;
-        }
+    for (start, part) in s.match_indices(from).take(max) {
         result.push_str(&s[last_end..start]);
         result.push_str(to);
         last_end = start + part.len();
-        done += 1;
     }
     result.push_str(&s[last_end..]);
     result
