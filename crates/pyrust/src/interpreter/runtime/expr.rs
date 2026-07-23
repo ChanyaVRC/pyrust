@@ -1838,6 +1838,17 @@ impl Interpreter {
     /// `hash()` builtin — issue #503) into a `PyKey::Object` along with the
     /// instance value.
     pub(crate) fn value_to_pykey(&mut self, value: &Value) -> Result<PyKey> {
+        // Fast path: the common primitive keys can never be a tuple / slice /
+        // Range / PyInstance, so build the `PyKey` directly and skip the four
+        // interpreter-dispatch branches below.  Semantically identical to the
+        // matching `Value::to_key` arms.
+        match value.kind() {
+            ValueKind::Str(_) => return Ok(PyKey::Str(value.clone())),
+            ValueKind::Int(v) => return Ok(PyKey::Int(v)),
+            ValueKind::Bool(v) => return Ok(PyKey::Bool(v)),
+            ValueKind::None => return Ok(PyKey::None),
+            _ => {}
+        }
         // Tuples need special handling: the core `Value::to_key` cannot
         // recurse through `PyInstance` elements (it has no interpreter
         // reference), and on an unhashable inner element it collapses the
