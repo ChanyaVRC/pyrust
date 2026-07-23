@@ -1053,6 +1053,13 @@ fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
             .then(|| py_mod_i64(a, b))
             .and_then(|m| a.checked_sub(m)?.checked_div(b))
             .map(Value::int),
+        // `/` → float. Inline only when both operands are exactly f64-representable
+        // (`|n| < 2^53`): IEEE division is then correctly rounded and byte-exact
+        // with CPython. `b == 0` and larger magnitudes fall through to `nb_div`
+        // for the ZeroDivisionError / exact bigint divider (#1923), matching its
+        // int-int fast branch exactly.
+        BinaryOp::Div => (b != 0 && a.unsigned_abs() < (1 << 53) && b.unsigned_abs() < (1 << 53))
+            .then(|| Value::float(a as f64 / b as f64)),
         BinaryOp::BitAnd => Some(Value::int(a & b)),
         BinaryOp::BitOr  => Some(Value::int(a | b)),
         BinaryOp::BitXor => Some(Value::int(a ^ b)),
