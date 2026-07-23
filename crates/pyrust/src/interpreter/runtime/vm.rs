@@ -337,9 +337,7 @@ fn try_enumerate_fastpath(value: &Value) -> Option<IterState> {
         // `start + (len - 1)` must fit i64 (the last index we produce).  A start
         // near i64::MAX (only reachable via a huge explicit `start=`) falls back
         // to the generic path, which promotes the counter to BigInt.
-        if start.checked_add(frame.items.len() as i64).is_none() {
-            return None;
-        }
+        start.checked_add(frame.items.len() as i64)?;
         // Move the snapshot out and mark the source exhausted so any later
         // `next()` on it (e.g. a second `iter()` of the same enumerate) is inert.
         let items = std::mem::take(&mut frame.items);
