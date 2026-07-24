@@ -1198,7 +1198,11 @@ fn shift_insn_regs(insn: &mut Insn, base: u32) {
     match insn {
         LoadConst(d, _) | LoadNone(d) => shift(d),
         LoadNoneRange { start, .. } => shift(start),
-        Move(d, s) | CopyReg(d, s) | UnaryOp(d, _, s) | FormatValue(d, s) => {
+        Move(d, s)
+        | CopyReg(d, s)
+        | UnaryOp(d, _, s)
+        | FormatValue(d, s)
+        | BuildListReserve(d, s) => {
             shift(d);
             shift(s);
         }
@@ -2378,6 +2382,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | CallEx { func: r, .. }
         | CallExArgs { func: r, .. }
         | BuildList(r, _, _)
+        | BuildListReserve(r, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
         | BuildSlice(r, _)
@@ -3351,6 +3356,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | JumpIfTrue(s, _)
         | GetIter(_, s)
         | GetAwaitable(_, s)
+        | BuildListReserve(_, s)
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
@@ -3540,6 +3546,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | JumpIfTrue(s, _)
         | GetIter(_, s)
         | GetAwaitable(_, s)
+        | BuildListReserve(_, s)
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
@@ -4514,6 +4521,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | MakeTypeAlias(r, _, _, _)
         | MakeTypeVar(r, _)
         | BuildList(r, _, _)
+        | BuildListReserve(r, _)
         | BuildTuple(r, _, _)
         | BuildString(r, _, _)
         | BuildSlice(r, _)
@@ -6438,6 +6446,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::ImportFromAttr(dst, obj, n) => Insn::ImportFromAttr(dst, s(&copies, obj), n),
             Insn::GetItem(dst, obj, idx) => Insn::GetItem(dst, s(&copies, obj), s(&copies, idx)),
             Insn::GetIter(slot, src) => Insn::GetIter(slot, s(&copies, src)),
+            Insn::BuildListReserve(dst, src) => Insn::BuildListReserve(dst, s(&copies, src)),
             Insn::GetAwaitable(dst, src) => Insn::GetAwaitable(dst, s(&copies, src)),
             Insn::Unpack(dst, src, n) => Insn::Unpack(dst, s(&copies, src), n),
             Insn::UnpackEx {
@@ -8547,6 +8556,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | JumpIfTrue(s, _)
         | GetIter(_, s)
         | GetAwaitable(_, s)
+        | BuildListReserve(_, s)
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
