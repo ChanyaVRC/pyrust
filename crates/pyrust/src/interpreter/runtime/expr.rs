@@ -6399,9 +6399,16 @@ impl Interpreter {
 
         while i < len {
             if bytes[i] != b'%' {
-                let ch = fmt[i..].chars().next().unwrap();
-                out.push(ch);
-                i += ch.len_utf8();
+                // Copy the whole run of literal (non-'%') bytes in one shot
+                // rather than decoding and pushing char-by-char.  `bytes` is a
+                // valid UTF-8 slice and `%` is ASCII, so a run boundary never
+                // splits a multibyte char.
+                let start = i;
+                i += 1;
+                while i < len && bytes[i] != b'%' {
+                    i += 1;
+                }
+                out.push_str(&fmt[start..i]);
                 continue;
             }
             i += 1; // consume '%'
@@ -6537,6 +6544,29 @@ impl Interpreter {
             } else {
                 str_printf_take_positional(&positional, &mut pos_idx)?
             };
+
+            // Fast path: when no width padding is requested we don't need the
+            // formatted length, so the two hottest conversions can render
+            // straight into `out`, skipping the per-conversion temporary
+            // `String` (and, for `%s` on a plain str, all allocation).
+            if width.is_none() {
+                match conv {
+                    's' if precision.is_none() => {
+                        if let ValueKind::Str(s) = arg.kind() {
+                            out.push_str(s);
+                            continue;
+                        }
+                    }
+                    'd' | 'i' | 'u' if !flag_plus && !flag_space => {
+                        if let ValueKind::Int(n) = arg.kind() {
+                            use std::fmt::Write as _;
+                            let _ = write!(out, "{n}");
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+            }
 
             // Format the argument according to the conversion code.
             let formatted = self.str_printf_convert(
