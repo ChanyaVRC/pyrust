@@ -1,6 +1,10 @@
-# Remaining Work
+# Remaining Work (Archived Roadmap)
 
-This document is an exhaustive inventory of the major gaps that still remain in PyRust relative to the current codebase and a broader Python 3 feature set.
+> **Warning:** This roadmap predates substantial implementation work and is not
+> an inventory of gaps in the current codebase. In particular, unchecked items
+> below may already be implemented. Use the executable parity cases under
+> `crates/pyrust/tests/cases/` to assess current support until this document is
+> re-audited.
 
 It is intentionally broader than the README limitations section. The goal here is not just to list the next 2 to 3 milestones, but to capture the remaining surface area so future work can be planned explicitly.
 

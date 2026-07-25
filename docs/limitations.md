@@ -1,6 +1,13 @@
-# Known Limitations
+# Historical Limitations (Archived)
 
-PyRust is a minimal educational interpreter. The following features are not yet implemented or are intentionally out of scope.
+> **Warning:** This is a historical roadmap snapshot, not a current compatibility
+> contract. It predates implemented support for features such as async/await,
+> generators, descriptors, bytes/bytearray, and richer tracebacks. Do not use
+> the unchecked lists below to determine whether a program is supported.
+>
+> Until this page is fully re-audited, the executable parity cases under
+> `crates/pyrust/tests/cases/` are the authoritative record of supported
+> behavior. This file is retained only for historical planning context.
 
 ## Language features
 
