@@ -2365,6 +2365,9 @@ fn is_ascii_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
+/// Linear membership avoids building a bitmap for short `chars`.
+const STRIP_LINEAR_SCAN_MAX: usize = 8;
+
 fn bytes_strip(bytes: &[u8], args: &[Value], left: bool, right: bool) -> Result<Value> {
     let chars_owned: Option<std::borrow::Cow<'_, [u8]>> = match args.first() {
         None => None,
@@ -2404,14 +2407,46 @@ fn bytes_strip(bytes: &[u8], args: &[Value], left: bool, right: bool) -> Result<
             }
         }
         Some(chars) => {
-            if left {
-                while start < end && chars.contains(&bytes[start]) {
-                    start += 1;
+            if chars.is_empty() {
+                // Nothing can be stripped.
+            } else if chars.len() == 1 {
+                let needle = chars[0];
+                if left {
+                    while start < end && bytes[start] == needle {
+                        start += 1;
+                    }
                 }
-            }
-            if right {
-                while end > start && chars.contains(&bytes[end - 1]) {
-                    end -= 1;
+                if right {
+                    while end > start && bytes[end - 1] == needle {
+                        end -= 1;
+                    }
+                }
+            } else if chars.len() <= STRIP_LINEAR_SCAN_MAX {
+                if left {
+                    while start < end && chars.contains(&bytes[start]) {
+                        start += 1;
+                    }
+                }
+                if right {
+                    while end > start && chars.contains(&bytes[end - 1]) {
+                        end -= 1;
+                    }
+                }
+            } else {
+                let mut bitmap = [0u64; 4];
+                for &byte in chars {
+                    bitmap[(byte >> 6) as usize] |= 1u64 << (byte & 63);
+                }
+                let contains = |byte: u8| bitmap[(byte >> 6) as usize] & (1u64 << (byte & 63)) != 0;
+                if left {
+                    while start < end && contains(bytes[start]) {
+                        start += 1;
+                    }
+                }
+                if right {
+                    while end > start && contains(bytes[end - 1]) {
+                        end -= 1;
+                    }
                 }
             }
         }

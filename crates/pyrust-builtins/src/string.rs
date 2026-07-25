@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use pyrust_core::{
     PyBigIntSign, PyDict, PyError, PyKey, Result, Value, ValueKind, builtin_type_name,
     cesu8_codepoints, cp_is_printable, expect_arg_count, extract_fill_char, extract_int,
@@ -1596,6 +1598,9 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Linear membership avoids building a bitmap/hash set for short `chars`.
+const STRIP_LINEAR_SCAN_MAX: usize = 8;
+
 fn strip_chars(
     src: &Value,
     s: &str,
@@ -1627,11 +1632,49 @@ fn strip_chars(
         }
         Some(chars) => {
             let mut result = s;
-            if left {
-                result = result.trim_start_matches(|c: char| chars.contains(c));
-            }
-            if right {
-                result = result.trim_end_matches(|c: char| chars.contains(c));
+            if chars.is_empty() {
+                // Nothing can be stripped.
+            } else if chars.len() == 1 {
+                // A one-byte UTF-8 string is necessarily ASCII. Keep this
+                // common case below the adaptive-set setup cost.
+                let needle = chars.as_bytes()[0] as char;
+                if left {
+                    result = result.trim_start_matches(needle);
+                }
+                if right {
+                    result = result.trim_end_matches(needle);
+                }
+            } else if chars.len() <= STRIP_LINEAR_SCAN_MAX
+                || chars.chars().nth(STRIP_LINEAR_SCAN_MAX).is_none()
+            {
+                if left {
+                    result = result.trim_start_matches(|c: char| chars.contains(c));
+                }
+                if right {
+                    result = result.trim_end_matches(|c: char| chars.contains(c));
+                }
+            } else if chars.is_ascii() {
+                let mut bitmap = [0u64; 2];
+                for byte in chars.bytes() {
+                    bitmap[(byte >> 6) as usize] |= 1u64 << (byte & 63);
+                }
+                let contains = |c: char| {
+                    c.is_ascii() && bitmap[(c as u8 >> 6) as usize] & (1u64 << (c as u8 & 63)) != 0
+                };
+                if left {
+                    result = result.trim_start_matches(contains);
+                }
+                if right {
+                    result = result.trim_end_matches(contains);
+                }
+            } else {
+                let set: HashSet<char> = chars.chars().collect();
+                if left {
+                    result = result.trim_start_matches(|c: char| set.contains(&c));
+                }
+                if right {
+                    result = result.trim_end_matches(|c: char| set.contains(&c));
+                }
             }
             result
         }
