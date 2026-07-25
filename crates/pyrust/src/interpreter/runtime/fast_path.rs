@@ -423,11 +423,8 @@ impl Interpreter {
                     && let Ok(mut inner_borrow) = inner_rc.try_borrow_mut()
                     && let Some(native) = inner_borrow.downcast_mut::<NativeIterFrame>()
                 {
-                    native.guard_check()?;
-                    if native.pos < native.items.len() {
-                        let v = native.items[native.pos].clone();
-                        native.pos += 1;
-                        return Ok(Some(v));
+                    if let Some(value) = native.advance()? {
+                        return Ok(Some(value));
                     }
                     // Native inner exhausted — drop it and loop to pull the next.
                     drop(inner_borrow);

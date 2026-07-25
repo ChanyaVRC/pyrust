@@ -2902,8 +2902,8 @@ impl Interpreter {
         // the legacy `__getitem__` protocol) whose iteration runs user code,
         // turn the argument into an iterator via the `iter()` builtin — the same
         // path `list()` / the `for`-loop use — and push each element onto the
-        // receiver as it arrives. `iter()` snapshots eager containers into a
-        // `NativeIterFrame`, so self-extend still terminates even on this path.
+        // receiver as it arrives. Plain eager containers took the snapshot
+        // branch above; already-created iterator objects stay incremental.
         let iter_arg = ExpandedCallArg {
             name: None,
             value: iterable,
@@ -2942,14 +2942,7 @@ impl Interpreter {
                 pyrust_core::value_err!("generator already executing")
             })?;
             if let Some(native) = probe.downcast_mut::<NativeIterFrame>() {
-                let remaining: Vec<Value> = native.items[native.pos..].to_vec();
-                native.pos = native.items.len();
-                // Bulk-drain reaches end-of-iteration in one shot; latch the
-                // exhausted flag so a later size mutation + `next()` returns
-                // StopIteration (not RuntimeError), matching `advance()`'s
-                // clean-exhaustion path and CPython (#2448).
-                native.exhausted = true;
-                return Ok(remaining);
+                return Ok(native.drain_remaining());
             }
 
             // Single-probe dispatch on the concrete iterator-state type for

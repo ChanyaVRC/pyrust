@@ -1648,11 +1648,18 @@ pyrust_module! {
                             } else {
                                 builtin_iter_type_name(&backing)
                             };
-                            // Pass the carrier (not the unwrapped backing) so a
-                            // non-iterable base subclass (`class C(int): pass`)
-                            // reports its own class name, not the base's (#2557).
-                            let items = iter_values(&val)?;
-                            let mut frame = NativeIterFrame::new(items, type_name);
+                            let mut frame = if matches!(
+                                backing.kind(),
+                                ValueKind::List(_) | ValueKind::Tuple(_)
+                            ) {
+                                NativeIterFrame::indexed(backing.clone(), type_name)
+                            } else {
+                                // Pass the carrier (not the unwrapped backing)
+                                // so a non-iterable base subclass (`class
+                                // C(int): pass`) reports its own class name,
+                                // not the base's (#2557).
+                                NativeIterFrame::new(iter_values(&val)?, type_name)
+                            };
                             if backing.as_dict().is_some()
                                 && let Some(recorded_len) =
                                     crate::interpreter::live_collection_len(&backing)
@@ -1690,13 +1697,23 @@ pyrust_module! {
                     IterKind::Other => {
                         // Determine the iterator type name before consuming val.
                         let iter_type_name = builtin_iter_type_name(&val);
-                        let items = iter_values(&val).map_err(|_| {
-                            PyError::named(
-                                "TypeError",
-                                format!("'{}' object is not iterable", value_type_name_str(&val)),
-                            )
-                        })?;
-                        let mut frame = NativeIterFrame::new(items, iter_type_name);
+                        let mut frame = if matches!(
+                            val.kind(),
+                            ValueKind::List(_) | ValueKind::Tuple(_)
+                        ) {
+                            NativeIterFrame::indexed(val.clone(), iter_type_name)
+                        } else {
+                            let items = iter_values(&val).map_err(|_| {
+                                PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object is not iterable",
+                                        value_type_name_str(&val)
+                                    ),
+                                )
+                            })?;
+                            NativeIterFrame::new(items, iter_type_name)
+                        };
                         // dict / set / dict-views: guard the manual `iter()`
                         // iterator against size mutation (#1988), mirroring the
                         // `for`-loop guard.
@@ -8264,9 +8281,8 @@ fn parse_complex_str(s: &str) -> Option<(f64, f64)> {
 /// - `PyInstance` values with `__iter__` have it called; the resulting iterator
 ///   object is returned.  `PyInstance` values with only `__getitem__` are
 ///   wrapped in a `GetItemIter`.
-/// - All other values (lists, tuples, ranges, dict views, …) are wrapped in a
-///   `NativeIterFrame` so they can be advanced one element at a time without
-///   materialising the entire sequence upfront.
+/// - Lists and tuples are wrapped as live indexed `NativeIterFrame`s; other
+///   builtins use the frame's materialized-source form.
 ///
 /// Used by `map()` and `filter()` to avoid eagerly exhausting generator sources
 /// at construction time (issue #1388).
@@ -8339,13 +8355,17 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
         }
         IterKind::Other => {
             let iter_type_name = builtin_iter_type_name(v);
-            let items = iter_values(v).map_err(|_| {
-                PyError::named(
-                    "TypeError",
-                    format!("'{}' object is not iterable", value_type_name_str(v)),
-                )
-            })?;
-            let mut frame = NativeIterFrame::new(items, iter_type_name);
+            let mut frame = if matches!(v.kind(), ValueKind::List(_) | ValueKind::Tuple(_)) {
+                NativeIterFrame::indexed(v.clone(), iter_type_name)
+            } else {
+                let items = iter_values(v).map_err(|_| {
+                    PyError::named(
+                        "TypeError",
+                        format!("'{}' object is not iterable", value_type_name_str(v)),
+                    )
+                })?;
+                NativeIterFrame::new(items, iter_type_name)
+            };
             // dict / set / dict-views: guard the manual `iter()` iterator
             // against size mutation, mirroring the `for`-loop guard (#1988).
             if let Some(recorded_len) = crate::interpreter::live_collection_len(v) {
