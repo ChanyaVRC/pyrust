@@ -2484,7 +2484,7 @@ pyrust_module! {
     fn len(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = &obj.0;
         let size = match value.kind() {
-            ValueKind::Str(text) => text.chars().count() as i64,
+            ValueKind::Str(_) => value.str_codepoint_len() as i64,
             ValueKind::List(items) => items.len() as i64,
             ValueKind::Tuple(items) => items.len() as i64,
             ValueKind::Set(items) => items.len() as i64,
@@ -2566,7 +2566,7 @@ pyrust_module! {
                     // dict/list/set/frozenset/tuple subclasses constructed by
                     // call_class_expanded (issue #976/#994).
                     match backing.kind() {
-                        ValueKind::Str(text) => text.chars().count() as i64,
+                        ValueKind::Str(_) => backing.str_codepoint_len() as i64,
                         ValueKind::Bytes(rc) => rc.len() as i64,
                         ValueKind::List(items) => items.len() as i64,
                         ValueKind::Dict(items) => items.len() as i64,
@@ -6860,7 +6860,7 @@ pyrust_module! {
         })?;
         let self_val = coerce_numeric(&self_val);
         match self_val.kind() {
-            ValueKind::Str(s) => Ok(Value::int(s.chars().count() as i64)),
+            ValueKind::Str(_) => Ok(Value::int(self_val.str_codepoint_len() as i64)),
             _ => Err(pyrust_core::descriptor_requires!("__len__", "str", value_type_name_str(&self_val))),
         }
     }

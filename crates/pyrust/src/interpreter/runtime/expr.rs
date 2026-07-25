@@ -1178,14 +1178,10 @@ impl Interpreter {
                 if target.str_is_ascii() {
                     return fast_str_ascii_index(text, &index);
                 }
-                let char_count = text.chars().count();
+                let char_count = target.str_codepoint_len_for_index();
                 let idx = normalize_index(&index, char_count, "string")?;
-                // Use nth() to avoid collecting a Vec<char>; normalize_index
-                // guarantees idx < char_count so unwrap is safe.
-                let ch = text.chars().nth(idx).expect("normalize_index bounds check");
-                // Stack-encode to a &str to avoid an intermediate String allocation.
-                let mut buf = [0u8; 4];
-                Ok(Value::string(ch.encode_utf8(&mut buf) as &str))
+                let (byte_start, byte_end) = target.str_codepoint_byte_range(idx);
+                Ok(target.string_slice(byte_start, byte_end))
             }
             ValueKind::Bytes(rc) => {
                 let idx = normalize_index(&index, rc.len(), "bytes")?;
@@ -5520,7 +5516,7 @@ impl Interpreter {
             ValueKind::List(items) => items.len() as i64,
             ValueKind::Tuple(items) => items.len() as i64,
             ValueKind::Str(s) if str_is_ascii => s.len() as i64,
-            ValueKind::Str(s) => s.chars().count() as i64,
+            ValueKind::Str(_) => target.str_codepoint_len_for_index() as i64,
             ValueKind::Bytes(rc) => rc.len() as i64,
             _ => {
                 return Err(pyrust_core::type_err!("'{}' object is not subscriptable",
