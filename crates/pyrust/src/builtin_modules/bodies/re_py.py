@@ -1006,7 +1006,29 @@ class Pattern:
         return None
 
     def finditer(self, string, pos=0, endpos=None):
-        return iter(self._findall_matches(string, pos, endpos))
+        if endpos is None:
+            endpos = len(string)
+        sub = string[:endpos]
+        # Preserve the eager range/type check that _findall_matches performed
+        # before returning its list iterator.
+        past_end = pos > endpos
+        return self._iter_matches(string, sub, pos, endpos, past_end)
+
+    def _iter_matches(self, string, sub, pos, endpos, past_end):
+        if past_end:
+            return
+        i = pos
+        while i <= endpos:
+            res = self._match_at(sub, i)
+            if res is None:
+                i += 1
+                continue
+            s, e, groups = res
+            yield Match(self, string, s, e, groups, pos, endpos)
+            if e == i:
+                i += 1
+            else:
+                i = e
 
     def _findall_matches(self, string, pos=0, endpos=None):
         if endpos is None:
