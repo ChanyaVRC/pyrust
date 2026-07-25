@@ -56,11 +56,12 @@ const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
 #[cfg(not(debug_assertions))]
 const INTERPRETER_STACK_SIZE: usize = 128 * 1024 * 1024;
 
-fn run_file(path: &str) -> Result<()> {
+fn run_file(path: &str, script_args: &[String]) -> Result<()> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
     let (program, linenos) = parse_source_with_linenos(&src)?;
     let path_owned = path.to_string();
+    let script_args = script_args.to_vec();
     let src_owned = src;
 
     // Marshal errors as strings so the Result crosses the thread boundary
@@ -73,7 +74,7 @@ fn run_file(path: &str) -> Result<()> {
     let err_str: Option<String> = std::thread::Builder::new()
         .stack_size(INTERPRETER_STACK_SIZE)
         .spawn(move || {
-            let mut interp = Interpreter::with_script_path(&path_owned);
+            let mut interp = Interpreter::with_script_path_and_args(&path_owned, &script_args);
             interp
                 .exec_program_with_linenos(&program, &linenos, &src_owned, false)
                 .err()
@@ -195,7 +196,7 @@ fn run_repl() -> Result<()> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = if args.len() > 1 {
-        run_file(&args[1])
+        run_file(&args[1], &args[2..])
     } else {
         run_repl()
     };

@@ -3382,6 +3382,10 @@ impl Interpreter {
                 let mut sub = Interpreter {
                     script_dir: self.script_dir.clone(),
                     script_filename: Some(std::sync::Arc::from(module_filename.as_str())),
+                    // Imported modules run in the top-level script's process
+                    // context, so a later `import sys` must see the original
+                    // command-line arguments rather than an empty vector.
+                    script_argv: self.script_argv.clone(),
                     module_cache: Rc::clone(&self.module_cache),
                     ..Default::default()
                 };

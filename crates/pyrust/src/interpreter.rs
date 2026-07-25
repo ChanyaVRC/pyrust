@@ -89,6 +89,10 @@ pub struct Interpreter {
     /// Stored as `Arc<str>` so that each call frame can clone the filename
     /// with a reference-count bump rather than a heap allocation.
     pub(crate) script_filename: Option<Arc<str>>,
+    /// The process-level argument vector visible to a script as `sys.argv`.
+    /// Empty when the interpreter has no script invocation context (for
+    /// example, a library caller executing an in-memory program).
+    script_argv: Vec<String>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
     /// Automatic memoization of pure scalar functions (#2234): caches the result
@@ -405,6 +409,7 @@ impl Default for Interpreter {
             exc_saved_active: Vec::new(),
             script_dir: None,
             script_filename: None,
+            script_argv: Vec::new(),
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
             memo_cache: std::collections::HashMap::new(),
