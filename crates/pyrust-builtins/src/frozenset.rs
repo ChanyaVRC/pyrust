@@ -9,14 +9,14 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyError, PyKey, PySet, Result, Value, ValueKind, key_repr,
-    py_hash_pykey,
+    BuiltinState, BuiltinTypeOps, FrozenSetKey, PyError, PyKey, PySet, Result, Value, ValueKind,
+    key_repr,
 };
 
 /// Internal frozenset state.  `Rc` so that clones are cheap and so that
 /// the same backing storage can be shared via `Value::builtin_object_shared`.
 pub struct FrozenSetState {
-    pub items: Rc<PySet>,
+    pub key: Rc<FrozenSetKey>,
 }
 
 pub struct FrozenSetOps;
@@ -119,36 +119,11 @@ impl BuiltinTypeOps for FrozenSetOps {
     }
 
     fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
-        let items = borrow_items(state)?;
-        // Content-based hashable key.  Canonicalise by sorting the inner
-        // keys' Debug form so different insertion orders compare equal.
-        let mut keys: Vec<PyKey> = items.iter().cloned().collect();
-        keys.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-        Some(PyKey::FrozenSet(keys))
+        Some(PyKey::FrozenSet(borrow_key(state)?))
     }
 
     fn hash(&self, state: &BuiltinState) -> Option<u64> {
-        let items = borrow_items(state)?;
-        // CPython Objects/setobject.c frozenset_hash algorithm.
-        // For each element: h ^= shuffle_bits(element_hash)
-        // Then length mixing and final scramble.
-        let mut h: u64 = 0;
-        for key in items.iter() {
-            let eh = py_hash_pykey(key) as u64;
-            // shuffle_bits: ((eh ^ 89869747) ^ (eh << 16)) * 3644798167
-            let shuffled = ((eh ^ 89869747u64) ^ (eh << 16)).wrapping_mul(3644798167u64);
-            h ^= shuffled;
-        }
-        // Length mixing: h ^= (len + 1) * 1927868237
-        let n = items.len() as u64;
-        h ^= (n + 1).wrapping_mul(1927868237u64);
-        // Secondary mix
-        h ^= (h >> 11) ^ (h >> 25);
-        // Final multiply-add
-        h = h.wrapping_mul(69069u64).wrapping_add(907133923u64);
-        let result = h as i64;
-        // CPython maps -1 to 590923713 (avoids the C-level error sentinel).
-        Some(if result == -1 { 590923713u64 } else { h })
+        Some(borrow_key(state)?.py_hash() as u64)
     }
 
     fn call_method(
@@ -206,7 +181,13 @@ pub fn frozenset(items: PySet) -> Value {
 /// Construct a frozenset Value from an existing `Rc<IndexSet>` — useful when
 /// converting from a `Set` value while sharing storage.
 pub fn frozenset_rc(items: Rc<PySet>) -> Value {
-    let state: Box<dyn Any> = Box::new(FrozenSetState { items });
+    frozenset_key(Rc::new(FrozenSetKey::new(items)))
+}
+
+/// Construct a frozenset Value from its already-cached hashable key backing.
+/// Used when a dict/set key is converted back to a Python value.
+pub fn frozenset_key(key: Rc<FrozenSetKey>) -> Value {
+    let state: Box<dyn Any> = Box::new(FrozenSetState { key });
     Value::builtin_object(FROZENSET_OPS, state)
 }
 
@@ -224,8 +205,12 @@ pub fn as_items(value: &Value) -> Option<Rc<PySet>> {
 }
 
 fn borrow_items(state: &BuiltinState) -> Option<Rc<PySet>> {
+    borrow_key(state).map(|key| key.items_rc())
+}
+
+fn borrow_key(state: &BuiltinState) -> Option<Rc<FrozenSetKey>> {
     let borrow = state.borrow();
     borrow
         .downcast_ref::<FrozenSetState>()
-        .map(|s| Rc::clone(&s.items))
+        .map(|s| Rc::clone(&s.key))
 }

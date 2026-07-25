@@ -1058,7 +1058,8 @@ fn pykey_object_or_none_value(key: &PyKey) -> Value {
 fn key_contains_object(key: &PyKey) -> bool {
     match key {
         PyKey::Object { .. } => true,
-        PyKey::Tuple(items) | PyKey::FrozenSet(items) => items.iter().any(key_contains_object),
+        PyKey::Tuple(items) => items.iter().any(key_contains_object),
+        PyKey::FrozenSet(key) => key.items().iter().any(key_contains_object),
         _ => false,
     }
 }

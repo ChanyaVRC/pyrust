@@ -3799,8 +3799,8 @@ pyrust_module! {
             0 => Ok(pyrust_builtins::frozenset::frozenset(PySet::default())),
             1 => {
                 // frozenset(frozenset_instance) returns the same object (per CPython).
-                if let Some(rc) = pyrust_builtins::frozenset::as_items(&args[0].value) {
-                    return Ok(pyrust_builtins::frozenset::frozenset_rc(rc));
+                if pyrust_builtins::frozenset::as_items(&args[0].value).is_some() {
+                    return Ok(args[0].value.clone());
                 }
                 let items = _interp.collect_iterable(&args[0].value)?;
                 let mut set: PySet = PySet::default();
@@ -10629,7 +10629,8 @@ pub(crate) fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> R
                 Ok(format!("({})", parts.join(", ")))
             }
         }
-        PyKey::FrozenSet(items) => {
+        PyKey::FrozenSet(key) => {
+            let items = key.items();
             if items.is_empty() {
                 return Ok("frozenset()".to_string());
             }
