@@ -1,3 +1,14 @@
+import sys
+
+
+# PyRust's pathlib implementation currently targets POSIX semantics. CPython
+# cannot instantiate PosixPath on Windows, so keep this parity fixture aligned
+# with the other POSIX-only pathlib tests.
+if sys.platform == "win32":
+    print("pathlib_joinpath_single_normalize ok (skipped on Windows)")
+    raise SystemExit
+
+
 from pathlib import Path, PosixPath
 
 
