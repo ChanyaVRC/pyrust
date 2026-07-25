@@ -193,24 +193,24 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
             expect_arg_count(args, 1, 2, "center")?;
             let width = extract_int(&args[0], "center", "width")?;
             let fill = extract_fill_char(args)?;
-            str_center(s, width, fill)
+            str_center(s, src.str_is_ascii(), width, fill)
         }
         "ljust" => {
             expect_arg_count(args, 1, 2, "ljust")?;
             let width = extract_int(&args[0], "ljust", "width")?;
             let fill = extract_fill_char(args)?;
-            str_ljust(s, width, fill)
+            str_ljust(s, src.str_is_ascii(), width, fill)
         }
         "rjust" => {
             expect_arg_count(args, 1, 2, "rjust")?;
             let width = extract_int(&args[0], "rjust", "width")?;
             let fill = extract_fill_char(args)?;
-            str_rjust(s, width, fill)
+            str_rjust(s, src.str_is_ascii(), width, fill)
         }
         "zfill" => {
             expect_arg_count(args, 1, 1, "zfill")?;
             let width = extract_int(&args[0], "zfill", "width")?;
-            str_zfill(s, width)
+            str_zfill(s, src.str_is_ascii(), width)
         }
         "expandtabs" => {
             // expandtabs() takes at most 1 argument (<got> given)
@@ -227,20 +227,20 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
             Ok(str_expandtabs(s, tabsize))
         }
         // Case
-        "upper" => Ok(Value::string(if s.is_ascii() {
+        "upper" => Ok(Value::string(if src.str_is_ascii() {
             s.to_ascii_uppercase()
         } else {
             s.to_uppercase()
         })),
-        "lower" => Ok(Value::string(if s.is_ascii() {
+        "lower" => Ok(Value::string(if src.str_is_ascii() {
             s.to_ascii_lowercase()
         } else {
             s.to_lowercase()
         })),
-        "casefold" => Ok(Value::string(unicode_casefold(s))),
+        "casefold" => Ok(Value::string(unicode_casefold(s, src.str_is_ascii()))),
         "capitalize" => Ok(Value::string(capitalize(s))),
-        "swapcase" => Ok(Value::string(swapcase(s))),
-        "title" => Ok(Value::string(titlecase(s))),
+        "swapcase" => Ok(Value::string(swapcase(s, src.str_is_ascii()))),
+        "title" => Ok(Value::string(titlecase(s, src.str_is_ascii()))),
         // Searching
         "find" => str_find(s, src.str_is_ascii(), args, false),
         "rfind" => str_rfind(s, src.str_is_ascii(), args, false),
@@ -248,11 +248,11 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         // Replacement
         "replace" => str_replace(s, args),
         // Testing
-        "startswith" => str_startswith(s, args),
-        "endswith" => str_endswith(s, args),
+        "startswith" => str_startswith(s, src.str_is_ascii(), args),
+        "endswith" => str_endswith(s, src.str_is_ascii(), args),
         "isdigit" => Ok(Value::bool_(
             !s.is_empty()
-                && if s.is_ascii() {
+                && if src.str_is_ascii() {
                     // is_python_digit includes superscript/subscript No codepoints which
                     // are all non-ASCII, so pure ASCII strings can shortcut with is_ascii_digit.
                     s.bytes().all(|b| b.is_ascii_digit())
@@ -264,7 +264,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         )),
         "isalpha" => Ok(Value::bool_(
             !s.is_empty()
-                && if s.is_ascii() {
+                && if src.str_is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphabetic())
                 } else {
                     cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_alpha))
@@ -272,7 +272,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         )),
         "isalnum" => Ok(Value::bool_(
             !s.is_empty()
-                && if s.is_ascii() {
+                && if src.str_is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphanumeric())
                 } else {
                     cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_alnum))
@@ -280,7 +280,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         )),
         "isspace" => Ok(Value::bool_(
             !s.is_empty()
-                && if s.is_ascii() {
+                && if src.str_is_ascii() {
                     s.bytes().all(is_python_space_ascii)
                 } else {
                     cesu8_codepoints(s).all(|n| char::from_u32(n).is_some_and(is_python_space))
@@ -288,7 +288,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         )),
         "isdecimal" => Ok(Value::bool_(
             !s.is_empty()
-                && if s.is_ascii() {
+                && if src.str_is_ascii() {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
                     cesu8_codepoints(s).all(|n| {
@@ -304,19 +304,19 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         )),
         "isnumeric" => Ok(Value::bool_(
             !s.is_empty()
-                && if s.is_ascii() {
+                && if src.str_is_ascii() {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
                     cesu8_codepoints(s)
                         .all(|n| char::from_u32(n).is_some_and(unicode_data::is_numeric))
                 },
         )),
-        "islower" => Ok(Value::bool_(str_islower(s))),
-        "isupper" => Ok(Value::bool_(str_isupper(s))),
-        "istitle" => Ok(Value::bool_(str_istitle(s))),
-        "isascii" => Ok(Value::bool_(s.is_ascii())),
-        "isidentifier" => Ok(Value::bool_(str_isidentifier(s))),
-        "isprintable" => Ok(Value::bool_(if s.is_ascii() {
+        "islower" => Ok(Value::bool_(str_islower(s, src.str_is_ascii()))),
+        "isupper" => Ok(Value::bool_(str_isupper(s, src.str_is_ascii()))),
+        "istitle" => Ok(Value::bool_(str_istitle(s, src.str_is_ascii()))),
+        "isascii" => Ok(Value::bool_(src.str_is_ascii())),
+        "isidentifier" => Ok(Value::bool_(str_isidentifier(s, src.str_is_ascii()))),
+        "isprintable" => Ok(Value::bool_(if src.str_is_ascii() {
             // Printable ASCII: 0x20 (space) through 0x7e (~). DEL (0x7f) is not printable.
             s.bytes().all(|b| (0x20..0x7f).contains(&b))
         } else {
@@ -385,9 +385,9 @@ fn try_reserve_str(out: &mut String, additional: usize) -> Result<()> {
         .map_err(|_| PyError::named("MemoryError", ""))
 }
 
-fn str_center(s: &str, width: i64, fill: char) -> Result<Value> {
+fn str_center(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
-    let char_len = s.chars().count();
+    let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
         return Ok(Value::string(s));
     }
@@ -409,9 +409,9 @@ fn str_center(s: &str, width: i64, fill: char) -> Result<Value> {
     Ok(Value::string(out))
 }
 
-fn str_ljust(s: &str, width: i64, fill: char) -> Result<Value> {
+fn str_ljust(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
-    let char_len = s.chars().count();
+    let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
         return Ok(Value::string(s));
     }
@@ -427,9 +427,9 @@ fn str_ljust(s: &str, width: i64, fill: char) -> Result<Value> {
     Ok(Value::string(out))
 }
 
-fn str_rjust(s: &str, width: i64, fill: char) -> Result<Value> {
+fn str_rjust(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
-    let char_len = s.chars().count();
+    let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
         return Ok(Value::string(s));
     }
@@ -445,9 +445,9 @@ fn str_rjust(s: &str, width: i64, fill: char) -> Result<Value> {
     Ok(Value::string(out))
 }
 
-fn str_zfill(s: &str, width: i64) -> Result<Value> {
+fn str_zfill(s: &str, is_ascii: bool, width: i64) -> Result<Value> {
     let width = width.max(0) as usize;
-    let char_len = s.chars().count();
+    let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
         return Ok(Value::string(s));
     }
@@ -630,8 +630,8 @@ fn str_removesuffix(s: &str, suffix: &str) -> Value {
 
 /// Unicode full case-folding (CaseFolding.txt status F and S).
 /// Handles multi-char expansions (ß→ss, ligatures) that Rust's `to_lowercase` misses.
-fn unicode_casefold(s: &str) -> String {
-    if s.is_ascii() {
+fn unicode_casefold(s: &str, is_ascii: bool) -> String {
+    if is_ascii {
         return s.to_ascii_lowercase();
     }
     let mut out = String::with_capacity(s.len());
@@ -647,8 +647,8 @@ fn unicode_casefold(s: &str) -> String {
     out
 }
 
-fn swapcase(s: &str) -> String {
-    if s.is_ascii() {
+fn swapcase(s: &str, is_ascii: bool) -> String {
+    if is_ascii {
         return s
             .chars()
             .map(|c| {
@@ -675,8 +675,8 @@ fn swapcase(s: &str) -> String {
     out
 }
 
-fn titlecase(s: &str) -> String {
-    if s.is_ascii() {
+fn titlecase(s: &str, is_ascii: bool) -> String {
+    if is_ascii {
         let mut out = String::with_capacity(s.len());
         let mut prev_cased = false;
         for c in s.chars() {
@@ -723,8 +723,8 @@ fn push_titlecase(out: &mut String, c: char) {
     }
 }
 
-fn str_islower(s: &str) -> bool {
-    if s.is_ascii() {
+fn str_islower(s: &str, is_ascii: bool) -> bool {
+    if is_ascii {
         let mut has_cased = false;
         for b in s.bytes() {
             if b.is_ascii_uppercase() {
@@ -755,8 +755,8 @@ fn str_islower(s: &str) -> bool {
     has_cased
 }
 
-fn str_isupper(s: &str) -> bool {
-    if s.is_ascii() {
+fn str_isupper(s: &str, is_ascii: bool) -> bool {
+    if is_ascii {
         let mut has_cased = false;
         for b in s.bytes() {
             if b.is_ascii_lowercase() {
@@ -787,8 +787,8 @@ fn str_isupper(s: &str) -> bool {
     has_cased
 }
 
-fn str_istitle(s: &str) -> bool {
-    if s.is_ascii() {
+fn str_istitle(s: &str, is_ascii: bool) -> bool {
+    if is_ascii {
         let mut prev_cased = false;
         let mut has_cased = false;
         for b in s.bytes() {
@@ -850,11 +850,11 @@ fn str_istitle(s: &str) -> bool {
     has_cased
 }
 
-fn str_isidentifier(s: &str) -> bool {
+fn str_isidentifier(s: &str, is_ascii: bool) -> bool {
     if s.is_empty() {
         return false;
     }
-    if s.is_ascii() {
+    if is_ascii {
         let mut bytes = s.bytes();
         let first = bytes.next().unwrap();
         if !first.is_ascii_alphabetic() && first != b'_' {
@@ -1466,12 +1466,12 @@ fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> String {
     result
 }
 
-fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
+fn str_startswith(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
     // str_slice_args returns None for an inverted window (start > end).
     // For a Str prefix, that is an immediate False.
     // For a Tuple, CPython still validates element types even on an inverted
     // window — TypeError takes priority over the inverted-range short-circuit.
-    let window = str_slice_args(s, s.is_ascii(), args)?;
+    let window = str_slice_args(s, is_ascii, args)?;
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => {
             let Some((start, end)) = window else {
@@ -1516,12 +1516,12 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
     }
 }
 
-fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
+fn str_endswith(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
     // str_slice_args returns None for an inverted window (start > end).
     // For a Str suffix, that is an immediate False.
     // For a Tuple, CPython still validates element types even on an inverted
     // window — TypeError takes priority over the inverted-range short-circuit.
-    let window = str_slice_args(s, s.is_ascii(), args)?;
+    let window = str_slice_args(s, is_ascii, args)?;
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => {
             let Some((start, end)) = window else {
