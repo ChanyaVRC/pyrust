@@ -195,17 +195,21 @@ pyrust_module! {
         /// Counter Counter.  This is the *only* defaulting branch; for
         /// proper present-key lookup we fall through to the stored map.
         fn __getitem__(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
+            let backing = counter_backing(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            // #1919: `__eq__`-aware lookup so equal user-keys hit.
-            Ok(map_get_eq(_interp, &counts, &key)?.unwrap_or_else(|| Value::int(0)))
+            // Probe the live backing directly.  `dict_lookup` keeps primitive
+            // keys O(1) and drops its map borrow before object-key `__eq__`.
+            Ok(_interp
+                .dict_lookup(&backing, &key)?
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| Value::int(0)))
         }
 
         /// `c[k] = v` — store any value under the key (CPython does not
         /// enforce integer-only counts in `__setitem__`; it is merely
         /// conventional to store integers).
         fn __setitem__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
+            expect_self(args, FN_NAME)?;
             if args.len() != 3 {
                 return Err(PyError::Runtime(format!(
                     "{FN_NAME}() takes exactly 2 arguments",
@@ -213,25 +217,27 @@ pyrust_module! {
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
             let value = args[2].value.clone();
-            let mut counts = read_counts(args, FN_NAME)?;
-            // #1919: `__eq__`-aware insert (overwrites the equal entry in place).
-            map_insert_eq(_interp, &mut counts, key, value)?;
-            store_counts(&inst, counts);
+            let backing = counter_backing(args, FN_NAME)?;
+            _interp.dict_insert_value(&backing, key, value)?;
             Ok(Value::none())
         }
 
         /// `key in c` — fall through to the stored map's contains.
         fn __contains__(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
+            let backing = counter_backing(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            // #1919: `__eq__`-aware membership.
-            Ok(Value::bool_(map_contains_eq(_interp, &counts, &key)?))
+            Ok(Value::bool_(
+                _interp.dict_lookup(&backing, &key)?.is_some(),
+            ))
         }
 
         /// `len(c)` — number of stored entries.
         fn __len__(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
-            Ok(Value::int(counts.len() as i64))
+            let backing = counter_backing(args, FN_NAME)?;
+            let len = backing.dict_with(|counts| counts.len()).ok_or_else(|| {
+                PyError::Runtime("internal: Counter backing is not a dict".to_string())
+            })?;
+            Ok(Value::int(len as i64))
         }
 
         /// `for k in c` — yield the keys in insertion order, matching
@@ -241,8 +247,12 @@ pyrust_module! {
         /// `iter()` builtin's dispatch.
         fn __iter__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let counts = read_counts(args, FN_NAME)?;
-            let items: Vec<Value> = counts.keys().cloned().map(key_to_value).collect();
+            let backing = counter_backing(args, FN_NAME)?;
+            let items = backing
+                .dict_with(|counts| counts.keys().cloned().map(key_to_value).collect())
+                .ok_or_else(|| {
+                    PyError::Runtime("internal: Counter backing is not a dict".to_string())
+                })?;
             Ok(make_guarded_dict_subclass_iter(inst, items))
         }
 
@@ -401,7 +411,7 @@ pyrust_module! {
         /// missing-key→0 default that `c[key]` applies.  Mirrors
         /// `dict.get`.
         fn get(args) -> Result<Value> {
-            let counts = read_counts(args, FN_NAME)?;
+            let backing = counter_backing(args, FN_NAME)?;
             let user = &args[1..];
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
@@ -410,9 +420,8 @@ pyrust_module! {
                 ));
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            // #1919: `__eq__`-aware lookup.
-            match map_get_eq(_interp, &counts, &key)? {
-                Some(v) => Ok(v),
+            match _interp.dict_lookup(&backing, &key)? {
+                Some((_, value)) => Ok(value),
                 None => Ok(user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none)),
             }
         }
@@ -427,19 +436,19 @@ pyrust_module! {
         // mid-iteration.
         fn keys(args) -> Result<Value> {
             require_no_args(args, "keys")?;
-            let backing = live_backing(args, FN_NAME)?;
+            let backing = counter_backing(args, FN_NAME)?;
             crate::Interpreter::dict_view_for_backing(&backing, "keys", false)
         }
 
         fn values(args) -> Result<Value> {
             require_no_args(args, "values")?;
-            let backing = live_backing(args, FN_NAME)?;
+            let backing = counter_backing(args, FN_NAME)?;
             crate::Interpreter::dict_view_for_backing(&backing, "values", false)
         }
 
         fn items(args) -> Result<Value> {
             require_no_args(args, "items")?;
-            let backing = live_backing(args, FN_NAME)?;
+            let backing = counter_backing(args, FN_NAME)?;
             crate::Interpreter::dict_view_for_backing(&backing, "items", false)
         }
 
@@ -555,10 +564,9 @@ pyrust_module! {
         fn __getitem__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            let items = read_items(args, FN_NAME)?;
-            // #1919: `__eq__`-aware lookup so equal user-keys hit.
-            if let Some(v) = map_get_eq(_interp, &items, &key)? {
-                return Ok(v);
+            let backing = defaultdict_backing(args, FN_NAME)?;
+            if let Some((_, value)) = _interp.dict_lookup(&backing, &key)? {
+                return Ok(value);
             }
             // Miss → __missing__.  Resolved via the class so that
             // user-defined subclasses (when pyrust grows them) can
@@ -596,45 +604,49 @@ pyrust_module! {
             // under `key` and returned.
             let new_val = _interp.call_function_expanded(factory, &[])?;
             let pk = _interp.value_to_pykey(&key_arg.value)?;
-            let mut items = read_items(args, FN_NAME)?;
-            // #1919: `__eq__`-aware insert (no duplicate equal user-key).
-            map_insert_eq(_interp, &mut items, pk, new_val.clone())?;
-            store_items(&inst, items);
+            let backing = defaultdict_backing(args, FN_NAME)?;
+            _interp.dict_insert_value(&backing, pk, new_val.clone())?;
             Ok(new_val)
         }
 
         /// `d[k] = v` — straight write-through to the inner dict.
         fn __setitem__(args) -> Result<Value> {
-            let inst = expect_self(args, FN_NAME)?;
+            expect_self(args, FN_NAME)?;
             if args.len() != 3 {
                 return Err(PyError::Runtime(format!(
                     "{FN_NAME}() takes exactly 2 arguments",
                 )));
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            let mut items = read_items(args, FN_NAME)?;
-            // #1919: `__eq__`-aware insert (overwrites equal entry in place).
-            map_insert_eq(_interp, &mut items, key, args[2].value.clone())?;
-            store_items(&inst, items);
+            let backing = defaultdict_backing(args, FN_NAME)?;
+            _interp.dict_insert_value(&backing, key, args[2].value.clone())?;
             Ok(Value::none())
         }
 
         fn __contains__(args) -> Result<Value> {
-            let items = read_items(args, FN_NAME)?;
+            let backing = defaultdict_backing(args, FN_NAME)?;
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            // #1919: `__eq__`-aware membership.
-            Ok(Value::bool_(map_contains_eq(_interp, &items, &key)?))
+            Ok(Value::bool_(
+                _interp.dict_lookup(&backing, &key)?.is_some(),
+            ))
         }
 
         fn __len__(args) -> Result<Value> {
-            let items = read_items(args, FN_NAME)?;
-            Ok(Value::int(items.len() as i64))
+            let backing = defaultdict_backing(args, FN_NAME)?;
+            let len = backing.dict_with(|items| items.len()).ok_or_else(|| {
+                PyError::Runtime("internal: defaultdict backing is not a dict".to_string())
+            })?;
+            Ok(Value::int(len as i64))
         }
 
         fn __iter__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let items = read_items(args, FN_NAME)?;
-            let keys: Vec<Value> = items.keys().cloned().map(key_to_value).collect();
+            let backing = defaultdict_backing(args, FN_NAME)?;
+            let keys = backing
+                .dict_with(|items| items.keys().cloned().map(key_to_value).collect())
+                .ok_or_else(|| {
+                    PyError::Runtime("internal: defaultdict backing is not a dict".to_string())
+                })?;
             Ok(make_guarded_dict_subclass_iter(inst, keys))
         }
 
@@ -658,7 +670,7 @@ pyrust_module! {
         }
 
         fn get(args) -> Result<Value> {
-            let items = read_items(args, FN_NAME)?;
+            let backing = defaultdict_backing(args, FN_NAME)?;
             let user = &args[1..];
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
@@ -667,9 +679,8 @@ pyrust_module! {
                 ));
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            // #1919: `__eq__`-aware lookup.
-            Ok(match map_get_eq(_interp, &items, &key)? {
-                Some(v) => v,
+            Ok(match _interp.dict_lookup(&backing, &key)? {
+                Some((_, value)) => value,
                 None => user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none),
             })
         }
@@ -683,19 +694,19 @@ pyrust_module! {
         // — `ordered=false` (issue #2447).
         fn keys(args) -> Result<Value> {
             require_no_args(args, "keys")?;
-            let backing = live_backing(args, FN_NAME)?;
+            let backing = defaultdict_backing(args, FN_NAME)?;
             crate::Interpreter::dict_view_for_backing(&backing, "keys", false)
         }
 
         fn values(args) -> Result<Value> {
             require_no_args(args, "values")?;
-            let backing = live_backing(args, FN_NAME)?;
+            let backing = defaultdict_backing(args, FN_NAME)?;
             crate::Interpreter::dict_view_for_backing(&backing, "values", false)
         }
 
         fn items(args) -> Result<Value> {
             require_no_args(args, "items")?;
-            let backing = live_backing(args, FN_NAME)?;
+            let backing = defaultdict_backing(args, FN_NAME)?;
             crate::Interpreter::dict_view_for_backing(&backing, "items", false)
         }
 
@@ -1562,31 +1573,49 @@ fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: PyDict) {
     store_backing(inst, counts);
 }
 
-/// `defaultdict`'s storage accessor.  Same shape as `read_counts` — the
-/// backing dict (`__builtin_data__`) holds the user's data, separate from
-/// `self.default_factory`.  TypeError on external corruption, empty-map
-/// fallback when `__init__` hasn't run.
-/// The live `__builtin_data__` backing `Value` (Rc-shared dict) of an
-/// OrderedDict/defaultdict instance — for view construction, which must NOT
-/// clone the map (issue #2436).
-fn live_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+/// Return the live `__builtin_data__` dict `Value` for Counter/defaultdict.
+///
+/// Cloning the `Value` only increments the backing `Rc`; it does not clone the
+/// `IndexMap`.  Read paths can therefore use `Interpreter::dict_lookup`
+/// directly, while its object-key slow path still releases the map borrow
+/// before dispatching user `__eq__`.
+fn collection_backing(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    type_name: &str,
+) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
-    let mut borrow = inst.borrow_mut();
-    match borrow.attrs.get(COUNTER_BACKING) {
-        Some(v) if matches!(v.kind(), ValueKind::Dict(_)) => Ok(v.clone()),
-        Some(_) => Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}: backing store has been overwritten with a non-dict"),
-        )),
-        // No backing yet (e.g. raw PyInstance, `__init__` not run): install one
-        // so the view shares the same `Rc` a later `store_backing` mutates in
-        // place (issue #2447) rather than dangling on a throwaway dict.
-        None => {
-            let backing = Value::dict(PyDict::default());
-            borrow.attrs.insert(COUNTER_BACKING, backing.clone());
-            Ok(backing)
+    {
+        let borrow = inst.borrow();
+        match borrow.attrs.get(COUNTER_BACKING) {
+            Some(v) if matches!(v.kind(), ValueKind::Dict(_)) => return Ok(v.clone()),
+            Some(_) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{fn_name}: {type_name} backing store has been overwritten with a non-dict; \
+                         don't assign to internal attributes"
+                    ),
+                ));
+            }
+            None => {}
         }
     }
+    // No backing yet (e.g. raw PyInstance, `__init__` not run): install one
+    // so views and subsequent direct operations share the same Rc.
+    let backing = Value::dict(PyDict::default());
+    inst.borrow_mut()
+        .attrs
+        .insert(COUNTER_BACKING, backing.clone());
+    Ok(backing)
+}
+
+fn counter_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    collection_backing(args, fn_name, "Counter")
+}
+
+fn defaultdict_backing(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
+    collection_backing(args, fn_name, "defaultdict")
 }
 
 fn read_items(
@@ -1608,10 +1637,6 @@ fn read_items(
         },
         None => Ok(PyDict::default()),
     }
-}
-
-fn store_items(inst: &Rc<RefCell<PyInstance>>, items: PyDict) {
-    store_backing(inst, items);
 }
 
 /// Build a key iterator over `keys` for a `Counter` / `defaultdict` instance,

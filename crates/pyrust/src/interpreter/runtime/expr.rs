@@ -2577,6 +2577,36 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Insert into a live dict `Value`, preserving Python `__eq__`
+    /// deduplication without holding its `RefCell` borrow across user code.
+    ///
+    /// `dict_lookup` scopes the backing-map borrow to raw probes and clones
+    /// only same-hash object-key candidates before dispatching `__eq__`.
+    /// Once it returns, no user code runs between recovering the matching
+    /// index and the short mutable borrow used for the actual update.
+    pub(crate) fn dict_insert_value(
+        &mut self,
+        receiver: &Value,
+        key: PyKey,
+        value: Value,
+    ) -> Result<()> {
+        let existing = self.dict_lookup(receiver, &key)?;
+        receiver
+            .dict_with_mut(|dict| {
+                if let Some((idx, _)) = existing
+                    && let Some(stored_key) = dict.get_index(idx).map(|(k, _)| k.clone())
+                {
+                    // Keep the original key object and insertion position when
+                    // a distinct but Python-equal object is assigned.
+                    dict.insert(stored_key, value);
+                } else {
+                    dict.insert(key, value);
+                }
+            })
+            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        Ok(())
+    }
+
     /// Bulk-insert `(key, value)` pairs into a dict with last-value-wins
     /// dedup, dispatching user `__eq__` for `PyKey::Object` keys (issues
     /// #1914 / #1919).  This is the shared mechanism behind `dict.update`,
@@ -2635,20 +2665,7 @@ impl Interpreter {
             return Ok(());
         }
         for (key, value) in pairs {
-            let existing = self.dict_lookup(receiver, &key)?;
-            receiver
-                .dict_with_mut(|dict| {
-                    if let Some((idx, _)) = existing {
-                        // Overwrite the matching entry in place, keeping the
-                        // existing (stored) key object and its position.
-                        if let Some(k) = dict.get_index(idx).map(|(k, _)| k.clone()) {
-                            dict.insert(k, value);
-                            return;
-                        }
-                    }
-                    dict.insert(key, value);
-                })
-                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            self.dict_insert_value(receiver, key, value)?;
         }
         Ok(())
     }
