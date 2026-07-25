@@ -1102,28 +1102,21 @@ impl Interpreter {
                             self.call_list_extend(&self_val, pos)
                         } else if method == "remove" {
                             self.call_seq_remove(&self_val, pos)
-                        } else if method == "index" || method == "count" {
+                        } else if method == "index" {
+                            self.call_seq_index(&self_val, pos, "list")
+                        } else if method == "count" {
                             let needs_dispatch = pos.first().map(|t| {
                                 self_val
                                     .list_with(|items| Self::seq_search_needs_dispatch(t, items))
                                     .unwrap_or(true)
                             }).unwrap_or(false);
-                            let pos = if method == "index" {
-                                self.resolve_seq_index_pos(pos)?
-                            } else {
-                                pos
-                            };
                             if needs_dispatch {
                                 let snapshot = self_val
                                     .list_with(|items| items.clone())
                                     .ok_or_else(|| {
                                         pyrust_core::type_err!("list.index receiver is not a list")
                                     })?;
-                                if method == "index" {
-                                    self.call_seq_index(snapshot, &pos, "list")
-                                } else {
-                                    self.call_seq_count(snapshot, &pos, "list")
-                                }
+                                self.call_seq_count(snapshot, &pos, "list")
                             } else {
                                 pyrust_builtins::list::call(method, &self_val, pos, &kw)
                             }
@@ -1136,25 +1129,18 @@ impl Interpreter {
                         if let Some(err) = reject_container_method_kwargs("tuple", method, &kw) {
                             return Err(err);
                         }
-                        if method == "index" || method == "count" {
+                        if method == "index" {
+                            self.call_seq_index(&self_val, pos, "tuple")
+                        } else if method == "count" {
                             match self_val.kind() {
                                 ValueKind::Tuple(items) => {
                                     let needs_dispatch = pos
                                         .first()
                                         .map(|t| Self::seq_search_needs_dispatch(t, items))
                                         .unwrap_or(false);
-                                    let pos = if method == "index" {
-                                        self.resolve_seq_index_pos(pos)?
-                                    } else {
-                                        pos
-                                    };
                                     if needs_dispatch {
                                         let snapshot = items.to_vec();
-                                        if method == "index" {
-                                            self.call_seq_index(snapshot, &pos, "tuple")
-                                        } else {
-                                            self.call_seq_count(snapshot, &pos, "tuple")
-                                        }
+                                        self.call_seq_count(snapshot, &pos, "tuple")
                                     } else {
                                         pyrust_builtins::tuple::call(method, items, pos)
                                     }
@@ -1987,22 +1973,14 @@ impl Interpreter {
                     self.call_list_extend(&receiver, args_vec)
                 } else if method == "remove" {
                     self.call_seq_remove(&receiver, args_vec)
-                } else if method == "index" || method == "count" {
+                } else if method == "index" {
+                    self.call_seq_index(&receiver, args_vec, "list")
+                } else if method == "count" {
                     let needs_dispatch = args_vec.first().map(|t| {
                         receiver
                             .list_with(|items| Self::seq_search_needs_dispatch(t, items))
                             .unwrap_or(true)
                     }).unwrap_or(false);
-                    let args_vec = if method == "index" {
-                        match self.resolve_seq_index_pos(args_vec) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                return Err(e);
-                            }
-                        }
-                    } else {
-                        args_vec
-                    };
                     if needs_dispatch {
                         // Snapshot so we can release the list borrow
                         // before `values_user_eq` may re-enter user code.
@@ -2011,11 +1989,7 @@ impl Interpreter {
                             .ok_or_else(|| {
                                 pyrust_core::type_err!("list.index receiver is not a list")
                             })?;
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &args_vec, "list")
-                        } else {
-                            self.call_seq_count(snapshot, &args_vec, "list")
-                        }
+                        self.call_seq_count(snapshot, &args_vec, "list")
                     } else {
                         pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
                     }
@@ -2042,30 +2016,18 @@ impl Interpreter {
                     return Err(err);
                 }
                 let args_vec: Vec<Value> = std::mem::take(pos);
-                if method == "index" || method == "count" {
+                if method == "index" {
+                    self.call_seq_index(&receiver, args_vec, "tuple")
+                } else if method == "count" {
                     let needs_dispatch = args_vec
                         .first()
                         .map(|t| Self::seq_search_needs_dispatch(t, items))
                         .unwrap_or(false);
-                    let args_vec = if method == "index" {
-                        match self.resolve_seq_index_pos(args_vec) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                return Err(e);
-                            }
-                        }
-                    } else {
-                        args_vec
-                    };
                     if needs_dispatch {
                         // Snapshot to release the tuple Ref before
                         // `values_user_eq` may re-enter user code.
                         let snapshot = items.to_vec();
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &args_vec, "tuple")
-                        } else {
-                            self.call_seq_count(snapshot, &args_vec, "tuple")
-                        }
+                        self.call_seq_count(snapshot, &args_vec, "tuple")
                     } else {
                         pyrust_builtins::tuple::call(method, items, args_vec)
                     }
@@ -2362,7 +2324,9 @@ impl Interpreter {
                                         self.call_list_extend(&backing, args_vec)
                                     } else if method == "remove" {
                                         self.call_seq_remove(&backing, args_vec)
-                                    } else if method == "index" || method == "count" {
+                                    } else if method == "index" {
+                                        self.call_seq_index(&backing, args_vec, "list")
+                                    } else if method == "count" {
                                         let needs_dispatch =
                                             args_vec.first().map(|t| {
                                                 backing
@@ -2380,15 +2344,7 @@ impl Interpreter {
                                                     pyrust_core::type_err!("list.index receiver is not a list"
                                                             .to_string())
                                                 })?;
-                                            if method == "index" {
-                                                self.call_seq_index(
-                                                    snapshot, &args_vec, "list",
-                                                )
-                                            } else {
-                                                self.call_seq_count(
-                                                    snapshot, &args_vec, "list",
-                                                )
-                                            }
+                                            self.call_seq_count(snapshot, &args_vec, "list")
                                         } else {
                                             pyrust_builtins::list::call(
                                                 method,
@@ -2414,7 +2370,9 @@ impl Interpreter {
                                 }
                                 BkKind::Tuple => match backing.kind() {
                                     ValueKind::Tuple(items) => {
-                                        if method == "index" || method == "count" {
+                                        if method == "index" {
+                                            self.call_seq_index(&backing, args_vec, "tuple")
+                                        } else if method == "count" {
                                             let needs_dispatch = args_vec
                                                 .first()
                                                 .map(|t| {
@@ -2425,15 +2383,9 @@ impl Interpreter {
                                                 .unwrap_or(false);
                                             if needs_dispatch {
                                                 let snapshot = items.to_vec();
-                                                if method == "index" {
-                                                    self.call_seq_index(
-                                                        snapshot, &args_vec, "tuple",
-                                                    )
-                                                } else {
-                                                    self.call_seq_count(
-                                                        snapshot, &args_vec, "tuple",
-                                                    )
-                                                }
+                                                self.call_seq_count(
+                                                    snapshot, &args_vec, "tuple",
+                                                )
                                             } else {
                                                 pyrust_builtins::tuple::call(
                                                     method,
@@ -6263,23 +6215,38 @@ impl Interpreter {
     }
 
     /// `list.index(target[, start[, stop]])` / `tuple.index(...)` with correct
-    /// `__eq__` dispatch.
+    /// `__eq__` dispatch and no whole-sequence dispatch pre-scan.
     ///
-    /// The `args` slice must already have had its start/stop arguments resolved
-    /// through `resolve_seq_index_pos` (so they are `Int`/`BigInt`/`Bool`).
-    /// The `items` snapshot is taken by the caller (snapshot required to release
-    /// the list/tuple borrow before calling `values_user_eq`, which may re-enter
-    /// user code that mutates the receiver).
+    /// Primitive elements are compared as they are encountered, so a match near
+    /// the front is O(match position), not O(sequence length).  A list borrow is
+    /// released before the first comparison that can call user `__eq__`; that
+    /// slow path then reads each element afresh so re-entrant list mutation
+    /// follows CPython's live-index walk.  Tuples are immutable and can be walked
+    /// directly throughout.
     fn call_seq_index(
         &mut self,
-        items: Vec<Value>,
-        args: &[Value],
+        receiver: &Value,
+        args: Vec<Value>,
         type_name: &'static str,
     ) -> Result<Value> {
+        let args = self.resolve_seq_index_pos(args)?;
         let target = args.first().ok_or_else(|| {
             pyrust_core::type_err!("index expected at least 1 argument, got 0")
         })?;
-        let len = items.len();
+        let len = if type_name == "list" {
+            receiver.list_with(|items| items.len()).ok_or_else(|| {
+                pyrust_core::type_err!("list.index receiver is not a list")
+            })?
+        } else {
+            match receiver.kind() {
+                ValueKind::Tuple(items) => items.len(),
+                _ => {
+                    return Err(pyrust_core::type_err!(
+                        "tuple.index receiver is not a tuple"
+                    ));
+                }
+            }
+        };
         let start = match args.get(1).map(|v| v.kind()) {
             Some(ValueKind::Int(i)) => pyrust_builtins::sequence::normalise_index(i, len).min(len),
             Some(ValueKind::Bool(b)) => {
@@ -6304,21 +6271,73 @@ impl Interpreter {
             _ => len,
         };
         let stop = stop.max(start);
-        let window = &items[start..stop];
-        if Self::seq_search_needs_dispatch(target, window) {
-            for (i, item) in window.iter().enumerate() {
+
+        if type_name == "list" {
+            enum SeqIndexScan {
+                Found(usize),
+                NotFound,
+                NeedsDispatch(usize),
+            }
+
+            let target_dispatches = Self::value_search_dispatches(target);
+            let slow_start = if target_dispatches {
+                start
+            } else {
+                let outcome = receiver.list_with(|items| {
+                    for (offset, item) in items[start..stop].iter().enumerate() {
+                        let i = start + offset;
+                        if !item.cannot_user_eq() {
+                            return SeqIndexScan::NeedsDispatch(i);
+                        }
+                        if item == target || item.is_identical_nan(target) {
+                            return SeqIndexScan::Found(i);
+                        }
+                    }
+                    SeqIndexScan::NotFound
+                });
+                match outcome {
+                    Some(SeqIndexScan::Found(i)) => return Ok(Value::int(i as i64)),
+                    Some(SeqIndexScan::NotFound) => {
+                        let repr_str = render_instance_repr(self, target)?;
+                        return Err(pyrust_core::value_err!(
+                            "{repr_str} is not in list"
+                        ));
+                    }
+                    Some(SeqIndexScan::NeedsDispatch(i)) => i,
+                    None => {
+                        return Err(pyrust_core::type_err!(
+                            "list.index receiver is not a list"
+                        ));
+                    }
+                }
+            };
+
+            for i in slow_start..stop {
+                let Some(item) = receiver.list_with(|items| items.get(i).cloned()).flatten()
+                else {
+                    break;
+                };
                 // Identity short-circuit before `__eq__` (RichCompareBool) keeps a
                 // NaN-bearing complex findable even when a container/instance
-                // element forced this dispatch branch (#2535).
-                if item.is_identical_nan(target) || self.values_user_eq(item, target)? {
-                    return Ok(Value::int((start + i) as i64));
+                // element requires this dispatch branch (#2535).
+                if item.is_identical_nan(target) || self.values_user_eq(&item, target)? {
+                    return Ok(Value::int(i as i64));
                 }
             }
         } else {
-            for (i, item) in window.iter().enumerate() {
-                // Identity short-circuit (CPython `PyObject_RichCompareBool`):
-                // a NaN searching for itself matches even though `==` is False.
-                if item == target || item.is_identical_nan(target) {
+            let target_dispatches = Self::value_search_dispatches(target);
+            let ValueKind::Tuple(items) = receiver.kind() else {
+                return Err(pyrust_core::type_err!(
+                    "tuple.index receiver is not a tuple"
+                ));
+            };
+            for (i, item) in items[start..stop].iter().enumerate() {
+                let equal = if !target_dispatches && item.cannot_user_eq() {
+                    item == target || item.is_identical_nan(target)
+                } else {
+                    item.is_identical_nan(target) || self.values_user_eq(item, target)?
+                };
+                if equal {
                     return Ok(Value::int((start + i) as i64));
                 }
             }
@@ -11350,9 +11369,13 @@ impl Interpreter {
                         // generators) through the interpreter (#2522).
                         return self.call_list_extend(&receiver, pos);
                     }
-                    // index / count: peek to decide whether values_user_eq
-                    // dispatch is needed (resolve_seq_index_pos only touches
-                    // pos[1..], so pos[0] (the target) is stable).
+                    if method == "index" {
+                        return self.call_seq_index(&receiver, pos, "list");
+                    }
+                    // count: peek to decide whether values_user_eq dispatch is
+                    // needed.  It always scans the full sequence, so the
+                    // classifier pass does not create the early-hit pathology
+                    // that `index` avoids in `call_seq_index`.
                     let needs_dispatch = pos
                         .first()
                         .map(|t| {
@@ -11361,21 +11384,12 @@ impl Interpreter {
                                 .unwrap_or(true)
                         })
                         .unwrap_or(false);
-                    let pos = if method == "index" {
-                        self.resolve_seq_index_pos(pos)?
-                    } else {
-                        pos
-                    };
                     if needs_dispatch {
                         let snapshot: Vec<Value> =
                             receiver.list_with(|items| items.to_vec()).ok_or_else(|| {
                                 pyrust_core::type_err!("list.index receiver is not a list")
                             })?;
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &pos, "list")
-                        } else {
-                            self.call_seq_count(snapshot, &pos, "list")
-                        }
+                        self.call_seq_count(snapshot, &pos, "list")
                     } else {
                         pyrust_builtins::list::call(method, &receiver, pos, kw)
                     }
@@ -11412,6 +11426,9 @@ impl Interpreter {
                 if let Some(err) = reject_container_method_kwargs("tuple", method, kw) {
                     return Err(err);
                 }
+                if method == "index" {
+                    return self.call_seq_index(&receiver, pos, "tuple");
+                }
                 // Snapshot the tuple's items once so the `&[Value]` borrow does
                 // not straddle the `&mut self` calls below.  Tuples are
                 // immutable, so the snapshot is exact.
@@ -11424,17 +11441,8 @@ impl Interpreter {
                         .first()
                         .map(|t| Self::seq_search_needs_dispatch(t, &items))
                         .unwrap_or(false);
-                    let pos = if method == "index" {
-                        self.resolve_seq_index_pos(pos)?
-                    } else {
-                        pos
-                    };
                     if needs_dispatch {
-                        if method == "index" {
-                            self.call_seq_index(items, &pos, "tuple")
-                        } else {
-                            self.call_seq_count(items, &pos, "tuple")
-                        }
+                        self.call_seq_count(items, &pos, "tuple")
                     } else {
                         pyrust_builtins::tuple::call(method, &items, pos)
                     }
@@ -11683,7 +11691,9 @@ impl Interpreter {
                     self.call_list_extend(&backing, args)
                 } else if prim_method == "remove" {
                     self.call_seq_remove(&backing, args)
-                } else if prim_method == "index" || prim_method == "count" {
+                } else if prim_method == "index" {
+                    self.call_seq_index(&backing, args, "list")
+                } else if prim_method == "count" {
                     let needs_dispatch = args
                         .first()
                         .map(|t| {
@@ -11692,20 +11702,11 @@ impl Interpreter {
                                 .unwrap_or(true)
                         })
                         .unwrap_or(false);
-                    let args = if prim_method == "index" {
-                        self.resolve_seq_index_pos(args)?
-                    } else {
-                        args
-                    };
                     if needs_dispatch {
                         let snapshot = backing.list_with(|items| items.clone()).ok_or_else(|| {
                             pyrust_core::type_err!("list.index receiver is not a list")
                         })?;
-                        if prim_method == "index" {
-                            self.call_seq_index(snapshot, &args, "list")
-                        } else {
-                            self.call_seq_count(snapshot, &args, "list")
-                        }
+                        self.call_seq_count(snapshot, &args, "list")
                     } else {
                         let empty_kw = PyDict::default();
                         pyrust_builtins::list::call(prim_method, &backing, args, &empty_kw)
