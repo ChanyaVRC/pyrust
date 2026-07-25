@@ -40,8 +40,21 @@ pub(crate) type IterSrcBuf = smallvec::SmallVec<[Value; 2]>;
 /// "list_iterator", "set_iterator") so that `type()` and error messages
 /// report the right name instead of the generic "generator".  Internal
 /// iterators that have no CPython-specified name use "generator".
+pub(crate) enum NativeIterSource {
+    /// Snapshot used by dict/set/view/range/string and other eager sources.
+    Materialized(Vec<Value>),
+    /// Live list/tuple source.  Elements are cloned one at a time as the
+    /// iterator advances, so creating `iter(seq)` is O(1) and list mutation
+    /// follows CPython's index-walk semantics.
+    Indexed(Value),
+    /// Source released after a live iterator is exhausted or moved into a VM
+    /// fast path.  Prevents a later list append from resurrecting an iterator
+    /// that has already returned StopIteration.
+    Exhausted,
+}
+
 pub(crate) struct NativeIterFrame {
-    pub(crate) items: Vec<Value>,
+    source: NativeIterSource,
     pub(crate) pos: usize,
     pub(crate) type_name: &'static str,
     /// Optional mutation guard (#1988/#1994).  Set only for `deque` iterators
@@ -102,9 +115,90 @@ pub(crate) enum GuardVersion {
 }
 
 impl NativeIterFrame {
-    /// Construct an unguarded native iterator (the common case).
+    /// Construct an unguarded iterator over an owned element snapshot.
     pub(crate) fn new(items: Vec<Value>, type_name: &'static str) -> Self {
-        NativeIterFrame { items, pos: 0, type_name, guard: None, exhausted: false }
+        NativeIterFrame {
+            source: NativeIterSource::Materialized(items),
+            pos: 0,
+            type_name,
+            guard: None,
+            exhausted: false,
+        }
+    }
+
+    /// Construct an O(1) live iterator over a list or tuple `Value`.
+    pub(crate) fn indexed(source: Value, type_name: &'static str) -> Self {
+        debug_assert!(matches!(
+            source.kind(),
+            ValueKind::List(_) | ValueKind::Tuple(_)
+        ));
+        NativeIterFrame {
+            source: NativeIterSource::Indexed(source),
+            pos: 0,
+            type_name,
+            guard: None,
+            exhausted: false,
+        }
+    }
+
+    #[inline]
+    fn source_len(&self) -> usize {
+        match &self.source {
+            NativeIterSource::Materialized(items) => items.len(),
+            NativeIterSource::Indexed(value) => match value.kind() {
+                ValueKind::List(items) => items.len(),
+                ValueKind::Tuple(items) => items.len(),
+                _ => 0,
+            },
+            NativeIterSource::Exhausted => 0,
+        }
+    }
+
+    #[inline]
+    fn source_item(&self, index: usize) -> Option<Value> {
+        match &self.source {
+            NativeIterSource::Materialized(items) => items.get(index).cloned(),
+            NativeIterSource::Indexed(value) => match value.kind() {
+                ValueKind::List(items) => items.get(index).cloned(),
+                ValueKind::Tuple(items) => items.get(index).cloned(),
+                _ => None,
+            },
+            NativeIterSource::Exhausted => None,
+        }
+    }
+
+    /// Move a pristine source into a specialised VM iterator.
+    fn take_source(&mut self) -> NativeIterSource {
+        std::mem::replace(&mut self.source, NativeIterSource::Exhausted)
+    }
+
+    /// Drain all currently remaining elements and permanently exhaust this
+    /// iterator.  Collection helpers use this when they need an eager `Vec`.
+    pub(crate) fn drain_remaining(&mut self) -> Vec<Value> {
+        if self.exhausted {
+            return Vec::new();
+        }
+        let len = self.source_len();
+        let remaining = match &self.source {
+            NativeIterSource::Materialized(items) => items[self.pos.min(len)..].to_vec(),
+            NativeIterSource::Indexed(value) => match value.kind() {
+                ValueKind::List(items) => items[self.pos.min(len)..].to_vec(),
+                ValueKind::Tuple(items) => items[self.pos.min(len)..].to_vec(),
+                _ => Vec::new(),
+            },
+            NativeIterSource::Exhausted => Vec::new(),
+        };
+        self.pos = len;
+        self.exhausted = true;
+        self.source = NativeIterSource::Exhausted;
+        remaining
+    }
+
+    fn latch_exhausted(&mut self) {
+        self.exhausted = true;
+        if matches!(self.source, NativeIterSource::Indexed(_)) {
+            self.source = NativeIterSource::Exhausted;
+        }
     }
 
     /// Mutation-guard check, run once per `__next__` *only when a guard is
@@ -150,13 +244,13 @@ impl NativeIterFrame {
     /// was created.  Used by call sites that already pay a function-call
     /// boundary (`call_next`, `yield_from_advance`); the VM's `ForIter` hot loop
     /// inlines the equivalent steps directly to keep iteration fast.
+    #[inline]
     pub(crate) fn advance(&mut self) -> Result<Option<Value>> {
         // Common path: still have elements.  `guard_check` is a no-op branch
         // for unguarded iterators.  The `exhausted` latch can only be set once
         // `pos` reaches the end, so it need not be tested on the element path.
-        if self.pos < self.items.len() {
+        if let Some(item) = self.source_item(self.pos) {
             self.guard_check()?;
-            let item = self.items[self.pos].clone();
             self.pos += 1;
             return Ok(Some(item));
         }
@@ -165,7 +259,7 @@ impl NativeIterFrame {
         if self.exhausted {
             return Ok(None);
         }
-        self.exhausted = true;
+        self.latch_exhausted();
         // OrderedDict iterators test exhaustion before the size guard; plain
         // dicts check the guard first (a final-step mutation still raises).
         if !self.guard.as_ref().is_some_and(|g| g.exhaust_first) {
@@ -300,10 +394,11 @@ pub(crate) struct EnumerateIter {
 /// not yet have yielded anything (`!done`, `counter` a plain `i64`) and its
 /// inner source must be an unguarded [`NativeIterFrame`] still at `pos == 0`
 /// (list / tuple / range / str iterators — collections with no per-step Python
-/// dispatch and no mutation guard).  In that case the frame's element snapshot
-/// is *moved* into the returned state (leaving the enumerate and its source
-/// marked exhausted, so re-iterating the same object yields nothing — matching
-/// CPython's single-pass enumerate), and the loop can walk it directly.
+/// dispatch and no mutation guard).  In that case the frame's snapshot or live
+/// indexed source is *moved* into the returned state (leaving the enumerate and
+/// its source marked exhausted, so re-iterating the same object yields nothing
+/// — matching CPython's single-pass enumerate), and the loop can walk it
+/// directly.
 ///
 /// Returns `None` — leaving the caller on the generic `UserDefined` /
 /// `call_next` path — for every other shape: a partly-consumed enumerate, a
@@ -328,7 +423,7 @@ fn try_enumerate_fastpath(value: &Value) -> Option<IterState> {
         return None;
     };
     // The source must be an unguarded, not-yet-advanced NativeIterFrame.
-    let items = {
+    let source = {
         let mut sb = src_rc.try_borrow_mut().ok()?;
         let frame = sb.downcast_mut::<NativeIterFrame>()?;
         if frame.guard.is_some() || frame.pos != 0 || frame.exhausted {
@@ -337,12 +432,13 @@ fn try_enumerate_fastpath(value: &Value) -> Option<IterState> {
         // `start + (len - 1)` must fit i64 (the last index we produce).  A start
         // near i64::MAX (only reachable via a huge explicit `start=`) falls back
         // to the generic path, which promotes the counter to BigInt.
-        start.checked_add(frame.items.len() as i64)?;
-        // Move the snapshot out and mark the source exhausted so any later
+        let len = i64::try_from(frame.source_len()).ok()?;
+        start.checked_add(len)?;
+        // Move the source out and mark its iterator exhausted so any later
         // `next()` on it (e.g. a second `iter()` of the same enumerate) is inert.
-        let items = std::mem::take(&mut frame.items);
+        let source = frame.take_source();
         frame.exhausted = true;
-        items
+        source
     };
     // Mark the enumerate object itself exhausted (single-pass parity).
     if let Ok(mut b) = enum_rc.try_borrow_mut()
@@ -350,11 +446,19 @@ fn try_enumerate_fastpath(value: &Value) -> Option<IterState> {
     {
         e.done = true;
     }
-    Some(IterState::Enumerate {
-        items,
-        pos: 0,
-        start,
-    })
+    match source {
+        NativeIterSource::Materialized(items) => Some(IterState::Enumerate {
+            items,
+            pos: 0,
+            start,
+        }),
+        NativeIterSource::Indexed(value) => Some(IterState::EnumerateIndexed {
+            value,
+            pos: 0,
+            start,
+        }),
+        NativeIterSource::Exhausted => None,
+    }
 }
 
 /// Lazy iterator over an arbitrary-precision `range` (#2118).  Produced by
@@ -789,6 +893,15 @@ pub(crate) enum IterState {
     /// or a `BigInt` start) stays on `UserDefined`.
     Enumerate {
         items: Vec<Value>,
+        pos: usize,
+        start: i64,
+    },
+    /// Native enumerate over a live list/tuple source.  This preserves the
+    /// fused-unpack fast path without forcing the O(n) snapshot that
+    /// `iter(list_or_tuple)` now avoids.  List appends/removals are observed by
+    /// the same live index walk as CPython's list iterator.
+    EnumerateIndexed {
+        value: Value,
         pos: usize,
         start: i64,
     },
@@ -5313,6 +5426,40 @@ impl Interpreter {
                                 pc = jump_pc!(*offset);
                             }
                         }
+                        Some(IterState::EnumerateIndexed { value, pos, start }) => {
+                            let cur_pos = *pos;
+                            let elem = match value.kind() {
+                                ValueKind::List(items) => items.get(cur_pos).cloned(),
+                                ValueKind::Tuple(items) => items.get(cur_pos).cloned(),
+                                _ => None,
+                            };
+                            if let Some(elem) = elem {
+                                let idx = i64::try_from(cur_pos)
+                                    .ok()
+                                    .and_then(|offset| start.checked_add(offset))
+                                    .map(Value::int)
+                                    .unwrap_or_else(|| {
+                                        value_from_bigint(
+                                            PyBigInt::from(*start) + PyBigInt::from(cur_pos),
+                                        )
+                                    });
+                                *pos = cur_pos + 1;
+                                // Preserve enumerate's fused two-target unpack
+                                // for the live sequence source.
+                                if let Some(Insn::Unpack(base, src, 2)) = code.insns.get(pc)
+                                    && *src == *dst
+                                {
+                                    let base = *base as usize;
+                                    regs[base] = idx;
+                                    regs[base + 1] = elem;
+                                    pc += 1;
+                                } else {
+                                    regs[*dst as usize] = Value::tuple(vec![idx, elem]);
+                                }
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
                         Some(IterState::Range { cur, stop, step }) => {
                             let exhausted =
                                 if *step > 0 { *cur >= *stop } else { *cur <= *stop };
@@ -5492,46 +5639,13 @@ impl Interpreter {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
-                                            // Inlined fast path: the common
-                                            // unguarded iterator pays only the
-                                            // `guard_check` no-op branch, keeping
-                                            // the per-step cost identical to the
-                                            // pre-guard code.
-                                            Some(if native.pos < native.items.len() {
-                                                // Common path: still have elements.
-                                                // The per-step cost is exactly the
-                                                // pre-latch code — a single bounds
-                                                // check then `guard_check` (a no-op
-                                                // branch for unguarded iterators).
-                                                // The `exhausted` latch can only be
-                                                // set once `pos` reaches the end, so
-                                                // it need not be tested here.
-                                                match native.guard_check() {
-                                                    Err(e) => Err(e),
-                                                    Ok(()) => {
-                                                        let item = native.items[native.pos].clone();
-                                                        native.pos += 1;
-                                                        Ok(item)
-                                                    }
-                                                }
-                                            } else if native.exhausted {
-                                                // Latched after a clean StopIteration:
-                                                // a later size mutation must not raise.
-                                                Err(pyrust_core::py_err!("StopIteration", String::new()))
-                                            } else {
-                                                // First time at the end: OrderedDict
-                                                // iterators test exhaustion before the
-                                                // size guard; plain dicts check the
-                                                // guard first (it may still raise).
-                                                native.exhausted = true;
-                                                if native.guard.as_ref().is_some_and(|g| g.exhaust_first) {
-                                                    Err(pyrust_core::py_err!("StopIteration", String::new()))
-                                                } else {
-                                                    match native.guard_check() {
-                                                        Err(e) => Err(e),
-                                                        Ok(()) => Err(pyrust_core::py_err!("StopIteration", String::new())),
-                                                    }
-                                                }
+                                            Some(match native.advance() {
+                                                Ok(Some(item)) => Ok(item),
+                                                Ok(None) => Err(pyrust_core::py_err!(
+                                                    "StopIteration",
+                                                    String::new()
+                                                )),
+                                                Err(e) => Err(e),
                                             })
                                         } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                                             // Resume the generator.
