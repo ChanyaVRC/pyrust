@@ -3316,13 +3316,22 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
     })
 }
 
-// Pool for `Box<Opaque>` allocations (#281).  Every `Value::opaque(...)` boxes
-// an `Opaque` enum; for hot patterns like `Opaque::SmallTuple2` per-iteration
-// these allocations dominate.  Recycling the fixed-size slabs (the enum
-// reserves max-variant bytes regardless of which arm is alive) eliminates the
-// general allocator round-trip.  Allocator round-trips for non-hot variants
-// also benefit; the pool is per-thread and has bounded capacity so it can
-// never leak memory unboundedly.
+/// Refcounted slab payload for [`TAG_OPAQUE`].
+///
+/// `Value` itself remains one NaN-boxed word.  Clones point at the same slot and
+/// increment `strong`, avoiding both a slab allocation and a clone of the
+/// `Opaque` enum (including its nested `Value`s).  Values are confined to the
+/// interpreter thread (opaque variants contain `Rc` and the slab pool is
+/// thread-local), so a non-atomic `Cell` matches the existing ownership model.
+#[repr(C)]
+struct OpaqueSlot {
+    strong: Cell<usize>,
+    value: Opaque,
+}
+
+// Pool for `OpaqueSlot` allocations (#281).  The fixed-size slabs are recycled
+// after the final aliased `Value` is dropped.  The pool is per-thread and
+// bounded, so unused capacity cannot grow without limit.
 const POOL_OPAQUE_CAP: usize = 128;
 
 thread_local! {
@@ -3331,7 +3340,7 @@ thread_local! {
 
 #[inline(always)]
 fn opaque_layout() -> Layout {
-    Layout::new::<Opaque>()
+    Layout::new::<OpaqueSlot>()
 }
 
 #[inline(always)]
@@ -3960,13 +3969,22 @@ impl Value {
     }
 
     fn opaque(o: Opaque) -> Self {
-        // SAFETY: `pool_opaque_alloc` returns a block sized/aligned for `Opaque`
+        // SAFETY: `pool_opaque_alloc` returns a block sized/aligned for
+        // `OpaqueSlot`
         // (either a recycled one from this thread's free list or a fresh
-        // `alloc(Layout::new::<Opaque>())`).  Writing through the cast pointer
-        // initialises the slot; the matching `pool_opaque_dealloc` in `Drop` is
-        // only invoked after `drop_in_place`, so no double-drop.  See #281.
-        let ptr = unsafe { pool_opaque_alloc() as *mut Opaque };
-        unsafe { std::ptr::write(ptr, o) };
+        // allocation).  Writing through the cast pointer initialises both the
+        // refcount and payload; final `Drop` destroys the slot before returning
+        // it to the pool.
+        let ptr = unsafe { pool_opaque_alloc() as *mut OpaqueSlot };
+        unsafe {
+            std::ptr::write(
+                ptr,
+                OpaqueSlot {
+                    strong: Cell::new(1),
+                    value: o,
+                },
+            )
+        };
         Value(TAG_OPAQUE_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
@@ -4070,7 +4088,16 @@ impl Value {
     pub fn is_identical_nan(&self, other: &Self) -> bool {
         if self.0 == other.0 {
             // Same NaN-boxed bits: the float arm (the original #2344 case).
-            return self.is_float() && f64::from_bits(self.0).is_nan();
+            if self.is_float() {
+                return f64::from_bits(self.0).is_nan();
+            }
+            // Opaque clones now share one refcounted slot, so two aliases have
+            // identical NaN-box bits.  Preserve the complex-NaN identity
+            // short-circuit that previously ran only after wrapper reallocation.
+            if top16(self.0) == TAG_OPAQUE {
+                return self.opaque_identical_nan(other);
+            }
+            return false;
         }
         // Distinct bits.  The only non-identical pair that can still be "the same
         // object" for RichCompareBool is a NaN-bearing complex (two heap allocs).
@@ -4131,9 +4158,9 @@ impl Value {
                 // Dicts already share an Rc backing.  Surface the Rc pointer
                 // address so `b = a; id(a) == id(b)` for dicts too (#305).
                 Opaque::Dict(rc) => Some(Rc::as_ptr(rc) as i64),
-                // BigInt clones share the inner Rc even though the opaque
-                // wrapper is reallocated.  Use that Rc address for Python
-                // object identity (`b = a; a is b`) parity (#523).
+                // BigInt clones share this opaque slot and the inner Rc.  Keep
+                // using the Rc address for Python object identity
+                // (`b = a; a is b`) parity (#523).
                 Opaque::PyBigInt(rc) => Some(Rc::as_ptr(rc) as i64),
                 // Generator clones share the same Rc<RefCell<...>>; surface its
                 // pointer address so `id(g)` is non-zero and stable, and so
@@ -4211,8 +4238,12 @@ impl Value {
         unsafe { &*self.list_inner_ptr() }
     }
 
-    unsafe fn opaque_ptr(&self) -> *mut Opaque {
+    unsafe fn opaque_slot_ptr(&self) -> *mut OpaqueSlot {
         (self.0 & PAYLOAD_MASK) as *mut _
+    }
+
+    unsafe fn opaque_ptr(&self) -> *mut Opaque {
+        unsafe { std::ptr::addr_of_mut!((*self.opaque_slot_ptr()).value) }
     }
 
     // ── Public accessors ─────────────────────────────────────────────────────
@@ -5299,8 +5330,14 @@ impl Clone for Value {
             }
             // Opaque
             TAG_OPAQUE => {
-                let o = unsafe { &*self.opaque_ptr() };
-                Value::opaque(o.clone())
+                let slot = unsafe { &*self.opaque_slot_ptr() };
+                let strong = slot.strong.get();
+                debug_assert!(strong > 0, "cloning a released opaque slot");
+                // Match the string header's saturation policy: an impossibly
+                // over-shared value leaks rather than wrapping to zero and
+                // freeing a live payload.
+                slot.strong.set(strong.saturating_add(1));
+                Value(self.0)
             }
             _ => unreachable!(),
         }
@@ -5356,10 +5393,19 @@ impl Drop for Value {
                 Rc::decrement_strong_count(self.list_inner_ptr());
             },
             TAG_OPAQUE => unsafe {
-                // Matched allocator: `Value::opaque` allocates through
-                // `pool_opaque_alloc`; drop the contained value in place and
-                // hand the slab back to the same pool.  See #281.
-                let ptr = self.opaque_ptr();
+                let ptr = self.opaque_slot_ptr();
+                let strong = (*ptr).strong.get();
+                debug_assert!(strong > 0, "dropping an already released opaque slot");
+                if strong == usize::MAX {
+                    // Saturated clones are intentionally immortal; see Clone.
+                    return;
+                }
+                if strong > 1 {
+                    (*ptr).strong.set(strong - 1);
+                    return;
+                }
+                // Matched allocator: destroy the final payload and hand the
+                // whole slot back to the same per-thread pool.
                 std::ptr::drop_in_place(ptr);
                 pool_opaque_dealloc(ptr as *mut u8);
             },
@@ -7908,6 +7954,28 @@ mod tests {
         // Distinct list literals must NOT share identity.
         let c = Value::list(vec![Value::int(1), Value::int(2)]);
         assert_ne!(a.value_id(), c.value_id());
+    }
+
+    #[test]
+    fn opaque_clone_reuses_refcounted_slot() {
+        let original = Value::complex(1.25, -2.5);
+        let slot = unsafe { &*original.opaque_slot_ptr() };
+        assert_eq!(slot.strong.get(), 1);
+
+        let alias = original.clone();
+        assert_eq!(original.0, alias.0, "clone must reuse the opaque slab");
+        assert_eq!(slot.strong.get(), 2);
+
+        drop(original);
+        assert_eq!(
+            unsafe { &*alias.opaque_slot_ptr() }.strong.get(),
+            1,
+            "dropping one alias must keep the shared payload alive"
+        );
+        assert!(matches!(
+            alias.kind(),
+            ValueKind::Complex(re, im) if re == 1.25 && im == -2.5
+        ));
     }
 
     #[test]
