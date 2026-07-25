@@ -862,14 +862,23 @@ pyrust_module! {
             // whole sequence repeated `repeat` times.  Use
             // `collect_iterable` (not the bare `iter_values`) so generator
             // and `__iter__`/`__next__`-class sources work.
-            let mut pools: Vec<Vec<Value>> =
+            let mut pools: Vec<Value> =
                 Vec::with_capacity(positional.len() * repeat as usize);
-            let single_pass: Vec<Vec<Value>> = positional
-                .iter()
-                .map(|v| _interp.collect_iterable(v))
-                .collect::<Result<_>>()?;
-            for _ in 0..repeat {
-                pools.extend(single_pass.iter().cloned());
+            // Materialise each distinct input once. Repeated dimensions share
+            // the private, never-mutated list backing through Value's O(1) Rc
+            // clone instead of cloning every element for every repeat.
+            let single_pass: Vec<Value> = if repeat == 0 || positional.is_empty() {
+                Vec::new()
+            } else {
+                positional
+                    .iter()
+                    .map(|v| _interp.collect_iterable(v).map(Value::list))
+                    .collect::<Result<_>>()?
+            };
+            if !single_pass.is_empty() {
+                for _ in 0..repeat {
+                    pools.extend(single_pass.iter().cloned());
+                }
             }
             // Three boundary cases:
             //   - `product()` with no iterables → `pools` is empty, the
@@ -880,11 +889,12 @@ pyrust_module! {
             //     nothing (an empty pool short-circuits the Cartesian
             //     product to ∅).  `empty_input` flips `_exhausted` to
             //     pre-empt the first `__next__`.
-            let empty_input = pools.iter().any(|p| p.is_empty());
+            let empty_input = pools.iter().any(|p| match p.kind() {
+                ValueKind::List(items) => items.is_empty(),
+                _ => false,
+            });
             let mut a = inst.borrow_mut();
-            a.attrs.insert("_pools", Value::list(
-                pools.into_iter().map(Value::list).collect(),
-            ));
+            a.attrs.insert("_pools", Value::list(pools));
             a.attrs.insert(
                 "_indices",
                 Value::list(Vec::new()),
