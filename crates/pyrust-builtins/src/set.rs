@@ -83,11 +83,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             for arg in args {
                 let snap = snapshot_iterable(receiver, arg)?;
                 receiver
-                    .set_with_mut(|items| {
-                        for k in &snap {
-                            items.shift_remove(k);
-                        }
-                    })
+                    .set_with_mut(|items| subtract_snapshot(items, &snap))
                     .ok_or_else(not_set)?;
             }
             Ok(Value::none())
@@ -286,6 +282,23 @@ fn collect_iterable(v: &Value) -> Result<PySet> {
     Ok(out)
 }
 
+/// Remove all keys in `snapshot` while preserving survivor order.
+///
+/// `retain` is linear in the receiver and avoids `IndexSet::shift_remove`'s
+/// repeated element shifts for multi-key differences.  Keep the single-key
+/// lookup path, though: a missing key remains O(1) instead of forcing a full
+/// receiver scan.
+#[inline]
+fn subtract_snapshot(items: &mut PySet, snapshot: &PySet) {
+    match snapshot.len() {
+        0 => {}
+        1 => {
+            items.shift_remove(snapshot.iter().next().unwrap());
+        }
+        _ => items.retain(|key| !snapshot.contains(key)),
+    }
+}
+
 // ── mutating methods ──────────────────────────────────────────────────────────
 
 fn add(items: &mut PySet, args: &[Value]) -> Result<Value> {
@@ -372,9 +385,7 @@ fn difference(receiver: &Value, args: &[Value]) -> Result<Value> {
         .set_with(|items| {
             let mut result = items.clone();
             for snap in &snapshots {
-                for k in snap {
-                    result.shift_remove(k);
-                }
+                subtract_snapshot(&mut result, snap);
             }
             Value::set(result)
         })
