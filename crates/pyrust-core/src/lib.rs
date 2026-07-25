@@ -2478,6 +2478,183 @@ const STR_IS_ASCII: u32 = 0b010; // bit 1 — cached ASCII-ness
 const STR_ASCII_COMPUTED: u32 = 0b100; // bit 2 — flag has been computed
 const STR_RC_ONE: u32 = 0b1000; // rc in bits 31:3; one reference
 
+// Non-ASCII strings lazily cache their codepoint length as a tagged usize in the
+// header. Repeated indexed access upgrades that word to a pointer to a sparse
+// codepoint→byte-offset index; a one-shot access scans without allocating.
+// Keeping one checkpoint per 32 codepoints bounds reused lookup to 31 short
+// UTF-8 steps while using at most 1/32 of the memory of a full offset table.
+//
+// `unicode_state` encoding (all cache allocations are 8-byte aligned):
+//   0             — no metadata yet
+//   low bit set   — `(codepoint_len << 2) | length_tag | index_seen`
+//   low bit clear — `*mut StrUnicodeCache`
+const STR_OFFSET_STRIDE: usize = 32;
+const STR_SLICE_LAYOUT_SIZE: usize = 32;
+const STR_SLICE_CACHE_OFFSET: usize = 24;
+const STR_CODEPOINT_LEN_TAG: usize = 1;
+const STR_CODEPOINT_INDEX_SEEN: usize = 2;
+const STR_CODEPOINT_LEN_SHIFT: usize = 2;
+
+struct StrUnicodeCache {
+    codepoint_len: u32,
+    checkpoints: Box<[u32]>,
+}
+
+impl StrUnicodeCache {
+    fn build(s: &str) -> Box<Self> {
+        let mut checkpoints = Vec::new();
+        let mut codepoint_len = 0usize;
+        let bytes = s.as_bytes();
+        let mut byte_offset = 0usize;
+        while byte_offset < bytes.len() {
+            if codepoint_len.is_multiple_of(STR_OFFSET_STRIDE) {
+                checkpoints.push(byte_offset as u32);
+            }
+            byte_offset += utf8_codepoint_width(bytes[byte_offset]);
+            codepoint_len += 1;
+        }
+        Box::new(Self {
+            codepoint_len: codepoint_len as u32,
+            checkpoints: checkpoints.into_boxed_slice(),
+        })
+    }
+
+    #[inline]
+    fn byte_offset(&self, s: &str, index: usize) -> usize {
+        let len = self.codepoint_len as usize;
+        debug_assert!(index <= len);
+        if index == len {
+            return s.len();
+        }
+
+        let checkpoint = index / STR_OFFSET_STRIDE;
+        let mut codepoint = checkpoint * STR_OFFSET_STRIDE;
+        let mut byte_offset = self.checkpoints[checkpoint] as usize;
+        let bytes = s.as_bytes();
+        while codepoint < index {
+            byte_offset += utf8_codepoint_width(bytes[byte_offset]);
+            codepoint += 1;
+        }
+        byte_offset
+    }
+}
+
+#[inline(always)]
+fn utf8_codepoint_width(first: u8) -> usize {
+    if first < 0x80 {
+        1
+    } else if first < 0xE0 {
+        2
+    } else if first < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
+#[inline]
+fn utf8_codepoint_count(bytes: &[u8]) -> usize {
+    // A codepoint starts at every byte except a UTF-8 continuation byte
+    // (`10xxxxxx`). This mirrors the lane-accumulation strategy used by Rust's
+    // optimized `str::chars().count()`, but operates on raw bytes so pyrust's
+    // CESU-8 surrogate representation is safe too.
+    const CHUNK_WORDS: usize = 192;
+
+    let (head, body, tail) = unsafe { bytes.align_to::<u64>() };
+    let mut total = utf8_codepoint_count_scalar(head) + utf8_codepoint_count_scalar(tail);
+    for chunk in body.chunks(CHUNK_WORDS) {
+        let mut lane_counts = 0u64;
+        for &word in chunk {
+            lane_counts += utf8_start_markers(word);
+        }
+        total += sum_u8_lanes(lane_counts);
+    }
+    total
+}
+
+#[inline(always)]
+fn utf8_start_markers(word: u64) -> u64 {
+    const LOW_BITS: u64 = 0x0101_0101_0101_0101;
+    ((!word >> 7) | (word >> 6)) & LOW_BITS
+}
+
+#[inline(always)]
+fn utf8_starts_in_word(word: u64) -> usize {
+    utf8_start_markers(word).count_ones() as usize
+}
+
+#[inline(always)]
+fn sum_u8_lanes(values: u64) -> usize {
+    const LOW_U16_LANES: u64 = 0x0001_0001_0001_0001;
+    const LOW_BYTES: u64 = 0x00ff_00ff_00ff_00ff;
+    let pair_sum = (values & LOW_BYTES) + ((values >> 8) & LOW_BYTES);
+    (pair_sum.wrapping_mul(LOW_U16_LANES) >> 48) as usize
+}
+
+#[inline]
+fn utf8_codepoint_count_scalar(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .filter(|byte| **byte & 0b1100_0000 != 0b1000_0000)
+        .count()
+}
+
+#[inline]
+fn uncached_utf8_byte_offset(bytes: &[u8], index: usize, codepoint_len: usize) -> usize {
+    debug_assert!(index <= codepoint_len);
+    if index <= codepoint_len - index {
+        let mut byte_offset = 0usize;
+        let mut remaining = index;
+        while byte_offset + 8 <= bytes.len() {
+            let word = u64::from_ne_bytes(
+                bytes[byte_offset..byte_offset + 8]
+                    .try_into()
+                    .expect("exact 8-byte chunk"),
+            );
+            let starts = utf8_starts_in_word(word);
+            if remaining < starts {
+                break;
+            }
+            remaining -= starts;
+            byte_offset += 8;
+        }
+        while byte_offset < bytes.len() {
+            if bytes[byte_offset] & 0b1100_0000 != 0b1000_0000 {
+                if remaining == 0 {
+                    return byte_offset;
+                }
+                remaining -= 1;
+            }
+            byte_offset += 1;
+        }
+        debug_assert_eq!(remaining, 0);
+        byte_offset
+    } else {
+        let mut byte_offset = bytes.len();
+        let mut remaining = codepoint_len - index;
+        while byte_offset >= 8 {
+            let word = u64::from_ne_bytes(
+                bytes[byte_offset - 8..byte_offset]
+                    .try_into()
+                    .expect("exact 8-byte chunk"),
+            );
+            let starts = utf8_starts_in_word(word);
+            if remaining <= starts {
+                break;
+            }
+            remaining -= starts;
+            byte_offset -= 8;
+        }
+        while remaining > 0 {
+            byte_offset -= 1;
+            if bytes[byte_offset] & 0b1100_0000 != 0b1000_0000 {
+                remaining -= 1;
+            }
+        }
+        byte_offset
+    }
+}
+
 // ── Small-string optimisation (SSO), issue #2832 ─────────────────────────────
 //
 // A TAG_STR value whose payload low bit is set stores its bytes *inline* in the
@@ -3290,7 +3467,7 @@ unsafe fn pool_b_alloc() -> *mut u8 {
             c.set((next, len - 1));
             head
         } else {
-            unsafe { alloc(Layout::from_size_align(20, 8).unwrap()) }
+            unsafe { alloc(Layout::from_size_align(STR_SLICE_LAYOUT_SIZE, 8).unwrap()) }
         }
     })
 }
@@ -3311,7 +3488,12 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
             unsafe { *(ptr as *mut *mut u8) = head };
             c.set((ptr, len + 1));
         } else {
-            unsafe { dealloc(ptr, Layout::from_size_align(20, 8).unwrap()) };
+            unsafe {
+                dealloc(
+                    ptr,
+                    Layout::from_size_align(STR_SLICE_LAYOUT_SIZE, 8).unwrap(),
+                )
+            };
         }
     })
 }
@@ -3454,8 +3636,12 @@ impl Value {
         if len <= STR_INLINE_MAX {
             return make_inline_str(s);
         }
-        // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes: u8 × len]
-        //            offset 0     offset 4     offset 8     offset 16
+        // Layout A: [rc_type:u32][sub_len:u32][unicode_state:usize][bytes]
+        //            offset 0     offset 4     offset 8            offset 16
+        //
+        // Owned bytes always start at header+16, so the old self-referential
+        // `ref` field was redundant.  Reuse those eight bytes for a lazily
+        // allocated non-ASCII length/offset cache.
         let layout = Layout::from_size_align(16 + len, 8).unwrap();
         let ptr = unsafe { alloc(layout) };
         // Compute ASCII-ness once, here, where every byte is about to be touched
@@ -3470,8 +3656,7 @@ impl Value {
         unsafe {
             (ptr as *mut u32).write(STR_RC_ONE | ascii_flag); // rc=1, type=A
             (ptr.add(4) as *mut u32).write(len as u32);
-            // Store the self-referential pointer as *const u8 (immutable bytes).
-            (ptr.add(8) as *mut *const u8).write(ptr.add(16)); // ref → own bytes
+            (ptr.add(8) as *mut usize).write(0);
             if len > 0 {
                 ptr.add(16)
                     .copy_from_nonoverlapping(s.as_bytes().as_ptr(), len);
@@ -3514,7 +3699,7 @@ impl Value {
         let layout = Layout::from_size_align(16 + total, 8).unwrap();
         unsafe {
             let ptr = alloc(layout);
-            (ptr.add(8) as *mut *const u8).write(ptr.add(16)); // ref → own bytes
+            (ptr.add(8) as *mut usize).write(0);
             let buf = std::slice::from_raw_parts_mut(ptr.add(16), total);
             let is_ascii = fill(buf);
             let ascii_flag = match is_ascii {
@@ -3579,8 +3764,13 @@ impl Value {
         }
         let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
         let rc_type = unsafe { *(hdr as *const u32) };
-        // self.ref (offset 8) points to self's bytes[0]; add byte_start for new slice
-        let self_ref = unsafe { *(hdr.add(8) as *const *const u8) };
+        // Layout A owns bytes at hdr+16. Layout B's ref (offset 8) points to
+        // this slice's bytes[0]. Add byte_start for the new slice.
+        let self_ref = if rc_type & STR_TYPE_B == 0 {
+            unsafe { hdr.add(16) }
+        } else {
+            unsafe { *(hdr.add(8) as *const *const u8) }
+        };
         let new_ref = unsafe { self_ref.add(byte_start) };
 
         // Find A_ptr (Layout A root) to increment its rc, and compute new offset.
@@ -3628,8 +3818,9 @@ impl Value {
             0
         };
 
-        // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
-        //            offset 0     offset 4     offset 8     offset 16
+        // Layout B:
+        // [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32][pad:u32][state:usize]
+        //  offset 0     offset 4     offset 8     offset 16   offset 20 offset 24
         // ref points directly to this slice's bytes[0]; ref - offset - 16 = A_ptr
         let ptr = unsafe { pool_b_alloc() };
         unsafe {
@@ -3637,6 +3828,7 @@ impl Value {
             (ptr.add(4) as *mut u32).write(sub_len as u32);
             *(ptr.add(8) as *mut *const u8) = new_ref;
             (ptr.add(16) as *mut u32).write(new_offset as u32);
+            (ptr.add(STR_SLICE_CACHE_OFFSET) as *mut usize).write(0);
         }
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
@@ -4194,6 +4386,84 @@ impl Value {
         (self.0 & PAYLOAD_MASK) as *const u8
     }
 
+    #[inline(always)]
+    unsafe fn str_unicode_state_slot(&self) -> *mut usize {
+        let hdr = unsafe { self.str_hdr() };
+        let rc_type = unsafe { *(hdr as *const u32) };
+        if rc_type & STR_TYPE_B == 0 {
+            unsafe { hdr.add(8) as *mut usize }
+        } else {
+            unsafe { hdr.add(STR_SLICE_CACHE_OFFSET) as *mut usize }
+        }
+    }
+
+    #[inline]
+    fn str_unicode_len(&self) -> usize {
+        debug_assert!(self.is_str() && !str_is_inline_bits(self.0));
+        unsafe {
+            let slot = self.str_unicode_state_slot();
+            let state = *slot;
+            if state & STR_CODEPOINT_LEN_TAG != 0 {
+                return state >> STR_CODEPOINT_LEN_SHIFT;
+            }
+            if state != 0 {
+                return (*(state as *const StrUnicodeCache)).codepoint_len as usize;
+            }
+
+            let len = utf8_codepoint_count(self.str_as_str().as_bytes());
+            slot.write((len << STR_CODEPOINT_LEN_SHIFT) | STR_CODEPOINT_LEN_TAG);
+            len
+        }
+    }
+
+    #[inline]
+    fn str_unicode_len_for_index(&self) -> usize {
+        debug_assert!(self.is_str() && !str_is_inline_bits(self.0));
+        unsafe {
+            let slot = self.str_unicode_state_slot();
+            let state = *slot;
+            if state != 0 && state & STR_CODEPOINT_LEN_TAG == 0 {
+                return (*(state as *const StrUnicodeCache)).codepoint_len as usize;
+            }
+            if state & STR_CODEPOINT_LEN_TAG != 0 {
+                let len = state >> STR_CODEPOINT_LEN_SHIFT;
+                if state & STR_CODEPOINT_INDEX_SEEN == 0 {
+                    slot.write(state | STR_CODEPOINT_INDEX_SEEN);
+                    return len;
+                }
+                return self.str_unicode_cache().codepoint_len as usize;
+            }
+
+            let len = utf8_codepoint_count(self.str_as_str().as_bytes());
+            slot.write(
+                (len << STR_CODEPOINT_LEN_SHIFT) | STR_CODEPOINT_LEN_TAG | STR_CODEPOINT_INDEX_SEEN,
+            );
+            len
+        }
+    }
+
+    #[inline]
+    fn str_unicode_cache(&self) -> &StrUnicodeCache {
+        debug_assert!(self.is_str() && !str_is_inline_bits(self.0));
+        unsafe {
+            let slot = self.str_unicode_state_slot();
+            let state = *slot;
+            if state != 0 && state & STR_CODEPOINT_LEN_TAG == 0 {
+                return &*(state as *const StrUnicodeCache);
+            }
+            let cache = StrUnicodeCache::build(self.str_as_str());
+            if state & STR_CODEPOINT_LEN_TAG != 0 {
+                debug_assert_eq!(
+                    cache.codepoint_len as usize,
+                    state >> STR_CODEPOINT_LEN_SHIFT
+                );
+            }
+            let cache = Box::into_raw(cache);
+            slot.write(cache as usize);
+            &*cache
+        }
+    }
+
     unsafe fn str_as_str(&self) -> &str {
         // Inline (SSO, #2832): the bytes live in this value's own NaN-box
         // payload, starting one byte in (past the marker/length byte).  The
@@ -4209,7 +4479,12 @@ impl Value {
         unsafe {
             let hdr = self.str_hdr();
             let sub_len = *(hdr.add(4) as *const u32) as usize;
-            let ref_ptr = *(hdr.add(8) as *const *const u8);
+            let rc_type = *(hdr as *const u32);
+            let ref_ptr = if rc_type & STR_TYPE_B == 0 {
+                hdr.add(16)
+            } else {
+                *(hdr.add(8) as *const *const u8)
+            };
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(ref_ptr, sub_len))
         }
     }
@@ -4332,6 +4607,101 @@ impl Value {
         is_ascii
     }
 
+    /// Return the Python codepoint length of a string.
+    ///
+    /// ASCII strings use their byte length directly. Non-ASCII strings build a
+    /// tagged codepoint length on first use; subsequent calls are O(1). It
+    /// counts leading bytes rather than using `str::chars()` so pyrust's
+    /// CESU-8-encoded lone surrogates remain one Python codepoint each.
+    pub fn str_codepoint_len(&self) -> usize {
+        debug_assert!(
+            self.is_str(),
+            "Value::str_codepoint_len() called on a non-string value"
+        );
+        if !self.is_str() {
+            return 0;
+        }
+        let s = unsafe { self.str_as_str() };
+        if str_is_inline_bits(self.0) {
+            return utf8_codepoint_count(s.as_bytes());
+        }
+        if self.str_is_ascii() {
+            return s.len();
+        }
+        self.str_unicode_len()
+    }
+
+    /// Return the codepoint length for an index or slice operation.
+    ///
+    /// Keeping this separate from [`Self::str_codepoint_len`] avoids allocating
+    /// an offset table for workloads that only ask for length. The first indexed
+    /// access records reuse and scans directly; a second access promotes the
+    /// header to the sparse offset cache.
+    pub fn str_codepoint_len_for_index(&self) -> usize {
+        debug_assert!(
+            self.is_str(),
+            "Value::str_codepoint_len_for_index() called on a non-string value"
+        );
+        if !self.is_str() {
+            return 0;
+        }
+        let s = unsafe { self.str_as_str() };
+        if str_is_inline_bits(self.0) {
+            return utf8_codepoint_count(s.as_bytes());
+        }
+        if self.str_is_ascii() {
+            return s.len();
+        }
+        self.str_unicode_len_for_index()
+    }
+
+    /// Translate a Python codepoint boundary to its UTF-8/CESU-8 byte offset.
+    ///
+    /// `index` may equal [`Self::str_codepoint_len`], in which case this returns
+    /// the byte length. A first non-ASCII lookup scans from the nearer end;
+    /// reused strings start at the nearest sparse checkpoint and advance at most
+    /// `STR_OFFSET_STRIDE - 1` codepoints.
+    pub fn str_codepoint_byte_offset(&self, index: usize) -> usize {
+        debug_assert!(
+            self.is_str(),
+            "Value::str_codepoint_byte_offset() called on a non-string value"
+        );
+        let s = unsafe { self.str_as_str() };
+        if str_is_inline_bits(self.0) {
+            let len = utf8_codepoint_count(s.as_bytes());
+            assert!(index <= len, "string codepoint offset out of bounds");
+            return uncached_utf8_byte_offset(s.as_bytes(), index, len);
+        }
+        if self.str_is_ascii() {
+            assert!(index <= s.len(), "string codepoint offset out of bounds");
+            return index;
+        }
+        let state = unsafe { *self.str_unicode_state_slot() };
+        if state & STR_CODEPOINT_LEN_TAG != 0 {
+            let len = state >> STR_CODEPOINT_LEN_SHIFT;
+            assert!(index <= len, "string codepoint offset out of bounds");
+            return uncached_utf8_byte_offset(s.as_bytes(), index, len);
+        }
+        if state == 0 {
+            self.str_unicode_len();
+            return self.str_codepoint_byte_offset(index);
+        }
+        let cache = unsafe { &*(state as *const StrUnicodeCache) };
+        assert!(
+            index <= cache.codepoint_len as usize,
+            "string codepoint offset out of bounds"
+        );
+        cache.byte_offset(s, index)
+    }
+
+    /// Return the byte range occupied by one Python codepoint.
+    pub fn str_codepoint_byte_range(&self, index: usize) -> (usize, usize) {
+        let s = unsafe { self.str_as_str() };
+        let start = self.str_codepoint_byte_offset(index);
+        assert!(start < s.len(), "string codepoint index out of bounds");
+        (start, start + utf8_codepoint_width(s.as_bytes()[start]))
+    }
+
     /// Grow this string in place by appending `other`'s bytes, the pyrust
     /// equivalent of CPython's `_PyUnicode_Append` fast path (issue #2850).
     ///
@@ -4392,9 +4762,6 @@ impl Value {
             return false;
         }
         unsafe {
-            // The `ref` field is self-referential (points at the block's own
-            // bytes); it must be repointed after realloc may have moved us.
-            (new_ptr.add(8) as *mut *const u8).write(new_ptr.add(16));
             new_ptr
                 .add(16 + old_len)
                 .copy_from_nonoverlapping(other.as_bytes().as_ptr(), add_len);
@@ -4423,6 +4790,16 @@ impl Value {
                 0
             };
             *(new_ptr as *mut u32) = base | new_flag;
+
+            // The cached length/checkpoints describe the pre-append bytes.
+            // Drop them only after realloc succeeds, then rebuild lazily if a
+            // later Unicode operation needs them.
+            let state_slot = new_ptr.add(8) as *mut usize;
+            let state = *state_slot;
+            if state != 0 && state & STR_CODEPOINT_LEN_TAG == 0 {
+                drop(Box::from_raw(state as *mut StrUnicodeCache));
+            }
+            state_slot.write(0);
         }
         self.0 = TAG_STR_BITS | (new_ptr as u64 & PAYLOAD_MASK);
         true
@@ -5360,17 +5737,30 @@ impl Drop for Value {
                 if *rc_type_ptr >> 3 == 0 {
                     // rc reached 0
                     if *rc_type_ptr & STR_TYPE_B == 0 {
-                        // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes...]
+                        // Layout A owns its lazily allocated Unicode cache.
+                        let state = *(hdr.add(8) as *const usize);
+                        if state != 0 && state & STR_CODEPOINT_LEN_TAG == 0 {
+                            drop(Box::from_raw(state as *mut StrUnicodeCache));
+                        }
                         let len = *(hdr.add(4) as *const u32) as usize;
                         dealloc(hdr, Layout::from_size_align(16 + len, 8).unwrap());
                     } else {
-                        // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
+                        // Layout B owns a cache for this slice independently
+                        // from its Layout A root.
+                        let state = *(hdr.add(STR_SLICE_CACHE_OFFSET) as *const usize);
+                        if state != 0 && state & STR_CODEPOINT_LEN_TAG == 0 {
+                            drop(Box::from_raw(state as *mut StrUnicodeCache));
+                        }
                         // A_ptr = ref - offset - 16
                         let ref_ptr = *(hdr.add(8) as *const *mut u8);
                         let offset = *(hdr.add(16) as *const u32) as usize;
                         let a_ptr = ref_ptr.sub(offset + 16);
                         *(a_ptr as *mut u32) -= STR_RC_ONE; // A.rc--
                         if *(a_ptr as *const u32) >> 3 == 0 {
+                            let root_state = *(a_ptr.add(8) as *const usize);
+                            if root_state != 0 && root_state & STR_CODEPOINT_LEN_TAG == 0 {
+                                drop(Box::from_raw(root_state as *mut StrUnicodeCache));
+                            }
                             let root_len = *(a_ptr.add(4) as *const u32) as usize;
                             dealloc(a_ptr, Layout::from_size_align(16 + root_len, 8).unwrap());
                         }
@@ -8050,6 +8440,104 @@ mod tests {
             m
         });
         assert_ne!(a.value_id(), c.value_id());
+    }
+
+    #[test]
+    fn unicode_string_metadata_transitions_from_length_to_offsets() {
+        let text = Value::string("日本語🙂");
+        let initial = unsafe { *text.str_unicode_state_slot() };
+        assert_eq!(initial, 0);
+
+        assert_eq!(text.str_codepoint_len(), 4);
+        let length_state = unsafe { *text.str_unicode_state_slot() };
+        assert_eq!(
+            length_state,
+            (4 << STR_CODEPOINT_LEN_SHIFT) | STR_CODEPOINT_LEN_TAG
+        );
+
+        assert_eq!(text.str_codepoint_len_for_index(), 4);
+        assert_eq!(text.str_codepoint_byte_range(2), (6, 9));
+        assert_eq!(text.str_codepoint_len_for_index(), 4);
+        let offset_state = unsafe { *text.str_unicode_state_slot() };
+        assert_ne!(offset_state, 0);
+        assert_eq!(offset_state & STR_CODEPOINT_LEN_TAG, 0);
+        assert_eq!(text.str_codepoint_len(), 4);
+    }
+
+    #[test]
+    fn inline_unicode_uses_payload_without_header_access() {
+        for text in ["é", "界", "🙂"] {
+            let value = Value::string(text);
+            assert!(str_is_inline_bits(value.0));
+            assert_eq!(value.str_codepoint_len(), 1);
+            assert_eq!(value.str_codepoint_len_for_index(), 1);
+            assert_eq!(value.str_codepoint_byte_range(0), (0, text.len()));
+        }
+    }
+
+    #[test]
+    fn unicode_codepoint_counter_handles_utf8_and_cesu8() {
+        for text in ["", "ascii", "日本語🙂", "aé界🙂z", "αβγδεζηθ"] {
+            assert_eq!(
+                utf8_codepoint_count(text.as_bytes()),
+                text.chars().count(),
+                "{text:?}"
+            );
+        }
+
+        // U+D800 encoded as pyrust's three-byte CESU-8 sequence, followed by
+        // ASCII and U+DFFF. Rust rejects these as scalar values, but pyrust
+        // intentionally stores them in its str backing.
+        let cesu8 = [0xED, 0xA0, 0x80, b'a', 0xED, 0xBF, 0xBF];
+        assert_eq!(utf8_codepoint_count(&cesu8), 3);
+        for (index, expected) in [0, 3, 4, 7].into_iter().enumerate() {
+            assert_eq!(uncached_utf8_byte_offset(&cesu8, index, 3), expected);
+        }
+
+        for text in [
+            "日本語🙂abcdefαβγδεζηθ",
+            "aaaaaaa🙂bbbbbbbb界ccccccccé",
+            "🙂🙂🙂🙂🙂🙂🙂🙂🙂",
+        ] {
+            let offsets: Vec<usize> = text
+                .char_indices()
+                .map(|(offset, _)| offset)
+                .chain(std::iter::once(text.len()))
+                .collect();
+            for (index, expected) in offsets.into_iter().enumerate() {
+                assert_eq!(
+                    uncached_utf8_byte_offset(text.as_bytes(), index, text.chars().count()),
+                    expected,
+                    "{text:?} at {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_slice_cache_survives_root_drop() {
+        let root = Value::string("αβγδεζηθ");
+        assert_eq!(root.str_codepoint_len_for_index(), 8);
+        assert_eq!(root.str_codepoint_len_for_index(), 8);
+        assert_eq!(root.str_codepoint_byte_offset(7), 14);
+        let view = root.string_slice(2, 14);
+        assert_eq!(unsafe { *view.str_unicode_state_slot() }, 0);
+        drop(root);
+
+        assert_eq!(view.str_codepoint_len(), 6);
+        assert_eq!(view.str_codepoint_byte_range(4), (8, 10));
+    }
+
+    #[test]
+    fn unicode_append_invalidates_cached_metadata() {
+        let mut text = Value::string("αβγδεζηθ");
+        assert_eq!(text.str_codepoint_len(), 8);
+        assert_ne!(unsafe { *text.str_unicode_state_slot() }, 0);
+
+        assert!(text.str_append_in_place("界🙂"));
+        assert_eq!(unsafe { *text.str_unicode_state_slot() }, 0);
+        assert_eq!(text.str_codepoint_len(), 10);
+        assert_eq!(text.str_codepoint_byte_range(9), (19, 23));
     }
 
     // ── float_bits_as_exact_i64 boundary tests ───────────────────────────────

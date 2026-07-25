@@ -675,7 +675,7 @@ fn fast_slice_contiguous(target: &Value, start: i64, end: i64, str_is_ascii: boo
         ValueKind::List(items) => Ok(Value::list(items[s..e].to_vec())),
         ValueKind::Tuple(items) => Ok(Value::tuple(items[s..e].to_vec())),
         ValueKind::Bytes(rc) => Ok(Value::bytes(rc[s..e].to_vec())),
-        ValueKind::Str(string) => {
+        ValueKind::Str(_) => {
             if s >= e {
                 return Ok(Value::string(String::new()));
             }
@@ -685,21 +685,12 @@ fn fast_slice_contiguous(target: &Value, start: i64, end: i64, str_is_ascii: boo
             if str_is_ascii {
                 return Ok(target.string_slice(s, e));
             }
-            // s/e are char indices; walk char_indices once to find the
-            // corresponding byte offsets, then slice the &str (no
-            // Vec<char> allocation, char-boundary correct for multibyte).
-            let mut byte_start = string.len();
-            let mut byte_end = string.len();
-            for (ci, (bi, _)) in string.char_indices().enumerate() {
-                if ci == s {
-                    byte_start = bi;
-                }
-                if ci == e {
-                    byte_end = bi;
-                    break;
-                }
-            }
-            Ok(Value::string(&string[byte_start..byte_end]))
+            // Reused non-ASCII strings start each boundary at a sparse
+            // checkpoint (at most 31 codepoints away); a one-shot slice scans
+            // from the nearer end without allocating the table.
+            let byte_start = target.str_codepoint_byte_offset(s);
+            let byte_end = target.str_codepoint_byte_offset(e);
+            Ok(target.string_slice(byte_start, byte_end))
         }
         _ => unreachable!(),
     }
