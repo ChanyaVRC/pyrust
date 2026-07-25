@@ -5,7 +5,7 @@ A tiny Python-like interpreter implemented in Rust.
 ## Documentation
 
 - [Implemented features](docs/features.md) — language, built-in functions, type methods, math module, optimizer
-- [Known limitations](docs/limitations.md) — what is not yet supported
+- [Historical limitations](docs/limitations.md) — archived roadmap; not a current compatibility contract
 - [Optimizer passes](docs/optimizer.md) — details of the 15-pass peephole pipeline
 
 ## Quick start
