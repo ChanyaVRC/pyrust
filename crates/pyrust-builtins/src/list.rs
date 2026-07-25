@@ -105,6 +105,38 @@ pub fn sort_no_key(receiver: &Value, reverse: bool) -> Result<Value> {
 }
 
 fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
+    let (kind, len) = receiver
+        .list_with(|items| (classify_sort(items.iter()), items.len()))
+        .ok_or_else(|| {
+            PyError::named("TypeError", "list.sort receiver is not a list".to_string())
+        })?;
+    if len < 2 {
+        return Ok(Value::none());
+    }
+    match kind {
+        // These native comparators cannot call Python or raise, so sorting the
+        // receiver in place is safe and avoids cloning the entire Vec.
+        SortKind::AllInt => {
+            receiver.list_with_mut(|items| {
+                items.sort_by(|a, b| {
+                    let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                    lhs.as_int().unwrap_or(0).cmp(&rhs.as_int().unwrap_or(0))
+                });
+            });
+            return Ok(Value::none());
+        }
+        SortKind::AllStr => {
+            receiver.list_with_mut(|items| {
+                items.sort_by(|a, b| {
+                    let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+                    lhs.as_str().unwrap_or("").cmp(rhs.as_str().unwrap_or(""))
+                });
+            });
+            return Ok(Value::none());
+        }
+        SortKind::HasInstance | SortKind::General => {}
+    }
+
     // Snapshot the items into an owned Vec.  The comparator may call
     // user `__lt__` which can re-enter the same list — by working on
     // a snapshot we keep the receiver's borrow unscoped during the
@@ -114,37 +146,22 @@ fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
     let mut snapshot = receiver.list_with(|items| items.clone()).ok_or_else(|| {
         PyError::named("TypeError", "list.sort receiver is not a list".to_string())
     })?;
-    // A homogeneous all-int / all-str list sorts with a native comparator (no
-    // type dispatch, no `Result`, cannot raise); everything else keeps the
-    // general registry comparator (which owns `PyInstance` / mixed behaviour).
-    match classify_sort(snapshot.iter()) {
-        SortKind::AllInt => snapshot.sort_by(|a, b| {
-            let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-            lhs.as_int().unwrap_or(0).cmp(&rhs.as_int().unwrap_or(0))
-        }),
-        SortKind::AllStr => snapshot.sort_by(|a, b| {
-            let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-            lhs.as_str().unwrap_or("").cmp(rhs.as_str().unwrap_or(""))
-        }),
-        _ => {
-            let mut err: Option<PyError> = None;
-            snapshot.sort_by(|a, b| {
-                if err.is_some() {
-                    return std::cmp::Ordering::Equal;
-                }
-                let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
-                match compare_values_via_registry(lhs, rhs) {
-                    Ok(ord) => ord,
-                    Err(e) => {
-                        err = Some(e);
-                        std::cmp::Ordering::Equal
-                    }
-                }
-            });
-            if let Some(e) = err {
-                return Err(e);
+    let mut err: Option<PyError> = None;
+    snapshot.sort_by(|a, b| {
+        if err.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+        match compare_values_via_registry(lhs, rhs) {
+            Ok(ord) => ord,
+            Err(e) => {
+                err = Some(e);
+                std::cmp::Ordering::Equal
             }
         }
+    });
+    if let Some(e) = err {
+        return Err(e);
     }
     receiver.list_with_mut(|items| *items = snapshot);
     Ok(Value::none())
