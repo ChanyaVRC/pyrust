@@ -1,16 +1,22 @@
 impl Interpreter {
-    /// Create an interpreter for running a named script file.
+    /// Create an interpreter for a named script plus the arguments supplied
+    /// after that script on the command line. The resulting context backs
+    /// `__file__` and `sys.argv`.
     ///
     /// Stores both the directory (for module-relative imports) and the
     /// filename (for traceback `File "..."` entries).
-    pub fn with_script_path(path: &str) -> Self {
+    pub fn with_script_path_and_args(path: &str, args: &[String]) -> Self {
         let dir = std::path::Path::new(path)
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let mut script_argv = Vec::with_capacity(args.len() + 1);
+        script_argv.push(path.to_string());
+        script_argv.extend(args.iter().cloned());
         Self {
             script_dir: Some(dir),
             script_filename: Some(std::sync::Arc::from(path)),
+            script_argv,
             ..Default::default()
         }
     }
@@ -146,16 +152,27 @@ impl Interpreter {
         seed_env!("__package__", Value::none());
         seed_env!("__spec__", Value::none());
         seed_env!("__loader__", Value::none());
-        seed_env!("__file__", Value::none());
+        let script_file = self.script_filename.as_deref().map(Value::string);
+        let has_script_file = script_file.is_some();
+        if let Some(file) = script_file {
+            seed_env!("__file__", file);
+        }
         seed_env!("__cached__", Value::none());
         seed_env!("__annotations__", Value::dict(PyDict::default()));
         seed_env!("__builtins__", builtins_val);
         // Mirror env values into module_globals_dict (issue #706: live globals dict).
         // Only insert keys not already present in the dict (REPL re-run safety).
-        let dunders: &[&str] = &[
-            "__name__", "__doc__", "__package__", "__spec__", "__loader__",
-            "__file__", "__cached__", "__annotations__", "__builtins__",
-        ];
+        let dunders: &[&str] = if has_script_file {
+            &[
+                "__name__", "__doc__", "__package__", "__spec__", "__loader__",
+                "__file__", "__cached__", "__annotations__", "__builtins__",
+            ]
+        } else {
+            &[
+                "__name__", "__doc__", "__package__", "__spec__", "__loader__",
+                "__cached__", "__annotations__", "__builtins__",
+            ]
+        };
         for name in dunders {
             // StrKey probe (issue #506): read check is zero-alloc; owned key
             // is constructed only when an entry is actually missing and must be
@@ -170,6 +187,24 @@ impl Interpreter {
                     let _ = self.module_globals_dict.dict_insert(key, v);
                 }
         }
+    }
+
+    /// Make the script invocation context observable before the first user
+    /// instruction. Loading `sys` here also ensures imported modules share the
+    /// top-level script's argument vector, even when they import `sys` first.
+    fn initialize_script_argv(&mut self) -> Result<()> {
+        if self.script_filename.is_none() {
+            return Ok(());
+        }
+        let sys = self.load_module("sys")?;
+        let ValueKind::PyModule(module) = sys.kind() else {
+            return Err(PyError::Runtime("sys is not a module".to_string()));
+        };
+        module.borrow_mut().attrs.insert(
+            "argv".to_string(),
+            Value::list(self.script_argv.iter().map(Value::string).collect()),
+        );
+        Ok(())
     }
 
     fn try_exec_vm_script_with_index(
@@ -208,6 +243,9 @@ impl Interpreter {
         // (they either update the fastlocal register which shadows the env
         // entry, or call `assign_name` which overwrites the env entry directly).
         self.seed_module_dunders();
+        if let Err(err) = self.initialize_script_argv() {
+            return Some(Err(err));
+        }
         let num_regs = code.num_regs as usize;
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
         let _depth_guard = CallDepthGuard::enter();
