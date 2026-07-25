@@ -366,15 +366,16 @@ pyrust_module! {
                     ),
                 )),
             };
-            current = if part.starts_with('/') {
-                normalize_path(&part)
-            } else if part.is_empty() {
-                current
-            } else {
-                normalize_path(&format!("{current}/{part}"))
-            };
+            if part.starts_with('/') {
+                current = part;
+            } else if !part.is_empty() {
+                if !current.ends_with('/') {
+                    current.push('/');
+                }
+                current.push_str(&part);
+            }
         }
-        Ok(make_path_instance(&current))
+        Ok(make_path_instance(&normalize_path(&current)))
     }
 
     // ── path component accessors (callable methods, not descriptors) ───────
