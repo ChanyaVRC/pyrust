@@ -3117,6 +3117,46 @@ impl Interpreter {
             .flatten()
     }
 
+    /// Populate the per-interpreter `sys.path` when `sys` is first imported.
+    /// The generated built-in module constructor has no access to the active
+    /// script, so the initial import root cannot live in `bodies/sys.rs`.
+    fn initialize_sys_path(&self, module: &Value) {
+        let ValueKind::PyModule(sys) = module.kind() else {
+            return;
+        };
+        let initial_path = self
+            .script_dir
+            .as_ref()
+            .map(|dir| Value::string(dir.to_string_lossy()))
+            .unwrap_or_else(|| Value::string(""));
+        sys.borrow_mut()
+            .attrs
+            .insert("path".to_string(), Value::list(vec![initial_path]));
+    }
+
+    /// Snapshot the import roots currently exposed through `sys.path`.
+    /// Before `sys` is imported, preserve the legacy script-directory lookup
+    /// so a script can still import a sibling module as its very first import.
+    fn user_module_search_dirs(&self) -> Vec<PathBuf> {
+        let sys_path = self.module_cache.borrow().get("sys").and_then(|module| {
+            let ValueKind::PyModule(sys) = module.kind() else {
+                return None;
+            };
+            sys.borrow().attrs.get("path").cloned()
+        });
+
+        if let Some(path) = sys_path
+            && let ValueKind::List(entries) = path.kind()
+        {
+            return entries
+                .iter()
+                .filter_map(|entry| entry.as_str().map(PathBuf::from))
+                .collect();
+        }
+
+        self.script_dir.iter().cloned().collect()
+    }
+
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
         // `sys.modules` is the authoritative cache (CPython semantics): a value
         // injected directly by user code (`sys.modules["x"] = obj`) wins, and a
@@ -3138,6 +3178,9 @@ impl Interpreter {
         // never has to change.
         let builtin = crate::builtin_modules::load_builtin_module(name);
         if let Some(val) = builtin {
+            if name == "sys" {
+                self.initialize_sys_path(&val);
+            }
             // `builtins` post-process: replace the auto-generated
             // `BuiltinFunction("int")` / `"str"` / etc. attrs with the
             // per-thread `PyClass` singletons so that
@@ -3338,10 +3381,10 @@ impl Interpreter {
             }
             return Ok(val);
         }
-        // User .py file: look for <name>.py relative to script_dir
-        if let Some(ref dir) = self.script_dir.clone() {
-            // Convert dotted name to path: "foo.bar" -> "foo/bar.py"
-            let rel_path = name.replace('.', "/") + ".py";
+        // User .py file: look for <name>.py in the active sys.path roots.
+        // Convert dotted name to path: "foo.bar" -> "foo/bar.py".
+        let rel_path = name.replace('.', "/") + ".py";
+        for dir in self.user_module_search_dirs() {
             let full_path = dir.join(&rel_path);
             if full_path.exists() {
                 let src = std::fs::read_to_string(&full_path).map_err(|e| {
