@@ -148,9 +148,9 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
             str_rpartition(s, sep)
         }
         // Stripping
-        "strip" => Ok(Value::string(strip_chars(s, args, true, true, "strip")?)),
-        "lstrip" => Ok(Value::string(strip_chars(s, args, true, false, "lstrip")?)),
-        "rstrip" => Ok(Value::string(strip_chars(s, args, false, true, "rstrip")?)),
+        "strip" => strip_chars(src, s, args, true, true, "strip"),
+        "lstrip" => strip_chars(src, s, args, true, false, "lstrip"),
+        "rstrip" => strip_chars(src, s, args, false, true, "rstrip"),
         // Prefix/suffix removal
         "removeprefix" => {
             expect_arg_count(args, 1, 1, "removeprefix")?;
@@ -168,7 +168,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
                     ));
                 }
             };
-            Ok(str_removeprefix(s, prefix))
+            Ok(str_removeprefix(src, s, prefix))
         }
         "removesuffix" => {
             expect_arg_count(args, 1, 1, "removesuffix")?;
@@ -186,31 +186,31 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
                     ));
                 }
             };
-            Ok(str_removesuffix(s, suffix))
+            Ok(str_removesuffix(src, s, suffix))
         }
         // Justification / padding
         "center" => {
             expect_arg_count(args, 1, 2, "center")?;
             let width = extract_int(&args[0], "center", "width")?;
             let fill = extract_fill_char(args)?;
-            str_center(s, src.str_is_ascii(), width, fill)
+            str_center(src, s, src.str_is_ascii(), width, fill)
         }
         "ljust" => {
             expect_arg_count(args, 1, 2, "ljust")?;
             let width = extract_int(&args[0], "ljust", "width")?;
             let fill = extract_fill_char(args)?;
-            str_ljust(s, src.str_is_ascii(), width, fill)
+            str_ljust(src, s, src.str_is_ascii(), width, fill)
         }
         "rjust" => {
             expect_arg_count(args, 1, 2, "rjust")?;
             let width = extract_int(&args[0], "rjust", "width")?;
             let fill = extract_fill_char(args)?;
-            str_rjust(s, src.str_is_ascii(), width, fill)
+            str_rjust(src, s, src.str_is_ascii(), width, fill)
         }
         "zfill" => {
             expect_arg_count(args, 1, 1, "zfill")?;
             let width = extract_int(&args[0], "zfill", "width")?;
-            str_zfill(s, src.str_is_ascii(), width)
+            str_zfill(src, s, src.str_is_ascii(), width)
         }
         "expandtabs" => {
             // expandtabs() takes at most 1 argument (<got> given)
@@ -224,7 +224,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
                 ));
             }
             let tabsize = extract_optional_int(args, 0)?.unwrap_or(8);
-            Ok(str_expandtabs(s, tabsize))
+            Ok(str_expandtabs(src, s, tabsize))
         }
         // Case
         "upper" => Ok(Value::string(if src.str_is_ascii() {
@@ -246,7 +246,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         "rfind" => str_rfind(s, src.str_is_ascii(), args, false),
         "rindex" => str_rfind(s, src.str_is_ascii(), args, true),
         // Replacement
-        "replace" => str_replace(s, args),
+        "replace" => str_replace(src, s, args),
         // Testing
         "startswith" => str_startswith(s, src.str_is_ascii(), args),
         "endswith" => str_endswith(s, src.str_is_ascii(), args),
@@ -385,11 +385,11 @@ fn try_reserve_str(out: &mut String, additional: usize) -> Result<()> {
         .map_err(|_| PyError::named("MemoryError", ""))
 }
 
-fn str_center(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
+fn str_center(src: &Value, s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Ok(src.clone());
     }
     let marg = width - char_len;
     // CPython formula: left = marg//2 + (marg & width & 1)
@@ -409,11 +409,11 @@ fn str_center(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> 
     Ok(Value::string(out))
 }
 
-fn str_ljust(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
+fn str_ljust(src: &Value, s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Ok(src.clone());
     }
     let pad = width - char_len;
     let fill_bytes = pad.saturating_mul(fill.len_utf8());
@@ -427,11 +427,11 @@ fn str_ljust(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     Ok(Value::string(out))
 }
 
-fn str_rjust(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
+fn str_rjust(src: &Value, s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Ok(src.clone());
     }
     let pad = width - char_len;
     let fill_bytes = pad.saturating_mul(fill.len_utf8());
@@ -445,11 +445,11 @@ fn str_rjust(s: &str, is_ascii: bool, width: i64, fill: char) -> Result<Value> {
     Ok(Value::string(out))
 }
 
-fn str_zfill(s: &str, is_ascii: bool, width: i64) -> Result<Value> {
+fn str_zfill(src: &Value, s: &str, is_ascii: bool, width: i64) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = if is_ascii { s.len() } else { s.chars().count() };
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Ok(src.clone());
     }
     let pad = width - char_len;
     let total = s.len().saturating_add(pad);
@@ -481,7 +481,10 @@ fn str_zfill(s: &str, is_ascii: bool, width: i64) -> Result<Value> {
     Ok(Value::string(out))
 }
 
-fn str_expandtabs(s: &str, tabsize: i64) -> Value {
+fn str_expandtabs(src: &Value, s: &str, tabsize: i64) -> Value {
+    if !s.as_bytes().contains(&b'\t') {
+        return src.clone();
+    }
     let tabsize = tabsize.max(0) as usize;
     let mut out = String::with_capacity(s.len());
     let mut col: usize = 0;
@@ -612,19 +615,23 @@ fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::list(lines))
 }
 
-fn str_removeprefix(s: &str, prefix: &str) -> Value {
-    if let Some(stripped) = s.strip_prefix(prefix) {
-        Value::string(stripped)
+fn str_removeprefix(src: &Value, s: &str, prefix: &str) -> Value {
+    if prefix.is_empty() {
+        src.clone()
+    } else if s.starts_with(prefix) {
+        src.string_slice(prefix.len(), s.len())
     } else {
-        Value::string(s)
+        src.clone()
     }
 }
 
-fn str_removesuffix(s: &str, suffix: &str) -> Value {
-    if let Some(stripped) = s.strip_suffix(suffix) {
-        Value::string(stripped)
+fn str_removesuffix(src: &Value, s: &str, suffix: &str) -> Value {
+    if suffix.is_empty() {
+        src.clone()
+    } else if s.ends_with(suffix) {
+        src.string_slice(0, s.len() - suffix.len())
     } else {
-        Value::string(s)
+        src.clone()
     }
 }
 
@@ -1385,7 +1392,7 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
     }
 }
 
-fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
+fn str_replace(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     if args.len() < 2 {
         return Err(PyError::named(
             "TypeError",
@@ -1441,7 +1448,13 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
     } else {
         count as usize
     };
-    Ok(Value::string(replace_fill(s, old, new, max)))
+    if old == new {
+        return Ok(src.clone());
+    }
+    Ok(match replace_fill(s, old, new, max) {
+        Some(result) => Value::string(result),
+        None => src.clone(),
+    })
 }
 
 /// Single-pass `str.replace`/`replacen` that seeds the result buffer with
@@ -1451,19 +1464,20 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
 /// intermediate reallocations without the extra counting pass a *precise* size
 /// would need.  Semantics are identical to `s.replacen(from, to, max)`
 /// (`max == usize::MAX` for replace-all), including empty-`from` behaviour.
-fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> String {
-    if max == 0 {
-        return s.to_string();
-    }
+fn replace_fill(s: &str, from: &str, to: &str, max: usize) -> Option<String> {
+    let mut matches = s.match_indices(from).take(max);
+    let (first_start, first_part) = matches.next()?;
     let mut result = String::with_capacity(s.len());
-    let mut last_end = 0;
-    for (start, part) in s.match_indices(from).take(max) {
+    result.push_str(&s[..first_start]);
+    result.push_str(to);
+    let mut last_end = first_start + first_part.len();
+    for (start, part) in matches {
         result.push_str(&s[last_end..start]);
         result.push_str(to);
         last_end = start + part.len();
     }
     result.push_str(&s[last_end..]);
-    result
+    Some(result)
 }
 
 fn str_startswith(s: &str, is_ascii: bool, args: &[Value]) -> Result<Value> {
@@ -1582,7 +1596,14 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-fn strip_chars(s: &str, args: &[Value], left: bool, right: bool, method: &str) -> Result<String> {
+fn strip_chars(
+    src: &Value,
+    s: &str,
+    args: &[Value],
+    left: bool,
+    right: bool,
+    method: &str,
+) -> Result<Value> {
     let chars_arg: Option<&str> = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(c)) => Some(c),
         Some(ValueKind::None) | None => None,
@@ -1593,7 +1614,7 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool, method: &str) -
             ));
         }
     };
-    Ok(match chars_arg {
+    let result = match chars_arg {
         None => {
             let mut result = s;
             if left {
@@ -1602,7 +1623,7 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool, method: &str) -
             if right {
                 result = result.trim_end();
             }
-            result.to_string()
+            result
         }
         Some(chars) => {
             let mut result = s;
@@ -1612,9 +1633,14 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool, method: &str) -
             if right {
                 result = result.trim_end_matches(|c: char| chars.contains(c));
             }
-            result.to_string()
+            result
         }
-    })
+    };
+    if result.len() == s.len() {
+        return Ok(src.clone());
+    }
+    let start = result.as_ptr() as usize - s.as_ptr() as usize;
+    Ok(src.string_slice(start, start + result.len()))
 }
 
 /// Parse (sep, maxsplit) from split/rsplit args.
