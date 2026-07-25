@@ -1,4 +1,4 @@
-use pyrust_core::{PyDict, PyError, PyKey, PySet, Result, Value, ValueKind};
+use pyrust_core::{PyDict, PyError, PyKey, Result, Value, ValueKind};
 
 /// Canonical list of method names exposed for `dict`.
 ///
@@ -251,13 +251,7 @@ fn key_to_value(k: PyKey) -> Value {
         PyKey::Bool(b) => Value::bool_(b),
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
-        PyKey::FrozenSet(items) => {
-            let mut set = PySet::default();
-            for k in items {
-                set.insert(k);
-            }
-            crate::frozenset::frozenset(set)
-        }
+        PyKey::FrozenSet(key) => crate::frozenset::frozenset_key(key),
         PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
         PyKey::Bytes(rc) => Value::bytes((*rc).clone()),
         PyKey::Complex(re, im) => Value::complex(re, im),

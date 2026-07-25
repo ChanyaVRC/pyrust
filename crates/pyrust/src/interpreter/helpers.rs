@@ -4072,13 +4072,7 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
-        PyKey::FrozenSet(items) => {
-            let mut set: PySet = PySet::default();
-            for k in items {
-                set.insert(k);
-            }
-            pyrust_builtins::frozenset::frozenset(set)
-        }
+        PyKey::FrozenSet(key) => pyrust_builtins::frozenset::frozenset_key(key),
         PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
         PyKey::Bytes(rc) => Value::bytes((*rc).clone()),
         PyKey::Complex(re, im) => Value::complex(re, im),

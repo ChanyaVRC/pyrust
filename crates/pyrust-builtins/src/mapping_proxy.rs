@@ -381,13 +381,7 @@ fn key_to_value(key: &PyKey) -> Value {
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
-        PyKey::FrozenSet(items) => {
-            let mut set: pyrust_core::PySet = pyrust_core::PySet::default();
-            for k in items {
-                set.insert(k);
-            }
-            crate::frozenset::frozenset(set)
-        }
+        PyKey::FrozenSet(key) => crate::frozenset::frozenset_key(key),
         PyKey::Tuple(items) => Value::tuple(items.iter().map(key_to_value).collect()),
         PyKey::Bytes(rc) => Value::bytes((*rc).clone()),
         PyKey::Complex(re, im) => Value::complex(re, im),

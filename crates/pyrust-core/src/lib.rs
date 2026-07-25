@@ -201,8 +201,13 @@ fn check_key_digits(key: &PyKey, limit: usize) -> std::result::Result<(), PyErro
         PyKey::BigInt(b) if bigint_exceeds_digit_limit(b, limit) => {
             return Err(int_max_str_digits_format_error());
         }
-        PyKey::Tuple(items) | PyKey::FrozenSet(items) => {
+        PyKey::Tuple(items) => {
             for item in items.iter() {
+                check_key_digits(item, limit)?;
+            }
+        }
+        PyKey::FrozenSet(key) => {
+            for item in key.items() {
                 check_key_digits(item, limit)?;
             }
         }
@@ -652,6 +657,40 @@ impl Drop for EqGuard {
 // PyKey — hashable subset of Value used as dict/set keys (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Shared immutable backing for [`PyKey::FrozenSet`].
+///
+/// A frozenset value and every key derived from it share the same `IndexSet`;
+/// the order-independent CPython hash is computed once at construction. This
+/// makes repeated dict/set probes O(1) instead of rebuilding, sorting, and
+/// hashing every element for each lookup.
+#[derive(Debug)]
+pub struct FrozenSetKey {
+    items: Rc<PySet>,
+    py_hash: i64,
+}
+
+impl FrozenSetKey {
+    pub fn new(items: Rc<PySet>) -> Self {
+        let py_hash = py_hash_frozenset_items(&items);
+        Self { items, py_hash }
+    }
+
+    #[inline]
+    pub fn items(&self) -> &PySet {
+        &self.items
+    }
+
+    #[inline]
+    pub fn items_rc(&self) -> Rc<PySet> {
+        Rc::clone(&self.items)
+    }
+
+    #[inline]
+    pub fn py_hash(&self) -> i64 {
+        self.py_hash
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PyKey {
     Int(i64),
@@ -673,9 +712,9 @@ pub enum PyKey {
     Bool(bool),
     None,
     Ellipsis,
-    /// Hashable frozenset key.  Stores a sorted-canonical Vec of inner keys
-    /// so equality and hashing are content-based (matching CPython).
-    FrozenSet(Vec<PyKey>),
+    /// Hashable frozenset key. Shares the immutable backing set and its cached
+    /// order-independent hash across value→key conversions and probes.
+    FrozenSet(Rc<FrozenSetKey>),
     /// Hashable tuple key.  Stores each element as its own `PyKey` so
     /// hashing and equality propagate element-wise (matching CPython's
     /// `hash((1, 2))`).  Unlike `FrozenSet`, ordering is significant —
@@ -893,7 +932,9 @@ impl PartialEq for PyKey {
             (PyKey::Str(a), PyKey::Str(b)) => a.as_str() == b.as_str(),
             (PyKey::None, PyKey::None) => true,
             (PyKey::Ellipsis, PyKey::Ellipsis) => true,
-            (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
+            (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => {
+                Rc::ptr_eq(a, b) || a.items() == b.items()
+            }
             (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
             (PyKey::Bytes(a), PyKey::Bytes(b)) => a.as_ref() == b.as_ref(),
             // Complex equality: two complex keys are equal iff both components match.
@@ -994,11 +1035,9 @@ impl Hash for PyKey {
             PyKey::Ellipsis => {
                 (py_hash_ellipsis() as u64).hash(state);
             }
-            PyKey::FrozenSet(items) => {
+            PyKey::FrozenSet(key) => {
                 4u8.hash(state);
-                for k in items {
-                    k.hash(state);
-                }
+                key.py_hash().hash(state);
             }
             PyKey::Tuple(items) => {
                 5u8.hash(state);
@@ -1094,6 +1133,25 @@ pub fn py_hash_not_implemented() -> i64 {
     if h == 0 || h == -1 { 2654435761 } else { h }
 }
 
+#[inline]
+fn frozenset_shuffle_bits(h: u64) -> u64 {
+    let shuffled = (h ^ 89869747u64) ^ (h << 16);
+    shuffled.wrapping_mul(3644798167u64)
+}
+
+fn py_hash_frozenset_items(items: &PySet) -> i64 {
+    let mut h: u64 = 0;
+    for item in items {
+        h ^= frozenset_shuffle_bits(py_hash_pykey(item) as u64);
+    }
+    let n = items.len() as u64;
+    h ^= (n + 1).wrapping_mul(1927868237u64);
+    h ^= (h >> 11) ^ (h >> 25);
+    h = h.wrapping_mul(69069u64).wrapping_add(907133923u64);
+    let result = h as i64;
+    if result == -1 { 590923713 } else { result }
+}
+
 /// Compute the CPython-compatible hash for a `PyKey`.
 ///
 /// This replicates the hash semantics that CPython applies at the C level for
@@ -1117,13 +1175,6 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
     fn hash_int(v: i64) -> i64 {
         let raw = v % PY_HASH_MODULUS;
         if raw == -1 { -2 } else { raw }
-    }
-
-    // CPython frozenset shuffle: ((h ^ 89869747) ^ (h << 16)) * 3644798167
-    #[inline]
-    fn cpython_shuffle(h: u64) -> u64 {
-        let s = (h ^ 89869747u64) ^ (h << 16);
-        s.wrapping_mul(3644798167u64)
     }
 
     match key {
@@ -1205,22 +1256,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             }
             acc as i64
         }
-        PyKey::FrozenSet(items) => {
-            // CPython Objects/setobject.c frozenset_hash algorithm.
-            let mut h: u64 = 0;
-            for item in items {
-                h ^= cpython_shuffle(py_hash_pykey(item) as u64);
-            }
-            // Length mixing
-            let n = items.len() as u64;
-            h ^= (n + 1).wrapping_mul(1927868237u64);
-            // Secondary mix
-            h ^= (h >> 11) ^ (h >> 25);
-            // Final scramble
-            h = h.wrapping_mul(69069u64).wrapping_add(907133923u64);
-            let result = h as i64;
-            if result == -1 { 590923713 } else { result }
-        }
+        PyKey::FrozenSet(key) => key.py_hash(),
         PyKey::Bytes(b) => {
             // FNV-1a over the raw byte content — matches the hash_value Bytes
             // arm in builtins.rs so that py_hash_pykey(key) == hash(value).
@@ -6527,11 +6563,16 @@ pub fn key_repr(key: &PyKey) -> String {
         }
         PyKey::None => "None".to_string(),
         PyKey::Ellipsis => "Ellipsis".to_string(),
-        PyKey::FrozenSet(items) => {
-            if items.is_empty() {
+        PyKey::FrozenSet(key) => {
+            if key.items().is_empty() {
                 "frozenset()".to_string()
             } else {
-                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
+                let inner = key
+                    .items()
+                    .iter()
+                    .map(key_repr)
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("frozenset({{{inner}}})")
             }
         }
@@ -8642,5 +8683,39 @@ mod tests {
         let bt = PyKey::Bool(true);
         assert_eq!(f1, bt, "Float(1.0) must equal Bool(true)");
         assert_eq!(key_hash(&f1), key_hash(&bt), "hash contract for 1.0/true");
+    }
+
+    #[test]
+    fn pykey_frozenset_hash_is_order_independent_and_cached() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn key_hash(key: &PyKey) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let mut left_items = PySet::default();
+        left_items.insert(PyKey::Int(1));
+        left_items.insert(PyKey::Int(2));
+
+        let mut right_items = PySet::default();
+        right_items.insert(PyKey::Int(2));
+        right_items.insert(PyKey::Int(1));
+
+        let left_backing = Rc::new(FrozenSetKey::new(Rc::new(left_items)));
+        let right_backing = Rc::new(FrozenSetKey::new(Rc::new(right_items)));
+        let left = PyKey::FrozenSet(Rc::clone(&left_backing));
+        let right = PyKey::FrozenSet(right_backing);
+
+        assert_eq!(left, right);
+        assert_eq!(key_hash(&left), key_hash(&right));
+        assert_eq!(py_hash_pykey(&left), py_hash_pykey(&right));
+
+        let PyKey::FrozenSet(shared) = left.clone() else {
+            unreachable!();
+        };
+        assert!(Rc::ptr_eq(&left_backing, &shared));
     }
 }
