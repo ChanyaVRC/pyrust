@@ -63,14 +63,59 @@ for i, x in enumerate(xs):
     xs[i] = x * 100
 print(xs)
 
-# --- immutable element sources under the fused unpack ---
+# --- every element source, driven through the loop ---
+# `list(enumerate(...))` consumes the adapter directly and never reaches the
+# loop step, so each source has to be walked by a `for` statement to pin the
+# inline pair advance for that representation.
 for i, c in enumerate("añ日", 1):
     print(i, c, len(c))
-print(list(enumerate("a\U0001F600b")))
-print(list(enumerate(b"\x00\x7f\xff", 1)))
-print(list(enumerate(bytearray(b"ab"), 1)))
-print(list(enumerate((), 7)))
-print(list(enumerate("")))
+for src in ([1, 2], (3, 4), "a\U0001F600b", b"\x00\x7f\xff", bytearray(b"ab"),
+            [], (), "", b"", bytearray()):
+    walked = []
+    for i, x in enumerate(src, 1):
+        walked.append((i, x))
+    print(type(src).__name__, walked)
+
+# --- the counter promotes past the i64 boundary in the loop step too (#2125) ---
+walked = []
+for i, x in enumerate([10, 20, 30, 40], (1 << 63) - 2):
+    walked.append(i)
+print(walked)
+for i, x in enumerate("ab", 1 << 70):
+    print(i, x)
+for i, x in enumerate((5, 6), -(1 << 64)):
+    print(i, x)
+
+# --- loop targets that must not take the fused two-register store ---
+for pair in enumerate("ab", 1):
+    print("single", pair, type(pair).__name__)
+for i, *rest in enumerate([7, 8]):
+    print("star", i, rest)
+for i, (a, b) in enumerate([(1, 2), (3, 4)], 5):
+    print("nested", i, a, b)
+try:
+    for i, x, y in enumerate([1, 2]):
+        pass
+except ValueError as exc:
+    print("ValueError", exc)
+
+# --- the loop step survives an exception and a generator suspension ---
+e = enumerate([0, 1, 2, 3])
+try:
+    for i, x in e:
+        if i == 1:
+            raise RuntimeError("boom")
+except RuntimeError as exc:
+    print("caught", exc)
+print(list(e))
+
+def drive(seq):
+    for i, x in enumerate(seq, 100):
+        yield (i, x)
+
+g = drive([1, 2, 3])
+print(next(g))
+print(list(g))
 
 # --- sources that must stay on the generic adapter path ---
 print(list(enumerate((i * i for i in range(3)), 1)))
