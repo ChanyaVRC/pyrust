@@ -9,6 +9,7 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::JumpIfFalse(_, offset)
         | Insn::JumpIfTrue(_, offset)
         | Insn::JumpIfNotInt(_, offset)
+        | Insn::JumpIfIterNotIntRange(_, offset)
         | Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
         | Insn::CmpJumpIfFalseConst(_, _, _, offset)
@@ -19,6 +20,7 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::SetupExcept(offset)
         | Insn::MatchExcept(_, offset)
         | Insn::MatchExceptStar(_, _, _, offset) => *offset,
+        Insn::CallInlineBinOp { skip, .. } => *skip,
         _ => return None,
     };
     Some((pc as i64 + 1 + i64::from(offset)) as usize)
@@ -135,6 +137,53 @@ fn int_loop_version_blocks_main_stream_fallthrough_into_fast_copies() {
         jump_target(7, &output[7]),
         Some(output.len()),
         "main fallthrough barrier must skip every appended copy: {output:?}"
+    );
+}
+
+#[test]
+fn for_range_past_end_exhaustion_keeps_the_deferred_sync_stub() {
+    // Module-level:
+    //   for r0 in <machine-int range>:
+    //       r1 += 1
+    //
+    // Both assignments have module syncs and the loop exhausts directly at
+    // old past-the-end. The fast ForIter must target its sync stub, not be
+    // rewritten to final_len by the generic old-past-end patch.
+    let input = vec![
+        Insn::ForIter(0, 0, 4),
+        Insn::SyncModuleGlobal(0, 0),
+        Insn::BinOpImm(1, 1, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(1, 1),
+        Insn::Jump(-5),
+    ];
+
+    let versioned = versioned(input, &[]);
+    let output = versioned.insns;
+    let fast_for_pc = output
+        .iter()
+        .enumerate()
+        .skip(versioned.source_prefix_len)
+        .find_map(|(pc, insn)| matches!(insn, Insn::ForIter(..)).then_some(pc))
+        .expect("the guarded for-range candidate must have a fast ForIter copy");
+    let stub_pc = jump_target(fast_for_pc, &output[fast_for_pc]).unwrap();
+
+    assert_ne!(
+        stub_pc,
+        output.len(),
+        "fast exhaustion must not bypass deferred module-global syncs: {output:?}"
+    );
+    assert!(
+        matches!(output[stub_pc], Insn::SyncModuleGlobal(0, 0)),
+        "target sync must be the first exhaustion-stub operation: {output:?}"
+    );
+    assert!(
+        matches!(output[stub_pc + 1], Insn::SyncModuleGlobal(1, 1)),
+        "body sync must remain in the exhaustion stub: {output:?}"
+    );
+    assert_eq!(
+        jump_target(stub_pc + 2, &output[stub_pc + 2]),
+        Some(output.len()),
+        "only the stub's terminal jump may receive the final-length patch"
     );
 }
 

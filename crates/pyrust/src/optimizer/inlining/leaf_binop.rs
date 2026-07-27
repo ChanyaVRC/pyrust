@@ -33,7 +33,17 @@
 /// whose body starts at the call keeps the guard on its hot path); jumps into
 /// the middle of the sequence simply run the original tail unoptimized.
 fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> {
-    if fn_protos.is_empty() {
+    const MAX_INLINE_SITES: usize = 64;
+
+    // `optimize` is normally single-shot, but callers and tests are allowed to
+    // pass already-optimized code back through the pipeline.  The original
+    // Move×3+Call deopt sequence intentionally remains after a guard, so a
+    // second run would otherwise prefix it with another identical guard.
+    if fn_protos.is_empty()
+        || insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::CallInlineBinOp { .. }))
+    {
         return insns;
     }
     // proto idx → (op, params_swapped) for eligible leaf bodies.
@@ -48,7 +58,12 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
             return None;
         }
         let code = &p.code;
-        if code.is_generator || code.is_coroutine || !code.cell_vars.is_empty() {
+        if code.is_generator
+            || code.is_coroutine
+            || !code.cell_vars.is_empty()
+            || !p.global_names.is_empty()
+            || !p.nonlocal_names.is_empty()
+        {
             return None;
         }
         match code.insns.as_slice() {
@@ -108,30 +123,65 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
     let mut sites: Vec<Site> = Vec::new();
     let mut i = 0usize;
     while i + 3 < n {
-        let window = (&insns[i], &insns[i + 1], &insns[i + 2], &insns[i + 3]);
-        if let (
-            Insn::Move(c0, f),
-            Insn::Move(c1, x),
-            Insn::Move(c2, y),
-            Insn::Call(cc, 2) | Insn::CallMemo(cc, 2),
-        ) = window
-            && *c1 == c0 + 1
-            && *c2 == c0 + 2
+        // Argument loader: `Move(c+k, src)` keeps its source readable before
+        // the sequence; `LoadConst(c+k, _)` only materialises inside it.
+        enum ArgSrc {
+            Reg(Reg),
+            Window,
+        }
+        let arg_src = |insn: &Insn, slot: Reg| -> Option<ArgSrc> {
+            match insn {
+                Insn::Move(d, s) if *d == slot => Some(ArgSrc::Reg(*s)),
+                Insn::LoadConst(d, _) if *d == slot => Some(ArgSrc::Window),
+                _ => None,
+            }
+        };
+        if let (Insn::Move(c0, f), w1, w2, Insn::Call(cc, 2) | Insn::CallMemo(cc, 2)) =
+            (&insns[i], &insns[i + 1], &insns[i + 2], &insns[i + 3])
             && cc == c0
+            && let Some(arg1) = arg_src(w1, c0 + 1)
+            && let Some(arg2) = arg_src(w2, c0 + 2)
             && let Some(&proto) = reg_proto.get(f)
             && let Some((op, swapped)) = eligible[proto as usize]
         {
-            let (a, b) = if swapped { (*y, *x) } else { (*x, *y) };
-            sites.push(Site {
-                at: i,
-                callee: *f,
-                dst: *c0,
-                a,
-                op,
-                b,
-                proto,
-                resume: i + 4,
-            });
+            let site = match (arg1, arg2) {
+                // Both argument values pre-exist in registers: guard before
+                // the whole sequence, reading the original sources — the hot
+                // shape for calls inside loops (2 dispatches per call).
+                // Reject aliases whose effective value would be changed by an
+                // earlier Move on the deopt path.
+                (ArgSrc::Reg(x), ArgSrc::Reg(y)) if x != *c0 && y != *c0 && y != c0 + 1 => {
+                    let (a, b) = if swapped { (y, x) } else { (x, y) };
+                    Site {
+                        at: i,
+                        callee: *f,
+                        dst: *c0,
+                        a,
+                        op,
+                        b,
+                        proto,
+                        resume: i + 4,
+                    }
+                }
+                // At least one argument is materialised inside the sequence:
+                // guard immediately before the Call, when the callee sits in
+                // the call-base register and both arguments are loaded.  The
+                // loaders run on both paths; only the frame is elided.
+                _ => Site {
+                    at: i + 3,
+                    callee: *c0,
+                    dst: *c0,
+                    a: if swapped { c0 + 2 } else { c0 + 1 },
+                    op,
+                    b: if swapped { c0 + 1 } else { c0 + 2 },
+                    proto,
+                    resume: i + 4,
+                },
+            };
+            sites.push(site);
+            if sites.len() == MAX_INLINE_SITES {
+                break;
+            }
             i += 4;
             continue;
         }
