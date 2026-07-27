@@ -144,10 +144,7 @@ impl Interpreter {
 
     /// During a plain-dict metaclass call, annotation scopes retain the actual
     /// prepared namespace so mutations made by `__new__` remain visible.
-    fn bind_class_annotation_mapping(
-        scopes: &[Weak<RefCell<Environment>>],
-        namespace: &Value,
-    ) {
+    fn bind_class_annotation_mapping(scopes: &[Weak<RefCell<Environment>>], namespace: &Value) {
         if !namespace.is_dict() {
             return;
         }

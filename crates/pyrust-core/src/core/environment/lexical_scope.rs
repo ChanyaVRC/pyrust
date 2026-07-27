@@ -90,9 +90,9 @@ impl Environment {
 
     /// Mirror a class-body fast-local store while the class is still running.
     pub fn set_class_annotation_binding(&mut self, name: &str, value: Value) {
-        let provider = self.class_annotation.get_or_insert_with(|| {
-            Box::new(ClassAnnotationProvider::Active(EnvValues::new()))
-        });
+        let provider = self
+            .class_annotation
+            .get_or_insert_with(|| Box::new(ClassAnnotationProvider::Active(EnvValues::new())));
         if let ClassAnnotationProvider::Active(values) = provider.as_mut() {
             values.insert(name, value);
         }
@@ -100,8 +100,7 @@ impl Environment {
 
     /// Mirror a class-body fast-local deletion while the class is still running.
     pub fn remove_class_annotation_binding(&mut self, name: &str) {
-        if let Some(ClassAnnotationProvider::Active(values)) =
-            self.class_annotation.as_deref_mut()
+        if let Some(ClassAnnotationProvider::Active(values)) = self.class_annotation.as_deref_mut()
         {
             values.remove(name);
         }
@@ -120,9 +119,7 @@ impl Environment {
     /// from a short-lived class must still be able to evaluate against that
     /// class namespace later.
     pub fn bind_class_annotation_owner(&mut self, class: &Rc<RefCell<PyClass>>) {
-        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Owner(Rc::clone(
-            class,
-        ))));
+        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Owner(Rc::clone(class))));
     }
 
     /// Resolve one name from this environment's class-annotation provider.
