@@ -80,7 +80,7 @@ fn pass_int_loop_version(
         /// `for … in range(…)`: `ForIter` header, unconditional back-edge; the
         /// guard block additionally checks the iterator slot holds the
         /// canonical machine-int range cursor.
-        ForRange { slot: Reg },
+        ForRange { slot: u8 },
     }
 
     struct Candidate {
@@ -114,7 +114,31 @@ fn pass_int_loop_version(
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
         )
     };
-    let arith_op = |op: &BinaryOp| matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul);
+    // Int-family-closed operations that cannot raise on int operands.
+    let arith_op = |op: &BinaryOp| {
+        matches!(
+            op,
+            BinaryOp::Add
+                | BinaryOp::Sub
+                | BinaryOp::Mul
+                | BinaryOp::BitAnd
+                | BinaryOp::BitOr
+                | BinaryOp::BitXor
+        )
+    };
+    // Division-family ops additionally require a known non-zero divisor, so
+    // they are admitted only in immediate/constant form.
+    let imm_arith_op = |op: &BinaryOp, imm: i16| {
+        arith_op(op) || (matches!(op, BinaryOp::FloorDiv | BinaryOp::Mod) && imm != 0)
+    };
+    let const_arith_op = |op: &BinaryOp, idx: u16| {
+        arith_op(op)
+            || (matches!(op, BinaryOp::FloorDiv | BinaryOp::Mod)
+                && consts
+                    .get(idx as usize)
+                    .and_then(|v| if v.is_unset() { None } else { v.as_int() })
+                    .is_some_and(|value| value != 0))
+    };
 
     // Jump targets of an instruction, as absolute indices.
     let targets = |i: usize, insn: &Insn| -> Option<usize> {
@@ -158,7 +182,7 @@ fn pass_int_loop_version(
                 (CandidateKind::Inverted, *k as usize)
             }
             Insn::ForIter(_, slot, k) if *k > 1 => {
-                (CandidateKind::ForRange { slot: *slot as Reg }, *k as usize)
+                (CandidateKind::ForRange { slot: *slot }, *k as usize)
             }
             _ => {
                 h += 1;
@@ -224,22 +248,23 @@ fn pass_int_loop_version(
                     guard(*a, &mut guards);
                     guard(*b, &mut guards);
                 }
-                Insn::BinOpImm(_, s, op, _, _) => {
-                    if !arith_op(op) {
+                Insn::BinOpImm(_, s, op, imm, _) => {
+                    if !imm_arith_op(op, *imm) {
                         eligible = false;
                         break;
                     }
                     guard(*s, &mut guards);
                 }
                 Insn::BinOpConst(_, s, op, idx, _) => {
-                    if !arith_op(op) || !const_is_int(*idx) {
+                    if !const_arith_op(op, *idx) || !const_is_int(*idx) {
                         eligible = false;
                         break;
                     }
                     guard(*s, &mut guards);
                 }
                 Insn::CmpJumpIfFalse(a, op, b, off) | Insn::CmpJumpIfTrue(a, op, b, off) => {
-                    if !cmp_op(op) || (i != h && i != back && *off < 0) {
+                    let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
+                    if !cmp_op(op) || (i != h && i != back && *off < 0 && !continue_edge) {
                         eligible = false;
                         break;
                     }
@@ -249,7 +274,11 @@ fn pass_int_loop_version(
                 }
                 Insn::CmpJumpIfFalseConst(a, op, idx, off)
                 | Insn::CmpJumpIfTrueConst(a, op, idx, off) => {
-                    if !cmp_op(op) || !const_is_int(*idx) || (i != h && i != back && *off < 0) {
+                    let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
+                    if !cmp_op(op)
+                        || !const_is_int(*idx)
+                        || (i != h && i != back && *off < 0 && !continue_edge)
+                    {
                         eligible = false;
                         break;
                     }
@@ -257,7 +286,8 @@ fn pass_int_loop_version(
                     guard(*a, &mut guards);
                 }
                 Insn::JumpIfFalse(r, off) | Insn::JumpIfTrue(r, off) => {
-                    if i != h && i != back && *off < 0 {
+                    let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
+                    if i != h && i != back && *off < 0 && !continue_edge {
                         eligible = false;
                         break;
                     }
@@ -267,9 +297,11 @@ fn pass_int_loop_version(
                 Insn::Jump(off) => {
                     let is_forrange_backedge =
                         i == back && matches!(kind, CandidateKind::ForRange { .. });
-                    if *off < 0 && !is_forrange_backedge {
-                        // A nested loop's back-edge; only innermost regions are
-                        // versioned.
+                    // A backward jump to the region head is a `continue`; any
+                    // other backward jump is a nested loop's back-edge and only
+                    // innermost regions are versioned.
+                    let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
+                    if *off < 0 && !is_forrange_backedge && !continue_edge {
                         eligible = false;
                         break;
                     }
@@ -294,9 +326,32 @@ fn pass_int_loop_version(
                 guards.retain(|g| g != dst);
             }
         }
+        // Interior control flow is compatible with sync deferral only when no
+        // synced name can be first-inserted into the live globals dict by this
+        // loop: conditionally-executed first insertions could otherwise change
+        // the dict's insertion order.  A name is proven pre-bound when the
+        // same (reg, name) sync already ran on the straight-line path before
+        // the loop head, and the function never deletes bindings.
+        let function_deletes_bindings = || {
+            insns.iter().any(|insn| {
+                matches!(
+                    insn,
+                    Insn::DeleteModuleGlobal(_) | Insn::DeleteName(_) | Insn::DeleteLocal(..)
+                )
+            })
+        };
+        let syncs_pre_bound = || {
+            syncs.iter().all(|&(r, name_idx)| {
+                insns[..h]
+                    .iter()
+                    .any(|insn| matches!(insn, Insn::SyncModuleGlobal(r2, n2) if *r2 == r && *n2 == name_idx))
+            })
+        };
         if !eligible
             || guards.len() > MAX_GUARDS
-            || (!syncs.is_empty() && has_interior_control_flow)
+            || (!syncs.is_empty()
+                && has_interior_control_flow
+                && (function_deletes_bindings() || !syncs_pre_bound()))
         {
             h += 1;
             continue;
@@ -342,7 +397,7 @@ fn pass_int_loop_version(
             | Insn::CmpJumpIfFalseConst(a, _, cidx, _) = &insns[back]
             && a == d
             && !has_fusion_interior_landing
-            && *num_regs < MAX_FRAME_REGS as u32
+            && *num_regs < MAX_FRAME_REGS
         {
             Some((*num_regs as Reg, *cidx))
         } else {
@@ -439,7 +494,7 @@ fn pass_int_loop_version(
                 if let CandidateKind::ForRange { slot } = cand.kind {
                     let gpos = out.len();
                     let fail_off = placement[i] as i64 - gpos as i64 - 1;
-                    out.push(Insn::JumpIfIterNotIntRange(slot as Reg, fail_off as i32));
+                    out.push(Insn::JumpIfIterNotIntRange(slot, fail_off as i32));
                 }
                 for g in &cand.guards {
                     let gpos = out.len();
@@ -583,7 +638,14 @@ fn pass_int_loop_version(
         // Emit fast insns with rewritten offsets.
         for (fpos, (old_i, insn)) in fast.iter().enumerate() {
             let abs = fast_base + fpos;
-            let targets_past_end = targets(*old_i, insn) == Some(n);
+            // Only an inverted-while header keeps a direct edge to old
+            // past-the-end. Every ForRange exhaustion and every body exit is
+            // deliberately routed through a deferred-sync stub; registering
+            // those source edges here would overwrite the stub destination
+            // during the final-length patch and silently skip the syncs.
+            let directly_targets_past_end = targets(*old_i, insn) == Some(n)
+                && fpos == 0
+                && matches!(cand.kind, CandidateKind::Inverted);
             let new_insn = match targets(*old_i, insn) {
                 Some(t) => {
                     let internal = t >= cand.head && t <= cand.back;
@@ -604,7 +666,7 @@ fn pass_int_loop_version(
                 }
                 None => insn.clone(),
             };
-            if targets_past_end {
+            if directly_targets_past_end {
                 past_end_patches.push(out.len());
             }
             out.push(new_insn);
