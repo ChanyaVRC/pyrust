@@ -8,12 +8,18 @@
 fn insn_jump_off(insn: &Insn) -> Option<i32> {
     match insn {
         Insn::Jump(offset) => Some(*offset),
-        Insn::JumpIfFalse(_, offset) | Insn::JumpIfTrue(_, offset) => Some(*offset),
+        Insn::JumpIfFalse(_, offset)
+        | Insn::JumpIfTrue(_, offset)
+        | Insn::JumpIfNotInt(_, offset)
+        | Insn::JumpIfIterNotIntRange(_, offset) => Some(*offset),
         Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
         | Insn::CmpJumpIfFalseConst(_, _, _, offset)
         | Insn::CmpJumpIfTrueConst(_, _, _, offset)
+        | Insn::CountCmpJumpTrue(_, _, _, _, offset)
+        | Insn::CountCmpJumpFalse(_, _, _, _, offset)
         | Insn::ForIter(_, _, offset) => Some(*offset),
+        Insn::CallInlineBinOp { skip, .. } => Some(*skip),
         Insn::SetupExcept(offset)
         | Insn::MatchExcept(_, offset)
         | Insn::MatchExceptStar(_, _, _, offset) => Some(*offset),

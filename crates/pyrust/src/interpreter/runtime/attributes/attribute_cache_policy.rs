@@ -74,6 +74,9 @@ pub(crate) fn read_attribute_cache_plan(target: &Value, name: &str) -> ReadAttri
     if matches!(name, "__bound__" | "__constraints__") && is_typevar_class(&instance.class) {
         return ReadAttributeCachePlan::Uncacheable;
     }
+    if name == "__value__" && is_type_alias_class(&instance.class) {
+        return ReadAttributeCachePlan::Uncacheable;
+    }
 
     let has_custom_getattribute = lookup_class_attr(&instance.class, "__getattribute__")
         .is_some_and(|value| matches!(value.kind(), ValueKind::UserFunction(_)));
@@ -84,7 +87,7 @@ pub(crate) fn read_attribute_cache_plan(target: &Value, name: &str) -> ReadAttri
     // Native exception slots have data-descriptor precedence over a
     // same-named visible dict key, but do not have materialised class
     // descriptors in pyrust. Never cache that dict key as an Instance hit.
-    if active_exception_slot(&instance.class, name) {
+    if active_exception_slot_policy(&instance.class, name).is_some() {
         return ReadAttributeCachePlan::Uncacheable;
     }
 

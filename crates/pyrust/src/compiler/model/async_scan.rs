@@ -4,8 +4,9 @@
 /// a non-outermost clause iterable) makes the comprehension asynchronous even
 /// without an `async for` clause.
 ///
-/// Mirrors `expr_contains_yield`: it does NOT descend into lambdas or nested
-/// comprehensions / generator expressions, which have their own scope.
+/// Mirrors `expr_contains_yield`: it does not enter lambda bodies or nested
+/// comprehension bodies, which have their own scopes. Lambda defaults and
+/// annotations remain in the current scope and are scanned.
 fn expr_contains_await(expr: &Expr) -> bool {
     match expr {
         Expr::Await(_) => true,
@@ -50,12 +51,23 @@ fn expr_contains_await(expr: &Expr) -> bool {
         // nested format spec) are real sub-expressions in the same scope, so an
         // `await` there counts: `[f"{await f(x)}" for x in xs]` is async.
         Expr::FString(parts) => fstring_parts_contain_await(parts),
-        // Lambda, comprehensions, and generator expressions are separate scopes.
-        Expr::Lambda { .. }
-        | Expr::ListComp { .. }
-        | Expr::SetComp { .. }
-        | Expr::DictComp { .. }
-        | Expr::GenExp { .. } => false,
+        // Lambda defaults and annotations are evaluated in the current scope;
+        // only the body belongs to the nested function.
+        Expr::Lambda { params, .. } => params.iter().any(|parameter| {
+            parameter.default.as_ref().is_some_and(expr_contains_await)
+                || parameter
+                    .annotation
+                    .as_ref()
+                    .is_some_and(expr_contains_await)
+        }),
+        // A comprehension body has its own synthesized scope, but its first
+        // iterable is evaluated by the enclosing scope before entry.
+        Expr::ListComp { clauses, .. }
+        | Expr::SetComp { clauses, .. }
+        | Expr::DictComp { clauses, .. }
+        | Expr::GenExp { clauses, .. } => clauses
+            .first()
+            .is_some_and(|clause| expr_contains_await(&clause.iter)),
         // Leaf nodes — cannot contain await.
         Expr::Var(_, _)
         | Expr::Int(_)
@@ -189,26 +201,21 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         Expr::Await(e) => expr_has_async_collection_comp(e),
         Expr::Yield(e) => e.as_deref().is_some_and(expr_has_async_collection_comp),
         Expr::YieldFrom(e) => expr_has_async_collection_comp(e),
-        Expr::FString(parts) => parts.iter().any(|part| match part {
-            crate::ast::FStringPart::Literal(_) => false,
-            crate::ast::FStringPart::Expr {
-                expr, format_spec, ..
-            } => {
-                expr_has_async_collection_comp(expr)
-                    || format_spec.as_deref().is_some_and(|fs| {
-                        fs.iter().any(|p| match p {
-                            crate::ast::FStringPart::Literal(_) => false,
-                            crate::ast::FStringPart::Expr { expr, .. } => {
-                                expr_has_async_collection_comp(expr)
-                            }
-                        })
-                    })
-            }
+        Expr::FString(parts) => fstring_parts_have_async_collection_comp(parts),
+        // Lambda bodies are separate, but defaults and annotations execute in
+        // the enclosing scope and can create an async collection comp there.
+        Expr::Lambda { params, .. } => params.iter().any(|parameter| {
+            parameter
+                .default
+                .as_ref()
+                .is_some_and(expr_has_async_collection_comp)
+                || parameter
+                    .annotation
+                    .as_ref()
+                    .is_some_and(expr_has_async_collection_comp)
         }),
-        // Lambda bodies are a separate scope and cannot make an enclosing
-        // comprehension async; leaf nodes carry nothing.
-        Expr::Lambda { .. }
-        | Expr::Var(_, _)
+        // Leaf nodes carry nothing.
+        Expr::Var(_, _)
         | Expr::Int(_)
         | Expr::BigInt(_)
         | Expr::Float(_)
@@ -219,6 +226,22 @@ fn expr_has_async_collection_comp(expr: &Expr) -> bool {
         | Expr::None
         | Expr::Ellipsis => false,
     }
+}
+
+/// Whether an f-string replacement field or a recursively nested format spec
+/// contains an async collection comprehension.
+fn fstring_parts_have_async_collection_comp(parts: &[crate::ast::FStringPart]) -> bool {
+    parts.iter().any(|part| match part {
+        crate::ast::FStringPart::Literal(_) => false,
+        crate::ast::FStringPart::Expr {
+            expr, format_spec, ..
+        } => {
+            expr_has_async_collection_comp(expr)
+                || format_spec
+                    .as_deref()
+                    .is_some_and(fstring_parts_have_async_collection_comp)
+        }
+    })
 }
 
 /// Scan a comprehension's element(s), conditions, and ALL iterables (including

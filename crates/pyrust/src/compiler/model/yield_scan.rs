@@ -11,49 +11,31 @@ fn stmts_contain_yield(stmts: &[Stmt]) -> bool {
 }
 
 fn stmt_contains_yield(stmt: &Stmt) -> bool {
+    let mut direct = false;
+    stmt.visit_evaluated_exprs(&mut |expr| {
+        direct |= expr_contains_yield(expr);
+    });
+    if direct {
+        return true;
+    }
+
+    // Expression evaluation belongs to the AST visitor above. This match owns
+    // only nested statement blocks and their scope transitions.
     match stmt {
-        Stmt::Expr(e) => expr_contains_yield(e),
-        Stmt::Return(Some(e)) => expr_contains_yield(e),
-        Stmt::Return(None) | Stmt::Pass | Stmt::Break | Stmt::Continue => false,
-        Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::Import { .. } | Stmt::ImportFrom { .. } => {
-            false
-        }
         Stmt::If {
             branches,
             else_branch,
             ..
         } => {
-            branches
-                .iter()
-                .any(|(cond, body)| expr_contains_yield(cond) || stmts_contain_yield(body))
+            branches.iter().any(|(_, body)| stmts_contain_yield(body))
                 || else_branch.as_deref().is_some_and(stmts_contain_yield)
         }
         Stmt::While {
-            cond,
-            body,
-            else_branch,
-            ..
-        } => {
-            expr_contains_yield(cond)
-                || stmts_contain_yield(body)
-                || else_branch.as_deref().is_some_and(stmts_contain_yield)
-        }
+            body, else_branch, ..
+        } => stmts_contain_yield(body) || else_branch.as_deref().is_some_and(stmts_contain_yield),
         Stmt::For {
-            target,
-            iter,
-            body,
-            else_branch,
-            ..
-        } => {
-            let mut target_contains_yield = false;
-            target.visit_evaluated_exprs(&mut |expr| {
-                target_contains_yield |= expr_contains_yield(expr);
-            });
-            target_contains_yield
-                || expr_contains_yield(iter)
-                || stmts_contain_yield(body)
-                || else_branch.as_deref().is_some_and(stmts_contain_yield)
-        }
+            body, else_branch, ..
+        } => stmts_contain_yield(body) || else_branch.as_deref().is_some_and(stmts_contain_yield),
         Stmt::Try {
             body,
             handlers,
@@ -62,83 +44,36 @@ fn stmt_contains_yield(stmt: &Stmt) -> bool {
             ..
         } => {
             stmts_contain_yield(body)
-                || handlers.iter().any(|h| {
-                    h.kind.as_ref().is_some_and(expr_contains_yield) || stmts_contain_yield(&h.body)
-                })
+                || handlers.iter().any(|h| stmts_contain_yield(&h.body))
                 || else_branch.as_deref().is_some_and(stmts_contain_yield)
                 || finally_branch.as_deref().is_some_and(stmts_contain_yield)
         }
-        Stmt::With { items, body, .. } => {
-            items.iter().any(|(expr, target)| {
-                let mut target_contains_yield = false;
-                if let Some(target) = target {
-                    target.visit_evaluated_exprs(&mut |expr| {
-                        target_contains_yield |= expr_contains_yield(expr);
-                    });
-                }
-                expr_contains_yield(expr) || target_contains_yield
-            }) || stmts_contain_yield(body)
-        }
-        Stmt::Assign(target, value) => {
-            let mut target_contains_yield = false;
-            target.visit_evaluated_exprs(&mut |expr| {
-                target_contains_yield |= expr_contains_yield(expr);
-            });
-            target_contains_yield || expr_contains_yield(value)
-        }
-        Stmt::AugAssign { target, expr, .. } => {
-            let mut target_contains_yield = false;
-            target.visit_evaluated_exprs(&mut |expr| {
-                target_contains_yield |= expr_contains_yield(expr);
-            });
-            target_contains_yield || expr_contains_yield(expr)
-        }
-        Stmt::AnnAssign { value, .. } => value.as_ref().is_some_and(expr_contains_yield),
-        Stmt::AttrAssign { target, expr, .. } => {
-            expr_contains_yield(target) || expr_contains_yield(expr)
-        }
-        Stmt::IndexAssign {
-            target,
-            index,
-            expr,
-        } => expr_contains_yield(target) || expr_contains_yield(index) || expr_contains_yield(expr),
-        Stmt::SliceAssign {
-            target,
-            lower,
-            upper,
-            step,
-            expr,
-        } => {
-            expr_contains_yield(target)
-                || lower.as_deref().is_some_and(expr_contains_yield)
-                || upper.as_deref().is_some_and(expr_contains_yield)
-                || step.as_deref().is_some_and(expr_contains_yield)
-                || expr_contains_yield(expr)
-        }
-        Stmt::Raise { expr, cause, .. } => {
-            expr.as_ref().is_some_and(expr_contains_yield)
-                || cause.as_ref().is_some_and(expr_contains_yield)
-        }
-        Stmt::Delete(exprs) => exprs.iter().any(expr_contains_yield),
-        Stmt::Assert { test, msg } => {
-            expr_contains_yield(test) || msg.as_ref().is_some_and(expr_contains_yield)
-        }
-        Stmt::Match { subject, arms } => {
-            expr_contains_yield(subject)
-                || arms.iter().any(|arm| {
-                    let mut pattern_contains_yield = false;
-                    arm.pattern.visit_evaluated_exprs(&mut |expr| {
-                        pattern_contains_yield |= expr_contains_yield(expr);
-                    });
-                    pattern_contains_yield
-                        || arm.guard.as_ref().is_some_and(expr_contains_yield)
-                        || stmts_contain_yield(&arm.body)
-                })
-        }
+        Stmt::With { body, .. } => stmts_contain_yield(body),
+        Stmt::Match { arms, .. } => arms.iter().any(|arm| stmts_contain_yield(&arm.body)),
         // Def and Class bodies are separate scopes — their yields do not make
-        // the enclosing function a generator.
-        Stmt::Def { .. } | Stmt::Class { .. } => false,
-        Stmt::TypeAlias { value, .. } => expr_contains_yield(value),
+        // the enclosing function a generator. Their headers were evaluated by
+        // `visit_evaluated_exprs` above and do belong to this scope.
+        Stmt::Def { .. }
+        | Stmt::Class { .. }
+        | Stmt::Assign(..)
+        | Stmt::AnnAssign { .. }
+        | Stmt::AttrAssign { .. }
+        | Stmt::IndexAssign { .. }
+        | Stmt::SliceAssign { .. }
+        | Stmt::AugAssign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Global(_)
+        | Stmt::Nonlocal(_)
+        | Stmt::Import { .. }
+        | Stmt::ImportFrom { .. }
+        | Stmt::Return(_)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Pass
+        | Stmt::Raise { .. }
+        | Stmt::Delete(_)
+        | Stmt::Assert { .. }
+        | Stmt::TypeAlias { .. } => false,
     }
 }
 
@@ -187,12 +122,21 @@ fn expr_contains_yield(expr: &Expr) -> bool {
         // `'yield' inside generator expression`. Mirrors the
         // `expr_contains_await` f-string handling (#2308 / #2313).
         Expr::FString(parts) => fstring_parts_contain_yield(parts),
-        // Lambda, comprehensions, and generator expressions are separate scopes.
-        Expr::Lambda { .. }
-        | Expr::ListComp { .. }
-        | Expr::SetComp { .. }
-        | Expr::DictComp { .. }
-        | Expr::GenExp { .. } => false,
+        Expr::Lambda { params, .. } => params.iter().any(|parameter| {
+            parameter.default.as_ref().is_some_and(expr_contains_yield)
+                || parameter
+                    .annotation
+                    .as_ref()
+                    .is_some_and(expr_contains_yield)
+        }),
+        // A comprehension body has its own scope, but its first iterable is
+        // evaluated by the enclosing scope before that scope is entered.
+        Expr::ListComp { clauses, .. }
+        | Expr::SetComp { clauses, .. }
+        | Expr::DictComp { clauses, .. }
+        | Expr::GenExp { clauses, .. } => clauses
+            .first()
+            .is_some_and(|clause| expr_contains_yield(&clause.iter)),
         // Leaf nodes — cannot contain yield.
         Expr::Var(_, _)
         | Expr::Int(_)

@@ -31,12 +31,18 @@ fn collect_local_names_from_block(
                 collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
                 collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
             }
-            Stmt::Def { name, .. } => {
+            stmt @ Stmt::Def { name, .. } => {
+                stmt.visit_evaluated_exprs(&mut |expr| {
+                    collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
+                });
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
             }
-            Stmt::Class { name, .. } => {
+            stmt @ Stmt::Class { name, .. } => {
+                stmt.visit_evaluated_exprs(&mut |expr| {
+                    collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
+                });
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
@@ -68,7 +74,11 @@ fn collect_local_names_from_block(
                     }
                 }
             }
-            Stmt::AnnAssign { name, value, .. } => {
+            Stmt::AnnAssign {
+                name,
+                annotation,
+                value,
+            } => {
                 // Both `x: T = v` (value = Some) and `x: T` (value = None) declare
                 // a local slot.  At function scope the bare form causes UnboundLocalError
                 // on read (matching CPython); at class scope the slot is allocated but
@@ -81,8 +91,10 @@ fn collect_local_names_from_block(
                 if let Some(v) = value {
                     collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
                 }
+                collect_walrus_targets_in_expr(annotation, names, global_names, nonlocal_names);
             }
             Stmt::AugAssign { target, expr, .. } => {
+                collect_assign_target_names(target, names, global_names, nonlocal_names);
                 target.visit_evaluated_exprs(&mut |expr| {
                     collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
                 });
@@ -198,6 +210,9 @@ fn collect_local_names_from_block(
             } => {
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
                 for handler in handlers {
+                    if let Some(kind) = &handler.kind {
+                        collect_walrus_targets_in_expr(kind, names, global_names, nonlocal_names);
+                    }
                     if let Some(name) = &handler.name
                         && !global_names.contains(name)
                         && !nonlocal_names.contains(name)
@@ -252,11 +267,13 @@ fn collect_local_names_from_block(
             // `type X[T] = expr` binds `X` as a local name (PEP 695).
             // The type params (T) are NOT local names — they are temporaries
             // visible only during RHS evaluation and do not escape to the scope.
-            Stmt::TypeAlias { name, value, .. } => {
+            stmt @ Stmt::TypeAlias { name, .. } => {
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
-                collect_walrus_targets_in_expr(value, names, global_names, nonlocal_names);
+                stmt.visit_evaluated_exprs(&mut |expr| {
+                    collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names)
+                });
             }
         }
     }
@@ -325,131 +342,11 @@ fn collect_walrus_targets_in_expr(
     global_names: &std::collections::HashSet<String>,
     nonlocal_names: &std::collections::HashSet<String>,
 ) {
-    match expr {
-        Expr::Named { target, value } => {
-            if !global_names.contains(target) && !nonlocal_names.contains(target) {
-                names.insert(target.clone());
-            }
-            collect_walrus_targets_in_expr(value, names, global_names, nonlocal_names);
+    expr.visit_enclosing_walrus_targets(&mut |target| {
+        if !global_names.contains(target) && !nonlocal_names.contains(target) {
+            names.insert(target.to_owned());
         }
-        Expr::Binary { left, right, .. } => {
-            collect_walrus_targets_in_expr(left, names, global_names, nonlocal_names);
-            collect_walrus_targets_in_expr(right, names, global_names, nonlocal_names);
-        }
-        Expr::Unary { expr: e, .. } => {
-            collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
-        }
-        Expr::Compare { left, ops } => {
-            collect_walrus_targets_in_expr(left, names, global_names, nonlocal_names);
-            for (_, e) in ops {
-                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
-            }
-        }
-        Expr::Call { func, args, .. } => {
-            collect_walrus_targets_in_expr(func, names, global_names, nonlocal_names);
-            for a in args {
-                collect_walrus_targets_in_expr(&a.value, names, global_names, nonlocal_names);
-            }
-        }
-        Expr::Ternary { cond, then, else_ } => {
-            collect_walrus_targets_in_expr(cond, names, global_names, nonlocal_names);
-            collect_walrus_targets_in_expr(then, names, global_names, nonlocal_names);
-            collect_walrus_targets_in_expr(else_, names, global_names, nonlocal_names);
-        }
-        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
-            for e in items {
-                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
-            }
-        }
-        Expr::Starred(inner) => {
-            collect_walrus_targets_in_expr(inner, names, global_names, nonlocal_names);
-        }
-        Expr::Dict(items) => {
-            for item in items {
-                match item {
-                    crate::ast::DictItem::Pair(k, v) => {
-                        collect_walrus_targets_in_expr(k, names, global_names, nonlocal_names);
-                        collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
-                    }
-                    crate::ast::DictItem::DoubleSplat(e) => {
-                        collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
-                    }
-                }
-            }
-        }
-        Expr::Index { target, index, .. } => {
-            collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
-            collect_walrus_targets_in_expr(index, names, global_names, nonlocal_names);
-        }
-        Expr::Attr { target, .. } => {
-            collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
-        }
-        Expr::Slice {
-            target,
-            lower,
-            upper,
-            step,
-        } => {
-            collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
-            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
-                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
-            }
-        }
-        Expr::FString(parts) => {
-            // Walrus inside an f-string interpolation (or inside a nested
-            // `{expr}` in the format spec) still binds in the enclosing
-            // scope; recurse so the target name is recorded.
-            use crate::ast::FStringPart;
-            fn walk(
-                parts: &[FStringPart],
-                names: &mut indexmap::IndexSet<String>,
-                global_names: &std::collections::HashSet<String>,
-                nonlocal_names: &std::collections::HashSet<String>,
-            ) {
-                for part in parts {
-                    if let FStringPart::Expr {
-                        expr, format_spec, ..
-                    } = part
-                    {
-                        collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
-                        if let Some(spec_parts) = format_spec {
-                            walk(spec_parts, names, global_names, nonlocal_names);
-                        }
-                    }
-                }
-            }
-            walk(parts, names, global_names, nonlocal_names);
-        }
-        // Walrus targets inside a comprehension escape to the nearest enclosing
-        // non-comprehension scope (PEP 572). Descend into the element/value
-        // expressions and filter conditions so their walrus targets are recorded
-        // as locals of the enclosing function.  Do NOT descend into Lambda nodes
-        // (they create a true new scope).
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
-            collect_walrus_targets_in_expr(elt, names, global_names, nonlocal_names);
-            for clause in clauses {
-                if let Some(c) = &clause.cond {
-                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
-                }
-                // Inner clause iters also run in the comprehension scope and can
-                // contain walrus expressions that escape outward.
-                collect_walrus_targets_in_expr(&clause.iter, names, global_names, nonlocal_names);
-            }
-        }
-        Expr::DictComp { key, val, clauses } => {
-            collect_walrus_targets_in_expr(key, names, global_names, nonlocal_names);
-            collect_walrus_targets_in_expr(val, names, global_names, nonlocal_names);
-            for clause in clauses {
-                if let Some(c) = &clause.cond {
-                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
-                }
-                collect_walrus_targets_in_expr(&clause.iter, names, global_names, nonlocal_names);
-            }
-        }
-        _ => {}
-    }
+    });
 }
 
 fn collect_assign_target_names(

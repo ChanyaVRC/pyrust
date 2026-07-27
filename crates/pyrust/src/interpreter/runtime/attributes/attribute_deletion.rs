@@ -176,7 +176,9 @@ impl Interpreter {
                     return Err(pyrust_core::py_err!("AttributeError", "readonly attribute"));
                 }
                 let module = Rc::clone(module);
-                if module.borrow().filesystem_namespace().is_some() {
+                if module.borrow().filesystem_namespace().is_some()
+                    || module.borrow().live_namespace().is_some()
+                {
                     let existing = module.borrow().get_attr_value(name);
                     if existing.as_ref().is_some_and(|value| !value.is_unset()) {
                         module.borrow_mut().remove_attr(name);
@@ -348,8 +350,8 @@ impl Interpreter {
         {
             return result;
         }
-        if active_exception_slot(&class, name) {
-            return delete_active_exception_slot(instance, name);
+        if let Some(policy) = active_exception_slot_policy(&class, name) {
+            return policy.delete(instance, name);
         }
         // `shift_remove` keeps the remaining entries in their
         // original insertion order so `vars(obj)` after `del obj.x`

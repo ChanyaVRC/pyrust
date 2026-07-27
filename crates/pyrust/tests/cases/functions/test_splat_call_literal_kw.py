@@ -1,8 +1,8 @@
 # Positional-splat calls with literal `kw=v` keyword arguments after the splat —
 # `f(<pos…>, *args, kw=v…)` — the CallExArgs `nkw > 0` path.  Covers fixed-arity
 # and variadic callees, positional/keyword collisions, evaluation order, and the
-# `f(*a, kw=v, **k)` shape that is intentionally excluded (kept on the __vcall__
-# path because a literal keyword and `**k` can name the same key).  Exceptions are
+# `f(*a, kw=v, **k)` shape that is intentionally excluded (kept on the generic
+# materializing path because a literal keyword and `**k` can name the same key). Exceptions are
 # caught and printed so the fixture is caret/traceback-independent.
 
 

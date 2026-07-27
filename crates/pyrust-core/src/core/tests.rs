@@ -92,6 +92,36 @@ mod tests {
     }
 
     #[test]
+    fn live_module_namespace_shares_alias_mutations_and_collection_generation() {
+        let mut attrs = HashMap::new();
+        attrs.insert("initial".to_string(), Value::int(1));
+        let mut module = PyModule::new("native".to_string(), attrs);
+        module.attach_live_namespace();
+
+        let namespace = module.live_namespace().expect("live namespace");
+        let state = namespace.dict_iteration_mutation_state().unwrap();
+        let before_alias_write = state.version();
+        namespace
+            .dict_insert(PyKey::str_from("from_alias"), Value::int(2))
+            .unwrap();
+        assert_eq!(
+            state.version(),
+            before_alias_write.wrapping_add(1),
+            "direct __dict__ writes must invalidate namespace consumers"
+        );
+        assert_eq!(module.get_attr_value("from_alias"), Some(Value::int(2)));
+
+        module.insert_attr("from_attribute".to_string(), Value::int(3));
+        assert_eq!(
+            namespace
+                .dict_with(|dict| dict.get(&PyKey::str_from("from_attribute")).cloned())
+                .flatten(),
+            Some(Value::int(3))
+        );
+        assert!(module.attrs.is_empty(), "the live dict is authoritative");
+    }
+
+    #[test]
     fn filesystem_module_shares_root_globals_without_owning_environment_strongly() {
         let root = Environment::new(None);
         let mut module = PyModule::new("source_module".to_string(), HashMap::new());

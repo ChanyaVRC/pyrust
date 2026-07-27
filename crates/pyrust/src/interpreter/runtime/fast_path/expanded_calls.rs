@@ -182,7 +182,7 @@ impl Interpreter {
     /// Slow path: materialise the leading positionals, the splat elements
     /// (honouring user `__iter__` / `__getitem__`, exactly as the old `ListExtend`
     /// lowering did), and the `**kw` entries into an `ExpandedCallArg` buffer — no
-    /// intermediate list/dict, no `__vcall__` global lookup or builtin dispatch —
+    /// intermediate list/dict and no hidden-global lookup or builtin dispatch —
     /// and dispatch through `call_function_expanded`, which owns every
     /// CPython-parity binding diagnostic.  The argument order is exactly the
     /// source order the compiler guarantees for this shape: leading positionals,
@@ -263,7 +263,7 @@ impl Interpreter {
                 // splat).  The fixed-arity slot cache keys on the `**kw` key-set, so
                 // rather than fold static literal names into it, only the variadic
                 // fast path applies here; a fixed-arity callee falls to the slow
-                // path (which still skips the `__vcall__` round-trip).
+                // path (which still uses the direct VM transport).
                 if f.params.iter().any(|p| p.is_args || p.is_kwargs)
                     && let Some(v) = self.call_ex_args_variadic_bind(
                         &f,

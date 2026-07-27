@@ -45,7 +45,11 @@ impl Interpreter {
         };
 
         // 2. Run the class body and collect its ordered assignments.
-        let (attrs, class_env_rc) = self.run_class_body(
+        let ClassBodyExecution {
+            attrs,
+            class_env: class_env_rc,
+            annotation_scopes,
+        } = self.run_class_body(
             &class_code,
             &local_index,
             &proto_qualname,
@@ -76,6 +80,7 @@ impl Interpreter {
         if let Some(orig) = orig_bases {
             self.namespace_set_item(&namespace, "__orig_bases__", Value::tuple(orig))?;
         }
+        Self::bind_class_annotation_mapping(&annotation_scopes, &namespace);
 
         // 4. metaclass(name, bases_tuple, namespace, **kwds).
         let mut call_args: ExpandedArgBuf = smallvec![
@@ -94,6 +99,9 @@ impl Interpreter {
         ];
         call_args.extend(kwargs);
         let result = self.call_function_expanded(metaclass, &call_args)?;
+        if let ValueKind::PyClass(class) = result.kind() {
+            Self::bind_class_annotation_owner(&annotation_scopes, class);
+        }
 
         // Seed the `__class__` cell the body's methods closed over so that
         // zero-arg `super()` inside them resolves to the *final* class the
@@ -158,7 +166,7 @@ impl Interpreter {
         proto_qualname: &str,
         proto_global_names: Rc<HashSet<String>>,
         proto_nonlocal_names: Rc<HashSet<String>>,
-    ) -> Result<(IndexMap<String, Value>, EnvRef)> {
+    ) -> Result<ClassBodyExecution> {
         let num_class_regs = class_code.num_regs as usize;
         let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
         // CPython pre-injects __qualname__ / __module__ / __annotations__ into
@@ -188,6 +196,11 @@ impl Interpreter {
         pre_order.extend(module_slot);
         pre_order.extend(annotations_slot);
         self.class_store_order.push(pre_order);
+        let has_type_alias = class_code
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, crate::bytecode::Insn::MakeTypeAlias(..)));
+        self.push_class_annotation_scopes(local_index, num_class_regs, has_type_alias);
 
         // Push a class env so methods capture __class__ (zero-arg super), and a
         // Class frame view so locals() inside the body sees the namespace.
@@ -229,9 +242,14 @@ impl Interpreter {
             .class_store_order
             .pop()
             .expect("class_store_order stack popped to empty");
+        let annotation_scopes = self.pop_class_annotation_scopes();
         body_result?;
 
         let attrs = collect_class_attrs(local_index, &class_regs, store_order, num_class_regs);
-        Ok((attrs, class_env_rc))
+        Ok(ClassBodyExecution {
+            attrs,
+            class_env: class_env_rc,
+            annotation_scopes,
+        })
     }
 }

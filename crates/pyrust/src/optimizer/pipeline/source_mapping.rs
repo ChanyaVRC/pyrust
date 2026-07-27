@@ -219,10 +219,7 @@ fn remap_lineno_and_col_tables_with_source_prefix(
     let new_insns = &new_insns[..source_prefix_len];
 
     if old_linenos.is_empty() {
-        return (
-            vec![0u32; full_new_len],
-            vec![(0, 0, 0, 0); full_new_len],
-        );
+        return (vec![0u32; full_new_len], vec![(0, 0, 0, 0); full_new_len]);
     }
     // Only do col work when at least one anchor was recorded.
     let want_cols = !old_cols.is_empty() && old_cols.iter().any(|&c| c != (0, 0, 0, 0));

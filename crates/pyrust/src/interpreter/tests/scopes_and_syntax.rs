@@ -60,6 +60,40 @@ fn closure_rebinding_uses_enclosing_frame() {
 }
 
 #[test]
+fn class_type_alias_uses_its_live_annotation_namespace_without_changing_methods() {
+    let interpreter = run_program(concat!(
+        "x = 10\n",
+        "class C:\n",
+        "    x = 1\n",
+        "    type A = x\n",
+        "    x = 2\n",
+        "    during = A.__value__\n",
+        "class D:\n",
+        "    x = 4\n",
+        "    type A = x\n",
+        "del D.x\n",
+        "class E:\n",
+        "    T = 5\n",
+        "    type A[T] = T\n",
+        "    def read(self):\n",
+        "        return x\n",
+        "C.x = 3\n",
+        "result = [C.during, C.A.__value__, D.A.__value__, E.A.__value__, E().read()]\n",
+    ));
+
+    assert_eq!(
+        interpreter.lookup_name("result").unwrap(),
+        Some(Value::list(vec![
+            Value::int(2),
+            Value::int(2),
+            Value::int(10),
+            Value::int(5),
+            Value::int(10),
+        ]))
+    );
+}
+
+#[test]
 fn assigned_names_are_local_for_the_whole_function() {
     let tokens = Lexer::new("x = 7\ndef f():\n    y = x\n    x = 9\n    return y\nresult = f()\n")
         .unwrap()
@@ -70,6 +104,15 @@ fn assigned_names_are_local_for_the_whole_function() {
 
     let error = interpreter.exec_program(&program, false).unwrap_err();
 
+    assert_eq!(
+        error.to_string(),
+        "UnboundLocalError: cannot access local variable 'x' where it is not associated with a value"
+    );
+}
+
+#[test]
+fn bare_augmented_assignment_declares_a_local() {
+    let error = run_program_expect_error("x = 7\ndef f():\n    x += 1\nf()\n");
     assert_eq!(
         error.to_string(),
         "UnboundLocalError: cannot access local variable 'x' where it is not associated with a value"
@@ -351,6 +394,115 @@ fn yield_in_dead_code_at_module_level_is_syntax_error() {
     let error = interpreter.exec_program(&program, false).unwrap_err();
 
     assert_eq!(error.to_string(), "SyntaxError: 'yield' outside function");
+}
+
+#[test]
+fn dead_assignment_targets_still_validate_await_and_yield_context() {
+    for (source, expected) in [
+        (
+            "def f(items):\n    if False:\n        items[(await g())] += 1\n",
+            "SyntaxError: 'await' outside async function",
+        ),
+        (
+            "def f(items):\n    if False:\n        items[(await g())] = 1\n",
+            "SyntaxError: 'await' outside async function",
+        ),
+        (
+            "if False:\n    items[(yield 0)] += 1\n",
+            "SyntaxError: 'yield' outside function",
+        ),
+        (
+            "def f(items):\n    if False:\n        items[(await g())].value += 1\n",
+            "SyntaxError: 'await' outside async function",
+        ),
+        (
+            "def f(items):\n    if False:\n        items[(lambda value=(await g()): 0)()] += 1\n",
+            "SyntaxError: 'await' outside async function",
+        ),
+    ] {
+        let tokens = Lexer::new(source).unwrap().into_tokens();
+        let program = Parser::new(tokens).parse_program().unwrap();
+        let error = Interpreter::default()
+            .exec_program(&program, false)
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected, "source:\n{source}");
+    }
+}
+
+#[test]
+fn dead_statement_headers_validate_every_evaluated_expression_context() {
+    for source in [
+        "def f():\n    if False:\n        return await g()\n",
+        "def f():\n    if False:\n        raise await g()\n",
+        "def f():\n    if False:\n        assert await g()\n",
+        "def f():\n    if False:\n        if await g():\n            pass\n",
+        "def f():\n    if False:\n        while await g():\n            pass\n",
+        "def f():\n    if False:\n        for item in await g():\n            pass\n",
+        "def f():\n    if False:\n        with await g():\n            pass\n",
+        "def f():\n    if False:\n        match await g():\n            case _:\n                pass\n",
+        "def f():\n    if False:\n        match 1:\n            case _ if await g():\n                pass\n",
+        "def f():\n    if False:\n        try:\n            pass\n        except await g():\n            pass\n",
+        "def outer():\n    if False:\n        def inner(value=await g()):\n            pass\n",
+        "def outer():\n    if False:\n        def inner(value: await g()):\n            pass\n",
+        "def f():\n    if False:\n        class Inner(await g()):\n            pass\n",
+        "def f():\n    if False:\n        del items[await g()]\n",
+    ] {
+        let tokens = Lexer::new(source).unwrap().into_tokens();
+        let program = Parser::new(tokens).parse_program().unwrap();
+        let error = Interpreter::default()
+            .exec_program(&program, false)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: 'await' outside async function",
+            "source:\n{source}"
+        );
+    }
+}
+
+#[test]
+fn dead_expression_validation_preserves_cpython_error_precedence() {
+    for (source, expected) in [
+        (
+            "if False:\n    items[(yield 0)] = await g()\n",
+            "SyntaxError: 'await' outside function",
+        ),
+        (
+            "if False:\n    items[await g()] = (yield 0)\n",
+            "SyntaxError: 'yield' outside function",
+        ),
+        (
+            "if False:\n    @(yield 1)\n    def f(value=await g()):\n        pass\n",
+            "SyntaxError: 'yield' outside function",
+        ),
+    ] {
+        let tokens = Lexer::new(source).unwrap().into_tokens();
+        let program = Parser::new(tokens).parse_program().unwrap();
+        let error = Interpreter::default()
+            .exec_program(&program, false)
+            .unwrap_err();
+        assert_eq!(error.to_string(), expected, "source:\n{source}");
+    }
+}
+
+#[test]
+fn dead_class_body_does_not_inherit_enclosing_async_context() {
+    for source in [
+        "async def outer():\n    if False:\n        class Inner:\n            async for item in items:\n                pass\n",
+        "async def outer():\n    if False:\n        class Inner:\n            async with manager:\n                pass\n",
+    ] {
+        let tokens = Lexer::new(source).unwrap().into_tokens();
+        let program = Parser::new(tokens).parse_program().unwrap();
+        let error = Interpreter::default()
+            .exec_program(&program, false)
+            .unwrap_err();
+        let expected = if source.contains("async for") {
+            "SyntaxError: 'async for' outside async function"
+        } else {
+            "SyntaxError: 'async with' outside async function"
+        };
+        assert_eq!(error.to_string(), expected, "source:\n{source}");
+    }
 }
 
 #[test]

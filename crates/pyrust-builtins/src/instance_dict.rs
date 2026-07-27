@@ -616,15 +616,11 @@ pub fn as_instance_dict_items(value: &Value) -> Option<Vec<(PyKey, Value)>> {
     )
 }
 
-/// Return the public `__dict__` state of an exception instance: the attrs that
-/// are *not* C-level exception slots (`args`, `__traceback__`, `__cause__`,
-/// `__context__`, `__suppress_context__`, plus the class-specific structured
-/// slots like `StopIteration.value` / `SyntaxError.msg` / `OSError.errno`).
+/// Return an exception instance's public `__dict__` state.
 ///
-/// This is exactly the third element of CPython's `BaseException.__reduce__`
-/// (the instance `__dict__`), and the state that `copy`/`deepcopy` carry over.
-/// Slots such as `__traceback__` are deliberately excluded — they are reset on
-/// the copy, matching CPython 3.12.  Keys keep their insertion order.
+/// Native exception fields live in `InstanceAttrs`' separate slot storage, so
+/// this returns only ordinary user attributes. It is the state carried by
+/// `BaseException.__reduce__` and `copy`/`deepcopy`; keys keep insertion order.
 pub fn exception_dict_state(instance: &Rc<RefCell<PyInstance>>) -> Vec<(String, Value)> {
     let inst = instance.borrow();
     inst.attrs
@@ -727,70 +723,4 @@ fn key_as_str(key: &Value) -> Result<&str> {
             ),
         )),
     }
-}
-
-/// Whether `name` is backed by native storage on this built-in exception
-/// family rather than by the instance `__dict__`.
-///
-/// The interpreter uses this at its exception get/set/delete adapter boundary;
-/// keeping the classification beside `instance_dict` makes the exclusion rule
-/// a typed storage property rather than a collection of ad-hoc hidden names.
-pub fn is_exception_slot_for_class(name: &str, class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool {
-    let is = |base| pyrust_core::class_chain_contains_builtin_exception(class, base);
-
-    if is("BaseException")
-        && matches!(
-            name,
-            "args" | "__cause__" | "__context__" | "__suppress_context__" | "__traceback__"
-        )
-    {
-        return true;
-    }
-    if is("StopIteration") && name == "value" {
-        return true;
-    }
-    if is("SystemExit") && name == "code" {
-        return true;
-    }
-    if is("SyntaxError")
-        && matches!(
-            name,
-            "msg"
-                | "filename"
-                | "lineno"
-                | "offset"
-                | "text"
-                | "end_lineno"
-                | "end_offset"
-                | "print_file_and_line"
-        )
-    {
-        return true;
-    }
-    if is("OSError")
-        && matches!(
-            name,
-            "errno" | "strerror" | "filename" | "filename2" | "winerror"
-        )
-    {
-        return true;
-    }
-    if is("BlockingIOError") && name == "characters_written" {
-        return true;
-    }
-    if is("ImportError") && matches!(name, "msg" | "name" | "path") {
-        return true;
-    }
-    if is("NameError") && name == "name" {
-        return true;
-    }
-    if is("AttributeError") && matches!(name, "name" | "obj") {
-        return true;
-    }
-    if (is("UnicodeDecodeError") || is("UnicodeEncodeError") || is("UnicodeTranslateError"))
-        && matches!(name, "encoding" | "object" | "start" | "end" | "reason")
-    {
-        return true;
-    }
-    is("BaseExceptionGroup") && matches!(name, "message" | "exceptions")
 }

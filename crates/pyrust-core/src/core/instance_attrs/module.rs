@@ -43,6 +43,15 @@ pub struct PyModule {
     pub name: String,
     pub attrs: HashMap<String, Value>,
     mutation_state: ModuleMutationState,
+    /// Exact Python dictionary exposed by built-in modules whose namespace
+    /// must remain writable through `module.__dict__`.
+    ///
+    /// Most built-in modules retain the compact direct `attrs` storage.  The
+    /// canonical `sys` module opts into this backing because rebinding
+    /// `sys.__dict__["modules"]` must affect the import registry immediately.
+    /// Keeping this separate from `filesystem_namespace` avoids inventing an
+    /// Environment owner for a native module.
+    live_namespace: Option<Value>,
     /// Boxed so the built-in-module common case pays only one nullable pointer
     /// and continues to use its existing direct `attrs` HashMap fast path.
     filesystem_namespace: Option<Box<FilesystemModuleNamespace>>,
@@ -54,8 +63,31 @@ impl PyModule {
             name,
             attrs,
             mutation_state: ModuleMutationState::fresh(),
+            live_namespace: None,
             filesystem_namespace: None,
         }
+    }
+
+    /// Move this native module's attributes into one stable Python dict.
+    ///
+    /// Calling this before publishing the module makes later attribute writes
+    /// and direct `module.__dict__` mutations share the same backing identity.
+    pub fn attach_live_namespace(&mut self) {
+        debug_assert!(self.filesystem_namespace.is_none());
+        if self.live_namespace.is_some() {
+            return;
+        }
+        let attrs = std::mem::take(&mut self.attrs)
+            .into_iter()
+            .map(|(name, value)| (PyKey::str_from(&name), value))
+            .collect();
+        self.live_namespace = Some(Value::dict(attrs));
+        self.mutation_state.bump();
+    }
+
+    #[inline]
+    pub fn live_namespace(&self) -> Option<Value> {
+        self.live_namespace.clone()
     }
 
     /// Attach this source-backed module to the environment executing its body.
@@ -82,6 +114,11 @@ impl PyModule {
     /// Read one attribute from the module's authoritative namespace.
     #[inline]
     pub fn get_attr_value(&self, name: &str) -> Option<Value> {
+        if let Some(namespace) = self.live_namespace.as_ref() {
+            return namespace
+                .dict_with(|dict| dict.get(&crate::object_model::StrKey(name)).cloned())
+                .flatten();
+        }
         if let Some(namespace) = self.filesystem_namespace.as_deref() {
             return namespace
                 .globals
@@ -97,6 +134,20 @@ impl PyModule {
     /// direct `__dict__` alias; those are visible in the dictionary itself but
     /// are not Python attributes and are intentionally omitted here.
     pub fn attrs_snapshot(&self) -> HashMap<String, Value> {
+        if let Some(namespace) = self.live_namespace.as_ref() {
+            return namespace
+                .dict_with(|dict| {
+                    dict.iter()
+                        .filter_map(|(key, value)| {
+                            let PyKey::Str(key) = key else {
+                                return None;
+                            };
+                            key.as_str().map(|name| (name.to_string(), value.clone()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         if let Some(namespace) = self.filesystem_namespace.as_deref() {
             return namespace
                 .globals
@@ -124,6 +175,13 @@ impl PyModule {
     /// Insert or replace one module attribute and invalidate namespace caches.
     #[inline]
     pub fn insert_attr(&mut self, name: String, value: Value) -> Option<Value> {
+        if let Some(namespace) = self.live_namespace.as_ref() {
+            let previous = namespace
+                .dict_insert(crate::object_model::PyKey::str_from(&name), value)
+                .expect("live module namespace must remain a dict");
+            self.mutation_state.bump();
+            return previous;
+        }
         if let Some(namespace) = self.filesystem_namespace.as_deref() {
             let previous = namespace
                 .globals
@@ -147,6 +205,15 @@ impl PyModule {
     /// Remove one module attribute and invalidate namespace caches when found.
     #[inline]
     pub fn remove_attr(&mut self, name: &str) -> Option<Value> {
+        if let Some(namespace) = self.live_namespace.as_ref() {
+            let removed = namespace
+                .dict_shift_remove(&crate::object_model::PyKey::str_from(name))
+                .expect("live module namespace must remain a dict");
+            if removed.is_some() {
+                self.mutation_state.bump();
+            }
+            return removed;
+        }
         if let Some(namespace) = self.filesystem_namespace.as_deref() {
             let removed = namespace
                 .globals
@@ -177,6 +244,21 @@ impl PyModule {
     /// Replace the complete module namespace while preserving its storage kind.
     #[inline]
     pub fn replace_attrs(&mut self, attrs: HashMap<String, Value>) {
+        if let Some(namespace) = self.live_namespace.as_ref() {
+            namespace
+                .dict_clear()
+                .expect("live module namespace must remain a dict");
+            namespace
+                .dict_extend(
+                    attrs
+                        .into_iter()
+                        .map(|(name, value)| (PyKey::str_from(&name), value))
+                        .collect(),
+                )
+                .expect("live module namespace must remain a dict");
+            self.mutation_state.bump();
+            return;
+        }
         if let Some(namespace) = self.filesystem_namespace.as_deref() {
             namespace
                 .globals

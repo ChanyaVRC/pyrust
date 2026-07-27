@@ -199,12 +199,7 @@ impl Interpreter {
         // Mirror into this interpreter's `sys.modules` dict (issue #2727) so that
         // `builtins` shows up in the import cache as it does in CPython, even
         // before any explicit `import builtins`.
-        if let Ok(module_registry) = self.import_module_registry() {
-            let _ = module_registry.dict_insert(
-                pyrust_core::PyKey::str_from("builtins"),
-                builtins_val.clone(),
-            );
-        }
+        let _ = self.insert_import_registry("builtins", builtins_val.clone());
 
         let me_ref = module_env(&self.env);
         let mut me = me_ref.borrow_mut();

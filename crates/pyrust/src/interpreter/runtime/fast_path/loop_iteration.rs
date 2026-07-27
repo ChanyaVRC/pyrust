@@ -16,20 +16,6 @@ pub(super) enum LoopFastOutcome {
     Error(Box<PyError>),
 }
 
-/// Read one item without letting a `RefCell` guard escape the operation.
-///
-/// Lists require a guarded borrow; tuples are immutable and expose a slice.
-/// Keeping the distinction here avoids materialising either sequence on the
-/// per-iteration fast path.
-#[inline(always)]
-fn indexed_sequence_item(value: &Value, index: usize) -> Option<Value> {
-    if let Some(items) = value.as_list() {
-        items.get(index).cloned()
-    } else {
-        value.as_tuple().and_then(|items| items.get(index).cloned())
-    }
-}
-
 #[inline(always)]
 pub(super) fn advance_loop_fast_state(
     state: &mut IterState,

@@ -1,6 +1,8 @@
 /// Collect all `Var(name)` references from an expression into `used`, and
 /// walrus-operator binding targets into `assigned`.
-/// Does NOT descend into nested function scopes (Def, Lambda, comprehensions).
+/// Does not descend into nested function bodies. Lambda defaults and a
+/// comprehension's outermost iterable are evaluated in the current scope;
+/// walrus targets in comprehensions bind the enclosing non-comprehension scope.
 fn collect_var_refs_in_expr(
     expr: &Expr,
     used: &mut HashSet<String>,
@@ -16,12 +18,33 @@ fn collect_var_refs_in_expr(
             assigned.insert(target.clone());
             collect_var_refs_in_expr(value, used, assigned);
         }
-        // Do NOT descend into nested scopes — they have their own symbol table.
-        Expr::Lambda { .. }
-        | Expr::ListComp { .. }
-        | Expr::SetComp { .. }
-        | Expr::DictComp { .. }
-        | Expr::GenExp { .. } => {}
+        Expr::Lambda { params, .. } => {
+            for parameter in params {
+                if let Some(default) = &parameter.default {
+                    collect_var_refs_in_expr(default, used, assigned);
+                }
+                if let Some(annotation) = &parameter.annotation {
+                    collect_var_refs_in_expr(annotation, used, assigned);
+                }
+            }
+        }
+        Expr::ListComp { clauses, .. }
+        | Expr::SetComp { clauses, .. }
+        | Expr::DictComp { clauses, .. }
+        | Expr::GenExp { clauses, .. } => {
+            // Only the first iterable is evaluated outside the synthesized
+            // comprehension function. Ordinary reads in its body and later
+            // iterables belong to the comprehension scope.
+            if let Some(first) = clauses.first() {
+                collect_var_refs_in_expr(&first.iter, used, assigned);
+            }
+            // PEP 572 is the exception: assignment expressions in a
+            // comprehension bind the nearest enclosing non-comprehension
+            // scope, including those evaluated in nested lambda defaults.
+            expr.visit_enclosing_walrus_targets(&mut |target| {
+                assigned.insert(target.to_owned());
+            });
+        }
         // Recurse into sub-expressions.
         Expr::List(elts) | Expr::Tuple(elts) | Expr::Set(elts) => {
             for e in elts {
@@ -86,26 +109,7 @@ fn collect_var_refs_in_expr(
             }
         }
         Expr::Starred(e) => collect_var_refs_in_expr(e, used, assigned),
-        Expr::FString(parts) => {
-            for part in parts {
-                if let crate::ast::FStringPart::Expr {
-                    expr, format_spec, ..
-                } = part
-                {
-                    collect_var_refs_in_expr(expr, used, assigned);
-                    if let Some(spec_parts) = format_spec {
-                        for spec_part in spec_parts {
-                            if let crate::ast::FStringPart::Expr {
-                                expr: spec_expr, ..
-                            } = spec_part
-                            {
-                                collect_var_refs_in_expr(spec_expr, used, assigned);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        Expr::FString(parts) => collect_var_refs_in_fstring_parts(parts, used, assigned),
         Expr::Yield(Some(e)) => collect_var_refs_in_expr(e, used, assigned),
         Expr::YieldFrom(e) => collect_var_refs_in_expr(e, used, assigned),
         Expr::Await(e) => collect_var_refs_in_expr(e, used, assigned),
@@ -120,6 +124,25 @@ fn collect_var_refs_in_expr(
         | Expr::None
         | Expr::Ellipsis
         | Expr::Yield(None) => {}
+    }
+}
+
+fn collect_var_refs_in_fstring_parts(
+    parts: &[crate::ast::FStringPart],
+    used: &mut HashSet<String>,
+    assigned: &mut HashSet<String>,
+) {
+    for part in parts {
+        let crate::ast::FStringPart::Expr {
+            expr, format_spec, ..
+        } = part
+        else {
+            continue;
+        };
+        collect_var_refs_in_expr(expr, used, assigned);
+        if let Some(format_spec) = format_spec {
+            collect_var_refs_in_fstring_parts(format_spec, used, assigned);
+        }
     }
 }
 

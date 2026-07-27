@@ -341,6 +341,9 @@ pyrust_module! {
                 )))
             }
             ValueKind::PyModule(module) => {
+                if let Some(namespace) = module.borrow().live_namespace() {
+                    return Ok(namespace);
+                }
                 if let Some(globals) = _interp.filesystem_module_globals(module) {
                     return Ok(globals);
                 }

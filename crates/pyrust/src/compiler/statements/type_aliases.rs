@@ -1,5 +1,12 @@
 impl Compiler {
     fn compile_type_alias(&mut self, name: &str, type_params: &[TypeParam], value: &Expr) {
+        if let Some(message) = validate_type_parameter_bounds(type_params)
+            .or_else(|| validate_pep695_expression(value, Pep695ExpressionOwner::TypeAlias))
+        {
+            self.set_syntax_error(&message);
+            return;
+        }
+
         // ── Step 1: create TypeVar objects for each type parameter ───────────
         // Each TypeVar is bound (via StoreGlobal) in a dedicated type-parameter
         // env so the RHS expression and any bound/constraint can reference it by
@@ -9,7 +16,14 @@ impl Compiler {
         // PEP 695 evaluates those on first `__bound__` / `__constraints__`
         // access (#2290), by which time the captured env must still resolve
         // every type parameter (e.g. `type X[T, U: T] = ...`).
-        if !type_params.is_empty() {
+        // Class-body aliases always need their own annotation environment.
+        // Their evaluator resolves ordinary names through the live class
+        // namespace, whereas methods defined beside them must skip class locals
+        // and resolve bare names as globals. A dedicated child env lets the
+        // runtime attach that provider to the alias thunk without changing
+        // method closure semantics.
+        let needs_annotation_env = !type_params.is_empty() || self.is_class_body;
+        if needs_annotation_env {
             self.emit(Insn::PushTypeParamEnv);
         }
         // Phase 1: create every TypeVar (unbounded) and bind its name, so the RHS
@@ -81,10 +95,15 @@ impl Compiler {
             self.free_temp(*tv_reg);
         }
 
-        // ── Step 3: evaluate the RHS ─────────────────────────────────────────
-        // TypeVar names are bound in the active type-param env, so LoadGlobal
-        // for e.g. `T` resolves to the TypeVar object.
-        let val_reg = self.compile_expr(value);
+        // ── Step 3: compile the lazy RHS evaluator ────────────────────────────
+        // Module/function aliases evaluate this zero-argument annotation thunk
+        // on first `__value__` access. TypeVar names are already bound in the
+        // active type-param env captured by the thunk.
+        //
+        // Class aliases use the same zero-argument lazy evaluator. Their
+        // dedicated environment is connected to the in-progress and then live
+        // class namespace by runtime class construction.
+        let value_thunk_reg = self.compile_lambda(&[], value);
 
         // ── Step 4: leave the type-parameter env ─────────────────────────────
         // Mirrors CPython's hidden annotation scope: type params must NOT be
@@ -92,7 +111,7 @@ impl Compiler {
         // popped env stays alive via the Rc captured by each lazy bound thunk
         // (reachable from `__type_params__`), so a later `__bound__` access can
         // still resolve a forward/self reference.
-        if !type_params.is_empty() {
+        if needs_annotation_env {
             self.emit(Insn::PopTypeParamEnv);
         }
 
@@ -100,8 +119,13 @@ impl Compiler {
         let name_str = crate::value::Value::string(name);
         let name_idx = self.intern_const(name_str);
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeTypeAlias(dst, name_idx, val_reg, params_reg));
-        self.free_temp(val_reg);
+        self.emit(Insn::MakeTypeAlias(
+            dst,
+            name_idx,
+            value_thunk_reg,
+            params_reg,
+        ));
+        self.free_temp(value_thunk_reg);
         self.free_temp(params_reg);
 
         // ── Step 6: store the alias under `name` ─────────────────────────────
@@ -141,12 +165,11 @@ impl Compiler {
     /// Returns `(0, 0)` when there are no type parameters (caller must skip the
     /// reuse path in that case).
     ///
-    /// Note: the bound names are intentionally *not* deleted afterwards. Unlike
-    /// the type-alias path (whose RHS is fully evaluated inline), a generic
-    /// function/class body references its type parameters lazily at call time via
-    /// `LoadGlobal`, so the binding must outlive the definition statement. This
-    /// leaks the parameter name into the enclosing namespace, which CPython hides
-    /// behind a dedicated annotation scope; see the deferred note in the PR.
+    /// The bound names live in the active dedicated type-parameter environment.
+    /// The caller pops that environment before decorators and the enclosing-name
+    /// store, while closures retained by the generic object keep it alive for
+    /// lazy bounds and body references. The names therefore outlive definition
+    /// compilation without leaking into the enclosing namespace.
     fn emit_bind_type_params(&mut self, type_params: &[TypeParam]) -> (Reg, Reg) {
         let n = type_params.len() as Reg;
         if n == 0 {

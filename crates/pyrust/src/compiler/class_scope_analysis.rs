@@ -354,18 +354,11 @@ fn collect_class_lambda_outer_refs_in_expr(
 ) {
     match expr {
         Expr::Lambda { params, body } => {
-            let mut uses: HashSet<String> = HashSet::new();
-            collect_free_var_reads_in_expr(body, &mut uses);
-            collect_transitive_free_vars_in_expr(body, &mut uses);
-            // Default expressions are evaluated in the enclosing scope.
+            let mut body_uses: HashSet<String> = HashSet::new();
+            collect_free_var_reads_in_expr(body, &mut body_uses);
+            collect_transitive_free_vars_in_expr(body, &mut body_uses);
             for p in params {
-                if let Some(d) = &p.default {
-                    collect_free_var_reads_in_expr(d, &mut uses);
-                    collect_transitive_free_vars_in_expr(d, &mut uses);
-                }
-            }
-            for p in params {
-                uses.remove(&p.name);
+                body_uses.remove(&p.name);
             }
             // Promote any name that the lambda reads from the enclosing function.
             // Note: we do NOT filter out class-body locals here.  Python class
@@ -376,9 +369,31 @@ fn collect_class_lambda_outer_refs_in_expr(
             // class-attribute names to cell vars (issue #699), so the class-body
             // assignment correctly emits `RecordClassStore` regardless of what
             // the enclosing function promotes.
-            for name in uses {
+            for name in body_uses {
                 if local_index.contains_key(&name) {
                     cells.insert(name);
+                }
+            }
+            // A lambda default executes in the class body, but a nested lambda
+            // created by that default still skips the class namespace and closes
+            // over the surrounding function. Keep defaults separate from body
+            // parameter shadowing and recurse with the class-aware collector.
+            for p in params {
+                if let Some(default) = &p.default {
+                    collect_class_lambda_outer_refs_in_expr(
+                        default,
+                        local_index,
+                        class_locals,
+                        cells,
+                    );
+                }
+                if let Some(annotation) = &p.annotation {
+                    collect_class_lambda_outer_refs_in_expr(
+                        annotation,
+                        local_index,
+                        class_locals,
+                        cells,
+                    );
                 }
             }
         }

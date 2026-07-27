@@ -99,13 +99,13 @@ mod call_dispatch {
 
 mod classes {
     use super::{
-        EnvRef, ExpandedArgBuf, ExpandedCallArg, FrameKind, HashMap, HashSet, IndexMap,
-        Interpreter, PrimitiveClassKind, PyClass, PyDict, PyError, PyKey, Rc, RefCell, RegSlice,
-        RegsBuf, Result, UserFunction, UserFunctionParam, Value, ValueKind, VmFrameView,
-        class_is_subclass_of, class_mro_items, has_local_binding_in_current_or_ancestor,
-        invoke_class_method, lookup_class_attr, make_slot_member_descriptor, metaclass_of,
-        object_class_singleton, primitive_class_kind, smallvec, type_class_singleton,
-        value_type_name_str, vm_read,
+        ActiveClassAnnotationScopes, EnvRef, Environment, ExpandedArgBuf, ExpandedCallArg,
+        FrameKind, HashMap, HashSet, IndexMap, Interpreter, PrimitiveClassKind, PyClass, PyDict,
+        PyError, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result, UserFunction, UserFunctionParam,
+        Value, ValueKind, VmFrameView, Weak, class_is_subclass_of, class_mro_items,
+        has_local_binding_in_current_or_ancestor, invoke_class_method, lookup_class_attr,
+        make_slot_member_descriptor, metaclass_of, object_class_singleton, primitive_class_kind,
+        smallvec, type_class_singleton, value_type_name_str, vm_read,
     };
     include!("runtime/classes.rs");
 }
@@ -176,7 +176,7 @@ mod fast_path {
         NativeClassMethodCachePlan, PyDict, PyError, PyKey, Rc, ReadAttributeCachePlan,
         ReadMethodCachePlan, RegSlice, Result, UserFunction, Value, ValueKind,
         bind_builtin_attribute, bind_cached_native_class_method, comp_read_is_free, float_divmod,
-        invoke_class_method, live_collection_len, live_dict_view_item,
+        indexed_sequence_item, invoke_class_method, live_collection_len, live_dict_view_item,
         ordered_mapping_guard_message, py_mod_i64, read_attribute_cache_plan,
         read_method_cache_plan, value_from_bigint, write_attribute_cache_class,
     };
@@ -291,12 +291,12 @@ mod iteration {
     include!("runtime/iteration.rs");
 }
 pub(crate) use iteration::{
-    BigRangeIter, BigRangeState, CallableIter, EnumerateIter, FilterIter, GetItemIter,
-    GuardVersion, IterCacheBuf, IterSrcBuf, IterState, ItersBuf, LiveDictViewItem,
+    BigRangeIter, BigRangeState, CallableIter, ConsumerIterator, EnumerateIter, FilterIter,
+    GetItemIter, GuardVersion, IterCacheBuf, IterSrcBuf, IterState, ItersBuf, LiveDictViewItem,
     LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard, ProviderIterator, RangeIter,
-    ZipIter, iter_values, live_collection_len, live_dict_view_item, make_iterator,
-    make_reversed_dict_iter, make_reversed_getitem_iterator, make_reversed_range_iterator,
-    make_reversed_sequence_iterator, ordered_mapping_guard_message,
+    ZipIter, indexed_sequence_item, iter_values, live_collection_len, live_dict_view_item,
+    make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
+    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_message,
 };
 
 mod type_objects {

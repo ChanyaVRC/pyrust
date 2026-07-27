@@ -1,30 +1,47 @@
 impl Compiler {
     fn compile_lambda(&mut self, params: &[FunctionParam], body: &Expr) -> Reg {
-        // Convert lambda body into an implicit return statement.
+        // A lambda shares function-prototype/default/annotation semantics with
+        // `def`, but has no source-level binding. Build its function value
+        // directly instead of routing it through an impossible `<lambda>`
+        // global name; that keeps compiler transport out of Python namespaces
+        // and avoids StoreGlobal/LoadGlobal/DeleteName on every lambda.
         let body_stmts = vec![Stmt::Return(Some(body.clone()))];
-        let temp_name = "<lambda>";
-        // A lambda's `co_firstlineno` is the source line it appears on; use the
-        // statement line currently being compiled (issue #2185).
-        let lambda_lineno = self.current_lineno;
-        self.compile_def(
-            temp_name,
+        let Some((proto_idx, _, _)) = self.build_def_proto(
+            "<lambda>",
             params,
             &body_stmts,
             &[],
-            lambda_lineno,
-            &[],
+            self.current_lineno,
             None,
             false,
-            &[],
-        );
-        // compile_def stored the result in local or global named "<lambda>".
-        // We need to return the register it's in.
-        // Actually compile_def uses compile_store_name which may put it in a
-        // global. We need to load it back.
-        let name_idx = self.intern_name(temp_name);
+        ) else {
+            return 0;
+        };
+        let Some((defs_base, defs_n)) = self.emit_def_default_values(params) else {
+            return 0;
+        };
+        let Some((annots_base, annots_n)) = self.emit_def_annotation_values(params, None) else {
+            return 0;
+        };
+
         let dst = self.alloc_temp();
-        self.emit(Insn::LoadGlobal(dst, name_idx));
-        dst
+        self.emit(Insn::MakeFunction(
+            dst,
+            proto_idx,
+            defs_base,
+            defs_n,
+            annots_base,
+            annots_n,
+        ));
+
+        // Defaults/annotations are dead after MakeFunction. Compact the result
+        // into the first register they reserved so callers do not carry holes
+        // in the temporary stack.
+        if dst != defs_base {
+            self.emit(Insn::Move(defs_base, dst));
+        }
+        self.next_temp = defs_base + 1;
+        defs_base
     }
 
     fn compile_collection(&mut self, items: &[Expr], is_tuple: bool) -> Reg {

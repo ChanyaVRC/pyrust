@@ -48,6 +48,93 @@ fn raise_try_except_else_and_finally_work() {
 }
 
 #[test]
+fn exact_blocking_io_constructor_normalizes_character_count_once() {
+    let interpreter = run_program(
+        r#"class Count:
+    calls = 0
+    def __index__(self):
+        type(self).calls += 1
+        return 9
+
+marker = Count()
+error = BlockingIOError(1, "blocked", marker, 4, 5)
+constructor_result = [
+    error.characters_written,
+    type(error.characters_written).__name__,
+    Count.calls,
+    len(error.args),
+    error.args[2] is marker,
+    error.filename is None,
+    error.filename2 is None,
+]
+
+class ChildBlockingIOError(BlockingIOError):
+    pass
+
+child = ChildBlockingIOError(1, "blocked", 3)
+subclass_result = [
+    len(child.args),
+    child.filename,
+    hasattr(child, "characters_written"),
+]
+
+remapped_marker = Count()
+remapped = OSError(11, "blocked", remapped_marker)
+remapped_result = [
+    type(remapped).__name__,
+    remapped.characters_written,
+    Count.calls,
+    len(remapped.args),
+    remapped.args[2] is remapped_marker,
+]
+
+try:
+    BlockingIOError(1, "blocked", 1.5)
+except Exception as error:
+    float_result = [type(error).__name__, str(error)]
+"#,
+    );
+
+    assert_eq!(
+        interpreter.lookup_name("constructor_result").unwrap(),
+        Some(Value::list(vec![
+            Value::int(9),
+            Value::string("int"),
+            Value::int(1),
+            Value::int(5),
+            Value::bool_(true),
+            Value::bool_(true),
+            Value::bool_(true),
+        ]))
+    );
+    assert_eq!(
+        interpreter.lookup_name("subclass_result").unwrap(),
+        Some(Value::list(vec![
+            Value::int(2),
+            Value::int(3),
+            Value::bool_(false),
+        ]))
+    );
+    assert_eq!(
+        interpreter.lookup_name("remapped_result").unwrap(),
+        Some(Value::list(vec![
+            Value::string("BlockingIOError"),
+            Value::int(9),
+            Value::int(2),
+            Value::int(3),
+            Value::bool_(true),
+        ]))
+    );
+    assert_eq!(
+        interpreter.lookup_name("float_result").unwrap(),
+        Some(Value::list(vec![
+            Value::string("TypeError"),
+            Value::string("'float' object cannot be interpreted as an integer"),
+        ]))
+    );
+}
+
+#[test]
 fn bare_raise_reraises_active_exception() {
     let interpreter = run_program(
         "result = ''\ntry:\n    try:\n        raise RuntimeError('inner')\n    except RuntimeError:\n        raise\nexcept RuntimeError as err:\n    result = err.args[0]\n",

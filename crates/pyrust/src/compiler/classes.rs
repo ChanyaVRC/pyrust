@@ -306,6 +306,11 @@ impl Compiler {
         decorators: &[Expr],
         type_params: &[TypeParam],
     ) {
+        if let Some(message) = validate_type_parameter_bounds(type_params) {
+            self.set_syntax_error(&message);
+            return;
+        }
+
         let proto_idx = match self.build_class_proto(name, keywords, body) {
             Some(idx) => idx,
             None => return,

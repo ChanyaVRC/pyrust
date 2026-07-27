@@ -215,7 +215,11 @@ impl Interpreter {
         }
 
         // Run the class body, collecting the attrs dict it stores.
-        let (mut attrs, class_env_rc) = self.run_class_body(
+        let ClassBodyExecution {
+            mut attrs,
+            class_env: class_env_rc,
+            annotation_scopes,
+        } = self.run_class_body(
             &class_code,
             &local_index,
             &proto_qualname,
@@ -258,6 +262,9 @@ impl Interpreter {
             &extra_bases_vec,
             &class_kwargs,
         )? {
+            if let ValueKind::PyClass(class_ref) = class.kind() {
+                Self::bind_class_annotation_owner(&annotation_scopes, class_ref);
+            }
             return Ok(class);
         }
 
@@ -287,6 +294,7 @@ impl Interpreter {
             .borrow_mut()
             .values
             .insert("__class__", Value::py_class(Rc::clone(&class)));
+        Self::bind_class_annotation_owner(&annotation_scopes, &class);
 
         // PEP 487 hooks: __set_name__ on every descriptor, then
         // __init_subclass__ on the base.

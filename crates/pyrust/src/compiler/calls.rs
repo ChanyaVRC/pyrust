@@ -17,7 +17,7 @@ impl Compiler {
 
         // Keyword call with no `*args` / `**kwargs` splats and a non-method
         // callee: lay the arguments out contiguously in registers and emit a
-        // `CallKw` (issue #2382), skipping the BuildDict + BuildList + __vcall__
+        // `CallKw` (issue #2382), skipping the BuildDict + BuildList + hidden-helper
         // round-trip the generic variadic path uses.  Method keyword calls
         // (`obj.m(a=1)`) still take the variadic path so in-place mutation of
         // the receiver register is preserved.
@@ -43,7 +43,7 @@ impl Compiler {
         // trailing `**d`, every preceding arg a plain positional (no `*a` splat,
         // no literal keyword), non-method callee.  Lower to `CallEx`, which binds
         // straight from the splat dict via a monomorphic shape cache instead of
-        // copying the dict and round-tripping through `__vcall__`.
+        // copying the dict and round-tripping through a Python-visible helper.
         if let Some(npos) = double_splat_fast_shape(args)
             && npos <= u8::MAX as usize
             && !matches!(func, Expr::Attr { .. })
@@ -56,7 +56,7 @@ impl Compiler {
         // preceded only by plain positionals, non-method callee.  Lower to
         // `CallExArgs`, which reads the splat iterable and the `**kw` mapping
         // directly instead of building a list + dict and round-tripping through
-        // `__vcall__`.
+        // a Python-visible helper.
         if let Some((npos, nkw)) = positional_splat_fast_shape(args)
             && !matches!(func, Expr::Attr { .. })
         {
@@ -441,50 +441,13 @@ impl Compiler {
     }
 
     fn compile_variadic_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
-        // For variadic/keyword calls, we build a list of positional args and a
-        // dict of keyword args, then use a special "expanded call" mechanism.
-        // Since the current VM Call instruction only handles simple positional
-        // args, we fall back to calling via the `__call__` convention by building
-        // lists/dicts and using a runtime helper.
-        //
-        // Simplified: collect positional args into a list and keyword args into
-        // a dict, then call the runtime built-in "apply" helper.
-        // For now, compile as: func(*args, **kwargs) using the ExpandedCall route.
-        //
-        // The approach: build a list of positional args and a dict of kwargs,
-        // then use a special instruction (or just let the normal Call handle it
-        // by putting them in the right registers).
-        //
-        // Actually, to avoid a new instruction, we compile this as:
-        //   _call_helper(func, positional_list, kwargs_dict)
-        // where _call_helper is a built-in that expands and calls.
-        //
-        // Better: use ExpandedCall instruction. For now, emit the positional
-        // args normally and mark the call as variadic.
-        //
-        // SIMPLIFICATION: compile splat/kwargs calls by materializing all args
-        // and using a special VM call path via a built-in helper function.
-        // The interpreter's call_function_expanded handles this already.
-        //
-        // We encode a variadic call as: emit args into consecutive registers
-        // including splat markers, then emit a special extended Call instruction.
-        // Since we don't have that instruction, use a simpler encoding:
-        // build a list for *args and a dict for **kwargs.
-
-        // Strategy: compile func, then for each arg:
-        // - if splat: use list.extend
-        // - if double_splat: use dict.update
-        // - if named: add to kwargs dict
-        // - else: add to positional list
-        // Then call via "built-in" expanded call.
-
-        // Simpler approach: just pack everything into two registers (pos_list, kw_dict)
-        // and use the existing call infrastructure.
-
-        // For *args: args.iter().flat_map expand
-        // For **kwargs: dict from kwargs
-
-        // Detect obj.method(*args, **kwargs) — emit CallMethodExpanded.
+        // Generic fallback for source-order-sensitive shapes not covered by the
+        // compact call opcodes. Evaluate each argument once in source order,
+        // accumulating positionals into a private list and keywords into a
+        // private dict; the merge instructions preserve duplicate-key errors.
+        // Method calls use CallMethodExpanded so a fast-local receiver can be
+        // written back in place. Other calls pass the materialized pair through
+        // CallExArgs directly, without exposing transport through Python globals.
         if let Expr::Attr { target, name, .. } = func {
             // Same fast-local optimisation as compile_method_call: use the
             // variable's own register as `obj` so mutations persist.
@@ -658,32 +621,28 @@ impl Compiler {
             }
         }
 
-        // Emit a ExpandedCall using the __pyrust_vcall__ builtin.
-        // Actually, the cleanest way: use a built-in "apply" that takes
-        // (func, pos_list, kw_dict). This requires a new built-in or instruction.
-        //
-        // For now, emit via a 3-arg call to "__vcall__" which the interpreter
-        // knows how to dispatch.
-        let vcall_name_idx = self.intern_name("__vcall__");
-        let vcall_reg = self.alloc_temp();
-        self.emit(Insn::LoadGlobal(vcall_reg, vcall_name_idx));
-        // vcall_reg+1 = func_reg
-        // vcall_reg+2 = pos_list_reg
-        // vcall_reg+3 = kw_dict_reg
-        // We need these in consecutive registers vcall_reg+1..vcall_reg+4
-        let f1 = self.alloc_temp();
-        let f2 = self.alloc_temp();
-        let f3 = self.alloc_temp();
-        self.emit(Insn::Move(f1, func_reg));
-        self.emit(Insn::Move(f2, pos_list_reg));
-        self.emit(Insn::Move(f3, kw_dict_reg));
-        self.emit(Insn::Call(vcall_reg, 3));
-        // Keep next_temp at vcall_reg+1 so the result register stays live.
-        // This matches compile_call's convention: the returned register is NOT
-        // freed, so callers can safely alloc_temp() without aliasing it.
-        self.next_temp = vcall_reg + 1;
-        // Return value is in vcall_reg
-        vcall_reg
+        // The source-order-sensitive generic shape is now fully materialized:
+        // `pos_list_reg` is a private plain list and `kw_dict_reg` is a private
+        // plain dict. Reuse CallExArgs as the typed VM transport for that pair
+        // instead of resolving an implementation-only helper through Python's
+        // global namespace. Besides preventing a user binding from changing
+        // call syntax, this also removes one global lookup, three register
+        // moves, and one nested builtin dispatch.
+        self.emit(Insn::CallExArgs {
+            func: func_reg,
+            npos: 0,
+            nkw: 0,
+            // Ignored when `nkw == 0`.
+            kwnames_idx: 0,
+            args_splat: pos_list_reg,
+            kwargs: kw_dict_reg,
+        });
+        self.free_temp(kw_dict_reg);
+        self.free_temp(pos_list_reg);
+        // CallExArgs writes the result back to `func_reg`. Keep it live for the
+        // caller, matching every other compile_call lowering.
+        self.next_temp = func_reg + 1;
+        func_reg
     }
 
     /// Compile a double-splat call `f(<pos…>, **d)` (issue #2393, shape vetted by
@@ -691,7 +650,7 @@ impl Compiler {
     /// `R[func+1 .. func+1+npos]` contiguously (as for `CallKw`); the single `**d`
     /// source dict is evaluated into a separate `kwargs` register above the
     /// positional window.  The runtime binder reads the dict directly — no
-    /// BuildDict/DictUpdate copy and no `__vcall__` round-trip.
+    /// BuildDict/DictUpdate copy and no hidden-helper round-trip.
     fn compile_double_splat_call(
         &mut self,
         func: &Expr,

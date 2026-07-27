@@ -135,6 +135,25 @@ elif workload == "range-for-full":
         total += value
     if size and total != size * (size - 1) // 2:
         raise AssertionError("range loop lost a value")
+elif workload == "while-counted-module":
+    index = 0
+    total = 0
+    while index < size:
+        total += index
+        index += 1
+    if size and total != size * (size - 1) // 2:
+        raise AssertionError("counted while loop lost a value")
+elif workload == "while-counted-short-reentry":
+    outer = 0
+    total = 0
+    while outer < size:
+        index = 0
+        while index < 4:
+            total += index
+            index += 1
+        outer += 1
+    if total != size * 6:
+        raise AssertionError("short counted while loop lost a value")
 elif workload == "range-index-hot":
     values = range(1024)
     total = 0
@@ -291,6 +310,25 @@ elif workload == "math-sqrt-calls":
         total += sqrt((value & 63) + 1.0)
     if size and total <= 0.0:
         raise AssertionError("math.sqrt calls produced an invalid total")
+elif workload == "math-prod-streaming":
+    from math import prod
+
+    values = [1] * size
+    if prod(values) != 1:
+        raise AssertionError("math.prod streaming fold lost a factor")
+elif workload == "math-fsum-streaming":
+    from math import fsum
+
+    values = [1.0] * size
+    if fsum(values) != float(size):
+        raise AssertionError("math.fsum streaming fold lost a term")
+elif workload == "math-sumprod-streaming":
+    from math import sumprod
+
+    left = [1.0] * size
+    right = [2.0] * size
+    if sumprod(left, right) != float(size * 2):
+        raise AssertionError("math.sumprod streaming fold lost a pair")
 elif workload == "math-module-reloads":
     import math
     import sys
@@ -300,6 +338,13 @@ elif workload == "math-module-reloads":
         import math
     if math.sqrt(4.0) != 2.0:
         raise AssertionError("reloaded math module lost its native callables")
+elif workload == "math-module-cached-imports":
+    import math
+
+    for _ in range(size):
+        import math
+    if math.sqrt(4.0) != 2.0:
+        raise AssertionError("cached math import lost its native callables")
 elif workload == "filesystem-module-attr":
     import _bench_refactor_filesystem_namespace as module
 
@@ -428,6 +473,43 @@ elif workload == "callmemo-scalar-hot":
         total += square(7)
     if total != size * 49:
         raise AssertionError("CallMemo returned a stale scalar result")
+elif workload == "leaf-binop-dynamic-calls":
+    def run_leaf_calls(count):
+        def add(left, right):
+            return left + right
+
+        increment = 1
+        total = 0
+        for value in range(count):
+            left = value & 255
+            # Keep both arguments in pre-existing registers so this workload
+            # exercises the guard-before-Move hot shape, rather than merely
+            # timing an ineligible argument-expression layout.
+            total += add(left, increment)
+        return total
+
+
+    total = run_leaf_calls(size)
+    cycles, remainder = divmod(size, 256)
+    expected = cycles * (255 * 256 // 2 + 256) + remainder * (
+        remainder - 1
+    ) // 2 + remainder
+    if total != expected:
+        raise AssertionError("guarded dynamic leaf-call inline lost a value")
+elif workload == "leaf-binop-constant-calls":
+    def run_leaf_calls(count):
+        def add(left, right):
+            return left + right
+
+        total = 0
+        for _ in range(count):
+            total += add(20, 22)
+        return total
+
+
+    total = run_leaf_calls(size)
+    if total != size * 42:
+        raise AssertionError("guarded constant leaf-call inline lost a value")
 elif workload == "callmemo-high-arity-hot":
     def add8(a, b, c, d, e, f, g, h):
         return a + b + c + d + e + f + g + h
@@ -568,6 +650,20 @@ elif workload == "keyword-call-hot":
         total += combine(first=1, second=2, third=3)
     if total != size * 6:
         raise AssertionError("keyword-call cache bound the wrong arguments")
+elif workload == "variadic-mixed-expanded":
+    def combine(first, second, marker=0, tail=0):
+        return first + second + marker + tail
+
+
+    positional = (1, 2)
+    keywords = {"tail": 4}
+    total = 0
+    for _ in range(size):
+        # The literal keyword between `*args` and `**kwargs` deliberately uses
+        # the source-order-sensitive generic expanded-call lowering.
+        total += combine(*positional, marker=3, **keywords)
+    if total != size * 10:
+        raise AssertionError("generic expanded call bound the wrong arguments")
 elif workload == "native-classmethod-calls":
     total = 0
     for _ in range(size):

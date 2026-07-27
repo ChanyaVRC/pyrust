@@ -1,4 +1,15 @@
 // Generic module loading and lookup.
+fn validate_import_cache_entry(name: &str, cached: Option<Value>) -> Result<Option<Value>> {
+    if cached.as_ref().is_some_and(Value::is_none) {
+        return Err(PyError::import_error(
+            "ModuleNotFoundError",
+            format!("import of {name} halted; None in sys.modules"),
+            Some(name.to_string()),
+        ));
+    }
+    Ok(cached)
+}
+
 impl Interpreter {
     /// Resolve a module-owned class through a typed cache slot.
     ///
@@ -51,11 +62,11 @@ impl Interpreter {
         module_name: &str,
         attribute_name: &str,
     ) -> Result<Rc<RefCell<PyClass>>> {
-        let (registry, registry_owner_state) = self.import_module_registry_with_owner_state()?;
-        let registry_state = registry
-            .dict_iteration_mutation_state()
-            .ok_or_else(|| PyError::Runtime("sys.modules is not a dict".to_string()))?;
-
+        // Resolve the authoritative module before gathering optional cache
+        // guards. `load_module` intentionally gives an entry retained in the
+        // interpreter's original registry priority over the Python-visible
+        // `sys.modules` attribute. A missing or invalid visible attribute must
+        // therefore not turn that successful internal hit into an error.
         let module_value = self.load_module(module_name)?;
         let ValueKind::PyModule(module) = module_value.kind() else {
             return Err(PyError::Runtime(format!(
@@ -74,21 +85,35 @@ impl Interpreter {
             };
             (module.mutation_state(), Rc::clone(class))
         };
-        if let (Some(registry_owner_state), Some(registry_version), Some(module_version)) = (
-            registry_owner_state,
-            registry_state.cache_version(),
-            module_state.cache_version(),
-        ) && let Some(registry_owner_version) = registry_owner_state.cache_version()
-        {
-            let entry = CachedModuleClass {
-                registry_owner_version,
-                registry_owner_state,
-                registry_version,
-                registry_state,
-                module_version,
-                module_state,
-                class: Rc::downgrade(&class),
-            };
+
+        // Cache installation is best-effort metadata collection after the
+        // semantic lookup. The existing guards cover the live `sys.modules`
+        // binding and one exact registry. A replacement, missing, or invalid
+        // binding stays uncached: such states either need two independent
+        // content guards or have no usable mutation generation.
+        let cache_entry = self
+            .import_module_registry_with_owner_state()
+            .ok()
+            .and_then(|(registry, registry_owner_state)| {
+                if !values_are_identical(&registry, &self.bootstrap_module_registry) {
+                    return None;
+                }
+                let registry_owner_state = registry_owner_state?;
+                let registry_state = registry.dict_iteration_mutation_state()?;
+                let module_version = module_state.cache_version()?;
+                let registry_owner_version = registry_owner_state.cache_version()?;
+                let registry_version = registry_state.cache_version()?;
+                Some(CachedModuleClass {
+                    registry_owner_version,
+                    registry_owner_state,
+                    registry_version,
+                    registry_state,
+                    module_version,
+                    module_state,
+                    class: Rc::downgrade(&class),
+                })
+            });
+        if let Some(entry) = cache_entry {
             self.module_class_cache
                 .get_or_insert_with(|| Box::new(ModuleClassCache::default()))
                 .entries[slot.0] = Some(entry);
@@ -103,10 +128,8 @@ impl Interpreter {
     /// imported module here as the import cache; pyrust mirrors each
     /// `module_cache` insertion into the active Python-visible registry so user
     /// code observes membership and identity.
-    fn register_in_sys_modules(&self, name: &str, module: &Value) -> Result<()> {
-        let modules = self.import_module_registry()?;
-        modules.dict_insert(pyrust_core::PyKey::str_from(name), module.clone())?;
-        Ok(())
+    fn register_in_sys_modules(&mut self, name: &str, module: &Value) -> Result<()> {
+        self.insert_import_registry(name, module.clone())
     }
 
     /// Remove a module whose initialization raised from both import caches.
@@ -115,25 +138,20 @@ impl Interpreter {
     /// Python-source injection/finalization failed.  Leaving the initially
     /// registered object behind would make the next `import` return a
     /// half-initialized module instead of retrying its body.
-    fn unregister_failed_module(&self, name: &str) {
+    fn unregister_failed_module(&mut self, name: &str) {
         self.module_cache.borrow_mut().remove(name);
-        if let Ok(modules) = self.import_module_registry() {
-            let _ = modules.dict_with_mut(|dict| {
-                dict.shift_remove(&pyrust_core::PyKey::str_from(name));
-            });
-        }
+        let _ = self.remove_import_registry(name);
     }
 
     /// Look up `name` in the user-visible `sys.modules` dict (issue #2727).
-    /// `sys.modules` is the authoritative import cache in CPython: a direct
-    /// write (`sys.modules["x"] = obj`) makes `import x` a cache hit, and a
-    /// `del sys.modules["x"]` forces re-execution on the next import.  We honour
-    /// both by consulting it before the internal `module_cache`.
-    fn lookup_sys_modules(&self, name: &str) -> Result<Option<Value>> {
-        let modules = self.import_module_registry()?;
-        Ok(modules
-            .dict_with(|d| d.get(&pyrust_core::PyKey::str_from(name)).cloned())
-            .flatten())
+    /// This is the importlib-visible cache in CPython: a direct write makes a
+    /// previously unknown name a cache hit, while deleting a name not retained
+    /// in the interpreter's original dict forces re-execution. Existing entries
+    /// in that original dict are resolved before this mapping by
+    /// [`Self::load_module`].
+    fn lookup_sys_modules(&mut self, name: &str) -> Result<Option<Value>> {
+        let cached = self.lookup_import_registry(name)?;
+        validate_import_cache_entry(name, cached)
     }
 
     /// Populate the per-interpreter `sys.path` when `sys` is first imported.
@@ -149,9 +167,18 @@ impl Interpreter {
             .map(|dir| Value::string(dir.to_string_lossy()))
             .unwrap_or_else(|| Value::string(""));
         let mut sys = sys.borrow_mut();
-        sys.attrs
-            .insert("path".to_string(), Value::list(vec![initial_path]));
-        sys.attrs.insert(
+        sys.attach_live_namespace();
+        for (name, value) in [
+            ("__name__", Value::string("sys")),
+            ("__package__", Value::string("")),
+            ("__loader__", Value::none()),
+            ("__spec__", Value::none()),
+            ("__doc__", Value::none()),
+        ] {
+            sys.insert_attr(name.to_string(), value);
+        }
+        sys.insert_attr("path".to_string(), Value::list(vec![initial_path]));
+        sys.insert_attr(
             "modules".to_string(),
             self.bootstrap_module_registry.clone(),
         );
@@ -165,7 +192,7 @@ impl Interpreter {
             let ValueKind::PyModule(sys) = module.kind() else {
                 return None;
             };
-            sys.borrow().attrs.get("path").cloned()
+            sys.borrow().get_attr_value("path")
         });
 
         if let Some(path) = sys_path
@@ -181,16 +208,21 @@ impl Interpreter {
     }
 
     pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
-        // `sys.modules` is the authoritative cache (CPython semantics): a value
-        // injected directly by user code (`sys.modules["x"] = obj`) wins, and a
-        // `del sys.modules["x"]` invalidates the internal `module_cache` so the
-        // module re-executes on the next import.
+        // CPython first probes its interpreter-owned original modules dict. The
+        // public `sys.modules` attribute initially aliases it, but rebinding the
+        // attribute does not discard already-cached entries. Only a name absent
+        // from the original dict reaches importlib's current visible mapping.
+        if let Some(cached) =
+            validate_import_cache_entry(name, self.lookup_internal_import_registry(name))?
+        {
+            return Ok(cached);
+        }
         if let Some(cached) = self.lookup_sys_modules(name)? {
             return Ok(cached);
         }
-        // Present internally but absent from `sys.modules` means it was
-        // `del`-eted there: drop the stale internal entry and fall through to a
-        // fresh load so the module body re-executes, matching CPython.
+        // Present in PyRust's object-owner map but absent from both import
+        // registries means the Python-visible cache entry was deleted. Drop the
+        // stale owner and load a fresh object.
         let present_internally = self.module_cache.borrow().contains_key(name);
         if present_internally {
             self.module_cache.borrow_mut().remove(name);

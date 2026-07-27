@@ -1,33 +1,17 @@
 // Shared attribute-domain support.
-/// Whether the built-in exception family's native slot owns `name` for this
-/// class lookup.
+/// Resolve the built-in exception family's native slot policy for this class
+/// lookup.
 ///
 /// A user exception subclass may override a native slot name with its own
 /// class attribute. In that case normal descriptor/instance-dict precedence
 /// applies and the internal slot remains available only to exception
 /// machinery (for example `BaseException.__reduce__`).
-fn active_exception_slot(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
-    pyrust_builtins::instance_dict::is_exception_slot_for_class(name, class)
-        && lookup_class_attr(class, name).is_none()
-}
-
-/// Apply CPython's deletion contract for an active built-in exception slot.
-fn delete_active_exception_slot(instance: &Rc<RefCell<PyInstance>>, name: &str) -> Result<()> {
-    match name {
-        "args" | "__traceback__" | "__cause__" | "__context__" => {
-            return Err(pyrust_core::type_err!("{name} may not be deleted"));
-        }
-        "__suppress_context__" | "start" | "end" | "characters_written" => {
-            return Err(pyrust_core::type_err!(
-                "can't delete numeric/char attribute"
-            ));
-        }
-        _ => {}
-    }
-    // Pointer-style structured fields become NULL on the C object. Their
-    // getters present that state as None, and repeated deletion succeeds.
-    instance.borrow_mut().attrs.shift_remove_slot(name);
-    Ok(())
+fn active_exception_slot_policy(
+    class: &Rc<RefCell<PyClass>>,
+    name: &str,
+) -> Option<ExceptionSlotPolicy> {
+    let policy = exception_slot_policy(class, name)?;
+    lookup_class_attr(class, name).is_none().then_some(policy)
 }
 
 #[derive(PartialEq, Eq)]

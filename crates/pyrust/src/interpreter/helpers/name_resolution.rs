@@ -273,9 +273,13 @@ fn lookup_name_in_env_as_free(env: &EnvRef, name: &str) -> Result<Option<Value>>
 fn lookup_name_in_env_impl(env: &EnvRef, name: &str, as_free: bool) -> Result<Option<Value>> {
     let borrowed = env.borrow();
     let value = borrowed.values.get(name).cloned();
+    let class_annotation_value = borrowed.class_annotation_binding(name);
     let is_local_name = borrowed.local_names.contains(name);
     let parent = borrowed.parent.clone();
     drop(borrowed);
+    if class_annotation_value.is_some() {
+        return Ok(class_annotation_value);
+    }
     if value.is_some() {
         return Ok(value);
     }

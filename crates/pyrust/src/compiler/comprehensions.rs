@@ -1,3 +1,9 @@
+struct ComprehensionScopeBindings {
+    locals: indexmap::IndexSet<String>,
+    globals: HashSet<String>,
+    nonlocals: HashSet<String>,
+}
+
 impl Compiler {
     // ── Comprehension compilation ──────────────────────────────────────────────
 
@@ -80,6 +86,69 @@ impl Compiler {
         body
     }
 
+    /// Resolve bindings for the implicit function shared by collection
+    /// comprehensions and generator expressions.
+    ///
+    /// PEP 572 assignment-expression targets skip every comprehension scope:
+    /// they become nonlocals when an enclosing function owns the name, and
+    /// globals otherwise. Keeping this classification here prevents the two
+    /// compilation paths from silently diverging.
+    fn analyze_comprehension_scope(
+        &mut self,
+        params: &[FunctionParam],
+        body: &[Stmt],
+    ) -> Option<ComprehensionScopeBindings> {
+        let mut walrus_targets = HashSet::new();
+        Self::collect_walrus_targets_in_stmts(body, &mut walrus_targets);
+
+        let walrus_nonlocals: HashSet<String> = walrus_targets
+            .iter()
+            .filter(|name| {
+                self.outer_locals
+                    .iter()
+                    .any(|scope| scope.contains_key(*name))
+                    || (self.is_function_scope && self.local_index.contains_key(*name))
+            })
+            .cloned()
+            .collect();
+        let walrus_globals: HashSet<String> = walrus_targets
+            .difference(&walrus_nonlocals)
+            .cloned()
+            .collect();
+
+        let mut globals = crate::interpreter::collect_global_names(body);
+        globals.extend(walrus_globals);
+        let mut nonlocals = crate::interpreter::collect_nonlocal_names(body);
+        nonlocals.extend(walrus_nonlocals);
+
+        let raw_locals =
+            crate::interpreter::collect_local_names(params, body, &globals, &nonlocals);
+        let locals = raw_locals
+            .into_iter()
+            .filter(|name| !walrus_targets.contains(name))
+            .collect();
+
+        let mut sorted_nonlocals: Vec<&String> = nonlocals.iter().collect();
+        sorted_nonlocals.sort();
+        for name in sorted_nonlocals {
+            let found = self
+                .outer_locals
+                .iter()
+                .any(|scope| scope.contains_key(name))
+                || (self.is_function_scope && self.local_index.contains_key(name));
+            if !found {
+                self.set_syntax_error(&format!("no binding for nonlocal '{name}' found"));
+                return None;
+            }
+        }
+
+        Some(ComprehensionScopeBindings {
+            locals,
+            globals,
+            nonlocals,
+        })
+    }
+
     /// Compile a comprehension (list/set/dict) as a nested implicit function,
     /// mirroring CPython's scope-isolation behaviour.
     ///
@@ -110,61 +179,19 @@ impl Compiler {
             is_positional_only: false,
         }];
 
-        // PEP 572: walrus targets inside a comprehension body belong to the
-        // *enclosing* scope, not to the comprehension's implicit inner scope.
-        // Collect them here so we can route writes to the right place:
-        //   - target in enclosing function scope → inject as `nonlocal`
-        //   - target in module/global scope      → inject as `global`
-        let mut walrus_targets: HashSet<String> = HashSet::new();
-        Self::collect_walrus_targets_in_stmts(&fn_body, &mut walrus_targets);
-
-        // Determine which walrus targets live in an enclosing function scope.
-        let walrus_nonlocal: HashSet<String> = walrus_targets
-            .iter()
-            .filter(|name| {
-                self.outer_locals.iter().any(|m| m.contains_key(*name))
-                    || (self.is_function_scope && self.local_index.contains_key(*name))
-            })
-            .cloned()
-            .collect();
-
-        // Walrus targets NOT in any enclosing function scope go through the
-        // global (module) env instead.
-        let walrus_global: HashSet<String> = walrus_targets
-            .difference(&walrus_nonlocal)
-            .cloned()
-            .collect();
-
-        let mut inner_global = crate::interpreter::collect_global_names(&fn_body);
-        inner_global.extend(walrus_global);
-        let mut inner_nonlocal = crate::interpreter::collect_nonlocal_names(&fn_body);
-        inner_nonlocal.extend(walrus_nonlocal);
-
-        // Build inner locals excluding any walrus targets (they belong to the
-        // enclosing scope, not the comprehension's implicit function).
-        let raw_inner_local = crate::interpreter::collect_local_names(
-            &params,
-            &fn_body,
-            &inner_global,
-            &inner_nonlocal,
-        );
-        // `collect_local_names` already excludes names in inner_global /
-        // inner_nonlocal, but it does NOT know about walrus targets yet
-        // (they were just added above). Filter them out explicitly.
-        let inner_local: indexmap::IndexSet<String> = raw_inner_local
-            .into_iter()
-            .filter(|n| !walrus_targets.contains(n))
-            .collect();
+        let Some(scope) = self.analyze_comprehension_scope(&params, &fn_body) else {
+            return 0;
+        };
 
         let mut inner_index: HashMap<String, Reg> = HashMap::new();
         let mut slot: Reg = 0;
         for param in &params {
-            if inner_local.contains(&param.name) {
+            if scope.locals.contains(&param.name) {
                 inner_index.insert(param.name.clone(), slot);
                 slot += 1;
             }
         }
-        for loc in &inner_local {
+        for loc in &scope.locals {
             if !inner_index.contains_key(loc) {
                 inner_index.insert(loc.clone(), slot);
                 slot += 1;
@@ -173,26 +200,8 @@ impl Compiler {
         let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
         let def_bound = crate::interpreter::compute_def_bound_mask(&params, &inner_index_rc);
         let inner_cell_vars = collect_cell_vars(&fn_body, &inner_index_rc);
-        let inner_global_rc = Rc::new(inner_global);
-        let inner_nonlocal_rc = Rc::new(inner_nonlocal);
-
-        // Validate nonlocal declarations (same as compile_def / compile_gen_exp).
-        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
-        sorted_nonlocals.sort();
-        for nonlocal_name in sorted_nonlocals {
-            let found = self
-                .outer_locals
-                .iter()
-                .any(|m| m.contains_key(nonlocal_name))
-                || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
-            if !found {
-                self.set_syntax_error(&format!(
-                    "no binding for nonlocal '{}' found",
-                    nonlocal_name
-                ));
-                return 0;
-            }
-        }
+        let inner_global_rc = Rc::new(scope.globals);
+        let inner_nonlocal_rc = Rc::new(scope.nonlocals);
 
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
         // Threaded source file (#2438): a lambda's code object inherits the
@@ -339,12 +348,12 @@ impl Compiler {
         }
         let is_async =
             clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[elt], clauses);
-        if is_async && !self.is_async_function {
-            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
-            return 0;
-        }
         if let Some(msg) = check_comprehension(&[elt], clauses, "list comprehension") {
             self.set_syntax_error(&msg);
+            return 0;
+        }
+        if is_async && !self.is_async_function {
+            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
         }
 
@@ -397,13 +406,12 @@ impl Compiler {
         }
         let is_async =
             clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[key, val], clauses);
-        if is_async && !self.is_async_function {
-            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
-            return 0;
-        }
-
         if let Some(msg) = check_comprehension(&[key, val], clauses, "dict comprehension") {
             self.set_syntax_error(&msg);
+            return 0;
+        }
+        if is_async && !self.is_async_function {
+            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
         }
 
@@ -513,13 +521,12 @@ impl Compiler {
         }
         let is_async =
             clauses.iter().any(|c| c.is_async) || Self::comp_body_has_await(&[elt], clauses);
-        if is_async && !self.is_async_function {
-            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
-            return 0;
-        }
-
         if let Some(msg) = check_comprehension(&[elt], clauses, "set comprehension") {
             self.set_syntax_error(&msg);
+            return 0;
+        }
+        if is_async && !self.is_async_function {
+            self.set_syntax_error("asynchronous comprehension outside of an asynchronous function");
             return 0;
         }
 
@@ -626,20 +633,19 @@ impl Compiler {
         // emit MakeFunction directly into a temp register instead of binding
         // the function into the global/local environment.  This avoids the
         // observable StoreGlobal("<genexp>") / LoadGlobal("<genexp>") pair.
-        let inner_global = crate::interpreter::collect_global_names(&body);
-        let inner_nonlocal = crate::interpreter::collect_nonlocal_names(&body);
-        let inner_local =
-            crate::interpreter::collect_local_names(&params, &body, &inner_global, &inner_nonlocal);
+        let Some(scope) = self.analyze_comprehension_scope(&params, &body) else {
+            return 0;
+        };
 
         let mut inner_index: HashMap<String, Reg> = HashMap::new();
         let mut slot: Reg = 0;
         for param in &params {
-            if inner_local.contains(&param.name) {
+            if scope.locals.contains(&param.name) {
                 inner_index.insert(param.name.clone(), slot);
                 slot += 1;
             }
         }
-        for loc in &inner_local {
+        for loc in &scope.locals {
             if !inner_index.contains_key(loc) {
                 inner_index.insert(loc.clone(), slot);
                 slot += 1;
@@ -650,26 +656,8 @@ impl Compiler {
         // Genexp bodies are never pure (they produce a generator object with
         // side-effectful iteration).
         let inner_cell_vars = collect_cell_vars(&body, &inner_index_rc);
-        let inner_global_rc = Rc::new(inner_global);
-        let inner_nonlocal_rc = Rc::new(inner_nonlocal);
-
-        // Validate nonlocal declarations in comprehension bodies (same as compile_def).
-        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
-        sorted_nonlocals.sort();
-        for nonlocal_name in sorted_nonlocals {
-            let found = self
-                .outer_locals
-                .iter()
-                .any(|m| m.contains_key(nonlocal_name))
-                || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
-            if !found {
-                self.set_syntax_error(&format!(
-                    "no binding for nonlocal '{}' found",
-                    nonlocal_name
-                ));
-                return 0;
-            }
-        }
+        let inner_global_rc = Rc::new(scope.globals);
+        let inner_nonlocal_rc = Rc::new(scope.nonlocals);
 
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
         // Threaded source file (#2438): the comprehension's implicit code object

@@ -10,7 +10,7 @@ impl Interpreter {
         let ValueKind::PyModule(module) = module_val.kind() else {
             return None;
         };
-        let stream = module.borrow().attrs.get(name).cloned()?;
+        let stream = module.borrow().get_attr_value(name)?;
         if pyrust_builtins::file::default_stdio_kind(&stream).is_some() {
             return None;
         }
@@ -25,7 +25,7 @@ impl Interpreter {
                 "internal: sys is not a module".to_string(),
             ));
         };
-        let stream = module.borrow().attrs.get(name).cloned();
+        let stream = module.borrow().get_attr_value(name);
         Ok(stream.unwrap_or_else(Value::none))
     }
 

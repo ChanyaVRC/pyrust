@@ -11,6 +11,20 @@ plus_one.__defaults__ = (5,)
 print("defaults-after", plus_one())
 
 
+# A fully-bound outer call may still invoke the same function recursively while
+# omitting a positional parameter. Its scalar result then depends transitively
+# on mutable __defaults__ state and must not be cached under the outer arguments.
+def recursive_default(n, explicit, fallback=1):
+    if n == 0:
+        return fallback
+    return recursive_default(n - 1, explicit)
+
+
+print("recursive-default-before", recursive_default(1, 99, 88))
+recursive_default.__defaults__ = (5,)
+print("recursive-default-after", recursive_default(1, 99, 88))
+
+
 # A registry spelling does not prove that the active global binding is the
 # canonical builtin.
 builtin_calls = 0

@@ -78,6 +78,27 @@ impl Interpreter {
             ));
         }
 
+        // PEP 695 type aliases defer their RHS until `__value__` is first
+        // read. Cache only a successful result; a failing evaluation retains
+        // the thunk so a later access retries, matching CPython.
+        if name == "__value__" && is_type_alias_class(&instance.borrow().class) {
+            let thunk = instance.borrow().attrs.get("__evaluate_value__").cloned();
+            if let Some(thunk) = thunk {
+                let value = self.call_function_expanded(thunk, &[])?;
+                let mut inst = instance.borrow_mut();
+                inst.attrs.insert("__value__", value.clone());
+                inst.attrs.shift_remove("__evaluate_value__");
+                return Ok(value);
+            }
+        }
+        if name == "__evaluate_value__" && is_type_alias_class(&instance.borrow().class) {
+            let class_name = instance.borrow().class.borrow().name.clone();
+            return Err(pyrust_core::py_err!(
+                "AttributeError",
+                "'{class_name}' object has no attribute '{name}'"
+            ));
+        }
+
         // General descriptor protocol (CPython Data Model §3.3.2):
         //
         // Step 1: Walk the class MRO for a data descriptor (has
@@ -120,25 +141,18 @@ impl Interpreter {
         // through the mapping without shadowing `e.args`, `e.errno`, etc.
         // A user subclass class attribute with the same name disables this
         // adapter and falls through to normal Python lookup precedence.
-        if active_exception_slot(&class, name) {
+        if let Some(policy) = active_exception_slot_policy(&class, name) {
             let slot_value = instance.borrow().attrs.get_slot(name).cloned();
             if let Some(value) = slot_value {
-                if name == "__traceback__"
+                if policy.materializes_deferred_traceback()
                     && let Some(real) = self.materialize_deferred_traceback(&value)
                 {
-                    instance
-                        .borrow_mut()
-                        .attrs
-                        .insert_slot("__traceback__", real.clone());
+                    instance.borrow_mut().attrs.insert_slot(name, real.clone());
                     return Ok(real);
                 }
                 return Ok(value);
             }
-            return Ok(match name {
-                "args" => Value::tuple(Vec::new()),
-                "__suppress_context__" => Value::bool_(false),
-                _ => Value::none(),
-            });
+            return policy.lookup_default(name);
         }
 
         // Step 2: Instance __dict__.  Scope the shared borrow so it is dropped
@@ -364,39 +378,11 @@ impl Interpreter {
         // PEP 3134 / issue #1066: validate native exception-slot types.
         // A user subclass class attribute with the same name restores normal
         // Python dict semantics and is therefore not validated as a C slot.
-        let exception_slot = active_exception_slot(&class, name);
-        if exception_slot {
-            match name {
-                "__cause__" | "__context__" => {
-                    let ok = match value.kind() {
-                        ValueKind::None => true,
-                        ValueKind::PyInstance(inst) => is_exception_class(&inst.borrow().class),
-                        _ => false,
-                    };
-                    if !ok {
-                        return Err(pyrust_core::type_err!(
-                            "exception {} must be None or derive from BaseException",
-                            if name == "__cause__" {
-                                "cause"
-                            } else {
-                                "context"
-                            }
-                        ));
-                    }
-                }
-                "__suppress_context__" if !matches!(value.kind(), ValueKind::Bool(_)) => {
-                    return Err(pyrust_core::type_err!("attribute value type must be bool"));
-                }
-                "__traceback__" => {
-                    let ok = value.is_none() || pyrust_builtins::traceback::is_traceback(&value);
-                    if !ok {
-                        return Err(pyrust_core::type_err!(
-                            "__traceback__ must be a traceback or None"
-                        ));
-                    }
-                }
-                _ => {}
-            }
+        let exception_slot = active_exception_slot_policy(&class, name);
+        if let Some(policy) = exception_slot {
+            let value = policy.prepare_assignment(self, value)?;
+            instance.borrow_mut().attrs.insert_slot(name, value);
+            return Ok(());
         }
         // Issue #1957: `obj.__class__ = NewType` re-types the instance rather
         // than storing a literal attribute. CPython requires another mutable
@@ -407,10 +393,7 @@ impl Interpreter {
         if name == "__class__" {
             return self.retype_instance(&instance, value);
         }
-        if exception_slot {
-            instance.borrow_mut().attrs.insert_slot(name, value);
-            return Ok(());
-        }
+        debug_assert!(exception_slot.is_none());
         // Issue #1106: if the class declares `__slots__`, only allow assignment
         // to names in the slot set.  CPython raises AttributeError for names not
         // listed in `__slots__` (when the class has no __dict__ slot).
@@ -509,8 +492,8 @@ impl Interpreter {
         {
             return result;
         }
-        if active_exception_slot(&class, name) {
-            return delete_active_exception_slot(&instance, name);
+        if let Some(policy) = active_exception_slot_policy(&class, name) {
+            return policy.delete(&instance, name);
         }
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
             let class_name = instance.borrow().class.borrow().name.clone();

@@ -10,8 +10,8 @@
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::{
-    ExpandedCallArg, builtin_data_backing, float_to_bigint, reject_keyword_args_expanded,
-    value_to_float, value_type_name_str,
+    ConsumerIterator, ExpandedCallArg, builtin_data_backing, float_to_bigint,
+    reject_keyword_args_expanded, value_to_float, value_type_name_str,
 };
 use crate::value::{PyBigInt, PyToPrimitive, Value, ValueKind};
 use pyrust_derive::pyrust_module;
@@ -42,7 +42,7 @@ use self::integer_algorithms::{
     bigint_gcd, bigint_lcm, bigint_to_int_value, value_to_bigint_int, value_to_bigint_strict_int,
 };
 use self::special_functions::{m_erf, m_erfc, m_lgamma, m_tgamma};
-use self::summation::{fsum_impl, sumprod_floats};
+use self::summation::{FsumState, SumProdFloatState};
 
 pyrust_module! {
     constants {
@@ -612,9 +612,9 @@ pyrust_module! {
             .first()
             .map(|a| a.value.clone())
             .unwrap_or_else(|| Value::int(1));
-        let items = _interp.collect_iterable(&positional[0].value)?;
+        let mut iterator = ConsumerIterator::new(_interp, &positional[0].value)?;
         let mut acc = start;
-        for item in items {
+        while let Some(item) = iterator.next(_interp)? {
             acc = _interp.eval_binary(acc, BinaryOp::Mul, item)?;
         }
         Ok(acc)
@@ -924,12 +924,15 @@ pyrust_module! {
                 ),
             ));
         }
-        let items = _interp.collect_iterable(&args[0].value)?;
-        let mut values = Vec::with_capacity(items.len());
-        for item in &items {
-            values.push(math_arg_to_float(_interp, item)?);
+        let mut iterator = ConsumerIterator::new(_interp, &args[0].value)?;
+        let mut state = FsumState::new();
+        while let Some(item) = iterator.next(_interp)? {
+            // Coerce and fold each item before advancing the iterator again.
+            // A bad first element therefore cannot consume an unused or
+            // unbounded tail.
+            state.add(math_arg_to_float(_interp, &item)?)?;
         }
-        Ok(Value::float(fsum_impl(&values)?))
+        Ok(Value::float(state.finish()?))
     }
 
     /// CPython: math.sumprod(p, q) → number.  Sum of products of two iterables
@@ -948,62 +951,126 @@ pyrust_module! {
                 format!("sumprod expected 2 arguments, got {}", args.len()),
             ));
         }
-        let p_items = _interp.collect_iterable(&args[0].value)?;
-        let q_items = _interp.collect_iterable(&args[1].value)?;
-        if p_items.len() != q_items.len() {
-            return Err(PyError::named(
-                "ValueError",
-                "Inputs are not the same length".to_string(),
-            ));
-        }
-        // CPython's math_sumprod_impl picks a path per pair (Modules/mathmodule.c):
-        //  (1) both exact ints  -> exact integer accumulation (BigInt here),
-        //  (2) an exact float / exact-int pair -> triple-double float sum,
-        //  (3) anything else (e.g. an object with __mul__) -> the generic
-        //      `*` / `+` operators.
-        // We classify whole iterables up front: all-int -> (1); all
-        // float-path-eligible (exact float or exact int) -> (2); otherwise the
-        // generic operator path (3), which — like CPython — raises TypeError for
-        // objects that define neither `__mul__` nor coercion.
-        let is_int =
-            |v: &Value| matches!(v.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_));
-        let is_flt_eligible = |v: &Value| {
+        // Construct p's iterator first, then q's, and advance them p-then-q on
+        // every step. If p is exhausted, q still gets one matching probe so a
+        // q-side exception wins over a mere length mismatch, as in CPython.
+        let mut p_iter = ConsumerIterator::new(_interp, &args[0].value)?;
+        let mut q_iter = ConsumerIterator::new(_interp, &args[1].value)?;
+
+        // Keep CPython's two independent speculative paths. The native-int
+        // path consumes only exact integers whose product and running total
+        // fit a C `long`; after it stops, the compensated-float path may
+        // consume a contiguous run containing at least one exact float per
+        // pair. Either path is permanently disabled by its first unsupported
+        // pair. The remaining terms use ordinary Python `*` and `+`.
+        let exact_int_as_i64 = |v: &Value| match v.kind() {
+            ValueKind::Int(value) => Some(value),
+            ValueKind::BigInt(value) => value.to_i64(),
+            _ => None,
+        };
+        let is_exact_int_or_bool = |v: &Value| {
             matches!(
                 v.kind(),
-                ValueKind::Float(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)
             )
         };
-        if p_items.iter().chain(q_items.iter()).all(is_int) {
-            // (1) Exact integer path -> exact `int` (sumprod([1,2,3],[4,5,6]) == 32).
-            let mut acc = PyBigInt::from(0i64);
-            for (pv, qv) in p_items.iter().zip(q_items.iter()) {
-                let a = value_to_bigint_int(_interp, FN_NAME, pv)?;
-                let b = value_to_bigint_int(_interp, FN_NAME, qv)?;
-                acc += a * b;
+        let is_exact_float = |v: &Value| matches!(v.kind(), ValueKind::Float(_));
+
+        let mut int_path_enabled = true;
+        let mut int_total_in_use = false;
+        let mut int_total = 0i64;
+        let mut float_path_enabled = true;
+        let mut float_total_in_use = false;
+        let mut float_state = SumProdFloatState::new();
+        let mut generic_total = Value::int(0);
+        loop {
+            let p_item = p_iter.next(_interp)?;
+            let q_item = q_iter.next(_interp)?;
+            let (pv, qv) = match (p_item, q_item) {
+                (None, None) => break,
+                (Some(pv), Some(qv)) => (pv, qv),
+                _ => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Inputs are not the same length".to_string(),
+                    ));
+                }
+            };
+
+            if int_path_enabled {
+                let next_int_total = exact_int_as_i64(&pv)
+                    .zip(exact_int_as_i64(&qv))
+                    .and_then(|(a, b)| a.checked_mul(b))
+                    .and_then(|product| int_total.checked_add(product));
+                if let Some(next_total) = next_int_total {
+                    int_total = next_total;
+                    int_total_in_use = true;
+                    // CPython's successful int path skips the float path for
+                    // this pair; it does not maintain a float shadow.
+                    continue;
+                }
+
+                int_path_enabled = false;
+                if int_total_in_use {
+                    generic_total = _interp.eval_binary(
+                        generic_total,
+                        BinaryOp::Add,
+                        Value::int(int_total),
+                    )?;
+                    int_total_in_use = false;
+                }
             }
-            return bigint_to_int_value(acc);
-        }
-        if p_items.iter().chain(q_items.iter()).all(is_flt_eligible) {
-            // (2) Float path: triple-double compensated sum of products.
-            let mut p = Vec::with_capacity(p_items.len());
-            let mut q = Vec::with_capacity(q_items.len());
-            for v in &p_items {
-                p.push(value_to_float(v, "__SENTINEL__")?);
+
+            if float_path_enabled {
+                let float_pair = (is_exact_float(&pv)
+                    && (is_exact_float(&qv) || is_exact_int_or_bool(&qv)))
+                    || (is_exact_float(&qv) && is_exact_int_or_bool(&pv));
+                let accepted = if float_pair {
+                    // Conversion failure (only possible for an oversized exact
+                    // int) merely ends the speculative path. Generic
+                    // arithmetic below replays the pair and produces the
+                    // Python-visible result or exception.
+                    match value_to_float(&pv, "__SENTINEL__").and_then(|a| {
+                        value_to_float(&qv, "__SENTINEL__").map(|b| (a, b))
+                    }) {
+                        Ok((a, b)) => float_state.try_add(a, b),
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                };
+
+                if accepted {
+                    float_total_in_use = true;
+                    continue;
+                }
+
+                float_path_enabled = false;
+                if float_total_in_use {
+                    generic_total = _interp.eval_binary(
+                        generic_total,
+                        BinaryOp::Add,
+                        Value::float(float_state.finish()),
+                    )?;
+                    float_total_in_use = false;
+                }
             }
-            for v in &q_items {
-                q.push(value_to_float(v, "__SENTINEL__")?);
-            }
-            return Ok(Value::float(sumprod_floats(&p, &q)));
+
+            let product = _interp.eval_binary(pv, BinaryOp::Mul, qv)?;
+            generic_total = _interp.eval_binary(generic_total, BinaryOp::Add, product)?;
         }
-        // (3) Generic path: accumulate via the `*` and `+` operators, exactly as
-        // CPython falls back to PyNumber_Multiply / PyNumber_Add.  Objects that
-        // define neither raise TypeError here, matching CPython.
-        let mut acc = Value::int(0);
-        for (pv, qv) in p_items.iter().zip(q_items.iter()) {
-            let prod = _interp.eval_binary(pv.clone(), BinaryOp::Mul, qv.clone())?;
-            acc = _interp.eval_binary(acc, BinaryOp::Add, prod)?;
+
+        if int_path_enabled && int_total_in_use {
+            generic_total =
+                _interp.eval_binary(generic_total, BinaryOp::Add, Value::int(int_total))?;
+        } else if float_path_enabled && float_total_in_use {
+            generic_total = _interp.eval_binary(
+                generic_total,
+                BinaryOp::Add,
+                Value::float(float_state.finish()),
+            )?;
         }
-        Ok(acc)
+        Ok(generic_total)
     }
 
     /// CPython: math.gamma(x) → float.  The Gamma function.  Poles at

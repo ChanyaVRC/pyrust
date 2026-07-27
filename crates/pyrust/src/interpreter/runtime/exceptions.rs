@@ -7,3 +7,4 @@ include!("exceptions/control.rs");
 include!("exceptions/groups.rs");
 include!("exceptions/render.rs");
 include!("exceptions/unicode_args.rs");
+include!("exceptions/slots.rs");

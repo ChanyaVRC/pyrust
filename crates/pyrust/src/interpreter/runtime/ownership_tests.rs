@@ -181,6 +181,44 @@ fn exception_groups_stay_separate_from_generic_exception_control() {
 }
 
 #[test]
+fn exception_slot_schema_stays_in_exception_domain() {
+    let slots = include_graph(&["runtime/exceptions/slots.rs"]);
+    assert!(
+        slots.iter().any(|source| {
+            source.contents.contains("enum ExceptionSlotPolicy")
+                && source.contents.contains("fn exception_slot_policy(")
+        }),
+        "exceptions/slots.rs must own the typed native exception-slot schema"
+    );
+
+    let attributes = include_graph(&["runtime/attributes.rs"]);
+    for concrete_slot in [
+        "\"characters_written\"",
+        "\"print_file_and_line\"",
+        "\"filename2\"",
+    ] {
+        assert_domain_excludes(
+            "generic attribute policy",
+            &attributes,
+            concrete_slot,
+            "consume ExceptionSlotPolicy instead of relisting exception-family fields",
+        );
+    }
+
+    let proxy_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("pyrust crate must have a workspace crates directory")
+        .join("pyrust-builtins/src/instance_dict.rs");
+    let proxy = std::fs::read_to_string(&proxy_path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", proxy_path.display()));
+    assert!(
+        !proxy.contains("fn is_exception_slot_for_class(")
+            && !proxy.contains("fn exception_slot_policy("),
+        "instance_dict must remain a proxy/storage owner, not an exception-slot schema"
+    );
+}
+
+#[test]
 fn primitive_slot_metadata_stays_separate_from_object_protocol_behaviour() {
     let object_protocol = include_graph(&["runtime/builtin_methods/object_protocol.rs"]);
     assert_domain_excludes(

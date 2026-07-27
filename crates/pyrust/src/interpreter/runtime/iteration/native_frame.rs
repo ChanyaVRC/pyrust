@@ -20,7 +20,10 @@ impl NativeIterFrame {
             LiveKeyCursor::dict(&container, kind, len)
         };
         NativeIterFrame {
-            source: NativeIterSource::LiveKeys { container, cursor },
+            source: NativeIterSource::LiveKeys {
+                container,
+                cursor: Box::new(cursor),
+            },
             pos: 0,
             type_name,
             guard: None,

@@ -46,6 +46,18 @@ impl Interpreter {
     ) -> Result<Value> {
         let module = Rc::clone(module);
         let filesystem_namespace = module.borrow().filesystem_namespace();
+        let live_namespace = module.borrow().live_namespace();
+        let has_explicit_namespace = filesystem_namespace.is_some() || live_namespace.is_some();
+
+        // Native modules that opt into an exposed namespace (currently the
+        // canonical `sys` module) return their exact backing dict. Attribute
+        // assignment and direct `module.__dict__` mutation therefore share
+        // identity and cache-invalidation state.
+        if name == "__dict__"
+            && let Some(namespace) = live_namespace
+        {
+            return Ok(namespace);
+        }
 
         // A source-backed module owns the exact root globals dict used by its
         // functions. Expose that same object, never a harvested snapshot.
@@ -65,7 +77,7 @@ impl Interpreter {
         // "module 'foo' has no attribute 'X'".
         // Precompute this once for both error sites below.
         let stored_name = module.borrow().get_attr_value("__name__");
-        let name_tombstoned = if filesystem_namespace.is_some() {
+        let name_tombstoned = if has_explicit_namespace {
             stored_name.as_ref().is_none_or(Value::is_unset)
         } else {
             stored_name.as_ref().is_some_and(Value::is_unset)
@@ -87,7 +99,7 @@ impl Interpreter {
         // Filesystem modules seed their real dunders directly into the shared
         // globals dictionary. Missing entries stay missing after deletion;
         // only built-in modules use the synthetic fallback below.
-        if filesystem_namespace.is_some() {
+        if has_explicit_namespace {
             let mod_name = module.borrow().name.clone();
             let msg = if name_tombstoned {
                 format!("module has no attribute '{name}'")

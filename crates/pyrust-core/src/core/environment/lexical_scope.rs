@@ -19,6 +19,13 @@
 /// `crates/pyrust/src/interpreter/helpers.rs` (search for
 /// "the env-lookup rule (issue #452)"). Keep these in sync.
 #[derive(Debug, Clone)]
+enum ClassAnnotationProvider {
+    Active(EnvValues),
+    Mapping(Value),
+    Owner(Rc<RefCell<PyClass>>),
+}
+
+#[derive(Debug, Clone)]
 pub struct Environment {
     /// Identity, mutation generations, and globals provider shared by every
     /// lexical scope below the same root namespace.
@@ -28,6 +35,16 @@ pub struct Environment {
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
     pub parent: Option<EnvRef>,
+    /// PEP 695 class-body annotation scopes resolve ordinary names through the
+    /// class namespace, unlike methods defined in the same body. While the
+    /// body is executing this is a register snapshot kept current by
+    /// `RecordClassStore`/`RecordClassDel`; after class construction it is
+    /// replaced by a weak reference to the live class namespace.
+    ///
+    /// Keeping this provider on the dedicated annotation environment (rather
+    /// than the shared class environment) prevents bare names in methods from
+    /// incorrectly seeing class attributes.
+    class_annotation: Option<Box<ClassAnnotationProvider>>,
 }
 
 pub type EnvRef = Rc<RefCell<Environment>>;
@@ -49,6 +66,7 @@ impl Environment {
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
             parent,
+            class_annotation: None,
         }))
     }
 
@@ -62,6 +80,66 @@ impl Environment {
         self.local_names = Rc::new(HashSet::new());
         self.global_names = Rc::new(HashSet::new());
         self.nonlocal_names = Rc::new(HashSet::new());
+        self.class_annotation = None;
+    }
+
+    /// Mark this lexical environment as a PEP 695 class annotation scope.
+    pub fn initialize_class_annotation_scope(&mut self) {
+        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Active(EnvValues::new())));
+    }
+
+    /// Mirror a class-body fast-local store while the class is still running.
+    pub fn set_class_annotation_binding(&mut self, name: &str, value: Value) {
+        let provider = self.class_annotation.get_or_insert_with(|| {
+            Box::new(ClassAnnotationProvider::Active(EnvValues::new()))
+        });
+        if let ClassAnnotationProvider::Active(values) = provider.as_mut() {
+            values.insert(name, value);
+        }
+    }
+
+    /// Mirror a class-body fast-local deletion while the class is still running.
+    pub fn remove_class_annotation_binding(&mut self, name: &str) {
+        if let Some(ClassAnnotationProvider::Active(values)) =
+            self.class_annotation.as_deref_mut()
+        {
+            values.remove(name);
+        }
+    }
+
+    /// Use the live plain-dict namespace prepared by a metaclass while its
+    /// constructor is running. Generic custom mappings remain on the mirrored
+    /// register provider because consulting `__getitem__` requires interpreter
+    /// dispatch and cannot live in the core lexical environment.
+    pub fn bind_class_annotation_mapping(&mut self, namespace: Value) {
+        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Mapping(namespace)));
+    }
+
+    /// Switch from the temporary class-body provider to the finished class's
+    /// live namespace. This is a semantic ownership edge: an alias extracted
+    /// from a short-lived class must still be able to evaluate against that
+    /// class namespace later.
+    pub fn bind_class_annotation_owner(&mut self, class: &Rc<RefCell<PyClass>>) {
+        self.class_annotation = Some(Box::new(ClassAnnotationProvider::Owner(Rc::clone(
+            class,
+        ))));
+    }
+
+    /// Resolve one name from this environment's class-annotation provider.
+    ///
+    /// The caller checks this provider before the environment's type-parameter
+    /// bindings. CPython's class annotation bytecode uses
+    /// `LOAD_FROM_DICT_OR_DEREF`: a same-named class attribute wins, with the
+    /// type parameter used only when the class namespace has no such key.
+    #[inline]
+    pub fn class_annotation_binding(&self, name: &str) -> Option<Value> {
+        match self.class_annotation.as_deref()? {
+            ClassAnnotationProvider::Owner(owner) => owner.borrow().attrs.get(name).cloned(),
+            ClassAnnotationProvider::Mapping(namespace) => namespace
+                .dict_with(|dict| dict.get(&StrKey(name)).cloned())
+                .flatten(),
+            ClassAnnotationProvider::Active(values) => values.get(name).cloned(),
+        }
     }
 
     /// Stable identity of the root namespace. `u64::MAX` is an uncacheable

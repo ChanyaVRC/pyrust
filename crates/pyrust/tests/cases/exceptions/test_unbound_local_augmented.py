@@ -53,3 +53,16 @@ except NameError as e:
     print("module NameError:", type(e).__name__)
 except UnboundLocalError as e:
     print("WRONG UnboundLocalError at module scope:", str(e))
+
+# Case 6: AugAssign alone is enough to make the name local for the entire
+# function; no later plain assignment is needed by Python's symbol table.
+x6 = 40
+def f6():
+    x6 += 2
+
+try:
+    f6()
+except UnboundLocalError as e:
+    print("aug-only:", type(e).__name__)
+
+print("module unchanged:", x6)

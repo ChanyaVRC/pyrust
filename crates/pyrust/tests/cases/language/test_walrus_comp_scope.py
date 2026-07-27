@@ -91,3 +91,22 @@ def f_nested_cond():
     return last
 
 print("nested_cond:", f_nested_cond())  # 4
+
+# ── Walrus in a lambda default nested in a comprehension ─────────────────────
+# The lambda body is a function scope, but its default executes in the
+# comprehension. PEP 572 therefore carries this binding through the implicit
+# comprehension scope to the enclosing function.
+def f_lambda_default():
+    values = [(lambda value=(last := i): value)() for i in range(3)]
+    return values, last
+
+print("lambda_default:", f_lambda_default())  # ([0, 1, 2], 2)
+
+# Definition headers are also evaluated in the enclosing scope and share the
+# same local-binding collector.
+def f_definition_default():
+    def nested(value=(captured := 9)):
+        return value
+    return nested(), captured
+
+print("definition_default:", f_definition_default())  # (9, 9)

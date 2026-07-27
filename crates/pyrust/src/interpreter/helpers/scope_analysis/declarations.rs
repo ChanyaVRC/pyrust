@@ -272,36 +272,19 @@ fn check_global_nonlocal_order_block(
                     collect_var_refs_in_expr(v, used, assigned);
                 }
             }
-            Stmt::Def {
-                name, decorators, ..
-            } => {
-                // Decorators are evaluated in the outer scope.
-                for dec in decorators {
-                    collect_var_refs_in_expr(dec, used, assigned);
-                }
+            stmt @ Stmt::Def { name, .. } => {
+                // Definition headers execute in the enclosing scope; the body
+                // is deliberately excluded by the AST visitor.
+                stmt.visit_evaluated_exprs(&mut |expr| {
+                    collect_var_refs_in_expr(expr, used, assigned)
+                });
                 // The def name is bound in the outer scope (not recursed into).
                 assigned.insert(name.clone());
             }
-            Stmt::Class {
-                name,
-                bases,
-                metaclass,
-                keywords,
-                decorators,
-                ..
-            } => {
-                for dec in decorators {
-                    collect_var_refs_in_expr(dec, used, assigned);
-                }
-                for base in bases {
-                    collect_var_refs_in_expr(base, used, assigned);
-                }
-                if let Some(mc) = metaclass {
-                    collect_var_refs_in_expr(mc, used, assigned);
-                }
-                for (_, kw) in keywords {
-                    collect_var_refs_in_expr(kw, used, assigned);
-                }
+            stmt @ Stmt::Class { name, .. } => {
+                stmt.visit_evaluated_exprs(&mut |expr| {
+                    collect_var_refs_in_expr(expr, used, assigned)
+                });
                 assigned.insert(name.clone());
             }
             Stmt::For {
@@ -485,8 +468,10 @@ fn check_global_nonlocal_order_block(
             }
             Stmt::Break | Stmt::Continue | Stmt::Pass => {}
             // `type X[T] = expr` binds X; references in expr are "used".
-            Stmt::TypeAlias { name, value, .. } => {
-                collect_var_refs_in_expr(value, used, assigned);
+            stmt @ Stmt::TypeAlias { name, .. } => {
+                stmt.visit_evaluated_exprs(&mut |expr| {
+                    collect_var_refs_in_expr(expr, used, assigned)
+                });
                 assigned.insert(name.clone());
             }
         }

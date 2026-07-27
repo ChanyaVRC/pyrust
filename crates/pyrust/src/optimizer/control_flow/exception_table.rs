@@ -22,8 +22,7 @@ pub(crate) const EXC_NO_HANDLER: u32 = u32::MAX;
 #[cfg(test)]
 fn build_exc_table(insns: Vec<Insn>) -> (Vec<Insn>, Vec<u32>) {
     let source_prefix_len = insns.len();
-    let (insns, exc_table, _) =
-        build_exc_table_with_source_prefix(insns, source_prefix_len);
+    let (insns, exc_table, _) = build_exc_table_with_source_prefix(insns, source_prefix_len);
     (insns, exc_table)
 }
 

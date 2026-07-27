@@ -70,7 +70,13 @@ impl Compiler {
         // Memo purity gates `CallMemo` emission and the VM result cache while
         // keeping comparison/unary self-recursive functions (`fib`) memoized.
         let is_memo_pure = !is_async
-            && crate::interpreter::is_memo_pure_body(body, &pure_fns_with_self, &inner_index_rc);
+            && crate::interpreter::is_memo_pure_function_body(
+                body,
+                &pure_fns_with_self,
+                &inner_index_rc,
+                name,
+                params,
+            );
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
@@ -460,6 +466,11 @@ impl Compiler {
         is_async: bool,
         type_params: &[TypeParam],
     ) {
+        if let Some(message) = validate_type_parameter_bounds(type_params) {
+            self.set_syntax_error(&message);
+            return;
+        }
+
         let (proto_idx, is_memo_pure, has_kwonly_params) = match self.build_def_proto(
             name,
             params,
@@ -561,8 +572,9 @@ impl Compiler {
         // a cache entry that an invalid positional-only call could match, bypassing
         // keyword-only enforcement in call_user_function_expanded.
         // Memo-purity gates `CallMemo` emission so the VM result cache stays
-        // active. Record memo-pure names so later sibling functions can use
-        // them in their own transitive memo-purity analysis.
+        // active. Record memo-pure names so later call sites in this enclosing
+        // compiler can emit `CallMemo` for the stable local binding. Sibling
+        // purity analysis deliberately does not consume this set.
         if decorators.is_empty() && !has_kwonly_params && is_memo_pure {
             self.pure_locals.insert(name.to_string());
         }

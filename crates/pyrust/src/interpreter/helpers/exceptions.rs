@@ -48,6 +48,28 @@ fn oserror_subclass_for_errno(errno: i64) -> Option<Rc<RefCell<PyClass>>> {
     })
 }
 
+/// Read the integer value CPython uses for exact `OSError` errno remapping.
+///
+/// `PyLong_Check` accepts bool and int subclasses, but this lookup must not run
+/// an arbitrary `__index__` method. PyRust stores an int subclass's immutable
+/// base value in `__builtin_data__`, so verify its canonical ancestry before
+/// reading that backing and leave every other object untouched.
+fn oserror_remap_errno(value: &Value) -> Option<i64> {
+    let integer = match value.kind() {
+        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => value.clone(),
+        ValueKind::PyInstance(instance) => {
+            let class = Rc::clone(&instance.borrow().class);
+            let int_class = canonical_class_by_tag(pyrust_core::CanonicalClassTag::Int);
+            if !class_is_subclass_of(&class, &int_class) {
+                return None;
+            }
+            builtin_data_backing(value)?
+        }
+        _ => return None,
+    };
+    value_to_bigint(&integer).and_then(|integer| integer.to_i64())
+}
+
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     // Classify the class against the special built-in exception families in
     // one non-cloning MRO walk (issue #1967). StopIteration is matched against
@@ -196,7 +218,7 @@ pub(crate) fn instantiate_exception_with_kinds(
         // also not remapped — only the plain OSError call triggers the lookup.
         if args.len() >= 2
             && class.borrow().builtin_exception_name == Some("OSError")
-            && let Some(errno_int) = args[0].as_int()
+            && let Some(errno_int) = oserror_remap_errno(&args[0])
             && let Some(subclass) = oserror_subclass_for_errno(errno_int)
         {
             return Value::py_instance(Rc::new(RefCell::new(PyInstance {

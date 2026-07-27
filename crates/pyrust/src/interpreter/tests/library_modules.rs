@@ -338,9 +338,7 @@ fn sys_modules_is_owned_by_each_root_interpreter() {
     };
     let first_exposed = first_sys
         .borrow()
-        .attrs
-        .get("modules")
-        .cloned()
+        .get_attr_value("modules")
         .expect("sys.modules");
     assert_eq!(first_exposed.value_id(), first_registry.value_id());
 
@@ -358,9 +356,7 @@ fn sys_modules_is_owned_by_each_root_interpreter() {
     };
     let second_exposed = second_sys
         .borrow()
-        .attrs
-        .get("modules")
-        .cloned()
+        .get_attr_value("modules")
         .expect("sys.modules");
     assert_eq!(second_exposed.value_id(), second_registry.value_id());
 }
@@ -406,7 +402,230 @@ fn sys_modules_attribute_replacement_controls_imports() {
 }
 
 #[test]
-fn sys_modules_replacement_invalidates_module_class_cache() {
+fn sys_live_dict_alias_controls_imports_and_vars_identity() {
+    let interpreter = run_program(
+        r#"import sys
+original = sys.modules
+replacement = {}
+namespace = sys.__dict__
+same_vars = vars(sys) is namespace
+namespace["modules"] = replacement
+import math
+replacement_used = sys.modules is replacement and replacement["math"] is math
+del namespace["modules"]
+try:
+    import math
+except AttributeError:
+    deletion_observed = True
+else:
+    deletion_observed = False
+namespace["modules"] = original
+"#,
+    );
+    assert_eq!(
+        interpreter.lookup_name("same_vars").unwrap(),
+        Some(Value::bool_(true))
+    );
+    assert_eq!(
+        interpreter.lookup_name("replacement_used").unwrap(),
+        Some(Value::bool_(true))
+    );
+    assert_eq!(
+        interpreter.lookup_name("deletion_observed").unwrap(),
+        Some(Value::bool_(true))
+    );
+}
+
+#[test]
+fn sys_modules_preserves_dict_subclass_protocol_overrides() {
+    let interpreter = run_program(
+        r#"import sys
+original = sys.modules
+class Registry(dict):
+    def get(self, name, default=None):
+        self.get_seen = name == "virtual_registry_module" or self.get_seen
+        if name == "virtual_registry_module":
+            return 42
+        return dict.get(self, name, default)
+    def __setitem__(self, name, value):
+        self.set_seen = name == "math" or self.set_seen
+        return dict.__setitem__(self, name, value)
+replacement = Registry(original)
+replacement.get_seen = False
+replacement.set_seen = False
+replacement.pop("math", None)
+sys.modules = replacement
+import virtual_registry_module
+import math
+subclass_used = replacement["math"] is math
+get_override_used = virtual_registry_module == 42 and replacement.get_seen
+set_override_used = replacement.set_seen
+sys.modules = original
+"#,
+    );
+    assert_eq!(
+        interpreter.lookup_name("subclass_used").unwrap(),
+        Some(Value::bool_(true))
+    );
+    assert_eq!(
+        interpreter.lookup_name("get_override_used").unwrap(),
+        Some(Value::bool_(true))
+    );
+    assert_eq!(
+        interpreter.lookup_name("set_override_used").unwrap(),
+        Some(Value::bool_(true))
+    );
+}
+
+#[test]
+fn sys_modules_accepts_arbitrary_mapping_protocol() {
+    let interpreter = run_program(
+        r#"import sys
+original = sys.modules
+class Registry:
+    def __init__(self, initial):
+        self.data = dict(initial)
+    def get(self, name, default=None):
+        if name == "virtual_protocol_registry_module":
+            return 84
+        return self.data.get(name, default)
+    def __setitem__(self, name, value):
+        self.data[name] = value
+    def __delitem__(self, name):
+        del self.data[name]
+replacement = Registry(original)
+replacement.data.pop("math", None)
+sys.modules = replacement
+import virtual_protocol_registry_module
+import math
+virtual_used = virtual_protocol_registry_module == 84
+mapping_received_module = replacement.data["math"] is math
+sys.modules = original
+"#,
+    );
+    assert_eq!(
+        interpreter.lookup_name("virtual_used").unwrap(),
+        Some(Value::bool_(true))
+    );
+    assert_eq!(
+        interpreter.lookup_name("mapping_received_module").unwrap(),
+        Some(Value::bool_(true))
+    );
+}
+
+#[test]
+fn replacement_registry_does_not_override_or_republish_internal_sys() {
+    let mut interpreter = Interpreter::default();
+    let original = interpreter.load_module("sys").unwrap();
+    let replacement = Value::dict(PyDict::default());
+    interpreter
+        .assign_attr(original.clone(), "modules", replacement.clone())
+        .unwrap();
+
+    let imported_again = interpreter.load_module("sys").unwrap();
+    assert_eq!(imported_again.value_id(), original.value_id());
+    assert_eq!(
+        replacement.dict_with(|modules| modules.contains_key(&PyKey::str_from("sys"))),
+        Some(false),
+        "an interpreter-cache hit must not publish into a replacement mapping"
+    );
+}
+
+#[test]
+fn deleting_sys_from_original_registry_creates_a_new_import_identity() {
+    let mut interpreter = Interpreter::default();
+    let original = interpreter.load_module("sys").unwrap();
+    interpreter
+        .bootstrap_module_registry
+        .dict_shift_remove(&PyKey::str_from("sys"))
+        .unwrap();
+
+    let imported_again = interpreter.load_module("sys").unwrap();
+    assert_ne!(imported_again.value_id(), original.value_id());
+    let registered = interpreter
+        .bootstrap_module_registry
+        .dict_with(|modules| modules.get(&PyKey::str_from("sys")).cloned())
+        .flatten()
+        .expect("the fresh sys identity must be registered in the original dict");
+    assert_eq!(registered.value_id(), imported_again.value_id());
+}
+
+#[test]
+fn replacement_registry_only_controls_names_missing_from_internal_cache() {
+    let mut interpreter = Interpreter::default();
+    let system_module = interpreter.load_module("sys").unwrap();
+    let original_math = interpreter.load_module("math").unwrap();
+    let fake_math = Value::int(42);
+    let replacement = Value::dict(PyDict::default());
+    replacement
+        .dict_insert(PyKey::str_from("math"), fake_math.clone())
+        .unwrap();
+    interpreter
+        .assign_attr(system_module, "modules", replacement)
+        .unwrap();
+
+    let still_internal = interpreter.load_module("math").unwrap();
+    assert_eq!(still_internal.value_id(), original_math.value_id());
+
+    interpreter
+        .bootstrap_module_registry
+        .dict_shift_remove(&PyKey::str_from("math"))
+        .unwrap();
+    assert_eq!(interpreter.load_module("math").unwrap(), fake_math);
+}
+
+#[test]
+fn none_in_sys_modules_halts_import_before_internal_cache_recovery() {
+    let interpreter = run_program(
+        r#"import sys
+sys.modules["sys"] = None
+try:
+    import sys as blocked
+except Exception as error:
+    error_type = type(error).__name__
+    error_text = str(error)
+"#,
+    );
+    assert_eq!(
+        interpreter.lookup_name("error_type").unwrap(),
+        Some(Value::string("ModuleNotFoundError"))
+    );
+    assert_eq!(
+        interpreter.lookup_name("error_text").unwrap(),
+        Some(Value::string("import of sys halted; None in sys.modules"))
+    );
+}
+
+#[test]
+fn import_registry_fast_path_does_not_retain_replaced_dictionary() {
+    let mut interpreter = Interpreter::default();
+    let system_module = interpreter.load_module("sys").unwrap();
+    let replacement = Value::dict(PyDict::default());
+    let replacement_backing = Rc::downgrade(
+        replacement
+            .get_dict_rc()
+            .expect("replacement must be a dict"),
+    );
+
+    interpreter
+        .assign_attr(system_module.clone(), "modules", replacement.clone())
+        .unwrap();
+    let resolved = interpreter.import_module_registry().unwrap();
+    assert_eq!(resolved.value_id(), replacement.value_id());
+    drop(resolved);
+
+    interpreter
+        .assign_attr(system_module, "modules", Value::dict(PyDict::default()))
+        .unwrap();
+    drop(replacement);
+    assert!(
+        replacement_backing.upgrade().is_none(),
+        "the registry fast path must be weak so replacement preserves object lifetimes"
+    );
+}
+
+#[test]
+fn replacement_registry_disables_module_class_cache_and_respects_internal_priority() {
     let mut interpreter = Interpreter::default();
     let system_module = interpreter.load_module("sys").unwrap();
     let typing_module = interpreter.load_module("typing").unwrap();
@@ -414,6 +633,14 @@ fn sys_modules_replacement_invalidates_module_class_cache() {
     let original_alias_class = interpreter
         .cached_module_class(cache_slot, "typing", "_GenericAlias")
         .unwrap();
+    assert!(
+        interpreter
+            .module_class_cache
+            .as_ref()
+            .and_then(|cache| cache.entries[cache_slot.0].as_ref())
+            .is_some(),
+        "the ordinary original-dict path should retain its hot cache"
+    );
 
     let ValueKind::PyModule(typing_module) = typing_module.kind() else {
         panic!("typing must be a module");
@@ -450,8 +677,91 @@ fn sys_modules_replacement_invalidates_module_class_cache() {
         .unwrap();
     assert!(Rc::ptr_eq(
         &resolved_after_replacement,
+        &original_alias_class
+    ));
+    assert!(
+        interpreter
+            .module_class_cache
+            .as_ref()
+            .and_then(|cache| cache.entries[cache_slot.0].as_ref())
+            .is_none(),
+        "a replacement mapping requires two content guards and stays uncached"
+    );
+
+    interpreter
+        .bootstrap_module_registry
+        .dict_shift_remove(&PyKey::str_from("typing"))
+        .unwrap();
+    let resolved_after_internal_deletion = interpreter
+        .cached_module_class(cache_slot, "typing", "_GenericAlias")
+        .unwrap();
+    assert!(Rc::ptr_eq(
+        &resolved_after_internal_deletion,
         &replacement_alias_class
     ));
+    assert!(
+        interpreter
+            .module_class_cache
+            .as_ref()
+            .and_then(|cache| cache.entries[cache_slot.0].as_ref())
+            .is_none()
+    );
+}
+
+#[test]
+fn invalid_visible_registry_does_not_break_cached_module_class_internal_hits() {
+    let mut interpreter = Interpreter::default();
+    let system_module = interpreter.load_module("sys").unwrap();
+    interpreter.load_module("typing").unwrap();
+    let cache_slot = ModuleClassCacheSlot::new(0);
+    let original_alias_class = interpreter
+        .cached_module_class(cache_slot, "typing", "_GenericAlias")
+        .unwrap();
+    assert!(
+        interpreter
+            .module_class_cache
+            .as_ref()
+            .and_then(|cache| cache.entries[cache_slot.0].as_ref())
+            .is_some()
+    );
+
+    interpreter
+        .delete_attr(system_module.clone(), "modules")
+        .unwrap();
+    let resolved_without_visible_registry = interpreter
+        .cached_module_class(cache_slot, "typing", "_GenericAlias")
+        .unwrap();
+    assert!(Rc::ptr_eq(
+        &resolved_without_visible_registry,
+        &original_alias_class
+    ));
+    assert!(
+        interpreter
+            .module_class_cache
+            .as_ref()
+            .and_then(|cache| cache.entries[cache_slot.0].as_ref())
+            .is_none(),
+        "a missing visible registry must use the internal module without caching"
+    );
+
+    interpreter
+        .assign_attr(system_module, "modules", Value::int(1))
+        .unwrap();
+    let resolved_with_invalid_visible_registry = interpreter
+        .cached_module_class(cache_slot, "typing", "_GenericAlias")
+        .unwrap();
+    assert!(Rc::ptr_eq(
+        &resolved_with_invalid_visible_registry,
+        &original_alias_class
+    ));
+    assert!(
+        interpreter
+            .module_class_cache
+            .as_ref()
+            .and_then(|cache| cache.entries[cache_slot.0].as_ref())
+            .is_none(),
+        "an invalid visible registry must use the internal module without caching"
+    );
 }
 
 #[test]

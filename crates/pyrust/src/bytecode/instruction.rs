@@ -197,7 +197,7 @@ pub enum Insn {
     /// proven non-reentrant int operations can defer its module syncs to the
     /// loop exits.  Any other iterator (BigInt range, list, generator, user
     /// object, empty slot) diverts to the original in-place loop unchanged.
-    JumpIfIterNotIntRange(Reg, i32),
+    JumpIfIterNotIntRange(u8, i32),
     /// Guarded numeric leaf-call inlining site (emitted only by the
     /// optimizer, always immediately before the original call sequence it
     /// specializes, which stays in place as the deopt path).

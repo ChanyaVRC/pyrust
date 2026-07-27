@@ -116,19 +116,16 @@ pub(crate) fn typevar_readonly_attr_error(name: &str) -> Option<String> {
     }
 }
 
-/// Construct a `TypeAliasType` `PyInstance` with `__name__`, `__value__`,
-/// `__type_params__`, and `__module__` attributes, matching the observable
-/// behaviour of CPython's `typing.TypeAliasType`.
-pub(crate) fn make_type_alias_instance(
+fn make_lazy_type_alias_instance(
     name: String,
-    value: Value,
+    value_thunk: Value,
     type_params: Value,
     module: String,
 ) -> Value {
     TYPE_ALIAS_CLASS.with(|cls| {
         let mut attrs = InstanceAttrs::new();
         attrs.insert("__name__", Value::string(name));
-        attrs.insert("__value__", value);
+        attrs.insert("__evaluate_value__", value_thunk);
         attrs.insert("__type_params__", type_params);
         attrs.insert("__module__", Value::string(module));
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
@@ -190,13 +187,13 @@ pub(crate) fn make_typevar_from_syntax(name: &Value) -> Result<Value> {
 /// Construct a TypeAliasType from the operands of `MakeTypeAlias`.
 pub(crate) fn make_type_alias_from_syntax(
     name: &Value,
-    value: Value,
+    value_thunk: Value,
     type_params: Value,
     module: String,
 ) -> Result<Value> {
-    Ok(make_type_alias_instance(
+    Ok(make_lazy_type_alias_instance(
         syntax_object_name(name, "MakeTypeAlias")?,
-        value,
+        value_thunk,
         type_params,
         module,
     ))

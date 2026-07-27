@@ -1888,6 +1888,7 @@ impl Interpreter {
                     let name_val = pool_get!(code.consts, *name_idx, "const");
                     let value_val = vm_try!(vm_read(&regs, *value_reg, num_locals)).clone();
                     let params_val = vm_try!(vm_read(&regs, *params_reg, num_locals)).clone();
+                    self.register_class_annotation_evaluator(&value_val, &regs);
                     let module_name = vm_try!(self.defining_module_name());
                     regs[*dst as usize] = vm_try!(make_type_alias_from_syntax(
                         name_val,
@@ -1923,16 +1924,10 @@ impl Interpreter {
                 // — ignore them silently rather than panic, since reordering
                 // / inlining passes could in principle hoist them.
                 Insn::RecordClassStore(slot) => {
-                    if let Some(order) = self.class_store_order.last_mut()
-                        && !order.contains(slot)
-                    {
-                        order.push(*slot);
-                    }
+                    self.record_class_namespace_store(&regs, *slot);
                 }
                 Insn::RecordClassDel(slot) => {
-                    if let Some(order) = self.class_store_order.last_mut() {
-                        order.retain(|s| s != slot);
-                    }
+                    self.record_class_namespace_delete(*slot);
                 }
             }
         }

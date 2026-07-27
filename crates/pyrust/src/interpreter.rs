@@ -44,11 +44,11 @@ impl ModuleClassCacheSlot {
 }
 
 struct CachedModuleClass {
-    /// Mutation generation of the canonical `sys` module which owns the
-    /// Python-visible `modules` binding. Rebinding or deleting `sys.modules`
-    /// must invalidate an entry even when the old registry dict itself was not
-    /// mutated.
-    registry_owner_state: ModuleMutationState,
+    /// Mutation generation of the canonical `sys.__dict__` which owns the
+    /// Python-visible `modules` binding. Attribute assignment, deletion, and
+    /// direct namespace aliases must invalidate an entry even when the old
+    /// registry dict itself was not mutated.
+    registry_owner_state: CollectionMutationState,
     registry_owner_version: u64,
     registry_state: CollectionMutationState,
     registry_version: u64,
@@ -61,6 +61,30 @@ struct CachedModuleClass {
 
 struct ModuleClassCache {
     entries: [Option<CachedModuleClass>; MODULE_CLASS_CACHE_SLOT_COUNT],
+}
+
+/// Per-active-class bookkeeping for PEP 695 type-alias annotation scopes.
+///
+/// `slot_names` makes `RecordClassStore`/`RecordClassDel` an O(1) name lookup,
+/// and `scopes` contains only weak references so an abandoned alias cannot be
+/// kept alive by the interpreter while the class body runs.
+pub(crate) struct ActiveClassAnnotationScopes {
+    slot_names: Vec<Option<String>>,
+    scopes: Vec<Weak<RefCell<Environment>>>,
+}
+
+/// Non-owning fast path for the Python-visible import registry.
+///
+/// Import lookup must observe both replacement of the canonical `sys` module
+/// and every mutation route to its live namespace, but resolving the module
+/// attribute on every cached import adds two unrelated hash lookups. Keep only
+/// weak identities and the namespace generation so this cache cannot extend
+/// the lifetime of a replaced dictionary or anything it owns.
+struct CachedImportModuleRegistry {
+    system_module: Weak<RefCell<PyModule>>,
+    registry_owner_state: CollectionMutationState,
+    registry_owner_version: u64,
+    registry: pyrust_core::WeakValueCache,
 }
 
 impl Default for ModuleClassCache {
@@ -147,6 +171,12 @@ pub struct Interpreter {
     /// Root interpreters own independent bootstrap registries; an imported-file
     /// child shares its parent's backing for the pre-`sys` case.
     bootstrap_module_registry: Value,
+    /// Non-owning cache of the active Python-visible import registry.
+    ///
+    /// This is separate from `module_class_cache`: every import consumes it,
+    /// while class resolution additionally guards registry contents and module
+    /// namespace generations.
+    import_module_registry_cache: RefCell<Option<CachedImportModuleRegistry>>,
     /// Lazily allocated cache for owner-requested module class lookups.
     ///
     /// Most interpreters never use this. `typing.Generic[...]` currently owns
@@ -213,6 +243,10 @@ pub struct Interpreter {
     /// runtime — CPython's `__dict__` ordering rule.  A stack (not a single Vec)
     /// supports nested `class A: class B: ...` bodies cleanly.
     pub(crate) class_store_order: Vec<Vec<u32>>,
+    /// PEP 695 annotation-scope providers parallel to `class_store_order`.
+    /// Each active class owns one entry; class-store opcodes mirror only into
+    /// alias evaluators registered for that exact body.
+    pub(crate) class_annotation_scopes: Vec<ActiveClassAnnotationScopes>,
     /// Stack of active VM frame views (issue #389).  Pushed before each
     /// `run_bytecode` invocation and popped immediately afterwards by:
     ///   * `try_exec_vm_script_with_index` (kind = `Script`), and
@@ -450,6 +484,7 @@ impl Default for Interpreter {
             script_argv: Vec::new(),
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             bootstrap_module_registry: Value::dict(PyDict::default()),
+            import_module_registry_cache: RefCell::new(None),
             module_class_cache: None,
             warnings_state: Rc::new(crate::builtin_modules::warnings::WarningsState::default()),
             int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT,
@@ -462,6 +497,7 @@ impl Default for Interpreter {
             invoke_arg_buf: ExpandedArgBuf::new(),
             bound_method_pos_buf: Vec::new(),
             class_store_order: Vec::new(),
+            class_annotation_scopes: Vec::new(),
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),
             exc_classes: ExcClasses::uninitialized(),

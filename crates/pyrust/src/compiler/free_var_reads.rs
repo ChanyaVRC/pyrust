@@ -30,7 +30,11 @@ fn collect_aug_assign_name_reads(target: &AssignTarget, uses: &mut HashSet<Strin
 
 fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
     match stmt {
-        Stmt::Def { .. } | Stmt::Class { .. } => {}
+        Stmt::Def { .. } | Stmt::Class { .. } => {
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                collect_free_var_reads_in_expr(expr, uses)
+            });
+        }
         Stmt::Assign(target, value) => {
             target.visit_evaluated_exprs(&mut |expr| collect_free_var_reads_in_expr(expr, uses));
             collect_free_var_reads_in_expr(value, uses);
@@ -184,8 +188,10 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(v, uses);
             }
         }
-        Stmt::TypeAlias { value, .. } => {
-            collect_free_var_reads_in_expr(value, uses);
+        Stmt::TypeAlias { .. } => {
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                collect_free_var_reads_in_expr(expr, uses)
+            });
         }
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
@@ -274,13 +280,26 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
             collect_free_var_reads_in_expr(else_, uses);
         }
         Expr::Lambda { params, body } => {
-            // Default expressions are evaluated in the enclosing scope.
+            // Defaults and annotations execute in the enclosing scope, where
+            // lambda parameters do not shadow their names.
             for p in params {
                 if let Some(d) = &p.default {
                     collect_free_var_reads_in_expr(d, uses);
                 }
+                if let Some(annotation) = &p.annotation {
+                    collect_free_var_reads_in_expr(annotation, uses);
+                }
             }
-            collect_free_var_reads_in_expr(body, uses);
+
+            // The body is a nested function scope. Surface only its free reads;
+            // parameters are local to the lambda and must not spuriously turn a
+            // same-named variable in an outer function into a cell.
+            let mut body_uses = HashSet::new();
+            collect_free_var_reads_in_expr(body, &mut body_uses);
+            for parameter in params {
+                body_uses.remove(&parameter.name);
+            }
+            uses.extend(body_uses);
         }
         Expr::Named { value, .. } => collect_free_var_reads_in_expr(value, uses),
         Expr::FString(parts) => {

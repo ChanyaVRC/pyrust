@@ -298,41 +298,11 @@ impl Interpreter {
         // be a bool.  CPython enforces these in the C slot setters;
         // not enforcing them makes pyrust silently accept bad values
         // that CPython raises TypeError for (issue #1066 review).
-        let exception_slot = active_exception_slot(&class, name);
-        if exception_slot {
-            match name {
-                "__cause__" | "__context__" => {
-                    let ok = match value.kind() {
-                        ValueKind::None => true,
-                        ValueKind::PyInstance(inst) => is_exception_class(&inst.borrow().class),
-                        _ => false,
-                    };
-                    if !ok {
-                        return Err(pyrust_core::type_err!(
-                            "exception {} must be None or derive from BaseException",
-                            if name == "__cause__" {
-                                "cause"
-                            } else {
-                                "context"
-                            }
-                        ));
-                    }
-                }
-                "__suppress_context__" if !matches!(value.kind(), ValueKind::Bool(_)) => {
-                    return Err(pyrust_core::type_err!("attribute value type must be bool"));
-                }
-                // Issue #1441: __traceback__ must be None or a traceback
-                // object.  CPython raises TypeError for any other value.
-                "__traceback__" => {
-                    let ok = value.is_none() || pyrust_builtins::traceback::is_traceback(&value);
-                    if !ok {
-                        return Err(pyrust_core::type_err!(
-                            "__traceback__ must be a traceback or None"
-                        ));
-                    }
-                }
-                _ => {}
-            }
+        let exception_slot = active_exception_slot_policy(&class, name);
+        if let Some(policy) = exception_slot {
+            let value = policy.prepare_assignment(self, value)?;
+            instance.borrow_mut().attrs.insert_slot(name, value);
+            return Ok(());
         }
         // Issue #1957: `obj.__class__ = NewType` re-types the instance
         // rather than storing a literal attribute (see `retype_instance`).
@@ -342,10 +312,7 @@ impl Interpreter {
         if name == "__class__" {
             return self.retype_instance(instance, value);
         }
-        if exception_slot {
-            instance.borrow_mut().attrs.insert_slot(name, value);
-            return Ok(());
-        }
+        debug_assert!(exception_slot.is_none());
         // Issue #1106: if the class declares `__slots__`, only allow
         // assignment to names in the slot set.  When `__dict__` is
         // explicitly listed as a slot, arbitrary attribute assignment

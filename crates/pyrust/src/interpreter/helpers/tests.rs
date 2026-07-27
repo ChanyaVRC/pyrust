@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod purity_tests {
-    use super::is_memo_pure_body;
+    use super::{is_memo_pure_body, is_memo_pure_function_body};
     use crate::lexer::Lexer;
     use crate::parser::Parser;
     use std::collections::{HashMap, HashSet};
@@ -8,6 +8,24 @@ mod purity_tests {
     fn parse_body(src: &str) -> Vec<crate::ast::Stmt> {
         let tokens = Lexer::new(src).expect("lex failed").into_tokens();
         Parser::new(tokens).parse_program().expect("parse failed")
+    }
+
+    fn parse_function(
+        src: &str,
+    ) -> (
+        String,
+        Vec<crate::ast::FunctionParam>,
+        Vec<crate::ast::Stmt>,
+    ) {
+        let mut program = parse_body(src);
+        assert_eq!(program.len(), 1, "expected one function definition");
+        let crate::ast::Stmt::Def {
+            name, params, body, ..
+        } = program.remove(0)
+        else {
+            panic!("expected a function definition");
+        };
+        (name, params, body)
     }
 
     /// Locals helper: treat the given names as function-local registers so a
@@ -50,6 +68,44 @@ mod purity_tests {
         assert!(
             is_memo_pure_body(&body, &pure_fns, &locals_of(&["n"])),
             "direct self-recursion must remain eligible for CallMemo"
+        );
+    }
+
+    #[test]
+    fn recursive_call_must_bind_every_positional_parameter_for_memo_purity() {
+        for source in [
+            "def recurse(n, value=1):\n    return recurse(n - 1)\n",
+            // `__defaults__` may add a default to an originally-required
+            // parameter, so source-declared defaults are not the complete set
+            // of mutable dependencies.
+            "def recurse(n, value):\n    return recurse(n - 1)\n",
+        ] {
+            let (name, params, body) = parse_function(source);
+            let pure_fns = HashSet::from([name.clone()]);
+            assert!(
+                !is_memo_pure_function_body(
+                    &body,
+                    &pure_fns,
+                    &locals_of(&["n", "value"]),
+                    &name,
+                    &params,
+                ),
+                "a recursive call that can use mutable __defaults__ must not be memo-pure"
+            );
+        }
+
+        let (name, params, body) =
+            parse_function("def recurse(n, value=1):\n    return recurse(n - 1, value)\n");
+        let pure_fns = HashSet::from([name.clone()]);
+        assert!(
+            is_memo_pure_function_body(
+                &body,
+                &pure_fns,
+                &locals_of(&["n", "value"]),
+                &name,
+                &params,
+            ),
+            "explicitly binding every positional parameter keeps recursion memo-pure"
         );
     }
 

@@ -26,7 +26,20 @@ fn lambda_captures_in_stmt(
     cells: &mut HashSet<String>,
 ) {
     match stmt {
-        Stmt::Def { .. } | Stmt::Class { .. } => {}
+        // Definition bodies are nested scopes. Eager header expressions and
+        // PEP 695 annotation-scope expressions can still contain explicit
+        // lambdas/comprehensions that capture this scope.
+        Stmt::Def { .. } | Stmt::Class { .. } => {
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                lambda_captures_in_expr(expr, local_index, is_class_scope, cells)
+            });
+            // Bounds/constraints are compiled as implicit zero-argument
+            // thunks, so their direct reads are captures even though there is
+            // no `Expr::Lambda` node in the source AST.
+            stmt.visit_deferred_annotation_exprs(&mut |expr| {
+                deferred_annotation_captures_in_expr(expr, local_index, is_class_scope, cells)
+            });
+        }
         Stmt::Assign(target, value) => {
             target.visit_evaluated_exprs(&mut |expr| {
                 lambda_captures_in_expr(expr, local_index, is_class_scope, cells)
@@ -182,8 +195,13 @@ fn lambda_captures_in_stmt(
                 lambda_captures_in_expr(v, local_index, is_class_scope, cells);
             }
         }
-        Stmt::TypeAlias { value, .. } => {
-            lambda_captures_in_expr(value, local_index, is_class_scope, cells);
+        Stmt::TypeAlias { .. } => {
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                lambda_captures_in_expr(expr, local_index, is_class_scope, cells)
+            });
+            stmt.visit_deferred_annotation_exprs(&mut |expr| {
+                deferred_annotation_captures_in_expr(expr, local_index, is_class_scope, cells)
+            });
         }
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
@@ -193,6 +211,28 @@ fn lambda_captures_in_stmt(
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
+    }
+}
+
+fn deferred_annotation_captures_in_expr(
+    expr: &Expr,
+    local_index: &HashMap<String, Reg>,
+    is_class_scope: bool,
+    cells: &mut HashSet<String>,
+) {
+    // An annotation thunk created while executing a class body does not close
+    // over the class namespace. The enclosing function's class-scope walker
+    // is responsible for promoting its own locals instead.
+    if is_class_scope {
+        return;
+    }
+    let mut uses = HashSet::new();
+    collect_free_var_reads_in_expr(expr, &mut uses);
+    collect_transitive_free_vars_in_expr(expr, &mut uses);
+    for name in uses {
+        if local_index.contains_key(&name) {
+            cells.insert(name);
+        }
     }
 }
 
@@ -214,203 +254,19 @@ fn for_each_fstring_expr<F: FnMut(&Expr)>(parts: &[FStringPart], f: &mut F) {
     }
 }
 
-/// Collect names bound by walrus (`:=`) inside `expr`, without descending
-/// into nested comprehensions, lambdas, or generator expressions (they create
-/// their own implicit scopes, so their walrus targets don't propagate here).
+/// Collect walrus targets that bind the nearest non-comprehension scope.
 fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
-    match expr {
-        Expr::Named { target, value } => {
-            out.insert(target.clone());
-            collect_walrus_writes_in_expr(value, out);
-        }
-        Expr::Binary { left, right, .. } => {
-            collect_walrus_writes_in_expr(left, out);
-            collect_walrus_writes_in_expr(right, out);
-        }
-        Expr::Unary { expr: e, .. } => collect_walrus_writes_in_expr(e, out),
-        Expr::Compare { left, ops } => {
-            collect_walrus_writes_in_expr(left, out);
-            for (_, e) in ops {
-                collect_walrus_writes_in_expr(e, out);
-            }
-        }
-        Expr::Call { func, args, .. } => {
-            collect_walrus_writes_in_expr(func, out);
-            for a in args {
-                collect_walrus_writes_in_expr(&a.value, out);
-            }
-        }
-        Expr::Ternary { cond, then, else_ } => {
-            collect_walrus_writes_in_expr(cond, out);
-            collect_walrus_writes_in_expr(then, out);
-            collect_walrus_writes_in_expr(else_, out);
-        }
-        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
-            for e in items {
-                collect_walrus_writes_in_expr(e, out);
-            }
-        }
-        Expr::Dict(items) => {
-            for item in items {
-                match item {
-                    DictItem::Pair(k, v) => {
-                        collect_walrus_writes_in_expr(k, out);
-                        collect_walrus_writes_in_expr(v, out);
-                    }
-                    DictItem::DoubleSplat(e) => collect_walrus_writes_in_expr(e, out),
-                }
-            }
-        }
-        Expr::Index { target, index, .. } => {
-            collect_walrus_writes_in_expr(target, out);
-            collect_walrus_writes_in_expr(index, out);
-        }
-        Expr::Attr { target, .. } => collect_walrus_writes_in_expr(target, out),
-        Expr::Starred(e) => collect_walrus_writes_in_expr(e, out),
-        Expr::Slice {
-            target,
-            lower,
-            upper,
-            step,
-        } => {
-            collect_walrus_writes_in_expr(target, out);
-            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
-                collect_walrus_writes_in_expr(e, out);
-            }
-        }
-        Expr::FString(parts) => {
-            for_each_fstring_expr(parts, &mut |e| collect_walrus_writes_in_expr(e, out));
-        }
-        // Walrus targets inside comprehensions escape to the nearest enclosing
-        // non-comprehension scope (PEP 572), so they may need to be promoted to
-        // cell vars of an enclosing function. Descend into elt/key/val/cond.
-        // Lambda creates a true new scope; stop there.
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
-            collect_walrus_writes_in_expr(elt, out);
-            for clause in clauses {
-                if let Some(c) = &clause.cond {
-                    collect_walrus_writes_in_expr(c, out);
-                }
-                collect_walrus_writes_in_expr(&clause.iter, out);
-            }
-        }
-        Expr::DictComp { key, val, clauses } => {
-            collect_walrus_writes_in_expr(key, out);
-            collect_walrus_writes_in_expr(val, out);
-            for clause in clauses {
-                if let Some(c) = &clause.cond {
-                    collect_walrus_writes_in_expr(c, out);
-                }
-                collect_walrus_writes_in_expr(&clause.iter, out);
-            }
-        }
-        Expr::Lambda { .. } => {}
-        _ => {}
-    }
+    expr.visit_enclosing_walrus_targets(&mut |target| {
+        out.insert(target.to_owned());
+    });
 }
 
 impl Compiler {
-    /// Collect all `Expr::Named` (walrus `:=`) target names from an expression,
-    /// without descending into nested comprehensions or lambdas (those create
-    /// their own implicit scopes, so their walrus targets don't leak here).
+    /// Collect walrus targets that bind the nearest non-comprehension scope.
     fn collect_walrus_targets_in_expr(expr: &Expr, out: &mut HashSet<String>) {
-        match expr {
-            Expr::Named { target, value } => {
-                out.insert(target.clone());
-                Self::collect_walrus_targets_in_expr(value, out);
-            }
-            Expr::Binary { left, right, .. } => {
-                Self::collect_walrus_targets_in_expr(left, out);
-                Self::collect_walrus_targets_in_expr(right, out);
-            }
-            Expr::Unary { expr: e, .. } => Self::collect_walrus_targets_in_expr(e, out),
-            Expr::Compare { left, ops } => {
-                Self::collect_walrus_targets_in_expr(left, out);
-                for (_, e) in ops {
-                    Self::collect_walrus_targets_in_expr(e, out);
-                }
-            }
-            Expr::Call { func, args, .. } => {
-                Self::collect_walrus_targets_in_expr(func, out);
-                for a in args {
-                    Self::collect_walrus_targets_in_expr(&a.value, out);
-                }
-            }
-            Expr::Ternary { cond, then, else_ } => {
-                Self::collect_walrus_targets_in_expr(cond, out);
-                Self::collect_walrus_targets_in_expr(then, out);
-                Self::collect_walrus_targets_in_expr(else_, out);
-            }
-            Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
-                for e in items {
-                    Self::collect_walrus_targets_in_expr(e, out);
-                }
-            }
-            Expr::Dict(items) => {
-                for item in items {
-                    match item {
-                        DictItem::Pair(k, v) => {
-                            Self::collect_walrus_targets_in_expr(k, out);
-                            Self::collect_walrus_targets_in_expr(v, out);
-                        }
-                        DictItem::DoubleSplat(e) => {
-                            Self::collect_walrus_targets_in_expr(e, out);
-                        }
-                    }
-                }
-            }
-            Expr::Index { target, index, .. } => {
-                Self::collect_walrus_targets_in_expr(target, out);
-                Self::collect_walrus_targets_in_expr(index, out);
-            }
-            Expr::Attr { target, .. } => Self::collect_walrus_targets_in_expr(target, out),
-            Expr::Starred(e) => Self::collect_walrus_targets_in_expr(e, out),
-            Expr::Slice {
-                target,
-                lower,
-                upper,
-                step,
-            } => {
-                Self::collect_walrus_targets_in_expr(target, out);
-                for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
-                    Self::collect_walrus_targets_in_expr(e, out);
-                }
-            }
-            Expr::FString(parts) => {
-                for_each_fstring_expr(parts, &mut |e| {
-                    Self::collect_walrus_targets_in_expr(e, out);
-                });
-            }
-            // Walrus targets inside nested comprehensions still escape to the
-            // nearest non-comprehension scope (PEP 572). Descend so that the
-            // outer comprehension's compile_collection_comp_impl can route them
-            // as nonlocal/global correctly.  Lambda creates a true new scope.
-            Expr::ListComp { elt, clauses }
-            | Expr::SetComp { elt, clauses }
-            | Expr::GenExp { elt, clauses } => {
-                Self::collect_walrus_targets_in_expr(elt, out);
-                for clause in clauses {
-                    if let Some(c) = &clause.cond {
-                        Self::collect_walrus_targets_in_expr(c, out);
-                    }
-                    Self::collect_walrus_targets_in_expr(&clause.iter, out);
-                }
-            }
-            Expr::DictComp { key, val, clauses } => {
-                Self::collect_walrus_targets_in_expr(key, out);
-                Self::collect_walrus_targets_in_expr(val, out);
-                for clause in clauses {
-                    if let Some(c) = &clause.cond {
-                        Self::collect_walrus_targets_in_expr(c, out);
-                    }
-                    Self::collect_walrus_targets_in_expr(&clause.iter, out);
-                }
-            }
-            Expr::Lambda { .. } => {}
-            _ => {}
-        }
+        expr.visit_enclosing_walrus_targets(&mut |target| {
+            out.insert(target.to_owned());
+        });
     }
 
     /// Collect walrus targets from an entire statement list (used to find
@@ -537,9 +393,130 @@ fn collect_comp_target_names(target: &AssignTarget, out: &mut HashSet<String>) {
     }
 }
 
+/// Return whether an expression lexically contains an assignment expression.
+///
+/// This deliberately crosses lambda and nested-comprehension scope boundaries:
+/// PEP 572 prohibits `:=` anywhere inside a comprehension iterable's syntax,
+/// including inside a lambda body/default or a nested comprehension. This is a
+/// syntax rule, not a binding rule, so it must remain separate from
+/// `visit_enclosing_walrus_targets`, which correctly stops at function scopes.
+fn expr_contains_assignment_expression(expr: &Expr) -> bool {
+    match expr {
+        Expr::Named { .. } => true,
+        Expr::Lambda { params, body } => {
+            params.iter().any(|parameter| {
+                parameter
+                    .default
+                    .as_ref()
+                    .is_some_and(expr_contains_assignment_expression)
+                    || parameter
+                        .annotation
+                        .as_ref()
+                        .is_some_and(expr_contains_assignment_expression)
+            }) || expr_contains_assignment_expression(body)
+        }
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
+            expr_contains_assignment_expression(elt)
+                || clauses.iter().any(|clause| {
+                    expr_contains_assignment_expression(&clause.iter)
+                        || clause
+                            .cond
+                            .as_ref()
+                            .is_some_and(expr_contains_assignment_expression)
+                })
+        }
+        Expr::DictComp { key, val, clauses } => {
+            expr_contains_assignment_expression(key)
+                || expr_contains_assignment_expression(val)
+                || clauses.iter().any(|clause| {
+                    expr_contains_assignment_expression(&clause.iter)
+                        || clause
+                            .cond
+                            .as_ref()
+                            .is_some_and(expr_contains_assignment_expression)
+                })
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_contains_assignment_expression(left) || expr_contains_assignment_expression(right)
+        }
+        Expr::Unary { expr, .. }
+        | Expr::Starred(expr)
+        | Expr::YieldFrom(expr)
+        | Expr::Await(expr) => expr_contains_assignment_expression(expr),
+        Expr::Yield(expr) => expr
+            .as_deref()
+            .is_some_and(expr_contains_assignment_expression),
+        Expr::Compare { left, ops } => {
+            expr_contains_assignment_expression(left)
+                || ops
+                    .iter()
+                    .any(|(_, operand)| expr_contains_assignment_expression(operand))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            expr_contains_assignment_expression(cond)
+                || expr_contains_assignment_expression(then)
+                || expr_contains_assignment_expression(else_)
+        }
+        Expr::Call { func, args, .. } => {
+            expr_contains_assignment_expression(func)
+                || args
+                    .iter()
+                    .any(|argument| expr_contains_assignment_expression(&argument.value))
+        }
+        Expr::Attr { target, .. } => expr_contains_assignment_expression(target),
+        Expr::Index { target, index, .. } => {
+            expr_contains_assignment_expression(target)
+                || expr_contains_assignment_expression(index)
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_contains_assignment_expression(target)
+                || [lower, upper, step]
+                    .iter()
+                    .flat_map(|bound| bound.as_deref())
+                    .any(expr_contains_assignment_expression)
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            items.iter().any(expr_contains_assignment_expression)
+        }
+        Expr::Dict(items) => items.iter().any(|item| match item {
+            DictItem::Pair(key, value) => {
+                expr_contains_assignment_expression(key)
+                    || expr_contains_assignment_expression(value)
+            }
+            DictItem::DoubleSplat(expr) => expr_contains_assignment_expression(expr),
+        }),
+        Expr::FString(parts) => {
+            let mut contains = false;
+            for_each_fstring_expr(parts, &mut |expr| {
+                contains |= expr_contains_assignment_expression(expr);
+            });
+            contains
+        }
+        Expr::Var(_, _)
+        | Expr::Int(_)
+        | Expr::BigInt(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None
+        | Expr::Ellipsis => false,
+    }
+}
+
 /// Validate a comprehension / generator expression at compile time, raising the
 /// CPython 3.12 `SyntaxError`s that pyrust would otherwise accept:
 ///
+/// * an assignment expression anywhere inside an iterable expression
+///   (`assignment expression cannot be used in a comprehension iterable expression`);
 /// * a `yield`/`yield from` directly in the element/condition expressions
 ///   (`'yield' inside <kind>`); and
 /// * an assignment expression (`:=`) whose target collides with one of the
@@ -547,9 +524,8 @@ fn collect_comp_target_names(target: &AssignTarget, out: &mut HashSet<String>) {
 ///   `assignment expression cannot rebind comprehension iteration variable '<n>'`).
 ///
 /// `result_exprs` are the value-producing expressions (`elt`, or `key`+`val`);
-/// `clauses` are the comprehension clauses.  Iterable expressions (`clause.iter`)
-/// are evaluated in the enclosing scope and are validated elsewhere, so they are
-/// not scanned here.  `kind` is the CPython label (e.g. `"list comprehension"`).
+/// `clauses` are the comprehension clauses. `kind` is the CPython label
+/// (e.g. `"list comprehension"`).
 ///
 /// Returns the `SyntaxError` message on violation (`None` when valid).
 fn check_comprehension(
@@ -557,12 +533,28 @@ fn check_comprehension(
     clauses: &[CompClause],
     kind: &str,
 ) -> Option<String> {
-    // yield directly inside the comprehension body.
+    // This check has precedence over body-level yield/rebind diagnostics in
+    // CPython and applies to every iterable, not only the outermost one.
+    if clauses
+        .iter()
+        .any(|clause| expr_contains_assignment_expression(&clause.iter))
+    {
+        return Some(
+            "assignment expression cannot be used in a comprehension iterable expression"
+                .to_string(),
+        );
+    }
+
+    // `yield` directly inside the comprehension body. The first iterable is
+    // evaluated in the enclosing scope, where `yield` may be valid; every
+    // later iterable belongs to the implicit comprehension function and must
+    // therefore be rejected along with the result/filter expressions.
     let mut yields = result_exprs.iter().any(|e| expr_contains_yield(e));
     yields = yields
         || clauses
             .iter()
             .any(|c| c.cond.as_ref().is_some_and(expr_contains_yield));
+    yields = yields || clauses.iter().skip(1).any(|c| expr_contains_yield(&c.iter));
     if yields {
         return Some(format!("'yield' inside {kind}"));
     }
@@ -603,21 +595,28 @@ fn lambda_captures_in_expr(
             // (issue #699).  Skip promotion entirely for class scopes; the lambda
             // will resolve these names through the outer function/module env.
             if !is_class_scope {
-                let mut uses = HashSet::new();
-                collect_free_var_reads_in_expr(body, &mut uses);
-                // Default expressions are evaluated in the enclosing scope.
+                let mut body_uses = HashSet::new();
+                collect_free_var_reads_in_expr(body, &mut body_uses);
                 for param in params {
-                    if let Some(d) = &param.default {
-                        collect_free_var_reads_in_expr(d, &mut uses);
-                    }
+                    body_uses.remove(&param.name);
                 }
-                for param in params {
-                    uses.remove(&param.name);
-                }
-                for name in uses {
+                for name in body_uses {
                     if local_index.contains_key(&name) {
                         cells.insert(name);
                     }
+                }
+            }
+            // Defaults/annotations are evaluated in the enclosing scope, where
+            // the lambda parameters do not shadow names. Descend separately so
+            // a nested closure in `lambda x=(lambda: x): ...` can still promote
+            // the enclosing `x`; merging it with body uses and then subtracting
+            // parameters loses that dependency.
+            for param in params {
+                if let Some(default) = &param.default {
+                    lambda_captures_in_expr(default, local_index, is_class_scope, cells);
+                }
+                if let Some(annotation) = &param.annotation {
+                    lambda_captures_in_expr(annotation, local_index, is_class_scope, cells);
                 }
             }
         }

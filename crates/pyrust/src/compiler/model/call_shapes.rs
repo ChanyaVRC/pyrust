@@ -59,9 +59,9 @@ fn positional_splat_fast_shape(args: &[crate::ast::CallArg]) -> Option<(usize, u
     let nkw = kw_end - (splat_pos + 1);
     // A literal keyword together with a `**kw` splat can name the SAME key (e.g.
     // `f(*a, x=1, **{'x': 2})`), which CPython rejects as "got multiple values for
-    // keyword argument 'x'" at merge time.  Detecting that cross-source collision
-    // is the `__vcall__` path's job (DICT_MERGE) — keep that shape on it rather
-    // than silently letting one value win.  Literal keywords alone are unique
+    // keyword argument 'x'" at merge time. Detecting that cross-source collision
+    // is the generic materializing path's job (DICT_MERGE) — keep that shape on
+    // it rather than silently letting one value win. Literal keywords alone are unique
     // (duplicate `kw=` is a syntax error) and never collide with each other.
     if nkw > 0 && ndsplat == 1 {
         return None;
@@ -72,8 +72,8 @@ fn positional_splat_fast_shape(args: &[crate::ast::CallArg]) -> Option<(usize, u
     // BEFORE it evaluates the keyword values — the iteration side effects of a
     // generator / iterator `*a` are observable in that order.  The `CallExArgs`
     // lowering instead defers splat iteration to call time (after the keyword values
-    // are already evaluated), so it would reorder those side effects.  Keep this
-    // shape on the `__vcall__` path, which preserves the ordering.  (With no leading
+    // are already evaluated), so it would reorder those side effects. Keep this
+    // shape on the materializing path, which preserves the ordering. (With no leading
     // positional, CPython also defers the splat into `CALL_FUNCTION_EX`, so
     // `f(*a, kw=v)` stays on the fast path and matches.)
     if npos > 0 && nkw > 0 {

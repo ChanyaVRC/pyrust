@@ -221,6 +221,36 @@ fn fastpath_semantics_memo_call_observes_defaults_reassignment() {
 }
 
 #[test]
+fn recursive_memo_call_observes_transitive_defaults_reassignment() {
+    let interpreter = run_program(
+        r#"def resolve(n, explicit, fallback=1):
+    if n == 0:
+        return fallback
+    return resolve(n - 1, explicit)
+before = resolve(1, 99, 88)
+resolve.__defaults__ = (2,)
+after = resolve(1, 99, 88)
+"#,
+    );
+    assert_eq!(
+        interpreter.lookup_name("before").unwrap(),
+        Some(Value::int(1))
+    );
+    assert_eq!(
+        interpreter.lookup_name("after").unwrap(),
+        Some(Value::int(2))
+    );
+    let function = interpreter.lookup_name("resolve").unwrap().unwrap();
+    let ValueKind::UserFunction(function) = function.kind() else {
+        panic!("resolve must be a user function");
+    };
+    assert!(
+        !function.is_memo_pure,
+        "a direct self-call that can consume mutable defaults must not use CallMemo"
+    );
+}
+
+#[test]
 fn fastpath_semantics_builtin_spelling_does_not_prove_memo_purity() {
     let interpreter = run_program(
         r#"calls = 0

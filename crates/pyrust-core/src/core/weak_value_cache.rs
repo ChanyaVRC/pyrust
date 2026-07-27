@@ -180,6 +180,18 @@ impl WeakValueCache {
             _ => None,
         }
     }
+
+    /// Upgrade a cached exact dict directly to its shared backing.
+    ///
+    /// Import-registry reads operate on the backing `Rc` and must not allocate
+    /// a temporary `OpaqueSlot` merely to recover the same dictionary.
+    #[inline]
+    pub fn upgrade_dict(&self) -> Option<Rc<RefCell<PyDict>>> {
+        match &self.0 {
+            WeakValueCacheKind::Dict(value) => value.upgrade(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

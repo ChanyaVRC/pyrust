@@ -1,6 +1,6 @@
 # Awaiting a coroutine constructed with keyword / splat arguments (issue #2298).
 #
-# `await f(x, kw=v)` lowered the call through the variadic `__vcall__` path,
+# `await f(x, kw=v)` used to lower through the old variadic helper path,
 # which emits an arg `Move` into the register slot that subsequently becomes the
 # await drive's iterator.  Copy-propagation did not treat `GetAwaitable` as
 # writing its destination, so the stale `Move` alias was substituted into the

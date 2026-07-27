@@ -10,7 +10,7 @@ pub(crate) enum NativeIterSource {
     /// limit and may observe an inserted replacement.
     LiveKeys {
         container: Value,
-        cursor: LiveKeyCursor,
+        cursor: Box<LiveKeyCursor>,
     },
     /// Independent live cursor over an instance's reusable `__dict__` proxy.
     ///

@@ -10,19 +10,43 @@ fn inline_guard_count(code: &FnCode) -> usize {
 #[test]
 fn leaf_binop_inlining_has_a_producer_and_is_idempotent() {
     let once = optimize(compile_fn(
-        "def leaf(a, b):\n    return a + b\nresult = leaf(20, 22)\n",
+        "def outer(count):\n    def leaf(a, b):\n        return a + b\n    increment = 1\n    total = 0\n    for value in range(count):\n        left = value & 255\n        total += leaf(left, increment)\n    return total\n",
     ));
+    let outer = once
+        .fn_protos
+        .iter()
+        .find(|proto| proto.name.as_ref() == "outer")
+        .expect("outer prototype");
     assert_eq!(
-        inline_guard_count(&once),
+        inline_guard_count(&outer.code),
         1,
         "eligible source must produce exactly one guarded inline site"
     );
 
     let twice = optimize(once);
+    let outer = twice
+        .fn_protos
+        .iter()
+        .find(|proto| proto.name.as_ref() == "outer")
+        .expect("outer prototype");
     assert_eq!(
-        inline_guard_count(&twice),
+        inline_guard_count(&outer.code),
         1,
         "re-optimizing guarded code must not stack another guard"
+    );
+}
+
+#[test]
+fn leaf_binop_inlining_guards_a_one_shot_literal_call() {
+    let code = optimize(compile_fn(
+        "def leaf(a, b):\n    return a * b\nresult = leaf(1073741824, 1073741825)\n",
+    ));
+
+    assert_eq!(
+        inline_guard_count(&code),
+        1,
+        "a literal call with no hot memo history should retain the inline guard: {:?}",
+        code.insns
     );
 }
 

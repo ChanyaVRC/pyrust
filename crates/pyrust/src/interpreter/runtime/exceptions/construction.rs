@@ -331,7 +331,21 @@ impl Interpreter {
         // Reuse the `kinds` classification computed above instead of running a
         // second MRO walk inside `instantiate_exception` (perf: one classify per
         // raise instead of two).
+        // The generic OSError allocator owns errno-specific class remapping.
+        // Once it has selected the final exact class, apply BlockingIOError's
+        // Interpreter-aware third-argument policy. Keeping this after allocation
+        // lets `OSError(EAGAIN, ..., count)` share the same path while excluding
+        // user subclasses of BlockingIOError.
+        let may_select_exact_blocking_io = values.len() >= 3
+            && matches!(
+                class.borrow().builtin_exception_name,
+                Some("OSError" | "BlockingIOError")
+            );
+        let constructor_args = may_select_exact_blocking_io.then(|| values.clone());
         let instance = instantiate_exception_with_kinds(class, values, &kinds);
+        if let Some(constructor_args) = constructor_args {
+            finalize_blocking_io_constructor(self, &instance, &constructor_args)?;
+        }
         // Apply keyword arguments extracted above for NameError and ImportError.
         // `instantiate_exception` already initialised `.name` (and `.path`) to
         // `None`; override them with the caller-supplied values when provided.

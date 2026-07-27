@@ -22,34 +22,15 @@ fn collect_transitive_free_vars_in_stmts(stmts: &[Stmt], uses: &mut HashSet<Stri
 
 fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
     match stmt {
-        Stmt::Def {
+        stmt @ Stmt::Def {
             params,
             body: nested_body,
-            decorators,
-            return_annotation,
             ..
         } => {
-            // Decorator expressions evaluate in the enclosing scope.
-            for d in decorators {
-                collect_transitive_free_vars_in_expr(d, uses);
-                collect_free_var_reads_in_expr(d, uses);
-            }
-            // Default values are also evaluated in the enclosing scope.
-            for p in params {
-                if let Some(d) = &p.default {
-                    collect_transitive_free_vars_in_expr(d, uses);
-                    collect_free_var_reads_in_expr(d, uses);
-                }
-                // Annotation expressions also evaluate in the enclosing scope.
-                if let Some(a) = &p.annotation {
-                    collect_transitive_free_vars_in_expr(a, uses);
-                    collect_free_var_reads_in_expr(a, uses);
-                }
-            }
-            if let Some(a) = return_annotation {
-                collect_transitive_free_vars_in_expr(a, uses);
-                collect_free_var_reads_in_expr(a, uses);
-            }
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                collect_transitive_free_vars_in_expr(expr, uses);
+                collect_free_var_reads_in_expr(expr, uses);
+            });
             // Names locally bound inside the nested function — exclude them
             // when contributing to the enclosing scope's free-var set.
             let nested_globals = crate::interpreter::collect_global_names(nested_body);
@@ -78,32 +59,13 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                 }
             }
         }
-        Stmt::Class {
-            body: nested_body,
-            bases,
-            metaclass,
-            keywords,
-            decorators,
-            ..
+        stmt @ Stmt::Class {
+            body: nested_body, ..
         } => {
-            // Decorator + base expressions evaluate in the enclosing scope.
-            for d in decorators {
-                collect_transitive_free_vars_in_expr(d, uses);
-                collect_free_var_reads_in_expr(d, uses);
-            }
-            for b in bases {
-                collect_transitive_free_vars_in_expr(b, uses);
-                collect_free_var_reads_in_expr(b, uses);
-            }
-            if let Some(m) = metaclass {
-                collect_transitive_free_vars_in_expr(m, uses);
-                collect_free_var_reads_in_expr(m, uses);
-            }
-            // PEP 487 keyword arg expressions also evaluate in the enclosing scope.
-            for (_, v) in keywords {
-                collect_transitive_free_vars_in_expr(v, uses);
-                collect_free_var_reads_in_expr(v, uses);
-            }
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                collect_transitive_free_vars_in_expr(expr, uses);
+                collect_free_var_reads_in_expr(expr, uses);
+            });
             // Class body itself: methods read enclosing scope (skipping class scope).
             // We approximate the class scope conservatively by collecting class-level
             // assignments as the local set, while excluding any `nonlocal` names so
@@ -284,8 +246,11 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                 collect_transitive_free_vars_in_expr(v, uses);
             }
         }
-        Stmt::TypeAlias { value, .. } => {
-            collect_transitive_free_vars_in_expr(value, uses);
+        Stmt::TypeAlias { .. } => {
+            stmt.visit_scope_dependency_exprs(&mut |expr| {
+                collect_transitive_free_vars_in_expr(expr, uses);
+                collect_free_var_reads_in_expr(expr, uses);
+            });
         }
         Stmt::Return(None)
         | Stmt::Import { .. }
@@ -302,21 +267,26 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
 fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
     match expr {
         Expr::Lambda { params, body } => {
-            let mut inner_uses: HashSet<String> = HashSet::new();
-            collect_free_var_reads_in_expr(body, &mut inner_uses);
-            collect_transitive_free_vars_in_expr(body, &mut inner_uses);
-            // Default expressions are evaluated in the enclosing scope.
+            let mut body_uses: HashSet<String> = HashSet::new();
+            collect_free_var_reads_in_expr(body, &mut body_uses);
+            collect_transitive_free_vars_in_expr(body, &mut body_uses);
             for p in params {
-                if let Some(d) = &p.default {
-                    collect_free_var_reads_in_expr(d, &mut inner_uses);
-                    collect_transitive_free_vars_in_expr(d, &mut inner_uses);
+                body_uses.remove(&p.name);
+            }
+            uses.extend(body_uses);
+
+            // Defaults/annotations execute in the enclosing scope, not the
+            // lambda body. Keep their provenance separate so parameter-name
+            // subtraction applies only to body reads.
+            for p in params {
+                if let Some(default) = &p.default {
+                    collect_free_var_reads_in_expr(default, uses);
+                    collect_transitive_free_vars_in_expr(default, uses);
                 }
-            }
-            for p in params {
-                inner_uses.remove(&p.name);
-            }
-            for n in inner_uses {
-                uses.insert(n);
+                if let Some(annotation) = &p.annotation {
+                    collect_free_var_reads_in_expr(annotation, uses);
+                    collect_transitive_free_vars_in_expr(annotation, uses);
+                }
             }
         }
         Expr::Binary { left, right, .. } => {

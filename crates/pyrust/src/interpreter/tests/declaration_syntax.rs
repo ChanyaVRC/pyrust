@@ -136,6 +136,76 @@ fn global_after_use_is_syntax_error() {
 }
 
 #[test]
+fn global_after_lambda_default_use_is_syntax_error() {
+    expect_syntax_error(
+        "def f():\n    (lambda value=x: value)\n    global x\n",
+        "name 'x' is used prior to global declaration",
+    );
+}
+
+#[test]
+fn global_after_lambda_default_assignment_is_syntax_error() {
+    expect_syntax_error(
+        "def f():\n    (lambda value=(x := 1): value)\n    global x\n",
+        "name 'x' is assigned to before global declaration",
+    );
+}
+
+#[test]
+fn global_after_comprehension_outer_iter_use_is_syntax_error() {
+    expect_syntax_error(
+        "def f():\n    [item for item in source]\n    global source\n",
+        "name 'source' is used prior to global declaration",
+    );
+}
+
+#[test]
+fn global_after_comprehension_walrus_is_syntax_error() {
+    expect_syntax_error(
+        "def f():\n    [(result := item) for item in ()]\n    global result\n",
+        "name 'result' is assigned to before global declaration",
+    );
+}
+
+#[test]
+fn global_after_function_default_use_is_syntax_error() {
+    expect_syntax_error(
+        "def f():\n    def inner(value=x):\n        pass\n    global x\n",
+        "name 'x' is used prior to global declaration",
+    );
+}
+
+#[test]
+fn pep695_annotation_scope_reads_do_not_precede_global() {
+    let _ = run_program(
+        r#"x = int
+def outer():
+    type Alias = x
+    def generic[T: x](value: x):
+        return value
+    global x
+    return Alias, generic
+alias, generic = outer()
+"#,
+    );
+}
+
+#[test]
+fn generic_function_default_still_precedes_global() {
+    expect_syntax_error(
+        "def outer():\n    def generic[T](value=x):\n        pass\n    global x\n",
+        "name 'x' is used prior to global declaration",
+    );
+}
+
+#[test]
+fn nested_lambda_and_comprehension_body_reads_do_not_precede_global() {
+    let _ = run_program(
+        "x = 1\ndef f():\n    (lambda: x)\n    [x for item in ()]\n    global x\n    return x\nf()\n",
+    );
+}
+
+#[test]
 fn nonlocal_after_assignment_is_syntax_error() {
     expect_syntax_error(
         "def outer():\n    y = 0\n    def f():\n        y = 10\n        nonlocal y\n",
