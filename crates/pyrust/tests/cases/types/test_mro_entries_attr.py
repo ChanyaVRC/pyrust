@@ -58,6 +58,20 @@ class MultiBase(r, proxy):
 print(MultiBase.__bases__)
 
 
+# Native GenericAlias follows the same protocol instead of being unwrapped by
+# a class-builder representation check.
+alias = list[int]
+print(alias.__mro_entries__((alias,)) == (list,))
+
+
+class FromGenericAlias(alias):
+    pass
+
+
+print(FromGenericAlias.__bases__ == (list,))
+print(FromGenericAlias.__orig_bases__ == (alias,))
+
+
 # A genuine non-class base with no __mro_entries__ anywhere still fails.
 try:
 

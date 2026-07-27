@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use indexmap::IndexMap;
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyClass, PyDict, PyError, PyKey, Result, Value, ValueKind,
-    key_repr,
+    BuiltinState, BuiltinTypeOps, CanonicalClassTag, PyClass, PyDict, PyError, PyKey, Result,
+    Value, ValueKind, builtin_ops_is, key_repr,
 };
 
 pub const TYPE_NAME: &str = "mappingproxy";
@@ -41,6 +41,10 @@ pub const MAPPING_PROXY_OPS: &MappingProxyOps = &MappingProxyOps;
 impl BuiltinTypeOps for MappingProxyOps {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
+    }
+
+    fn canonical_class_tag(&self) -> Option<CanonicalClassTag> {
+        Some(CanonicalClassTag::MappingProxy)
     }
 
     fn repr(&self, state: &BuiltinState) -> String {
@@ -100,7 +104,7 @@ impl BuiltinTypeOps for MappingProxyOps {
             ValueKind::BuiltinObject {
                 ops,
                 state: rhs_state,
-            } if ops.type_name() == TYPE_NAME => {
+            } if builtin_ops_is::<MappingProxyOps>(ops) => {
                 let rhs_src = match borrow_source(rhs_state) {
                     Some(s) => s,
                     None => return false,
@@ -147,10 +151,9 @@ impl BuiltinTypeOps for MappingProxyOps {
                     ValueKind::Str(s) => s.to_string(),
                     _ => return Err(PyError::named("KeyError", key.repr_raw())),
                 };
-                cls.borrow()
-                    .attrs
-                    .get(&key_str)
-                    .cloned()
+                let value = cls.borrow().attrs.get(&key_str).cloned();
+                value
+                    .map(|value| expose_class_value(&value))
                     .ok_or_else(|| PyError::named("KeyError", key.repr_raw()))
             }
             MappingProxySource::Dict(rc) => {
@@ -272,11 +275,9 @@ impl BuiltinTypeOps for MappingProxyOps {
                             // Non-string keys are never in a class dict.
                             _ => return Ok(default()),
                         };
-                        Ok(cls
-                            .borrow()
-                            .attrs
-                            .get(&key_str)
-                            .cloned()
+                        let value = cls.borrow().attrs.get(&key_str).cloned();
+                        Ok(value
+                            .map(|value| expose_class_value(&value))
                             .unwrap_or_else(default))
                     }
                     MappingProxySource::Dict(rc) => match args[0].to_key() {
@@ -300,7 +301,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                         let class = cls.borrow();
                         let mut dict: PyDict = PyDict::default();
                         for (k, v) in class.attrs.iter() {
-                            dict.insert(PyKey::str_from(k), v.clone());
+                            dict.insert(PyKey::str_from(k), expose_class_value(v));
                         }
                         Ok(Value::dict(dict))
                     }
@@ -349,11 +350,18 @@ fn source_dict_rc(src: &MappingProxySource) -> Rc<RefCell<PyDict>> {
             let class = cls.borrow();
             let mut dict = PyDict::default();
             for (k, v) in class.attrs.iter() {
-                dict.insert(PyKey::str_from(k), v.clone());
+                dict.insert(PyKey::str_from(k), expose_class_value(v));
             }
             Rc::new(RefCell::new(dict))
         }
     }
+}
+
+/// Class dictionaries internally keep member descriptors cycle-free. Every
+/// Python-visible mappingproxy read must vend the detached, owner-retaining
+/// descriptor form.
+fn expose_class_value(value: &Value) -> Value {
+    crate::member_descriptor::export_member_descriptor(value).unwrap_or_else(|| value.clone())
 }
 
 /// The keys of a proxy source as `Value`s, preserving insertion order.
@@ -405,6 +413,17 @@ pub fn mapping_proxy_dict(dict: Rc<RefCell<PyDict>>) -> Value {
     Value::builtin_object(MAPPING_PROXY_OPS, state)
 }
 
+/// Return whether `value` is backed by this module's mappingproxy operations
+/// table. The check uses the concrete Rust implementation type, never the
+/// Python-visible `mappingproxy` presentation name.
+#[inline]
+pub fn is_mapping_proxy(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<MappingProxyOps>(ops)
+    )
+}
+
 /// Extract the inner `Rc<RefCell<PyClass>>` from a class-backed mappingproxy
 /// Value, or `None` if the value is not a class-backed mappingproxy.  Used by
 /// `iter_values` in the interpreter so that `for k in vars(Foo)` works without
@@ -441,7 +460,7 @@ fn borrow_source_of(value: &Value) -> Option<MappingProxySource> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<MappingProxyOps>(ops) {
         return None;
     }
     borrow_source(state)

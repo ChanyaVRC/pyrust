@@ -1,7 +1,7 @@
 // `functools` module — body for the `functools` entry in
-// `pyrust_builtin_modules!`.  Exposes `reduce`, `partial`, `lru_cache`,
-// `wraps`, `cached_property`.  These are the four functools entries
-// that didn't make it into the phase-2 stdlib drop (PR #327 → #329).
+// `pyrust_builtin_modules!`. Owns the concrete functools APIs (`reduce`,
+// `partial`, caching decorators, wrapper metadata helpers, `cmp_to_key`,
+// `singledispatch`, and `total_ordering`).
 //
 // ## Design choices
 //
@@ -16,8 +16,8 @@
 //   `pyrust-builtins/src/cached_property.rs`) because the descriptor
 //   protocol — `__get__` lookup from `Interpreter::get_attr` — runs
 //   before the user-class fallback.  Plugging into the same hook as
-//   `property` keeps the hot attribute-lookup path tight; see
-//   `env.rs::get_attr`.
+//   `property` keeps the hot attribute-lookup path tight; see the runtime
+//   environment descriptor domain.
 //
 // - `wraps(orig)` returns a `_wraps_partial` callable.  Calling it with
 //   the wrapper function mutates that wrapper in place — copying the
@@ -26,23 +26,28 @@
 //   merging `orig.__dict__`, and setting `__wrapped__` — then returns
 //   the wrapper.  UserFunction exposes mutable overrides for all these
 //   (`user_name`/`user_qualname`/`module`/`doc`/`attrs`/`annotations`
-//   in `pyrust-core`; see `env.rs::assign_attr_function`), so the
+//   in `pyrust-core`), so the
 //   wrapper stays a real function (`type(w).__name__ == "function"`).
 //   `update_wrapper(wrapper, wrapped)` is the same operation exposed
 //   directly.
 //
 // Reference: <https://docs.python.org/3/library/functools.html>
 
+use std::any::Any;
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
-use crate::interpreter::{Interpreter, lookup_class_attr, object_class_singleton};
-use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, StrKey, Value, ValueKind};
+use crate::interpreter::{Interpreter, lookup_class_attr, object_class_singleton, value_class};
+use crate::value::{
+    InstanceAttrs, ModuleMutationState, PyClass, PyDict, PyInstance, PyKey, PyModule, Value,
+    ValueKind,
+};
 use indexmap::IndexMap;
+use pyrust_core::BuiltinTypeOps;
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -61,8 +66,7 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        let items = _interp.collect_iterable(&args[1].value)?;
-        let mut iter = items.into_iter();
+        let iterator = crate::interpreter::make_iterator(_interp, &args[1].value)?;
         let mut acc = if args.len() == 3 {
             // Initializer supplied → it's the seed; the iterable is folded
             // onto it from the left.  This is the only branch that's
@@ -71,18 +75,26 @@ pyrust_module! {
         } else {
             // No initializer → first item is the seed.  Empty iterable
             // is a hard error (mirrors CPython's TypeError text).
-            match iter.next() {
-                Some(v) => v,
-                None => return Err(PyError::named(
+            match _interp.call_next(&iterator, None) {
+                Ok(value) => value,
+                Err(ref error) if crate::interpreter::is_stop_iteration_error(error) => {
+                    return Err(PyError::named(
                     "TypeError",
                     // CPython's C `reduce` uses the bare `reduce()` here, with
                     // no `functools.` module prefix (unlike most other arity
                     // errors in this module, which carry the qualified name).
-                    "reduce() of empty iterable with no initial value".to_string(),
-                )),
+                        "reduce() of empty iterable with no initial value".to_string(),
+                    ))
+                }
+                Err(error) => return Err(error),
             }
         };
-        for item in iter {
+        loop {
+            let item = match _interp.call_next(&iterator, None) {
+                Ok(value) => value,
+                Err(ref error) if crate::interpreter::is_stop_iteration_error(error) => break,
+                Err(error) => return Err(error),
+            };
             acc = _interp.call_function_expanded(
                 func.clone(),
                 &[
@@ -194,17 +206,16 @@ pyrust_module! {
             let (func, bound_pos, bound_kw) = read_partial_state(&inst, FN_NAME)?;
             let mut parts: Vec<String> =
                 Vec::with_capacity(1 + bound_pos.len() + bound_kw.len());
-            parts.push(crate::builtin_modules::builtins::render_value_repr(_interp, &func)?);
+            parts.push(crate::interpreter::render_value_repr(_interp, &func)?);
             for v in &bound_pos {
-                parts.push(crate::builtin_modules::builtins::render_value_repr(_interp, v)?);
+                parts.push(crate::interpreter::render_value_repr(_interp, v)?);
             }
             for (k, v) in &bound_kw {
                 let name = match k {
                     PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
                     _ => continue,
                 };
-                let val_repr =
-                    crate::builtin_modules::builtins::render_value_repr(_interp, v)?;
+                let val_repr = crate::interpreter::render_value_repr(_interp, v)?;
                 parts.push(format!("{name}={val_repr}"));
             }
             Ok(Value::string(format!("functools.partial({})", parts.join(", "))))
@@ -220,6 +231,7 @@ pyrust_module! {
     /// next call.
     /// <https://docs.python.org/3/library/functools.html#functools.lru_cache>
     fn lru_cache(args) -> Result<Value> {
+        let (generation, args) = split_generation_arg(args, FN_NAME)?;
         // Reject any unknown kwargs.
         for a in args.iter() {
             if let Some(name) = a.name.as_deref()
@@ -244,7 +256,14 @@ pyrust_module! {
             && typed_kw.is_none()
             && is_callable(&positional[0].value)
         {
-            return Ok(make_lru_wrapper(positional[0].value.clone(), Some(128), false));
+            let (wrapper_class, cache_info_class) = lru_wrapper_classes(_interp, generation)?;
+            return Ok(make_lru_wrapper(
+                wrapper_class,
+                cache_info_class,
+                positional[0].value.clone(),
+                Some(128),
+                false,
+            ));
         }
         if positional.len() > 1 {
             return Err(PyError::named(
@@ -281,7 +300,13 @@ pyrust_module! {
                 format!("{FN_NAME}() typed must be a bool"),
             )),
         };
-        Ok(make_lru_factory(maxsize, typed))
+        let factory_class = lru_factory_class(_interp, generation)?;
+        Ok(make_lru_factory(
+            generation,
+            factory_class,
+            maxsize,
+            typed,
+        ))
     }
 
     /// Wrapper class produced by `lru_cache(func)` (or
@@ -320,27 +345,35 @@ pyrust_module! {
                 );
                 (func, maxsize, typed)
             };
-            let key = build_key(user, typed);
-            let key_pykey = PyKey::str_from(&key);
-            // Hit?  The `_cache` dict is keyed by `PyKey::Str(key)` and
-            // `_order` is the LRU list (front = LRU, back = MRU).
-            let hit = {
-                let borrow = inst.borrow();
-                borrow
-                    .attrs
-                    .get("_cache")
-                    .and_then(|v| v.as_dict().map(|d| d.get(&key_pykey).cloned()))
-                    .flatten()
-            };
-            if let Some(v) = hit {
-                promote_key(&inst, &key);
-                bump_counter(&inst, "_hits");
-                return Ok(v);
+
+            // CPython's maxsize=0 wrapper is a statistics-only pass-through:
+            // it does not hash the arguments (so even an unhashable list is
+            // accepted), and every call is a miss.
+            if maxsize == Some(0) {
+                bump_counter(&inst, "_misses");
+                return _interp.call_function_expanded(func, user);
             }
+
+            let key = build_key(_interp, user, typed)?;
+            let cache = lru_cache_value(&inst, FN_NAME)?;
+            if let Some((_index, entry)) = _interp.dict_lookup(&cache, &key)? {
+                let (value, node_id) = decode_cache_entry(entry, maxsize.is_some(), FN_NAME)?;
+                // A bounded cache of size one has only one live node, which is
+                // necessarily already the MRU node. Avoid cloning/downcasting
+                // the private link state for this common steady-hit case.
+                if maxsize != Some(1)
+                    && let Some(node_id) = node_id
+                {
+                    with_lru_links(&inst, FN_NAME, |links| links.promote(node_id))?;
+                }
+                bump_counter(&inst, "_hits");
+                return Ok(value);
+            }
+
             // Miss: compute, insert, evict if over capacity.
             bump_counter(&inst, "_misses");
             let result = _interp.call_function_expanded(func, user)?;
-            insert_cache(&inst, key, key_pykey, result.clone(), maxsize);
+            insert_cache(_interp, &inst, key, result.clone(), maxsize, FN_NAME)?;
             Ok(result)
         }
 
@@ -348,15 +381,15 @@ pyrust_module! {
         /// hit/miss counters.  Matches CPython's API.
         fn cache_clear(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let mut borrow = inst.borrow_mut();
-            borrow
-                .attrs
-                .insert("_cache", Value::dict(PyDict::default()));
-            borrow
-                .attrs
-                .insert("_order", Value::list(Vec::new()));
-            borrow.attrs.insert("_hits", Value::int(0));
-            borrow.attrs.insert("_misses", Value::int(0));
+            {
+                let mut borrow = inst.borrow_mut();
+                borrow
+                    .attrs
+                    .insert("_cache", Value::dict(PyDict::default()));
+                borrow.attrs.insert("_hits", Value::int(0));
+                borrow.attrs.insert("_misses", Value::int(0));
+            }
+            with_lru_links(&inst, FN_NAME, LruLinks::clear)?;
             let _ = _interp;
             Ok(Value::none())
         }
@@ -367,8 +400,13 @@ pyrust_module! {
         /// for unbounded / `functools.cache`).
         fn cache_info(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let (hits, misses, maxsize, currsize) = {
+            let (class, hits, misses, maxsize, currsize) = {
                 let borrow = inst.borrow();
+                let class = borrow
+                    .attrs
+                    .get("_cache_info_class")
+                    .cloned()
+                    .ok_or_else(|| internal(FN_NAME))?;
                 let hits = counter_value(&borrow.attrs, "_hits");
                 let misses = counter_value(&borrow.attrs, "_misses");
                 let maxsize = borrow
@@ -381,9 +419,9 @@ pyrust_module! {
                     .get("_cache")
                     .and_then(|v| v.as_dict().map(|d| d.len()))
                     .unwrap_or(0) as i64;
-                (hits, misses, maxsize, currsize)
+                (class, hits, misses, maxsize, currsize)
             };
-            make_cache_info(_interp, hits, misses, maxsize, currsize)
+            make_cache_info(_interp, class, hits, misses, maxsize, currsize)
         }
     }
 
@@ -408,8 +446,13 @@ pyrust_module! {
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
-            let (maxsize, typed) = {
+            let (generation, maxsize, typed) = {
                 let borrow = inst.borrow();
+                let generation = borrow
+                    .attrs
+                    .get("_generation")
+                    .cloned()
+                    .ok_or_else(|| internal(FN_NAME))?;
                 let maxsize = match borrow.attrs.get("_maxsize").map(|v| v.kind()) {
                     Some(ValueKind::Int(n)) => Some(n),
                     Some(ValueKind::None) | None => None,
@@ -419,10 +462,17 @@ pyrust_module! {
                     borrow.attrs.get("_typed").map(|v| v.kind()),
                     Some(ValueKind::Bool(true))
                 );
-                (maxsize, typed)
+                (generation, maxsize, typed)
             };
-            let _ = _interp;
-            Ok(make_lru_wrapper(user[0].value.clone(), maxsize, typed))
+            let (wrapper_class, cache_info_class) =
+                lru_wrapper_classes(_interp, &generation)?;
+            Ok(make_lru_wrapper(
+                wrapper_class,
+                cache_info_class,
+                user[0].value.clone(),
+                maxsize,
+                typed,
+            ))
         }
     }
 
@@ -456,6 +506,7 @@ pyrust_module! {
     /// wrapper.  Equivalent to `partial(update_wrapper, wrapped=wrapped)`.
     /// <https://docs.python.org/3/library/functools.html#functools.wraps>
     fn wraps(args) -> Result<Value> {
+        let (generation, args) = split_generation_arg(args, FN_NAME)?;
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
             return Err(PyError::named(
@@ -464,7 +515,7 @@ pyrust_module! {
             ));
         }
         let _ = _interp;
-        Ok(make_wraps_partial(args[0].value.clone()))
+        make_wraps_partial(generation, args[0].value.clone())
     }
 
     /// `wraps(wrapped)` returns one of these.  Calling it with the
@@ -541,6 +592,7 @@ pyrust_module! {
     /// takes a single positional function and no configuration).
     /// <https://docs.python.org/3/library/functools.html#functools.cache>
     fn cache(args) -> Result<Value> {
+        let (generation, args) = split_generation_arg(args, FN_NAME)?;
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
             return Err(PyError::named(
@@ -549,9 +601,15 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        let _ = _interp;
         // Unbounded memo == lru_cache with maxsize=None, typed=False.
-        Ok(make_lru_wrapper(func, None, false))
+        let (wrapper_class, cache_info_class) = lru_wrapper_classes(_interp, generation)?;
+        Ok(make_lru_wrapper(
+            wrapper_class,
+            cache_info_class,
+            func,
+            None,
+            false,
+        ))
     }
 
     /// CPython: functools.cmp_to_key(mycmp).
@@ -562,6 +620,7 @@ pyrust_module! {
     /// `mycmp` and test its result against zero.
     /// <https://docs.python.org/3/library/functools.html#functools.cmp_to_key>
     fn cmp_to_key(args) -> Result<Value> {
+        let (generation, args) = split_generation_arg(args, FN_NAME)?;
         if args.len() != 1 || args[0].name.is_some() {
             // CPython's C `cmp_to_key` is `cmp_to_key(mycmp)` — a single
             // positional argument.
@@ -570,10 +629,13 @@ pyrust_module! {
                 format!("{FN_NAME} expected 1 argument, got {}", args.len()),
             ));
         }
-        let _ = _interp;
         let mut attrs = InstanceAttrs::new();
         attrs.insert("_cmp", args[0].value.clone());
-        Ok(make_instance("_cmp_to_key", attrs))
+        attrs.insert(
+            "_item_class",
+            Value::py_class(generation_class(generation, "_cmp_key")?),
+        );
+        make_instance(generation, "_cmp_to_key", attrs)
     }
 
     /// The callable returned by `cmp_to_key(mycmp)`.  Calling it with a value
@@ -597,17 +659,32 @@ pyrust_module! {
                     format!("{FN_NAME} expected 1 argument, got {}", user.len()),
                 ));
             }
-            let cmp = inst
-                .borrow()
-                .attrs
-                .get("_cmp")
-                .cloned()
-                .ok_or_else(|| internal(FN_NAME))?;
-            let _ = _interp;
+            let (cmp, item_class) = {
+                let borrow = inst.borrow();
+                (
+                    borrow
+                        .attrs
+                        .get("_cmp")
+                        .cloned()
+                        .ok_or_else(|| internal(FN_NAME))?,
+                    borrow
+                        .attrs
+                        .get("_item_class")
+                        .cloned()
+                        .ok_or_else(|| internal(FN_NAME))?,
+                )
+            };
+            let ValueKind::PyClass(item_class) = item_class.kind() else {
+                return Err(internal(FN_NAME));
+            };
             let mut attrs = InstanceAttrs::new();
             attrs.insert("obj", user[0].value.clone());
             attrs.insert("_cmp", cmp);
-            Ok(make_instance("_cmp_key", attrs))
+            Ok(make_instance_with_class(
+                Rc::clone(item_class),
+                "_cmp_key",
+                attrs,
+            ))
         }
     }
 
@@ -630,6 +707,10 @@ pyrust_module! {
 
         fn __eq__(args) -> Result<Value> {
             cmp_key_compare(_interp, args, BinaryOp::Eq, FN_NAME)
+        }
+
+        fn __ne__(args) -> Result<Value> {
+            cmp_key_compare(_interp, args, BinaryOp::Ne, FN_NAME)
         }
 
         fn __le__(args) -> Result<Value> {
@@ -656,6 +737,7 @@ pyrust_module! {
     /// ABC virtual-subclass resolution (`_compose_mro`).
     /// <https://docs.python.org/3/library/functools.html#functools.singledispatch>
     fn singledispatch(args) -> Result<Value> {
+        let (generation, args) = split_generation_arg(args, FN_NAME)?;
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
             return Err(PyError::named(
@@ -670,7 +752,7 @@ pyrust_module! {
                 format!("{FN_NAME} requires a callable argument"),
             ));
         }
-        let factory = singledispatch_factory(_interp)?;
+        let factory = singledispatch_factory(_interp, generation)?;
         _interp.call_function_expanded(
             factory,
             &[ExpandedCallArg { name: None, value: func }],
@@ -707,807 +789,14 @@ pyrust_module! {
     }
 }
 
-// ── shared helpers ───────────────────────────────────────────────────────────
-
-/// Method-shared `self` extractor — `args[0]` is the instance (the
-/// `pyrust_module!` `class { … }` block always prepends it).
-fn expect_self(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<RefCell<PyInstance>>> {
-    match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() self must be a PyInstance",
-        ))),
-    }
-}
-
-/// Shared arity guard for this module's private no-op `__init__`s.
-/// These classes are constructed internally with their attrs seeded
-/// directly, so the `__init__` only needs to reject any user-provided
-/// arguments (everything past the implicit `self`) and return `None`.
-fn reject_extra_args(args: &[ExpandedCallArg], fn_name: &str) -> Result<Value> {
-    if args.len() > 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() takes no arguments (got {})", args.len() - 1),
-        ));
-    }
-    Ok(Value::none())
-}
-
-/// Internal-error shorthand.  Should never fire in practice; reaching
-/// it means a class instance was constructed without going through its
-/// `__init__` (or an attr was overwritten externally).
-fn internal(fn_name: &str) -> PyError {
-    PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
-}
-
-/// Pull a class out of *this* module's `module()` build — the macro
-/// emits a `module() -> Value` constructor that returns a fresh
-/// `PyModule` with the class attrs already populated.  Each call
-/// rebuilds the module, but the resulting `PyClass` carries the same
-/// method-name → leaked-static-name mapping, so any instance we build
-/// here will dispatch correctly under `calls.rs`'s PyInstance arm.
-fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
-    let module_val = module();
-    let ValueKind::PyModule(m) = module_val.kind() else {
-        return None;
-    };
-    let class_val = m.borrow().attrs.get(name).cloned()?;
-    match class_val.kind() {
-        ValueKind::PyClass(c) => Some(Rc::clone(c)),
-        _ => None,
-    }
-}
-
-/// Construct a `PyInstance` of class `name` with the supplied attrs,
-/// bypassing `__init__`.  Used by the LRU and wraps helpers below to
-/// seed private state without going through a public constructor.
-fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
-    match module_class(name) {
-        Some(class) => {
-            // CPython's `cmp_to_key` wrapper (`functools.K`) is unhashable: it
-            // defines the rich-comparison dunders but no `__hash__`, and any
-            // class that overrides `__eq__` without `__hash__` is unhashable
-            // (the pure-Python version uses `__slots__`; the C version sets
-            // `tp_hash = PyObject_HashNotImplemented`).  pyrust applies the
-            // same `__eq__`-implies-unhashable rule to user `class` statements,
-            // but `pyrust_module!` `class` blocks don't get the automatic
-            // `__hash__ = None`, so graft it on (idempotently) here.
-            if name == "_cmp_key"
-                && !class.borrow().attrs.contains_key("__hash__")
-            {
-                class
-                    .borrow_mut()
-                    .attrs
-                    .insert("__hash__".to_string(), Value::none());
-            }
-            Value::py_instance(Rc::new(RefCell::new(PyInstance {
-                class,
-                attrs,
-            })))
-        }
-        // "Shouldn't happen" really means "would indicate a macro/build
-        // bug": every class name passed here is declared in this very
-        // module via `class { … }`, which the `pyrust_module!` macro
-        // wires into `module()`.  If a lookup miss ever escapes, it's
-        // a build-time inconsistency — fail loud rather than handing
-        // back a silently-broken `None`.
-        None => unreachable!(
-            "internal: functools module did not register class `{name}` \
-             (declared via `class {{ … }}` in this module — macro build broken)",
-        ),
-    }
-}
-
-// ── partial helpers ──────────────────────────────────────────────────────────
-
-fn read_partial_state(
-    inst: &Rc<RefCell<PyInstance>>,
-    fn_name: &str,
-) -> Result<(Value, Vec<Value>, PyDict)> {
-    let borrow = inst.borrow();
-    let func = borrow
-        .attrs
-        .get("func")
-        .cloned()
-        .ok_or_else(|| internal(fn_name))?;
-    let args = match borrow.attrs.get("args").map(|v| v.kind()) {
-        Some(ValueKind::Tuple(items)) => items.to_vec(),
-        _ => return Err(internal(fn_name)),
-    };
-    let kwargs = match borrow.attrs.get("keywords").map(|v| v.kind()) {
-        Some(ValueKind::Dict(d)) => d.clone(),
-        _ => return Err(internal(fn_name)),
-    };
-    Ok((func, args, kwargs))
-}
-
-// ── lru_cache helpers ────────────────────────────────────────────────────────
-
-/// Decide if `v` is "callable" in the sense that `lru_cache` should
-/// treat its first positional arg as the function to wrap (the bare
-/// `@lru_cache` form).  Anything else falls through to the
-/// decorator-factory branch.
-fn is_callable(v: &Value) -> bool {
-    matches!(
-        v.kind(),
-        ValueKind::UserFunction(_)
-            | ValueKind::BuiltinFunction(_)
-            | ValueKind::BoundMethod { .. }
-            | ValueKind::ClassBoundMethod { .. }
-            | ValueKind::PyClass(_)
-    )
-}
-
-/// Build a string key from `args` for the LRU cache.  Each arg is
-/// emitted as `[type:]repr`, joined by an ASCII unit-separator.  When
-/// `typed=true`, the type tag is included so `1` and `1.0` map to
-/// different keys (matches CPython's `typed=True` semantics).
-fn build_key(args: &[ExpandedCallArg], typed: bool) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(args.len() * 2);
-    for a in args.iter().filter(|a| a.name.is_none()) {
-        parts.push(encode_value(&a.value, typed));
-    }
-    // Sentinel between positional and kwargs so `f(1, x=2)` and
-    // `f(1, 2)` can never collide.
-    parts.push("\x1e".to_string());
-    // Keyword args sorted by name so `f(x=1, y=2)` and `f(y=2, x=1)`
-    // produce the same key.
-    let mut kw: Vec<(&str, &Value)> = args
-        .iter()
-        .filter_map(|a| a.name.as_deref().map(|n| (n, &a.value)))
-        .collect();
-    kw.sort_by_key(|(n, _)| *n);
-    for (name, value) in kw {
-        parts.push(name.to_string());
-        parts.push(encode_value(value, typed));
-    }
-    parts.join("\x1f")
-}
-
-/// Encode a single value into a cache-key substring.  The type tag is
-/// always present — CPython's `lru_cache(typed=False)` *also*
-/// distinguishes `1` (int) from `1.0` (float) because its internal
-/// `_make_key` wraps floats in a `_HashedSeq` with a different hash
-/// than the bare int (so the keys never collide even though `1 ==
-/// 1.0`).  The `typed=true` flag adds an *additional* sub-tag for
-/// 1-arg fast-path types (mirroring CPython's `[type]` decoration).
-fn encode_value(v: &Value, typed: bool) -> String {
-    let (tag, body) = match v.kind() {
-        ValueKind::None => ("n", "None".to_string()),
-        ValueKind::Bool(b) => ("b", b.to_string()),
-        ValueKind::Int(n) => ("i", n.to_string()),
-        ValueKind::Float(f) => ("f", f.to_string()),
-        ValueKind::Str(s) => ("s", format!("{:?}", s.to_string())),
-        _ => ("o", v.repr_raw()),
-    };
-    if typed {
-        // typed=True adds explicit type-name segmentation so subclass
-        // instances of int (e.g. bool) and the underlying int never
-        // share a key.  Equivalent to CPython's "fasttypes" branch.
-        format!("T{tag}:{body}")
-    } else {
-        format!("{tag}:{body}")
-    }
-}
-
-/// Move `key` to the MRU end of `_order`.  No-op if the key isn't in
-/// the order list (shouldn't happen — but we tolerate it rather than
-/// panicking on the hot path).
-fn promote_key(inst: &Rc<RefCell<PyInstance>>, key: &str) {
-    let order = inst.borrow().attrs.get("_order").cloned();
-    if let Some(order) = order {
-        order.list_with_mut(|items| {
-            if let Some(pos) = items
-                .iter()
-                .position(|v| matches!(v.kind(), ValueKind::Str(s) if s == key))
-            {
-                let item = items.remove(pos);
-                items.push(item);
-            }
-        });
-    }
-}
-
-/// Insert `value` into the cache under `key`; if `maxsize` is bounded
-/// and the cache is full, evict the oldest entry (front of `_order`).
-fn insert_cache(
-    inst: &Rc<RefCell<PyInstance>>,
-    key: String,
-    key_pykey: PyKey,
-    value: Value,
-    maxsize: Option<i64>,
-) {
-    let order_val = inst.borrow().attrs.get("_order").cloned();
-    let cache_val = inst.borrow().attrs.get("_cache").cloned();
-    let order_full = if let Some(ref order) = order_val {
-        order
-            .list_with_mut(|items| {
-                items.push(Value::string(&key));
-                match maxsize {
-                    Some(0) => true,
-                    Some(n) => items.len() > n as usize,
-                    None => false,
-                }
-            })
-            .unwrap_or(false)
-    } else {
-        false
-    };
-    if let Some(ref cache) = cache_val {
-        let _ = cache.dict_with_mut(|dict| {
-            dict.insert(key_pykey, value);
-        });
-    }
-    // Evict head if over capacity.  `maxsize=0` is a degenerate case
-    // — no entries are kept; we immediately evict what we just
-    // inserted.
-    if order_full {
-        let evict_key: Option<String> = order_val.as_ref().and_then(|order| {
-            order.list_with_mut(|items| {
-                if items.is_empty() {
-                    None
-                } else {
-                    let head = items.remove(0);
-                    match head.kind() {
-                        ValueKind::Str(s) => Some(s.to_string()),
-                        _ => None,
-                    }
-                }
-            })?
-        });
-        if let Some(k) = evict_key
-            && let Some(ref cache) = cache_val
-        {
-            let _ = cache.dict_with_mut(|dict| {
-                dict.shift_remove(&StrKey(&k));
-            });
-        }
-    }
-}
-
-/// Construct a `_lru_cache_wrapper` instance seeded with `func` /
-/// `maxsize` / `typed`.
-fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
-    let mut attrs = InstanceAttrs::new();
-    // `wrapper.__wrapped__` exposes the original function (CPython sets this
-    // on the wrapper so `inspect.unwrap` / introspection can reach it).
-    attrs.insert("__wrapped__", func.clone());
-    attrs.insert("_func", func);
-    attrs.insert(
-        "_maxsize",
-        maxsize.map_or_else(Value::none, Value::int),
-    );
-    attrs.insert("_typed", Value::bool_(typed));
-    attrs.insert("_cache", Value::dict(PyDict::default()));
-    attrs.insert("_order", Value::list(Vec::new()));
-    attrs.insert("_hits", Value::int(0));
-    attrs.insert("_misses", Value::int(0));
-    make_instance("_lru_cache_wrapper", attrs)
-}
-
-/// Construct a `_lru_cache_factory` instance — the decorator returned
-/// by `lru_cache(maxsize=N)` / `lru_cache()`.
-fn make_lru_factory(maxsize: Option<i64>, typed: bool) -> Value {
-    let mut attrs = InstanceAttrs::new();
-    attrs.insert(
-        "_maxsize",
-        maxsize.map_or_else(Value::none, Value::int),
-    );
-    attrs.insert("_typed", Value::bool_(typed));
-    make_instance("_lru_cache_factory", attrs)
-}
-
-/// Increment the integer counter stored under `key` on the wrapper
-/// instance (`_hits` / `_misses`).  Missing/non-int treated as 0.
-fn bump_counter(inst: &Rc<RefCell<PyInstance>>, key: &str) {
-    let mut borrow = inst.borrow_mut();
-    let cur = match borrow.attrs.get(key).map(|v| v.kind()) {
-        Some(ValueKind::Int(n)) => n,
-        _ => 0,
-    };
-    borrow
-        .attrs
-        .insert(key, Value::int(cur.wrapping_add(1)));
-}
-
-/// Read an integer counter from the instance attrs, defaulting to 0.
-fn counter_value(attrs: &InstanceAttrs, key: &str) -> i64 {
-    match attrs.get(key).map(|v| v.kind()) {
-        Some(ValueKind::Int(n)) => n,
-        _ => 0,
-    }
-}
-
-/// Build a `CacheInfo(hits, misses, maxsize, currsize)` named-tuple
-/// instance.  `CacheInfo` is a `tuple` subclass (matching CPython:
-/// `isinstance(info, tuple)` is `True`, fields are indexable, and the
-/// repr is `CacheInfo(hits=.., misses=.., maxsize=.., currsize=..)`).
-/// The class is defined once via interpreter `exec` and cached.
-fn make_cache_info(
-    interp: &mut Interpreter,
-    hits: i64,
-    misses: i64,
-    maxsize: Value,
-    currsize: i64,
-) -> Result<Value> {
-    let class = cache_info_class(interp)?;
-    interp.call_function_expanded(
-        class,
-        &[
-            ExpandedCallArg { name: None, value: Value::int(hits) },
-            ExpandedCallArg { name: None, value: Value::int(misses) },
-            ExpandedCallArg { name: None, value: maxsize },
-            ExpandedCallArg { name: None, value: Value::int(currsize) },
-        ],
-    )
-}
-
-thread_local! {
-    /// Cached `CacheInfo` class, built once per thread on first
-    /// `cache_info()` call.
-    static CACHE_INFO_CLASS: RefCell<Option<Value>> = const { RefCell::new(None) };
-}
-
-/// Lazily define and return the `CacheInfo` named-tuple class.
-fn cache_info_class(interp: &mut Interpreter) -> Result<Value> {
-    if let Some(cls) = CACHE_INFO_CLASS.with(|c| c.borrow().clone()) {
-        return Ok(cls);
-    }
-    let ns = Value::dict(PyDict::default());
-    interp.exec_source(CACHE_INFO_SOURCE, Some(ns.clone()), None)?;
-    let cls = ns
-        .as_dict()
-        .and_then(|d| d.get(&PyKey::str_from("CacheInfo")).cloned())
-        .ok_or_else(|| internal("cache_info"))?;
-    // The exec namespace's `__name__` defaults to `__main__`; override
-    // `__module__` to `functools` so `type(cache_info()).__module__ ==
-    // "functools"`, matching CPython.
-    if let ValueKind::PyClass(cls_rc) = cls.kind() {
-        cls_rc
-            .borrow_mut()
-            .attrs
-            .insert("__module__".to_string(), Value::string("functools"));
-    }
-    CACHE_INFO_CLASS.with(|c| *c.borrow_mut() = Some(cls.clone()));
-    Ok(cls)
-}
-
-/// Python source for the `CacheInfo` named-tuple, transcribed to match
-/// CPython's `collections.namedtuple('CacheInfo', [...])` behaviour
-/// (tuple subclass, indexable, attribute access, custom repr).
-const CACHE_INFO_SOURCE: &str = "\
-class CacheInfo(tuple):
-    __slots__ = ()
-    _fields = ('hits', 'misses', 'maxsize', 'currsize')
-    def __new__(cls, hits, misses, maxsize, currsize):
-        return tuple.__new__(cls, (hits, misses, maxsize, currsize))
-    @classmethod
-    def _make(cls, iterable):
-        return cls(*iterable)
-    def _asdict(self):
-        return {f: self[i] for i, f in enumerate(self._fields)}
-    def _replace(self, **kwds):
-        vals = list(self)
-        for i, f in enumerate(self._fields):
-            if f in kwds:
-                vals[i] = kwds.pop(f)
-        if kwds:
-            raise ValueError(f'Got unexpected field names: {list(kwds)!r}')
-        return self.__class__(*vals)
-    @property
-    def hits(self):
-        return self[0]
-    @property
-    def misses(self):
-        return self[1]
-    @property
-    def maxsize(self):
-        return self[2]
-    @property
-    def currsize(self):
-        return self[3]
-    def __repr__(self):
-        return f'CacheInfo(hits={self[0]}, misses={self[1]}, maxsize={self[2]}, currsize={self[3]})'
-";
-
-// ── singledispatch helpers ───────────────────────────────────────────────────
-
-thread_local! {
-    /// Cached `singledispatch` factory function, built once per thread on
-    /// first use.  Holds the pure-Python `singledispatch(func)` defined in
-    /// `SINGLEDISPATCH_SOURCE`.
-    static SINGLEDISPATCH_FACTORY: RefCell<Option<Value>> = const { RefCell::new(None) };
-}
-
-/// Lazily define and return the pure-Python `singledispatch` factory.
-fn singledispatch_factory(interp: &mut Interpreter) -> Result<Value> {
-    if let Some(f) = SINGLEDISPATCH_FACTORY.with(|c| c.borrow().clone()) {
-        return Ok(f);
-    }
-    let ns = Value::dict(PyDict::default());
-    interp.exec_source(SINGLEDISPATCH_SOURCE, Some(ns.clone()), None)?;
-    let f = ns
-        .as_dict()
-        .and_then(|d| d.get(&PyKey::str_from("singledispatch")).cloned())
-        .ok_or_else(|| internal("singledispatch"))?;
-    SINGLEDISPATCH_FACTORY.with(|c| *c.borrow_mut() = Some(f.clone()));
-    Ok(f)
-}
-
-/// Pure-Python `singledispatch`, transcribed (and simplified) from
-/// CPython's `functools.singledispatch`.  Dispatch is by the type of the
-/// first positional argument, resolved through that type's MRO.  The
-/// annotation form (`@wrapper.register` on a function whose first
-/// parameter is annotated with a type) and the explicit form
-/// (`@wrapper.register(cls)` / `wrapper.register(cls, func)`) are both
-/// supported.  ABC virtual-subclass resolution is not modelled.
-const SINGLEDISPATCH_SOURCE: &str = "\
-import functools
-
-
-def singledispatch(func):
-    registry = {}
-    dispatch_cache = {}
-
-    def dispatch(cls):
-        try:
-            return dispatch_cache[cls]
-        except KeyError:
-            pass
-        try:
-            impl = registry[cls]
-        except KeyError:
-            impl = registry[object]
-            for t in cls.__mro__:
-                if t in registry:
-                    impl = registry[t]
-                    break
-        dispatch_cache[cls] = impl
-        return impl
-
-    def register(cls, func=None):
-        if func is None:
-            if isinstance(cls, type):
-                return lambda f: register(cls, f)
-            ann = getattr(cls, '__annotations__', {})
-            func = cls
-            argname, cls = next(iter(ann.items()))
-            if not isinstance(cls, type):
-                raise TypeError(
-                    f'Invalid annotation for {argname!r}. '
-                    f'{cls!r} is not a class.'
-                )
-        registry[cls] = func
-        dispatch_cache.clear()
-        return func
-
-    def wrapper(*args, **kw):
-        if not args:
-            raise TypeError(
-                f'{funcname} requires at least 1 positional argument'
-            )
-        return dispatch(args[0].__class__)(*args, **kw)
-
-    funcname = getattr(func, '__name__', 'singledispatch function')
-    registry[object] = func
-    wrapper.register = register
-    wrapper.dispatch = dispatch
-    wrapper.registry = registry
-    functools.update_wrapper(wrapper, func)
-    return wrapper
-";
-
-// ── wraps helpers ────────────────────────────────────────────────────────────
-
-fn make_wraps_partial(wrapped: Value) -> Value {
-    let mut attrs = InstanceAttrs::new();
-    attrs.insert("__wraps_func", wrapped);
-    make_instance("_wraps_partial", attrs)
-}
-
-/// The attributes copied directly from `wrapped` to `wrapper`, mirroring
-/// CPython's `functools.WRAPPER_ASSIGNMENTS`.  (CPython 3.12 also lists
-/// `__type_params__`, but pyrust does not expose that attribute on
-/// functions, so copying it would be a no-op on every supported type;
-/// omitting it keeps the observable behaviour identical.)
-const WRAPPER_ASSIGNMENTS: [&str; 5] =
-    ["__module__", "__name__", "__qualname__", "__annotations__", "__doc__"];
-
-/// Core of `update_wrapper` / `wraps`.  Mutates `wrapper` in place to
-/// look like `wrapped`, mirroring CPython's pure-Python `update_wrapper`:
-///   1. copy each WRAPPER_ASSIGNMENTS attr present on `wrapped`
-///      (skipping any that raise `AttributeError`),
-///   2. update `wrapper.__dict__` with `wrapped.__dict__`,
-///   3. set `wrapper.__wrapped__ = wrapped` (last, so it isn't clobbered
-///      by the `__dict__` merge).
-fn do_update_wrapper(
-    interp: &mut Interpreter,
-    wrapper: &Value,
-    wrapped: &Value,
-) -> Result<()> {
-    for attr in WRAPPER_ASSIGNMENTS {
-        // CPython does `try: value = getattr(wrapped, attr) except
-        // AttributeError: pass`.  Any *other* error propagates.
-        match interp.get_attr(wrapped, attr) {
-            Ok(value) => interp.assign_attr(wrapper.clone(), attr, value)?,
-            // A missing attribute may surface as the structured
-            // `AttributeError` variant *or* as `PyError::Named("AttributeError",
-            // …)` (e.g. built-ins / type objects raise the latter), so match by
-            // class name to cover both.
-            Err(e) if e.class_name_is("AttributeError") => {}
-            Err(e) => return Err(e),
-        }
-    }
-    // `wrapper.__dict__.update(wrapped.__dict__)`.  CPython merges into the
-    // wrapper's existing dict rather than replacing it.
-    if let Ok(dst) = interp.get_attr(wrapper, "__dict__") {
-        let src = match interp.get_attr(wrapped, "__dict__") {
-            Ok(d) => d,
-            Err(e) if e.class_name_is("AttributeError") => Value::dict(PyDict::default()),
-            Err(e) => return Err(e),
-        };
-        if let (Some(src_dict), Some(_)) = (src.as_dict(), dst.as_dict()) {
-            for (k, v) in src_dict.iter() {
-                let k = k.clone();
-                let v = v.clone();
-                let _ = dst.dict_with_mut(|d| {
-                    d.insert(k, v);
-                });
-            }
-        }
-    }
-    // Set `__wrapped__` last (CPython issue #17482).
-    interp.assign_attr(wrapper.clone(), "__wrapped__", wrapped.clone())
-}
-
-/// Best-effort `__name__` extractor for `cached_property`.
-/// UserFunctions carry the name in the struct; built-in functions
-/// carry it in the kind tag.  Returns `None` for unknown kinds — the
-/// caller substitutes a default.
-fn function_name(v: &Value) -> Option<String> {
-    match v.kind() {
-        ValueKind::UserFunction(f) => Some(f.name.to_string()),
-        ValueKind::BuiltinFunction(s) => Some(s.to_string()),
-        ValueKind::BoundMethod { function, .. } => Some(function.name.to_string()),
-        ValueKind::PyClass(c) => Some(c.borrow().name.clone()),
-        _ => None,
-    }
-}
-
-// ── cmp_to_key helpers ───────────────────────────────────────────────────────
-
-/// Shared body for `_cmp_key.__lt__/__gt__/__eq__/__le__/__ge__`.
-/// `args[0]` is `self` (a `_cmp_key`), `args[1]` is `other`.  Calls the wrapped
-/// comparison function on the two `obj`s and tests its result against `0` with
-/// `op` (e.g. `__lt__` → `cmp(self.obj, other.obj) < 0`), mirroring CPython's
-/// `functools.K`.
-fn cmp_key_compare(
-    interp: &mut Interpreter,
-    args: &[ExpandedCallArg],
-    op: BinaryOp,
-    fn_name: &str,
-) -> Result<Value> {
-    let inst = expect_self(args, fn_name)?;
-    let user = &args[1..];
-    if user.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name} expected 1 argument, got {}", user.len()),
-        ));
-    }
-    // The right operand must also be a `_cmp_key` (as produced by the same
-    // `cmp_to_key` call).  When it isn't, defer to Python's reflected-operand
-    // machinery by returning `NotImplemented` — matching CPython, which only
-    // ever compares two key objects during a sort.
-    let other_obj = match user[0].value.kind() {
-        ValueKind::PyInstance(other) => other.borrow().attrs.get("obj").cloned(),
-        _ => None,
-    };
-    let Some(other_obj) = other_obj else {
-        return Ok(Value::not_implemented());
-    };
-    let (cmp, self_obj) = {
-        let borrow = inst.borrow();
-        (
-            borrow
-                .attrs
-                .get("_cmp")
-                .cloned()
-                .ok_or_else(|| internal(fn_name))?,
-            borrow
-                .attrs
-                .get("obj")
-                .cloned()
-                .ok_or_else(|| internal(fn_name))?,
-        )
-    };
-    let result = interp.call_function_expanded(
-        cmp,
-        &[
-            ExpandedCallArg { name: None, value: self_obj },
-            ExpandedCallArg { name: None, value: other_obj },
-        ],
-    )?;
-    let cmp_bool = interp.eval_binary(result, op, Value::int(0))?;
-    Ok(Value::bool_(cmp_bool.truthy_raw()))
-}
-
-// ── total_ordering helpers ───────────────────────────────────────────────────
-
-/// The four ordering operations in CPython's `max(roots)` priority order.
-/// CPython picks `root = max(roots)` over the *string* names, and
-/// `'__lt__' > '__le__' > '__gt__' > '__ge__'` lexicographically — so the
-/// first present op in this list is the chosen root.
-const ORDERING_OPS: [&str; 4] = ["__lt__", "__le__", "__gt__", "__ge__"];
-
-/// Is `op` defined on `class` to something other than the inherited
-/// `object.<op>` default?  Mirrors CPython's
-/// `getattr(cls, op, None) is not getattr(object, op, None)`.
-fn ordering_op_is_root(class: &Rc<RefCell<PyClass>>, op: &str) -> bool {
-    match lookup_class_attr(class, op) {
-        None => false,
-        // Inherited straight from `object` (the builtin slot) → not a root.
-        Some(v) => !matches!(
-            v.kind(),
-            ValueKind::BuiltinFunction(n) if n == format!("object.{op}")
-        ),
-    }
-}
-
-/// Apply `@total_ordering` to `class`: derive the missing ordering operators
-/// from the highest-priority present one, compiling the derived methods from
-/// the same formulas CPython uses.
-fn apply_total_ordering(
-    interp: &mut Interpreter,
-    class: &Rc<RefCell<PyClass>>,
-) -> Result<()> {
-    // Guard against the bare `object` singleton — its ordering slots are the
-    // builtin defaults, so it would never count as a root anyway, but a stray
-    // `total_ordering(object)` shouldn't mutate the shared singleton.
-    if Rc::ptr_eq(class, &object_class_singleton()) {
-        return Err(PyError::named(
-            "ValueError",
-            "must define at least one ordering operation: < > <= >=".to_string(),
-        ));
-    }
-    // `root = max(roots)` over the op names; ORDERING_OPS is in descending
-    // string order, so the first present op is the chosen root.
-    let root = ORDERING_OPS
-        .into_iter()
-        .find(|op| ordering_op_is_root(class, op));
-    let Some(root) = root else {
-        return Err(PyError::named(
-            "ValueError",
-            "must define at least one ordering operation: < > <= >=".to_string(),
-        ));
-    };
-    // Compile the derivation functions once into a fresh namespace, then graft
-    // the ones not already defined directly onto the class (CPython's
-    // `setattr(cls, opname, opfunc)`).
-    let source = derivation_source(root);
-    let ns = Value::dict(PyDict::default());
-    interp.exec_source(source, Some(ns.clone()), None)?;
-    for (opname, _) in convert_table(root) {
-        if !ordering_op_is_root(class, opname) {
-            let func = ns
-                .as_dict()
-                .and_then(|d| d.get(&PyKey::str_from(opname)).cloned())
-                .ok_or_else(|| internal("total_ordering"))?;
-            class.borrow_mut().attrs.insert(opname.to_string(), func);
-        }
-    }
-    class.borrow().mutation_version.set(
-        class.borrow().mutation_version.get().wrapping_add(1),
-    );
-    Ok(())
-}
-
-/// CPython's `_convert[root]` — the ordered list of `(opname, derived-from)`
-/// pairs for a given root operator.
-fn convert_table(root: &str) -> &'static [(&'static str, &'static str)] {
-    match root {
-        "__lt__" => &[
-            ("__gt__", "__lt__"),
-            ("__le__", "__lt__"),
-            ("__ge__", "__lt__"),
-        ],
-        "__le__" => &[
-            ("__ge__", "__le__"),
-            ("__lt__", "__le__"),
-            ("__gt__", "__le__"),
-        ],
-        "__gt__" => &[
-            ("__lt__", "__gt__"),
-            ("__ge__", "__gt__"),
-            ("__le__", "__gt__"),
-        ],
-        // "__ge__"
-        _ => &[
-            ("__le__", "__ge__"),
-            ("__gt__", "__ge__"),
-            ("__lt__", "__ge__"),
-        ],
-    }
-}
-
-/// Python source defining the three derived ordering methods for `root`,
-/// transcribed from CPython's `functools._<op>_from_<root>` helpers (the
-/// `NotImplemented` short-circuit included).  Executing this in a fresh
-/// namespace yields `UserFunction` values keyed by op name.
-fn derivation_source(root: &str) -> &'static str {
-    match root {
-        "__lt__" => "\
-def __gt__(self, other):
-    op_result = type(self).__lt__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result and self != other
-def __le__(self, other):
-    op_result = type(self).__lt__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return op_result or self == other
-def __ge__(self, other):
-    op_result = type(self).__lt__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result
-",
-        "__le__" => "\
-def __ge__(self, other):
-    op_result = type(self).__le__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result or self == other
-def __lt__(self, other):
-    op_result = type(self).__le__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return op_result and self != other
-def __gt__(self, other):
-    op_result = type(self).__le__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result
-",
-        "__gt__" => "\
-def __lt__(self, other):
-    op_result = type(self).__gt__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result and self != other
-def __ge__(self, other):
-    op_result = type(self).__gt__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return op_result or self == other
-def __le__(self, other):
-    op_result = type(self).__gt__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result
-",
-        // "__ge__"
-        _ => "\
-def __le__(self, other):
-    op_result = type(self).__ge__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result or self == other
-def __gt__(self, other):
-    op_result = type(self).__ge__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return op_result and self != other
-def __lt__(self, other):
-    op_result = type(self).__ge__(self, other)
-    if op_result is NotImplemented:
-        return op_result
-    return not op_result
-",
-    }
-}
+// Non-macro responsibilities are kept in focused implementation fragments.
+include!("functools/common.inc.rs");
+include!("functools/class_registry.inc.rs");
+include!("functools/partial.inc.rs");
+include!("functools/lru_key.inc.rs");
+include!("functools/lru_links.inc.rs");
+include!("functools/lru_cache.inc.rs");
+include!("functools/dynamic_factories.inc.rs");
+include!("functools/wrapper_metadata.inc.rs");
+include!("functools/cmp_to_key.inc.rs");
+include!("functools/total_ordering.inc.rs");

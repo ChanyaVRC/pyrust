@@ -1,5 +1,9 @@
 use pyrust_core::{PyError, PyKey, PySet, Result, Value, ValueKind};
 
+use crate::method_signature::{KeywordPolicy, PositionalArity};
+
+pub const TYPE_NAME: &str = "set";
+
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
     "__iter__",
@@ -22,9 +26,168 @@ pub const METHODS: &[&str] = &[
     "isdisjoint",
 ];
 
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS).with_flags(
+        crate::primitive_class_attrs::PrimitiveClassFlags::NONE
+            .with_init()
+            .with_class_getitem(),
+    );
+
 /// Returns `true` if `method` is the name of a built-in `set` method.
 pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Method {
+    Iter,
+    Add,
+    Remove,
+    Discard,
+    Pop,
+    Clear,
+    Update,
+    IntersectionUpdate,
+    DifferenceUpdate,
+    SymmetricDifferenceUpdate,
+    Copy,
+    Union,
+    Intersection,
+    Difference,
+    SymmetricDifference,
+    IsSubset,
+    IsSuperset,
+    IsDisjoint,
+    Contains,
+}
+
+impl Method {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Iter => "__iter__",
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Discard => "discard",
+            Self::Pop => "pop",
+            Self::Clear => "clear",
+            Self::Update => "update",
+            Self::IntersectionUpdate => "intersection_update",
+            Self::DifferenceUpdate => "difference_update",
+            Self::SymmetricDifferenceUpdate => "symmetric_difference_update",
+            Self::Copy => "copy",
+            Self::Union => "union",
+            Self::Intersection => "intersection",
+            Self::Difference => "difference",
+            Self::SymmetricDifference => "symmetric_difference",
+            Self::IsSubset => "issubset",
+            Self::IsSuperset => "issuperset",
+            Self::IsDisjoint => "isdisjoint",
+            Self::Contains => "__contains__",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MethodSpec {
+    method: Method,
+    arity: PositionalArity,
+    keywords: KeywordPolicy,
+}
+
+impl MethodSpec {
+    #[inline(always)]
+    pub const fn method(self) -> Method {
+        self.method
+    }
+
+    #[inline]
+    pub fn validate_positional_arity(self, given: usize) -> Result<()> {
+        if self.arity.accepts(given) {
+            return Ok(());
+        }
+        self.arity
+            .reject_excess(TYPE_NAME, self.method.name(), given)
+    }
+
+    #[inline]
+    pub fn validate_keywords(self, has_keywords: bool) -> Result<()> {
+        if self.keywords.accepts(has_keywords) {
+            return Ok(());
+        }
+        self.keywords
+            .validate(TYPE_NAME, self.method.name(), has_keywords)
+    }
+
+    #[inline(always)]
+    pub const fn keyword_policy(self) -> KeywordPolicy {
+        self.keywords
+    }
+}
+
+/// Resolve a set method once into its semantic route and positional policy.
+#[inline]
+pub fn method_spec(method: &str) -> Option<MethodSpec> {
+    let (method, arity) = match method {
+        "__iter__" => (Method::Iter, PositionalArity::exact(0)),
+        "add" => (Method::Add, PositionalArity::exact(1)),
+        "remove" => (Method::Remove, PositionalArity::exact(1)),
+        "discard" => (Method::Discard, PositionalArity::exact(1)),
+        "pop" => (Method::Pop, PositionalArity::exact(0)),
+        "clear" => (Method::Clear, PositionalArity::exact(0)),
+        "update" => (Method::Update, PositionalArity::variadic(0)),
+        "intersection_update" => (Method::IntersectionUpdate, PositionalArity::variadic(0)),
+        "difference_update" => (Method::DifferenceUpdate, PositionalArity::variadic(0)),
+        "symmetric_difference_update" => {
+            (Method::SymmetricDifferenceUpdate, PositionalArity::exact(1))
+        }
+        "copy" => (Method::Copy, PositionalArity::exact(0)),
+        "union" => (Method::Union, PositionalArity::variadic(0)),
+        "intersection" => (Method::Intersection, PositionalArity::variadic(0)),
+        "difference" => (Method::Difference, PositionalArity::variadic(0)),
+        "symmetric_difference" => (Method::SymmetricDifference, PositionalArity::exact(1)),
+        "issubset" => (Method::IsSubset, PositionalArity::exact(1)),
+        "issuperset" => (Method::IsSuperset, PositionalArity::exact(1)),
+        "isdisjoint" => (Method::IsDisjoint, PositionalArity::exact(1)),
+        "__contains__" => (Method::Contains, PositionalArity::exact(1)),
+        _ => return None,
+    };
+    Some(MethodSpec {
+        method,
+        arity,
+        keywords: KeywordPolicy::Reject,
+    })
+}
+
+/// Positional signature for set methods, including the interpreter-owned
+/// object-key routes.
+pub fn positional_arity(method: &str) -> Option<PositionalArity> {
+    method_spec(method).map(|spec| spec.arity)
+}
+
+#[inline]
+pub fn validate_method_positional_arity(method: &str, given: usize) -> Result<()> {
+    if given == 0 {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(arity) => arity.reject_excess(TYPE_NAME, method, given),
+        None => Ok(()),
+    }
+}
+
+#[inline]
+pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> {
+    if !has_keywords {
+        return Ok(());
+    }
+    match method_spec(method) {
+        Some(spec) => spec.validate_keywords(true),
+        None => Ok(()),
+    }
+}
+
+pub fn keyword_policy(method: &str) -> Option<KeywordPolicy> {
+    method_spec(method).map(MethodSpec::keyword_policy)
 }
 
 /// Dispatch a `set` method.  Receiver is `&Value`; each method body
@@ -33,21 +196,34 @@ pub fn has_method(method: &str) -> bool {
 /// self-aliased calls (`s.update(s)`) never simultaneously borrow the
 /// same storage (#448).
 pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
+    let Some(spec) = method_spec(method) else {
+        return Err(PyError::named(
+            "AttributeError",
+            format!("'set' object has no attribute '{method}'"),
+        ));
+    };
+    spec.validate_positional_arity(args.len())?;
+    call_resolved(spec.method(), receiver, args)
+}
+
+/// Dispatch a method whose name and arity were resolved by [`method_spec`].
+#[doc(hidden)]
+pub fn call_resolved(method: Method, receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let args = args.as_slice();
     let not_set = || PyError::named("TypeError", "set method receiver is not a set".to_string());
     match method {
         // ── Mutating ───────────────────────────────────────────────
-        "add" => receiver
+        Method::Add => receiver
             .set_with_mut(|items| add(items, args))
             .ok_or_else(not_set)?,
-        "remove" => receiver
+        Method::Remove => receiver
             .set_with_mut(|items| remove(items, args))
             .ok_or_else(not_set)?,
-        "discard" => receiver
+        Method::Discard => receiver
             .set_with_mut(|items| discard(items, args))
             .ok_or_else(not_set)?,
-        "pop" => receiver.set_with_mut(pop).ok_or_else(not_set)?,
-        "clear" => {
+        Method::Pop => receiver.set_with_mut(pop).ok_or_else(not_set)?,
+        Method::Clear => {
             receiver.set_clear()?;
             Ok(Value::none())
         }
@@ -61,7 +237,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
         // receiver visible (`s.update([1], object())` leaves `1` in
         // `s` before raising TypeError).  Collecting all args upfront
         // would make these all-or-nothing, diverging from CPython.
-        "update" => {
+        Method::Update => {
             for arg in args {
                 let snap = snapshot_iterable(receiver, arg)?;
                 receiver
@@ -70,7 +246,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             }
             Ok(Value::none())
         }
-        "intersection_update" => {
+        Method::IntersectionUpdate => {
             for arg in args {
                 let snap = snapshot_iterable(receiver, arg)?;
                 receiver
@@ -79,7 +255,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             }
             Ok(Value::none())
         }
-        "difference_update" => {
+        Method::DifferenceUpdate => {
             for arg in args {
                 let snap = snapshot_iterable(receiver, arg)?;
                 receiver
@@ -88,7 +264,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             }
             Ok(Value::none())
         }
-        "symmetric_difference_update" => {
+        Method::SymmetricDifferenceUpdate => {
             let other = args
                 .first()
                 .ok_or_else(|| {
@@ -115,24 +291,24 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
         }
         // ── Non-mutating ───────────────────────────────────────────
         // Scoped read borrow + clone is enough; no `&mut` ever taken.
-        "copy" => receiver
+        Method::Copy => receiver
             .set_with(|items| Value::set(items.clone()))
             .ok_or_else(not_set),
-        "union" => union(receiver, args),
-        "intersection" => intersection(receiver, args),
-        "difference" => difference(receiver, args),
-        "symmetric_difference" => symmetric_difference(receiver, args),
-        "issubset" => issubset(receiver, args),
-        "issuperset" => issuperset(receiver, args),
-        "isdisjoint" => isdisjoint(receiver, args),
-        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
-        "__iter__" => Err(PyError::named(
+        Method::Union => union(receiver, args),
+        Method::Intersection => intersection(receiver, args),
+        Method::Difference => difference(receiver, args),
+        Method::SymmetricDifference => symmetric_difference(receiver, args),
+        Method::IsSubset => issubset(receiver, args),
+        Method::IsSuperset => issuperset(receiver, args),
+        Method::IsDisjoint => isdisjoint(receiver, args),
+        // Intercepted by the interpreter's iteration domain; drift sentinel.
+        Method::Iter => Err(PyError::named(
             "TypeError",
             "'set' __iter__ must be dispatched by the interpreter",
         )),
-        _ => Err(PyError::named(
+        Method::Contains => Err(PyError::named(
             "AttributeError",
-            format!("'set' object has no attribute '{method}'"),
+            "'set' object has no attribute '__contains__'",
         )),
     }
 }
@@ -187,7 +363,7 @@ pub fn leaf_unhashable_type_name(v: &Value) -> String {
     }
     // Slice: recurse into components.
     if let ValueKind::BuiltinObject { ops, state } = v.kind()
-        && ops.type_name() == crate::slice::TYPE_NAME
+        && crate::slice::is_slice_ops(ops)
     {
         let borrow = state.borrow();
         if let Some(s) = borrow.downcast_ref::<crate::slice::SliceState>() {
@@ -265,7 +441,14 @@ fn collect_iterable(v: &Value) -> Result<PySet> {
                         break;
                     }
                     out.insert(PyKey::Int(cur));
-                    cur = cur.wrapping_add(step);
+                    let Some(next) = cur.checked_add(step) else {
+                        // A monotonic i64 range can only overflow after its
+                        // final in-domain value; wrapping would re-enter the
+                        // opposite side and make materialisation effectively
+                        // unbounded.
+                        break;
+                    };
+                    cur = next;
                 }
             }
         }

@@ -11,7 +11,9 @@ use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyKey, Value, ValueKind};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, CanonicalClassTag, PyKey, Value, ValueKind, builtin_ops_is,
+};
 
 pub struct UnionTypeState {
     /// The component types, as a flat tuple.  Matches CPython's `__args__`.
@@ -71,7 +73,7 @@ impl BuiltinTypeOps for UnionTypeOps {
             state: other_state,
         } = other.kind()
         {
-            if other_ops.type_name() != TYPE_NAME {
+            if !builtin_ops_is::<UnionTypeOps>(other_ops) {
                 return false;
             }
             let other_borrow = other_state.borrow();
@@ -111,15 +113,17 @@ impl BuiltinTypeOps for UnionTypeOps {
 pub fn repr_type_component(v: &Value) -> String {
     match v.kind() {
         ValueKind::PyClass(rc) => {
-            let name = rc.borrow().qualname.clone();
+            let class = rc.borrow();
             // `NoneType` displays as `None` in union repr (CPython: `int | None`).
-            if name == "NoneType" {
+            if class.canonical_tag == Some(CanonicalClassTag::NoneType) {
                 "None".to_string()
             } else {
-                name
+                class.qualname.clone()
             }
         }
-        ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
+        ValueKind::BuiltinObject { ops, state } if builtin_ops_is::<UnionTypeOps>(ops) => {
+            ops.repr(state)
+        }
         _ => v.repr_raw(),
     }
 }
@@ -173,9 +177,10 @@ fn component_hash(v: &Value) -> Option<u64> {
         ptr.hash(&mut h);
         return Some(h.finish());
     }
-    if let ValueKind::BuiltinFunction(name) = v.kind() {
+    if matches!(v.kind(), ValueKind::BuiltinFunction(_)) {
         let mut h = DefaultHasher::new();
-        name.hash(&mut h);
+        let function = v.as_function_rc()?;
+        (std::rc::Rc::as_ptr(function) as usize).hash(&mut h);
         return Some(h.finish());
     }
     None
@@ -213,11 +218,16 @@ pub fn make_union_type(lhs: Value, rhs: Value) -> Value {
 /// deduplication in union construction.
 ///
 /// - `PyClass` identity: same `Rc` pointer (same class object).
-/// - `BuiltinFunction` identity: same type-name string.
+/// - `BuiltinFunction` identity: same concrete function-object Rc.
 fn same_type_identity(a: &Value, b: &Value) -> bool {
     match (a.kind(), b.kind()) {
         (ValueKind::PyClass(ra), ValueKind::PyClass(rb)) => std::rc::Rc::ptr_eq(ra, rb),
-        (ValueKind::BuiltinFunction(na), ValueKind::BuiltinFunction(nb)) => na == nb,
+        (ValueKind::BuiltinFunction(_), ValueKind::BuiltinFunction(_)) => {
+            match (a.as_function_rc(), b.as_function_rc()) {
+                (Some(ra), Some(rb)) => std::rc::Rc::ptr_eq(ra, rb),
+                _ => false,
+            }
+        }
         _ => false,
     }
 }
@@ -226,7 +236,7 @@ fn same_type_identity(a: &Value, b: &Value) -> bool {
 /// `UnionType` values so the result stays flat.
 fn collect_union_components(v: Value, out: &mut Vec<Value>) {
     if let ValueKind::BuiltinObject { ops, state } = v.kind()
-        && ops.type_name() == TYPE_NAME
+        && builtin_ops_is::<UnionTypeOps>(ops)
     {
         let borrow = state.borrow();
         if let Some(s) = borrow.downcast_ref::<UnionTypeState>()
@@ -245,7 +255,7 @@ fn collect_union_components(v: Value, out: &mut Vec<Value>) {
 pub fn is_union_type(v: &Value) -> bool {
     matches!(
         v.kind(),
-        ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<UnionTypeOps>(ops)
     )
 }
 
@@ -253,7 +263,7 @@ pub fn is_union_type(v: &Value) -> bool {
 /// is not a `UnionType`.
 pub fn union_type_args(v: &Value) -> Option<Value> {
     if let ValueKind::BuiltinObject { ops, state } = v.kind()
-        && ops.type_name() == TYPE_NAME
+        && builtin_ops_is::<UnionTypeOps>(ops)
     {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<UnionTypeState>()?;

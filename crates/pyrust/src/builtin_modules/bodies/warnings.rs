@@ -8,12 +8,14 @@
 //
 // ### Filter list
 //
-// CPython stores `warnings.filters` as a module-level list of 5-tuples.
-// Here we maintain a thread-local `Vec<Filter>` as the canonical state.
-// The module constant `"filters"` is a Python list that is rebuilt from
-// the canonical state each time `module()` is called; mutations via the
-// Python list object are not reflected back into the canonical state, but
-// that is acceptable for a stub implementation.
+// CPython stores `warnings.filters` as interpreter/module state.  Here the
+// native filter and recording state is owned by `Interpreter`: independent
+// root interpreters do not leak policy through the host thread, while the
+// short-lived child used to execute an imported Python module shares its
+// parent's state because both represent one Python interpreter.
+//
+// The public `"filters"` value remains a snapshot stub. Mutations through
+// that Python list are not reflected back into the canonical state.
 //
 // ### warn() output
 //
@@ -31,10 +33,12 @@
 // Reference: <https://docs.python.org/3/library/warnings.html>
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{lookup_exc_class, ExpandedCallArg};
+use crate::interpreter::{
+    ExpandedCallArg, class_is_subclass_of, lookup_exc_class, render_instance_str,
+};
 use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -44,110 +48,280 @@ use pyrust_derive::pyrust_module;
 /// A parsed warnings filter entry.
 #[derive(Clone)]
 struct Filter {
-    /// "default", "ignore", "always", "error", "once", "module", "all".
+    /// "default", "ignore", "always", "error", "once", "module".
     action: String,
-    /// Category class name to match (empty = match all).
-    category_name: String,
+    /// The exact class object supplied to the filter API.
+    ///
+    /// `simplefilter` intentionally accepts non-class values and defers the
+    /// resulting `issubclass` TypeError until a warning reaches the filter, as
+    /// CPython 3.12 does.  Valid categories retain their Rc identity.
+    category: FilterCategory,
 }
 
 impl Filter {
-    fn new(action: &str, category_name: &str) -> Self {
+    fn new(action: &str, category: FilterCategory) -> Self {
         Filter {
             action: action.to_string(),
-            category_name: category_name.to_string(),
+            category,
         }
     }
 }
 
-thread_local! {
-    /// Active filters — most-recently-added is checked first (prepend).
-    static FILTERS: RefCell<Vec<Filter>> = const { RefCell::new(Vec::new()) };
+#[derive(Clone)]
+enum FilterCategory {
+    Class(Rc<RefCell<PyClass>>),
+    Invalid(Value),
+}
 
-    /// When Some, we are inside a `catch_warnings(record=True)` block and
-    /// warn() pushes WarningMessage objects directly into this Python list so
-    /// the caller's `w` binding sees them immediately (shared Rc<ListInner>).
-    static RECORD_SINK: RefCell<Option<Value>> = const { RefCell::new(None) };
+impl FilterCategory {
+    fn unchecked(value: Value) -> Self {
+        let class = match value.kind() {
+            ValueKind::PyClass(class) => Some(Rc::clone(class)),
+            _ => None,
+        };
+        match class {
+            Some(class) => Self::Class(class),
+            None => Self::Invalid(value),
+        }
+    }
+
+    fn as_value(&self) -> Value {
+        match self {
+            Self::Class(class) => Value::py_class(Rc::clone(class)),
+            Self::Invalid(value) => value.clone(),
+        }
+    }
+}
+
+struct RecordSink {
+    log: Value,
+    warning_message_class: Rc<RefCell<PyClass>>,
+}
+
+/// Mutable state of the `warnings` module for one Python interpreter.
+///
+/// `Interpreter` owns this behind an `Rc`: roots get fresh state, while the
+/// implementation-only child used for a filesystem import clones the handle.
+/// Keeping the concrete filters and sinks private to this module preserves the
+/// built-in's responsibility boundary.
+#[derive(Default)]
+pub(crate) struct WarningsState {
+    /// Active filters — most-recently-added is checked first (prepend).
+    filters: RefCell<Vec<Filter>>,
+    /// Active `catch_warnings(record=True)` sinks in nesting order.
+    ///
+    /// Leaving an inner recording context must restore the outer context,
+    /// rather than disabling recording entirely. Non-recording nested
+    /// contexts do not push and therefore keep using the nearest recording
+    /// ancestor, matching CPython.
+    record_sinks: RefCell<Vec<RecordSink>>,
 }
 
 /// Push a filter entry to the front of the list (highest priority).
-fn push_filter(f: Filter) {
-    FILTERS.with(|fl| fl.borrow_mut().insert(0, f));
+fn push_filter(interpreter: &crate::Interpreter, filter: Filter) {
+    interpreter
+        .warnings_state
+        .filters
+        .borrow_mut()
+        .insert(0, filter);
 }
 
-/// Determine the action for a warning with the given category name.
+/// Determine the action for a warning with the given category class.
 /// Returns "default" if no filter matches.
-fn matched_action(category_name: &str) -> String {
-    FILTERS.with(|fl| {
-        for f in fl.borrow().iter() {
-            if f.category_name.is_empty() || f.category_name == category_name {
-                return f.action.clone();
+fn matched_action(
+    interpreter: &crate::Interpreter,
+    category: &Rc<RefCell<PyClass>>,
+) -> Result<String> {
+    for filter in interpreter.warnings_state.filters.borrow().iter() {
+        let matches = match &filter.category {
+            FilterCategory::Class(expected) => class_is_subclass_of(category, expected),
+            FilterCategory::Invalid(_) => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "issubclass() arg 2 must be a class, a tuple of classes, or a union",
+                ));
             }
+        };
+        if matches {
+            return Ok(filter.action.clone());
         }
-        "default".to_string()
+    }
+    Ok("default".to_string())
+}
+
+// ── warnings-owned classes ───────────────────────────────────────────────────
+
+type WeakPyClass = Weak<RefCell<PyClass>>;
+
+struct WarningClassGeneration {
+    /// A live catch_warnings class owns the lifetime of its paired
+    /// WarningMessage generation through this registry entry.
+    warning_message: Rc<RefCell<PyClass>>,
+    catch_warnings: WeakPyClass,
+}
+
+thread_local! {
+    /// Tracks the class pair created for every still-live catch_warnings
+    /// generation.
+    ///
+    /// `del sys.modules["warnings"]` followed by another import executes the
+    /// module again and must create fresh classes. A retained catch_warnings
+    /// class must still be sufficient to construct a context after its module
+    /// and WarningMessage binding are collected. The catch side stays weak to
+    /// avoid making every import immortal; the paired WarningMessage stays
+    /// strong until that catch side dies and the registry is next pruned.
+    static WARNING_CLASS_GENERATIONS: RefCell<Vec<WarningClassGeneration>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn new_warning_message_class() -> Value {
+    Value::py_class(Rc::new(RefCell::new(PyClass::new(
+        "WarningMessage",
+        "WarningMessage",
+        None,
+        IndexMap::new(),
+    ))))
+}
+
+fn new_catch_warnings_class() -> Value {
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
+    attrs.insert(
+        "__init__".to_string(),
+        Value::builtin_function("warnings.CatchWarnings.__init__"),
+    );
+    attrs.insert(
+        "__enter__".to_string(),
+        Value::builtin_function("warnings.CatchWarnings.__enter__"),
+    );
+    attrs.insert(
+        "__exit__".to_string(),
+        Value::builtin_function("warnings.CatchWarnings.__exit__"),
+    );
+    Value::py_class(Rc::new(RefCell::new(PyClass::new(
+        "catch_warnings",
+        "catch_warnings",
+        None,
+        attrs,
+    ))))
+}
+
+/// Finalize one imported warnings generation: publish this interpreter's
+/// filter snapshot and register the module's concrete class pair. Called by
+/// the generic built-in module finalization hook before the module becomes
+/// observable through `sys.modules`.
+pub(crate) fn prepare_module(interpreter: &crate::Interpreter, module: &Value) {
+    let ValueKind::PyModule(module) = module.kind() else {
+        return;
+    };
+    module
+        .borrow_mut()
+        .attrs
+        .insert("filters".to_string(), snapshot_filters(interpreter));
+    let (warning_message, catch_warnings) = {
+        let module = module.borrow();
+        let warning_message =
+            module
+                .attrs
+                .get("WarningMessage")
+                .and_then(|value| match value.kind() {
+                    ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                    _ => None,
+                });
+        let catch_warnings =
+            module
+                .attrs
+                .get("catch_warnings")
+                .and_then(|value| match value.kind() {
+                    ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                    _ => None,
+                });
+        (warning_message, catch_warnings)
+    };
+    let (Some(warning_message), Some(catch_warnings)) = (warning_message, catch_warnings) else {
+        return;
+    };
+
+    for class in [&warning_message, &catch_warnings] {
+        class
+            .borrow_mut()
+            .attrs
+            .insert("__module__".to_string(), Value::string("warnings"));
+    }
+
+    WARNING_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.catch_warnings.strong_count() > 0);
+        if generations.iter().any(|generation| {
+            Rc::ptr_eq(&generation.warning_message, &warning_message)
+                && generation.catch_warnings.as_ptr() == Rc::as_ptr(&catch_warnings)
+        }) {
+            return;
+        }
+        generations.push(WarningClassGeneration {
+            warning_message,
+            catch_warnings: Rc::downgrade(&catch_warnings),
+        });
+    });
+}
+
+fn warning_message_class_for_catch(class: &Rc<RefCell<PyClass>>) -> Option<Rc<RefCell<PyClass>>> {
+    WARNING_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.catch_warnings.strong_count() > 0);
+        generations.iter().rev().find_map(|generation| {
+            let catch_warnings = generation.catch_warnings.upgrade()?;
+            class_is_subclass_of(class, &catch_warnings)
+                .then(|| Rc::clone(&generation.warning_message))
+        })
     })
 }
 
-// ── WarningMessage class ──────────────────────────────────────────────────────
+/// Resolve and retain the WarningMessage class paired with this context's
+/// generation. The cached instance attribute keeps the class alive even if the
+/// old module is removed and no other Python reference to it remains.
+fn context_warning_message_class(
+    inst: &Rc<RefCell<PyInstance>>,
+    fn_name: &str,
+) -> Result<Rc<RefCell<PyClass>>> {
+    let cached = inst.borrow().attrs.get("_warning_message_class").cloned();
+    if let Some(value) = cached
+        && let ValueKind::PyClass(class) = value.kind()
+    {
+        return Ok(Rc::clone(class));
+    }
 
-thread_local! {
-    static WARNING_MESSAGE_CLASS: Rc<RefCell<PyClass>> = {
-        Rc::new(RefCell::new(PyClass::new(
-            "WarningMessage",
-            "WarningMessage",
-            None,
-            IndexMap::new(),
-        )))
-    };
+    let context_class = Rc::clone(&inst.borrow().class);
+    let warning_message = warning_message_class_for_catch(&context_class).ok_or_else(|| {
+        PyError::Runtime(format!(
+            "internal: {fn_name}() cannot resolve its warnings module generation",
+        ))
+    })?;
+    inst.borrow_mut().attrs.insert(
+        "_warning_message_class",
+        Value::py_class(Rc::clone(&warning_message)),
+    );
+    Ok(warning_message)
 }
 
-/// Build a `WarningMessage` instance.
+/// Build a `WarningMessage` instance without reconstructing its category from
+/// a mutable Python-visible class name.
 fn make_warning_message(
+    warning_message_class: &Rc<RefCell<PyClass>>,
     message: Value,
-    category_name: &str,
+    category: &Rc<RefCell<PyClass>>,
     filename: &str,
     lineno: i64,
 ) -> Value {
-    WARNING_MESSAGE_CLASS.with(|class| {
-        let mut attrs = InstanceAttrs::new();
-        attrs.insert("message", message);
-        attrs.insert(
-            "category",
-            warning_class_by_name(category_name),
-        );
-        attrs.insert("filename", Value::string(filename));
-        attrs.insert("lineno", Value::int(lineno));
-        attrs.insert("source", Value::none());
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
-}
-
-// ── catch_warnings class ──────────────────────────────────────────────────────
-
-thread_local! {
-    static CATCH_WARNINGS_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__init__".to_string(),
-            Value::builtin_function("warnings.CatchWarnings.__init__"),
-        );
-        attrs.insert(
-            "__enter__".to_string(),
-            Value::builtin_function("warnings.CatchWarnings.__enter__"),
-        );
-        attrs.insert(
-            "__exit__".to_string(),
-            Value::builtin_function("warnings.CatchWarnings.__exit__"),
-        );
-        Rc::new(RefCell::new(PyClass::new(
-            "catch_warnings",
-            "catch_warnings",
-            None,
-            attrs,
-        )))
-    };
+    let mut attrs = InstanceAttrs::new();
+    attrs.insert("message", message);
+    attrs.insert("category", Value::py_class(Rc::clone(category)));
+    attrs.insert("filename", Value::string(filename));
+    attrs.insert("lineno", Value::int(lineno));
+    attrs.insert("source", Value::none());
+    Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class: Rc::clone(warning_message_class),
+        attrs,
+    })))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -161,97 +335,132 @@ fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyI
     }
 }
 
-/// Get the name of a class (PyClass or PyInstance via its class).
-fn class_name(v: &Value) -> Option<String> {
-    match v.kind() {
-        ValueKind::PyClass(rc) => Some(rc.borrow().name.clone()),
-        _ => None,
-    }
-}
-
-/// Resolve a warning category class Value to its name string.
-fn category_name_for(cat: &Value) -> String {
-    match cat.kind() {
-        ValueKind::PyClass(rc) => rc.borrow().name.clone(),
-        _ => "UserWarning".to_string(),
-    }
-}
-
-/// Look up a warning category class by name from the exception cache.
-fn warning_class_by_name(name: &str) -> Value {
+fn built_in_warning_class(name: &str) -> Result<Rc<RefCell<PyClass>>> {
     lookup_exc_class(name)
-        .map(Value::py_class)
-        .unwrap_or_else(Value::none)
+        .ok_or_else(|| PyError::Runtime(format!("built-in exception '{name}' is not defined")))
 }
 
-/// Extract the text of a warning from its `message` argument.
-///
-/// CPython accepts a string or a Warning instance.  We accept anything and
-/// call `repr()` as a fallback.
-fn message_text(v: &Value) -> String {
-    match v.kind() {
-        ValueKind::Str(s) => s.to_string(),
-        ValueKind::PyInstance(rc) => {
-            // If the instance has an `args` attribute with at least one
-            // element, use that (matches BaseException.__str__ behaviour).
-            let borrow = rc.borrow();
-            if let Some(args_val) = borrow.attrs.get("args") {
-                match args_val.kind() {
-                    ValueKind::Tuple(items) if !items.is_empty() => {
-                        if let ValueKind::Str(s) = items[0].kind() { return s.to_string() }
-                    }
-                    _ => {}
-                }
-            }
-            v.repr_raw()
-        }
-        _ => v.repr_raw(),
+fn positional_or_keyword(
+    args: &[ExpandedCallArg],
+    position: usize,
+    keyword: &str,
+) -> Option<Value> {
+    args.iter()
+        .find(|argument| argument.name.as_deref() == Some(keyword))
+        .map(|argument| argument.value.clone())
+        .or_else(|| {
+            args.iter()
+                .filter(|argument| argument.name.is_none())
+                .nth(position)
+                .map(|argument| argument.value.clone())
+        })
+}
+
+fn validated_filter_category(value: &Value) -> Result<FilterCategory> {
+    let ValueKind::PyClass(category) = value.kind() else {
+        return Err(PyError::named("AssertionError", "category must be a class"));
+    };
+    let warning = built_in_warning_class("Warning")?;
+    if !class_is_subclass_of(category, &warning) {
+        return Err(PyError::named(
+            "AssertionError",
+            "category must be a Warning subclass",
+        ));
     }
+    Ok(FilterCategory::Class(Rc::clone(category)))
 }
 
-/// Snapshot the current filter list as a Python list of strings (action names).
-/// We store them as `(action, category_name)` tuples so they can be restored.
-fn snapshot_filters() -> Value {
-    FILTERS.with(|fl| {
-        let items: Vec<Value> = fl
-            .borrow()
-            .iter()
-            .map(|f| {
-                Value::tuple(vec![
-                    Value::string(&f.action),
-                    Value::string(&f.category_name),
-                ])
-            })
-            .collect();
-        Value::list(items)
-    })
+/// Normalise `warn(message, category)` to the actual Warning instance and its
+/// concrete category.  A Warning instance wins over an explicitly supplied
+/// category; otherwise the requested class is invoked so user `__init__`
+/// semantics and instance identity are preserved.
+fn normalize_warning(
+    interp: &mut crate::Interpreter,
+    message: Value,
+    category: Option<Value>,
+) -> Result<(Value, Rc<RefCell<PyClass>>)> {
+    let warning = built_in_warning_class("Warning")?;
+    let message_class = match message.kind() {
+        ValueKind::PyInstance(instance) => Some(Rc::clone(&instance.borrow().class)),
+        _ => None,
+    };
+    if let Some(message_class) = message_class
+        && class_is_subclass_of(&message_class, &warning)
+    {
+        return Ok((message, message_class));
+    }
+
+    let category = match category {
+        None => Value::py_class(built_in_warning_class("UserWarning")?),
+        Some(value) if value.is_none() => Value::py_class(built_in_warning_class("UserWarning")?),
+        Some(value) => value,
+    };
+    let ValueKind::PyClass(category_class) = category.kind() else {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "category must be a Warning subclass, not '{}'",
+                pyrust_core::builtin_type_name(&category)
+            ),
+        ));
+    };
+    let category_class = Rc::clone(category_class);
+    if !class_is_subclass_of(&category_class, &warning) {
+        return Err(PyError::named(
+            "TypeError",
+            "category must be a Warning subclass, not 'type'",
+        ));
+    }
+    let warning_instance = interp.call_function_expanded(
+        Value::py_class(Rc::clone(&category_class)),
+        &[ExpandedCallArg {
+            name: None,
+            value: message,
+        }],
+    )?;
+    Ok((warning_instance, category_class))
+}
+
+/// Snapshot the current filter list while retaining category object identity.
+fn snapshot_filters(interpreter: &crate::Interpreter) -> Value {
+    let items: Vec<Value> = interpreter
+        .warnings_state
+        .filters
+        .borrow()
+        .iter()
+        .map(|filter| {
+            Value::tuple(vec![
+                Value::string(&filter.action),
+                filter.category.as_value(),
+            ])
+        })
+        .collect();
+    Value::list(items)
 }
 
 /// Restore the filter list from a snapshot produced by `snapshot_filters`.
 ///
-/// The snapshot is ordered identically to the internal FILTERS vec (index 0 =
+/// The snapshot is ordered identically to the internal filter vec (index 0 =
 /// highest priority), so we iterate forward and push to keep that order.
-fn restore_filters(snapshot: &Value) {
-    FILTERS.with(|fl| {
-        let mut filters = fl.borrow_mut();
-        filters.clear();
-        if let ValueKind::List(items) = snapshot.kind() {
-            for item in items.iter() {
-                if let ValueKind::Tuple(pair) = item.kind()
-                    && pair.len() == 2 {
-                        let action = match pair[0].kind() {
-                            ValueKind::Str(s) => s.to_string(),
-                            _ => continue,
-                        };
-                        let category_name = match pair[1].kind() {
-                            ValueKind::Str(s) => s.to_string(),
-                            _ => continue,
-                        };
-                        filters.push(Filter { action, category_name });
-                    }
+fn restore_filters(interpreter: &crate::Interpreter, snapshot: &Value) {
+    let mut filters = interpreter.warnings_state.filters.borrow_mut();
+    filters.clear();
+    if let ValueKind::List(items) = snapshot.kind() {
+        for item in items.iter() {
+            if let ValueKind::Tuple(pair) = item.kind()
+                && pair.len() == 2
+            {
+                let action = match pair[0].kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => continue,
+                };
+                filters.push(Filter {
+                    action,
+                    category: FilterCategory::unchecked(pair[1].clone()),
+                });
             }
         }
-    });
+    }
 }
 
 // ── module ────────────────────────────────────────────────────────────────────
@@ -263,14 +472,14 @@ pyrust_module! {
         // `warnings.warn("msg", UserWarning)` still works because UserWarning
         // is resolved from the caller's builtins namespace, not from here.
 
-        // filters: the active filter list.  Rebuilt at module() time.
-        "filters"                   => snapshot_filters(),
+        // Replaced with this interpreter's snapshot by the import finalizer.
+        "filters"                   => Value::list(Vec::new()),
 
-        // catch_warnings class value.
-        "catch_warnings"            => Value::py_class(CATCH_WARNINGS_CLASS.with(Rc::clone)),
+        // These classes are defined by warnings.py, so each fresh module import
+        // receives a fresh pair just as CPython does.
+        "catch_warnings"            => new_catch_warnings_class(),
 
-        // WarningMessage class value.
-        "WarningMessage"            => Value::py_class(WARNING_MESSAGE_CLASS.with(Rc::clone)),
+        "WarningMessage"            => new_warning_message_class(),
     }
 
     /// `warnings.warn(message, category=UserWarning, stacklevel=1, source=None)`
@@ -287,50 +496,45 @@ pyrust_module! {
             ));
         }
         let msg_val = args[0].value.clone();
-        // category defaults to UserWarning.
-        let cat_val = args.get(1).map(|a| a.value.clone()).unwrap_or_else(|| {
-            warning_class_by_name("UserWarning")
-        });
+        let category = positional_or_keyword(args, 1, "category");
         // stacklevel and source are accepted but ignored.
-        let _ = _interp;
-
-        let cat_name = category_name_for(&cat_val);
-        let msg_text = message_text(&msg_val);
-        let action = matched_action(&cat_name);
+        let (warning_instance, category) =
+            normalize_warning(_interp, msg_val, category)?;
+        let category_name = category.borrow().name.clone();
+        let message_text = render_instance_str(_interp, &warning_instance)?;
+        let action = matched_action(_interp, &category)?;
 
         match action.as_str() {
             "ignore" => {
                 // Suppressed — do nothing.
             }
             "error" => {
-                // Raise the warning category as an exception.
-                let err = match lookup_exc_class(&cat_name) {
-                    Some(rc) => PyError::class(rc, msg_text),
-                    None => PyError::Named(std::borrow::Cow::Owned(cat_name), msg_text),
-                };
-                return Err(err);
+                // The warning was already constructed above.  Raising that
+                // exact object preserves user-class identity, custom
+                // __init__, and (when passed in) object identity.
+                return Err(PyError::Raised(warning_instance));
             }
             _ => {
-                // "default", "always", "once", "module", "all" — emit the warning.
-                let warn_line =
-                    format!("<unknown>:0: {cat_name}: {msg_text}");
+                // "default", "always", "once", "module" — emit the warning.
+                let warn_line = format!("<unknown>:0: {category_name}: {message_text}");
                 // If inside a catch_warnings(record=True) block, push
                 // directly into the shared Python list so the caller's `w`
                 // binding sees the item immediately.
-                let recorded = RECORD_SINK.with(|sink| {
-                    if let Some(ref list_val) = *sink.borrow() {
-                        let wmsg = make_warning_message(
-                            msg_val.clone(),
-                            &cat_name,
-                            "<unknown>",
-                            0,
-                        );
-                        let _ = list_val.list_push(wmsg);
-                        true
-                    } else {
-                        false
-                    }
-                });
+                let recorded = if let Some(record_sink) =
+                    _interp.warnings_state.record_sinks.borrow().last()
+                {
+                    let wmsg = make_warning_message(
+                        &record_sink.warning_message_class,
+                        warning_instance.clone(),
+                        &category,
+                        "<unknown>",
+                        0,
+                    );
+                    let _ = record_sink.log.list_push(wmsg);
+                    true
+                } else {
+                    false
+                };
                 if !recorded {
                     eprintln!("{warn_line}");
                 }
@@ -366,24 +570,11 @@ pyrust_module! {
             .iter()
             .find(|a| a.name.as_deref() == Some("category"))
             .map(|a| a.value.clone())
-            .or_else(|| args.get(2).map(|a| a.value.clone()))
-            .unwrap_or_else(|| warning_class_by_name("Warning"));
-        // Map the category name to the canonical filter string.  An empty
-        // string means "match all"; the base class Warning also means match
-        // all because every warning is a Warning subclass.
-        let cat_name = match cat_val.kind() {
-            ValueKind::PyClass(rc) => {
-                let name = rc.borrow().name.clone();
-                if name == "Warning" {
-                    String::new()
-                } else {
-                    name
-                }
-            }
-            _ => String::new(),
-        };
-        let _ = _interp;
-        push_filter(Filter::new(&action, &cat_name));
+            .or_else(|| positional_or_keyword(args, 2, "category"))
+            .unwrap_or(Value::py_class(built_in_warning_class("Warning")?));
+        // Unlike simplefilter, filterwarnings validates eagerly.
+        let category = validated_filter_category(&cat_val)?;
+        push_filter(_interp, Filter::new(&action, category));
         Ok(Value::none())
     }
 
@@ -406,27 +597,22 @@ pyrust_module! {
                 ))
             }
         };
-        // Empty category_name means "match all".  Warning (the base class)
-        // also means match all because every warning is a Warning subclass.
-        let cat_name = if let Some(cat_arg) = args.get(1) {
-            let name = class_name(&cat_arg.value).unwrap_or_default();
-            if name == "Warning" {
-                String::new()
-            } else {
-                name
-            }
-        } else {
-            String::new()
-        };
-        let _ = _interp;
-        push_filter(Filter::new(&action, &cat_name));
+        // CPython deliberately does not validate this category here.  A class
+        // participates in normal subclass matching; a non-class is retained
+        // and raises TypeError only if warning dispatch reaches this filter.
+        let category = positional_or_keyword(args, 1, "category")
+            .unwrap_or(Value::py_class(built_in_warning_class("Warning")?));
+        push_filter(
+            _interp,
+            Filter::new(&action, FilterCategory::unchecked(category)),
+        );
         Ok(Value::none())
     }
 
     /// `warnings.resetwarnings()` — clear all warning filters.
     fn resetwarnings(args) -> Result<Value> {
-        let _ = (args, _interp);
-        FILTERS.with(|fl| fl.borrow_mut().clear());
+        let _ = args;
+        _interp.warnings_state.filters.borrow_mut().clear();
         Ok(Value::none())
     }
 
@@ -439,6 +625,9 @@ pyrust_module! {
     #[py_name = "CatchWarnings.__init__"]
     fn catch_warnings_init(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
+        // Resolve the paired class by immutable class identity while this
+        // generation is registered, then retain it on the context object.
+        let _ = context_warning_message_class(&inst, FN_NAME)?;
         // Parse keyword args for `record`.
         let mut record = false;
         for arg in &args[1..] {
@@ -451,9 +640,10 @@ pyrust_module! {
             }
         }
         let _ = _interp;
-        inst.borrow_mut()
-            .attrs
-            .insert("_record", Value::bool_(record));
+        let mut instance = inst.borrow_mut();
+        instance.attrs.insert("_record", Value::bool_(record));
+        instance.attrs.insert("_entered", Value::bool_(false));
+        instance.attrs.insert("_sink_active", Value::bool_(false));
         Ok(Value::none())
     }
 
@@ -461,32 +651,63 @@ pyrust_module! {
     #[py_name = "CatchWarnings.__enter__"]
     fn catch_warnings_enter(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
-        let _ = _interp;
-        // Save current filters.
-        let snap = snapshot_filters();
-        inst.borrow_mut()
-            .attrs
-            .insert("_saved_filters", snap);
-        // If record=True, install an "always" filter and set up the sink.
         let record = matches!(
             inst.borrow().attrs.get("_record").map(|v| v.kind()),
             Some(ValueKind::Bool(true))
         );
+        let entered = matches!(
+            inst.borrow().attrs.get("_entered").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        if entered {
+            return Err(PyError::named(
+                "RuntimeError",
+                if record {
+                    "Cannot enter catch_warnings(record=True) twice"
+                } else {
+                    "Cannot enter catch_warnings() twice"
+                },
+            ));
+        }
+        inst.borrow_mut()
+            .attrs
+            .insert("_entered", Value::bool_(true));
+        // Save current filters.
+        let snap = snapshot_filters(_interp);
+        inst.borrow_mut()
+            .attrs
+            .insert("_saved_filters", snap);
+        // If record=True, install an "always" filter and set up the sink.
         if record {
-            push_filter(Filter::new("always", ""));
-            // Create the Python list that both RECORD_SINK and the caller's
-            // `w` binding will share via Rc<ListInner>.  warn() pushes
+            let warning_message_class = context_warning_message_class(&inst, FN_NAME)?;
+            push_filter(
+                _interp,
+                Filter::new(
+                    "always",
+                    FilterCategory::Class(built_in_warning_class("Warning")?),
+                ),
+            );
+            // Create the Python list that both the recording state and the
+            // caller's `w` binding share via Rc<ListInner>. warn() pushes
             // directly into this list so items are visible immediately.
             let list_val = Value::list(Vec::new());
-            RECORD_SINK.with(|sink| {
-                *sink.borrow_mut() = Some(list_val.clone());
-            });
+            _interp
+                .warnings_state
+                .record_sinks
+                .borrow_mut()
+                .push(RecordSink {
+                    log: list_val.clone(),
+                    warning_message_class,
+                });
             inst.borrow_mut()
                 .attrs
                 .insert("_log", list_val.clone());
+            inst.borrow_mut()
+                .attrs
+                .insert("_sink_active", Value::bool_(true));
             Ok(list_val)
         } else {
-            Ok(Value::py_instance(inst))
+            Ok(Value::none())
         }
     }
 
@@ -494,22 +715,45 @@ pyrust_module! {
     #[py_name = "CatchWarnings.__exit__"]
     fn catch_warnings_exit(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
-        let _ = _interp;
         // Flush recorded warnings into the list object.
         let record = matches!(
             inst.borrow().attrs.get("_record").map(|v| v.kind()),
             Some(ValueKind::Bool(true))
         );
-        if record {
-            // Items were pushed directly into the shared list via RECORD_SINK;
-            // just clear the sink so warn() stops recording.
-            RECORD_SINK.with(|sink| sink.borrow_mut().take());
+        let entered = matches!(
+            inst.borrow().attrs.get("_entered").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        if !entered {
+            return Err(PyError::named(
+                "RuntimeError",
+                if record {
+                    "Cannot exit catch_warnings(record=True) without entering first"
+                } else {
+                    "Cannot exit catch_warnings() without entering first"
+                },
+            ));
+        }
+        let sink_active = matches!(
+            inst.borrow().attrs.get("_sink_active").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        if record && sink_active {
+            // Pop only this context so an outer recording context becomes
+            // active again.
+            _interp.warnings_state.record_sinks.borrow_mut().pop();
+            inst.borrow_mut()
+                .attrs
+                .insert("_sink_active", Value::bool_(false));
         }
         // Restore saved filters.
         let snap = inst.borrow().attrs.get("_saved_filters").cloned();
         if let Some(snap) = snap {
-            restore_filters(&snap);
+            restore_filters(_interp, &snap);
         }
-        Ok(Value::bool_(false))
+        // Context-manager suppression treats both None and False as falsey,
+        // but the direct Python-visible return value is observable.  CPython's
+        // catch_warnings.__exit__ returns None, including on repeated exits.
+        Ok(Value::none())
     }
 }

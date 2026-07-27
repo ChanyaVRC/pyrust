@@ -30,45 +30,67 @@
 // Reference: <https://docs.python.org/3/library/copy.html>
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{
-    invoke_class_method, is_exception_class, key_to_value, lookup_class_attr, ExpandedCallArg,
+    ExpandedCallArg, invoke_class_method, is_exception_class, key_to_value, lookup_class_attr,
 };
 use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, PySet, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
-// ── copy.Error class singleton ────────────────────────────────────────────────
+// ── copy.Error class generations ──────────────────────────────────────────────
 
 thread_local! {
-    static COPY_ERROR_CLASS: Rc<RefCell<PyClass>> = {
-        let exception_base = crate::interpreter::lookup_exc_class("Exception")
-            .expect("EXC_CLASS_CACHE must contain Exception");
-        let class = Rc::new(RefCell::new(PyClass::new(
-            "Error",
-            "Error",
-            Some(Rc::clone(&exception_base)),
-            IndexMap::new(),
-        )));
-        exception_base.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
-        class
-    };
+    /// `copy` is a Python module in CPython, so each fresh import generation
+    /// owns a distinct Error class. Weak storage keeps old classes alive only
+    /// while an old module/class/instance still references them.
+    static COPY_ERROR_CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
-fn copy_error_class_value() -> Value {
-    COPY_ERROR_CLASS.with(|c| Value::py_class(Rc::clone(c)))
+fn new_copy_error_class_value() -> Value {
+    let exception_base = crate::interpreter::lookup_exc_class("Exception")
+        .expect("EXC_CLASS_CACHE must contain Exception");
+    let mut attrs = IndexMap::new();
+    attrs.insert("__module__".to_string(), Value::string("copy"));
+    let class = Rc::new(RefCell::new(PyClass::new(
+        "Error",
+        "Error",
+        Some(Rc::clone(&exception_base)),
+        attrs,
+    )));
+    exception_base
+        .borrow()
+        .subclasses
+        .borrow_mut()
+        .push(Rc::downgrade(&class));
+    COPY_ERROR_CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        classes.retain(|registered| registered.strong_count() > 0);
+        classes.push(Rc::downgrade(&class));
+    });
+    Value::py_class(class)
+}
+
+fn current_copy_error_class_value() -> Value {
+    let class = COPY_ERROR_CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        classes.retain(|registered| registered.strong_count() > 0);
+        classes.iter().rev().find_map(Weak::upgrade)
+    });
+    class.map_or_else(new_copy_error_class_value, Value::py_class)
 }
 
 pyrust_module! {
     constants {
         // copy.Error — subclass of Exception, raised on deepcopy failures.
-        "Error" => copy_error_class_value(),
+        "Error" => new_copy_error_class_value(),
         // CPython's `copy.py` keeps a lowercase alias for backward
         // compatibility: `error = Error`.  Both names must resolve to the
         // same class so `copy.error is copy.Error` is `True`.
-        "error" => copy_error_class_value(),
+        "error" => current_copy_error_class_value(),
     }
     /// CPython: copy.copy(x) — shallow copy.
     ///
@@ -233,9 +255,10 @@ fn apply_state_dict(rc: &Rc<RefCell<PyInstance>>, state: &Value) {
         let mut borrow = rc.borrow_mut();
         for (k, v) in pairs {
             if let PyKey::Str(s) = &k
-                && let Some(name) = s.as_str() {
-                    borrow.attrs.insert(name, v);
-                }
+                && let Some(name) = s.as_str()
+            {
+                borrow.attrs.insert(name, v);
+            }
         }
     }
 }
@@ -263,13 +286,13 @@ fn copy_exception(
     mut copy_val: impl FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
     on_constructed: impl FnOnce(&Value),
 ) -> Result<Value> {
-    let cls = crate::builtin_modules::builtins::value_class(&Value::py_instance(Rc::clone(rc)));
+    let cls = crate::interpreter::value_class(&Value::py_instance(Rc::clone(rc)));
     // `self.args` — the constructor arguments.  Copy each element so deepcopy
     // recurses into args (CPython deep-copies args via the state machinery).
     let args_tuple = rc
         .borrow()
         .attrs
-        .get("args")
+        .get_slot("args")
         .cloned()
         .unwrap_or_else(|| Value::tuple(Vec::new()));
     let arg_values: Vec<Value> = match args_tuple.kind() {
@@ -321,7 +344,9 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
         ValueKind::Tuple(_) => Ok(obj.clone()),
 
         // frozenset is immutable — same object.
-        ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => {
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
+        {
             Ok(obj.clone())
         }
 
@@ -362,12 +387,7 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
                 // Call `__copy__(self)` — use invoke_class_method so that
                 // UserFunction and BuiltinFunction are both handled and
                 // `self` is bound via the bound_prefix slot.
-                invoke_class_method(
-                    interp,
-                    method,
-                    Value::py_instance(Rc::clone(&rc)),
-                    &[],
-                )
+                invoke_class_method(interp, method, Value::py_instance(Rc::clone(&rc)), &[])
             } else if is_exception_class(&rc.borrow().class) {
                 // #2360 / #2361: exceptions copy via their `__reduce__` value —
                 // reconstruct `type(*args)` and re-apply the non-slot state.
@@ -422,9 +442,10 @@ fn deep_copy(
     // Cycle / sharing short-circuit: if we've already copied this object,
     // return the same copy.  Atomic values (value_identity == None) skip this.
     if let Some(id) = value_identity(&obj)
-        && let Some(existing) = memo_get(memo, id) {
-            return Ok(existing);
-        }
+        && let Some(existing) = memo_get(memo, id)
+    {
+        return Ok(existing);
+    }
 
     match obj.kind() {
         // Immutable scalars.
@@ -443,13 +464,16 @@ fn deep_copy(
         // the frozenset may have __deepcopy__ methods.  Extract the inner
         // PySet, convert each key to a Value, deep-copy it, then
         // convert back via value_to_pykey and rebuild a new frozenset.
-        ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => {
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
+        {
             let items_rc = pyrust_builtins::frozenset::as_items(&obj)
                 .expect("frozenset arm: as_items must succeed");
             // Snapshot before borrowing mutably through interp.
             let keys: Vec<PyKey> = items_rc.iter().cloned().collect();
             drop(items_rc);
-            let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
+            let mut new_set: PySet =
+                PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
                 let deep_v = deep_copy(v, memo, interp)?;
@@ -488,9 +512,10 @@ fn deep_copy(
             // A child may have cycled back and inserted a copy of this tuple
             // under our identity while we recursed — honour it.
             if let Some(id) = value_identity(&obj)
-                && let Some(existing) = memo_get(memo, id) {
-                    return Ok(existing);
-                }
+                && let Some(existing) = memo_get(memo, id)
+            {
+                return Ok(existing);
+            }
             if all_same {
                 // Every element is the same object as in the source → CPython
                 // returns the original tuple unchanged.
@@ -527,8 +552,10 @@ fn deep_copy(
             let pairs: Vec<(PyKey, Value)> =
                 d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             drop(d);
-            let new_dict =
-                Value::dict(PyDict::with_capacity_and_hasher(pairs.len(), Default::default()));
+            let new_dict = Value::dict(PyDict::with_capacity_and_hasher(
+                pairs.len(),
+                Default::default(),
+            ));
             if let Some(id) = value_identity(&obj) {
                 memo_insert(memo, id, new_dict.clone());
             }
@@ -555,7 +582,8 @@ fn deep_copy(
             if let Some(id) = value_identity(&obj) {
                 memo_insert(memo, id, new_set_val.clone());
             }
-            let mut new_set: PySet = PySet::with_capacity_and_hasher(keys.len(), Default::default());
+            let mut new_set: PySet =
+                PySet::with_capacity_and_hasher(keys.len(), Default::default());
             for k in keys {
                 let v = key_to_value(k);
                 let deep_v = deep_copy(v, memo, interp)?;

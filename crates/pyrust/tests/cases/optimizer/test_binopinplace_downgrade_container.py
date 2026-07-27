@@ -1,11 +1,9 @@
-# Parity fixture for issue #1943: pass_binopinplace_downgrade must NOT downgrade
-# a `BinOpInPlace` (augmented-assign / __iadd__) to a plain `BinOp` when the LHS
-# is a container (list/set/dict/bytearray) or any non-numeric value.
+# Parity fixture for issue #1943: augmented assignment must retain
+# `BinOpInPlace` / `__iadd__` semantics for containers and other dynamic values.
 #
 # `obj[i] += <iterable>` where obj[i] is a list extends in place (list.extend,
-# accepts ANY iterable). Downgrading to `+` (which builds a new list and rejects
-# non-list operands) raised a spurious TypeError. The downgrade is sound only for
-# numeric primitives where `+=` == `+`.
+# accepts ANY iterable). Treating it as plain `+` would build a new list, reject
+# non-list operands, and can raise a spurious TypeError.
 
 
 # --- subscript target, list += various iterables -----------------------------
@@ -103,7 +101,7 @@ def subscript_set_ior():
 print(subscript_set_ior())  # [[1, 2, 3, 4]]
 
 
-# --- numeric primitive subscript: downgrade is valid, result still correct ----
+# --- numeric primitive subscript remains correct -------------------------------
 def subscript_int():
     l = [10]
     l[0] += 5

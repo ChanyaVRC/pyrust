@@ -23,10 +23,11 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{reject_keyword_args_expanded, ExpandedCallArg, Interpreter};
+use crate::interpreter::{ExpandedCallArg, Interpreter, reject_keyword_args_expanded};
 use crate::value::{PyDict, PyKey, Value, ValueKind};
 use num_traits::ToPrimitive;
 use pyrust_derive::pyrust_module;
@@ -38,13 +39,10 @@ const TIME_PY_SOURCE: &str = include_str!("time_py.py");
 /// Names from `TIME_PY_SOURCE` exported onto the `time` module.
 const TIME_PY_EXPORTS: [&str; 1] = ["struct_time"];
 
-thread_local! {
-    /// Process-wide monotonic reference point.  `monotonic()` / `perf_counter()`
-    /// report seconds elapsed from this instant, so the value is non-negative
-    /// and never decreases for the process lifetime (CPython's `monotonic` is
-    /// likewise anchored to an unspecified epoch).
-    static MONO_EPOCH: Instant = Instant::now();
-}
+/// Process-wide monotonic reference point. `monotonic()` / `perf_counter()`
+/// report seconds elapsed from this instant, so values from different
+/// interpreter threads share one comparable clock.
+static MONO_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Execute `TIME_PY_SOURCE` once and copy its public names onto the `time`
 /// module's attribute map.  Wired from `env.rs::load_module`'s post-import hook
@@ -85,7 +83,9 @@ fn collections_namedtuple(interp: &mut Interpreter) -> Result<Value> {
     {
         return Ok(v.clone());
     }
-    Err(PyError::Runtime("time: collections.namedtuple not available".into()))
+    Err(PyError::Runtime(
+        "time: collections.namedtuple not available".into(),
+    ))
 }
 
 pyrust_module! {
@@ -291,12 +291,12 @@ fn unix_time_nanos() -> u128 {
 
 /// Monotonic seconds elapsed since the process-wide epoch.
 fn monotonic_secs() -> f64 {
-    MONO_EPOCH.with(|start| start.elapsed().as_secs_f64())
+    MONO_EPOCH.elapsed().as_secs_f64()
 }
 
 /// Monotonic nanoseconds elapsed since the process-wide epoch.
 fn monotonic_nanos() -> u128 {
-    MONO_EPOCH.with(|start| start.elapsed().as_nanos())
+    MONO_EPOCH.elapsed().as_nanos()
 }
 
 /// CPU time (user + system) consumed by the process, in seconds.
@@ -355,10 +355,7 @@ fn require_no_args(fn_name: &str, args: &[ExpandedCallArg]) -> Result<()> {
     } else {
         Err(PyError::named(
             "TypeError",
-            format!(
-                "{fn_name}() takes no arguments ({} given)",
-                args.len()
-            ),
+            format!("{fn_name}() takes no arguments ({} given)", args.len()),
         ))
     }
 }
@@ -498,9 +495,9 @@ fn mktime_local(tm: &Tm) -> Result<i64> {
         .ok_or_else(|| {
             PyError::named("OverflowError", "mktime argument out of range".to_string())
         })?;
-    local_secs.checked_add(tz_info().timezone).ok_or_else(|| {
-        PyError::named("OverflowError", "mktime argument out of range".to_string())
-    })
+    local_secs
+        .checked_add(tz_info().timezone)
+        .ok_or_else(|| PyError::named("OverflowError", "mktime argument out of range".to_string()))
 }
 
 /// Build a `time.struct_time` instance from broken-down time by fetching the
@@ -578,7 +575,10 @@ fn field_to_i64(v: &Value) -> Result<i64> {
         ValueKind::Int(i) => Ok(i),
         ValueKind::Bool(b) => Ok(b as i64),
         ValueKind::BigInt(b) => b.to_i64().ok_or_else(|| {
-            PyError::named("OverflowError", "Python int too large to convert".to_string())
+            PyError::named(
+                "OverflowError",
+                "Python int too large to convert".to_string(),
+            )
         }),
         _ => Err(PyError::named(
             "TypeError",
@@ -778,6 +778,22 @@ fn tz_info() -> TzInfo {
         daylight,
         std_name,
         dst_name,
+    }
+}
+
+#[cfg(test)]
+mod monotonic_tests {
+    use super::monotonic_secs;
+
+    #[test]
+    fn monotonic_epoch_is_shared_across_threads() {
+        let before = monotonic_secs();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let from_new_thread = std::thread::spawn(monotonic_secs).join().unwrap();
+        let after = monotonic_secs();
+
+        assert!(from_new_thread > before);
+        assert!(from_new_thread <= after);
     }
 }
 

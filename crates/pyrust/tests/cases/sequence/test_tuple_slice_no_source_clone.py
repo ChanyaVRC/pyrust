@@ -1,8 +1,7 @@
 # Tuple slicing must not deep-copy the whole source before slicing (#2114).
-# The GetSlice path used to clone the source Value, which for a tuple is an
-# O(source_len) Vec deep-copy, so a tuple slice cost scaled with the *source*
-# size regardless of the result size.  This fixture locks the behaviour: a
-# large-source / tiny-result slice must produce the right elements with shared
+# Tuple Values now share an Rc-backed immutable payload, so retaining an owned
+# source across bound conversion is an O(1) refcount bump. This fixture locks
+# the observable result: a large-source / tiny-result slice has shared
 # (shallow) element identity, byte-identical to CPython.
 
 big = tuple(range(1000))

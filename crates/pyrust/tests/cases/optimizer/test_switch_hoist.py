@@ -1,9 +1,7 @@
-# Parity fixture for the switch-head hoisting optimisation (issue #355).
+# Parity fixture for repeated global reads in if/elif chains (issue #355).
 #
-# When an if/elif chain compares the same global variable to different constants,
-# each branch in the un-optimised bytecode loads the global into a fresh temp
-# register before every CmpJumpIfFalseConst.  pass_switch_hoist eliminates the
-# redundant loads after the first one, reusing the already-loaded value.
+# Each branch must resolve the name again. The preceding comparison can dispatch
+# user code and replace a live namespace binding before the next branch.
 #
 # These tests verify that the behaviour is identical to CPython 3.12 across:
 #   - integer discriminants (the common case)

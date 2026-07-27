@@ -116,3 +116,53 @@ try:
     print("OK: 'hello'.upper is accessible")
 except TypeError as e:
     print("FAIL: 'hello'.upper raised TypeError:", e)
+
+# --- Aliases retain their original callable category across cached reads ---
+class CacheAlias:
+    f = len
+
+
+ca = CacheAlias()
+
+
+def read_alias(obj):
+    return obj.f
+
+
+for _ in range(3):
+    print("cache module alias", read_alias(ca) is len)
+
+
+class CacheWrong:
+    f = list.append
+
+
+cw = CacheWrong()
+
+
+def read_wrong(obj):
+    return obj.f
+
+
+for _ in range(3):
+    try:
+        read_wrong(cw)
+        print("FAIL: cached list.append should raise TypeError")
+    except TypeError as e:
+        print("cache descriptor", e)
+
+
+class CacheList(list):
+    pass
+
+
+cl = CacheList()
+
+
+def read_append(obj):
+    return obj.append
+
+
+for i in range(3):
+    read_append(cl)(i)
+    print("cache subclass", list(cl))

@@ -11,7 +11,7 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind, builtin_ops_is};
 
 pub struct SuperBoundBuiltinState {
     /// Registry name of the builtin (e.g. `"list.__init__"`).
@@ -92,7 +92,7 @@ pub fn as_super_bound_builtin(value: &Value) -> Option<(String, Value)> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<SuperBoundBuiltinOps>(ops) {
         return None;
     }
     let borrow = state.borrow();

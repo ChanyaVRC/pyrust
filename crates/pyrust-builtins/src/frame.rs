@@ -13,7 +13,7 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, builtin_ops_is};
 
 /// Backing state for a `frame` object.
 pub struct FrameState {
@@ -99,5 +99,5 @@ pub fn frame(code: Value, lineno: i64, back: Value, globals: Value, locals: Valu
 
 /// Returns `true` if `value` is a frame object.
 pub fn is_frame(value: &Value) -> bool {
-    matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME)
+    matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<FrameOps>(ops))
 }

@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, builtin_ops_is};
 
 pub const TYPE_NAME: &str = "traceback";
 pub const TRACEBACK_OPS: &TracebackOps = &TracebackOps;
@@ -91,7 +91,7 @@ pub fn traceback_node_with_col(
 
 /// Returns `true` if `value` is a traceback object.
 pub fn is_traceback(value: &Value) -> bool {
-    matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME)
+    matches!(value.kind(), pyrust_core::ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<TracebackOps>(ops))
 }
 
 /// Read attribute `name` from any built-in object value (`frame`, `code`, …)
@@ -130,7 +130,7 @@ pub fn walk_frames_with_col(value: &Value) -> Vec<(String, i64, Option<(u32, u32
         let pyrust_core::ValueKind::BuiltinObject { ops, state } = cur.kind() else {
             break;
         };
-        if ops.type_name() != TYPE_NAME {
+        if !builtin_ops_is::<TracebackOps>(ops) {
             break;
         }
         let (frame, lineno, col_span, next) = {
@@ -160,7 +160,7 @@ pub fn chain_len(value: &Value) -> usize {
         let pyrust_core::ValueKind::BuiltinObject { ops, state } = cur.kind() else {
             break;
         };
-        if ops.type_name() != TYPE_NAME {
+        if !builtin_ops_is::<TracebackOps>(ops) {
             break;
         }
         let next = {

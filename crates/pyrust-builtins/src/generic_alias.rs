@@ -6,13 +6,16 @@
 //! carries `(__origin__, __args__)` and has a human-readable repr.
 //!
 //! This module provides the pyrust equivalent as a `BuiltinTypeOps`
-//! implementation backed by `GenericAliasState { origin, args }`.
+//! implementation backed by `GenericAliasState`.
 
 use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyKey, Value, ValueKind};
+use indexmap::IndexMap;
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, CanonicalClassTag, PyKey, Value, ValueKind, builtin_ops_is,
+};
 
 pub struct GenericAliasState {
     /// The origin type (e.g. the `list` class value).
@@ -23,12 +26,34 @@ pub struct GenericAliasState {
     pub args: Value,
 }
 
-pub struct GenericAliasOps;
+/// Operations table for one GenericAlias semantic family.
+///
+/// `typing.Union` needs order-independent equality and hashing, while ordinary
+/// PEP 585 aliases are ordered. Encoding that distinction in the zero-sized
+/// operations type keeps the per-alias state to its two visible `Value`s.
+pub struct GenericAliasOps<const TYPING_UNION: bool>;
 
-pub const GENERIC_ALIAS_OPS: &GenericAliasOps = &GenericAliasOps;
+pub const GENERIC_ALIAS_OPS: &GenericAliasOps<false> = &GenericAliasOps;
+const TYPING_UNION_ALIAS_OPS: &GenericAliasOps<true> = &GenericAliasOps;
 pub const TYPE_NAME: &str = "types.GenericAlias";
 
-impl BuiltinTypeOps for GenericAliasOps {
+#[inline(always)]
+fn generic_alias_ops_kind(ops: &dyn BuiltinTypeOps) -> Option<bool> {
+    if builtin_ops_is::<GenericAliasOps<false>>(ops) {
+        Some(false)
+    } else if builtin_ops_is::<GenericAliasOps<true>>(ops) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+fn is_generic_alias_ops(ops: &dyn BuiltinTypeOps) -> bool {
+    generic_alias_ops_kind(ops).is_some()
+}
+
+impl<const TYPING_UNION: bool> BuiltinTypeOps for GenericAliasOps<TYPING_UNION> {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
     }
@@ -79,7 +104,7 @@ impl BuiltinTypeOps for GenericAliasOps {
         // helper in `typing.rs` always lowers `Optional[...]` to a `Union`
         // origin, so this is the single place the `Optional` spelling is
         // reconstructed.
-        if origin_name == "typing.Union"
+        if TYPING_UNION
             && let ValueKind::Tuple(items) = s.args.kind()
             && items.len() == 2
         {
@@ -138,6 +163,42 @@ impl BuiltinTypeOps for GenericAliasOps {
         }
     }
 
+    fn has_method(&self, name: &str) -> bool {
+        name == "__mro_entries__"
+    }
+
+    fn call_method(
+        &self,
+        state: &BuiltinState,
+        name: &str,
+        args: Vec<Value>,
+        kwargs: &IndexMap<String, Value>,
+    ) -> pyrust_core::Result<Value> {
+        if name != "__mro_entries__" {
+            return Err(pyrust_core::PyError::attribute_error(
+                format!("'types.GenericAlias' object has no attribute '{name}'"),
+                Some(name.to_string()),
+                None,
+            ));
+        }
+        if !kwargs.is_empty() {
+            return Err(pyrust_core::type_err!(
+                "GenericAlias.__mro_entries__() takes no keyword arguments"
+            ));
+        }
+        if args.len() != 1 {
+            return Err(pyrust_core::type_err!(
+                "GenericAlias.__mro_entries__() takes exactly one argument ({} given)",
+                args.len()
+            ));
+        }
+        let borrow = state.borrow();
+        let alias = borrow
+            .downcast_ref::<GenericAliasState>()
+            .ok_or_else(|| pyrust_core::PyError::Runtime("invalid GenericAlias state".into()))?;
+        Ok(Value::tuple(vec![alias.origin.clone()]))
+    }
+
     /// `list[int] == list[int]` must be `True` (CPython behaviour).
     ///
     /// Two `GenericAlias` values are equal iff their `__origin__` and
@@ -161,7 +222,7 @@ impl BuiltinTypeOps for GenericAliasOps {
             state: other_state,
         } = other.kind()
         {
-            if other_ops.type_name() != TYPE_NAME {
+            if generic_alias_ops_kind(other_ops) != Some(TYPING_UNION) {
                 return false;
             }
             let other_borrow = other_state.borrow();
@@ -172,7 +233,7 @@ impl BuiltinTypeOps for GenericAliasOps {
             if s.origin != other_s.origin {
                 return false;
             }
-            if is_union_origin(&s.origin) {
+            if TYPING_UNION {
                 return union_args_set_eq(&s.args, &other_s.args);
             }
             s.args == other_s.args
@@ -197,7 +258,7 @@ impl BuiltinTypeOps for GenericAliasOps {
         // consistent with the order-insensitive `eq` above.  XOR of the
         // per-element hashes is commutative, matching frozenset's semantics
         // (args are already de-duplicated by the flatten helper).
-        let args_hash = if is_union_origin(&s.origin) {
+        let args_hash = if TYPING_UNION {
             union_args_set_hash(&s.args)?
         } else {
             value_hash_u64(&s.args)?
@@ -213,7 +274,12 @@ impl BuiltinTypeOps for GenericAliasOps {
         // Reconstruct a Value wrapping this same shared state so that
         // `PyKey::Object`'s `PartialEq` (`Value::eq`) dispatches back to
         // our `eq` impl and compares by content rather than by pointer.
-        let value = Value::builtin_object_shared(GENERIC_ALIAS_OPS, state.clone());
+        let ops: &'static dyn BuiltinTypeOps = if TYPING_UNION {
+            TYPING_UNION_ALIAS_OPS
+        } else {
+            GENERIC_ALIAS_OPS
+        };
+        let value = Value::builtin_object_shared(ops, state.clone());
         Some(PyKey::Object {
             hash: combined,
             value,
@@ -222,10 +288,14 @@ impl BuiltinTypeOps for GenericAliasOps {
 }
 
 /// True if `v` is the `NoneType` class singleton (the union component that
-/// `None` lowers to).  Matched by qualname so the union repr can collapse
-/// `Union[X, NoneType]` to `Optional[X]`.
+/// `None` lowers to). The immutable canonical tag prevents a user class named
+/// `NoneType` from being mistaken for the runtime singleton.
 fn is_none_type_class(v: &Value) -> bool {
-    matches!(v.kind(), ValueKind::PyClass(rc) if rc.borrow().qualname == "NoneType")
+    matches!(
+        v.kind(),
+        ValueKind::PyClass(class)
+            if class.borrow().canonical_tag == Some(CanonicalClassTag::NoneType)
+    )
 }
 
 /// Produce the repr for a single type argument, matching how CPython formats
@@ -266,7 +336,7 @@ fn repr_type_arg(v: &Value, lower_none: bool) -> String {
                 .join(", ");
             format!("[{inner}]")
         }
-        ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
+        ValueKind::BuiltinObject { ops, state } if is_generic_alias_ops(ops) => ops.repr(state),
         ValueKind::PyInstance(inst_rc) => {
             if let Some(name_val) = inst_rc.borrow().attrs.get("__name__")
                 && let Some(s) = name_val.as_str()
@@ -296,7 +366,7 @@ fn collect_parameters(args: &Value) -> Value {
     for item in items {
         match item.kind() {
             // Nested GenericAlias: pull its parameters in.
-            ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
+            ValueKind::BuiltinObject { ops, state } if is_generic_alias_ops(ops) => {
                 let borrow = state.borrow();
                 if let Some(s) = borrow.downcast_ref::<GenericAliasState>()
                     && let ValueKind::Tuple(nested) = collect_parameters(&s.args).kind()
@@ -363,6 +433,18 @@ fn value_hash_u64(v: &Value) -> Option<u64> {
     None
 }
 
+/// Return whether `v` is a `types.GenericAlias` value owned by this module.
+///
+/// The concrete Rust operations type is stable even though `type_name()` is
+/// presentation metadata.
+#[inline]
+pub fn is_generic_alias(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::BuiltinObject { ops, .. } if is_generic_alias_ops(ops)
+    )
+}
+
 /// If `v` is a `GenericAlias`, return a clone of its `__origin__`.
 ///
 /// Used by the interpreter's call path (issue #2133): calling a `GenericAlias`
@@ -371,7 +453,7 @@ fn value_hash_u64(v: &Value) -> Option<u64> {
 /// asks for the origin here and re-dispatches the call itself.
 pub fn as_generic_alias_origin(v: &Value) -> Option<Value> {
     if let ValueKind::BuiltinObject { ops, state } = v.kind()
-        && ops.type_name() == TYPE_NAME
+        && is_generic_alias_ops(ops)
     {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<GenericAliasState>()?;
@@ -386,7 +468,7 @@ pub fn as_generic_alias_origin(v: &Value) -> Option<Value> {
 /// needs to splice a nested alias's `__args__` into the outer union.
 pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
     if let ValueKind::BuiltinObject { ops, state } = v.kind()
-        && ops.type_name() == TYPE_NAME
+        && is_generic_alias_ops(ops)
     {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<GenericAliasState>()?;
@@ -402,25 +484,14 @@ pub fn as_generic_alias_origin_args(v: &Value) -> Option<(Value, Value)> {
 /// the `isinstance`/`issubclass` builtins to treat `typing.Union[int, str]`
 /// like the tuple `(int, str)`, matching CPython 3.12.
 pub fn as_typing_union_args(v: &Value) -> Option<Value> {
-    let (origin, args) = as_generic_alias_origin_args(v)?;
-    if is_union_origin(&origin) {
-        Some(args)
-    } else {
-        None
+    if let ValueKind::BuiltinObject { ops, state } = v.kind()
+        && builtin_ops_is::<GenericAliasOps<true>>(ops)
+    {
+        let borrow = state.borrow();
+        let alias = borrow.downcast_ref::<GenericAliasState>()?;
+        return Some(alias.args.clone());
     }
-}
-
-/// True if `origin` is the `typing.Union` special-form class — the origin
-/// every flattened `Union`/`Optional` alias carries.  Matched by
-/// `__qualname__ == "Union"` plus `__module__ == "typing"` so it does not also
-/// catch a user class happening to be named `Union`.
-fn is_union_origin(origin: &Value) -> bool {
-    if let ValueKind::PyClass(rc) = origin.kind() {
-        let c = rc.borrow();
-        return c.qualname == "Union"
-            && c.attrs.get("__module__").and_then(|m| m.as_str()) == Some("typing");
-    }
-    false
+    None
 }
 
 /// Order-insensitive equality of two `Union` arg tuples, mirroring CPython's
@@ -461,4 +532,64 @@ fn union_args_set_hash(args: &Value) -> Option<u64> {
 pub fn generic_alias(origin: Value, args: Value) -> Value {
     let state: Box<dyn Any> = Box::new(GenericAliasState { origin, args });
     Value::builtin_object(GENERIC_ALIAS_OPS, state)
+}
+
+/// Construct the internal alias representation owned by
+/// `typing.Union`/`typing.Optional`.
+///
+/// The typing module has already resolved the canonical Union class for its
+/// active generation, so it selects Union equality/hash semantics explicitly.
+/// Keeping this separate from [`generic_alias`] avoids stdlib identity lookups
+/// on every ordinary PEP 585 alias construction.
+pub fn typing_union_alias(origin: Value, args: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(GenericAliasState { origin, args });
+    Value::builtin_object(TYPING_UNION_ALIAS_OPS, state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyrust_core::PyClass;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn test_class(name: &str) -> Rc<RefCell<PyClass>> {
+        Rc::new(RefCell::new(PyClass::new(
+            name,
+            name,
+            None,
+            IndexMap::new(),
+        )))
+    }
+
+    #[test]
+    fn generic_alias_state_remains_two_nanboxed_values() {
+        assert_eq!(
+            std::mem::size_of::<GenericAliasState>(),
+            2 * std::mem::size_of::<Value>()
+        );
+    }
+
+    #[test]
+    fn only_typing_owned_union_aliases_use_order_independent_semantics() {
+        let origin = Value::py_class(test_class("Union"));
+        let forward_args = Value::tuple(vec![
+            Value::py_class(test_class("int")),
+            Value::py_class(test_class("str")),
+        ]);
+        let ValueKind::Tuple(forward_items) = forward_args.kind() else {
+            unreachable!("constructed tuple");
+        };
+        let reverse_args = Value::tuple(vec![forward_items[1].clone(), forward_items[0].clone()]);
+
+        let direct = generic_alias(origin.clone(), forward_args.clone());
+        let direct_reversed = generic_alias(origin.clone(), reverse_args.clone());
+        assert!(direct != direct_reversed);
+        assert!(as_typing_union_args(&direct).is_none());
+
+        let typing = typing_union_alias(origin.clone(), forward_args);
+        let typing_reversed = typing_union_alias(origin, reverse_args.clone());
+        assert!(typing == typing_reversed);
+        assert_eq!(as_typing_union_args(&typing_reversed), Some(reverse_args));
+    }
 }

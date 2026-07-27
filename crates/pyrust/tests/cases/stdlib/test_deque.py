@@ -204,7 +204,7 @@ print(5 in d)                            # False
 
 d = deque([1, 2, 3])
 print(list(d))                           # [1, 2, 3]
-# Iteration is a snapshot — safe to iterate
+# Normal, unmodified iteration traverses the live deque in order.
 for x in d:
     pass
 

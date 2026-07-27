@@ -11,9 +11,7 @@ Opcode shapes used in this fixture:
 """
 
 # ── CmpJumpIfFalse (while loop back-edge) ────────────────────────────────────
-# Uses `i = i + 1` (Assign) rather than `i += 1` (AugAssign) so the
-# compiler's try_compile_while_range optimisation does not fire and the loop
-# back-edge remains a CmpJumpIfFalse* instruction.
+# Ordinary while-loop comparisons retain a CmpJumpIfFalse* back edge.
 
 # Lt: i < n
 i = 0
@@ -69,8 +67,7 @@ if x != 6:
     print("ne-ok")     # ne-ok
 
 # ── CmpJumpIfFalse (register vs register, inside function) ───────────────────
-# `while i < n` where n is a parameter (register), body avoids the
-# try_compile_while_range pattern by using Assign instead of AugAssign.
+# `while i < n` where n is a parameter exercises register-vs-register dispatch.
 
 def sum_range(n):
     """CmpJumpIfFalse: while i < n where n is a runtime register."""
@@ -87,9 +84,7 @@ print(sum_range(1))    # 0
 
 # ── CmpJumpIfFalseConst (register vs compile-time constant) ──────────────────
 # `while i < 10` with Int literal on the RHS produces BinOpConst, which fuses
-# with JumpIfFalse to CmpJumpIfFalseConst.  The body puts the accumulate step
-# last so that try_compile_while_range does not recognise the loop (it requires
-# VAR += step to be the final statement).
+# with JumpIfFalse to CmpJumpIfFalseConst.
 
 def sum_up_to_10():
     """CmpJumpIfFalseConst: while i < 10 with literal RHS."""

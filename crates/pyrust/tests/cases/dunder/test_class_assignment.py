@@ -59,6 +59,65 @@ sa.x = 11
 sa.__class__ = SB
 print(type(sa).__name__, sa.x)
 
+# Re-typing rejects classes whose physical instance layouts differ.
+def try_retype(label, value, target):
+    try:
+        value.__class__ = target
+        print(label, "OK")
+    except TypeError as e:
+        print(label, str(e))
+
+
+class DifferentSlot:
+    __slots__ = ("y",)
+
+
+class PlainLayout:
+    pass
+
+
+class EmptySlots:
+    __slots__ = ()
+
+
+class SlotWithDict:
+    __slots__ = ("x", "__dict__")
+
+
+try_retype("different-slot", SA(), DifferentSlot)
+try_retype("slot-to-plain", SA(), PlainLayout)
+try_retype("empty-to-plain", EmptySlots(), PlainLayout)
+try_retype("slot-dict-difference", SlotWithDict(), SA)
+
+# Layout-neutral subclasses may differ, but adding a slot on top of distinct
+# slotted bases makes those base identities part of the layout contract.
+class BaseSlotA:
+    __slots__ = ("base",)
+
+
+class BaseSlotB:
+    __slots__ = ("base",)
+
+
+class SharedChildA(BaseSlotA):
+    __slots__ = ("child",)
+
+
+class SharedChildB(BaseSlotA):
+    __slots__ = ("child",)
+
+
+class DifferentBaseChild(BaseSlotB):
+    __slots__ = ("child",)
+
+
+shared = SharedChildA()
+shared.base = 1
+shared.child = 2
+shared.__class__ = SharedChildB
+print("shared-base", type(shared).__name__, shared.base, shared.child)
+try_retype("different-slot-base", SharedChildA(), DifferentBaseChild)
+
 # Methods resolve through the new class after re-typing.
 class WhoA:
     def who(self):

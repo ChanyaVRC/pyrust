@@ -50,3 +50,37 @@ sys.modules["fake_injected_2727"] = _fake
 import fake_injected_2727
 
 print(fake_injected_2727 is _fake)
+
+# Rebinding the attribute replaces the authoritative import registry.  Imports
+# must populate the replacement dict rather than an Interpreter-private stale
+# handle.
+_original_modules = sys.modules
+_replacement_modules = {}
+sys.modules = _replacement_modules
+import math as _math_after_registry_replacement
+
+print(sys.modules is _replacement_modules)
+print(_replacement_modules["math"] is _math_after_registry_replacement)
+
+# CPython permits assigning a non-dict; the failure occurs when importlib next
+# asks the replacement for its dict-like `get` operation.
+sys.modules = 1
+try:
+    import math as _math_with_invalid_registry
+except Exception as _invalid_registry_error:
+    print(type(_invalid_registry_error).__name__)
+    print(str(_invalid_registry_error))
+
+# Deleting the attribute likewise succeeds, but the next import observes that
+# the canonical sys module no longer exposes the registry.
+sys.modules = _replacement_modules
+del sys.modules
+try:
+    import math as _math_without_registry
+except Exception as _missing_registry_error:
+    print(type(_missing_registry_error).__name__)
+    print(str(_missing_registry_error))
+
+# Leave the process in a usable state for interpreter shutdown and for runners
+# that execute more than one fixture in the same process.
+sys.modules = _original_modules

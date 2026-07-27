@@ -5,10 +5,14 @@
 
 use pyrust_core::{PyError, Result, Value, ValueKind};
 
+pub const TYPE_NAME: &str = "complex";
+
 /// Canonical list of method names exposed by `complex`.  Keep in sync with
-/// the `match method` arm in `call` below and with `COMPLEX_METHODS` in
-/// `crates/pyrust/src/interpreter/helpers.rs`.
+/// the `match method` arm in `call` below.
 pub const METHODS: &[&str] = &["conjugate", "__getnewargs__"];
+
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS);
 
 /// Returns `true` if `method` is the name of a built-in `complex` method.
 /// Used by `hasattr` / `getattr` to validate attribute names without

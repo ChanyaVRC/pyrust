@@ -1,7 +1,5 @@
-# Regression test for issue #966: ForCountConstInline back-edge offset for
-# nested loops.  pass_thread_jumps was threading the inner loop's exit through
-# the outer loop's backward back-edge, producing a negative exit offset that
-# broke pass_forcount_unroll's structural assumptions.
+# Regression test for issue #966: jump threading must not follow an outer
+# loop's backward edge while rewriting a nested iterator loop's exit.
 
 
 def sum_products():

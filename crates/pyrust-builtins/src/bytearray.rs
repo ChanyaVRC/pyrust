@@ -7,14 +7,31 @@
 //! mutable state (Python reference semantics: `b = a; b.append(1)` mutates `a`
 //! too).
 
+mod indexing;
+mod read_ops;
+mod repr;
+mod storage;
+#[cfg(test)]
+mod tests;
+
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
-use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyBigIntSign, PyDict, PyError, PyKey, Result, Value, ValueKind,
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyDict, PyError, PyKey, Result, Value, ValueKind};
+
+use indexing::{
+    bytes_from_value, resolve_slice_indices, slice_indices, value_to_byte, value_to_index,
 };
+use read_ops::{
+    bytearray_join, bytearray_partition, bytes_capitalize, bytes_list_to_bytearray_list,
+    bytes_title, bytes_val_to_bytearray,
+};
+use repr::bytearray_bytes_repr;
+use storage::call_storage_method;
+
+use crate::method_signature::{KeywordPolicy, PositionalArity};
 
 pub const TYPE_NAME: &str = "bytearray";
 pub const BYTEARRAY_OPS: &ByteArrayOps = &ByteArrayOps;
@@ -77,9 +94,64 @@ pub const METHODS: &[&str] = &[
     "fromhex",
 ];
 
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS)
+        .with_native_class_methods(&["fromhex"])
+        .with_native_static_methods(&["maketrans"]);
+
 /// Returns `true` if `method` is exposed by `bytearray`.
 pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
+}
+
+/// Positional signature for every public bytearray method.
+///
+/// Read-only operations deliberately reuse the bytes signature table, while
+/// the owner passed to diagnostics remains `bytearray`.
+pub fn positional_arity(method: &str) -> Option<PositionalArity> {
+    match method {
+        "append" | "extend" | "remove" => Some(PositionalArity::exact(1)),
+        "insert" => Some(PositionalArity::exact(2)),
+        "pop" => Some(PositionalArity::range(0, 1)),
+        "reverse" | "clear" | "copy" => Some(PositionalArity::exact(0)),
+        // Shared read methods plus fromhex/maketrans use bytes-compatible
+        // signatures. bytearray intentionally does not expose
+        // bytes.__getnewargs__.
+        "__getnewargs__" => None,
+        _ => crate::bytes::positional_arity(method),
+    }
+}
+
+#[inline]
+pub fn validate_method_positional_arity(method: &str, given: usize) -> Result<()> {
+    if given == 0 {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(arity) => arity.reject_excess(TYPE_NAME, method, given),
+        None => Ok(()),
+    }
+}
+
+pub fn keyword_policy(method: &str) -> Option<KeywordPolicy> {
+    match method {
+        "append" | "extend" | "insert" | "pop" | "remove" | "reverse" | "clear" | "copy" => {
+            Some(KeywordPolicy::Reject)
+        }
+        "__getnewargs__" => None,
+        _ => crate::bytes::keyword_policy(method),
+    }
+}
+
+#[inline]
+pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> {
+    if !has_keywords {
+        return Ok(());
+    }
+    match keyword_policy(method) {
+        Some(policy) => policy.validate(TYPE_NAME, method, true),
+        None => Ok(()),
+    }
 }
 
 /// Internal bytearray state.  `Rc<RefCell<Vec<u8>>>` so that cloning a
@@ -93,6 +165,10 @@ pub struct ByteArrayOps;
 impl BuiltinTypeOps for ByteArrayOps {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
+    }
+
+    fn canonical_class_tag(&self) -> Option<pyrust_core::CanonicalClassTag> {
+        Some(pyrust_core::CanonicalClassTag::Bytearray)
     }
 
     fn repr(&self, state: &BuiltinState) -> String {
@@ -123,7 +199,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             ValueKind::BuiltinObject {
                 ops,
                 state: rhs_state,
-            } if ops.type_name() == TYPE_NAME => {
+            } if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) => {
                 let rhs_borrow = rhs_state.borrow();
                 let rhs = rhs_borrow
                     .downcast_ref::<ByteArrayState>()
@@ -172,7 +248,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             ValueKind::BuiltinObject {
                 ops,
                 state: item_state,
-            } if ops.type_name() == TYPE_NAME => {
+            } if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) => {
                 let ib = item_state.borrow();
                 let item_s = ib
                     .downcast_ref::<ByteArrayState>()
@@ -228,7 +304,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             ops,
             state: slice_state,
         } = key.kind()
-            && ops.type_name() == crate::slice::TYPE_NAME
+            && crate::slice::is_slice_ops(ops)
         {
             let sb = slice_state.borrow();
             let sl = sb
@@ -248,26 +324,34 @@ impl BuiltinTypeOps for ByteArrayOps {
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
-        let borrow = state.borrow();
-        let s = borrow
-            .downcast_ref::<ByteArrayState>()
-            .expect("bytearray state");
-        let mut data = s.data.borrow_mut();
+        let data_rc = {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<ByteArrayState>()
+                .expect("bytearray state");
+            Rc::clone(&s.data)
+        };
         // Slice assignment.
         if let ValueKind::BuiltinObject {
             ops,
             state: slice_state,
         } = key.kind()
-            && ops.type_name() == crate::slice::TYPE_NAME
+            && crate::slice::is_slice_ops(ops)
         {
             let sb = slice_state.borrow();
             let sl = sb
                 .downcast_ref::<crate::slice::SliceState>()
                 .expect("slice state");
-            let len = data.len() as i64;
+            let len = data_rc.borrow().len() as i64;
             let (start, stop, step) = resolve_slice_indices(len, &sl.start, &sl.stop, &sl.step)?;
             drop(sb);
+            // Materialise the complete RHS before taking the mutable borrow.
+            // Besides keeping iterator/pre-pass work outside the mutation
+            // critical section, this is required for aliasing assignments such
+            // as `data[:] = data`: `bytes_from_value` must be able to read the
+            // same RefCell without colliding with our eventual write borrow.
             let replacement = bytes_from_value(&value, "bytearray slice assignment")?;
+            let mut data = data_rc.borrow_mut();
             if step == 1 {
                 // Simple slice: replace range [start, stop) with replacement.
                 // For step == 1 both bounds are forward, clamped to [0, len].
@@ -298,6 +382,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             return Ok(());
         }
         // Integer item assignment: value must be an integer 0..255.
+        let mut data = data_rc.borrow_mut();
         let idx = value_to_index(key, data.len(), "bytearray")?;
         let byte = value_to_byte(&value, "bytearray item assignment")?;
         data[idx] = byte;
@@ -315,7 +400,7 @@ impl BuiltinTypeOps for ByteArrayOps {
             ops,
             state: slice_state,
         } = key.kind()
-            && ops.type_name() == crate::slice::TYPE_NAME
+            && crate::slice::is_slice_ops(ops)
         {
             let sb = slice_state.borrow();
             let sl = sb
@@ -331,15 +416,28 @@ impl BuiltinTypeOps for ByteArrayOps {
                 let e2 = (stop.max(0) as usize).min(data.len()).max(s2);
                 data.drain(s2..e2);
             } else {
-                // Extended slice deletion: collect indices in reverse and remove.
+                // Extended slice deletion. `slice_indices` is already monotonic:
+                // positive steps yield ascending indices and negative steps
+                // yield descending indices. Normalise that list to ascending,
+                // then compact the Vec once. Repeated `Vec::remove` shifted the
+                // remaining tail for every selected byte, making `del b[::2]`
+                // quadratic.
                 let mut indices: Vec<usize> = slice_indices(start, stop, step)
                     .filter(|&i| i < data.len())
                     .collect();
-                // Remove from back to front to keep indices valid.
-                indices.sort_unstable_by(|a, b| b.cmp(a));
-                for i in indices {
-                    data.remove(i);
+                if step < 0 {
+                    indices.reverse();
                 }
+                let mut indices = indices.into_iter().peekable();
+                let mut old_index = 0usize;
+                data.retain(|_| {
+                    let should_delete = indices.peek().copied() == Some(old_index);
+                    if should_delete {
+                        indices.next();
+                    }
+                    old_index += 1;
+                    !should_delete
+                });
             }
             return Ok(());
         }
@@ -375,15 +473,12 @@ impl BuiltinTypeOps for ByteArrayOps {
         args: Vec<Value>,
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
-        // Extract the byte slice; needed for read methods.
-        let data_snapshot: Vec<u8> = {
-            let borrow = state.borrow();
-            let s = borrow
-                .downcast_ref::<ByteArrayState>()
-                .expect("bytearray state");
-            s.data.borrow().clone()
-        };
-        // For mutable methods we need the Rc to mutate through.
+        validate_method_keywords(method, !kwargs.is_empty())?;
+        validate_method_positional_arity(method, args.len())?;
+        // Resolve the shared backing storage without copying it. Mutating
+        // methods operate directly on this Rc and return before read-only
+        // dispatch takes its snapshot, so `append`/`pop`/etc. stay O(1) where
+        // their underlying Vec operation is O(1).
         let data_rc: Rc<RefCell<Vec<u8>>> = {
             let borrow = state.borrow();
             let s = borrow
@@ -391,7 +486,14 @@ impl BuiltinTypeOps for ByteArrayOps {
                 .expect("bytearray state");
             Rc::clone(&s.data)
         };
+        if let Some(result) = call_storage_method(&data_rc, method, &args)? {
+            return Ok(result);
+        }
 
+        // Shared bytes operations work from an immutable snapshot. Take it only
+        // after storage-local methods have been dispatched so those methods do
+        // not clone the entire bytearray before mutating a single byte.
+        let data_snapshot = data_rc.borrow().clone();
         // Build an empty kwargs map for bytes::call_on_slice.
         let empty_kw: PyDict = PyDict::default();
 
@@ -435,8 +537,17 @@ impl BuiltinTypeOps for ByteArrayOps {
             // These delegate to the shared bytes impl with the same method name and
             // wrap the resulting bytes object as a new bytearray.
             "replace" | "strip" | "lstrip" | "rstrip" | "removeprefix" | "removesuffix"
-            | "center" | "ljust" | "rjust" | "zfill" | "translate" => {
+            | "center" | "ljust" | "rjust" | "zfill" => {
                 let result = crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?;
+                return Ok(bytes_val_to_bytearray(result));
+            }
+            "translate" => {
+                let pk_kwargs: PyDict = kwargs
+                    .iter()
+                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                    .collect();
+                let result =
+                    crate::bytes::call_on_slice(method, &data_snapshot, &args, &pk_kwargs)?;
                 return Ok(bytes_val_to_bytearray(result));
             }
             // expandtabs accepts `tabsize` by keyword; merge it into the
@@ -465,155 +576,21 @@ impl BuiltinTypeOps for ByteArrayOps {
                 return Ok(bytes_list_to_bytearray_list(result));
             }
             "splitlines" => {
-                let merged =
-                    crate::bytes::merge_single_kwarg_str(method, "keepends", &args, kwargs)?;
-                let result =
-                    crate::bytes::call_on_slice(method, &data_snapshot, &merged, &empty_kw)?;
+                let result = if kwargs.is_empty() {
+                    // Interpreter adapters already bind and truth-normalize
+                    // keepends before BuiltinTypeOps dispatch. Keep the core
+                    // Bool-only contract without allocating a duplicate Vec.
+                    crate::bytes::call_on_slice(method, &data_snapshot, &args, &empty_kw)?
+                } else {
+                    let merged =
+                        crate::bytes::merge_single_kwarg_str(method, "keepends", &args, kwargs)?;
+                    crate::bytes::call_on_slice(method, &data_snapshot, &merged, &empty_kw)?
+                };
                 return Ok(bytes_list_to_bytearray_list(result));
             }
             // join: like bytes.join but accepts bytearray as separator and elements.
             "join" => {
                 return bytearray_join(&data_snapshot, &args);
-            }
-            // Mutable methods.
-            "append" => {
-                let byte_val = args.into_iter().next().ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "append() takes exactly one argument (0 given)".to_string(),
-                    )
-                })?;
-                let byte = value_to_byte(&byte_val, "bytearray.append")?;
-                data_rc.borrow_mut().push(byte);
-                return Ok(Value::none());
-            }
-            "extend" => {
-                let iterable = args.into_iter().next().ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "extend() takes exactly one argument (0 given)".to_string(),
-                    )
-                })?;
-                let bytes = bytes_from_value(&iterable, "bytearray.extend")?;
-                data_rc.borrow_mut().extend_from_slice(&bytes);
-                return Ok(Value::none());
-            }
-            "insert" => {
-                if args.len() < 2 {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("insert() takes exactly 2 arguments ({} given)", args.len()),
-                    ));
-                }
-                let idx = match args[0].kind() {
-                    ValueKind::Int(n) => n,
-                    ValueKind::Bool(b) => b as i64,
-                    ValueKind::BigInt(_) => {
-                        // A BigInt never fits in a C ssize_t, so it can never be
-                        // a valid index. CPython raises OverflowError here.
-                        return Err(PyError::named(
-                            "OverflowError",
-                            "Python int too large to convert to C ssize_t".to_string(),
-                        ));
-                    }
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "integer argument expected".to_string(),
-                        ));
-                    }
-                };
-                let byte = value_to_byte(&args[1], "bytearray.insert")?;
-                let mut data = data_rc.borrow_mut();
-                let len = data.len();
-                let pos = if idx < 0 {
-                    let from_end = (-idx) as usize;
-                    len.saturating_sub(from_end)
-                } else {
-                    (idx as usize).min(len)
-                };
-                data.insert(pos, byte);
-                return Ok(Value::none());
-            }
-            "pop" => {
-                let mut data = data_rc.borrow_mut();
-                if data.is_empty() {
-                    return Err(PyError::named(
-                        "IndexError",
-                        "pop from empty bytearray".to_string(),
-                    ));
-                }
-                let idx = match args.first() {
-                    None => data.len() - 1,
-                    Some(v) => match v.kind() {
-                        ValueKind::Int(n) => {
-                            let len = data.len();
-
-                            if n < 0 {
-                                let from_end = (-n) as usize;
-                                len.checked_sub(from_end).ok_or_else(|| {
-                                    PyError::named(
-                                        "IndexError",
-                                        "bytearray index out of range".to_string(),
-                                    )
-                                })?
-                            } else {
-                                let ui = n as usize;
-                                if ui >= len {
-                                    return Err(PyError::named(
-                                        "IndexError",
-                                        "bytearray index out of range".to_string(),
-                                    ));
-                                }
-                                ui
-                            }
-                        }
-                        ValueKind::Bool(b) => b as usize,
-                        ValueKind::BigInt(_) => {
-                            // A BigInt never fits in a C ssize_t, so it can never
-                            // be a valid index. CPython raises OverflowError here.
-                            return Err(PyError::named(
-                                "OverflowError",
-                                "Python int too large to convert to C ssize_t".to_string(),
-                            ));
-                        }
-                        _ => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "integer argument expected".to_string(),
-                            ));
-                        }
-                    },
-                };
-                let byte = data.remove(idx);
-                return Ok(Value::int(byte as i64));
-            }
-            "remove" => {
-                let val = args.into_iter().next().ok_or_else(|| {
-                    PyError::named(
-                        "TypeError",
-                        "remove() takes exactly one argument (0 given)".to_string(),
-                    )
-                })?;
-                let byte = value_to_byte(&val, "bytearray.remove")?;
-                let mut data = data_rc.borrow_mut();
-                let pos = data.iter().position(|&b| b == byte).ok_or_else(|| {
-                    PyError::named("ValueError", "value not found in bytearray".to_string())
-                })?;
-                data.remove(pos);
-                return Ok(Value::none());
-            }
-            "reverse" => {
-                data_rc.borrow_mut().reverse();
-                return Ok(Value::none());
-            }
-            "clear" => {
-                data_rc.borrow_mut().clear();
-                return Ok(Value::none());
-            }
-            "copy" => {
-                let snapshot = data_rc.borrow().clone();
-                return Ok(bytearray(snapshot));
             }
             _ => {}
         }
@@ -660,7 +637,7 @@ pub fn as_bytearray_rc(v: &Value) -> Option<Rc<RefCell<Vec<u8>>>> {
     let ValueKind::BuiltinObject { ops, state } = v.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if ops.canonical_class_tag() != Some(pyrust_core::CanonicalClassTag::Bytearray) {
         return None;
     }
     let borrow = state.borrow();
@@ -685,472 +662,4 @@ pub fn iter_elements(v: &Value) -> Option<Vec<Value>> {
     let rc = as_bytearray_rc(v)?;
     let data = rc.borrow();
     Some(data.iter().map(|&b| Value::int(b as i64)).collect())
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Private helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Resolve a slice object's start/stop/step against a sequence of length
-/// `len`. Returns `(start, stop, step)` as signed `i64` values matching CPython
-/// slice semantics: `stop` is the *exclusive* boundary, and for a backward
-/// slice both `start` and `stop` may be `-1` (an empty slice / a walk down to
-/// and including index 0). For forward (`step >= 0`) slices both land in
-/// `[0, len]`, so step==1 callers can cast them back to `usize`.
-fn resolve_slice_indices(
-    len: i64,
-    start: &Value,
-    stop: &Value,
-    step: &Value,
-) -> Result<(i64, i64, i64)> {
-    let step_val: i64 = match step.kind() {
-        ValueKind::Int(n) => n,
-        ValueKind::Bool(b) => b as i64,
-        // A BigInt step never fits in an index range: a positive one saturates to
-        // i64::MAX (forward walk that takes at most the first element), a negative
-        // one to i64::MIN (reverse walk that takes at most the last element).
-        ValueKind::BigInt(b) => match b.sign() {
-            PyBigIntSign::Minus => i64::MIN,
-            _ => i64::MAX,
-        },
-        _ => 1,
-    };
-    if step_val == 0 {
-        return Err(PyError::named(
-            "ValueError",
-            "slice step cannot be zero".to_string(),
-        ));
-    }
-
-    let clamp = |v: i64, lo: i64, hi: i64| v.max(lo).min(hi);
-
-    let (default_start, default_stop) = if step_val > 0 {
-        (0i64, len)
-    } else {
-        (len - 1, -1i64)
-    };
-
-    // Map a BigInt bound to an effective `i64` that lies strictly beyond every
-    // clamp boundary, so the shared Int clamping logic below produces the same
-    // result CPython does for an out-of-range index: a positive BigInt acts like
-    // an index past the end, a negative one like an index before the start.
-    let bigint_bound = |b: &pyrust_core::PyBigInt| match b.sign() {
-        PyBigIntSign::Minus => -len - 1,
-        _ => len + 1,
-    };
-    // Clamp an already-signed index value the way CPython does, given the slice
-    // direction. Negative values are first rebased by `+ len`.
-    let clamp_bound = |n: i64| {
-        if step_val > 0 {
-            if n < 0 {
-                clamp(n + len, 0, len)
-            } else {
-                clamp(n, 0, len)
-            }
-        } else if n < 0 {
-            // Backward slice: a bound below `-len` clamps to -1 (empty);
-            // otherwise to at most `len - 1` (the last valid index).
-            clamp(n + len, -1, len - 1)
-        } else {
-            clamp(n, -1, len - 1)
-        }
-    };
-
-    let start_val: i64 = match start.kind() {
-        ValueKind::None => default_start,
-        ValueKind::Int(n) => clamp_bound(n),
-        ValueKind::Bool(b) => b as i64,
-        ValueKind::BigInt(b) => clamp_bound(bigint_bound(b)),
-        _ => default_start,
-    };
-    let stop_val: i64 = match stop.kind() {
-        ValueKind::None => default_stop,
-        ValueKind::Int(n) => clamp_bound(n),
-        ValueKind::Bool(b) => b as i64,
-        ValueKind::BigInt(b) => clamp_bound(bigint_bound(b)),
-        _ => default_stop,
-    };
-
-    // Both `start` and `stop` are kept signed. For a backward slice `start`
-    // may be -1 (the slice is empty) and `stop` may be -1 (iterate down to and
-    // including index 0); round-tripping either through `usize` would corrupt
-    // these boundary cases. For forward slices both land in [0, len], so the
-    // step==1 callers can cast back to `usize` safely.
-    Ok((start_val, stop_val, step_val))
-}
-
-/// Generate index sequence for a slice (start, stop, step) over a sequence.
-fn slice_indices(start: i64, stop: i64, step: i64) -> impl Iterator<Item = usize> {
-    struct SliceIter {
-        current: i64,
-        stop: i64,
-        step: i64,
-    }
-    impl Iterator for SliceIter {
-        type Item = usize;
-        fn next(&mut self) -> Option<usize> {
-            // Forward (step > 0) and backward (step < 0) slices share the same
-            // advance step; only the bound test differs.
-            let in_range = (self.step > 0 && self.current < self.stop)
-                || (self.step < 0 && self.current > self.stop);
-            if in_range {
-                let c = self.current as usize;
-                // `saturating_add` rather than `+=`: a BigInt step saturates to
-                // i64::MIN/MAX, and a non-zero `start` would overflow-panic on the
-                // increment after the first element in debug builds. Saturating
-                // pins `current` at i64::MAX/MIN, which fails the next `in_range`
-                // test (so the slice yields exactly the first element, matching
-                // CPython); a *wrapping* add would instead flip the sign and keep
-                // `current` in range, yielding a bogus second index. For ordinary
-                // steps no saturation ever occurs, so this stays a bare `add` with
-                // no perf cost on the common slice walk.
-                self.current = self.current.saturating_add(self.step);
-                Some(c)
-            } else {
-                None
-            }
-        }
-    }
-    // `stop` is already the exclusive boundary (CPython slice semantics):
-    // forward slices stop before `stop`, backward slices stop after `stop`.
-    SliceIter {
-        current: start,
-        stop,
-        step,
-    }
-}
-
-/// Convert a subscript `Value` to a concrete `usize` index into a slice of
-/// length `len`.  Raises `IndexError` if out of range.
-fn value_to_index(key: &Value, len: usize, type_name: &str) -> Result<usize> {
-    let idx: i64 = match key.kind() {
-        ValueKind::Int(n) => n,
-        ValueKind::Bool(b) => b as i64,
-        ValueKind::BigInt(_) => {
-            return Err(PyError::named(
-                "IndexError",
-                "cannot fit 'int' into an index-sized integer".to_string(),
-            ));
-        }
-        _ => {
-            // CPython 3.12 uses the bare (unquoted) type name here, matching
-            // bytes: `bytearray indices must be integers or slices, not float`.
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "{type_name} indices must be integers or slices, not {}",
-                    pyrust_core::builtin_type_name(key)
-                ),
-            ));
-        }
-    };
-    let i = if idx < 0 {
-        let from_end = (-idx) as usize;
-        len.checked_sub(from_end).ok_or_else(|| {
-            PyError::named("IndexError", format!("{type_name} index out of range"))
-        })?
-    } else {
-        let ui = idx as usize;
-        if ui >= len {
-            return Err(PyError::named(
-                "IndexError",
-                format!("{type_name} index out of range"),
-            ));
-        }
-        ui
-    };
-    Ok(i)
-}
-
-/// Convert a `Value` to a single byte (0..255).  Used for item assignment
-/// and `append`.
-fn value_to_byte(v: &Value, _context: &str) -> Result<u8> {
-    match v.kind() {
-        ValueKind::Int(n) => {
-            if (0..=255).contains(&n) {
-                Ok(n as u8)
-            } else {
-                Err(PyError::named(
-                    "ValueError",
-                    "byte must be in range(0, 256)".to_string(),
-                ))
-            }
-        }
-        ValueKind::Bool(b) => Ok(b as u8),
-        // A BigInt is a valid int but always outside 0..=255 — CPython raises
-        // ValueError, not the "cannot be interpreted as an integer" TypeError
-        // used for non-int types.
-        ValueKind::BigInt(_) => Err(PyError::named(
-            "ValueError",
-            "byte must be in range(0, 256)".to_string(),
-        )),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "'{}' object cannot be interpreted as an integer",
-                pyrust_core::builtin_type_name(v)
-            ),
-        )),
-    }
-}
-
-/// Extract a `Vec<u8>` from a bytes-like value (bytes or bytearray) or an
-/// iterable of integers.
-fn bytes_from_value(v: &Value, context: &str) -> Result<Vec<u8>> {
-    match v.kind() {
-        ValueKind::Bytes(rc) => Ok(rc.as_slice().to_vec()),
-        ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
-            let borrow = state.borrow();
-            let s = borrow
-                .downcast_ref::<ByteArrayState>()
-                .expect("bytearray state");
-            Ok(s.data.borrow().clone())
-        }
-        ValueKind::List(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items.iter() {
-                out.push(value_to_byte(item, context)?);
-            }
-            Ok(out)
-        }
-        ValueKind::Tuple(items) => {
-            let mut out = Vec::with_capacity(items.len());
-            for item in items.iter() {
-                out.push(value_to_byte(item, context)?);
-            }
-            Ok(out)
-        }
-        // CPython rejects str in slice assignment with a special message;
-        // for extend() it iterates the string and fails per-character.
-        ValueKind::Str(_) if context != "bytearray.extend" => Err(PyError::named(
-            "TypeError",
-            "can assign only bytes, buffers, or iterables of ints in range(0, 256)".to_string(),
-        )),
-        _ => {
-            let type_name = pyrust_core::builtin_type_name(v);
-            // Try materialising via the registered iter callback.
-            let items = pyrust_core::iter_values_via_registry(v).map_err(|_| {
-                // Mirror CPython wording for the two call sites:
-                // extend() → "can't extend bytearray with <type>"
-                // slice assignment → "can assign only bytes, buffers, or iterables of ints in range(0, 256)"
-                if context == "bytearray.extend" {
-                    PyError::named(
-                        "TypeError",
-                        format!("can't extend bytearray with {type_name}"),
-                    )
-                } else {
-                    PyError::named(
-                        "TypeError",
-                        "can assign only bytes, buffers, or iterables of ints in range(0, 256)"
-                            .to_string(),
-                    )
-                }
-            })?;
-            let mut out = Vec::with_capacity(items.len());
-            for item in &items {
-                out.push(value_to_byte(item, context)?);
-            }
-            Ok(out)
-        }
-    }
-}
-
-/// Convert a `Value::bytes(...)` result to `bytearray(...)`.  Panics if
-/// `v` is not a bytes value — callers guarantee this.
-fn bytes_val_to_bytearray(v: Value) -> Value {
-    match v.kind() {
-        ValueKind::Bytes(rc) => bytearray(rc.as_slice().to_vec()),
-        _ => panic!("bytes_val_to_bytearray: expected bytes value"),
-    }
-}
-
-/// Convert a `Value::list` of `Value::bytes` items to a `Value::list` of
-/// `bytearray` items (for split/rsplit/splitlines return types).
-fn bytes_list_to_bytearray_list(v: Value) -> Value {
-    // Collect into a snapshot first to avoid holding a kind() borrow.
-    let snapshot: Option<Vec<Value>> = match v.kind() {
-        ValueKind::List(items) => Some(
-            items
-                .iter()
-                .map(|item| match item.kind() {
-                    ValueKind::Bytes(rc) => bytearray(rc.as_slice().to_vec()),
-                    _ => item.clone(),
-                })
-                .collect(),
-        ),
-        _ => None,
-    };
-    match snapshot {
-        Some(out) => Value::list(out),
-        None => v,
-    }
-}
-
-/// `bytearray.partition` / `bytearray.rpartition` — returns a 3-tuple of
-/// bytearray values.
-fn bytearray_partition(bytes: &[u8], args: &[Value], reverse: bool) -> Result<Value> {
-    let name = if reverse { "rpartition" } else { "partition" };
-    if args.len() != 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "bytearray.{name}() takes exactly one argument ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    let sep_val = &args[0];
-    let sep: Vec<u8> = match sep_val.kind() {
-        ValueKind::Bytes(rc) => rc.as_slice().to_vec(),
-        ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
-            let borrow = state.borrow();
-            let s = borrow
-                .downcast_ref::<ByteArrayState>()
-                .expect("bytearray state");
-            s.data.borrow().clone()
-        }
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "a bytes-like object is required, not '{}'",
-                    pyrust_core::builtin_type_name(sep_val)
-                ),
-            ));
-        }
-    };
-    if sep.is_empty() {
-        return Err(PyError::named("ValueError", "empty separator".to_string()));
-    }
-    let found = if reverse {
-        crate::bytes::rfind_subsequence(bytes, &sep)
-    } else {
-        crate::bytes::find_subsequence(bytes, &sep)
-    };
-    let parts = match found {
-        Some(pos) => {
-            let before = bytearray(bytes[..pos].to_vec());
-            let mid = bytearray(sep.clone());
-            let after = bytearray(bytes[pos + sep.len()..].to_vec());
-            vec![before, mid, after]
-        }
-        None => {
-            if reverse {
-                vec![
-                    bytearray(vec![]),
-                    bytearray(vec![]),
-                    bytearray(bytes.to_vec()),
-                ]
-            } else {
-                vec![
-                    bytearray(bytes.to_vec()),
-                    bytearray(vec![]),
-                    bytearray(vec![]),
-                ]
-            }
-        }
-    };
-    Ok(Value::tuple(parts))
-}
-
-/// `bytearray.join(iterable)` — join elements of an iterable of bytes-like
-/// objects using this bytearray as separator.
-fn bytearray_join(sep: &[u8], args: &[Value]) -> Result<Value> {
-    let iterable = args.first().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            "join() takes exactly one argument (0 given)".to_string(),
-        )
-    })?;
-    // Collect elements from the iterable.
-    let items = pyrust_core::iter_values_via_registry(iterable).map_err(|_| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "can only join an iterable, not '{}'",
-                pyrust_core::builtin_type_name(iterable)
-            ),
-        )
-    })?;
-    let mut out: Vec<u8> = Vec::new();
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            out.extend_from_slice(sep);
-        }
-        match item.kind() {
-            ValueKind::Bytes(rc) => out.extend_from_slice(rc.as_slice()),
-            ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => {
-                let borrow = state.borrow();
-                let s = borrow
-                    .downcast_ref::<ByteArrayState>()
-                    .expect("bytearray state");
-                out.extend_from_slice(&s.data.borrow());
-            }
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "sequence item {}: expected a bytes-like object, {} found",
-                        i,
-                        pyrust_core::builtin_type_name(item)
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(bytearray(out))
-}
-
-/// Title-case a byte slice (same logic as bytes).
-fn bytes_title(bytes: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut prev_was_alpha = false;
-    for &b in bytes {
-        if b.is_ascii_alphabetic() {
-            if prev_was_alpha {
-                out.push(b.to_ascii_lowercase());
-            } else {
-                out.push(b.to_ascii_uppercase());
-            }
-            prev_was_alpha = true;
-        } else {
-            out.push(b);
-            prev_was_alpha = false;
-        }
-    }
-    out
-}
-
-/// Capitalize a byte slice (same logic as bytes).
-fn bytes_capitalize(bytes: &[u8]) -> Vec<u8> {
-    let mut out: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-    if let Some(first) = out.first_mut() {
-        *first = first.to_ascii_uppercase();
-    }
-    out
-}
-
-/// Render a byte slice as a Python bytes literal (`b'...'`).  Used for
-/// `bytearray.__repr__`, which wraps this in `bytearray(...)`.
-fn bytearray_bytes_repr(bytes: &[u8]) -> String {
-    let has_single = bytes.contains(&b'\'');
-    let has_double = bytes.contains(&b'"');
-    let q = if has_single && !has_double { '"' } else { '\'' };
-    let mut out = String::with_capacity(bytes.len() + 3);
-    out.push('b');
-    out.push(q);
-    for &b in bytes {
-        match b {
-            0x09 => out.push_str("\\t"),
-            0x0a => out.push_str("\\n"),
-            0x0d => out.push_str("\\r"),
-            0x5c => out.push_str("\\\\"),
-            b'\'' if q == '\'' => out.push_str("\\'"),
-            b'"' if q == '"' => out.push_str("\\\""),
-            0x20..=0x7e => out.push(b as char),
-            _ => out.push_str(&format!("\\x{b:02x}")),
-        }
-    }
-    out.push(q);
-    out
 }

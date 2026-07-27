@@ -26,6 +26,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use crate::error::{PyError, Result};
@@ -54,11 +55,9 @@ const ASYNCIO_PY_EXPORTS: [&str; 13] = [
     "_run_main",
 ];
 
-thread_local! {
-    /// Monotonic reference point so `_monotonic()` returns small float seconds
-    /// (independent of the wall clock and stable for the process lifetime).
-    static MONO_EPOCH: Instant = Instant::now();
-}
+/// Process-wide reference point so `_monotonic()` values are comparable across
+/// interpreter threads as well as independent of the wall clock.
+static MONO_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Execute `ASYNCIO_PY_SOURCE` once and copy its public names onto the
 /// `asyncio` module's attribute map.  Wired from `env.rs::load_module`'s
@@ -82,9 +81,9 @@ pub(crate) fn inject_python_members(
         });
     }
     interp.exec_source(ASYNCIO_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| crate::error::PyError::Runtime("asyncio: exec namespace not a dict".into()))?;
+    let dict = ns.as_dict().ok_or_else(|| {
+        crate::error::PyError::Runtime("asyncio: exec namespace not a dict".into())
+    })?;
     for name in ASYNCIO_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module
@@ -137,10 +136,10 @@ pyrust_module! {
         let coro = positional[0].value.clone();
         // An async generator (`async def` containing `yield`, #2280) is
         // coroutine-tagged but is not a runnable coroutine.
-        if !crate::builtin_modules::builtins::is_coroutine_value(&coro)
-            || crate::builtin_modules::builtins::is_async_generator_value(&coro)
+        if !crate::interpreter::is_coroutine_value(&coro)
+            || crate::interpreter::is_async_generator_value(&coro)
         {
-            let r = crate::builtin_modules::builtins::render_value_repr(_interp, &coro)?;
+            let r = crate::interpreter::render_value_repr(_interp, &coro)?;
             return Err(PyError::named(
                 "ValueError",
                 format!("a coroutine was expected, got {r}"),
@@ -176,14 +175,14 @@ pyrust_module! {
     /// `async def` call that is not an async generator).
     fn _iscoroutine(args) -> Result<Value> {
         let obj = &args[0].value;
-        let is = crate::builtin_modules::builtins::is_coroutine_value(obj)
-            && !crate::builtin_modules::builtins::is_async_generator_value(obj);
+        let is = crate::interpreter::is_coroutine_value(obj)
+            && !crate::interpreter::is_async_generator_value(obj);
         Ok(Value::bool_(is))
     }
 
     /// `asyncio._monotonic()` — monotonic clock in float seconds.
     fn _monotonic(_args) -> Result<Value> {
-        let secs = MONO_EPOCH.with(|e| e.elapsed().as_secs_f64());
+        let secs = MONO_EPOCH.elapsed().as_secs_f64();
         Ok(Value::float(secs))
     }
 

@@ -1,30 +1,75 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
 use smallvec::smallvec;
 
 use crate::ast::{AssignTarget, BinaryOp, Expr, Stmt, UnaryOp};
-use crate::bytecode::{FnCode, GLOBAL_CACHE_EMPTY};
+use crate::bytecode::{FnCode, GlobalCacheEntry};
 use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, InstanceAttrs, PyBigInt, PyBigIntSign, PyClass, PyDict, PyInstance, PyKey,
-    PyModule, PyPow, PySet, PyToPrimitive, PyZero, StrKey, UserFunction, UserFunctionKind,
-    UserFunctionParam, Value, ValueKind, intern_string, intern_string_value, range_len,
+    EnvRef, Environment, InstanceAttrs, ModuleMutationState, PyBigInt, PyBigIntSign, PyClass,
+    PyDict, PyInstance, PyKey, PyModule, PyPow, PySet, PyToPrimitive, PyZero, StrKey, UserFunction,
+    UserFunctionKind, UserFunctionParam, Value, ValueKind, intern_string, intern_string_value,
+    range_len,
 };
+use pyrust_core::CollectionMutationState;
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
+type MemoKey = (u64, smallvec::SmallVec<[i64; 3]>);
 
-// MAX_CALL_DEPTH is now a thread-local managed by sys.setrecursionlimit().
-// The default value (1000) and the accessor functions are defined in
-// runtime/calls.rs (included below via runtime.rs).  The name
-// `max_call_depth()` replaces the old constant at all call sites.
+const DEFAULT_RECURSION_LIMIT: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
+const MODULE_CLASS_CACHE_SLOT_COUNT: usize = 1;
+
+/// Typed index into an Interpreter-owned module/class resolution cache.
+///
+/// Built-in module owners allocate a stable slot and provide the module and
+/// attribute names only on a cache miss. The generic import layer validates
+/// the `sys.modules` binding, its dictionary contents, and module-namespace
+/// mutation generations, so the fast path never guesses from a Python-visible
+/// class or module name.
+#[derive(Clone, Copy)]
+pub(crate) struct ModuleClassCacheSlot(usize);
+
+impl ModuleClassCacheSlot {
+    pub(crate) const fn new(index: usize) -> Self {
+        Self(index)
+    }
+}
+
+struct CachedModuleClass {
+    /// Mutation generation of the canonical `sys` module which owns the
+    /// Python-visible `modules` binding. Rebinding or deleting `sys.modules`
+    /// must invalidate an entry even when the old registry dict itself was not
+    /// mutated.
+    registry_owner_state: ModuleMutationState,
+    registry_owner_version: u64,
+    registry_state: CollectionMutationState,
+    registry_version: u64,
+    module_state: ModuleMutationState,
+    module_version: u64,
+    /// Cache metadata must not become an additional Python-visible owner of a
+    /// class from a replaceable module generation.
+    class: Weak<RefCell<PyClass>>,
+}
+
+struct ModuleClassCache {
+    entries: [Option<CachedModuleClass>; MODULE_CLASS_CACHE_SLOT_COUNT],
+}
+
+impl Default for ModuleClassCache {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+        }
+    }
+}
 
 /// Pre-resolved table of built-in exception classes.
 ///
@@ -94,6 +139,41 @@ pub struct Interpreter {
     /// example, a library caller executing an in-memory program).
     script_argv: Vec<String>,
     module_cache: ModuleCache,
+    /// Bootstrap `sys.modules` dictionary for this interpreter.
+    ///
+    /// This is authoritative only until the canonical `sys` module exists.
+    /// Thereafter import operations resolve its current Python-visible
+    /// `modules` attribute, so rebinding or deleting that attribute is observed.
+    /// Root interpreters own independent bootstrap registries; an imported-file
+    /// child shares its parent's backing for the pre-`sys` case.
+    bootstrap_module_registry: Value,
+    /// Lazily allocated cache for owner-requested module class lookups.
+    ///
+    /// Most interpreters never use this. `typing.Generic[...]` currently owns
+    /// the first slot because its process-canonical receiver cannot itself
+    /// identify the active Interpreter's reload generation.
+    module_class_cache: Option<Box<ModuleClassCache>>,
+    /// Canonical filter and recording-context state for the `warnings` module.
+    ///
+    /// The concrete policy data remains private to the built-in module. Root
+    /// interpreters own independent handles; filesystem-import children clone
+    /// the handle because they are an implementation detail of the same
+    /// Python interpreter and share `sys.modules` with their parent.
+    pub(crate) warnings_state: Rc<crate::builtin_modules::warnings::WarningsState>,
+    /// Decimal integer string-conversion limit configured through
+    /// `sys.set_int_max_str_digits` (0 means unlimited).
+    ///
+    /// The core value layer consumes this through a scoped TLS adapter only
+    /// while this interpreter is executing. Keeping the authoritative value
+    /// here prevents independent roots on one host thread from leaking policy.
+    int_max_str_digits: usize,
+    /// Maximum Python call depth for this interpreter.
+    ///
+    /// The active depth remains thread-local because nested Interpreter calls
+    /// share one host stack. The configurable limit is interpreter-owned so
+    /// independent roots on the same thread cannot change one another's
+    /// `sys.setrecursionlimit` setting.
+    recursion_limit: usize,
     env_pool: Vec<EnvRef>,
     /// Automatic memoization of pure scalar functions (#2234): caches the result
     /// of a `CallMemo` (statically-pure callee) keyed by `(fn_id, integer
@@ -102,8 +182,15 @@ pub struct Interpreter {
     /// a function whose hit-rate stays low after a warmup is disabled, so the
     /// common varying-argument case pays nothing (the reason #1987 removed the
     /// previous always-on cache).
-    memo_cache: std::collections::HashMap<(u64, smallvec::SmallVec<[i64; 3]>), Value>,
+    memo_cache: std::collections::HashMap<MemoKey, Value>,
     memo_stats: std::collections::HashMap<u64, (u32, u32, bool)>,
+    /// Memo keys whose cache miss is currently executing.
+    ///
+    /// A direct recursive call with the same key cannot produce a cache entry
+    /// until its caller returns. Declining that nested miss lets the VM's
+    /// explicit frame trampoline enforce the Python recursion limit without
+    /// growing the native Rust stack.
+    memo_in_flight: std::collections::HashSet<MemoKey>,
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
@@ -144,10 +231,10 @@ pub struct Interpreter {
     /// Safety: each raw pointer is only dereferenced while the frame
     /// is still on the VM stack, i.e. inside the same VM entry that
     /// pushed it.  The push/pop invariant is maintained by:
-    ///   * `program.rs::try_exec_vm_script_with_index` (`Script`)
-    ///   * `calls.rs::call_user_function_expanded` — both the simple
+    ///   * `program_execution::try_exec_vm_script_with_index` (`Script`)
+    ///   * `calls::call_user_function_expanded` — both the simple
     ///     and variadic user-function paths (`Function`)
-    ///   * `vm.rs::resume_generator_with_exc` — each generator resume
+    ///   * `execution::resume_generator_with_exc` — each generator resume
     ///     (`Function`; the regs pointer comes from the heap-allocated
     ///     `GeneratorFrame::regs`, stable across yields)
     ///
@@ -188,58 +275,6 @@ pub struct Interpreter {
     /// [`ExcClasses`] is a newtype that exposes a `get(&str)` method so
     /// callers stay legible and the HashMap detail stays local.
     pub(crate) exc_classes: ExcClasses,
-    /// The persistent module globals dict — the single `Value::dict` that
-    /// `globals()` returns on every call (issue #706).
-    ///
-    /// `globals()` returns `module_globals_dict.clone()`, which shares the
-    /// same `Rc<RefCell<IndexMap<...>>>` — callers that mutate the returned
-    /// dict are mutating this backing store directly, and `LoadGlobal`
-    /// checks this dict as a fallback so `globals()["x"] = val` mutations
-    /// are visible as the global `x` immediately.
-    pub(crate) module_globals_dict: Value,
-    /// Set to `true` the first time `globals()` (or `locals()` at module
-    /// scope) is called.  While `false`, `assign_name` skips the eager
-    /// `module_globals_dict` write — this is the common case for scripts
-    /// that never call `globals()`, and the main source of the regression
-    /// introduced by PR #810.  Once `true`, `assign_name` resumes writing
-    /// to the dict so the returned live view stays in sync (issue #810).
-    pub(crate) globals_accessed: bool,
-    /// Monotonic version counter for the global environment.
-    ///
-    /// Incremented on every write or delete to the module-level `env.values`
-    /// (via `assign_name` at module scope or `global`-declared names in
-    /// functions) and on explicit `del` of module-level names.
-    ///
-    /// `LoadGlobal` caches the resolved value alongside this counter in
-    /// `FnCode::global_cache[name_idx]`.  A cache entry is valid when its
-    /// stored version equals the current `global_env_version`; on mismatch
-    /// the slow env-chain lookup runs and the entry is refreshed.  Builtin
-    /// resolutions are cached with the current version as well, so that a
-    /// subsequent module-level assignment of the same name (e.g. `len = fn`)
-    /// correctly invalidates the cached builtin entry.
-    ///
-    /// Wrapped in `Cell<u32>` so that `assign_name` (which takes `&self`
-    /// for consistency with its callers) can increment it via interior
-    /// mutability without requiring `&mut Interpreter` at call sites.
-    ///
-    /// Note: `globals()["x"] = y` mutations (writing directly to
-    /// `module_globals_dict` without going through `assign_name`) do not
-    /// increment this counter.  Values surfaced only through the dict
-    /// fallback path are therefore not cached — they fall through to the
-    /// slow lookup on every `LoadGlobal` execution.  This is acceptable
-    /// because the dict-only path is already guarded by `globals_accessed`
-    /// and is not on the hot path of normal code.
-    pub(crate) global_env_version: Cell<u32>,
-    /// Coarse "global namespace structure" version, bumped only when the *set*
-    /// of module globals changes in a way that can shadow/unshadow a built-in —
-    /// i.e. on `del`, on the cold assign paths, and (in `SyncModuleGlobal`) only
-    /// when the assigned name is itself a built-in.  Built-in `LoadGlobal`
-    /// resolutions are cached against THIS counter in `FnCode::builtin_cache`,
-    /// so a hot module-scope value reassignment (`n += …`, which bumps
-    /// `global_env_version` every iteration) no longer thrashes the built-in
-    /// cache — the dominant reason `len`/`ord`/… calls in a top-level loop were
-    /// several times slower than CPython.
-    pub(crate) global_struct_version: Cell<u32>,
     /// Tracks the nesting depth of `PushExcContext` instructions currently
     /// in progress.  Incremented by `PushExcContext`, decremented by
     /// `PopExcContext`.  While non-zero, `handle_vm_error` must NOT perform
@@ -329,7 +364,9 @@ pub(crate) struct VmFrameView {
     /// `call_user_function_expanded` before `run_bytecode`).
     /// `snapshot_current_locals` uses it as the starting point for
     /// `find_enclosing_local_env_for_name` to resolve nonlocal names.
-    /// `None` for `Script` frames (which use the module env directly).
+    /// Script frames retain their root env so namespace-sensitive helpers can
+    /// distinguish an imported function's globals from the caller's script
+    /// registers.
     pub(crate) env: Option<EnvRef>,
     /// True when this function was compiled as a direct method inside a class
     /// body (`FnCode::is_class_method`).  Used by `resolve_zero_arg_super` to
@@ -393,6 +430,7 @@ fn compare_values_for_registry(a: &Value, b: &Value) -> Result<std::cmp::Orderin
 impl Default for Interpreter {
     fn default() -> Self {
         pyrust_builtins::install();
+        pyrust_core::install_builtin_callable_presentation_provider(builtin_callable_presentation);
         pyrust_core::install_iter_values(iter_values_for_registry);
         pyrust_core::install_compare_values(compare_values_for_registry);
         let env = Environment::new(None);
@@ -411,9 +449,15 @@ impl Default for Interpreter {
             script_filename: None,
             script_argv: Vec::new(),
             module_cache: Rc::new(RefCell::new(HashMap::new())),
+            bootstrap_module_registry: Value::dict(PyDict::default()),
+            module_class_cache: None,
+            warnings_state: Rc::new(crate::builtin_modules::warnings::WarningsState::default()),
+            int_max_str_digits: pyrust_core::INT_MAX_STR_DIGITS_DEFAULT,
+            recursion_limit: DEFAULT_RECURSION_LIMIT,
             env_pool: Vec::new(),
             memo_cache: std::collections::HashMap::new(),
             memo_stats: std::collections::HashMap::new(),
+            memo_in_flight: std::collections::HashSet::new(),
             call_arg_buf: Vec::new(),
             invoke_arg_buf: ExpandedArgBuf::new(),
             bound_method_pos_buf: Vec::new(),
@@ -421,10 +465,6 @@ impl Default for Interpreter {
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),
             exc_classes: ExcClasses::uninitialized(),
-            module_globals_dict: Value::dict(PyDict::default()),
-            globals_accessed: false,
-            global_env_version: Cell::new(0),
-            global_struct_version: Cell::new(0),
             push_exc_ctx_depth: 0,
             reraise_is_bare: false,
         }
@@ -443,9 +483,12 @@ impl Default for Interpreter {
 /// the same allocation and the `globals()`/`locals()` helpers or
 /// `StoreGlobal`/`DeleteGlobal` dereference it while the dispatch loop holds
 /// `&mut [Value]` on the call stack.  `RegSlice` (raw pointer + len) replaces
-/// `&mut [Value]` in every dispatch-loop signature; raw pointers carry no
-/// aliasing semantics in Rust's type system, so the concurrent dereferences
-/// through `VmFrameView::regs_ptr` are sound.
+/// `&mut [Value]` in every dispatch-loop signature. The raw pointer itself
+/// carries no reference aliasing promise, so a `VmFrameView` may retain it
+/// while the loop runs. References reconstructed from either pointer still
+/// obey Rust's ordinary rules: a shared slot reference must end before that
+/// slot is mutated, and an exclusive slot reference must not overlap any other
+/// reference to the slot.
 ///
 /// # Invariants the caller must uphold
 ///
@@ -453,16 +496,20 @@ impl Default for Interpreter {
 ///   `Value` reads/writes for the duration of the dispatch-loop call.
 /// - No `&mut [Value]` covering the same allocation is held live (on the call
 ///   stack or otherwise) while the dispatch loop runs.
+/// - A shared reference reconstructed by `Deref` or `Index` is not held across
+///   a re-entrant operation that can mutate the same register allocation
+///   through a `VmFrameView`.
 /// - No two mutable references to the same slot obtained through `IndexMut`
 ///   are alive simultaneously (trivially satisfied by normal borrow rules on
 ///   the returned `&mut Value`).
 ///
 /// These invariants hold at every call site:
-/// - `calls.rs`: the `RegsBuf` local is alive, not borrowed as `&mut [Value]`,
+/// - `calls`: the `RegsBuf` local is alive, not borrowed as `&mut [Value]`,
 ///   and the dispatch loop owns the only path to the allocation.
-/// - `program.rs`: same pattern; `RegsBuf` is only accessed through `regs[i]`
+/// - `program_execution`: same pattern; `RegsBuf` is only accessed through
+///   `regs[i]`
 ///   after `run_bytecode` returns (no concurrent access).
-/// - `vm.rs` generator resumes: `GeneratorFrame::regs` is on the heap
+/// - `execution` generator resumes: `GeneratorFrame::regs` is on the heap
 ///   (stable address across yields) and is not borrowed as `&mut [Value]`.
 pub(crate) struct RegSlice {
     ptr: *mut Value,
@@ -494,26 +541,25 @@ impl RegSlice {
         self.len
     }
 
-    /// Iterate mutably over every slot.  Yields `&mut Value` one at a time;
-    /// no two yielded references overlap, satisfying Rust's aliasing rules.
     #[inline]
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Value> {
-        // SAFETY: ptr..ptr+len is valid and aligned (struct invariant);
-        // from_raw_parts_mut produces the canonical slice for that range.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len).iter_mut() }
+    pub(crate) fn non_null_ptr(&self) -> std::ptr::NonNull<Value> {
+        // SAFETY: non-nullness is a construction invariant of `RegSlice`.
+        unsafe { std::ptr::NonNull::new_unchecked(self.ptr) }
     }
 }
 
 /// Read-only view via `Deref` — reconstructs `&[Value]` from the raw pointer.
-/// `&[Value]` (shared reference) does NOT carry LLVM `noalias`, so this is safe
-/// to produce even while `VmFrameView` holds another pointer to the allocation.
+///
+/// A raw `VmFrameView` pointer may coexist with this slice, but it must not be
+/// used to mutate any covered slot until the returned shared reference is no
+/// longer live.
 impl std::ops::Deref for RegSlice {
     type Target = [Value];
     #[inline]
     fn deref(&self) -> &[Value] {
-        // SAFETY: ptr/len satisfy the struct invariant; &[Value] imposes no
-        // exclusivity guarantee, so forming it alongside VmFrameView's raw
-        // pointer is not aliasing UB.
+        // SAFETY: ptr/len satisfy the struct invariant. Callers must uphold the
+        // reference-lifetime rule documented above before mutating through an
+        // aliasing raw frame-view pointer.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
@@ -602,7 +648,7 @@ pub(crate) fn value_code_object(
 /// If `value` is a code object, call `f` with its `CodeState` and return the result.
 pub(crate) fn with_code_state<R>(value: &Value, f: impl FnOnce(&CodeState) -> R) -> Option<R> {
     if let ValueKind::BuiltinObject { ops, state } = value.kind()
-        && ops.type_name() == "code"
+        && pyrust_core::builtin_ops_is::<CodeObjectOps>(ops)
     {
         let borrow = state.borrow();
         let cs = borrow.downcast_ref::<CodeState>()?;

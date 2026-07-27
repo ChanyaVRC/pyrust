@@ -1,17 +1,10 @@
-# Tests for pass_binopinplace_downgrade:
-# BinOpInPlace(dst, lhs, op, rhs) → BinOp(dst, lhs, op, rhs)
-# when lhs is a dead temp register.
-#
-# Augmented assignment (+=, -=, *=, etc.) on a temporary expression compiles
-# to BinOpInPlace.  For immutable types (int, float, str) the __iadd__ dispatch
-# always fails and falls back to __add__, wasting one method-resolution per
-# execution.  The optimizer eliminates this by emitting plain BinOp instead.
-#
-# Correctness is verified by matching CPython output for all patterns.
+# Augmented-assignment parity across primitive and container targets.
+# BinOpInPlace remains an observable protocol operation: the runtime must retain
+# __iadd__ / __isub__ / __imul__ behavior instead of assuming plain BinOp is
+# equivalent from bytecode-only type facts.
 
 # Integer augmented assignment in a tight loop
-# The optimizer sees: BinOpInPlace(s, s, Add, i) where s is a local,
-# and the accumulated-sum expression: BinOpInPlace(tmp, tmp, Add, 1).
+# The local target remains an in-place operation on every iteration.
 s = 0
 for i in range(100):
     s += i
@@ -36,7 +29,7 @@ x -= 3
 x *= 2
 print(x)        # (10+5-3)*2 = 24
 
-# Augmented assignment inside a function (temp register is clearly dead)
+# Augmented assignment inside a function
 def sum_squares(n):
     total = 0
     for i in range(n):
@@ -59,7 +52,7 @@ for _ in range(4):
     a += b * 2
 print(a)        # 4 * 6 = 24
 
-# In-place with a list element (user object — optimizer must NOT downgrade these)
+# In-place with a list element must preserve target write-back semantics.
 lst = [1, 2, 3]
 lst[0] += 10
 print(lst)      # [11, 2, 3]

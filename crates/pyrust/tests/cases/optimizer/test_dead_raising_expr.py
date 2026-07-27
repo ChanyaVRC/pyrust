@@ -1,10 +1,9 @@
 # Parity fixture for issue #2487: a function body whose only effect is a
 # may-raise binary op with a DEAD result must still propagate its exception.
 #
-# Such a function used to be misclassified as "pure" by the CallMemo purity
-# analysis, so a dead-result call to it was dead-store-eliminated by the
-# optimizer — silently swallowing ZeroDivisionError / ValueError instead of
-# raising.  The observable behaviour (output) must match CPython 3.12.
+# CallMemo purity now controls result caching only; dead-result calls remain
+# runtime operations and must surface ZeroDivisionError / ValueError. The
+# observable behaviour (output) must match CPython 3.12.
 
 
 # --- constant divisor, dead result --------------------------------------------

@@ -13,6 +13,8 @@ use pyrust_core::{
     key_repr,
 };
 
+use crate::method_signature::{KeywordPolicy, PositionalArity};
+
 /// Internal frozenset state.  `Rc` so that clones are cheap and so that
 /// the same backing storage can be shared via `Value::builtin_object_shared`.
 pub struct FrozenSetState {
@@ -39,9 +41,59 @@ pub const METHODS: &[&str] = &[
     "union",
 ];
 
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS).with_flags(
+        crate::primitive_class_attrs::PrimitiveClassFlags::NONE
+            .with_init()
+            .with_new()
+            .with_class_getitem(),
+    );
+
+/// Positional signature for every public frozenset method.
+pub fn positional_arity(method: &str) -> Option<PositionalArity> {
+    Some(match method {
+        "__iter__" | "copy" => PositionalArity::exact(0),
+        "symmetric_difference" | "isdisjoint" | "issubset" | "issuperset" => {
+            PositionalArity::exact(1)
+        }
+        "difference" | "intersection" | "union" => PositionalArity::variadic(0),
+        _ => return None,
+    })
+}
+
+#[inline]
+pub fn validate_method_positional_arity(method: &str, given: usize) -> Result<()> {
+    if given == 0 {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(arity) => arity.reject_excess(TYPE_NAME, method, given),
+        None => Ok(()),
+    }
+}
+
+#[inline]
+pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> {
+    if !has_keywords {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(_) => KeywordPolicy::Reject.validate(TYPE_NAME, method, true),
+        None => Ok(()),
+    }
+}
+
+pub fn keyword_policy(method: &str) -> Option<KeywordPolicy> {
+    positional_arity(method).map(|_| KeywordPolicy::Reject)
+}
+
 impl BuiltinTypeOps for FrozenSetOps {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
+    }
+
+    fn canonical_class_tag(&self) -> Option<pyrust_core::CanonicalClassTag> {
+        Some(pyrust_core::CanonicalClassTag::Frozenset)
     }
 
     fn repr(&self, state: &BuiltinState) -> String {
@@ -67,7 +119,7 @@ impl BuiltinTypeOps for FrozenSetOps {
             ValueKind::BuiltinObject {
                 ops,
                 state: rhs_state,
-            } if ops.type_name() == TYPE_NAME => {
+            } if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) => {
                 let rhs = match borrow_items(rhs_state) {
                     Some(s) => s,
                     None => return false,
@@ -131,7 +183,20 @@ impl BuiltinTypeOps for FrozenSetOps {
         state: &BuiltinState,
         method: &str,
         args: Vec<Value>,
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        validate_method_keywords(method, !kwargs.is_empty())?;
+        validate_method_positional_arity(method, args.len())?;
+        self.call_method_prevalidated(state, method, args)
+    }
+}
+
+impl FrozenSetOps {
+    fn call_method_prevalidated(
+        &self,
+        state: &BuiltinState,
+        method: &str,
+        args: Vec<Value>,
     ) -> Result<Value> {
         let rc = borrow_items(state)
             .ok_or_else(|| PyError::Runtime("internal: bad frozenset state".to_string()))?;
@@ -140,7 +205,10 @@ impl BuiltinTypeOps for FrozenSetOps {
         // `set::call(&Value, ...)` API, and re-wrap result-returning
         // methods back into a frozenset.
         let temp_set = Value::set((*rc).clone());
-        let result = crate::set::call(method, &temp_set, args)?;
+        let set_method = crate::set::method_spec(method).ok_or_else(|| {
+            PyError::named("AttributeError", format!("unknown method '{method}'"))
+        })?;
+        let result = crate::set::call_resolved(set_method.method(), &temp_set, args)?;
         if matches!(
             method,
             "copy" | "union" | "intersection" | "difference" | "symmetric_difference"
@@ -155,11 +223,24 @@ impl BuiltinTypeOps for FrozenSetOps {
 /// Dispatch a `frozenset` method call.  `receiver` must be a frozenset
 /// `BuiltinObject` value; `args` are the remaining positional arguments (the
 /// receiver itself is NOT in `args`).  Used by the unified `<type>.<method>`
-/// class-attr dispatcher in `calls.rs` so that `frozenset.copy(fs)` routes
+/// class-attribute dispatcher in `runtime/builtin_methods` so that
+/// `frozenset.copy(fs)` routes
 /// through the same implementation as `fs.copy()`.
 pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
+    validate_method_positional_arity(method, args.len())?;
+    call_prevalidated(method, receiver, args)
+}
+
+/// Dispatch after the interpreter adapter has already validated positional
+/// arity.
+#[doc(hidden)]
+pub fn call_prevalidated(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
     let state = match receiver.kind() {
-        ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => state,
+        ValueKind::BuiltinObject { ops, state }
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) =>
+        {
+            state
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
@@ -169,8 +250,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             ));
         }
     };
-    let empty_kw = IndexMap::new();
-    FROZENSET_OPS.call_method(state, method, args, &empty_kw)
+    FROZENSET_OPS.call_method_prevalidated(state, method, args)
 }
 
 /// Construct a frozenset Value from an `IndexSet`.
@@ -198,7 +278,7 @@ pub fn as_items(value: &Value) -> Option<Rc<PySet>> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if ops.canonical_class_tag() != Some(pyrust_core::CanonicalClassTag::Frozenset) {
         return None;
     }
     borrow_items(state)

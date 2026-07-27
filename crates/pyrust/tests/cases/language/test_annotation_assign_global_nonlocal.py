@@ -64,8 +64,7 @@ b.set(55)
 print(b.value)  # 55
 print(Box.value)  # 0
 
-# Annotated assignment inside a while-index loop body — the optimizer must
-# rewrite `c[i]` inside the annotated value, not leave it unrewritten.
+# Annotated assignment inside a while-index loop body.
 items = [10, 20, 30]
 i = 0
 results = []

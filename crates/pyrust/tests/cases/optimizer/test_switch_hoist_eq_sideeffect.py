@@ -1,15 +1,13 @@
-# Parity fixture for issue #844: pass_switch_hoist safety for __eq__ side effects.
+# Parity fixture for issue #844: repeated global lookup across __eq__ re-entry.
 #
-# pass_switch_hoist hoists a LoadGlobal across if/elif chains.  The safety guard
-# added in the fix requires the compared constant to be a primitive (int, str, None,
-# bool, float) — i.e. the comparison cannot dispatch user __eq__ purely from the
-# constant side.
+# A primitive right operand does not make a comparison non-reentrant: the left
+# operand may implement __eq__ and replace the live global binding. Every elif
+# branch must therefore perform its own lookup.
 #
 # This fixture covers:
 #   1. Integer discriminants: the fast-path (int,int) comparison never calls user
-#      __eq__, so hoisting is always safe.
-#   2. A user-defined __eq__ that logs side effects but does NOT mutate the global
-#      being tested — hoisting is safe and output must match CPython 3.12.
+#      __eq__.
+#   2. A user-defined __eq__ that logs side effects but does NOT mutate the global.
 #   3. String discriminants: another common primitive case.
 
 # ── Case 1: integer if/elif chain, hoist is safe ────────────────────────────
@@ -26,8 +24,7 @@ for val in (1, 2, 3, 99):
         print("other")
 
 # ── Case 2: user-defined __eq__ that logs calls but doesn't mutate the global ─
-# The global `g` itself is not overwritten by __eq__, so reusing the loaded
-# register value is correct even if the optimizer hoists.
+# The global `g` itself is not overwritten by __eq__ in this case.
 
 _calls = []
 
@@ -68,20 +65,9 @@ for word in ("apple", "banana", "cherry", "durian"):
         print("fruit-other")
 
 # ── Case 4: user-defined __eq__ that MUTATES the global between elif branches ─
-# This is the core case motivating issue #844.  If pass_switch_hoist hoisted
-# LoadGlobal(g) and reused the cached register across the elif, mutating g in
-# __eq__ would not be visible to the second test — pyrust would compare the
-# stale cached object, and the elif that should match would be skipped.
-#
-# The guard (primitive-const check on the RHS constant) prevents hoisting when
-# the RHS is a non-primitive object that could itself define __eq__.  Note that
-# even a primitive RHS does not guarantee no user __eq__ is called: if the LHS
-# is a PyInstance the VM still dispatches to the LHS __eq__.  The guard is a
-# necessary but not sufficient condition for safety; the broader correctness
-# argument rests on the fact that LoadGlobal is only hoisted when the global
-# binding itself cannot be replaced by a side-effecting __eq__ on the LHS — the
-# primitive-const check is the first filter that stops obviously unsafe cases
-# (non-primitive RHS values whose own __eq__ could mutate state).
+# This is the core case motivating issue #844. Reusing the first LoadGlobal
+# result across the elif would hide the replacement performed by __eq__ and
+# compare the stale Switcher object a second time.
 #
 # Expected (CPython 3.12 and correct pyrust):
 #   - __eq__ called once with other=1; sets g to an int (2)

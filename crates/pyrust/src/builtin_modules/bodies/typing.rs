@@ -11,17 +11,15 @@
 //   already have `__class_getitem__` registered, so `List[int]` produces a
 //   `types.GenericAlias` exactly like `list[int]` does.
 //
-// - `Any` is a singleton PyInstance.  The class is built via a thread-local
-//   singleton (like `os.rs`'s `_Environ`) to avoid infinite recursion
-//   during `module()` construction.
+// - `Any` is a singleton PyInstance within one imported module generation.
 //
 // - `Optional`, `Union`, `Callable`, `ClassVar`, `Final`, `Literal`, `Type`
-//   are special forms — stub `PyClass` values built via thread-locals with
+//   are special forms — stub `PyClass` values built per module generation with
 //   a `__class_getitem__` attr.  `expr.rs`'s sentinel path creates a
 //   `GenericAlias` directly on subscript so no extra interpreter plumbing
 //   is needed.
 //
-// - `Generic` and `Protocol` are real `PyClass` singletons so that they
+// - `Generic` and `Protocol` are real `PyClass` values so that they
 //   can be used as class bases (`class Stack(Generic[T]): pass`).  pyrust's
 //   `MakeClass` instruction requires every base to be `ValueKind::PyClass`;
 //   the subscript `Generic[T]` returns the `Generic` class itself (not a
@@ -34,12 +32,14 @@
 //
 // - `overload` is a no-op decorator: returns the function unchanged.
 //
-// ## Why thread-locals instead of `module_class()`?
+// ## Module generations
 //
 // `module_class(name)` calls `module()`, and `module()` is itself evaluating
 // the constants block when we first call it.  Calling `module()` from inside
-// constants would loop forever.  Instead we build the internal class singletons
-// independently via `thread_local!` (same pattern as `os.rs::ENVIRON_CLASS`).
+// constants would loop forever. A module-owned weak registry therefore tracks
+// the synthetic classes of each import generation without keeping discarded
+// modules alive. CPython 3.12 keeps `Generic` stable, but recreates `Any`,
+// `Protocol`, its internal alias classes, special forms, and legacy aliases.
 //
 // Reference: <https://docs.python.org/3/library/typing.html>
 
@@ -48,198 +48,19 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::Interpreter;
-use crate::value::{InstanceAttrs, PyClass, PyInstance, PyKey, Value, ValueKind};
-use indexmap::IndexMap;
+use crate::value::{PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
-// ── thread-local class singletons ─────────────────────────────────────────────
-//
-// We build `_Any` and `_TypingAlias` as independent class singletons rather
-// than going through `module().attrs["_Any"]` — the `module()` call during a
-// constants-block evaluation would recurse infinitely.
+#[path = "typing/aliases.rs"]
+mod aliases;
+#[path = "typing/generation.rs"]
+mod generation;
+#[path = "typing/python_members.rs"]
+mod python_members;
 
-thread_local! {
-    static ANY_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        // FN_PREFIX for this module resolves to "typing." so method registration
-        // names are "typing._Any.__repr__" etc.  We use the same convention.
-        for (method, reg_name) in ANY_METHODS {
-            attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
-        }
-        Rc::new(RefCell::new(PyClass::new("_Any", "_Any", None, attrs)))
-    };
-
-    static TYPING_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        for (method, reg_name) in TYPING_ALIAS_METHODS {
-            attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
-        }
-        Rc::new(RefCell::new(PyClass::new(
-            "_TypingAlias",
-            "_TypingAlias",
-            None,
-            attrs,
-        )))
-    };
-
-    // `_GenericAlias` is the runtime type of `Generic[T]` / `Generic.__class_getitem__(T)`
-    // (CPython's `typing._GenericAlias`).  Instances carry `_origin` (the
-    // `Generic` class) and `_args` (the raw subscript).  When used as a class
-    // base, the class-creation machinery unwraps the alias to its origin via
-    // `generic_alias_origin` (mirroring `__mro_entries__`).
-    static GENERIC_ALIAS_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        for (method, reg_name) in GENERIC_ALIAS_METHODS {
-            attrs.insert((*method).to_string(), Value::builtin_function(reg_name));
-        }
-        attrs.insert("__module__".to_string(), Value::string("typing"));
-        Rc::new(RefCell::new(PyClass::new(
-            "_GenericAlias",
-            "_GenericAlias",
-            None,
-            attrs,
-        )))
-    };
-
-    // `Generic` must be a real `PyClass` so that `class Stack(Generic[T]): pass`
-    // can use it as a class base.  The `__class_getitem__` is registered under
-    // the name "typing._generic_cgi" which does NOT contain ".__class_getitem__",
-    // so expr.rs calls our function rather than creating a sentinel GenericAlias.
-    // Our function builds a `_GenericAlias` wrapping the subscript so both the
-    // direct call (`Generic.__class_getitem__(T)`) and the subscript form
-    // (`Generic[T]`) yield `typing.Generic[...]`; the class-base path unwraps it
-    // back to the `Generic` class via `generic_alias_origin`.
-    static GENERIC_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__class_getitem__".to_string(),
-            Value::builtin_function("typing._generic_cgi"),
-        );
-        // `__module__ = "typing"` so `typing.Generic.__module__ == "typing"`
-        // and the bare class reprs as `<class 'typing.Generic'>` (issue #2742).
-        attrs.insert("__module__".to_string(), Value::string("typing"));
-        Rc::new(RefCell::new(PyClass::new("Generic", "Generic", None, attrs)))
-    };
-
-    // `Protocol` follows the same pattern as `Generic`.
-    static PROTOCOL_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__class_getitem__".to_string(),
-            Value::builtin_function("typing._protocol_cgi"),
-        );
-        // `__module__ = "typing"` so `typing.Protocol.__module__ == "typing"`
-        // and the bare class reprs as `<class 'typing.Protocol'>` (issue #2742).
-        attrs.insert("__module__".to_string(), Value::string("typing"));
-        Rc::new(RefCell::new(PyClass::new(
-            "Protocol", "Protocol", None, attrs,
-        )))
-    };
-
-    // `NamedTuple` is a real `PyClass` so it can serve as a class base
-    // (`class Point(NamedTuple): x: int`).  Class creation detects the marker
-    // attr `__pyrust_namedtuple_marker__` and rebuilds the class as a
-    // `collections.namedtuple`; the functional call form is routed to the
-    // Python helper `typing._namedtuple_functional`.  See
-    // `calls.rs::exec_make_class` / `call_class_expanded`.
-    static NAMEDTUPLE_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__pyrust_namedtuple_marker__".to_string(),
-            Value::bool_(true),
-        );
-        // `__module__ = "typing"` so `typing.NamedTuple.__module__ == "typing"`,
-        // matching `Generic` / `Protocol` (issue #2742).
-        attrs.insert("__module__".to_string(), Value::string("typing"));
-        Rc::new(RefCell::new(PyClass::new(
-            "NamedTuple",
-            "NamedTuple",
-            None,
-            attrs,
-        )))
-    };
-
-    // `TypedDict` is a real `PyClass` so it can serve as a class base
-    // (`class Movie(TypedDict): title: str`).  Class creation detects the
-    // marker attr `__pyrust_typeddict_marker__` and rebuilds the class via the
-    // Python helper `typing._build_typeddict_class`; the functional call form
-    // is routed to `typing._typeddict_functional` (issue #2718).
-    static TYPEDDICT_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__pyrust_typeddict_marker__".to_string(),
-            Value::bool_(true),
-        );
-        // `__module__ = "typing"` so `typing.TypedDict.__module__ == "typing"`,
-        // matching `Generic` / `Protocol` / `NamedTuple` (issue #2742).
-        attrs.insert("__module__".to_string(), Value::string("typing"));
-        Rc::new(RefCell::new(PyClass::new(
-            "TypedDict",
-            "TypedDict",
-            None,
-            attrs,
-        )))
-    };
-}
-
-/// Identity check: is `class` the `typing.NamedTuple` marker?  Used by the
-/// class-creation machinery (`calls.rs`) to detect `class X(NamedTuple): ...`
-/// and the functional `NamedTuple('X', ...)` call.
-pub(crate) fn is_namedtuple_marker(class: &Rc<RefCell<PyClass>>) -> bool {
-    NAMEDTUPLE_CLASS.with(|nt| Rc::ptr_eq(class, nt))
-}
-
-/// The `typing.NamedTuple` marker class value (for the module constant).
-pub(crate) fn namedtuple_marker_value() -> Value {
-    NAMEDTUPLE_CLASS.with(|c| Value::py_class(Rc::clone(c)))
-}
-
-/// Identity check: is `class` the `typing.TypedDict` marker?  Used by the
-/// class-creation machinery (`calls.rs`) to detect `class X(TypedDict): ...`
-/// and the functional `TypedDict('X', ...)` call (issue #2718).
-pub(crate) fn is_typeddict_marker(class: &Rc<RefCell<PyClass>>) -> bool {
-    TYPEDDICT_CLASS.with(|td| Rc::ptr_eq(class, td))
-}
-
-/// The `typing.TypedDict` marker class value (for the module constant).
-pub(crate) fn typeddict_marker_value() -> Value {
-    TYPEDDICT_CLASS.with(|c| Value::py_class(Rc::clone(c)))
-}
-
-/// True if `class` is the `typing.Protocol` singleton or a subclass of it.
-/// Used by `isinstance` to apply structural protocol checks (issue #2526).
-pub(crate) fn is_protocol_subclass(class: &Rc<RefCell<PyClass>>) -> bool {
-    PROTOCOL_CLASS.with(|p| crate::interpreter::class_is_subclass_of(class, p))
-}
-
-/// True if `class` is the bare `typing.Protocol` marker singleton itself
-/// (not a user subclass).  `isinstance` skips the structural check for it so
-/// `Protocol` keeps ordinary class semantics (issue #2526).
-pub(crate) fn is_protocol_marker_class(class: &Rc<RefCell<PyClass>>) -> bool {
-    PROTOCOL_CLASS.with(|p| Rc::ptr_eq(class, p))
-}
-
-
-/// (method-short, registry-name) pairs for `_Any`.
-const ANY_METHODS: &[(&str, &str)] = &[
-    ("__repr__", "typing._Any.__repr__"),
-    ("__init__", "typing._Any.__init__"),
-];
-
-/// (method-short, registry-name) pairs for `_GenericAlias`.
-const GENERIC_ALIAS_METHODS: &[(&str, &str)] = &[
-    ("__repr__", "typing._GenericAlias.__repr__"),
-    ("__init__", "typing._GenericAlias.__init__"),
-    ("__call__", "typing._GenericAlias.__call__"),
-];
-
-/// (method-short, registry-name) pairs for `_TypingAlias`.
-const TYPING_ALIAS_METHODS: &[(&str, &str)] = &[
-    ("__repr__", "typing._TypingAlias.__repr__"),
-    ("__init__", "typing._TypingAlias.__init__"),
-    ("__class_getitem__", "typing._TypingAlias.__class_getitem__"),
-];
+pub(crate) use aliases::legacy_alias_delegate;
+pub(crate) use generation::{is_protocol_marker_class, is_protocol_subclass};
+pub(crate) use python_members::inject_python_members;
 
 pyrust_module! {
     constants {
@@ -248,44 +69,48 @@ pyrust_module! {
         // objects from the underlying builtins — `typing.List is not list` —
         // with a `typing.`-prefixed repr (`typing.List`, `typing.List[int]`).
         // `isinstance`/`issubclass` delegate to the underlying builtin.
-        "List"      => legacy_alias_value("List"),
-        "Dict"      => legacy_alias_value("Dict"),
-        "Set"       => legacy_alias_value("Set"),
-        "FrozenSet" => legacy_alias_value("FrozenSet"),
-        "Tuple"     => legacy_alias_value("Tuple"),
+        // The first constant starts a fresh generation; subsequent constants
+        // use the same latest registry entry.
+        "List"      => aliases::start_generation_legacy_alias_value("List"),
+        "Dict"      => aliases::legacy_alias_value("Dict"),
+        "Set"       => aliases::legacy_alias_value("Set"),
+        "FrozenSet" => aliases::legacy_alias_value("FrozenSet"),
+        "Tuple"     => aliases::legacy_alias_value("Tuple"),
 
-        // `Any` — special singleton.  Built via thread-local class to avoid
-        // recursion during `module()` construction.
-        "Any"   => make_any_instance(),
+        // `Any` — special singleton within this module generation.
+        "Any"   => aliases::make_any_instance(),
+
+        // `_GenericAlias` is a public private attribute in CPython and is
+        // recreated with its owning module generation. `_TypingAlias` remains
+        // internal on both runtimes, but is tracked by the same registry.
+        "_GenericAlias" => Value::py_class(generation::current_generic_alias_class()),
 
         // Subscriptable special forms — also class-based.  For `Optional`,
         // `Union`, etc., expose the PyClass itself; subscripting dispatches
         // through `__class_getitem__` on the class.
-        "Optional" => class_value_for("Optional"),
-        "Union"    => class_value_for("Union"),
-        "Callable" => class_value_for("Callable"),
-        "ClassVar" => class_value_for("ClassVar"),
-        "Final"    => class_value_for("Final"),
-        "Literal"  => class_value_for("Literal"),
+        "Optional" => aliases::class_value_for("Optional"),
+        "Union"    => aliases::class_value_for("Union"),
+        "Callable" => aliases::class_value_for("Callable"),
+        "ClassVar" => aliases::class_value_for("ClassVar"),
+        "Final"    => aliases::class_value_for("Final"),
+        "Literal"  => aliases::class_value_for("Literal"),
 
         // `Type` is the deprecated alias for the built-in `type`; like the
         // PEP 585 aliases above it reprs as `typing.Type` and delegates
         // `isinstance`/`issubclass` to `type`.
-        "Type"     => legacy_alias_value("Type"),
+        "Type"     => aliases::legacy_alias_value("Type"),
 
         // `Generic` and `Protocol` are real PyClass values (not _TypingAlias
         // instances) so they can serve as class bases.
-        "Generic"  => GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))),
-        "Protocol" => PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+        "Generic"  => Value::py_class(generation::current_generic_class()),
+        "Protocol" => Value::py_class(generation::current_protocol_class()),
 
-        // `NamedTuple` marker class — usable as a class base and callable as a
-        // factory.  Class creation rebuilds subclasses as namedtuples.
-        "NamedTuple" => namedtuple_marker_value(),
+        // Module-generation markers usable as class bases and functional
+        // factories. Their typed weak registry is interpreter-free; generic
+        // class/call routing consumes only the adapter result.
+        "NamedTuple" => Value::py_class(generation::current_namedtuple_marker_class()),
 
-        // `TypedDict` marker class — usable as a class base and callable as a
-        // factory.  Class creation rebuilds subclasses as TypedDict classes
-        // (issue #2718).
-        "TypedDict" => typeddict_marker_value(),
+        "TypedDict" => Value::py_class(generation::current_typeddict_marker_class()),
 
         // `TYPE_CHECKING` is always `False` at runtime (PEP 563 / typing docs):
         // it is `True` only for static type checkers.  This lets the common
@@ -343,7 +168,7 @@ pyrust_module! {
     fn typing_alias_class_getitem(args) -> Result<Value> {
         let _ = _interp;
         let subscript = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-        Ok(make_typing_alias("_TypingAlias", subscript))
+        Ok(aliases::make_typing_alias("_TypingAlias", subscript))
     }
 
     // ── _GenericAlias dispatch fns ────────────────────────────────────────────
@@ -366,7 +191,7 @@ pyrust_module! {
             .attrs
             .get("__origin__")
             .cloned()
-            .unwrap_or_else(|| GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))));
+            .unwrap_or_else(|| Value::py_class(generation::current_generic_class()));
         _interp.call_function_expanded(origin, &args[1..])
     }
 
@@ -382,7 +207,7 @@ pyrust_module! {
             let origin_repr = borrow
                 .attrs
                 .get("_origin")
-                .map(generic_origin_repr)
+                .map(aliases::generic_origin_repr)
                 .unwrap_or_else(|| "typing.Generic".to_string());
             let sub = borrow.attrs.get("_args").cloned().unwrap_or_else(Value::none);
             (origin_repr, sub)
@@ -394,12 +219,74 @@ pyrust_module! {
         let args_repr = match sub.kind() {
             ValueKind::Tuple(items) => items
                 .iter()
-                .map(|v| generic_arg_repr(_interp, v))
+                .map(|v| aliases::generic_arg_repr(_interp, v))
                 .collect::<Result<Vec<_>>>()?
                 .join(", "),
-            _ => generic_arg_repr(_interp, &sub)?,
+            _ => aliases::generic_arg_repr(_interp, &sub)?,
         };
         Ok(Value::string(format!("{origin_repr}[{args_repr}]")))
+    }
+
+    #[py_name = "_GenericAlias.__mro_entries__"]
+    fn generic_alias_mro_entries(args) -> Result<Value> {
+        let _ = _interp;
+        let instance = expect_self(args, FN_NAME)?;
+        let user_args = &args[1..];
+        let positional_count = user_args
+            .iter()
+            .filter(|argument| argument.name.is_none())
+            .count();
+        let has_bases_keyword = user_args
+            .iter()
+            .any(|argument| argument.name.as_deref() == Some("bases"));
+
+        // `_GenericAlias.__mro_entries__` is an ordinary Python method with
+        // signature `(self, bases)`. The runtime supplies `self`, so validate
+        // the remaining expanded arguments here before reading the origin.
+        // `bases` is intentionally unused by CPython's implementation, but it
+        // is still required and may be passed by keyword.
+        if user_args
+            .iter()
+            .any(|argument| argument.name.as_deref() == Some("self"))
+        {
+            return Err(pyrust_core::type_err!(
+                "_GenericAlias.__mro_entries__() got multiple values for argument 'self'"
+            ));
+        }
+        if positional_count > 0 && has_bases_keyword {
+            return Err(pyrust_core::type_err!(
+                "_GenericAlias.__mro_entries__() got multiple values for argument 'bases'"
+            ));
+        }
+        if let Some(name) = user_args
+            .iter()
+            .filter_map(|argument| argument.name.as_deref())
+            .find(|name| *name != "bases")
+        {
+            return Err(pyrust_core::type_err!(
+                "_GenericAlias.__mro_entries__() got an unexpected keyword argument '{name}'"
+            ));
+        }
+        if positional_count > 1 {
+            return Err(pyrust_core::type_err!(
+                "_GenericAlias.__mro_entries__() takes 2 positional arguments but {} were given",
+                positional_count + 1
+            ));
+        }
+        if positional_count == 0 && !has_bases_keyword {
+            return Err(pyrust_core::type_err!(
+                "_GenericAlias.__mro_entries__() missing 1 required positional argument: 'bases'"
+            ));
+        }
+        let origin = instance
+            .borrow()
+            .attrs
+            .get("_origin")
+            .cloned()
+            .ok_or_else(|| {
+                PyError::Runtime("typing._GenericAlias has no origin".to_string())
+            })?;
+        Ok(Value::tuple(vec![origin]))
     }
 
     // ── Generic.__class_getitem__ ─────────────────────────────────────────────
@@ -415,7 +302,6 @@ pyrust_module! {
 
     #[py_name = "_generic_cgi"]
     fn generic_class_getitem(args) -> Result<Value> {
-        let _ = _interp;
         // The subscript form `Generic[T]` (or `Stack[T]` inheriting via MRO)
         // calls us with the receiver class prepended (`[Cls, T]`), while the
         // direct call `Generic.__class_getitem__(T)` passes only `[T]`.  The
@@ -431,21 +317,20 @@ pyrust_module! {
             )
         } else {
             (
-                GENERIC_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+                Value::py_class(generation::current_generic_class()),
                 positionals
                     .first()
                     .map(|a| a.value.clone())
                     .unwrap_or_else(Value::none),
             )
         };
-        Ok(make_generic_alias(origin, subscript))
+        aliases::make_generic_alias(_interp, origin, subscript)
     }
 
     // ── Protocol.__class_getitem__ ────────────────────────────────────────────
 
     #[py_name = "_protocol_cgi"]
     fn protocol_class_getitem(args) -> Result<Value> {
-        let _ = _interp;
         // Mirror `_generic_cgi`: use the receiver class as the alias origin so a
         // subclass `class P(Protocol[T])` / `P[int]` keeps `P` as origin.  The
         // direct `Protocol.__class_getitem__(T)` form falls back to `Protocol`.
@@ -458,14 +343,60 @@ pyrust_module! {
             )
         } else {
             (
-                PROTOCOL_CLASS.with(|c| Value::py_class(Rc::clone(c))),
+                Value::py_class(generation::current_protocol_class()),
                 positionals
                     .first()
                     .map(|a| a.value.clone())
                     .unwrap_or_else(Value::none),
             )
         };
-        Ok(make_generic_alias(origin, subscript))
+        aliases::make_generic_alias(_interp, origin, subscript)
+    }
+
+    // Special forms own their subscript normalization. Their class slots point
+    // at these registered callables, so generic expression dispatch does not
+    // need to recognize `typing.Union` or `typing.Optional` by name.
+
+    #[py_name = "_optional_cgi"]
+    fn optional_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("Optional", args)
+    }
+
+    #[py_name = "_union_cgi"]
+    fn union_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("Union", args)
+    }
+
+    #[py_name = "_callable_cgi"]
+    fn callable_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("Callable", args)
+    }
+
+    #[py_name = "_classvar_cgi"]
+    fn classvar_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("ClassVar", args)
+    }
+
+    #[py_name = "_final_cgi"]
+    fn final_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("Final", args)
+    }
+
+    #[py_name = "_literal_cgi"]
+    fn literal_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("Literal", args)
+    }
+
+    #[py_name = "_type_cgi"]
+    fn type_class_getitem(args) -> Result<Value> {
+        let _ = _interp;
+        aliases::special_form_class_getitem("Type", args)
     }
 
     // ── cast ─────────────────────────────────────────────────────────────────
@@ -508,16 +439,16 @@ pyrust_module! {
     // `T = TypeVar('T')` followed by `class Stack(Generic[T]): pass` works.
     //
     // CPython signature: TypeVar(name, *constraints, bound=None,
-    //                            covariant=False, contravariant=False)
+    //                            covariant=False, contravariant=False,
+    //                            infer_variance=False)
     // - args[0]    = self
     // - args[1]    = name (required, positional)
     // - args[2..]  = positional constraint types (e.g. TypeVar('T', int, str))
     // - bound=     = optional keyword argument
-    // - covariant=/contravariant= accepted and ignored (runtime no-op)
+    // - variance flags are converted with Python's truth protocol
 
     class TypeVar {
         fn __init__(args) -> Result<Value> {
-            let _ = _interp;
             let inst = expect_self(args, FN_NAME)?;
             let name_val = args.get(1).map(|a| a.value.clone()).ok_or_else(|| {
                 PyError::named(
@@ -549,22 +480,30 @@ pyrust_module! {
                 .map(|a| a.value.clone())
                 .unwrap_or_else(Value::none);
 
-            // `covariant=`/`contravariant=` drive the variance prefix in
-            // `repr()` (`+T`/`-T`); invariant (the default) renders as `~T`.
-            let kw_flag = |name: &str| -> bool {
-                args.iter()
-                    .find(|a| a.name.as_deref() == Some(name))
-                    .map(|a| a.value.truthy_raw())
-                    .unwrap_or(false)
+            // Variance flags drive the variance prefix in repr:
+            // explicit covariance/contravariance render as +T/-T, the
+            // invariant default as ~T, and inferred variance as plain T.
+            let mut kw_flag = |name: &str| -> Result<bool> {
+                match args.iter().find(|a| a.name.as_deref() == Some(name)) {
+                    Some(arg) => _interp.truthy_value(&arg.value),
+                    None => Ok(false),
+                }
             };
-            let covariant = kw_flag("covariant");
-            let contravariant = kw_flag("contravariant");
+            let covariant = kw_flag("covariant")?;
+            let contravariant = kw_flag("contravariant")?;
+            let infer_variance = kw_flag("infer_variance")?;
             // CPython rejects a TypeVar that is both covariant and
             // contravariant (`ValueError: Bivariant types are not supported.`).
             if covariant && contravariant {
                 return Err(PyError::named(
                     "ValueError",
                     "Bivariant types are not supported.".to_string(),
+                ));
+            }
+            if infer_variance && (covariant || contravariant) {
+                return Err(PyError::named(
+                    "ValueError",
+                    "Variance cannot be specified with infer_variance.".to_string(),
                 ));
             }
 
@@ -591,6 +530,9 @@ pyrust_module! {
             borrow
                 .attrs
                 .insert("__contravariant__", Value::bool_(contravariant));
+            borrow
+                .attrs
+                .insert("__infer_variance__", Value::bool_(infer_variance));
             Ok(Value::none())
         }
 
@@ -606,8 +548,8 @@ pyrust_module! {
                     _ => None,
                 })
                 .unwrap_or_else(|| "T".to_string());
-            // CPython prefixes the variance: `+` covariant, `-` contravariant,
-            // `~` invariant (the default).
+            // CPython prefixes explicit variance: + covariant, - contravariant,
+            // ~ invariant; inferred variance is rendered without a prefix.
             let flag = |attr: &str| {
                 borrow
                     .attrs
@@ -615,14 +557,16 @@ pyrust_module! {
                     .map(|v| v.truthy_raw())
                     .unwrap_or(false)
             };
-            let prefix = if flag("__covariant__") {
-                '+'
+            let rendered = if flag("__infer_variance__") {
+                name
+            } else if flag("__covariant__") {
+                format!("+{name}")
             } else if flag("__contravariant__") {
-                '-'
+                format!("-{name}")
             } else {
-                '~'
+                format!("~{name}")
             };
-            Ok(Value::string(format!("{prefix}{name}")))
+            Ok(Value::string(rendered))
         }
     }
 }
@@ -638,501 +582,59 @@ fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyI
     }
 }
 
-/// Construct a `_TypingAlias` instance carrying `form` and `subscript`.
-fn make_typing_alias(form: &str, subscript: Value) -> Value {
-    TYPING_ALIAS_CLASS.with(|class| {
-        let mut attrs = InstanceAttrs::new();
-        attrs.insert("_form", Value::string(form));
-        attrs.insert("_args", subscript);
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
-}
-
-/// Construct a `_GenericAlias` instance wrapping `origin` (the `Generic` class)
-/// and the raw `subscript` argument.  Used by `Generic.__class_getitem__`.
-///
-/// `_origin` / `_args` keep the raw subscript for the repr (which distinguishes
-/// the single-arg `Generic[T]` from the tuple-arg `Generic[T, U]` spelling).
-/// `__origin__` / `__args__` expose CPython's public attributes: `__origin__`
-/// is the origin class and `__args__` is always a tuple, so `Stack[int].__args__
-/// == (int,)` and `Stack[int].__origin__ is Stack` (issue #2707).
-fn make_generic_alias(origin: Value, subscript: Value) -> Value {
-    let args_tuple = if matches!(subscript.kind(), ValueKind::Tuple(_)) {
-        subscript.clone()
-    } else {
-        Value::tuple(vec![subscript.clone()])
-    };
-    GENERIC_ALIAS_CLASS.with(|class| {
-        let mut attrs = InstanceAttrs::new();
-        attrs.insert("_origin", origin.clone());
-        attrs.insert("_args", subscript);
-        attrs.insert("__origin__", origin);
-        attrs.insert("__args__", args_tuple);
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
-}
-
-/// Render the `_origin` class of a `_GenericAlias` for its repr, mirroring
-/// CPython's `_type_repr`: a class is shown as `{__module__}.{qualname}` unless
-/// its module is `builtins`.  The `typing.Generic` / `typing.Protocol`
-/// singletons keep the `typing.` prefix, while a user subclass shows its
-/// module-qualified name (`__main__.Stack[int]`, matching CPython).
-fn generic_origin_repr(origin: &Value) -> String {
-    if let ValueKind::PyClass(rc) = origin.kind() {
-        let is_typing_singleton = GENERIC_CLASS.with(|c| Rc::ptr_eq(rc, c))
-            || PROTOCOL_CLASS.with(|c| Rc::ptr_eq(rc, c));
-        let borrow = rc.borrow();
-        let qualname = borrow.qualname.clone();
-        if is_typing_singleton {
-            return format!("typing.{qualname}");
-        }
-        let module = borrow
-            .attrs
-            .get("__module__")
-            .and_then(|v| v.as_str().map(|s| s.to_string()));
-        return match module.as_deref() {
-            Some("builtins") | None => qualname,
-            Some(m) => format!("{m}.{qualname}"),
-        };
-    }
-    "typing.Generic".to_string()
-}
-
-/// Render one subscript argument of a `_GenericAlias`, mirroring CPython's
-/// `_type_repr`: a plain class shows its name (`int`) rather than its `repr`
-/// (`<class 'int'>`), while everything else (TypeVar, nested alias, …) uses the
-/// interpreter-aware repr so e.g. a `TypeVar` keeps its variance prefix (`~T`).
-fn generic_arg_repr(interp: &mut Interpreter, v: &Value) -> Result<String> {
-    if let ValueKind::PyClass(rc) = v.kind() {
-        return Ok(rc.borrow().qualname.clone());
-    }
-    crate::builtin_modules::builtins::render_value_repr(interp, v)
-}
-
-/// If `v` is a `_GenericAlias` instance (the runtime type of `Generic[T]`),
-/// return its `_origin` class value so the class-creation machinery can use it
-/// as an MRO entry (`class Stack(Generic[T])`).  Returns `None` otherwise.
-pub(crate) fn generic_alias_origin(v: &Value) -> Option<Value> {
-    let ValueKind::PyInstance(inst) = v.kind() else {
-        return None;
-    };
-    let is_ours = GENERIC_ALIAS_CLASS.with(|c| Rc::ptr_eq(&inst.borrow().class, c));
-    if !is_ours {
-        return None;
-    }
-    inst.borrow().attrs.get("_origin").cloned()
-}
-
-/// Construct the `Any` singleton as a PyInstance of `_Any`.
-fn make_any_instance() -> Value {
-    ANY_CLASS.with(|class| {
-        let mut attrs = InstanceAttrs::new();
-        // `typing.Any.__module__ == "typing"` and `__name__`/`__qualname__` ==
-        // "Any" (issue #2745).  CPython 3.12 models `Any` as a class; pyrust
-        // models it as a singleton instance, so seed these introspection attrs
-        // on the instance rather than on the `_Any` class.
-        attrs.insert("__module__", Value::string("typing"));
-        attrs.insert("__name__", Value::string("Any"));
-        attrs.insert("__qualname__", Value::string("Any"));
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
-}
-
-// Build a PyClass with `__class_getitem__` for a special form.  Uses a
-// thread-local rather than `module()` to avoid re-entrant calls during the
-// constants block.  `expr.rs` treats any BuiltinFunction whose name contains
-// `".__class_getitem__"` as a sentinel and creates a GenericAlias directly,
-// so the function body is never actually invoked at runtime.
-fn class_value_for(name: &str) -> Value {
-    SPECIAL_FORM_CLASSES.with(|map| {
-        map.get(name).cloned().map(Value::py_class).unwrap_or_else(Value::none)
-    })
-}
-
-/// Build a `Union`/`Optional` alias from a subscript, normalising it the way
-/// CPython's `_SpecialForm.__getitem__` does (issue #2524):
-///
-/// 1. `Optional[X]` is `Union[X, None]` — the lone arg is collected and
-///    `NoneType` is appended.  `Optional` rejects a multi-element subscript
-///    with the same `TypeError` CPython raises.
-/// 2. Each arg that is itself a `Union`/`Optional` alias is *flattened* —
-///    its `__args__` are spliced in rather than the nested alias surviving.
-/// 3. `None` arguments are lowered to the `NoneType` class.
-/// 4. Duplicate args are dropped, preserving first-seen order.
-/// 5. A union of a single unique type collapses to that type
-///    (`Union[int]` → `int`); an empty union is a `TypeError`.
-///
-/// The resulting alias always carries the `Union` class as its origin, so
-/// `get_origin` reports `Union` and the repr reconstructs the `Optional[X]`
-/// spelling for the two-arg `X | None` case.
-pub(crate) fn union_or_optional_getitem(form: &str, index: Value) -> Result<Value> {
-    let none_type = || primitive_class_value("NoneType");
-
-    // Collect the raw subscript arguments.
-    let raw: Vec<Value> = match index.kind() {
-        ValueKind::Tuple(items) => {
-            if form == "Optional" {
-                // `Optional[int, str]` is a TypeError in CPython.
-                return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "typing.Optional requires a single type. Got {}.",
-                        index.repr_raw()
-                    ),
-                ));
-            }
-            items.to_vec()
-        }
-        _ => vec![index.clone()],
-    };
-
-    if form == "Optional" {
-        // `Optional[X]` == `Union[X, None]`.
-        let mut args = raw;
-        args.push(Value::none());
-        return build_union(args, none_type());
-    }
-
-    if raw.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            "Cannot take a Union of no types.".to_string(),
-        ));
-    }
-    build_union(raw, none_type())
-}
-
-/// Flatten, lower-`None`, de-duplicate, and collapse a list of `Union` args.
-fn build_union(raw: Vec<Value>, none_type: Value) -> Result<Value> {
-    let mut flat: Vec<Value> = Vec::with_capacity(raw.len());
-    for arg in raw {
-        // Lower `None` to `NoneType` first so nested-vs-bare `None` dedup
-        // consistently.
-        let arg = if arg.is_none() { none_type.clone() } else { arg };
-        // Splice in the args of a nested `Union`/`Optional` alias.
-        if let Some((origin, nested_args)) =
-            pyrust_builtins::generic_alias::as_generic_alias_origin_args(&arg)
-            && is_union_class(&origin)
-            && let ValueKind::Tuple(items) = nested_args.kind()
-        {
-            for inner in items.iter() {
-                push_unique(&mut flat, inner.clone());
-            }
-            continue;
-        }
-        push_unique(&mut flat, arg);
-    }
-
-    // A single-type union collapses to the type itself (`Union[int]` → `int`).
-    if flat.len() == 1 {
-        return Ok(flat.into_iter().next().unwrap());
-    }
-
-    Ok(pyrust_builtins::generic_alias::generic_alias(
-        class_value_for("Union"),
-        Value::tuple(flat),
-    ))
-}
-
-/// Append `arg` to `acc` unless an equal value is already present, preserving
-/// first-seen order (CPython de-dups union members).
-fn push_unique(acc: &mut Vec<Value>, arg: Value) {
-    if !acc.contains(&arg) {
-        acc.push(arg);
-    }
-}
-
-/// True if `v` is the `Union` special-form class singleton (the origin every
-/// flattened union alias carries).
-fn is_union_class(v: &Value) -> bool {
-    if let ValueKind::PyClass(rc) = v.kind() {
-        return SPECIAL_FORM_CLASSES
-            .with(|map| map.get("Union").map(|u| Rc::ptr_eq(rc, u)).unwrap_or(false));
-    }
-    false
-}
-
-thread_local! {
-    /// Map from special-form name → PyClass with `__class_getitem__` registered.
-    static SPECIAL_FORM_CLASSES: std::collections::HashMap<&'static str, Rc<RefCell<PyClass>>> = {
-        let names: &[(&str, &str)] = &[
-            ("Optional", "typing.Optional.__class_getitem__"),
-            ("Union",    "typing.Union.__class_getitem__"),
-            ("Callable", "typing.Callable.__class_getitem__"),
-            ("ClassVar", "typing.ClassVar.__class_getitem__"),
-            ("Final",    "typing.Final.__class_getitem__"),
-            ("Literal",  "typing.Literal.__class_getitem__"),
-            ("Type",     "typing.Type.__class_getitem__"),
-        ];
-        let mut map = std::collections::HashMap::new();
-        for (name, reg_name) in names {
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
-            attrs.insert(
-                "__class_getitem__".to_string(),
-                Value::builtin_function(reg_name),
-            );
-            // Every special-form subscript reprs with a `typing.` prefix
-            // (`typing.Union[int, str]`, `typing.Final[int]`,
-            // `typing.Callable[[int], str]`, …).  The `GenericAlias` repr
-            // qualifies a class origin with its `__module__`, so seed it here
-            // for all special forms.  (The flatten helper always uses the
-            // `Union` class as the union alias origin.)
-            attrs.insert("__module__".to_string(), Value::string("typing"));
-            let mut pyclass = PyClass::new(*name, *name, None, attrs);
-            // The bare special form reprs as `typing.<name>` (e.g.
-            // `repr(typing.Union) == "typing.Union"`), not the default
-            // `<class 'typing.Union'>`.  Set on the dedicated `override_repr`
-            // field, not in `attrs`, so it mirrors CPython's `_SpecialForm`
-            // repr without being hijackable via `__dict__` (issue #2608).
-            pyclass.override_repr = Some(format!("typing.{name}").into_boxed_str());
-            let class = Rc::new(RefCell::new(pyclass));
-            map.insert(*name, class);
-        }
-        map
-    };
-}
-
-thread_local! {
-    /// Map from legacy-alias name (`List`, `Dict`, …) → its dedicated
-    /// `_SpecialGenericAlias`-style `PyClass` singleton.  Each carries:
-    ///   * `qualname`/`name` = the alias name (`List`),
-    ///   * `__module__` = `"typing"` so the `GenericAlias` repr qualifies a
-    ///     subscript as `typing.List[int]`,
-    ///   * `override_repr` = `"typing.List"` so the *bare* class reprs as
-    ///     `typing.List` (not `<class 'typing.List'>`).  This is a dedicated
-    ///     `PyClass` field, not a `__dict__` attr, so a user class cannot hijack
-    ///     its own repr (issue #2608),
-    ///   * `__class_getitem__` sentinel so `List[int]` builds a `GenericAlias`
-    ///     with this class as origin,
-    ///   * `__pyrust_legacy_alias_of__` = the underlying builtin name
-    ///     (`"list"`) so `isinstance`/`issubclass` delegate to that builtin.
-    static LEGACY_ALIAS_CLASSES: std::collections::HashMap<&'static str, Rc<RefCell<PyClass>>> = {
-        // (alias name, underlying builtin name)
-        let names: &[(&str, &str)] = &[
-            ("List", "list"),
-            ("Dict", "dict"),
-            ("Set", "set"),
-            ("FrozenSet", "frozenset"),
-            ("Tuple", "tuple"),
-            ("Type", "type"),
-        ];
-        let mut map = std::collections::HashMap::new();
-        for (name, builtin) in names {
-            let name = *name;
-            let mut attrs: IndexMap<String, Value> = IndexMap::new();
-            attrs.insert(
-                "__class_getitem__".to_string(),
-                Value::builtin_function(legacy_alias_cgi_name(name)),
-            );
-            attrs.insert("__module__".to_string(), Value::string("typing"));
-            // The underlying builtin this alias delegates to, stored as the
-            // class value itself so both `legacy_alias_delegate` (native) and
-            // `get_origin` (Python) can normalise to it directly.
-            attrs.insert(
-                "__pyrust_legacy_alias_of__".to_string(),
-                legacy_builtin_class_value(builtin),
-            );
-            let mut pyclass = PyClass::new(name, name, None, attrs);
-            // Verbatim bare-class repr (`typing.List`).  Set on the dedicated
-            // field, not in `attrs`, so user classes can't hijack it (#2608).
-            pyclass.override_repr = Some(format!("typing.{name}").into_boxed_str());
-            let class = Rc::new(RefCell::new(pyclass));
-            map.insert(name, class);
-        }
-        map
-    };
-}
-
-/// Registry name for a legacy alias's `__class_getitem__` sentinel.  The name
-/// contains `.__class_getitem__`, which makes `expr.rs`'s subscript handler
-/// build a `GenericAlias` (origin = this class) directly rather than invoking
-/// the function — so the function body is never called.
-fn legacy_alias_cgi_name(name: &str) -> &'static str {
-    match name {
-        "List" => "typing.List.__class_getitem__",
-        "Dict" => "typing.Dict.__class_getitem__",
-        "Set" => "typing.Set.__class_getitem__",
-        "FrozenSet" => "typing.FrozenSet.__class_getitem__",
-        "Tuple" => "typing.Tuple.__class_getitem__",
-        "Type" => "typing.Type.__class_getitem__",
-        _ => "typing._legacy.__class_getitem__",
-    }
-}
-
-/// The module-constant `Value` for a legacy alias (`typing.List`, …).
-fn legacy_alias_value(name: &str) -> Value {
-    LEGACY_ALIAS_CLASSES.with(|map| {
-        map.get(name)
-            .cloned()
-            .map(Value::py_class)
-            .unwrap_or_else(Value::none)
-    })
-}
-
-/// Resolve a legacy-alias builtin name (`"list"`, `"type"`, …) to its
-/// `PyClass` value.  `type` lives in the metaclass singleton; the rest are
-/// primitive classes.
-fn legacy_builtin_class_value(builtin: &str) -> Value {
-    if builtin == "type" {
-        return Value::py_class(crate::interpreter::type_class_singleton());
-    }
-    crate::interpreter::primitive_class_by_name(builtin)
-        .map(Value::py_class)
-        .unwrap_or_else(Value::none)
-}
-
-/// If `class` is one of the legacy typing aliases (`typing.List`, …), return
-/// the `PyClass` value of the underlying builtin it delegates to (`list`, …).
-/// Used by `isinstance`/`issubclass` so checks against the alias behave like
-/// checks against the builtin.  Returns `None` for any other class.
-pub(crate) fn legacy_alias_delegate(class: &Rc<RefCell<PyClass>>) -> Option<Value> {
-    // Confirm pointer identity against a singleton (not just the marker attr)
-    // so a user class that happens to set the attr cannot hijack delegation.
-    let is_ours = LEGACY_ALIAS_CLASSES.with(|map| map.values().any(|c| Rc::ptr_eq(c, class)));
-    if !is_ours {
-        return None;
-    }
-    class.borrow().attrs.get("__pyrust_legacy_alias_of__").cloned()
-}
-
-/// Helper to get a primitive-class Value by name.
-fn primitive_class_value(name: &str) -> Value {
-    match crate::interpreter::primitive_class_by_name(name) {
-        Some(rc) => Value::py_class(rc),
-        None => Value::none(),
-    }
-}
-
-// ── Python-source members (issue #2516) ───────────────────────────────────────
-//
-// Members that are most naturally expressed in Python (`get_type_hints`,
-// `get_origin`, `get_args`, `runtime_checkable`, `reveal_type`, the
-// `Self`/`Never`/`Annotated`/… special-form markers, `ParamSpec`,
-// `TypeVarTuple`, …) live in `typing_py.py`.  They are exec'd once into a
-// throwaway namespace at first import of `typing`, and the resulting public
-// names are copied onto the module — mirroring `collections::inject_python_members`.
-
-/// Python-source definitions for the runtime helpers and special-form markers.
-const TYPING_PY_SOURCE: &str = include_str!("typing_py.py");
-
-/// Public names defined by `TYPING_PY_SOURCE` to export onto the module.
-/// Private helpers (`_resolve`, `_namedtuple_functional`,
-/// `_build_namedtuple_class`, `_SpecialMarker`) are intentionally omitted.
-const TYPING_PY_EXPORTS: &[&str] = &[
-    "get_origin",
-    "get_args",
-    "get_type_hints",
-    "runtime_checkable",
-    "final",
-    "no_type_check",
-    "reveal_type",
-    "assert_never",
-    "assert_type",
-    "dataclass_transform",
-    "get_overloads",
-    "clear_overloads",
-    "Self",
-    "Never",
-    "LiteralString",
-    "Annotated",
-    "TypeAlias",
-    "Concatenate",
-    "Unpack",
-    "Required",
-    "NotRequired",
-    "TypeGuard",
-    "ParamSpec",
-    "ParamSpecArgs",
-    "ParamSpecKwargs",
-    "TypeVarTuple",
-];
-
-/// Exec `TYPING_PY_SOURCE` once and copy its public names onto the `typing`
-/// module.  The native special forms (`Optional`, `Union`, `Type`, …) are
-/// pre-seeded into the exec namespace so the Python helpers can reference them
-/// by identity (e.g. `get_origin` normalising `Optional`/`Union` origins).
-/// `_namedtuple_functional` and `_build_namedtuple_class` are also retained on
-/// the module under their private names for the native `NamedTuple` paths.
-pub(crate) fn inject_python_members(
-    interp: &mut Interpreter,
-    module: &Rc<RefCell<crate::value::PyModule>>,
-) -> Result<()> {
-    let ns = crate::builtin_modules::make_module_exec_ns(module)?;
-    // Seed the exec namespace with the native special-form names the helpers
-    // reference by identity.
-    for name in [
-        "Optional", "Union", "Type", "Callable", "ClassVar", "Final", "Literal",
-    ] {
-        let v = module.borrow().attrs.get(name).cloned();
-        if let Some(v) = v {
-            ns.dict_insert(PyKey::str_from(name), v)?;
-        }
-    }
-    // `typing.TypeVar` is a macro-built `PyClass` whose attrs only carry its
-    // methods; the macro has no facility to seed `__module__`.  Set it here so
-    // `typing.TypeVar.__module__ == "typing"` and the bare class reprs as
-    // `<class 'typing.TypeVar'>` (issue #2745), mirroring Generic/Protocol.
-    let type_var = module.borrow().attrs.get("TypeVar").cloned();
-    if let Some(tv) = type_var
-        && let ValueKind::PyClass(class) = tv.kind()
-    {
-        class
-            .borrow_mut()
-            .attrs
-            .insert("__module__".to_string(), Value::string("typing"));
-    }
-    // `TypeAliasType` (the runtime type of PEP 695 `type X = ...` objects) lives
-    // as a thread-local singleton on the interpreter side, not as a typing.rs
-    // class.  Export the same singleton so `typing.TypeAliasType` exists and
-    // `type(my_alias) is typing.TypeAliasType` holds (issue #2779).
-    module.borrow_mut().attrs.insert(
-        "TypeAliasType".to_string(),
-        Value::py_class(crate::interpreter::type_alias_class_singleton()),
+#[cfg(test)]
+mod ownership_tests {
+    const OWNER: &str = include_str!("typing.rs");
+    const ALIASES: &str = include_str!("typing/aliases.rs");
+    const GENERATION: &str = include_str!("typing/generation.rs");
+    const PYTHON_MEMBERS: &str = include_str!("typing/python_members.rs");
+    const IMPLEMENTATIONS: &str = concat!(
+        include_str!("typing/aliases.rs"),
+        include_str!("typing/generation.rs"),
+        include_str!("typing/python_members.rs"),
     );
-    interp.exec_source(TYPING_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| PyError::Runtime("typing: exec namespace not a dict".into()))?;
-    let mut exports: Vec<&str> = TYPING_PY_EXPORTS.to_vec();
-    // Private helpers consumed by the native NamedTuple paths.
-    exports.push("_namedtuple_functional");
-    exports.push("_build_namedtuple_class");
-    // Private helpers consumed by the native TypedDict paths (issue #2718).
-    exports.push("_typeddict_functional");
-    exports.push("_build_typeddict_class");
-    for name in exports {
-        if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            // `ParamSpecArgs` / `ParamSpecKwargs` are exec'd into a throwaway
-            // namespace whose module name defaults to `__main__`, so their class
-            // `__module__` would wrongly report `__main__`.  CPython exposes them
-            // as `typing.<Name>` (`type(P.args).__module__ == "typing"`, issue
-            // #2796).  Seed `__module__ = "typing"` on these two classes to match.
-            // (Limited to the proxy classes on purpose: `ParamSpec` /
-            // `TypeVarTuple` instances capture the *caller's* module like
-            // `TypeVar`, so retagging their class to "typing" would make
-            // `P.__module__` wrongly report "typing" instead of "__main__".)
-            if matches!(name, "ParamSpecArgs" | "ParamSpecKwargs")
-                && let ValueKind::PyClass(class) = val.kind()
-            {
-                class
-                    .borrow_mut()
-                    .attrs
-                    .insert("__module__".to_string(), Value::string("typing"));
-            }
-            module
-                .borrow_mut()
-                .attrs
-                .insert(name.to_string(), val.clone());
-        }
+
+    #[test]
+    fn facade_keeps_the_only_registration_surface() {
+        let registration_macro = concat!("pyrust_", "module!");
+        assert_eq!(
+            OWNER.matches(registration_macro).count(),
+            1,
+            "typing.rs must remain the only registration owner"
+        );
+        assert!(
+            !IMPLEMENTATIONS.contains(registration_macro),
+            "private implementation modules must not register Python names"
+        );
     }
-    Ok(())
+
+    #[test]
+    fn implementation_dependencies_are_explicit() {
+        let wildcard_parent_import = concat!("use super::", "*");
+        assert!(!IMPLEMENTATIONS.contains(wildcard_parent_import));
+        assert!(!IMPLEMENTATIONS.contains("include!("));
+    }
+
+    #[test]
+    fn responsibilities_stay_owned_by_one_module() {
+        assert!(GENERATION.contains("struct TypingGeneration"));
+        assert!(GENERATION.contains("STABLE_GENERIC_CLASS"));
+        assert!(!GENERATION.contains("Interpreter"));
+
+        assert!(ALIASES.contains("fn build_union"));
+        assert!(ALIASES.contains("fn build_legacy_alias_class"));
+        assert!(!ALIASES.contains("TYPING_PY_SOURCE"));
+
+        assert!(PYTHON_MEMBERS.contains("TYPING_PY_SOURCE"));
+        assert!(PYTHON_MEMBERS.contains("exec_source"));
+        assert!(!PYTHON_MEMBERS.contains("TypingGeneration"));
+    }
+
+    #[test]
+    fn registration_facade_stays_small() {
+        assert!(
+            OWNER.lines().count() <= 700,
+            "typing registration facade grew beyond its 700-line budget"
+        );
+    }
 }

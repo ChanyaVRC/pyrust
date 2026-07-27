@@ -93,9 +93,9 @@ except KeyError as e:
     print("missing key:", e)
 
 
-# A `__slots__ = (..., '__dict__')` class stores slot members in the same attrs
-# map but they are NOT part of the `__dict__` proxy: they must stay hidden from
-# iteration/len and must survive a `dict.clear()` / `popitem()` of the proxy.
+# A `__slots__ = (..., '__dict__')` class stores slot members independently
+# from the visible mapping: they are not part of the `__dict__` proxy and must
+# survive a `dict.clear()` / `popitem()` of the proxy.
 class S:
     __slots__ = ("q", "__dict__")
 

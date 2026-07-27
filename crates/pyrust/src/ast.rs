@@ -76,6 +76,43 @@ pub enum AssignTarget {
     Starred(Box<AssignTarget>),
 }
 
+impl AssignTarget {
+    /// Visit expressions that Python evaluates while resolving this target.
+    ///
+    /// A bare name is a binding, not an expression evaluation.  Attribute,
+    /// item and slice targets evaluate their receiver/key/bounds even though
+    /// they occur on the left-hand side.  Keeping that shape traversal next to
+    /// the AST prevents scope, yield and walrus analyses from independently
+    /// forgetting augmented-assignment target reads.
+    pub(crate) fn visit_evaluated_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        match self {
+            AssignTarget::Name(_) => {}
+            AssignTarget::Attr(target, ..) => visitor(target),
+            AssignTarget::Index(target, index) => {
+                visitor(target);
+                visitor(index);
+            }
+            AssignTarget::Slice {
+                target,
+                lower,
+                upper,
+                step,
+            } => {
+                visitor(target);
+                for expr in [lower, upper, step].iter().flat_map(|expr| expr.as_deref()) {
+                    visitor(expr);
+                }
+            }
+            AssignTarget::Tuple(targets) => {
+                for target in targets {
+                    target.visit_evaluated_exprs(visitor);
+                }
+            }
+            AssignTarget::Starred(target) => target.visit_evaluated_exprs(visitor),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Assign(AssignTarget, Expr),
@@ -302,6 +339,50 @@ pub enum Pattern {
     /// `pattern as name` — matches `pattern` and, if it succeeds, binds the
     /// entire subject (not just the matched portion) to `name`.
     As { pattern: Box<Pattern>, name: String },
+}
+
+impl Pattern {
+    /// Visit expressions evaluated by a structural-match pattern.
+    ///
+    /// Capture names are bindings.  Literal/value expressions, mapping keys and
+    /// the class expression are runtime reads and must remain visible to every
+    /// scope/effect walker.
+    pub(crate) fn visit_evaluated_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        match self {
+            Pattern::Wildcard | Pattern::Capture(_) => {}
+            Pattern::Literal(expr) | Pattern::Value(expr) => visitor(expr),
+            Pattern::Or(patterns) => {
+                for pattern in patterns {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::Sequence(elements) => {
+                for (pattern, _) in elements {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::Mapping(pairs, _) => {
+                for (key, pattern) in pairs {
+                    visitor(key);
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::Class {
+                cls,
+                positional,
+                kwargs,
+            } => {
+                visitor(cls);
+                for pattern in positional {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+                for (_, pattern) in kwargs {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::As { pattern, .. } => pattern.visit_evaluated_exprs(visitor),
+        }
+    }
 }
 
 /// An entry in a dict literal: either a `key: value` pair or a `**expr` splat

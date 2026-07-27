@@ -1,8 +1,6 @@
-# Issue #439: ForCount* opcodes used wrapping_add, so range() over near-i64::MAX
-# (or near-i64::MIN) bounds wrapped past `stop` and looped forever.
-#
-# The fix is in the VM's ForCountReg / ForCountConst / ForCountConstInline
-# handlers: use checked_add, and exit the loop on overflow.
+# Issue #439: range iteration near i64 limits must not wrap its cursor past
+# `stop` and loop forever. The canonical range iterator owns this arithmetic
+# and promotes or terminates without machine-integer wraparound.
 
 # --- The exact #439 repro: step=2, start = i64::MAX - 3, stop = i64::MAX ---
 

@@ -1,9 +1,8 @@
 # Regression fixture for issue #438.
 #
-# Before the fix, `pass_algebraic_simplify` rewrote `x + 0`, `x * 1`, `x * 0`,
-# `x ** 0`, `x ** 1`, `x - 0` into Move / LoadConst at compile time, bypassing
-# the `__add__` / `__sub__` / `__mul__` / `__pow__` dunder dispatch on user
-# classes.
+# Dynamic `x + 0`, `x * 1`, `x * 0`, `x ** 0`, `x ** 1`, and `x - 0` must not
+# become Move / LoadConst operations: doing so bypasses the `__add__`,
+# `__sub__`, `__mul__`, and `__pow__` dispatch on user classes.
 #
 # This file exercises each of the six identity patterns with a user-class LHS
 # (the failure case is *inside* a function body — at module scope the
@@ -55,7 +54,7 @@ print(f_mul0(7))    # 0
 print(f_pow0(7))    # 1
 print(f_pow1(7))    # 7
 
-# Constant LHS continues to be folded by pass_const_fold.
+# A fully constant expression continues to use ordinary constant folding.
 def const_fold_check():
     return 5 + 0
 print(const_fold_check())   # 5

@@ -38,9 +38,9 @@ pub(crate) fn inject_python_members(
 ) -> Result<()> {
     let ns = crate::builtin_modules::make_module_exec_ns(module)?;
     interp.exec_source(STRING_PY_SOURCE, Some(ns.clone()), None)?;
-    let dict = ns
-        .as_dict()
-        .ok_or_else(|| crate::error::PyError::Runtime("string: exec namespace not a dict".into()))?;
+    let dict = ns.as_dict().ok_or_else(|| {
+        crate::error::PyError::Runtime("string: exec namespace not a dict".into())
+    })?;
     for name in STRING_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
             module

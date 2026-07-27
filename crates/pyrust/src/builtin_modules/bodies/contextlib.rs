@@ -25,14 +25,190 @@
 // Reference: <https://docs.python.org/3/library/contextlib.html>
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::class_is_subclass_of;
 use crate::interpreter::Interpreter;
-use crate::value::{InstanceAttrs, PyDict, PyInstance, PyKey, Value, ValueKind};
+use crate::interpreter::{class_is_subclass_of, is_stop_iteration_error};
+use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
+
+const INTERNAL_CLASS_NAMES: [&str; 3] = [
+    "_GeneratorContextManager",
+    "_ContextManagerFactory",
+    "_StackCallback",
+];
+
+type WeakPyClass = Weak<RefCell<PyClass>>;
+type InternalClassRegistry = RefCell<Vec<(&'static str, WeakPyClass)>>;
+
+struct ContextManagerClassGeneration {
+    factory: WeakPyClass,
+    // The factory class is the weak lifetime key. Retaining its sibling
+    // strongly lets a decorated factory outlive a removed module without
+    // keeping discarded generations alive after the factory itself dies.
+    manager: Rc<RefCell<PyClass>>,
+}
+
+struct ExitStackClassGeneration {
+    exit_stack: WeakPyClass,
+    // As above, the public receiver class is the weak lifetime key for the
+    // private callback sibling.
+    callback: Rc<RefCell<PyClass>>,
+}
+
+thread_local! {
+    /// Weak identities for every still-live imported contextlib generation.
+    ///
+    /// A fresh import after deleting `sys.modules["contextlib"]` must create a
+    /// fresh set of classes. Old instances keep their generation alive through
+    /// their strong class reference.
+    static INTERNAL_CLASSES: InternalClassRegistry = const { RefCell::new(Vec::new()) };
+
+    /// Generation-local `_ContextManagerFactory` → `_GeneratorContextManager`
+    /// associations. Calling a retained factory must not switch to the newest
+    /// imported contextlib generation.
+    static CONTEXT_MANAGER_CLASS_GENERATIONS:
+        RefCell<Vec<ContextManagerClassGeneration>> = const { RefCell::new(Vec::new()) };
+
+    /// Generation-local `ExitStack` → `_StackCallback` associations.
+    static EXIT_STACK_CLASS_GENERATIONS:
+        RefCell<Vec<ExitStackClassGeneration>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Finalize and register the concrete classes exported by one imported
+/// `contextlib` module generation.
+pub(crate) fn prepare_module_classes(module: &Value) {
+    let ValueKind::PyModule(module) = module.kind() else {
+        return;
+    };
+    let classes = module
+        .borrow()
+        .attrs
+        .iter()
+        .filter_map(|(name, value)| match value.kind() {
+            ValueKind::PyClass(class) => Some((name.clone(), Rc::clone(class))),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (_, class) in &classes {
+        class
+            .borrow_mut()
+            .attrs
+            .insert("__module__".to_string(), Value::string("contextlib"));
+    }
+    if let (Some((_, factory)), Some((_, manager))) = (
+        classes
+            .iter()
+            .find(|(name, _)| name == "_ContextManagerFactory"),
+        classes
+            .iter()
+            .find(|(name, _)| name == "_GeneratorContextManager"),
+    ) {
+        register_context_manager_generation(factory, manager);
+    }
+    if let (Some((_, exit_stack)), Some((_, callback))) = (
+        classes.iter().find(|(name, _)| name == "ExitStack"),
+        classes.iter().find(|(name, _)| name == "_StackCallback"),
+    ) {
+        register_exit_stack_generation(exit_stack, callback);
+    }
+    INTERNAL_CLASSES.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.retain(|(_, class)| class.strong_count() > 0);
+        for &name in &INTERNAL_CLASS_NAMES {
+            let Some((_, class)) = classes.iter().find(|(candidate, _)| candidate == name) else {
+                continue;
+            };
+            if !registry.iter().any(|(registered_name, registered)| {
+                *registered_name == name && registered.as_ptr() == Rc::as_ptr(class)
+            }) {
+                registry.push((name, Rc::downgrade(class)));
+            }
+        }
+    });
+}
+
+fn registered_internal_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    INTERNAL_CLASSES.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry.retain(|(_, class)| class.strong_count() > 0);
+        registry
+            .iter()
+            .rev()
+            .find(|(registered_name, _)| *registered_name == name)
+            .and_then(|(_, class)| class.upgrade())
+    })
+}
+
+fn register_context_manager_generation(
+    factory: &Rc<RefCell<PyClass>>,
+    manager: &Rc<RefCell<PyClass>>,
+) {
+    CONTEXT_MANAGER_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.factory.strong_count() > 0);
+        if generations
+            .iter()
+            .any(|generation| generation.factory.as_ptr() == Rc::as_ptr(factory))
+        {
+            return;
+        }
+        generations.push(ContextManagerClassGeneration {
+            factory: Rc::downgrade(factory),
+            manager: Rc::clone(manager),
+        });
+    });
+}
+
+fn generator_manager_class_for_factory(
+    factory: &Rc<RefCell<PyClass>>,
+) -> Option<Rc<RefCell<PyClass>>> {
+    CONTEXT_MANAGER_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.factory.strong_count() > 0);
+        generations.iter().rev().find_map(|generation| {
+            let registered_factory = generation.factory.upgrade()?;
+            class_is_subclass_of(factory, &registered_factory)
+                .then(|| Rc::clone(&generation.manager))
+        })
+    })
+}
+
+fn register_exit_stack_generation(
+    exit_stack: &Rc<RefCell<PyClass>>,
+    callback: &Rc<RefCell<PyClass>>,
+) {
+    EXIT_STACK_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.exit_stack.strong_count() > 0);
+        if generations
+            .iter()
+            .any(|generation| generation.exit_stack.as_ptr() == Rc::as_ptr(exit_stack))
+        {
+            return;
+        }
+        generations.push(ExitStackClassGeneration {
+            exit_stack: Rc::downgrade(exit_stack),
+            callback: Rc::clone(callback),
+        });
+    });
+}
+
+fn stack_callback_class_for_exit_stack(
+    exit_stack: &Rc<RefCell<PyClass>>,
+) -> Option<Rc<RefCell<PyClass>>> {
+    EXIT_STACK_CLASS_GENERATIONS.with(|generations| {
+        let mut generations = generations.borrow_mut();
+        generations.retain(|generation| generation.exit_stack.strong_count() > 0);
+        generations.iter().rev().find_map(|generation| {
+            let registered_exit_stack = generation.exit_stack.upgrade()?;
+            class_is_subclass_of(exit_stack, &registered_exit_stack)
+                .then(|| Rc::clone(&generation.callback))
+        })
+    })
+}
 
 /// Python-source definitions for the contextlib members most naturally
 /// expressed in Python (issue #2795): `AbstractContextManager`,
@@ -109,9 +285,10 @@ fn seed_dependency(
         )));
     };
     for name in names {
-        let val = m.borrow().attrs.get(*name).cloned().ok_or_else(|| {
-            PyError::Runtime(format!("contextlib: {module_name}.{name} missing"))
-        })?;
+        let val =
+            m.borrow().attrs.get(*name).cloned().ok_or_else(|| {
+                PyError::Runtime(format!("contextlib: {module_name}.{name} missing"))
+            })?;
         ns.dict_insert(PyKey::str_from(name), val)?;
     }
     Ok(())
@@ -211,7 +388,7 @@ pyrust_module! {
             // Advance to the first yield; the yielded value becomes the `with … as` target.
             match _interp.call_next(&generator, None) {
                 Ok(val) => Ok(val),
-                Err(e) if is_stop_iteration(&e) => {
+                Err(e) if is_stop_iteration_error(&e) => {
                     // Generator returned without yielding — protocol violation.
                     Err(PyError::named(
                         "RuntimeError",
@@ -242,7 +419,7 @@ pyrust_module! {
                             "generator didn't stop".to_string(),
                         ))
                     }
-                    Err(e) if is_stop_iteration(&e) => {
+                    Err(e) if is_stop_iteration_error(&e) => {
                         // Generator finished normally — expected.
                         // CPython's _GeneratorContextManager.__exit__ returns
                         // `False` here (not None): it falls through to the
@@ -275,7 +452,7 @@ pyrust_module! {
                             "generator didn't stop after throw()".to_string(),
                         ))
                     }
-                    Err(e) if is_stop_iteration(&e) => {
+                    Err(e) if is_stop_iteration_error(&e) => {
                         // Generator handled the exception and returned normally — suppress.
                         Ok(Value::bool_(true))
                     }
@@ -332,16 +509,21 @@ pyrust_module! {
 
         fn __call__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let func = inst.borrow().attrs.get("_func").cloned().ok_or_else(|| {
-                PyError::Runtime(format!("internal: {FN_NAME}() _func missing"))
-            })?;
+            let (factory_class, func) = {
+                let factory = inst.borrow();
+                let func = factory.attrs.get("_func").cloned().ok_or_else(|| {
+                    PyError::Runtime(format!("internal: {FN_NAME}() _func missing"))
+                })?;
+                (Rc::clone(&factory.class), func)
+            };
             let user = &args[1..];
             // Call the generator function to get a generator object.
             let generator = _interp.call_function_expanded(func, user)?;
-            // Wrap the generator in a _GeneratorContextManager.
+            // Wrap the generator in the sibling class from this factory's
+            // imported module generation, even if contextlib was re-imported.
             let mut attrs = InstanceAttrs::new();
             attrs.insert("_gen", generator);
-            Ok(make_instance("_GeneratorContextManager", attrs))
+            Ok(make_generator_manager_instance(&factory_class, attrs))
         }
     }
 
@@ -663,6 +845,7 @@ pyrust_module! {
         /// a no-argument cleanup callback.  The extra args are bound at push time.
         fn callback(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
+            let exit_stack_class = Rc::clone(&inst.borrow().class);
             if args.len() < 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -682,7 +865,7 @@ pyrust_module! {
                 ])
             }).collect();
             attrs.insert("_bound_args", Value::list(encoded));
-            let wrapper = make_instance("_StackCallback", attrs);
+            let wrapper = make_stack_callback_instance(&exit_stack_class, attrs);
             // Push a closure-like value: a _StackCallback that, when called with
             // (exc_type, exc_val, tb), ignores those and calls func(*bound_args).
             let callbacks_val = inst.borrow().attrs.get("_callbacks").cloned()
@@ -766,10 +949,7 @@ pyrust_module! {
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
-fn expect_self(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<RefCell<PyInstance>>> {
+fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
         Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
@@ -778,40 +958,55 @@ fn expect_self(
     }
 }
 
-/// Quick-check whether `err` is a StopIteration error (any variant).
-fn is_stop_iteration(err: &PyError) -> bool {
-    match err {
-        PyError::Named(name, _) => name.as_ref() == "StopIteration",
-        PyError::Class(cls, _) => cls.borrow().name == "StopIteration",
-        PyError::Raised(exc) => match exc.kind() {
-            ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name == "StopIteration",
-            _ => false,
-        },
-        _ => false,
-    }
-}
-
-/// Pull out `module_class` from this contextlib module by name.
+/// Resolve the newest live imported generation for receiver-less bootstrap.
+///
+/// Receiver-driven sibling factories use their dedicated generation mappings
+/// above. This lookup remains only for creating the initial
+/// `_ContextManagerFactory` from the module-level decorator and for rebuilding
+/// a dropped fallback module.
 fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
-    let module_val = module();
-    let ValueKind::PyModule(m) = module_val.kind() else {
-        return None;
-    };
-    let class_val = m.borrow().attrs.get(name).cloned()?;
-    match class_val.kind() {
-        ValueKind::PyClass(c) => Some(Rc::clone(c)),
-        _ => None,
+    if let Some(class) = registered_internal_class(name) {
+        return Some(class);
     }
+    let module_value = module();
+    prepare_module_classes(&module_value);
+    registered_internal_class(name)
 }
 
 /// Construct a `PyInstance` of `name` with the given attrs, bypassing `__init__`.
 fn make_instance(name: &str, attrs: InstanceAttrs) -> Value {
     match module_class(name) {
         Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs }))),
-        None => unreachable!(
-            "internal: contextlib module did not register class `{name}`",
-        ),
+        None => unreachable!("internal: contextlib module did not register class `{name}`",),
     }
+}
+
+/// Construct the manager sibling owned by a concrete factory generation.
+fn make_generator_manager_instance(
+    factory_class: &Rc<RefCell<PyClass>>,
+    attrs: InstanceAttrs,
+) -> Value {
+    let class = generator_manager_class_for_factory(factory_class)
+        .or_else(|| module_class("_GeneratorContextManager"))
+        .unwrap_or_else(|| {
+            unreachable!(
+                "internal: contextlib module did not register class `_GeneratorContextManager`"
+            )
+        });
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Construct the callback sibling owned by a concrete ExitStack generation.
+fn make_stack_callback_instance(
+    exit_stack_class: &Rc<RefCell<PyClass>>,
+    attrs: InstanceAttrs,
+) -> Value {
+    let class = stack_callback_class_for_exit_stack(exit_stack_class)
+        .or_else(|| module_class("_StackCallback"))
+        .unwrap_or_else(|| {
+            unreachable!("internal: contextlib module did not register class `_StackCallback`")
+        });
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
 /// Shared `__enter__` for `redirect_stdout`/`redirect_stderr`.  Snapshots the
@@ -856,7 +1051,9 @@ fn redirect_exit(
         .cloned()
         .unwrap_or_else(|| Value::list(vec![]));
     let restored = match old_targets.list_len() {
-        Some(n) if n > 0 => old_targets.list_pop_at(n - 1).unwrap_or_else(|_| Value::none()),
+        Some(n) if n > 0 => old_targets
+            .list_pop_at(n - 1)
+            .unwrap_or_else(|_| Value::none()),
         _ => Value::none(),
     };
     interp.set_std_stream(stream, restored)?;
@@ -865,11 +1062,7 @@ fn redirect_exit(
 
 /// Call `os.<func>(*args)` from the contextlib runtime.  Used by `chdir` to
 /// reach `os.getcwd()` / `os.chdir(path)` without duplicating their logic.
-fn os_call(
-    interp: &mut crate::Interpreter,
-    func: &str,
-    args: &[ExpandedCallArg],
-) -> Result<Value> {
+fn os_call(interp: &mut crate::Interpreter, func: &str, args: &[ExpandedCallArg]) -> Result<Value> {
     let os_module = interp.load_module("os")?;
     let callable = interp.get_attr(&os_module, func)?;
     interp.call_function_expanded(callable, args)
@@ -884,7 +1077,11 @@ fn make_cm_factory(func: Value) -> Value {
 
 /// Drain all callbacks from `_callbacks` into a Vec and clear the stack.
 fn pop_all_callbacks(inst: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
-    let callbacks_val = inst.borrow().attrs.get("_callbacks").cloned()
+    let callbacks_val = inst
+        .borrow()
+        .attrs
+        .get("_callbacks")
+        .cloned()
         .unwrap_or_else(|| Value::list(vec![]));
     // Collect a snapshot first (list_with drops the Ref before returning),
     // then clear the underlying list.  Doing both in one `match callbacks_val.kind()`
@@ -909,5 +1106,70 @@ fn is_same_raised_exception(err: &PyError, thrown: &Value) -> bool {
     match (raised.kind(), thrown.kind()) {
         (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    fn test_class(name: &str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
+        Rc::new(RefCell::new(PyClass {
+            name: name.to_string(),
+            qualname: name.to_string(),
+            base,
+            ..PyClass::default()
+        }))
+    }
+
+    #[test]
+    fn retained_factory_resolves_manager_from_its_own_generation() {
+        let old_factory = test_class("old factory", None);
+        let old_manager = test_class("old manager", None);
+        register_context_manager_generation(&old_factory, &old_manager);
+
+        let new_factory = test_class("new factory", None);
+        let new_manager = test_class("new manager", None);
+        register_context_manager_generation(&new_factory, &new_manager);
+
+        let old_factory_subclass =
+            test_class("old factory subclass", Some(Rc::clone(&old_factory)));
+        assert!(Rc::ptr_eq(
+            &generator_manager_class_for_factory(&old_factory).unwrap(),
+            &old_manager,
+        ));
+        assert!(Rc::ptr_eq(
+            &generator_manager_class_for_factory(&old_factory_subclass).unwrap(),
+            &old_manager,
+        ));
+        assert!(Rc::ptr_eq(
+            &generator_manager_class_for_factory(&new_factory).unwrap(),
+            &new_manager,
+        ));
+    }
+
+    #[test]
+    fn retained_exit_stack_resolves_callback_from_its_own_generation() {
+        let old_stack = test_class("old ExitStack", None);
+        let old_callback = test_class("old callback", None);
+        register_exit_stack_generation(&old_stack, &old_callback);
+
+        let new_stack = test_class("new ExitStack", None);
+        let new_callback = test_class("new callback", None);
+        register_exit_stack_generation(&new_stack, &new_callback);
+
+        let old_stack_subclass = test_class("old stack subclass", Some(Rc::clone(&old_stack)));
+        assert!(Rc::ptr_eq(
+            &stack_callback_class_for_exit_stack(&old_stack).unwrap(),
+            &old_callback,
+        ));
+        assert!(Rc::ptr_eq(
+            &stack_callback_class_for_exit_stack(&old_stack_subclass).unwrap(),
+            &old_callback,
+        ));
+        assert!(Rc::ptr_eq(
+            &stack_callback_class_for_exit_stack(&new_stack).unwrap(),
+            &new_callback,
+        ));
     }
 }
