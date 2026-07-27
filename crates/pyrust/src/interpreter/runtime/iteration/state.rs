@@ -63,6 +63,12 @@ pub(crate) struct LiveKeyCursor {
     /// complete current key order is captured once. `snapshot_pos` divides
     /// the already-yielded prefix from the remaining fast indexed suffix.
     pub(crate) snapshot: Option<Vec<PyKey>>,
+    /// A small key or set walk's frozen order, already in yielded form.
+    ///
+    /// Mutually exclusive with `snapshot`: the walk holds exactly one
+    /// representation of its order, and converts to `snapshot` the moment it
+    /// needs the original keys back.
+    pub(crate) frozen_keys: Option<Vec<Value>>,
     pub(crate) snapshot_pos: usize,
     /// Backing mapping resolved once, for containers whose backing identity
     /// cannot move. While the mutation generation is unchanged the insertion
@@ -71,7 +77,11 @@ pub(crate) struct LiveKeyCursor {
     pub(crate) backing: Option<pyrust_builtins::dict_views::DictRc>,
     /// Allocated only after a mutation generation changes, when restarting the
     /// index walk may otherwise yield an earlier key twice.
-    pub(crate) seen: Option<pyrust_core::PySet>,
+    ///
+    /// Boxed so the recovery table's inline size does not sit in every loop
+    /// slot: the cursor is written whole on each loop entry and copied with the
+    /// frame of every suspended generator.
+    pub(crate) seen: Option<Box<pyrust_core::PySet>>,
     pub(crate) next_index: usize,
     pub(crate) last_key: Option<PyKey>,
     pub(crate) last_index: usize,
@@ -115,9 +125,13 @@ impl LiveKeyCursor {
             .expect("live dict cursor requires mutation state");
         let observed_mutation = mutation_state.version();
         let dynamic_backing = container.as_py_instance_rc().is_some();
+        let frozen_keys = initial_frozen_key_order(container, dynamic_backing, kind, len);
         Self {
             yielded: Vec::new(),
-            snapshot: initial_key_snapshot(container, dynamic_backing, len),
+            snapshot: (frozen_keys.is_none())
+                .then(|| initial_key_snapshot(container, dynamic_backing, len))
+                .flatten(),
+            frozen_keys,
             snapshot_pos: 0,
             backing: stable_cursor_backing(container, dynamic_backing),
             seen: None,
@@ -145,9 +159,13 @@ impl LiveKeyCursor {
             .expect("live set cursor requires mutation state");
         let observed_mutation = mutation_state.version();
         let dynamic_backing = container.as_py_instance_rc().is_some();
+        let frozen_keys = initial_frozen_key_order(container, dynamic_backing, 3, len);
         Self {
             yielded: Vec::new(),
-            snapshot: initial_key_snapshot(container, dynamic_backing, len),
+            snapshot: (frozen_keys.is_none())
+                .then(|| initial_key_snapshot(container, dynamic_backing, len))
+                .flatten(),
+            frozen_keys,
             snapshot_pos: 0,
             backing: None,
             seen: None,
@@ -175,14 +193,13 @@ impl LiveKeyCursor {
     }
 
     pub(crate) fn yielded_len(&self) -> usize {
-        self.seen.as_ref().map_or_else(
-            || {
-                self.snapshot
-                    .as_ref()
-                    .map_or_else(|| self.yielded.len(), |_| self.snapshot_pos)
-            },
-            pyrust_core::PySet::len,
-        )
+        if let Some(seen) = &self.seen {
+            return seen.len();
+        }
+        if self.snapshot.is_some() || self.frozen_keys.is_some() {
+            return self.snapshot_pos;
+        }
+        self.yielded.len()
     }
 
     pub(crate) fn release(&mut self) {
@@ -194,7 +211,12 @@ impl LiveKeyCursor {
         self.watching_terminal_key = false;
         self.terminal_entry_cursor = 0;
         self.yielded = Vec::new();
-        self.snapshot = None;
+        if let Some(snapshot) = self.snapshot.take() {
+            release_key_snapshot_buffer(snapshot);
+        }
+        if let Some(frozen) = self.frozen_keys.take() {
+            release_frozen_key_buffer(frozen);
+        }
         self.snapshot_pos = 0;
         self.backing = None;
         self.seen = None;
