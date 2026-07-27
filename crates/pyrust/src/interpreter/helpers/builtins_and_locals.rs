@@ -122,6 +122,23 @@ pub(crate) fn builtin_class_doc(name: &str) -> Option<&'static str> {
     })
 }
 
+/// Borrowing counterpart of [`key_to_value`].
+///
+/// Live dict/set walks hold their key order in a snapshot they keep; reading
+/// through it avoids copying the whole `PyKey` enum once per yielded item.
+pub(crate) fn key_ref_to_value(key: &PyKey) -> Value {
+    match key {
+        PyKey::Int(v) => Value::int(*v),
+        PyKey::Str(v) => v.clone(),
+        PyKey::Bool(v) => Value::bool_(*v),
+        PyKey::None => Value::none(),
+        PyKey::Ellipsis => Value::ellipsis(),
+        PyKey::Float(v) => Value::float(f64::from_bits(*v)),
+        PyKey::Object { value, .. } => value.clone(),
+        _ => key_to_value(key.clone()),
+    }
+}
+
 pub(crate) fn key_to_value(key: PyKey) -> Value {
     match key {
         PyKey::Int(v) => Value::int(v),

@@ -153,6 +153,54 @@ fn live_dict_value(container: &Value, key: &PyKey) -> Option<Value> {
 
 const ADAPTIVE_KEY_SNAPSHOT_THRESHOLD: usize = 64;
 
+/// Resolve the backing mapping a live cursor may read positionally.
+///
+/// Only containers whose backing identity is fixed qualify: a builtin subclass
+/// can replace `__builtin_data__` under an active iterator, so those cursors
+/// keep re-probing the carrier on every step.
+pub(crate) fn stable_cursor_backing(
+    container: &Value,
+    dynamic_backing: bool,
+) -> Option<pyrust_builtins::dict_views::DictRc> {
+    if dynamic_backing {
+        return None;
+    }
+    if let Some(dict) = container.get_dict_rc() {
+        return Some(Rc::clone(dict));
+    }
+    if let Some(dict) = pyrust_builtins::dict_views::as_dict_rc(container) {
+        return Some(dict);
+    }
+    pyrust_builtins::mapping_proxy::as_dict_rc(container)
+}
+
+/// Capture the key order of a container small enough that one snapshot costs
+/// less than the general walk's per-item key history.
+///
+/// Larger containers keep O(1) iterator creation — a loop that breaks after a
+/// few items must not pay for the whole key order — and adopt the snapshot
+/// from [`advance_live_key_cursor`] once the walk proves it is amortised.
+pub(crate) fn initial_key_snapshot(
+    container: &Value,
+    dynamic_backing: bool,
+    len: usize,
+) -> Option<Vec<PyKey>> {
+    if dynamic_backing || len > ADAPTIVE_KEY_SNAPSHOT_THRESHOLD {
+        return None;
+    }
+    live_collection_keys(container).filter(|keys| keys.len() == len)
+}
+
+/// How many items a larger container's walk must yield before one whole-order
+/// snapshot beats continuing the general walk.
+///
+/// The snapshot costs `recorded_len` key clones, so the walk commits only once
+/// it has consumed a comparable share of the container. The cap preserves the
+/// existing behavior for very large containers.
+fn adaptive_snapshot_trigger(recorded_len: usize) -> usize {
+    (recorded_len / 8).clamp(1, ADAPTIVE_KEY_SNAPSHOT_THRESHOLD)
+}
+
 /// Result of the compact steady-state path used after a live key cursor has
 /// captured its adaptive snapshot.
 ///
@@ -242,47 +290,108 @@ fn emit_live_key_item(
     Ok(item)
 }
 
+/// One entry read from a backing mapping whose order is currently frozen.
+enum PositionalEntry {
+    Value(Value),
+    Pair(PyKey, Value),
+}
+
 #[inline(always)]
 fn advance_snapshot_key_cursor(
     container: &Value,
     cursor: &mut LiveKeyCursor,
 ) -> Result<Option<LiveDictViewItem>> {
-    let key = cursor
+    let pos = cursor.snapshot_pos;
+    // An unchanged mutation generation freezes insertion order, so the
+    // snapshot position is also the live entry position. Value and item walks
+    // therefore read the entry itself rather than hashing the snapshot key
+    // back into the mapping on every step. Key and set walks already have the
+    // key in the snapshot and need no borrow at all.
+    let positional = cursor.backing.as_ref().and_then(|dict| match cursor.kind {
+        1 => Some(pyrust_builtins::dict_views::value_at(dict, pos).map(PositionalEntry::Value)),
+        2 => Some(
+            pyrust_builtins::dict_views::entry_at(dict, pos)
+                .map(|(key, value)| PositionalEntry::Pair(key, value)),
+        ),
+        _ => None,
+    });
+    if let Some(entry) = positional {
+        let Some(entry) = entry else {
+            cursor.release();
+            return Ok(None);
+        };
+        cursor.snapshot_pos = pos + 1;
+        if cursor.remaining.is_some()
+            && cursor.snapshot_pos == cursor.recorded_len
+            && !cursor.watching_terminal_key
+        {
+            let key = match &entry {
+                PositionalEntry::Pair(key, _) => Some(key.clone()),
+                PositionalEntry::Value(_) => cursor
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.get(pos))
+                    .cloned(),
+            };
+            watch_terminal_key(cursor, key, pos);
+        }
+        return Ok(Some(match entry {
+            PositionalEntry::Value(value) => LiveDictViewItem::Item(value),
+            PositionalEntry::Pair(key, value) => LiveDictViewItem::Pair(key_to_value(key), value),
+        }));
+    }
+
+    // The key order is already in hand: read it in place instead of copying
+    // the whole `PyKey` out of the snapshot on every step.
+    let Some(key) = cursor
         .snapshot
         .as_ref()
-        .and_then(|snapshot| snapshot.get(cursor.snapshot_pos))
-        .cloned();
-    let Some(key) = key else {
+        .and_then(|snapshot| snapshot.get(pos))
+    else {
         cursor.release();
         return Ok(None);
     };
-    cursor.snapshot_pos += 1;
-    if cursor.remaining.is_some()
-        && cursor.snapshot_pos == cursor.recorded_len
-        && !cursor.watching_terminal_key
-        && let Some(state) = &cursor.mutation_state
-    {
-        cursor.last_index = cursor.snapshot_pos - 1;
-        cursor.last_key = Some(key.clone());
-        cursor.terminal_entry_cursor = state.watch_key_reinsertion(&key);
-        cursor.watching_terminal_key = true;
-    }
     let item = match cursor.kind {
-        0 | 3 => LiveDictViewItem::Item(key_to_value(key)),
+        0 | 3 => LiveDictViewItem::Item(key_ref_to_value(key)),
         1 => {
-            let value = live_dict_value(container, &key).ok_or_else(|| {
+            let value = live_dict_value(container, key).ok_or_else(|| {
                 PyError::Runtime("dictionary keys changed during iteration".to_string())
             })?;
             LiveDictViewItem::Item(value)
         }
         _ => {
-            let value = live_dict_value(container, &key).ok_or_else(|| {
+            let value = live_dict_value(container, key).ok_or_else(|| {
                 PyError::Runtime("dictionary keys changed during iteration".to_string())
             })?;
-            LiveDictViewItem::Pair(key_to_value(key), value)
+            LiveDictViewItem::Pair(key_ref_to_value(key), value)
         }
     };
+    let terminal_key = (cursor.remaining.is_some()
+        && pos + 1 == cursor.recorded_len
+        && !cursor.watching_terminal_key)
+        .then(|| key.clone());
+    cursor.snapshot_pos = pos + 1;
+    watch_terminal_key(cursor, terminal_key, pos);
     Ok(Some(item))
+}
+
+/// Install the one-key removal watch that separates a delete/reinsert of a
+/// dict iterator's final entry from an unrelated temporary insert/remove.
+fn watch_terminal_key(cursor: &mut LiveKeyCursor, key: Option<PyKey>, index: usize) {
+    let Some(key) = key else {
+        return;
+    };
+    let Some(entry_cursor) = cursor
+        .mutation_state
+        .as_ref()
+        .map(|state| state.watch_key_reinsertion(&key))
+    else {
+        return;
+    };
+    cursor.last_index = index;
+    cursor.last_key = Some(key);
+    cursor.terminal_entry_cursor = entry_cursor;
+    cursor.watching_terminal_key = true;
 }
 
 /// Advance a live dict/set cursor after its size guard has passed.
@@ -390,7 +499,7 @@ pub(crate) fn advance_live_key_cursor(
     // has exact seen-key history without retaining a second O(n) buffer.
     if cursor.seen.is_none()
         && cursor.snapshot.is_none()
-        && cursor.yielded.len() >= ADAPTIVE_KEY_SNAPSHOT_THRESHOLD
+        && cursor.yielded.len() >= adaptive_snapshot_trigger(cursor.recorded_len)
         && let Some(snapshot) = live_collection_keys(container)
     {
         let yielded = cursor.yielded.len();

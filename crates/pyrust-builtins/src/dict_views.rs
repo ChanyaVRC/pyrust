@@ -9,7 +9,9 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyDict, Result, Value, builtin_ops_is, key_repr};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyDict, PyKey, Result, Value, builtin_ops_is, key_repr,
+};
 
 pub type DictRc = Rc<RefCell<PyDict>>;
 
@@ -247,6 +249,37 @@ pub fn as_dict_rc(value: &Value) -> Option<DictRc> {
     };
     view_kind_from_ops(ops)?;
     borrow_view(state)
+}
+
+// ── positional entry reads ───────────────────────────────────────────────────
+//
+// Insertion position is an entry's identity only while the mapping's order is
+// frozen. The caller owns that proof (a live iterator's unchanged mutation
+// generation); these accessors own the representation decode and hold the
+// `RefCell` borrow for exactly one indexed read.
+
+/// Read the key and value stored at `index`.
+pub fn entry_at(dict: &DictRc, index: usize) -> Option<(PyKey, Value)> {
+    dict.borrow()
+        .get_index(index)
+        .map(|(key, value)| (key.clone(), value.clone()))
+}
+
+/// Read only the value stored at `index`.
+pub fn value_at(dict: &DictRc, index: usize) -> Option<Value> {
+    dict.borrow()
+        .get_index(index)
+        .map(|(_, value)| value.clone())
+}
+
+/// Number of entries in a backing mapping.
+pub fn backing_len(dict: &DictRc) -> usize {
+    dict.borrow().len()
+}
+
+/// Snapshot the backing mapping's current key order.
+pub fn backing_keys(dict: &DictRc) -> Vec<PyKey> {
+    dict.borrow().keys().cloned().collect()
 }
 
 /// `true` if `value` is a dict view tagged as backed by a `collections.
