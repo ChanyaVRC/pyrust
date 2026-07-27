@@ -188,6 +188,16 @@ pub enum Insn {
     /// As `CountCmpJumpTrue` but jumps when the comparison is false
     /// (the `BinOpImm` + `CmpJumpIfFalse` pair).
     CountCmpJumpFalse(Reg, BinaryOp, Reg, i16, i32),
+    /// Jump when iterator slot `slot` does not currently hold the canonical
+    /// machine-int `range` cursor state.
+    ///
+    /// Emitted only by the int-loop versioning pass as the entry guard for an
+    /// out-of-line `for … in range(…)` copy: a canonical int-range cursor is
+    /// advanced without invoking any Python-visible protocol, so a body of
+    /// proven non-reentrant int operations can defer its module syncs to the
+    /// loop exits.  Any other iterator (BigInt range, list, generator, user
+    /// object, empty slot) diverts to the original in-place loop unchanged.
+    JumpIfIterNotIntRange(Reg, i32),
     /// Guarded numeric leaf-call inlining site (emitted only by the
     /// optimizer, always immediately before the original call sequence it
     /// specializes, which stays in place as the deopt path).

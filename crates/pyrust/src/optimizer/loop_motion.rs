@@ -429,6 +429,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | PopTypeParamEnv
         | GetIter(..)
         | Jump(..)
+        | JumpIfIterNotIntRange(..)
         | JumpIfFalse(..)
         | JumpIfTrue(..)
         | CmpJumpIfFalse(..)
@@ -669,6 +670,11 @@ fn is_control_flow(insn: &Insn) -> bool {
     matches!(
         insn,
         Jump(..)
+            | JumpIfNotInt(..)
+            | JumpIfIterNotIntRange(..)
+            | CountCmpJumpTrue(..)
+            | CountCmpJumpFalse(..)
+            | CallInlineBinOp { .. }
             | JumpIfFalse(..)
             | JumpIfTrue(..)
             | CmpJumpIfFalse(..)

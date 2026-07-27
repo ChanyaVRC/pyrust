@@ -900,6 +900,18 @@ impl Interpreter {
                         pc = jump_pc!(*offset);
                     }
                 }
+                Insn::JumpIfIterNotIntRange(slot, offset) => {
+                    // Entry guard for an out-of-line int-range loop copy: only
+                    // the canonical machine-int range cursor advances without
+                    // Python-visible effects, so anything else diverts to the
+                    // original loop.
+                    if !matches!(
+                        iters[*slot as usize].as_ref(),
+                        Some(IterState::Range { .. })
+                    ) {
+                        pc = jump_pc!(*offset);
+                    }
+                }
                 Insn::CallInlineBinOp {
                     callee,
                     dst,
@@ -912,14 +924,20 @@ impl Interpreter {
                     // Guarded leaf-call inline: on success this is the entire
                     // observable effect of the call sequence it precedes; on
                     // any guard failure fall through into that sequence.
-                    if let Some(result) = try_inline_leaf_binop(
-                        &regs[*callee as usize],
-                        &regs[*a as usize],
-                        &regs[*b as usize],
-                        *op,
-                        code,
-                        *proto,
-                    ) {
+                    // A real Python call would fail before entering the leaf
+                    // when the active frame depth has reached the recursion
+                    // limit.  Deopt at that boundary so the original Call
+                    // produces the normal RecursionError and traceback.
+                    if call_depth() < max_call_depth(self)
+                        && let Some(result) = try_inline_leaf_binop(
+                            &regs[*callee as usize],
+                            &regs[*a as usize],
+                            &regs[*b as usize],
+                            *op,
+                            code,
+                            *proto,
+                        )
+                    {
                         regs[*dst as usize] = result;
                         pc = jump_pc!(*skip);
                     }

@@ -74,7 +74,17 @@ fn pass_int_loop_version(
     const MAX_REGION: usize = 48;
     const MAX_GUARDS: usize = 8;
 
+    enum CandidateKind {
+        /// Inverted while loop: conditional header, conditional back-edge.
+        Inverted,
+        /// `for … in range(…)`: `ForIter` header, unconditional back-edge; the
+        /// guard block additionally checks the iterator slot holds the
+        /// canonical machine-int range cursor.
+        ForRange { slot: Reg },
+    }
+
     struct Candidate {
+        kind: CandidateKind,
         head: usize,
         back: usize,
         guards: Vec<Reg>,
@@ -113,6 +123,7 @@ fn pass_int_loop_version(
             | Insn::JumpIfFalse(_, k)
             | Insn::JumpIfTrue(_, k)
             | Insn::JumpIfNotInt(_, k)
+            | Insn::JumpIfIterNotIntRange(_, k)
             | Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -133,8 +144,9 @@ fn pass_int_loop_version(
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut h = 0usize;
     while h < n {
-        // Header: forward conditional jump over the whole region.
-        let k = match &insns[h] {
+        // Header: forward conditional jump (inverted while) or ForIter
+        // (for-range) over the whole region.
+        let (kind, k) = match &insns[h] {
             Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -143,7 +155,10 @@ fn pass_int_loop_version(
             | Insn::JumpIfTrue(_, k)
                 if *k > 1 =>
             {
-                *k as usize
+                (CandidateKind::Inverted, *k as usize)
+            }
+            Insn::ForIter(_, slot, k) if *k > 1 => {
+                (CandidateKind::ForRange { slot: *slot as Reg }, *k as usize)
             }
             _ => {
                 h += 1;
@@ -155,15 +170,20 @@ fn pass_int_loop_version(
             h += 1;
             continue;
         }
-        // Back-edge: conditional jump targeting the body start (head + 1),
-        // i.e. the shape produced by `pass_loop_inversion`.
-        let back_targets_body = match &insns[back] {
-            Insn::CmpJumpIfFalse(_, _, _, kb)
-            | Insn::CmpJumpIfTrue(_, _, _, kb)
-            | Insn::CmpJumpIfFalseConst(_, _, _, kb)
-            | Insn::CmpJumpIfTrueConst(_, _, _, kb)
-            | Insn::JumpIfFalse(_, kb)
-            | Insn::JumpIfTrue(_, kb) => *kb == -(k as i32),
+        // Back-edge: an inverted while re-checks its condition at the body
+        // end (the shape produced by `pass_loop_inversion`); a for-range
+        // returns to its ForIter with an unconditional Jump.
+        let back_targets_body = match (&kind, &insns[back]) {
+            (
+                CandidateKind::Inverted,
+                Insn::CmpJumpIfFalse(_, _, _, kb)
+                | Insn::CmpJumpIfTrue(_, _, _, kb)
+                | Insn::CmpJumpIfFalseConst(_, _, _, kb)
+                | Insn::CmpJumpIfTrueConst(_, _, _, kb)
+                | Insn::JumpIfFalse(_, kb)
+                | Insn::JumpIfTrue(_, kb),
+            ) => *kb == -(k as i32),
+            (CandidateKind::ForRange { .. }, Insn::Jump(kb)) => *kb == -(k as i32 + 1),
             _ => false,
         };
         if !back_targets_body {
@@ -181,7 +201,13 @@ fn pass_int_loop_version(
             }
         };
         let mut eligible = true;
-        for i in h..=back {
+        let walk_start = match kind {
+            // The ForIter header is not in the body whitelist; the runtime
+            // iterator-slot guard owns its semantics.
+            CandidateKind::ForRange { .. } => h + 1,
+            CandidateKind::Inverted => h,
+        };
+        for i in walk_start..=back {
             match &insns[i] {
                 Insn::Move(_, s) | Insn::CopyReg(_, s) => guard(*s, &mut guards),
                 Insn::LoadConst(_, idx) => {
@@ -239,7 +265,9 @@ fn pass_int_loop_version(
                     guard(*r, &mut guards);
                 }
                 Insn::Jump(off) => {
-                    if *off < 0 {
+                    let is_forrange_backedge =
+                        i == back && matches!(kind, CandidateKind::ForRange { .. });
+                    if *off < 0 && !is_forrange_backedge {
                         // A nested loop's back-edge; only innermost regions are
                         // versioned.
                         eligible = false;
@@ -256,6 +284,14 @@ fn pass_int_loop_version(
                     eligible = false;
                     break;
                 }
+            }
+        }
+        if let CandidateKind::ForRange { .. } = kind {
+            // The ForIter target register is (re)written by the guarded range
+            // cursor before every body execution, so its entry state is
+            // irrelevant — and on a fresh loop it is legitimately unset.
+            if let Insn::ForIter(dst, _, _) = &insns[h] {
+                guards.retain(|g| g != dst);
             }
         }
         if !eligible
@@ -340,6 +376,7 @@ fn pass_int_loop_version(
             *num_regs += 1;
         }
         candidates.push(Candidate {
+            kind,
             head: h,
             back,
             guards,
@@ -369,6 +406,10 @@ fn pass_int_loop_version(
             if ci < candidates.len() && candidates[ci].head == i {
                 guard_start = Some(i + shift);
                 shift += candidates[ci].guards.len()
+                    + usize::from(matches!(
+                        candidates[ci].kind,
+                        CandidateKind::ForRange { .. }
+                    ))
                     + usize::from(candidates[ci].const_fuse.is_some())
                     + 1;
                 ci += 1;
@@ -395,6 +436,11 @@ fn pass_int_loop_version(
         for (i, insn) in insns.iter().enumerate() {
             if ci < candidates.len() && candidates[ci].head == i {
                 let cand = &candidates[ci];
+                if let CandidateKind::ForRange { slot } = cand.kind {
+                    let gpos = out.len();
+                    let fail_off = placement[i] as i64 - gpos as i64 - 1;
+                    out.push(Insn::JumpIfIterNotIntRange(slot as Reg, fail_off as i32));
+                }
                 for g in &cand.guards {
                     let gpos = out.len();
                     let fail_off = placement[i] as i64 - gpos as i64 - 1;
@@ -512,9 +558,13 @@ fn pass_int_loop_version(
             if internal {
                 continue;
             }
-            // The header copy (fast position 0) exits directly: a zero-trip
-            // entry must not flush syncs the original never executed.
-            if fpos == 0 {
+            // An inverted-while header runs once, on entry: its exit edge is
+            // the zero-trip path and must not flush syncs the original never
+            // executed.  A ForRange header is the recurring exhaustion test,
+            // so its exit flushes like any body exit (a zero-trip pass is
+            // safe there: never-assigned registers are unset and the sync
+            // skips them, and already-synced names rewrite identical values).
+            if fpos == 0 && matches!(cand.kind, CandidateKind::Inverted) {
                 continue;
             }
             if !stub_targets.contains(&t) {
@@ -544,7 +594,7 @@ fn pass_int_loop_version(
                             rel += 1;
                         }
                         fast_base + fast_index[rel]
-                    } else if fpos == 0 {
+                    } else if fpos == 0 && matches!(cand.kind, CandidateKind::Inverted) {
                         jump_target[t]
                     } else {
                         stub_abs(t, &stub_targets)
@@ -593,6 +643,7 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         JumpIfFalse(r, _) => JumpIfFalse(r, off),
         JumpIfTrue(r, _) => JumpIfTrue(r, off),
         JumpIfNotInt(r, _) => JumpIfNotInt(r, off),
+        JumpIfIterNotIntRange(s2, _) => JumpIfIterNotIntRange(s2, off),
         CmpJumpIfFalse(a, op, b, _) => CmpJumpIfFalse(a, op, b, off),
         CmpJumpIfTrue(a, op, b, _) => CmpJumpIfTrue(a, op, b, off),
         CmpJumpIfFalseConst(a, op, c, _) => CmpJumpIfFalseConst(a, op, c, off),

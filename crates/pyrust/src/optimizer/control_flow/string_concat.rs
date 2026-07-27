@@ -413,6 +413,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | DeleteLocal(..)
         | DeleteModuleGlobal(..)
         | Jump(..)
+        | JumpIfIterNotIntRange(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept

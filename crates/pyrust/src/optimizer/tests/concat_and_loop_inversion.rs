@@ -346,10 +346,13 @@ fn loop_inversion_full_pipeline_while_loop() {
     // End-to-end: compile a while loop whose back-edge reaches loop inversion
     // as a raw Jump.
     //
-    // `while a != b: a += 1` — the Ne operator is not recognised by the
-    // The Ne comparison remains as CmpJumpIfFalse + Jump.
-    // pass_loop_inversion should replace the back-edge Jump with CmpJumpIfTrue.
-    let code = compile_fn("def f(a, b):\n    while a != b:\n        a += 1\n    return a\n");
+    // `while a != b: a %= b` — the Ne comparison remains as CmpJumpIfFalse +
+    // Jump, and pass_loop_inversion should replace the back-edge Jump with
+    // CmpJumpIfTrue.  The `%=` body keeps the loop outside the int-loop
+    // versioning whitelist (Mod can raise ZeroDivisionError), so the final
+    // stream is the plain inverted loop with no appended guarded copy — which
+    // is exactly the shape this end-to-end test pins.
+    let code = compile_fn("def f(a, b):\n    while a != b:\n        a %= b\n    return a\n");
     let optimized = optimize(code);
     let inner = &optimized.fn_protos[0].code;
     // The optimized code must not contain an unconditional back-edge Jump.

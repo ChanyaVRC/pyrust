@@ -20,6 +20,7 @@ fn insn_is_back_edge(insn: &Insn) -> bool {
         | Insn::CmpJumpIfFalseConst(_, _, _, k)
         | Insn::CmpJumpIfTrueConst(_, _, _, k)
         | Insn::JumpIfNotInt(_, k)
+        | Insn::JumpIfIterNotIntRange(_, k)
         | Insn::CountCmpJumpTrue(_, _, _, _, k)
         | Insn::CountCmpJumpFalse(_, _, _, _, k)
         | Insn::CallInlineBinOp { skip: k, .. }
@@ -138,6 +139,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | PopTypeParamEnv
         | DeleteLocal(..)
         | Jump(..)
+        | JumpIfIterNotIntRange(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept
@@ -327,6 +329,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | PopTypeParamEnv
         | DeleteLocal(..)
         | Jump(..)
+        | JumpIfIterNotIntRange(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept
