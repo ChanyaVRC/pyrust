@@ -6,6 +6,51 @@ impl Compiler {
         branch_linenos: &[Vec<u32>],
         else_linenos: &[u32],
     ) {
+        // `if COND: break` / `if COND: continue` with no elif/else lowers to a
+        // single conditional jump straight at the loop's break/continue target.
+        // The general lowering emits `JumpIfFalse(+1); Jump(target)`, whose
+        // taken skip-jump sits on the per-iteration path of `while True:` loops;
+        // the fused form removes it and lets loop inversion later convert the
+        // back-edge into a conditional re-check (issue #282).  Truthiness is
+        // still evaluated exactly once per test and the jump keeps the `if`
+        // statement's source attribution, so protocol semantics and raise
+        // attribution are unchanged for every operand type.  Bail when try/with
+        // cleanups would have to run before the jump, or when the condition is
+        // constant (the general path owns dead-branch validation).
+        if let [(cond, body)] = branches
+            && else_branch.is_none()
+            && let [only] = body.as_slice()
+            && (matches!(only, Stmt::Break)
+                || (matches!(only, Stmt::Continue)
+                    && self
+                        .loops
+                        .last()
+                        .is_some_and(|l| l.continue_target.is_some())))
+            && !self.loops.is_empty()
+            && fold_constant(cond).is_none()
+            && self.except_cleanups.len() <= self.loops[self.loops.len() - 1].cleanup_depth
+        {
+            let cond_reg = self.compile_expr(cond);
+            let jmp = self.emit_cond_jump(cond_reg, true);
+            self.free_temp(cond_reg);
+            let last = self.loops.len() - 1;
+            match only {
+                Stmt::Break => self.loops[last].break_patches.push(jmp),
+                Stmt::Continue => {
+                    let target = self.loops[last]
+                        .continue_target
+                        .expect("guarded by peephole eligibility");
+                    let offset = target as i32 - (jmp as i32 + 1);
+                    if let Insn::JumpIfTrue(_, off) = &mut self.insns[jmp] {
+                        *off = offset;
+                    }
+                }
+                _ => unreachable!(),
+            }
+            // Definite-assignment: the taken branch binds nothing and leaves
+            // the statement, so the fall-through def-set is unchanged.
+            return;
+        }
         let has_else = else_branch.is_some();
         let n = branches.len();
         let mut end_patches: Vec<usize> = Vec::new();

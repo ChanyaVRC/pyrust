@@ -864,6 +864,69 @@ impl Interpreter {
                         pc = jump_pc!(*offset);
                     }
                 }
+                Insn::JumpIfNotInt(reg, offset) => {
+                    // Entry guard for an out-of-line int-specialized loop copy.
+                    // Unset slots must divert to the original loop so its own
+                    // CheckLocal / name-error paths stay authoritative.
+                    let value = &regs[*reg as usize];
+                    if value.is_unset() || value.as_int().is_none() {
+                        pc = jump_pc!(*offset);
+                    }
+                }
+                Insn::CountCmpJumpTrue(var, op, stop, imm, offset) => {
+                    // Exact composition of `BinOpImm(var, var, Add, imm, true)`
+                    // followed by `CmpJumpIfTrue(var, op, stop, offset)`.
+                    vm_try!(self.exec_binop_immediate(
+                        &mut regs,
+                        *var,
+                        *var,
+                        crate::ast::BinaryOp::Add,
+                        *imm,
+                        true,
+                        num_locals,
+                    ));
+                    if let Some(cond) =
+                        try_integer_compare_fast(&regs[*var as usize], &regs[*stop as usize], *op)
+                    {
+                        if cond {
+                            pc = jump_pc!(*offset);
+                        }
+                        continue;
+                    }
+                    let l = vm_try!(vm_read(&regs, *var, num_locals));
+                    let r = vm_try!(vm_read(&regs, *stop, num_locals));
+                    let result = vm_try!(self.eval_binary(l, *op, r));
+                    if vm_try!(self.truthy_value(&result)) {
+                        pc = jump_pc!(*offset);
+                    }
+                }
+                Insn::CountCmpJumpFalse(var, op, stop, imm, offset) => {
+                    // Exact composition of `BinOpImm(var, var, Add, imm, true)`
+                    // followed by `CmpJumpIfFalse(var, op, stop, offset)`.
+                    vm_try!(self.exec_binop_immediate(
+                        &mut regs,
+                        *var,
+                        *var,
+                        crate::ast::BinaryOp::Add,
+                        *imm,
+                        true,
+                        num_locals,
+                    ));
+                    if let Some(cond) =
+                        try_integer_compare_fast(&regs[*var as usize], &regs[*stop as usize], *op)
+                    {
+                        if !cond {
+                            pc = jump_pc!(*offset);
+                        }
+                        continue;
+                    }
+                    let l = vm_try!(vm_read(&regs, *var, num_locals));
+                    let r = vm_try!(vm_read(&regs, *stop, num_locals));
+                    let result = vm_try!(self.eval_binary(l, *op, r));
+                    if !vm_try!(self.truthy_value(&result)) {
+                        pc = jump_pc!(*offset);
+                    }
+                }
 
                 // ── Exception handling ───────────────────────────────────
                 Insn::SetupExcept(offset) => {

@@ -64,6 +64,14 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_loop_inversion(insns);
     let insns = pass_trivial_nop(insns);
     let insns = pass_loadnone_merge(insns);
+    // Runs last among the shape passes: the guarded out-of-line loop copies it
+    // appends introduce `JumpIfNotInt` / `CountCmpJump*`, which downstream
+    // shape passes do not model.  Only `build_exc_table`, the source-table
+    // remap (the appended copies cannot raise), and `pass_compact_consts`
+    // (which they carry no const slots through) run after it.
+    let versioned = pass_int_loop_version(insns, &consts, &mut num_regs);
+    let insns = versioned.insns;
+    let source_prefix_len = versioned.source_prefix_len;
 
     // Remap line numbers BEFORE compacting constants.  `pass_compact_consts`
     // reindexes constant-pool slots, which mutates the `idx` field of every
@@ -86,14 +94,20 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // computed against.  On the (never-observed) bail path the stream is handed
     // back unchanged with an empty table, and the VM falls back to the dynamic
     // SetupExcept/PopExcept handler stack — always correct, never wrong.
-    let (insns, exc_table) = build_exc_table(insns);
+    let (insns, exc_table, source_prefix_len) =
+        build_exc_table_with_source_prefix(insns, source_prefix_len);
     let has_exc_handlers = has_exception_handlers(&insns, &exc_table);
 
     // Remap line numbers and PEP 657 caret anchors (#2426) in one shared scan.
     // `pass_compact_consts` below is 1:1 order-preserving, so both tables
     // computed against the pre-compaction stream apply unchanged after it.
-    let (lineno_table, col_table) =
-        remap_lineno_and_col_tables(&original_insns, &original_linenos, &original_cols, &insns);
+    let (lineno_table, col_table) = remap_lineno_and_col_tables_with_source_prefix(
+        &original_insns,
+        &original_linenos,
+        &original_cols,
+        &insns,
+        source_prefix_len,
+    );
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     let insns_len = insns.len();

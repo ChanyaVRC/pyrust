@@ -19,19 +19,42 @@ pub(crate) const EXC_NO_HANDLER: u32 = u32::MAX;
 /// dynamic `SetupExcept`/`PopExcept` handler stack.  The compiler emits balanced,
 /// properly-nested `SetupExcept`/`PopExcept`, so in practice this never bails;
 /// the check is a safety net that guarantees we never produce an incorrect table.
+#[cfg(test)]
 fn build_exc_table(insns: Vec<Insn>) -> (Vec<Insn>, Vec<u32>) {
+    let source_prefix_len = insns.len();
+    let (insns, exc_table, _) =
+        build_exc_table_with_source_prefix(insns, source_prefix_len);
+    (insns, exc_table)
+}
+
+/// [`build_exc_table`] with an explicit boundary between source-derived
+/// instructions and optimizer-appended copies.
+///
+/// Stripping `SetupExcept`/`PopExcept` compacts the instruction stream, so the
+/// boundary must be remapped through the same old-to-new index map as branch
+/// targets. Returning it alongside the compacted stream prevents downstream
+/// source mapping from guessing optimizer-specific bytecode shapes.
+fn build_exc_table_with_source_prefix(
+    insns: Vec<Insn>,
+    source_prefix_len: usize,
+) -> (Vec<Insn>, Vec<u32>, usize) {
     let n = insns.len();
+    debug_assert!(
+        source_prefix_len <= n,
+        "source prefix {source_prefix_len} exceeds instruction count {n}"
+    );
+    let source_prefix_len = source_prefix_len.min(n);
 
     // Fast out: no exception handlers at all → empty table, nothing to strip.
     if !insns.iter().any(|i| matches!(i, Insn::SetupExcept(_))) {
-        return (insns, vec![EXC_NO_HANDLER; n]);
+        return (insns, vec![EXC_NO_HANDLER; n], source_prefix_len);
     }
 
     // Safety net: a statically inconsistent handler stack means the per-pc table
     // would be ambiguous.  Hand the (unstripped) stream back with an empty table
     // and let the VM keep the dynamic SetupExcept/PopExcept handler stack.
     let Some(stack_in) = analyze_active_handler_stacks(&insns) else {
-        return (insns, Vec::new());
+        return (insns, Vec::new(), source_prefix_len);
     };
 
     // `handler_at[pc]` (original PC space) = innermost active handler at `pc`,
@@ -84,7 +107,8 @@ fn build_exc_table(insns: Vec<Insn>) -> (Vec<Insn>, Vec<u32>) {
         };
     }
 
-    (new_insns, exc_table)
+    let new_source_prefix_len = to_new[source_prefix_len];
+    (new_insns, exc_table, new_source_prefix_len)
 }
 
 /// True for either a populated zero-cost table or a conservative dynamic-stack

@@ -186,14 +186,47 @@ fn remap_lineno_and_col_tables(
     old_cols: &[crate::ast::CaretSpan],
     new_insns: &[Insn],
 ) -> (Vec<u32>, Vec<crate::ast::CaretSpan>) {
+    remap_lineno_and_col_tables_with_source_prefix(
+        old_insns,
+        old_linenos,
+        old_cols,
+        new_insns,
+        new_insns.len(),
+    )
+}
+
+/// Remap source tables while excluding an optimizer-appended suffix from every
+/// source-origin proof and match.
+///
+/// The suffix still receives a stable fallback line so table lengths remain
+/// aligned with bytecode, but it receives no PEP 657 caret and cannot consume
+/// an old instruction occurrence in the LCS/discriminant recovery. This is
+/// required for int-loop versioning, whose fast copy deliberately duplicates
+/// generic source instructions.
+fn remap_lineno_and_col_tables_with_source_prefix(
+    old_insns: &[Insn],
+    old_linenos: &[u32],
+    old_cols: &[crate::ast::CaretSpan],
+    new_insns: &[Insn],
+    source_prefix_len: usize,
+) -> (Vec<u32>, Vec<crate::ast::CaretSpan>) {
+    let full_new_len = new_insns.len();
+    debug_assert!(
+        source_prefix_len <= full_new_len,
+        "source prefix {source_prefix_len} exceeds instruction count {full_new_len}"
+    );
+    let source_prefix_len = source_prefix_len.min(full_new_len);
+    let new_insns = &new_insns[..source_prefix_len];
+
     if old_linenos.is_empty() {
         return (
-            vec![0u32; new_insns.len()],
-            vec![(0, 0, 0, 0); new_insns.len()],
+            vec![0u32; full_new_len],
+            vec![(0, 0, 0, 0); full_new_len],
         );
     }
     // Only do col work when at least one anchor was recorded.
     let want_cols = !old_cols.is_empty() && old_cols.iter().any(|&c| c != (0, 0, 0, 0));
+    let origin_new_insns = new_insns;
 
     // Build a "current best lineno" prefix from old_linenos: for each position
     // in old_insns, the last non-zero lineno seen up to and including that position.
@@ -255,7 +288,7 @@ fn remap_lineno_and_col_tables(
     // recovery so a fused op stays caret-free (a missing caret beats a wrong
     // one, per #2426).  Plain renumbered `BinOp`s still recover via the exact /
     // discriminant match paths above, unaffected by this guard.
-    let new_binop_origin_count = new_insns
+    let new_binop_origin_count = origin_new_insns
         .iter()
         .filter(|i| matches!(i, Insn::BinOp(..)) || insn_is_fused_binop(i))
         .count();
@@ -292,7 +325,7 @@ fn remap_lineno_and_col_tables(
     let mut suffix_binop_old_pos: HashMap<usize, usize> = HashMap::new();
     if want_cols && !binop_recovery_sound && new_binop_origin_count > 0 {
         let old_start = old_binop_positions.len() - new_binop_origin_count;
-        let surviving: Vec<(usize, crate::ast::BinaryOp)> = new_insns
+        let surviving: Vec<(usize, crate::ast::BinaryOp)> = origin_new_insns
             .iter()
             .enumerate()
             .filter_map(|(i, insn)| binop_origin_op(insn).map(|op| (i, op)))
@@ -444,7 +477,7 @@ fn remap_lineno_and_col_tables(
     // fuses a site (dropping the `not`) or leaves it untouched (the `UnaryOp(Not)`
     // then survives); requiring zero survivors guarantees the 1:1
     // site→fused-jump mapping the diagonal cursor relies on.
-    let new_not_unaryop_survives = new_insns
+    let new_not_unaryop_survives = origin_new_insns
         .iter()
         .any(|i| matches!(i, Insn::UnaryOp(_, crate::ast::UnaryOp::Not, _)));
     let notjump_recovery_sound = !old_notjump_operand_cols.is_empty() && !new_not_unaryop_survives;
@@ -483,7 +516,7 @@ fn remap_lineno_and_col_tables(
     let mut disc_diag_sound: HashSet<std::mem::Discriminant<Insn>> = HashSet::new();
     if want_cols {
         let mut new_disc_counts: HashMap<std::mem::Discriminant<Insn>, usize> = HashMap::new();
-        for insn in new_insns {
+        for insn in origin_new_insns {
             if insn_anchor_by_discriminant(insn) {
                 *new_disc_counts
                     .entry(std::mem::discriminant(insn))
@@ -672,5 +705,8 @@ fn remap_lineno_and_col_tables(
             *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
         }
     }
+    let suffix_line = linenos.last().copied().unwrap_or(0);
+    linenos.resize(full_new_len, suffix_line);
+    cols.resize(full_new_len, (0, 0, 0, 0));
     (linenos, cols)
 }

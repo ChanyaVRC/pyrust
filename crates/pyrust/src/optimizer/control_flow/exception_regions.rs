@@ -67,10 +67,13 @@ fn analyze_active_handler_stacks(insns: &[Insn]) -> Option<Vec<Option<Vec<usize>
             Insn::Jump(offset) => propagate_to(jump_target(*offset), &current),
             Insn::JumpIfFalse(_, offset)
             | Insn::JumpIfTrue(_, offset)
+            | Insn::JumpIfNotInt(_, offset)
             | Insn::CmpJumpIfFalse(_, _, _, offset)
             | Insn::CmpJumpIfTrue(_, _, _, offset)
             | Insn::CmpJumpIfFalseConst(_, _, _, offset)
             | Insn::CmpJumpIfTrueConst(_, _, _, offset)
+            | Insn::CountCmpJumpTrue(_, _, _, _, offset)
+            | Insn::CountCmpJumpFalse(_, _, _, _, offset)
             | Insn::ForIter(_, _, offset)
             | Insn::MatchExcept(_, offset)
             | Insn::MatchExceptStar(_, _, _, offset) => {

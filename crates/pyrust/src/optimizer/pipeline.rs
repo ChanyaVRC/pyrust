@@ -2,9 +2,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use crate::ast::BinaryOp;
 use crate::bytecode::{
     AttrCacheEntry, BinOpCacheEntry, FnCode, FnProto, GlobalCacheEntry, Insn, KwCallCacheEntry,
-    MAX_FRAME_REGS,
+    MAX_FRAME_REGS, Reg,
 };
 use crate::value::{Value, ValueKind};
 

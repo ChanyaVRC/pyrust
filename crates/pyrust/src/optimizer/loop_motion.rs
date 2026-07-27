@@ -1,3 +1,5 @@
+include!("loop_motion/int_loop_versioning.rs");
+
 // ─── Exit-block inlining ───────────────────────────────────────────────────────
 
 /// Replace an unconditional `Jump(k)` with the instruction it targets when that
@@ -341,6 +343,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BinOp(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | BinOpConst(r, _, _, _, _)
+        | CountCmpJumpTrue(r, _, _, _, _)
+        | CountCmpJumpFalse(r, _, _, _, _)
         | BinOpImm(r, _, _, _, _)
         | UnaryOp(r, _, _)
         | FormatValue(r, _)
@@ -430,6 +434,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | CmpJumpIfTrue(..)
         | CmpJumpIfFalseConst(..)
         | CmpJumpIfTrueConst(..)
+        | JumpIfNotInt(..)
         | Return(..)
         | ReturnNone
         | RaiseValue(..)

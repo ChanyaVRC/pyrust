@@ -169,6 +169,25 @@ pub enum Insn {
     CmpJumpIfFalseConst(Reg, BinaryOp, u16, i32),
     /// Constant-RHS form of `CmpJumpIfTrue`.
     CmpJumpIfTrueConst(Reg, BinaryOp, u16, i32),
+    /// Jump when R[reg] is not an exact built-in integer representable as i64.
+    ///
+    /// Emitted only by the optimizer's int-loop versioning pass as the entry
+    /// guard for an out-of-line specialized loop copy; any value that fails the
+    /// guard (bool, out-of-i64 BigInt, str, user object, unset, …) runs the
+    /// original in-place loop unchanged, so the guard never changes Python
+    /// semantics.
+    JumpIfNotInt(Reg, i32),
+    /// Fused counted-loop back-edge: R[var] = R[var] + imm, then jump when
+    /// `R[var] op R[stop]` is true.
+    ///
+    /// Exact semantics of the `BinOpImm(var, var, Add, imm, true)` +
+    /// `CmpJumpIfTrue(var, op, stop, off)` pair it replaces, including
+    /// int→BigInt overflow promotion; the VM arm delegates to the same
+    /// helpers those two instructions use.
+    CountCmpJumpTrue(Reg, BinaryOp, Reg, i16, i32),
+    /// As `CountCmpJumpTrue` but jumps when the comparison is false
+    /// (the `BinOpImm` + `CmpJumpIfFalse` pair).
+    CountCmpJumpFalse(Reg, BinaryOp, Reg, i16, i32),
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
     /// Marks a call to a statically memo-pure callee. The VM may reuse a cached
@@ -201,9 +220,9 @@ pub enum Insn {
     /// strings in the constant-pool tuple `consts[kwnames_idx]` (in order).  The
     /// first `total - nkw` are positional.  Result is written back to `R[func]`.
     ///
-    /// This replaces the old `BuildList`+`BuildDict`+`SetItem`+`__vcall__`
+    /// This replaces the old `BuildList`+`BuildDict`+`SetItem`+hidden-helper
     /// lowering for plain keyword calls, which allocated a dict and a list and
-    /// round-tripped through the `__vcall__` builtin on every invocation.
+    /// round-tripped through a Python-visible builtin on every invocation.
     CallKw {
         func: Reg,
         total: u8,
@@ -215,9 +234,9 @@ pub enum Insn {
     /// `R[kwargs]` holds the single `**d` source mapping.  Result is written back
     /// to `R[func]`.
     ///
-    /// This replaces the old `BuildList`+`BuildDict`+`DictUpdate`+`__vcall__`
+    /// This replaces the old `BuildList`+`BuildDict`+`DictUpdate`+hidden-helper
     /// lowering for the common `f(**d)` / `f(a, **d)` shapes, which copied the
-    /// whole dict, round-tripped through the `__vcall__` builtin, and then
+    /// whole dict, round-tripped through a Python-visible builtin, and then
     /// linearly name-scanned the parameter list on every call.  A per-call-site
     /// cache ([`KwCallCacheEntry::ExSimple`]) records the dict key-set →
     /// parameter-slot mapping for a monomorphic plain-`UserFunction` callee whose
@@ -236,20 +255,21 @@ pub enum Insn {
     /// to `R[func]`.
     ///
     /// This replaces the old `BuildList`+`ListExtend`+`BuildDict`+`DictMergeKwCall`
-    /// +`LoadGlobal(__vcall__)`+`Move`×3+`Call` lowering for the common
+    /// +hidden-global lookup+`Move`×3+`Call` lowering for the common
     /// single-`*args`(+optional single-`**kw`) shape, which allocated a list and a
-    /// dict, copied every splatted element and every kwarg into them, looked up
-    /// the `__vcall__` global, and round-tripped through the builtin on every
-    /// call.  The runtime handler ([`Interpreter::exec_call_ex_args`]) reads the
-    /// splat iterable and the `**kw` mapping directly.  A per-call-site cache
+    /// dict, copied every splatted element and every kwarg into them, and
+    /// round-tripped through a Python-visible builtin on every call. The runtime
+    /// handler ([`Interpreter::exec_call_ex_args`]) reads the splat iterable and
+    /// the `**kw` mapping directly. A per-call-site cache
     /// ([`KwCallCacheEntry::ExArgs`]) records the callee prototype + total
     /// positional count + `**kw` key-set → parameter-slot mapping for a
     /// monomorphic plain-`UserFunction` callee, so on a hit the values bind
     /// straight into their slots with no intermediate list/dict and no name scan.
     /// Emitted for a single `*args` (as the last positional group), followed by
     /// zero or more literal `kw=v` keyword arguments and an optional single
-    /// trailing `**kw`, non-method callee; every other variadic shape keeps the
-    /// generic `__vcall__` lowering.
+    /// trailing `**kw`, non-method callee. Generic source-order-sensitive shapes
+    /// also use this opcode after the compiler has materialized their positional
+    /// list and keyword dict; for that transport form `npos == nkw == 0`.
     ///
     /// The `nkw` literal keyword VALUES occupy `R[func+1+npos ..
     /// func+1+npos+nkw]` (contiguously, right after the leading positionals);
