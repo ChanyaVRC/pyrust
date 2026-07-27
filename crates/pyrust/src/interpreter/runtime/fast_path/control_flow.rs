@@ -23,3 +23,11 @@ pub(super) fn try_constant_compare_fast(left: &Value, right: &Value, op: BinaryO
         _ => None,
     }
 }
+
+/// Whether an iterator slot currently holds the canonical machine-int range
+/// cursor — the only iterator kind the int-loop versioning guard admits,
+/// because advancing it has no Python-visible effect.
+#[inline(always)]
+pub(super) fn iter_slot_is_int_range(state: Option<&IterState>) -> bool {
+    matches!(state, Some(IterState::Range { .. }))
+}

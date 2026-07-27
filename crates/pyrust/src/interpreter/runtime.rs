@@ -53,7 +53,8 @@ mod exceptions {
         instantiate_import_error, instantiate_name_error, instantiate_os_error,
         instantiate_unicode_decode_error, instantiate_unicode_encode_error, invoke_class_method,
         is_exception_class, is_stop_iteration_error, lookup_class_attr, lookup_exc_class,
-        reject_keyword_args_expanded, render_key_repr, render_value_repr, value_to_bigint,
+        lookup_value_special_method, reject_keyword_args_expanded, render_key_repr,
+        render_value_repr, value_to_bigint, value_type_name_str,
     };
     include!("runtime/exceptions.rs");
 }
@@ -324,8 +325,9 @@ pub(crate) fn is_ordered_dict_class_or_subclass(class: &Rc<RefCell<PyClass>>) ->
 mod execution {
     use super::fast_path::{
         LoopFastOutcome, MemoCallProbe, advance_loop_fast_state, build_string_fast,
-        list_reserve_hint, try_constant_compare_fast, try_inline_leaf_binop,
-        try_integer_compare_fast, try_scalar_truthiness_fast, try_tagged_int_unary,
+        iter_slot_is_int_range, list_reserve_hint, try_constant_compare_fast,
+        try_inline_leaf_binop, try_integer_compare_fast, try_scalar_truthiness_fast,
+        try_tagged_int_unary,
     };
     use super::{
         CallDepthGuard, EnvRef, FrameKind, HashMap, Interpreter, IterCacheBuf, IterState, ItersBuf,

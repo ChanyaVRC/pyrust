@@ -905,10 +905,7 @@ impl Interpreter {
                     // the canonical machine-int range cursor advances without
                     // Python-visible effects, so anything else diverts to the
                     // original loop.
-                    if !matches!(
-                        iters[*slot as usize].as_ref(),
-                        Some(IterState::Range { .. })
-                    ) {
+                    if !iter_slot_is_int_range(iters[*slot as usize].as_ref()) {
                         pc = jump_pc!(*offset);
                     }
                 }
