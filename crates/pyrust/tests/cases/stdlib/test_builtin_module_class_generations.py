@@ -61,28 +61,32 @@ print(
 )
 
 old_path_class = pathlib.Path
-old_posix_class = pathlib.PosixPath
 old_path = old_path_class("old/root")
+# `Path(...)` instantiates the platform flavor (PosixPath or WindowsPath),
+# so anchor every identity check on the instantiated flavor class instead of
+# naming one flavor and diverging per platform.
+old_flavor_class = type(old_path)
 print(
     "pathlib generation:",
-    type(old_path) is old_posix_class,
-    old_posix_class.__base__ is old_path_class,
+    issubclass(old_flavor_class, old_path_class),
+    old_flavor_class.__base__ is old_path_class,
     old_path_class.__module__,
-    old_posix_class.__module__,
+    old_flavor_class.__module__,
 )
 del sys.modules["pathlib"]
 import pathlib as reloaded_pathlib
 
 new_path = reloaded_pathlib.Path("new/root")
 old_path_after_reload = old_path_class("old/again")
+reloaded_flavor_class = getattr(reloaded_pathlib, old_flavor_class.__name__)
 print(
     "pathlib reimport:",
     reloaded_pathlib.Path is old_path_class,
-    reloaded_pathlib.PosixPath is old_posix_class,
-    type(new_path) is reloaded_pathlib.PosixPath,
-    type(old_path) is old_posix_class,
-    type(old_path_after_reload) is old_posix_class,
-    type(old_path / "child") is old_posix_class,
+    reloaded_flavor_class is old_flavor_class,
+    type(new_path) is reloaded_flavor_class,
+    type(old_path) is old_flavor_class,
+    type(old_path_after_reload) is old_flavor_class,
+    type(old_path / "child") is old_flavor_class,
 )
 
 

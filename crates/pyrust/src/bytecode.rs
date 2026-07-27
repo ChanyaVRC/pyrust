@@ -91,6 +91,9 @@ mod ownership_tests {
 
     #[test]
     fn cache_facade_uses_real_children_and_explicit_reexports() {
+        // `include_str!` embeds the checkout's line endings, so a CRLF
+        // working copy (Windows CI) must not fail the multi-line pattern.
+        let cache_facade = CACHE_FACADE.replace("\r\n", "\n");
         for declaration in [
             "mod attr;",
             "mod binop;",
@@ -99,7 +102,7 @@ mod ownership_tests {
             "#[cfg(test)]\nmod tests;",
         ] {
             assert!(
-                CACHE_FACADE.contains(declaration),
+                cache_facade.contains(declaration),
                 "bytecode::cache facade must declare the real child module: {declaration}"
             );
         }

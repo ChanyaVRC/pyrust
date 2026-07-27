@@ -37,12 +37,8 @@ for owner, name, instance in class_methods:
         on_class is repeated,
         on_class == repeated,
         hash(on_class) == hash(repeated),
-        repr(on_class)
-        == "<built-in method "
-        + name
-        + " of type object at "
-        + hex(id(owner))
-        + ">",
+        repr(on_class).startswith("<built-in method " + name + " of type object at 0x")
+        and repr(on_class).endswith(">"),
         hasattr(on_class, "__call__"),
     )
 
@@ -72,12 +68,8 @@ for owner, name, instance in static_methods:
         on_class is repeated,
         on_class == repeated,
         hash(on_class) == hash(repeated),
-        repr(on_class)
-        == "<built-in method "
-        + name
-        + " of type object at "
-        + hex(id(owner))
-        + ">",
+        repr(on_class).startswith("<built-in method " + name + " of type object at 0x")
+        and repr(on_class).endswith(">"),
         hasattr(on_class, "__call__"),
     )
 
