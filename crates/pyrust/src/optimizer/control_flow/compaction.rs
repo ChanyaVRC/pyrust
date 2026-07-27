@@ -68,6 +68,23 @@ pub(crate) fn rewrite_offsets_with(
         JumpIfNotInt(r, k) => JumpIfNotInt(r, fix(k)),
         CountCmpJumpTrue(v, op, s, imm, k) => CountCmpJumpTrue(v, op, s, imm, fix(k)),
         CountCmpJumpFalse(v, op, s, imm, k) => CountCmpJumpFalse(v, op, s, imm, fix(k)),
+        CallInlineBinOp {
+            callee,
+            dst,
+            a,
+            op,
+            b,
+            proto,
+            skip,
+        } => CallInlineBinOp {
+            callee,
+            dst,
+            a,
+            op,
+            b,
+            proto,
+            skip: fix(skip),
+        },
         other => other,
     }
 }

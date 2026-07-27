@@ -307,3 +307,40 @@ impl Interpreter {
         )
     }
 }
+
+/// Guard + compute for a `CallInlineBinOp` site.
+///
+/// Returns the inlined result only when every guard holds: the callee is the
+/// exact `Regular` user function compiled from `code.fn_protos[proto]`
+/// (code-object identity, so runtime rebinding deopts) and both arguments are
+/// machine integers, making the leaf body's effect a pure int binop with no
+/// observable frame.  Any failure returns `None` and the VM falls through to
+/// the original call sequence.
+#[inline(always)]
+pub(super) fn try_inline_leaf_binop(
+    callee: &Value,
+    a: &Value,
+    b: &Value,
+    op: BinaryOp,
+    code: &crate::bytecode::FnCode,
+    proto: u16,
+) -> Option<Value> {
+    if callee.is_unset() || a.is_unset() || b.is_unset() {
+        return None;
+    }
+    let ValueKind::UserFunction(function) = callee.kind() else {
+        return None;
+    };
+    if !matches!(function.kind, pyrust_core::UserFunctionKind::Regular) {
+        return None;
+    }
+    let expected = &code.fn_protos.get(proto as usize)?.code;
+    let actual = function.precompiled_code.as_ref()?;
+    if !std::ptr::eq(
+        Rc::as_ptr(actual) as *const u8,
+        Rc::as_ptr(expected) as *const u8,
+    ) {
+        return None;
+    }
+    int_int_fast(a.as_int()?, b.as_int()?, op)
+}

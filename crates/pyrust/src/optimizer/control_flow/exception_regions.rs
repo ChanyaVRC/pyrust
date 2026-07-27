@@ -74,6 +74,7 @@ fn analyze_active_handler_stacks(insns: &[Insn]) -> Option<Vec<Option<Vec<usize>
             | Insn::CmpJumpIfTrueConst(_, _, _, offset)
             | Insn::CountCmpJumpTrue(_, _, _, _, offset)
             | Insn::CountCmpJumpFalse(_, _, _, _, offset)
+            | Insn::CallInlineBinOp { skip: offset, .. }
             | Insn::ForIter(_, _, offset)
             | Insn::MatchExcept(_, offset)
             | Insn::MatchExceptStar(_, _, _, offset) => {

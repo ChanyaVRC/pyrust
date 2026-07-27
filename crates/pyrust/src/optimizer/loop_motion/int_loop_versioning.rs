@@ -119,6 +119,7 @@ fn pass_int_loop_version(
             | Insn::CmpJumpIfTrueConst(_, _, _, k)
             | Insn::CountCmpJumpTrue(_, _, _, _, k)
             | Insn::CountCmpJumpFalse(_, _, _, _, k)
+            | Insn::CallInlineBinOp { skip: k, .. }
             | Insn::ForIter(_, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k)
@@ -174,7 +175,7 @@ fn pass_int_loop_version(
         let mut guards: Vec<Reg> = Vec::new();
         let mut syncs: Vec<(Reg, u16)> = Vec::new();
         let mut has_interior_control_flow = false;
-        let mut guard = |r: Reg, guards: &mut Vec<Reg>| {
+        let guard = |r: Reg, guards: &mut Vec<Reg>| {
             if !guards.contains(&r) {
                 guards.push(r);
             }
@@ -406,12 +407,7 @@ fn pass_int_loop_version(
                 out.push(Insn::Jump(0)); // → fast head, patched below
                 ci += 1;
             }
-            let remapped = rewrite_offsets_with(
-                insn.clone(),
-                i,
-                &placement,
-                &jump_target,
-            );
+            let remapped = rewrite_offsets_with(insn.clone(), i, &placement, &jump_target);
             if targets(i, insn) == Some(n) {
                 past_end_patches.push(out.len());
             }
@@ -457,9 +453,7 @@ fn pass_int_loop_version(
                         let interior_landing = insns[cand.head..=cand.back]
                             .iter()
                             .enumerate()
-                            .filter_map(|(rel, region_insn)| {
-                                targets(cand.head + rel, region_insn)
-                            })
+                            .filter_map(|(rel, region_insn)| targets(cand.head + rel, region_insn))
                             .any(|t| t > i && t <= cand.back);
                         let fused = if j == cand.back && !interior_landing {
                             match &insns[cand.back] {
@@ -605,6 +599,23 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         CmpJumpIfTrueConst(a, op, c, _) => CmpJumpIfTrueConst(a, op, c, off),
         CountCmpJumpTrue(v, op, s, imm, _) => CountCmpJumpTrue(v, op, s, imm, off),
         CountCmpJumpFalse(v, op, s, imm, _) => CountCmpJumpFalse(v, op, s, imm, off),
+        CallInlineBinOp {
+            callee,
+            dst,
+            a,
+            op,
+            b,
+            proto,
+            ..
+        } => CallInlineBinOp {
+            callee,
+            dst,
+            a,
+            op,
+            b,
+            proto,
+            skip: off,
+        },
         ForIter(dst, slot, _) => ForIter(dst, slot, off),
         SetupExcept(_) => SetupExcept(off),
         MatchExcept(r, _) => MatchExcept(r, off),

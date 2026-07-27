@@ -654,5 +654,11 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*subj);
             f(*cls);
         }
+
+        CallInlineBinOp { callee, a, b, .. } => {
+            f(*callee);
+            f(*a);
+            f(*b);
+        }
     }
 }

@@ -900,6 +900,30 @@ impl Interpreter {
                         pc = jump_pc!(*offset);
                     }
                 }
+                Insn::CallInlineBinOp {
+                    callee,
+                    dst,
+                    a,
+                    op,
+                    b,
+                    proto,
+                    skip,
+                } => {
+                    // Guarded leaf-call inline: on success this is the entire
+                    // observable effect of the call sequence it precedes; on
+                    // any guard failure fall through into that sequence.
+                    if let Some(result) = try_inline_leaf_binop(
+                        &regs[*callee as usize],
+                        &regs[*a as usize],
+                        &regs[*b as usize],
+                        *op,
+                        code,
+                        *proto,
+                    ) {
+                        regs[*dst as usize] = result;
+                        pc = jump_pc!(*skip);
+                    }
+                }
                 Insn::CountCmpJumpFalse(var, op, stop, imm, offset) => {
                     // Exact composition of `BinOpImm(var, var, Add, imm, true)`
                     // followed by `CmpJumpIfFalse(var, op, stop, offset)`.

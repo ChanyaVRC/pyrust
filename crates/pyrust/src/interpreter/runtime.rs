@@ -46,17 +46,18 @@ use formatting::{format_dunder_owner, format_dunder_spec_arg};
 
 mod exceptions {
     use super::{
-        ExpandedCallArg, Interpreter, PyClass, PyError, Rc, RefCell, Result, Value, ValueKind,
-        builtin_data_backing, class_is_builtin_exception_subclass, class_is_subclass_of,
-        classify_exception_class, instantiate_attribute_error, instantiate_exception,
-        instantiate_exception_with_kinds, instantiate_import_error, instantiate_name_error,
-        instantiate_os_error, instantiate_unicode_decode_error, instantiate_unicode_encode_error,
-        invoke_class_method, is_exception_class, is_stop_iteration_error, lookup_class_attr,
-        lookup_exc_class, reject_keyword_args_expanded, render_key_repr, render_value_repr,
+        ExpandedCallArg, Interpreter, PyClass, PyError, PyInstance, PyToPrimitive, Rc, RefCell,
+        Result, Value, ValueKind, builtin_data_backing, canonical_class_by_tag,
+        class_is_builtin_exception_subclass, class_is_subclass_of, classify_exception_class,
+        instantiate_attribute_error, instantiate_exception, instantiate_exception_with_kinds,
+        instantiate_import_error, instantiate_name_error, instantiate_os_error,
+        instantiate_unicode_decode_error, instantiate_unicode_encode_error, invoke_class_method,
+        is_exception_class, is_stop_iteration_error, lookup_class_attr, lookup_exc_class,
+        reject_keyword_args_expanded, render_key_repr, render_value_repr, value_to_bigint,
     };
     include!("runtime/exceptions.rs");
 }
-use exceptions::render_instance_repr;
+use exceptions::{ExceptionSlotPolicy, exception_slot_policy, render_instance_repr};
 pub(crate) use exceptions::{
     ascii_repr_interp, exception_repr_with_dispatch, exception_str_with_dispatch,
     is_sequence_iter_terminator,
@@ -211,16 +212,17 @@ pub(crate) use expressions::{
 
 mod attributes {
     use super::{
-        ExpandedCallArg, GeneratorFrame, Interpreter, PyClass, PyDict, PyError, PyInstance, PyKey,
-        Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind, Value, ValueKind,
-        adapt_builtin_subclass_method, bind_builtin_class_special, builtin_callable_metadata,
-        builtin_class_doc, canonical_class_by_tag, class_chain_new_slot_wrapped,
-        class_hash_inherits_builtin_none, class_is_subclass_of, class_suppresses_instance_dict,
-        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
-        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
-        mro_has_unslotted_ancestor, mro_slot_allows, object_class_singleton,
-        primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
-        typevar_readonly_attr_error, value_class, value_type_name_str,
+        ExceptionSlotPolicy, ExpandedCallArg, GeneratorFrame, Interpreter, PyClass, PyDict,
+        PyError, PyInstance, PyKey, Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind,
+        Value, ValueKind, adapt_builtin_subclass_method, bind_builtin_class_special,
+        builtin_callable_metadata, builtin_class_doc, canonical_class_by_tag,
+        class_chain_new_slot_wrapped, class_hash_inherits_builtin_none, class_is_subclass_of,
+        class_suppresses_instance_dict, exception_slot_policy, instance_builtin_data,
+        invoke_class_method, is_exception_class, is_type_alias_class, is_typevar_class,
+        lookup_class_attr, metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor,
+        mro_slot_allows, object_class_singleton, primitive_owned_object_dunder,
+        replace_instance_dict, type_alias_readonly_attr_error, typevar_readonly_attr_error,
+        value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }
@@ -233,14 +235,16 @@ use attributes::{class_direct_subclasses, class_mro_items};
 
 mod namespaces {
     use super::{
-        CachedModuleClass, ENV_POOL_MAX, EnvRef, Environment, FrameKind, HashMap, Interpreter,
+        CachedImportModuleRegistry, CachedModuleClass, CollectionMutationState, ENV_POOL_MAX,
+        EnvRef, Environment, ExpandedCallArg, FrameKind, HashMap, InstanceAttrs, Interpreter,
         Lexer, MODULE_CLASS_CACHE_SLOT_COUNT, ModuleClassCache, ModuleClassCacheSlot,
-        ModuleMutationState, Parser, PathBuf, PyClass, PyDict, PyError, PyKey, PyModule, Rc,
-        RefCell, RegSlice, Result, StrKey, Value, ValueKind, cached_builtins_module,
+        ModuleMutationState, Parser, PathBuf, PyClass, PyDict, PyError, PyInstance, PyKey,
+        PyModule, Rc, RefCell, RegSlice, Result, StrKey, Value, ValueKind, cached_builtins_module,
         call_del_if_last_binding, env_assign_local, find_enclosing_local_env_for_name,
-        get_int_max_str_digits, is_cached_builtins_module, lookup_name_in_enclosing_local_env,
-        lookup_name_in_env, lookup_name_in_env_as_free, lookup_name_in_module, module_env,
-        set_int_max_str_digits, value_type_name_str, vm_read,
+        get_int_max_str_digits, invoke_class_method, is_cached_builtins_module,
+        lookup_name_in_enclosing_local_env, lookup_name_in_env, lookup_name_in_env_as_free,
+        lookup_name_in_module, lookup_value_special_method, module_env, object_class_singleton,
+        set_int_max_str_digits, value_type_name_str, values_are_identical, vm_read,
     };
     include!("runtime/namespaces.rs");
 }
@@ -320,8 +324,8 @@ pub(crate) fn is_ordered_dict_class_or_subclass(class: &Rc<RefCell<PyClass>>) ->
 mod execution {
     use super::fast_path::{
         LoopFastOutcome, MemoCallProbe, advance_loop_fast_state, build_string_fast,
-        list_reserve_hint, try_constant_compare_fast, try_integer_compare_fast,
-        try_scalar_truthiness_fast, try_tagged_int_unary,
+        list_reserve_hint, try_constant_compare_fast, try_inline_leaf_binop,
+        try_integer_compare_fast, try_scalar_truthiness_fast, try_tagged_int_unary,
     };
     use super::{
         CallDepthGuard, EnvRef, FrameKind, HashMap, Interpreter, IterCacheBuf, IterState, ItersBuf,

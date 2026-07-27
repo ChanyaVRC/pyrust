@@ -345,6 +345,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BinOpConst(r, _, _, _, _)
         | CountCmpJumpTrue(r, _, _, _, _)
         | CountCmpJumpFalse(r, _, _, _, _)
+        | CallInlineBinOp { dst: r, .. }
         | BinOpImm(r, _, _, _, _)
         | UnaryOp(r, _, _)
         | FormatValue(r, _)

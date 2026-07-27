@@ -22,6 +22,7 @@ fn insn_is_back_edge(insn: &Insn) -> bool {
         | Insn::JumpIfNotInt(_, k)
         | Insn::CountCmpJumpTrue(_, _, _, _, k)
         | Insn::CountCmpJumpFalse(_, _, _, _, k)
+        | Insn::CallInlineBinOp { skip: k, .. }
         if *k < 0
     )
 }
@@ -303,6 +304,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // MatchClassPositional reads subj and cls.
         MatchClassPositional { subj, cls, .. } => r == *subj || r == *cls,
+
+        // Guard reads its callee and both argument registers.
+        CallInlineBinOp { callee, a, b, .. } => r == *callee || r == *a || r == *b,
     }
 }
 
@@ -565,6 +569,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         MatchClassPositional { subj, cls, .. } => {
             reads.insert(*subj);
             reads.insert(*cls);
+        }
+
+        CallInlineBinOp { callee, a, b, .. } => {
+            reads.insert(*callee);
+            reads.insert(*a);
+            reads.insert(*b);
         }
     }
 }

@@ -188,6 +188,29 @@ pub enum Insn {
     /// As `CountCmpJumpTrue` but jumps when the comparison is false
     /// (the `BinOpImm` + `CmpJumpIfFalse` pair).
     CountCmpJumpFalse(Reg, BinaryOp, Reg, i16, i32),
+    /// Guarded numeric leaf-call inlining site (emitted only by the
+    /// optimizer, always immediately before the original call sequence it
+    /// specializes, which stays in place as the deopt path).
+    ///
+    /// When R[callee] is the exact `Regular` user function compiled from
+    /// `fn_protos[proto]` — compared by code-object identity, so any runtime
+    /// rebinding of the source-level name deopts — and both argument
+    /// registers hold machine integers, the VM stores `R[a] op R[b]` into
+    /// R[dst] (the call-base register) and jumps by `skip` over the call
+    /// sequence.  That computation is the entire observable effect of calling
+    /// the eligible two-parameter `return a op b` leaf on ints: no user code,
+    /// raise, or namespace read is elided, and overflow promotes to BigInt
+    /// exactly like the called body would.  On any guard failure execution
+    /// falls through into the unmodified call sequence.
+    CallInlineBinOp {
+        callee: Reg,
+        dst: Reg,
+        a: Reg,
+        op: BinaryOp,
+        b: Reg,
+        proto: u16,
+        skip: i32,
+    },
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
     /// Marks a call to a statically memo-pure callee. The VM may reuse a cached
@@ -499,9 +522,11 @@ pub enum Insn {
     /// `SetAttr` / `DeleteAttr` on these names raises `AttributeError` while this
     /// internal write succeeds.
     SetTypeVarAttr(Reg, u16, Reg),
-    /// R[dst] = TypeAliasType(name=consts[name_idx], value=R[value_reg], type_params=R[params_reg])
-    /// PEP 695: construct a `TypeAliasType` object from a string name, the evaluated value
-    /// expression, and a tuple of TypeVar objects (may be an empty tuple).
+    /// R[dst] = TypeAliasType(name=consts[name_idx],
+    ///                        value_thunk=R[value_reg],
+    ///                        type_params=R[params_reg])
+    /// PEP 695: construct a `TypeAliasType` whose zero-argument evaluator runs
+    /// and caches its successful result on first `__value__` access.
     MakeTypeAlias(Reg, u16, Reg, Reg),
     /// Print R[src] if not None (REPL expression output).
     PrintExpr(Reg),

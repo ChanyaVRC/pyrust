@@ -7,6 +7,7 @@ include!("optimizer/pipeline.rs");
 include!("optimizer/constant_folding.rs");
 include!("optimizer/register_analysis.rs");
 include!("optimizer/loop_motion.rs");
+include!("optimizer/inlining.rs");
 include!("optimizer/elimination.rs");
 include!("optimizer/propagation.rs");
 include!("optimizer/control_flow.rs");

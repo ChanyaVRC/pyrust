@@ -69,6 +69,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // shape passes do not model.  Only `build_exc_table`, the source-table
     // remap (the appended copies cannot raise), and `pass_compact_consts`
     // (which they carry no const slots through) run after it.
+    // Guarded leaf-call inlining precedes loop versioning: its guard opcode
+    // is not in the versioning whitelist, so a loop containing a call site
+    // simply keeps its original form.
+    let insns = pass_inline_leaf_binop(insns, &fn_protos);
     let versioned = pass_int_loop_version(insns, &consts, &mut num_regs);
     let insns = versioned.insns;
     let source_prefix_len = versioned.source_prefix_len;
