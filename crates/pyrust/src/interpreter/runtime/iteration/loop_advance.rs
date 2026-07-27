@@ -74,6 +74,20 @@ impl Interpreter {
         &mut self,
         state: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Value> {
+        // A real generator frame is checked first: every other arm below is a
+        // built-in adapter, so probing nine `is::<T>()` types before reaching
+        // the generator made each generator step (native resume, and any body
+        // the #2253 trampoline cannot carry) pay for all of them. The concrete
+        // states are mutually exclusive, so the order is semantics-preserving.
+        {
+            let mut borrowed = state.borrow_mut();
+            if let Some(frame) = borrowed.downcast_mut::<GeneratorFrame>() {
+                if frame.done {
+                    return Err(stop_iteration());
+                }
+                return self.resume_generator(frame);
+            }
+        }
         if state.borrow().is::<GetItemIter>() {
             return self
                 .step_getitem_iter(state)
@@ -115,12 +129,6 @@ impl Interpreter {
         let mut borrowed = state.borrow_mut();
         if let Some(native) = borrowed.downcast_mut::<NativeIterFrame>() {
             return native.advance().and_then(require_iterator_item);
-        }
-        if let Some(frame) = borrowed.downcast_mut::<GeneratorFrame>() {
-            if frame.done {
-                return Err(stop_iteration());
-            }
-            return self.resume_generator(frame);
         }
         Err(PyError::Runtime("invalid generator state".to_string()))
     }

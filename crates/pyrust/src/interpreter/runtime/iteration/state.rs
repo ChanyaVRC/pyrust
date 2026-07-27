@@ -64,6 +64,11 @@ pub(crate) struct LiveKeyCursor {
     /// the already-yielded prefix from the remaining fast indexed suffix.
     pub(crate) snapshot: Option<Vec<PyKey>>,
     pub(crate) snapshot_pos: usize,
+    /// Backing mapping resolved once, for containers whose backing identity
+    /// cannot move. While the mutation generation is unchanged the insertion
+    /// order is frozen, so `snapshot_pos` is also the live entry position and
+    /// values are read positionally instead of by key.
+    pub(crate) backing: Option<pyrust_builtins::dict_views::DictRc>,
     /// Allocated only after a mutation generation changes, when restarting the
     /// index walk may otherwise yield an earlier key twice.
     pub(crate) seen: Option<pyrust_core::PySet>,
@@ -109,10 +114,12 @@ impl LiveKeyCursor {
         let mutation_state = live_collection_mutation_state(container)
             .expect("live dict cursor requires mutation state");
         let observed_mutation = mutation_state.version();
+        let dynamic_backing = container.as_py_instance_rc().is_some();
         Self {
             yielded: Vec::new(),
-            snapshot: None,
+            snapshot: initial_key_snapshot(container, dynamic_backing, len),
             snapshot_pos: 0,
+            backing: stable_cursor_backing(container, dynamic_backing),
             seen: None,
             next_index: 0,
             last_key: None,
@@ -121,7 +128,7 @@ impl LiveKeyCursor {
             observed_mutation,
             recorded_len: len,
             size_change_message: "dictionary changed size during iteration",
-            dynamic_backing: container.as_py_instance_rc().is_some(),
+            dynamic_backing,
             remaining: Some(len),
             kind,
             keys_changed: false,
@@ -137,10 +144,12 @@ impl LiveKeyCursor {
         let mutation_state = live_collection_mutation_state(container)
             .expect("live set cursor requires mutation state");
         let observed_mutation = mutation_state.version();
+        let dynamic_backing = container.as_py_instance_rc().is_some();
         Self {
             yielded: Vec::new(),
-            snapshot: None,
+            snapshot: initial_key_snapshot(container, dynamic_backing, len),
             snapshot_pos: 0,
+            backing: None,
             seen: None,
             next_index: 0,
             last_key: None,
@@ -149,7 +158,7 @@ impl LiveKeyCursor {
             observed_mutation,
             recorded_len: len,
             size_change_message: "Set changed size during iteration",
-            dynamic_backing: container.as_py_instance_rc().is_some(),
+            dynamic_backing,
             remaining: None,
             kind: 3,
             keys_changed: false,
@@ -187,6 +196,7 @@ impl LiveKeyCursor {
         self.yielded = Vec::new();
         self.snapshot = None;
         self.snapshot_pos = 0;
+        self.backing = None;
         self.seen = None;
         self.last_key = None;
         self.mutation_state = None;

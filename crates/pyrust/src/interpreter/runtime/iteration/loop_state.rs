@@ -315,18 +315,20 @@ impl Interpreter {
             pyrust_builtins::dict_views::view_kind(&source).expect("dict view has a known kind");
         let dict =
             pyrust_builtins::dict_views::as_dict_rc(&source).expect("dict view has a backing dict");
-        let keys = dict.borrow().keys().cloned().collect::<Vec<_>>();
-        let recorded_len = keys.len();
+        let recorded_len = pyrust_builtins::dict_views::backing_len(&dict);
         let ordered_policy = pyrust_builtins::ordered_mapping::view_policy(&source);
         let (msg, exhaust_first) = ordered_policy
             .map(|policy| (policy.mutation_message, policy.exhaust_first))
             .unwrap_or(("dictionary changed size during iteration", false));
         if ordered_policy.is_none() {
+            // The live cursor owns its own key-order policy, so a plain view
+            // must not pay for a key vector it would immediately discard.
             return IterState::LiveKeysGuarded {
                 cursor: LiveKeyCursor::dict(&source, kind.live_cursor_code(), recorded_len),
                 container: source,
             };
         }
+        let keys = pyrust_builtins::dict_views::backing_keys(&dict);
         let provider_sequence = pyrust_builtins::ordered_mapping::clear_sequence();
         IterState::DictViewGuarded {
             keys,
