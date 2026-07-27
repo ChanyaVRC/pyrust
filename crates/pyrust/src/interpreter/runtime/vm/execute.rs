@@ -909,6 +909,25 @@ impl Interpreter {
                         pc = jump_pc!(*offset);
                     }
                 }
+                Insn::JumpIfIterNotIndexedSeq(slot, offset) => {
+                    // Entry guard for the out-of-line list/tuple loop copy: an
+                    // index cursor over a canonical sequence steps without
+                    // Python-visible effects; anything else diverts to the
+                    // original loop.
+                    if !iter_slot_is_indexed_sequence(iters[*slot as usize].as_ref()) {
+                        pc = jump_pc!(*offset);
+                    }
+                }
+                Insn::GetItemSeqOrExit(dst, obj, idx, offset) => {
+                    // Mid-loop side exit: a canonical in-range sequence read is
+                    // the whole observable effect, so on any other operand
+                    // shape the deferred syncs are flushed by the stub at
+                    // `offset` and the original subscript re-runs unchanged.
+                    match try_indexed_sequence_element(&regs[*obj as usize], &regs[*idx as usize]) {
+                        Some(element) => regs[*dst as usize] = element,
+                        None => pc = jump_pc!(*offset),
+                    }
+                }
                 Insn::CallInlineBinOp {
                     callee,
                     dst,

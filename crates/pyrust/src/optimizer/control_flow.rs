@@ -11,7 +11,9 @@ fn insn_jump_off(insn: &Insn) -> Option<i32> {
         Insn::JumpIfFalse(_, offset)
         | Insn::JumpIfTrue(_, offset)
         | Insn::JumpIfNotInt(_, offset)
-        | Insn::JumpIfIterNotIntRange(_, offset) => Some(*offset),
+        | Insn::JumpIfIterNotIntRange(_, offset)
+        | Insn::JumpIfIterNotIndexedSeq(_, offset)
+        | Insn::GetItemSeqOrExit(_, _, _, offset) => Some(*offset),
         Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
         | Insn::CmpJumpIfFalseConst(_, _, _, offset)

@@ -10,6 +10,8 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::JumpIfTrue(_, offset)
         | Insn::JumpIfNotInt(_, offset)
         | Insn::JumpIfIterNotIntRange(_, offset)
+        | Insn::JumpIfIterNotIndexedSeq(_, offset)
+        | Insn::GetItemSeqOrExit(_, _, _, offset)
         | Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
         | Insn::CmpJumpIfFalseConst(_, _, _, offset)
@@ -594,4 +596,211 @@ fn continue_at_loop_top_reaches_int_loop_versioning() {
         "the versioned copy needs a fused counted back-edge: {:?}",
         optimized.insns
     );
+}
+
+// ── Mid-loop side exits (#2887) ──────────────────────────────────────────────
+
+/// Follow the dispatch `Jump` that terminates the guard chain beginning at
+/// `guard_pc`, returning the first instruction index of the fast copy it
+/// selects.
+fn fast_copy_head(insns: &[Insn], guard_pc: usize) -> usize {
+    let mut pc = guard_pc;
+    while !matches!(insns[pc], Insn::Jump(_)) {
+        pc += 1;
+    }
+    jump_target(pc, &insns[pc]).expect("a guard chain ends in its dispatch jump")
+}
+
+/// Walk a deferred-sync stub, returning its `SyncModuleGlobal` operands and the
+/// index its terminal `Jump` resumes at.
+fn stub_at(insns: &[Insn], mut pc: usize) -> (Vec<(Reg, u16)>, usize) {
+    let mut syncs = Vec::new();
+    while let Insn::SyncModuleGlobal(reg, name_idx) = insns[pc] {
+        syncs.push((reg, name_idx));
+        pc += 1;
+    }
+    let resume = jump_target(pc, &insns[pc]).expect("a stub ends in its resume jump");
+    (syncs, resume)
+}
+
+#[test]
+fn for_over_a_list_gets_its_own_guarded_copy_with_an_element_side_exit() {
+    let code = optimize(compile_fn(
+        "xs = [1, 2, 3]\ntotal = 0\nfor x in xs:\n    total += x\n",
+    ));
+    let insns = &code.insns;
+
+    // The range guard chain stays first, so a `for … in range(…)` still enters
+    // its copy through exactly the instructions it used before.
+    let range_guard = insns
+        .iter()
+        .position(|insn| matches!(insn, Insn::JumpIfIterNotIntRange(..)))
+        .expect("the machine-int range chain must still be emitted");
+    let seq_guard = insns
+        .iter()
+        .position(|insn| matches!(insn, Insn::JumpIfIterNotIndexedSeq(..)))
+        .expect("a canonical list/tuple cursor must get its own guard chain");
+    assert!(
+        range_guard < seq_guard,
+        "the range chain must be tried first: {insns:?}"
+    );
+    assert_eq!(
+        jump_target(range_guard, &insns[range_guard]),
+        Some(seq_guard),
+        "a rejected range cursor falls through to the sequence chain"
+    );
+
+    let head = fast_copy_head(insns, seq_guard);
+    let Insn::ForIter(loop_var, _, _) = insns[head] else {
+        panic!("the sequence copy must open with its ForIter: {insns:?}");
+    };
+    let Insn::JumpIfNotInt(guarded, _) = insns[head + 1] else {
+        panic!("the element type is a per-iteration fact: {insns:?}");
+    };
+    assert_eq!(
+        guarded, loop_var,
+        "the side exit must guard the loop variable"
+    );
+
+    // The side exit flushes every deferred sync and resumes the *original*
+    // loop after its ForIter, because the shared cursor already advanced.
+    let (syncs, resume) = stub_at(
+        insns,
+        jump_target(head + 1, &insns[head + 1]).expect("the guard jumps to its stub"),
+    );
+    assert_eq!(
+        syncs.len(),
+        2,
+        "both the loop variable and the accumulator are deferred: {insns:?}"
+    );
+    assert!(
+        resume < head,
+        "a side exit resumes the original stream, not the copy: {insns:?}"
+    );
+    assert!(
+        matches!(insns[resume], Insn::SyncModuleGlobal(reg, _) if reg == loop_var),
+        "resume lands on the instruction after the original ForIter: {insns:?}"
+    );
+    assert!(
+        matches!(insns[resume - 1], Insn::ForIter(..)),
+        "resume lands immediately after the original ForIter: {insns:?}"
+    );
+}
+
+#[test]
+fn a_branching_for_body_keeps_only_the_range_copy() {
+    // Interior control flow would let an execution path reach a use of the
+    // loop variable without passing its side exit, so only the range cursor —
+    // whose elements are ints by construction — is admitted.  Both synced
+    // names are pre-bound so the branching body still clears the existing
+    // globals-insertion-order condition.
+    let code = optimize(compile_fn(
+        "item = 0\nseen = 0\nfor item in [1, 2, 3]:\n    if item == 2:\n        seen += 1\n",
+    ));
+
+    assert!(
+        code.insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::JumpIfIterNotIntRange(..))),
+        "the range copy is unaffected: {:?}",
+        code.insns
+    );
+    assert!(
+        !code
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::JumpIfIterNotIndexedSeq(..))),
+        "a branching body must not get a sequence copy: {:?}",
+        code.insns
+    );
+}
+
+#[test]
+fn a_subscript_side_exit_resumes_the_original_get_item() {
+    let code = optimize(compile_fn(
+        "xs = [1, 2, 3]\ntotal = 0\nfor i in range(3):\n    total += xs[i]\n",
+    ));
+    let insns = &code.insns;
+
+    let original_get_item = insns
+        .iter()
+        .position(|insn| matches!(insn, Insn::GetItem(..)))
+        .expect("the original subscript must stay in place as the deopt target");
+    let fast_pc = insns
+        .iter()
+        .position(|insn| matches!(insn, Insn::GetItemSeqOrExit(..)))
+        .expect("the fast copy must run the deopting subscript form");
+    let Insn::GetItemSeqOrExit(dst, obj, idx, _) = insns[fast_pc] else {
+        unreachable!()
+    };
+    assert!(
+        matches!(insns[original_get_item], Insn::GetItem(d, o, i) if (d, o, i) == (dst, obj, idx)),
+        "the deopting form must carry the original operands: {insns:?}"
+    );
+    let Insn::JumpIfNotInt(guarded, _) = insns[fast_pc + 1] else {
+        panic!("the element type is a per-iteration fact: {insns:?}");
+    };
+    assert_eq!(guarded, dst, "the side exit must guard the loaded element");
+
+    // Both the out-of-range/non-sequence deopt and the non-int-element deopt
+    // resume at the original subscript, which re-reads the same element — or
+    // raises with its own line and caret.
+    for pc in [fast_pc, fast_pc + 1] {
+        let (syncs, resume) = stub_at(
+            insns,
+            jump_target(pc, &insns[pc]).expect("a side exit jumps to its stub"),
+        );
+        assert_eq!(syncs.len(), 2, "every deferred sync is flushed: {insns:?}");
+        assert_eq!(
+            resume, original_get_item,
+            "pc {pc} must resume at the original subscript: {insns:?}"
+        );
+    }
+}
+
+#[test]
+fn a_subscript_clobbering_its_own_operand_is_not_versioned() {
+    // Deopting after the fast read would destroy the operand the original
+    // GetItem needs, so the whole candidate is rejected.
+    let input = vec![
+        Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 4),
+        Insn::GetItem(2, 2, 0),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 0),
+        Insn::CmpJumpIfTrue(0, BinaryOp::Lt, 1, -4),
+    ];
+
+    assert_eq!(
+        version(input.clone(), &[]),
+        input,
+        "a self-clobbering subscript must keep the original loop"
+    );
+}
+
+#[test]
+fn side_exit_opcodes_participate_in_register_analysis_and_compaction() {
+    let subscript = Insn::GetItemSeqOrExit(4, 5, 6, 0);
+    let iter_guard = Insn::JumpIfIterNotIndexedSeq(0, 0);
+
+    assert!(insn_reads_reg(&subscript, 5));
+    assert!(insn_reads_reg(&subscript, 6));
+    assert!(!insn_reads_reg(&subscript, 4));
+    assert!(!insn_reads_reg(&iter_guard, 0));
+    let mut writes = HashSet::new();
+    collect_writes(&subscript, &mut writes);
+    assert_eq!(writes, HashSet::from([4]));
+
+    // Removing old pc 2 shifts both forward targets by one instruction.
+    let compacted = compact(
+        vec![
+            Insn::JumpIfIterNotIndexedSeq(0, 3),
+            Insn::GetItemSeqOrExit(1, 2, 3, 2),
+            Insn::LoadNone(4),
+            Insn::LoadNone(5),
+            Insn::ReturnNone,
+        ],
+        &[true, true, false, true, true],
+    );
+    assert!(matches!(compacted[0], Insn::JumpIfIterNotIndexedSeq(0, 2)));
+    assert!(matches!(compacted[1], Insn::GetItemSeqOrExit(1, 2, 3, 1)));
 }

@@ -414,6 +414,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | DeleteModuleGlobal(..)
         | Jump(..)
         | JumpIfIterNotIntRange(..)
+        | JumpIfIterNotIndexedSeq(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept
@@ -476,6 +477,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
+        | GetItemSeqOrExit(_, a, b, _)
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => {
             f(*a);

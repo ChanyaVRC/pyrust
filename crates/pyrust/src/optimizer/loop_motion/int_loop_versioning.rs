@@ -30,6 +30,40 @@
 ///   Jump(→ t)
 /// ```
 ///
+/// ## Mid-loop side exits
+///
+/// Entry guards can only establish loop-invariant facts.  Two operations the
+/// pass admits produce values whose type is a *per-iteration* fact — a
+/// `ForIter` step over a canonical list/tuple, and a canonical sequence
+/// subscript — so the specialized copy carries **mid-loop side exits**:
+///
+/// ```text
+/// fast_head:
+///   ForIter(x, slot, → stub(exit))
+///   JumpIfNotInt(x, → side(head+1))    ; element type is per-iteration
+///   GetItemSeqOrExit(v, xs, i, → side(i_sub))
+///   JumpIfNotInt(v, → side(i_sub))     ; element type is per-iteration
+///   …
+/// side(t):                              ; same shape as an exit stub
+///   SyncModuleGlobal(…)                 ; every deferred sync, flushed
+///   Jump(→ original instruction t)      ; resume the original loop mid-body
+/// ```
+///
+/// Flushing *every* deferred sync is always correct: a synced register either
+/// still holds the value the previous iteration published, or holds the value
+/// the original would already have published at that program point.  The
+/// iterator slot is shared by both copies, so resuming the original loop needs
+/// no cursor fix-up, and any subsequent raise happens on the original path with
+/// its own source line, PEP 657 caret span, and a synchronized namespace.
+///
+/// A side exit re-enters the original stream *at* the guarded operation (or,
+/// for `ForIter`, at the instruction after it, because the cursor has already
+/// advanced).  Re-running a canonical sequence read observes exactly the same
+/// state, so the deopt target is only reached in states where the original
+/// instruction reproduces the fast copy's effect — or raises, which is the
+/// point.  Candidates whose subscript would clobber its own operand register,
+/// or that could branch around a guarded definition, are rejected instead.
+///
 /// ## Soundness
 ///
 /// - Eligible regions contain only `Move`/`CopyReg`, int-pool `LoadConst`,
@@ -77,10 +111,24 @@ fn pass_int_loop_version(
     enum CandidateKind {
         /// Inverted while loop: conditional header, conditional back-edge.
         Inverted,
-        /// `for … in range(…)`: `ForIter` header, unconditional back-edge; the
-        /// guard block additionally checks the iterator slot holds the
-        /// canonical machine-int range cursor.
-        ForRange { slot: u8 },
+        /// `for … in <iterable>`: `ForIter` header, unconditional back-edge;
+        /// the guard block additionally checks the iterator slot's kind.
+        ForIter { slot: u8 },
+    }
+
+    /// One out-of-line copy of a candidate region, reached through its own
+    /// iterator-kind guard chain.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FastVariant {
+        /// No iterator guard: the inverted-while copy.
+        Plain,
+        /// `for … in range(…)`: the canonical machine-int cursor always yields
+        /// an `int`, so the loop variable needs no per-iteration guard.
+        IntRange,
+        /// `for … in <list|tuple>`: the element type is a per-iteration fact,
+        /// so the copy opens with a `JumpIfNotInt` side exit on the loop
+        /// variable.
+        IndexedSeq,
     }
 
     struct Candidate {
@@ -93,6 +141,27 @@ fn pass_int_loop_version(
         /// pool slot; the guard block materialises it once into `tmp_reg` so
         /// the fused `CountCmpJump*` can use the register form.
         const_fuse: Option<(Reg, u16)>,
+        /// One appended fast copy per entry, in guard-chain order.
+        variants: Vec<FastVariant>,
+    }
+
+    impl Candidate {
+        /// Instructions the guard block contributes ahead of the original head.
+        fn guard_block_len(&self) -> usize {
+            let per_variant = usize::from(matches!(self.kind, CandidateKind::ForIter { .. }))
+                + self.guards.len()
+                + usize::from(self.const_fuse.is_some())
+                + 1;
+            self.variants.len() * per_variant
+        }
+    }
+
+    /// A fast-copy entry: either a rewritten copy of the original instruction
+    /// at some old index, or a synthesized guard whose failure edge is the
+    /// deferred-sync side-exit stub for the given old index.
+    enum FastEntry {
+        Copied(usize, Insn),
+        SideExit(usize, Insn),
     }
 
     let n = insns.len();
@@ -148,6 +217,8 @@ fn pass_int_loop_version(
             | Insn::JumpIfTrue(_, k)
             | Insn::JumpIfNotInt(_, k)
             | Insn::JumpIfIterNotIntRange(_, k)
+            | Insn::JumpIfIterNotIndexedSeq(_, k)
+            | Insn::GetItemSeqOrExit(_, _, _, k)
             | Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -182,7 +253,7 @@ fn pass_int_loop_version(
                 (CandidateKind::Inverted, *k as usize)
             }
             Insn::ForIter(_, slot, k) if *k > 1 => {
-                (CandidateKind::ForRange { slot: *slot }, *k as usize)
+                (CandidateKind::ForIter { slot: *slot }, *k as usize)
             }
             _ => {
                 h += 1;
@@ -207,7 +278,7 @@ fn pass_int_loop_version(
                 | Insn::JumpIfFalse(_, kb)
                 | Insn::JumpIfTrue(_, kb),
             ) => *kb == -(k as i32),
-            (CandidateKind::ForRange { .. }, Insn::Jump(kb)) => *kb == -(k as i32 + 1),
+            (CandidateKind::ForIter { .. }, Insn::Jump(kb)) => *kb == -(k as i32 + 1),
             _ => false,
         };
         if !back_targets_body {
@@ -225,10 +296,13 @@ fn pass_int_loop_version(
             }
         };
         let mut eligible = true;
+        // Old indices of `GetItem`s the fast copy may run as the deopting
+        // `GetItemSeqOrExit`.
+        let mut subscripts: Vec<usize> = Vec::new();
         let walk_start = match kind {
             // The ForIter header is not in the body whitelist; the runtime
             // iterator-slot guard owns its semantics.
-            CandidateKind::ForRange { .. } => h + 1,
+            CandidateKind::ForIter { .. } => h + 1,
             CandidateKind::Inverted => h,
         };
         for i in walk_start..=back {
@@ -296,7 +370,7 @@ fn pass_int_loop_version(
                 }
                 Insn::Jump(off) => {
                     let is_forrange_backedge =
-                        i == back && matches!(kind, CandidateKind::ForRange { .. });
+                        i == back && matches!(kind, CandidateKind::ForIter { .. });
                     // A backward jump to the region head is a `continue`; any
                     // other backward jump is a nested loop's back-edge and only
                     // innermost regions are versioned.
@@ -306,6 +380,19 @@ fn pass_int_loop_version(
                         break;
                     }
                     has_interior_control_flow |= i != h && i != back;
+                }
+                Insn::GetItem(dst, obj, idx) => {
+                    // Admitted through a mid-loop side exit: the fast copy runs
+                    // the deopting `GetItemSeqOrExit` and guards its result.
+                    // Neither operand may be entry-guarded (the sequence is not
+                    // an int, and the index may legitimately be the loop
+                    // variable), and the deopt only reproduces the original
+                    // read when the destination is not one of them.
+                    if dst == obj || dst == idx {
+                        eligible = false;
+                        break;
+                    }
+                    subscripts.push(i);
                 }
                 Insn::SyncModuleGlobal(r, name_idx) => {
                     if !syncs.contains(&(*r, *name_idx)) {
@@ -318,13 +405,31 @@ fn pass_int_loop_version(
                 }
             }
         }
-        if let CandidateKind::ForRange { .. } = kind {
-            // The ForIter target register is (re)written by the guarded range
-            // cursor before every body execution, so its entry state is
-            // irrelevant — and on a fresh loop it is legitimately unset.
+        if let CandidateKind::ForIter { .. } = kind {
+            // The ForIter target register is (re)written by the guarded cursor
+            // before every body execution, so its entry state is irrelevant —
+            // and on a fresh loop it is legitimately unset.  Over a canonical
+            // sequence the element type is a per-iteration fact instead, which
+            // the copy's opening side exit covers.
             if let Insn::ForIter(dst, _, _) = &insns[h] {
                 guards.retain(|g| g != dst);
             }
+        }
+        // A subscript destination is likewise rewritten every iteration, and
+        // its side exit dominates every later read only while the body is
+        // straight-line and nothing reads it ahead of its definition.
+        for &si in &subscripts {
+            let Insn::GetItem(dst, _, _) = &insns[si] else {
+                unreachable!("only GetItem sites are recorded as subscripts");
+            };
+            if insns[h..si].iter().any(|insn| insn_reads_reg(insn, *dst)) {
+                eligible = false;
+                break;
+            }
+            guards.retain(|g| g != dst);
+        }
+        if has_interior_control_flow && !subscripts.is_empty() {
+            eligible = false;
         }
         // Interior control flow is compatible with sync deferral only when no
         // synced name can be first-inserted into the live globals dict by this
@@ -430,6 +535,19 @@ fn pass_int_loop_version(
         if const_fuse.is_some() {
             *num_regs += 1;
         }
+        // A `for` header admits two iterator kinds, each with its own guard
+        // chain and copy: the machine-int range cursor, and — when the body is
+        // straight-line, so the opening side exit dominates every use of the
+        // loop variable — the canonical list/tuple index cursor.
+        let variants = match kind {
+            CandidateKind::Inverted => vec![FastVariant::Plain],
+            CandidateKind::ForIter { .. } if has_interior_control_flow => {
+                vec![FastVariant::IntRange]
+            }
+            CandidateKind::ForIter { .. } => {
+                vec![FastVariant::IntRange, FastVariant::IndexedSeq]
+            }
+        };
         candidates.push(Candidate {
             kind,
             head: h,
@@ -437,6 +555,7 @@ fn pass_int_loop_version(
             guards,
             syncs,
             const_fuse,
+            variants,
         });
         h = back + 1;
     }
@@ -460,13 +579,7 @@ fn pass_int_loop_version(
             let mut guard_start = None;
             if ci < candidates.len() && candidates[ci].head == i {
                 guard_start = Some(i + shift);
-                shift += candidates[ci].guards.len()
-                    + usize::from(matches!(
-                        candidates[ci].kind,
-                        CandidateKind::ForRange { .. }
-                    ))
-                    + usize::from(candidates[ci].const_fuse.is_some())
-                    + 1;
+                shift += candidates[ci].guard_block_len();
                 ci += 1;
             }
             placement[i] = i + shift;
@@ -485,27 +598,50 @@ fn pass_int_loop_version(
     // first appended copy and can replay the function tail.
     let mut past_end_patches: Vec<usize> = Vec::new();
     // Main stream: guard blocks (offsets patched later) + remapped originals.
-    let mut guard_jump_patches: Vec<(usize, usize)> = Vec::new(); // (out idx, candidate idx)
+    // Per candidate, the out index of each variant's trailing dispatch jump.
+    let mut guard_jump_patches: Vec<Vec<usize>> = Vec::new();
     {
         let mut ci = 0usize;
         for (i, insn) in insns.iter().enumerate() {
             if ci < candidates.len() && candidates[ci].head == i {
                 let cand = &candidates[ci];
-                if let CandidateKind::ForRange { slot } = cand.kind {
-                    let gpos = out.len();
-                    let fail_off = placement[i] as i64 - gpos as i64 - 1;
-                    out.push(Insn::JumpIfIterNotIntRange(slot, fail_off as i32));
+                let per_variant = cand.guard_block_len() / cand.variants.len();
+                let mut patches = Vec::with_capacity(cand.variants.len());
+                for (vi, variant) in cand.variants.iter().enumerate() {
+                    let block_end = out.len() + per_variant;
+                    if let CandidateKind::ForIter { slot } = cand.kind {
+                        // A rejected iterator kind falls through to the next
+                        // guard chain; the last one gives up on the fast copies
+                        // entirely and runs the original loop.
+                        let fail = if vi + 1 < cand.variants.len() {
+                            block_end
+                        } else {
+                            placement[i]
+                        };
+                        let fail_off = (fail as i64 - out.len() as i64 - 1) as i32;
+                        out.push(match variant {
+                            FastVariant::IntRange => Insn::JumpIfIterNotIntRange(slot, fail_off),
+                            FastVariant::IndexedSeq => {
+                                Insn::JumpIfIterNotIndexedSeq(slot, fail_off)
+                            }
+                            FastVariant::Plain => {
+                                unreachable!("a for header always guards its iterator kind")
+                            }
+                        });
+                    }
+                    for g in &cand.guards {
+                        let gpos = out.len();
+                        let fail_off = placement[i] as i64 - gpos as i64 - 1;
+                        out.push(Insn::JumpIfNotInt(*g, fail_off as i32));
+                    }
+                    if let Some((tmp, cidx)) = cand.const_fuse {
+                        out.push(Insn::LoadConst(tmp, cidx));
+                    }
+                    patches.push(out.len());
+                    out.push(Insn::Jump(0)); // → fast head, patched below
+                    debug_assert_eq!(out.len(), block_end);
                 }
-                for g in &cand.guards {
-                    let gpos = out.len();
-                    let fail_off = placement[i] as i64 - gpos as i64 - 1;
-                    out.push(Insn::JumpIfNotInt(*g, fail_off as i32));
-                }
-                if let Some((tmp, cidx)) = cand.const_fuse {
-                    out.push(Insn::LoadConst(tmp, cidx));
-                }
-                guard_jump_patches.push((out.len(), ci));
-                out.push(Insn::Jump(0)); // → fast head, patched below
+                guard_jump_patches.push(patches);
                 ci += 1;
             }
             let remapped = rewrite_offsets_with(insn.clone(), i, &placement, &jump_target);
@@ -525,22 +661,61 @@ fn pass_int_loop_version(
     out.push(Insn::Jump(0));
     let source_prefix_len = out.len();
 
-    // Appended fast copies + stubs.
-    for (ci, cand) in candidates.iter().enumerate() {
+    // Appended fast copies + stubs, one per candidate variant.
+    let variant_copies: Vec<(usize, usize, FastVariant)> = candidates
+        .iter()
+        .enumerate()
+        .flat_map(|(ci, cand)| {
+            cand.variants
+                .iter()
+                .enumerate()
+                .map(move |(vi, variant)| (ci, vi, *variant))
+        })
+        .collect();
+    for (ci, vi, variant) in variant_copies {
+        let cand = &candidates[ci];
         let fast_base = out.len();
-        // Patch this candidate's guard-block trailing jump.
-        let (jpos, _) = guard_jump_patches[ci];
+        // Patch this variant's guard-block trailing jump.
+        let jpos = guard_jump_patches[ci][vi];
         out[jpos] = Insn::Jump((fast_base as i64 - jpos as i64 - 1) as i32);
 
         // fast_index[i - head] = index within the fast copy (before offsets),
         // usize::MAX for skipped syncs / fused-away insns.
         let mut fast_index = vec![usize::MAX; cand.back - cand.head + 1];
-        let mut fast: Vec<(usize, Insn)> = Vec::new(); // (old idx, insn)
+        let mut fast: Vec<FastEntry> = Vec::new();
         {
+            // Side exits are emitted immediately *before* the next original
+            // instruction rather than after their producer, so an internal edge
+            // landing there re-runs the guard instead of skipping it.
+            let mut pending: Vec<(Reg, usize)> = Vec::new(); // (guarded reg, old target)
             let mut i = cand.head;
             while i <= cand.back {
+                let entry_pos = fast.len();
+                for (reg, target) in pending.drain(..) {
+                    fast.push(FastEntry::SideExit(target, Insn::JumpIfNotInt(reg, 0)));
+                }
+                fast_index[i - cand.head] = entry_pos;
                 match &insns[i] {
                     Insn::SyncModuleGlobal(..) => {}
+                    Insn::ForIter(dst, _, _)
+                        if i == cand.head && variant == FastVariant::IndexedSeq =>
+                    {
+                        // The element type is a per-iteration fact: guard it
+                        // before the body, side-exiting to the instruction
+                        // after the original ForIter because the shared cursor
+                        // has already advanced.
+                        fast.push(FastEntry::Copied(i, insns[i].clone()));
+                        pending.push((*dst, cand.head + 1));
+                    }
+                    Insn::GetItem(dst, obj, idx) => {
+                        fast.push(FastEntry::SideExit(
+                            i,
+                            Insn::GetItemSeqOrExit(*dst, *obj, *idx, 0),
+                        ));
+                        // Re-running the original subscript after a deopt reads
+                        // the same element, so both guards resume at it.
+                        pending.push((*dst, i));
+                    }
                     Insn::BinOpImm(d, s, BinaryOp::Add, imm, _) if d == s && i < cand.back => {
                         // Try to fuse with the back-edge compare-jump when the
                         // only instructions between them are removed syncs and
@@ -582,46 +757,56 @@ fn pass_int_loop_version(
                             None
                         };
                         if let Some(fused_insn) = fused {
-                            fast_index[i - cand.head] = fast.len();
                             fast_index[cand.back - cand.head] = fast.len();
                             // Attribute the fused insn to the back-edge index so
                             // its jump offset is rewritten relative to it.
-                            fast.push((cand.back, fused_insn));
+                            fast.push(FastEntry::Copied(cand.back, fused_insn));
                             i = cand.back + 1;
                             continue;
                         }
-                        fast_index[i - cand.head] = fast.len();
-                        fast.push((i, insns[i].clone()));
+                        fast.push(FastEntry::Copied(i, insns[i].clone()));
                     }
                     _ => {
-                        fast_index[i - cand.head] = fast.len();
-                        fast.push((i, insns[i].clone()));
+                        fast.push(FastEntry::Copied(i, insns[i].clone()));
                     }
                 }
                 i += 1;
             }
+            debug_assert!(
+                pending.is_empty(),
+                "a side exit must precede a later instruction in the region"
+            );
         }
         // Resolve, per external target, a stub slot.  The back-edge's
         // fall-through (the normal loop exit, `back + 1`) always needs one and
         // is emitted first so execution falls straight into it.
         let mut stub_targets: Vec<usize> = vec![cand.back + 1]; // old absolute targets
-        for (fpos, (old_i, insn)) in fast.iter().enumerate() {
-            let Some(t) = targets(*old_i, insn) else {
-                continue;
+        for (fpos, entry) in fast.iter().enumerate() {
+            let t = match entry {
+                // A side exit always resumes the original stream, even though
+                // its target is inside the region.
+                FastEntry::SideExit(target, _) => *target,
+                FastEntry::Copied(old_i, insn) => {
+                    let Some(t) = targets(*old_i, insn) else {
+                        continue;
+                    };
+                    let internal = t >= cand.head && t <= cand.back;
+                    if internal {
+                        continue;
+                    }
+                    // An inverted-while header runs once, on entry: its exit
+                    // edge is the zero-trip path and must not flush syncs the
+                    // original never executed.  A `for` header is the recurring
+                    // exhaustion test, so its exit flushes like any body exit
+                    // (a zero-trip pass is safe there: never-assigned registers
+                    // are unset and the sync skips them, and already-synced
+                    // names rewrite identical values).
+                    if fpos == 0 && matches!(cand.kind, CandidateKind::Inverted) {
+                        continue;
+                    }
+                    t
+                }
             };
-            let internal = t >= cand.head && t <= cand.back;
-            if internal {
-                continue;
-            }
-            // An inverted-while header runs once, on entry: its exit edge is
-            // the zero-trip path and must not flush syncs the original never
-            // executed.  A ForRange header is the recurring exhaustion test,
-            // so its exit flushes like any body exit (a zero-trip pass is
-            // safe there: never-assigned registers are unset and the sync
-            // skips them, and already-synced names rewrite identical values).
-            if fpos == 0 && matches!(cand.kind, CandidateKind::Inverted) {
-                continue;
-            }
             if !stub_targets.contains(&t) {
                 stub_targets.push(t);
             }
@@ -636,10 +821,19 @@ fn pass_int_loop_version(
         };
 
         // Emit fast insns with rewritten offsets.
-        for (fpos, (old_i, insn)) in fast.iter().enumerate() {
+        for (fpos, entry) in fast.iter().enumerate() {
             let abs = fast_base + fpos;
+            let (old_i, insn) = match entry {
+                FastEntry::Copied(old_i, insn) | FastEntry::SideExit(old_i, insn) => (old_i, insn),
+            };
+            if let FastEntry::SideExit(target, _) = entry {
+                let dest_abs = stub_abs(*target, &stub_targets);
+                let new_off = (dest_abs as i64 - abs as i64 - 1) as i32;
+                out.push(replace_jump_offset(insn.clone(), new_off));
+                continue;
+            }
             // Only an inverted-while header keeps a direct edge to old
-            // past-the-end. Every ForRange exhaustion and every body exit is
+            // past-the-end. Every `for` exhaustion and every body exit is
             // deliberately routed through a deferred-sync stub; registering
             // those source edges here would overwrite the stub destination
             // during the final-length patch and silently skip the syncs.
@@ -706,6 +900,8 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         JumpIfTrue(r, _) => JumpIfTrue(r, off),
         JumpIfNotInt(r, _) => JumpIfNotInt(r, off),
         JumpIfIterNotIntRange(s2, _) => JumpIfIterNotIntRange(s2, off),
+        JumpIfIterNotIndexedSeq(s2, _) => JumpIfIterNotIndexedSeq(s2, off),
+        GetItemSeqOrExit(dst, obj, idx, _) => GetItemSeqOrExit(dst, obj, idx, off),
         CmpJumpIfFalse(a, op, b, _) => CmpJumpIfFalse(a, op, b, off),
         CmpJumpIfTrue(a, op, b, _) => CmpJumpIfTrue(a, op, b, off),
         CmpJumpIfFalseConst(a, op, c, _) => CmpJumpIfFalseConst(a, op, c, off),

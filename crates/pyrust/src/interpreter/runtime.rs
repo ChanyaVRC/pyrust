@@ -325,9 +325,9 @@ pub(crate) fn is_ordered_dict_class_or_subclass(class: &Rc<RefCell<PyClass>>) ->
 mod execution {
     use super::fast_path::{
         LoopFastOutcome, MemoCallProbe, advance_loop_fast_state, build_string_fast,
-        iter_slot_is_int_range, list_reserve_hint, try_constant_compare_fast,
-        try_inline_leaf_binop, try_integer_compare_fast, try_scalar_truthiness_fast,
-        try_tagged_int_unary,
+        iter_slot_is_indexed_sequence, iter_slot_is_int_range, list_reserve_hint,
+        try_constant_compare_fast, try_indexed_sequence_element, try_inline_leaf_binop,
+        try_integer_compare_fast, try_scalar_truthiness_fast, try_tagged_int_unary,
     };
     use super::{
         CallDepthGuard, EnvRef, FrameKind, HashMap, Interpreter, IterCacheBuf, IterState, ItersBuf,

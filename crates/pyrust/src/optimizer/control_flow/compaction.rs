@@ -67,6 +67,8 @@ pub(crate) fn rewrite_offsets_with(
         MatchExceptStar(r, src, dst, k) => MatchExceptStar(r, src, dst, fix(k)),
         JumpIfNotInt(r, k) => JumpIfNotInt(r, fix(k)),
         JumpIfIterNotIntRange(s, k) => JumpIfIterNotIntRange(s, fix(k)),
+        JumpIfIterNotIndexedSeq(s, k) => JumpIfIterNotIndexedSeq(s, fix(k)),
+        GetItemSeqOrExit(dst, obj, idx, k) => GetItemSeqOrExit(dst, obj, idx, fix(k)),
         CountCmpJumpTrue(v, op, s, imm, k) => CountCmpJumpTrue(v, op, s, imm, fix(k)),
         CountCmpJumpFalse(v, op, s, imm, k) => CountCmpJumpFalse(v, op, s, imm, fix(k)),
         CallInlineBinOp {
