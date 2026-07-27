@@ -133,6 +133,77 @@ impl NativeIterFrame {
         }
     }
 
+    /// Whether this frame is an unguarded element walk: no mutation guard, and
+    /// a source that produces one element per position from its own storage
+    /// with no Python protocol step and no failure mode.
+    ///
+    /// `guard` is only ever installed at construction and `source` only ever
+    /// transitions to `Exhausted`, so a frame that answers `true` keeps
+    /// answering `true`. A loop may therefore classify the cell once and reuse
+    /// [`advance_element`](Self::advance_element) for the rest of the walk.
+    #[inline]
+    pub(crate) fn is_unguarded_element_source(&self) -> bool {
+        self.guard.is_none()
+            && matches!(
+                self.source,
+                NativeIterSource::Materialized(_)
+                    | NativeIterSource::Indexed(_)
+                    | NativeIterSource::Bytes(_)
+                    | NativeIterSource::String { .. }
+                    | NativeIterSource::Exhausted
+            )
+    }
+
+    /// Advance a frame classified by
+    /// [`is_unguarded_element_source`](Self::is_unguarded_element_source).
+    ///
+    /// Produces exactly what [`advance`](Self::advance) would for those
+    /// sources, minus the guard, live-cursor, and fallible protocol arms that
+    /// classification ruled out. A live `Indexed` source is still read at the
+    /// current position, so a list mutated mid-iteration is observed by the
+    /// same index walk.
+    #[inline]
+    pub(crate) fn advance_element(&mut self) -> Option<Value> {
+        debug_assert!(self.is_unguarded_element_source());
+        if self.exhausted {
+            return None;
+        }
+        let pos = self.pos;
+        let item = match &mut self.source {
+            NativeIterSource::Materialized(items) => items.get(pos).cloned(),
+            NativeIterSource::Indexed(value) => indexed_sequence_item(value, pos),
+            NativeIterSource::Bytes(value) => match value.kind() {
+                ValueKind::Bytes(bytes) => bytes.get(pos).map(|byte| Value::int(*byte as i64)),
+                _ => None,
+            },
+            NativeIterSource::String { value, byte_pos } => {
+                match value
+                    .as_str()
+                    .and_then(|text| pyrust_core::cesu8_next_codepoint(text, *byte_pos))
+                {
+                    Some((codepoint, next_pos)) => {
+                        *byte_pos = next_pos;
+                        Some(Value::string(pyrust_core::cesu8_encode_codepoint(
+                            codepoint,
+                        )))
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        match item {
+            Some(item) => {
+                self.pos = pos + 1;
+                Some(item)
+            }
+            None => {
+                self.latch_exhausted();
+                None
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn source_len(&self) -> usize {
         match &self.source {

@@ -329,6 +329,22 @@ pub(crate) struct EnumerateIter {
     pub(crate) done: bool,
 }
 
+/// Loop cursor for `enumerate(...)` over a built-in element iterator.
+///
+/// Both handles are the cells the two Python objects already own, so the
+/// counter and the element position stay shared: an aliased `next()` on the
+/// enumerate — or on the inner iterator it was built from — interleaves with
+/// the loop exactly as it does on the generic adapter path.
+#[derive(Clone)]
+pub(crate) struct EnumerateElementCursor {
+    /// The `enumerate` object's own state cell, holding the running counter.
+    pub(crate) enumerate: Rc<RefCell<Box<dyn std::any::Any>>>,
+    /// The enumerate's inner iterator cell, a [`NativeIterFrame`] whose source
+    /// is an unguarded element walk over a list, tuple, snapshot, or an
+    /// immutable `bytes` / `str`.
+    pub(crate) frame: Rc<RefCell<Box<dyn std::any::Any>>>,
+}
+
 pub(crate) struct BigRangeIter {
     pub(crate) cur: PyBigInt,
     pub(crate) stop: PyBigInt,

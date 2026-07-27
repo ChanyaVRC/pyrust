@@ -228,6 +228,12 @@ pub(super) fn advance_loop_fast_state(
                 advanced_item!(value)
             }
         }
+        IterState::EnumerateElements(cursor) => {
+            match crate::interpreter::iteration::advance_enumerate_elements(cursor) {
+                Some((index, item)) => advanced_pair!(index, item),
+                None => LoopFastOutcome::Exhausted,
+            }
+        }
         IterState::UserDefined(_) => LoopFastOutcome::UserDefined,
     }
 }
