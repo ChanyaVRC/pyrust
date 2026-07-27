@@ -427,12 +427,13 @@ fn remap_lineno_and_col_tables_with_source_prefix(
     // same destination temp (`(a + b) + "s"`) — so the `lhs` register breaks the
     // tie.  Still "never a wrong caret": a non-unique match falls through to no
     // anchor.
+    //
+    // Both this index and the monotone cursor also carry the fused op's *line*
+    // (issue #2889), so it is built unconditionally rather than only for carets.
     let mut old_binop_reg_positions: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    if want_cols {
-        for &p in &old_binop_positions {
-            if let Insn::BinOp(d, l, _, _) = old_insns[p] {
-                old_binop_reg_positions.entry((d, l)).or_default().push(p);
-            }
+    for &p in &old_binop_positions {
+        if let Insn::BinOp(d, l, _, _) = old_insns[p] {
+            old_binop_reg_positions.entry((d, l)).or_default().push(p);
         }
     }
 
@@ -626,47 +627,67 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                         old_pos = i + 1;
                     }
                     None => {
-                        // Optimizer-created instruction with no eligible opcode match:
-                        // approximate the line from the running prefix; line anchor
-                        // stays on the running prefix.  For a fused binary op
-                        // (`BinOpConst`/`BinOpImm`), recover the PEP 657 caret
-                        // anchor from the originating `BinOp` via a monotone scan
-                        // over `old_binop_positions` (issue #2411); col-only, so
-                        // the #1962/#2002 line contract is untouched.
-                        linenos.push(old_prefix.get(old_pos).copied().unwrap_or(0));
-                        if want_cols && binop_recovery_sound && insn_is_fused_binop(new_insn) {
+                        // Optimizer-created instruction with no eligible opcode
+                        // match.  For a fused binary op (`BinOpConst`/`BinOpImm`)
+                        // recover the originating `BinOp`'s position — by a
+                        // monotone scan over `old_binop_positions` (issue #2411),
+                        // or, when a fold made that scan unsound, by the surviving
+                        // op's `(dst, lhs)` register pair (issue #2580).
+                        let fused_origin = if !insn_is_fused_binop(new_insn) {
+                            None
+                        } else if binop_recovery_sound {
                             while binop_col_cursor < old_binop_positions.len()
                                 && old_binop_positions[binop_col_cursor] < old_pos
                             {
                                 binop_col_cursor += 1;
                             }
-                            if let Some(&i) = old_binop_positions.get(binop_col_cursor) {
-                                *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                            let found = old_binop_positions.get(binop_col_cursor).copied();
+                            if found.is_some() {
                                 binop_col_cursor += 1;
                             }
-                        } else if want_cols && insn_is_fused_binop(new_insn) {
+                            found
+                        } else {
                             // The monotone recovery is unsound (an inner binop was
                             // folded away, so the surviving op is not the next old
                             // `BinOp` in order — issue #2580).  Pin the origin by the
                             // surviving op's `(dst, lhs)` registers: fusion preserves
                             // them, so a *unique* old `BinOp` at-or-after the cursor
                             // with the same register pair is unambiguously the origin.
-                            // A non-unique match stays caret-free (never a wrong one).
+                            // A non-unique match stays anchor-free (never a wrong one).
                             let new_regs = match new_insn {
                                 Insn::BinOpConst(d, l, _, _, _) | Insn::BinOpImm(d, l, _, _, _) => {
                                     Some((*d, *l))
                                 }
                                 _ => None,
                             };
-                            if let Some(key) = new_regs
-                                && let Some(locs) = old_binop_reg_positions.get(&key)
-                            {
-                                let candidates: Vec<usize> =
-                                    locs.iter().copied().filter(|&p| p >= old_pos).collect();
-                                if let [i] = candidates[..] {
-                                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
-                                }
-                            }
+                            new_regs
+                                .and_then(|key| old_binop_reg_positions.get(&key))
+                                .and_then(|locs| {
+                                    let candidates: Vec<usize> =
+                                        locs.iter().copied().filter(|&p| p >= old_pos).collect();
+                                    match candidates[..] {
+                                        [i] => Some(i),
+                                        _ => None,
+                                    }
+                                })
+                        };
+                        // Fusion is a 1:1 replacement of the old `BinOp` (it only
+                        // additionally consumes the preceding `LoadConst`), so a
+                        // pinned origin gives the fused op's true source line, not
+                        // just its caret.  Without this a raising bare `a / b`
+                        // statement reports the *previous* statement's line once it
+                        // fuses — issue #2439's defect re-entered through the fused
+                        // opcode, which #2889's precise fusion liveness makes
+                        // reachable for ordinary straight-line code.  Everything
+                        // else still approximates from the running prefix, keeping
+                        // the #1962/#2002 contract.
+                        linenos.push(
+                            fused_origin
+                                .and_then(|i| old_prefix.get(i).copied())
+                                .unwrap_or_else(|| old_prefix.get(old_pos).copied().unwrap_or(0)),
+                        );
+                        if want_cols && let Some(i) = fused_origin {
+                            *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                         }
                         // Recover the caret anchor of a conditional jump synthesized
                         // from `UnaryOp(Not) + JumpIf*` by `pass_not_invert` (issue

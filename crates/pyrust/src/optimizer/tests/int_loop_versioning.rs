@@ -553,3 +553,45 @@ fn compiler_fuses_single_if_break_and_continue_to_direct_conditional_jumps() {
         continue_code.insns
     );
 }
+
+/// Issue #2889: `while i < N: if i % 2 == 0: … continue` at module scope.
+///
+/// The body reloads one scratch temp with a different constant per operand, so
+/// the loop bound's `LoadConst` used to survive on the back-edge target.  That
+/// made the region head a `LoadConst` and the back edge unconditional — a shape
+/// neither `pass_loop_inversion` nor `pass_int_loop_version` recognises.  With
+/// the bound folded into the comparison the back edge lands on the header again
+/// and the loop reaches the guarded int version.
+#[test]
+fn continue_at_loop_top_reaches_int_loop_versioning() {
+    let code = compile_fn(
+        "i = 0\ntotal = 0\nwhile i < 10:\n    if i % 2 == 0:\n        i += 1\n        continue\n    total += i\n    i += 1\n",
+    );
+    let optimized = optimize(code);
+
+    assert!(
+        optimized
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::CmpJumpIfTrueConst(_, _, _, k) if *k < 0)),
+        "the bound folds into the header, so loop inversion turns the \
+         unconditional back-edge into a re-check: {:?}",
+        optimized.insns
+    );
+    assert!(
+        optimized
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::JumpIfNotInt(..))),
+        "the versioned copy needs entry guards: {:?}",
+        optimized.insns
+    );
+    assert!(
+        optimized.insns.iter().any(|insn| matches!(
+            insn,
+            Insn::CountCmpJumpTrue(..) | Insn::CountCmpJumpFalse(..)
+        )),
+        "the versioned copy needs a fused counted back-edge: {:?}",
+        optimized.insns
+    );
+}

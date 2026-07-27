@@ -58,6 +58,13 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
     }
 
+    // Candidates the coarse guards below rejected.  They are re-decided in a
+    // second phase by `load_const_dead_after_use`, whose two extra linear scans
+    // are only paid for when such a candidate exists (issue #2002's O(n²)
+    // lesson applies to constant factors too: a module that is one huge
+    // literal has thousands of `LoadConst`s and no rejected pair at all).
+    let mut rejected: Vec<usize> = Vec::new();
+
     let mut i = 0;
     while i + 1 < n {
         if jump_targets.contains(&(i + 1)) {
@@ -86,20 +93,49 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             // sound regardless of the forward `last_read` estimate or a later
             // back-edge (no reachable path can observe the dead value).
             let dead_after = scratch_dead_after(&transformed, i + 2, lc_reg);
-            if rhs == lc_reg
-                && lhs != lc_reg
-                && lc_reg >= num_locals
-                && (dead_after || !back_edge_after[i + 2])
-                && (dst == lc_reg || !read_after || dead_after)
-            {
-                keep[i] = false;
-                // Fusing a plain BinOp (never augmented) → is_aug = false.
-                transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx, false);
-                i += 2;
-                continue;
+            if rhs == lc_reg && lhs != lc_reg && lc_reg >= num_locals {
+                if (dead_after || !back_edge_after[i + 2])
+                    && (dst == lc_reg || !read_after || dead_after)
+                {
+                    keep[i] = false;
+                    // Fusing a plain BinOp (never augmented) → is_aug = false.
+                    transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx, false);
+                    i += 2;
+                    continue;
+                }
+                rejected.push(i);
             }
         }
         i += 1;
     }
+
+    // Second phase: the coarse guards are whole-function (`last_read`,
+    // `back_edge_after`) or fixed-window (`scratch_dead_after`) approximations,
+    // and they always reject the scratch temp a loop body reloads per operand —
+    // including the one holding the loop bound at the header.  Deciding those
+    // rejections precisely is what lets the bound's `LoadConst` disappear so the
+    // back edge lands on the comparison header again, which is what
+    // `pass_loop_inversion` and `pass_int_loop_version` need to see (#2889).
+    //
+    // The phase-1 rewrites already applied are invisible here: fusing only ever
+    // drops a `BinOp`'s read of a register defined by the `LoadConst`
+    // immediately before it, so no read that carries a value across an
+    // instruction boundary — the only kind either scan reasons about — is lost.
+    if !rejected.is_empty() {
+        let dead_def = load_const_dead_after_use(&transformed, num_locals, &jump_targets);
+        for i in rejected {
+            if !dead_def[i] {
+                continue;
+            }
+            if let (Insn::LoadConst(_, c_idx), Insn::BinOp(dst, lhs, op, _)) =
+                (&transformed[i], &transformed[i + 1])
+            {
+                let insn = Insn::BinOpConst(*dst, *lhs, *op, *c_idx, false);
+                keep[i] = false;
+                transformed[i + 1] = insn;
+            }
+        }
+    }
+
     compact(transformed, &keep)
 }

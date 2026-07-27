@@ -86,6 +86,120 @@ fn scratch_dead_after(insns: &[Insn], start: usize, r: u32) -> bool {
     end == insns.len()
 }
 
+/// For every index `i`, whether a `LoadConst` at `i` writes a scratch temp
+/// whose loaded value is provably unread after `i + 1` on *every* path.
+///
+/// `pass_binop_const_fusion` folds `LoadConst(r, c); BinOp(dst, lhs, op, r)`
+/// into one `BinOpConst` and drops the load, which needs exactly that fact.
+/// Its other guards answer the question with whole-function approximations —
+/// "is `r` read anywhere later" plus "does a back edge appear later" — and the
+/// shape every `while COND: … EXPR == K …` loop compiles to always fails them:
+/// the compiler reloads one scratch temp with a different constant per operand,
+/// so a later reload counts as a later read, and the loop's own back edge is
+/// always "later".  The surviving `LoadConst` of the loop bound then sits on
+/// the back-edge target, which is what stops LICM (the temp is no longer
+/// single-writer), loop inversion and int-loop versioning from recognising the
+/// loop at all (issue #2889).
+///
+/// Two linear scans compute the precise fact:
+///
+/// 1. **Block-local temps.**  A temp is *block-local* when every read of it is
+///    reached from its defining write by pure fall-through — no jump target
+///    lies between the write and the read.  `insn_jump_off` reports
+///    exception-handler entries (`SetupExcept` / `MatchExcept` /
+///    `MatchExceptStar`) as well as ordinary branches, so a handler counts as
+///    an entry edge too.  A block-local temp never carries a value across a
+///    control-flow edge, so reaching definitions for it can be decided by a
+///    straight-line walk without following jumps.
+/// 2. **Reaching scan.**  For a block-local `r` defined at `i`, the loaded
+///    value is observable only at indices reached from `i + 2` by fall-through,
+///    up to the first jump target (past which any read is fed by its own,
+///    later, definition) or the next write of `r`.  If no read of `r` comes
+///    first, the definition is dead after `i + 1`.
+///
+/// Registers below `num_locals` are never reported: named locals are visible
+/// through `globals()` / `locals()` frame views without a bytecode read.
+fn load_const_dead_after_use(
+    insns: &[Insn],
+    num_locals: u32,
+    jump_targets: &HashSet<usize>,
+) -> Vec<bool> {
+    let n = insns.len();
+    let mut dead = vec![false; n];
+    if n == 0 {
+        return dead;
+    }
+
+    let mut reads: HashSet<u32> = HashSet::new();
+    let mut writes: HashSet<u32> = HashSet::new();
+
+    // Pass 1 (forward): which temps are block-local, and how many register
+    // slots the reverse pass needs.
+    let mut max_reg: u32 = num_locals;
+    let mut defined: HashSet<u32> = HashSet::new();
+    let mut escaping: HashSet<u32> = HashSet::new();
+    for (idx, insn) in insns.iter().enumerate() {
+        // Control can enter here from elsewhere, so nothing carries over.
+        if jump_targets.contains(&idx) {
+            defined.clear();
+        }
+        reads.clear();
+        collect_reads(insn, &mut reads);
+        for &r in &reads {
+            max_reg = max_reg.max(r);
+            if r >= num_locals && !defined.contains(&r) {
+                escaping.insert(r);
+            }
+        }
+        // Reads are folded in before writes so an instruction that both reads
+        // and writes `r` is judged against the *previous* definition.
+        writes.clear();
+        collect_writes(insn, &mut writes);
+        for &w in &writes {
+            max_reg = max_reg.max(w);
+            defined.insert(w);
+        }
+    }
+
+    // Pass 2 (reverse): nearest upcoming read / write per register, and the
+    // nearest upcoming jump target.
+    let slots = max_reg as usize + 1;
+    let mut next_read = vec![n; slots];
+    let mut next_write = vec![n; slots];
+    let mut next_target = n;
+    for idx in (0..n).rev() {
+        // The running state describes positions `> idx`.  At `idx` that is
+        // exactly the region a `LoadConst` at `idx - 1`, consumed by
+        // `insns[idx]`, must stay dead in.
+        if idx > 0
+            && let Insn::LoadConst(r, _) = insns[idx - 1]
+            && r >= num_locals
+            && !escaping.contains(&r)
+        {
+            let (read_at, write_at) = (next_read[r as usize], next_write[r as usize]);
+            // Live only if a read comes strictly before the first jump target
+            // (a read at the target is reached by an incoming edge, so it sees
+            // a different definition) and at or before the next write (a
+            // same-instruction read+write reads the old value).
+            dead[idx - 1] = !(read_at < next_target && read_at <= write_at);
+        }
+        if jump_targets.contains(&idx) {
+            next_target = idx;
+        }
+        reads.clear();
+        collect_reads(&insns[idx], &mut reads);
+        for &r in &reads {
+            next_read[r as usize] = idx;
+        }
+        writes.clear();
+        collect_writes(&insns[idx], &mut writes);
+        for &w in &writes {
+            next_write[w as usize] = idx;
+        }
+    }
+    dead
+}
+
 /// True if the register(s) backing a `KwCallName` include `r`.
 fn kwcall_name_reads(name: &crate::bytecode::KwCallName, r: u32) -> bool {
     match name {
