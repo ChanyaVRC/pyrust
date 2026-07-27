@@ -78,7 +78,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{class_is_subclass_of, ExpandedCallArg};
+use crate::interpreter::{ExpandedCallArg, class_is_subclass_of};
 use crate::value::{PyClass, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -88,14 +88,11 @@ use pyrust_derive::pyrust_module;
 // One thread-local per ABC.
 
 macro_rules! abc_class {
-    ($name:expr) => {
-        Rc::new(RefCell::new(PyClass::new(
-            $name,
-            $name,
-            None,
-            IndexMap::new(),
-        )))
-    };
+    ($name:expr) => {{
+        let mut attrs = IndexMap::new();
+        attrs.insert("__module__".to_string(), Value::string("collections.abc"));
+        Rc::new(RefCell::new(PyClass::new($name, $name, None, attrs)))
+    }};
 }
 
 thread_local! {
@@ -136,20 +133,26 @@ thread_local! {
 // in this table; they fall through to the `extra_bases` / MRO path.
 
 const ABC_REQUIRED_METHODS: &[(&str, &[&str])] = &[
-    ("Hashable",        &["__hash__"]),
-    ("Iterable",        &["__iter__"]),
-    ("Iterator",        &["__iter__", "__next__"]),
-    ("Reversible",      &["__reversed__", "__iter__"]),
-    ("Generator",       &["__iter__", "__next__", "send", "throw", "close"]),
-    ("Sized",           &["__len__"]),
-    ("Container",       &["__contains__"]),
-    ("Callable",        &["__call__"]),
-    ("Buffer",          &["__buffer__"]),
-    ("Awaitable",       &["__await__"]),
-    ("Coroutine",       &["__await__", "send", "throw", "close"]),
-    ("AsyncIterable",   &["__aiter__"]),
-    ("AsyncIterator",   &["__anext__", "__aiter__"]),
-    ("AsyncGenerator",  &["__aiter__", "__anext__", "asend", "athrow", "aclose"]),
+    ("Hashable", &["__hash__"]),
+    ("Iterable", &["__iter__"]),
+    ("Iterator", &["__iter__", "__next__"]),
+    ("Reversible", &["__reversed__", "__iter__"]),
+    (
+        "Generator",
+        &["__iter__", "__next__", "send", "throw", "close"],
+    ),
+    ("Sized", &["__len__"]),
+    ("Container", &["__contains__"]),
+    ("Callable", &["__call__"]),
+    ("Buffer", &["__buffer__"]),
+    ("Awaitable", &["__await__"]),
+    ("Coroutine", &["__await__", "send", "throw", "close"]),
+    ("AsyncIterable", &["__aiter__"]),
+    ("AsyncIterator", &["__anext__", "__aiter__"]),
+    (
+        "AsyncGenerator",
+        &["__aiter__", "__anext__", "asend", "athrow", "aclose"],
+    ),
 ];
 
 /// Required methods for an ABC, or `None` if the ABC has no structural hook.
@@ -158,6 +161,39 @@ fn required_methods(abc_name: &str) -> Option<&'static [&'static str]> {
         .iter()
         .find(|(name, _)| *name == abc_name)
         .map(|(_, methods)| *methods)
+}
+
+/// Return the immutable semantic name for one of the canonical ABC objects.
+///
+/// `PyClass.name` is Python-visible and mutable.  It is suitable for repr and
+/// diagnostics, but not for choosing which structural hook an ABC implements.
+fn canonical_structural_abc_name(class: &Rc<RefCell<PyClass>>) -> Option<&'static str> {
+    macro_rules! identify {
+        ($($class_key:ident => $name:literal),+ $(,)?) => {
+            $(
+                if $class_key.with(|candidate| Rc::ptr_eq(class, candidate)) {
+                    return Some($name);
+                }
+            )+
+        };
+    }
+    identify! {
+        ABC_HASHABLE => "Hashable",
+        ABC_ITERABLE => "Iterable",
+        ABC_ITERATOR => "Iterator",
+        ABC_REVERSIBLE => "Reversible",
+        ABC_GENERATOR => "Generator",
+        ABC_SIZED => "Sized",
+        ABC_CONTAINER => "Container",
+        ABC_CALLABLE => "Callable",
+        ABC_BUFFER => "Buffer",
+        ABC_AWAITABLE => "Awaitable",
+        ABC_COROUTINE => "Coroutine",
+        ABC_ASYNC_ITERABLE => "AsyncIterable",
+        ABC_ASYNC_ITERATOR => "AsyncIterator",
+        ABC_ASYNC_GENERATOR => "AsyncGenerator",
+    }
+    None
 }
 
 // ── Primitive protocol support table ─────────────────────────────────────────
@@ -226,27 +262,22 @@ fn primitive_value_has_dunder(value: &Value, dunder: &str) -> bool {
         ),
 
         // generator objects: have __iter__, __next__, send, throw, close
-        ValueKind::Generator(_) => matches!(
-            dunder,
-            "__iter__" | "__next__" | "send" | "throw" | "close"
-        ),
+        ValueKind::Generator(_) => {
+            matches!(dunder, "__iter__" | "__next__" | "send" | "throw" | "close")
+        }
 
         // BuiltinObject variants
         ValueKind::BuiltinObject { ops, .. } => {
-            let type_name = ops.type_name();
-            if type_name == "bytearray" {
+            if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Bytearray) {
                 // bytearray: iterable, sized, contains, reversed, NOT hashable
                 matches!(
                     dunder,
                     "__iter__" | "__len__" | "__contains__" | "__reversed__"
                 )
-            } else if type_name == "frozenset" {
+            } else if ops.canonical_class_tag() == Some(pyrust_core::CanonicalClassTag::Frozenset) {
                 // frozenset: iterable, sized, contains, hashable, NOT reversed
-                matches!(
-                    dunder,
-                    "__iter__" | "__len__" | "__contains__" | "__hash__"
-                )
-            } else if type_name == pyrust_builtins::bound_method::TYPE_NAME {
+                matches!(dunder, "__iter__" | "__len__" | "__contains__" | "__hash__")
+            } else if pyrust_builtins::bound_method::is_bound_method(value) {
                 // Built-in bound methods are callable and hashable
                 matches!(dunder, "__call__" | "__hash__")
             } else {
@@ -317,9 +348,9 @@ pub(crate) fn abc_subclasshook(abc_name: &str, value: &Value) -> Option<bool> {
             let class = Rc::clone(&inst.borrow().class);
             for &method in required {
                 match class_mro_has_method(&class, method) {
-                    Some(true) => {} // present and non-None; continue
+                    Some(true) => {}                   // present and non-None; continue
                     Some(false) => return Some(false), // explicitly None
-                    None => return Some(false), // method absent from entire MRO
+                    None => return Some(false),        // method absent from entire MRO
                 }
             }
             Some(true)
@@ -351,9 +382,9 @@ fn abc_subclasshook_for_class(abc_name: &str, class: &Rc<RefCell<PyClass>>) -> O
     let required = required_methods(abc_name)?;
     for &method in required {
         match class_mro_has_method(class, method) {
-            Some(true) => {} // present and non-None; continue
+            Some(true) => {}                   // present and non-None; continue
             Some(false) => return Some(false), // explicitly None → hard False
-            None => return None,              // absent → NotImplemented; let caller fall back
+            None => return None,               // absent → NotImplemented; let caller fall back
         }
     }
     Some(true)
@@ -365,9 +396,9 @@ fn abc_subclasshook_for_class(abc_name: &str, class: &Rc<RefCell<PyClass>>) -> O
 // `pyrust_module!` below, prefixed with the module's `FN_PREFIX`
 // ("collections.abc.").
 
-const ABC_INSTANCECHECK_FN:   &str = "collections.abc.__instancecheck__";
-const ABC_SUBCLASSHOOK_FN:    &str = "collections.abc.__subclasshook__";
-const ABC_SUBCLASSCHECK_FN:   &str = "collections.abc.__subclasscheck__";
+const ABC_INSTANCECHECK_FN: &str = "collections.abc.__instancecheck__";
+const ABC_SUBCLASSHOOK_FN: &str = "collections.abc.__subclasshook__";
+const ABC_SUBCLASSCHECK_FN: &str = "collections.abc.__subclasscheck__";
 
 pyrust_module! {
     constants {
@@ -417,14 +448,16 @@ pyrust_module! {
         let cls_val  = &args[0].value;
         let instance = &args[1].value;
 
-        let abc_name = match cls_val.kind() {
-            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+        let abc_class = match cls_val.kind() {
+            ValueKind::PyClass(rc) => Rc::clone(rc),
             _ => return Err(PyError::named("TypeError",
                 format!("{FN_NAME}() first argument must be a class"))),
         };
 
         // Step 1: structural hook (instance-based).
-        if let Some(result) = abc_subclasshook(&abc_name, instance) {
+        if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
+            && let Some(result) = abc_subclasshook(abc_name, instance)
+        {
             return Ok(Value::bool_(result));
         }
 
@@ -442,8 +475,8 @@ pyrust_module! {
             _ => crate::interpreter::primitive_class_for_value(instance),
         };
 
-        if let (Some(actual), ValueKind::PyClass(expected_rc)) = (actual_class, cls_val.kind()) {
-            return Ok(Value::bool_(class_is_subclass_of(&actual, expected_rc)));
+        if let Some(actual) = actual_class {
+            return Ok(Value::bool_(class_is_subclass_of(&actual, &abc_class)));
         }
 
         Ok(Value::bool_(false))
@@ -466,15 +499,18 @@ pyrust_module! {
         let cls_val = &args[0].value;
         let c_val   = &args[1].value;
 
-        let abc_name = match cls_val.kind() {
-            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+        let abc_class = match cls_val.kind() {
+            ValueKind::PyClass(rc) => Rc::clone(rc),
             _ => return Err(PyError::named("TypeError",
                 format!("{FN_NAME}() first argument must be a class"))),
         };
 
         match c_val.kind() {
             ValueKind::PyClass(c_rc) => {
-                match abc_subclasshook_for_class(&abc_name, c_rc) {
+                let Some(abc_name) = canonical_structural_abc_name(&abc_class) else {
+                    return Ok(Value::not_implemented());
+                };
+                match abc_subclasshook_for_class(abc_name, c_rc) {
                     Some(result) => Ok(Value::bool_(result)),
                     None => Ok(Value::not_implemented()),
                 }
@@ -503,8 +539,8 @@ pyrust_module! {
         let cls_val      = &args[0].value;
         let subclass_val = &args[1].value;
 
-        let abc_name = match cls_val.kind() {
-            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+        let abc_class = match cls_val.kind() {
+            ValueKind::PyClass(rc) => Rc::clone(rc),
             _ => return Err(PyError::named("TypeError",
                 format!("{FN_NAME}() first argument must be a class"))),
         };
@@ -512,15 +548,13 @@ pyrust_module! {
         match subclass_val.kind() {
             ValueKind::PyClass(c_rc) => {
                 // Step 1: structural hook (class-based).
-                if let Some(result) = abc_subclasshook_for_class(&abc_name, c_rc) {
+                if let Some(abc_name) = canonical_structural_abc_name(&abc_class)
+                    && let Some(result) = abc_subclasshook_for_class(abc_name, c_rc)
+                {
                     return Ok(Value::bool_(result));
                 }
                 // Step 2: MRO / extra_bases fallback.
-                let expected_rc = match cls_val.kind() {
-                    ValueKind::PyClass(rc) => rc,
-                    _ => unreachable!(),
-                };
-                Ok(Value::bool_(class_is_subclass_of(c_rc, expected_rc)))
+                Ok(Value::bool_(class_is_subclass_of(c_rc, &abc_class)))
             }
             _ => Ok(Value::bool_(false)),
         }
@@ -582,74 +616,104 @@ fn register_abc_extra_bases() {
     // `abc`'s subclasses list so the relationship is discoverable.
     fn link(prim: &Rc<RefCell<PyClass>>, abc: &Rc<RefCell<PyClass>>) {
         // Avoid duplicates if called more than once (safety belt).
-        let already = prim
-            .borrow()
-            .extra_bases
-            .iter()
-            .any(|b| Rc::ptr_eq(b, abc));
+        let already = prim.borrow().extra_bases.iter().any(|b| Rc::ptr_eq(b, abc));
         if already {
             return;
         }
-        prim.borrow_mut()
-            .extra_bases
-            .push(Rc::clone(abc));
+        prim.borrow_mut().extra_bases.push(Rc::clone(abc));
         abc.borrow()
             .subclasses
             .borrow_mut()
             .push(Rc::downgrade(prim));
     }
 
-    // Add __instancecheck__, __subclasshook__, __subclasscheck__ to an ABC as
-    // BuiltinFunction values.  When accessed on a PyClass via env.rs::get_attr,
-    // these are intercepted by `is_builtin_classmethod` and wrapped as
-    // `super_bound_builtin(fn_name, cls)`, so that direct access
-    // `Iterable.__instancecheck__` returns a bound callable where cls=Iterable.
-    // This means `Iterable.__instancecheck__(x)` is called as
-    // `abc_instancecheck([Iterable, x])` after the super_bound_builtin dispatch
-    // prepends the receiver.
+    // `collections.abc` is a Python-library surface: CPython stores these
+    // hooks as `classmethod` objects wrapping Python functions. Their bodies
+    // happen to be interpreter-native here, but that implementation detail
+    // must not turn the public descriptors into C-style method descriptors.
+    // Select the Python binding policy here, at the owning provider.
     fn add_dunder_methods(abc: &Rc<RefCell<PyClass>>) {
         let mut borrowed = abc.borrow_mut();
-        borrowed.attrs.entry("__instancecheck__".to_string())
-            .or_insert_with(|| Value::builtin_function(ABC_INSTANCECHECK_FN));
-        borrowed.attrs.entry("__subclasshook__".to_string())
-            .or_insert_with(|| Value::builtin_function(ABC_SUBCLASSHOOK_FN));
-        borrowed.attrs.entry("__subclasscheck__".to_string())
-            .or_insert_with(|| Value::builtin_function(ABC_SUBCLASSCHECK_FN));
+        borrowed
+            .attrs
+            .entry("__instancecheck__".to_string())
+            .or_insert_with(|| {
+                pyrust_builtins::classmethod::class_method_any(Value::builtin_function(
+                    ABC_INSTANCECHECK_FN,
+                ))
+            });
+        borrowed
+            .attrs
+            .entry("__subclasshook__".to_string())
+            .or_insert_with(|| {
+                pyrust_builtins::classmethod::class_method_any(Value::builtin_function(
+                    ABC_SUBCLASSHOOK_FN,
+                ))
+            });
+        borrowed
+            .attrs
+            .entry("__subclasscheck__".to_string())
+            .or_insert_with(|| {
+                pyrust_builtins::classmethod::class_method_any(Value::builtin_function(
+                    ABC_SUBCLASSCHECK_FN,
+                ))
+            });
     }
 
     // Resolve ABCs once.
-    let container       = ABC_CONTAINER.with(Rc::clone);
-    let hashable        = ABC_HASHABLE.with(Rc::clone);
-    let iterable        = ABC_ITERABLE.with(Rc::clone);
-    let iterator        = ABC_ITERATOR.with(Rc::clone);
-    let reversible      = ABC_REVERSIBLE.with(Rc::clone);
-    let generator       = ABC_GENERATOR.with(Rc::clone);
-    let sized           = ABC_SIZED.with(Rc::clone);
-    let callable        = ABC_CALLABLE.with(Rc::clone);
-    let sequence        = ABC_SEQUENCE.with(Rc::clone);
-    let mut_sequence    = ABC_MUTABLE_SEQUENCE.with(Rc::clone);
-    let set_abc         = ABC_SET.with(Rc::clone);
-    let mut_set         = ABC_MUTABLE_SET.with(Rc::clone);
-    let mapping         = ABC_MAPPING.with(Rc::clone);
-    let mut_mapping     = ABC_MUTABLE_MAPPING.with(Rc::clone);
-    let mapping_view    = ABC_MAPPING_VIEW.with(Rc::clone);
-    let keys_view       = ABC_KEYS_VIEW.with(Rc::clone);
-    let items_view      = ABC_ITEMS_VIEW.with(Rc::clone);
-    let values_view     = ABC_VALUES_VIEW.with(Rc::clone);
-    let awaitable       = ABC_AWAITABLE.with(Rc::clone);
-    let coroutine       = ABC_COROUTINE.with(Rc::clone);
-    let async_iterable  = ABC_ASYNC_ITERABLE.with(Rc::clone);
-    let async_iterator  = ABC_ASYNC_ITERATOR.with(Rc::clone);
+    let container = ABC_CONTAINER.with(Rc::clone);
+    let hashable = ABC_HASHABLE.with(Rc::clone);
+    let iterable = ABC_ITERABLE.with(Rc::clone);
+    let iterator = ABC_ITERATOR.with(Rc::clone);
+    let reversible = ABC_REVERSIBLE.with(Rc::clone);
+    let generator = ABC_GENERATOR.with(Rc::clone);
+    let sized = ABC_SIZED.with(Rc::clone);
+    let callable = ABC_CALLABLE.with(Rc::clone);
+    let sequence = ABC_SEQUENCE.with(Rc::clone);
+    let mut_sequence = ABC_MUTABLE_SEQUENCE.with(Rc::clone);
+    let set_abc = ABC_SET.with(Rc::clone);
+    let mut_set = ABC_MUTABLE_SET.with(Rc::clone);
+    let mapping = ABC_MAPPING.with(Rc::clone);
+    let mut_mapping = ABC_MUTABLE_MAPPING.with(Rc::clone);
+    let mapping_view = ABC_MAPPING_VIEW.with(Rc::clone);
+    let keys_view = ABC_KEYS_VIEW.with(Rc::clone);
+    let items_view = ABC_ITEMS_VIEW.with(Rc::clone);
+    let values_view = ABC_VALUES_VIEW.with(Rc::clone);
+    let awaitable = ABC_AWAITABLE.with(Rc::clone);
+    let coroutine = ABC_COROUTINE.with(Rc::clone);
+    let async_iterable = ABC_ASYNC_ITERABLE.with(Rc::clone);
+    let async_iterator = ABC_ASYNC_ITERATOR.with(Rc::clone);
     let async_generator = ABC_ASYNC_GENERATOR.with(Rc::clone);
-    let buffer          = ABC_BUFFER.with(Rc::clone);
+    let buffer = ABC_BUFFER.with(Rc::clone);
+
+    pyrust_builtins::abc_marker::register(&mapping, pyrust_builtins::abc_marker::AbcKind::Mapping);
 
     // Add __instancecheck__ / __subclasshook__ / __subclasscheck__ to every ABC.
     for abc in [
-        &container, &hashable, &iterable, &iterator, &reversible, &generator,
-        &sized, &callable, &sequence, &mut_sequence, &set_abc, &mut_set,
-        &mapping, &mut_mapping, &mapping_view, &keys_view, &items_view,
-        &values_view, &awaitable, &coroutine, &async_iterable, &async_iterator,
-        &async_generator, &buffer,
+        &container,
+        &hashable,
+        &iterable,
+        &iterator,
+        &reversible,
+        &generator,
+        &sized,
+        &callable,
+        &sequence,
+        &mut_sequence,
+        &set_abc,
+        &mut_set,
+        &mapping,
+        &mut_mapping,
+        &mapping_view,
+        &keys_view,
+        &items_view,
+        &values_view,
+        &awaitable,
+        &coroutine,
+        &async_iterable,
+        &async_iterator,
+        &async_generator,
+        &buffer,
     ] {
         add_dunder_methods(abc);
     }
@@ -664,31 +728,38 @@ fn register_abc_extra_bases() {
         };
     }
 
-    let list_cls        = prim!("list");
-    let tuple_cls       = prim!("tuple");
-    let str_cls         = prim!("str");
-    let bytes_cls       = prim!("bytes");
-    let bytearray_cls   = prim!("bytearray");
-    let dict_cls        = prim!("dict");
-    let set_cls         = prim!("set");
-    let frozenset_cls   = prim!("frozenset");
-    let int_cls         = prim!("int");
-    let float_cls       = prim!("float");
-    let complex_cls     = prim!("complex");
-    let bool_cls        = prim!("bool");
-    let none_cls        = prim!("NoneType");
+    let list_cls = prim!("list");
+    let tuple_cls = prim!("tuple");
+    let str_cls = prim!("str");
+    let bytes_cls = prim!("bytes");
+    let bytearray_cls = prim!("bytearray");
+    let dict_cls = prim!("dict");
+    let set_cls = prim!("set");
+    let frozenset_cls = prim!("frozenset");
+    let int_cls = prim!("int");
+    let float_cls = prim!("float");
+    let complex_cls = prim!("complex");
+    let bool_cls = prim!("bool");
+    let none_cls = prim!("NoneType");
 
     // ── Singleton class objects ──────────────────────────────────────────────
-    let fn_type   = function_type_singleton();
+    let fn_type = function_type_singleton();
     let meth_type = method_type_singleton();
-    let type_cls  = type_class_singleton();
+    let type_cls = type_class_singleton();
     let range_cls = range_class_singleton();
-    let _obj_cls  = object_class_singleton(); // ensure singleton initialised
+    let _obj_cls = object_class_singleton(); // ensure singleton initialised
 
     // ── Sequence ────────────────────────────────────────────────────────────
     // list, tuple, str, bytes, bytearray, range are Sequences.
     // CPython: Sequence.register(range) in Lib/_collections_abc.py (issue #1800).
-    for cls in [&list_cls, &tuple_cls, &str_cls, &bytes_cls, &bytearray_cls, &range_cls] {
+    for cls in [
+        &list_cls,
+        &tuple_cls,
+        &str_cls,
+        &bytes_cls,
+        &bytearray_cls,
+        &range_cls,
+    ] {
         link(cls, &sequence);
     }
 
@@ -704,7 +775,13 @@ fn register_abc_extra_bases() {
     // dict became Reversible in Python 3.8 (dict keys preserve insertion order).
     // CPython: Reversible.register(range) in Lib/_collections_abc.py (issue #1800).
     for cls in [
-        &list_cls, &tuple_cls, &str_cls, &bytes_cls, &dict_cls, &bytearray_cls, &range_cls,
+        &list_cls,
+        &tuple_cls,
+        &str_cls,
+        &bytes_cls,
+        &dict_cls,
+        &bytearray_cls,
+        &range_cls,
     ] {
         link(cls, &reversible);
     }
@@ -730,8 +807,15 @@ fn register_abc_extra_bases() {
     // ── Container ───────────────────────────────────────────────────────────
     // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
     for cls in [
-        &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls, &range_cls,
+        &str_cls,
+        &bytes_cls,
+        &list_cls,
+        &tuple_cls,
+        &dict_cls,
+        &set_cls,
+        &frozenset_cls,
+        &bytearray_cls,
+        &range_cls,
     ] {
         link(cls, &container);
     }
@@ -739,8 +823,15 @@ fn register_abc_extra_bases() {
     // ── Sized ───────────────────────────────────────────────────────────────
     // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
     for cls in [
-        &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls, &range_cls,
+        &str_cls,
+        &bytes_cls,
+        &list_cls,
+        &tuple_cls,
+        &dict_cls,
+        &set_cls,
+        &frozenset_cls,
+        &bytearray_cls,
+        &range_cls,
     ] {
         link(cls, &sized);
     }
@@ -748,8 +839,15 @@ fn register_abc_extra_bases() {
     // ── Iterable ────────────────────────────────────────────────────────────
     // str, bytes, list, tuple, dict, set, frozenset, bytearray, range.
     for cls in [
-        &str_cls, &bytes_cls, &list_cls, &tuple_cls,
-        &dict_cls, &set_cls, &frozenset_cls, &bytearray_cls, &range_cls,
+        &str_cls,
+        &bytes_cls,
+        &list_cls,
+        &tuple_cls,
+        &dict_cls,
+        &set_cls,
+        &frozenset_cls,
+        &bytearray_cls,
+        &range_cls,
     ] {
         link(cls, &iterable);
     }
@@ -762,9 +860,18 @@ fn register_abc_extra_bases() {
     // the extra_bases MRO path, so we must link the function/method class here.
     // (list, dict, set are NOT hashable)
     for cls in [
-        &int_cls, &float_cls, &complex_cls, &str_cls, &bytes_cls,
-        &tuple_cls, &frozenset_cls, &bool_cls, &none_cls,
-        &range_cls, &fn_type, &meth_type,
+        &int_cls,
+        &float_cls,
+        &complex_cls,
+        &str_cls,
+        &bytes_cls,
+        &tuple_cls,
+        &frozenset_cls,
+        &bool_cls,
+        &none_cls,
+        &range_cls,
+        &fn_type,
+        &meth_type,
     ] {
         link(cls, &hashable);
     }

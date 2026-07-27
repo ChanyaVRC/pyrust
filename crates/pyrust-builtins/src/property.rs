@@ -7,7 +7,8 @@
 use std::any::Any;
 use std::rc::Rc;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
+use indexmap::IndexMap;
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Result, Value, ValueKind, builtin_ops_is};
 
 /// Property descriptor state.  Each slot is either a callable `Value` or
 /// `Value::none()` (meaning "not set").
@@ -21,11 +22,13 @@ pub struct PropertyState {
     /// `slot` is 0=fget, 1=fset, 2=fdel.
     pub partial_slot: Option<u8>,
     /// Attribute name recorded via `__set_name__` when the property is bound in
-    /// a class body (issue #1846).  `None` for properties never assigned in a
-    /// class body (e.g. `C.x = property(...)` after creation); their
-    /// `__set__`/`__delete__` errors then use the unnamed `property of '...'`
-    /// form, matching CPython.
-    pub name: Option<String>,
+    /// a class body (issue #1846). CPython stores the object without requiring
+    /// it to be a string, so direct calls such as `p.__set_name__(C, 1)` are
+    /// valid and later accessor errors render that object with `repr`.
+    ///
+    /// `None` is reserved for properties that have never received
+    /// `__set_name__`; their errors use the unnamed `property of '...'` form.
+    pub name: Option<Value>,
     /// Explicit `doc=` argument passed to `property(...)`.  `None` means no
     /// explicit doc was given, in which case `property.__doc__` falls back to
     /// the getter's docstring (issue #1961).  Stored as a `Value` so any object
@@ -52,6 +55,43 @@ impl BuiltinTypeOps for PropertyOps {
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
         true
+    }
+
+    fn has_method(&self, name: &str) -> bool {
+        name == "__set_name__"
+    }
+
+    fn call_method(
+        &self,
+        state: &BuiltinState,
+        name: &str,
+        args: Vec<Value>,
+        kwargs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        if name != "__set_name__" {
+            return Err(pyrust_core::PyError::attribute_error(
+                format!("'property' object has no attribute '{name}'"),
+                Some(name.to_string()),
+                None,
+            ));
+        }
+        if !kwargs.is_empty() {
+            return Err(pyrust_core::type_err!(
+                "property.__set_name__() takes no keyword arguments"
+            ));
+        }
+        if args.len() != 2 {
+            return Err(pyrust_core::type_err!(
+                "property.__set_name__() takes exactly 2 arguments ({} given)",
+                args.len()
+            ));
+        }
+        let mut borrow = state.borrow_mut();
+        let property = borrow
+            .downcast_mut::<PropertyState>()
+            .ok_or_else(|| pyrust_core::PyError::Runtime("invalid property state".to_string()))?;
+        property.name = Some(args[1].clone());
+        Ok(Value::none())
     }
 }
 
@@ -130,7 +170,7 @@ pub fn with_property<R>(value: &Value, f: impl FnOnce(&PropertyState) -> R) -> O
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<PropertyOps>(ops) {
         return None;
     }
     let borrow = state.borrow();
@@ -138,18 +178,24 @@ pub fn with_property<R>(value: &Value, f: impl FnOnce(&PropertyState) -> R) -> O
     Some(f(s))
 }
 
-/// Record the attribute `name` on a `property` via the `__set_name__` protocol
-/// (issue #1846).  No-op if `value` is not a property.  Called during class
-/// creation so `__set__`/`__delete__` errors can name the property.
+/// Compatibility helper for the former class-construction shortcut.
+///
+/// New code should invoke the descriptor's `__set_name__` protocol so custom
+/// descriptors receive the same treatment. This wrapper preserves the old
+/// string-only helper for downstream `pyrust-builtins` callers.
+#[deprecated(
+    since = "0.1.0",
+    note = "invoke the descriptor __set_name__ protocol instead"
+)]
 pub fn set_property_name(value: &Value, name: &str) {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<PropertyOps>(ops) {
         return;
     }
-    if let Some(s) = state.borrow_mut().downcast_mut::<PropertyState>() {
-        s.name = Some(name.to_string());
+    if let Some(property) = state.borrow_mut().downcast_mut::<PropertyState>() {
+        property.name = Some(Value::string(name));
     }
 }
 
@@ -180,6 +226,15 @@ impl PropertyMethodKind {
             PropertyMethodKind::Get => "__get__",
             PropertyMethodKind::Set => "__set__",
             PropertyMethodKind::Delete => "__delete__",
+        }
+    }
+
+    /// Accessor label used by CPython's missing-accessor error messages.
+    pub const fn accessor_name(self) -> &'static str {
+        match self {
+            PropertyMethodKind::Get => "getter",
+            PropertyMethodKind::Set => "setter",
+            PropertyMethodKind::Delete => "deleter",
         }
     }
 }
@@ -226,7 +281,7 @@ pub fn as_property_method(value: &Value) -> Option<(Value, PropertyMethodKind)> 
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != METHOD_TYPE_NAME {
+    if !builtin_ops_is::<PropertyMethodOps>(ops) {
         return None;
     }
     let borrow = state.borrow();

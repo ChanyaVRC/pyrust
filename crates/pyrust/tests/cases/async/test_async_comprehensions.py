@@ -60,6 +60,31 @@ async def await_no_async_for():
     # so this is a plain (sync) comprehension.
     print([x for x in await get_list()])
 
+    # Lambda defaults execute in the comprehension scope. An await there makes
+    # the synthesized comprehension function async even though the lambda body
+    # itself remains a separate scope.
+    print([(lambda value=(await double(x)): value)() for x in xs])
+
+    # The same boundary applies when a lambda default contains a nested async
+    # collection comprehension: its async-ness propagates to the outer comp.
+    print([
+        (lambda value=[await double(y) for y in range(x)]: value)()
+        for x in xs
+    ])
+
+    # A nested comprehension's first iterable is evaluated in its enclosing
+    # scope. Here that scope is the outer comprehension via a lambda default,
+    # so the await must make the outer synthesized function async.
+    print([
+        (lambda value=[y for y in await get_list()]: value)()
+        for _ in [0]
+    ])
+
+    # Format specs are recursively nested f-string parts. The async list comp
+    # lives two specs deep; its result is paired with an empty string so the
+    # resulting format spec remains valid ("3" for the outer integer).
+    print(f"{42:{3:{([await double(y) for y in range(1)], '')[1]}}}")
+
     # await combined with an explicit `async for` clause.
     print([await double(x) async for x in arange(3)])
 

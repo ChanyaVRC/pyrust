@@ -11,6 +11,10 @@
 // Instance attrs are updated atomically (no partial writes) so a method
 // that reads then writes always sees a consistent snapshot.
 //
+// This file is the Python registration and argument-validation facade. The
+// character-oriented and byte-oriented cursor/buffer policies live in the
+// `string_buffer` and `bytes_buffer` child modules respectively.
+//
 // ### seek(pos[, whence]) implementation
 //
 // CPython's StringIO supports only a restricted set of whence values:
@@ -27,8 +31,13 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{ExpandedCallArg, Interpreter};
-use crate::value::{PyDict, PyInstance, PyKey, Value, ValueKind};
+use crate::value::{PyBigInt, PyDict, PyInstance, PyKey, PyToPrimitive, Value, ValueKind};
 use pyrust_derive::pyrust_module;
+
+#[path = "io/bytes_buffer.rs"]
+mod bytes_buffer;
+#[path = "io/string_buffer.rs"]
+mod string_buffer;
 
 /// Python-source supplements for the `io` module (constants, `open` alias, and
 /// the `IOBase` family of abstract base classes).  Exec'd once at first import
@@ -72,7 +81,10 @@ pub(crate) fn inject_python_members(
                     .attrs
                     .insert("__module__".to_string(), Value::string("io"));
             }
-            module.borrow_mut().attrs.insert(name.to_string(), val.clone());
+            module
+                .borrow_mut()
+                .attrs
+                .insert(name.to_string(), val.clone());
         }
     }
     // Re-parent the native concrete stream classes onto the matching ABC so
@@ -87,7 +99,10 @@ pub(crate) fn inject_python_members(
             && c_rc.borrow().base.is_none()
         {
             c_rc.borrow_mut().base = Some(Rc::clone(a_rc));
-            a_rc.borrow().subclasses.borrow_mut().push(Rc::downgrade(c_rc));
+            a_rc.borrow()
+                .subclasses
+                .borrow_mut()
+                .push(Rc::downgrade(c_rc));
         }
     }
     Ok(())
@@ -116,10 +131,7 @@ fn unsupported_fileno() -> PyError {
 
 // ── common self helpers ───────────────────────────────────────────────────────
 
-fn expect_self(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<RefCell<PyInstance>>> {
+fn expect_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     match args.first().map(|a| a.value.kind()) {
         Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
         _ => Err(PyError::Runtime(format!(
@@ -143,19 +155,14 @@ fn get_pos(inst: &Rc<RefCell<PyInstance>>) -> i64 {
 }
 
 fn set_pos(inst: &Rc<RefCell<PyInstance>>, pos: i64) {
-    inst.borrow_mut()
-        .attrs
-        .insert("_pos", Value::int(pos));
+    inst.borrow_mut().attrs.insert("_pos", Value::int(pos));
 }
 
 // ── shared method prologue helpers ─────────────────────────────────────────────
 
 /// Resolve `self` and reject operations on a closed stream — the prologue
 /// shared by every read/write/seek-style method.
-fn open_self(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<RefCell<PyInstance>>> {
+fn open_self(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     let inst = expect_self(args, fn_name)?;
     if is_closed(&inst) {
         return Err(closed_error());
@@ -166,10 +173,7 @@ fn open_self(
 /// Like `open_self`, but raises the trailing-period variant of the closed-file
 /// error.  CPython's `BytesIO` uses the period on every closed-file message,
 /// and `StringIO.__enter__` does too, so those sites use this prologue.
-fn open_self_dot(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<RefCell<PyInstance>>> {
+fn open_self_dot(args: &[ExpandedCallArg], fn_name: &str) -> Result<Rc<RefCell<PyInstance>>> {
     let inst = expect_self(args, fn_name)?;
     if is_closed(&inst) {
         return Err(closed_error_dot());
@@ -195,18 +199,73 @@ fn user_at_most_one<'a>(
 
 /// Parse the optional `size` argument of `read` / `readline`: `None`,
 /// negative, or omitted means "no limit"; bool/int give the limit.
-fn parse_optional_size(
-    user: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Option<usize>> {
+fn parse_optional_size(user: &[ExpandedCallArg], fn_name: &str) -> Result<Option<usize>> {
     match user.first().map(|a| a.value.kind()) {
         None | Some(ValueKind::None) => Ok(None),
         Some(ValueKind::Int(n)) if n < 0 => Ok(None),
-        Some(ValueKind::Int(n)) => Ok(Some(n as usize)),
+        // On a narrower host, an oversized read limit is equivalent to an
+        // unbounded limit because no backing buffer can reach it.
+        Some(ValueKind::Int(n)) => Ok(Some(usize::try_from(n).unwrap_or(usize::MAX))),
+        Some(ValueKind::BigInt(n)) if n < &PyBigInt::from(0) => Ok(None),
+        Some(ValueKind::BigInt(n)) => Ok(Some(n.to_usize().unwrap_or(usize::MAX))),
         Some(ValueKind::Bool(b)) => Ok(Some(b as usize)),
         _ => Err(PyError::named(
             "TypeError",
             format!("{fn_name}() size must be an integer"),
+        )),
+    }
+}
+
+fn parse_io_offset(value: &Value, fn_name: &str, arg_name: &str) -> Result<i64> {
+    match value.kind() {
+        ValueKind::Int(value) => Ok(value),
+        ValueKind::Bool(value) => Ok(value as i64),
+        ValueKind::BigInt(value) => value.to_i64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t".to_string(),
+            )
+        }),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() {arg_name} must be an integer"),
+        )),
+    }
+}
+
+fn parse_io_whence(value: &Value, fn_name: &str) -> Result<i64> {
+    let value = match value.kind() {
+        ValueKind::Int(value) => i32::try_from(value).ok(),
+        ValueKind::Bool(value) => Some(value as i32),
+        ValueKind::BigInt(value) => value.to_i32(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{fn_name}() whence must be an integer"),
+            ));
+        }
+    };
+    value.map(i64::from).ok_or_else(|| {
+        PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C int".to_string(),
+        )
+    })
+}
+
+fn parse_truncate_size(value: &Value, fn_name: &str) -> Result<i64> {
+    match value.kind() {
+        ValueKind::Int(value) => Ok(value),
+        ValueKind::Bool(value) => Ok(value as i64),
+        ValueKind::BigInt(value) => value.to_i64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "cannot fit 'int' into an index-sized integer".to_string(),
+            )
+        }),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}(): size must be an integer"),
         )),
     }
 }
@@ -256,10 +315,7 @@ pyrust_module! {
                 }
             }
             let _ = _interp;
-            let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("_buf", Value::string(&initial));
-            attrs.attrs.insert("_pos", Value::int(0));
-            attrs.attrs.insert("_closed", Value::bool_(false));
+            string_buffer::initialize(&inst, &initial);
             Ok(Value::none())
         }
 
@@ -270,18 +326,7 @@ pyrust_module! {
             let user = user_at_most_one(args, FN_NAME)?;
             let size = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let chars: Vec<char> = buf.chars().collect();
-            let total = chars.len();
-            let start = pos.min(total);
-            let end = match size {
-                None => total,
-                Some(n) => (start + n).min(total),
-            };
-            let result: String = chars[start..end].iter().collect();
-            set_pos(&inst, end as i64);
-            Ok(Value::string(result))
+            Ok(Value::string(string_buffer::read(&inst, size, FN_NAME)?))
         }
 
         /// `readline([size=-1])` — read up to the next newline (inclusive)
@@ -291,21 +336,9 @@ pyrust_module! {
             let user = user_at_most_one(args, FN_NAME)?;
             let size_limit = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let chars: Vec<char> = buf.chars().collect();
-            let total = chars.len();
-            let start = pos.min(total);
-            let max_read = size_limit.unwrap_or(total - start);
-            let mut count = 0;
-            for ch in &chars[start..] {
-                count += 1;
-                if count > max_read { count -= 1; break; }
-                if *ch == '\n' { break; }
-            }
-            let result: String = chars[start..start + count].iter().collect();
-            set_pos(&inst, (start + count) as i64);
-            Ok(Value::string(result))
+            Ok(Value::string(string_buffer::read_line(
+                &inst, size_limit, FN_NAME,
+            )?))
         }
 
         /// `readlines([hint])` — read all remaining lines into a list.
@@ -316,30 +349,10 @@ pyrust_module! {
             if is_closed(&inst) { return Err(closed_error_dot()); }
             user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let chars: Vec<char> = buf.chars().collect();
-            let total = chars.len();
-            let start = pos.min(total);
-            let remaining: String = chars[start..].iter().collect();
-            set_pos(&inst, total as i64);
-            let lines: Vec<Value> = if remaining.is_empty() {
-                Vec::new()
-            } else {
-                let mut out = Vec::new();
-                let mut cur = String::new();
-                for ch in remaining.chars() {
-                    cur.push(ch);
-                    if ch == '\n' {
-                        out.push(Value::string(&cur));
-                        cur.clear();
-                    }
-                }
-                if !cur.is_empty() {
-                    out.push(Value::string(&cur));
-                }
-                out
-            };
+            let lines = string_buffer::read_lines(&inst, FN_NAME)?
+                .into_iter()
+                .map(Value::string)
+                .collect();
             Ok(Value::list(lines))
         }
 
@@ -361,8 +374,7 @@ pyrust_module! {
                 )),
             };
             let _ = _interp;
-            let n_written = s.chars().count();
-            string_io_write_at(&inst, &s);
+            let n_written = string_buffer::write(&inst, &s)?;
             Ok(Value::int(n_written as i64))
         }
 
@@ -377,8 +389,7 @@ pyrust_module! {
                 ));
             }
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            Ok(Value::string(buf))
+            Ok(Value::string(string_buffer::contents(&inst, FN_NAME)?))
         }
 
         /// `seek(pos[, whence=0])` — set the stream position.
@@ -394,65 +405,15 @@ pyrust_module! {
                     format!("{FN_NAME}() takes 1 or 2 arguments"),
                 ));
             }
-            let offset = match user[0].value.kind() {
-                ValueKind::Int(n) => n,
-                ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() offset must be an integer"),
-                )),
-            };
-            let whence = match user.get(1).map(|a| a.value.kind()) {
+            let offset = parse_io_offset(&user[0].value, FN_NAME, "offset")?;
+            let whence = match user.get(1) {
                 None => 0i64,
-                Some(ValueKind::Int(n)) => n,
-                Some(ValueKind::Bool(b)) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() whence must be an integer"),
-                )),
+                Some(arg) => parse_io_whence(&arg.value, FN_NAME)?,
             };
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let char_len = buf.chars().count() as i64;
-            let new_pos = match whence {
-                0 => {
-                    // SEEK_SET — absolute
-                    if offset < 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("{FN_NAME}(): negative seek position {offset}"),
-                        ));
-                    }
-                    offset
-                }
-                1 => {
-                    // SEEK_CUR — StringIO only allows offset=0
-                    if offset != 0 {
-                        return Err(PyError::named(
-                            "OSError",
-                            "Can't do nonzero cur-relative seeks".to_string(),
-                        ));
-                    }
-                    get_pos(&inst)
-                }
-                2 => {
-                    // SEEK_END — StringIO only allows offset=0
-                    if offset != 0 {
-                        return Err(PyError::named(
-                            "OSError",
-                            "Can't do nonzero end-relative seeks".to_string(),
-                        ));
-                    }
-                    char_len
-                }
-                _ => return Err(PyError::named(
-                    "ValueError",
-                    format!("{FN_NAME}(): unsupported whence value {whence}"),
-                )),
-            };
-            let clamped = new_pos.max(0);
-            set_pos(&inst, clamped);
-            Ok(Value::int(clamped))
+            Ok(Value::int(string_buffer::seek(
+                &inst, offset, whence, FN_NAME,
+            )?))
         }
 
         /// `tell()` — return the current stream position (character offset).
@@ -475,28 +436,21 @@ pyrust_module! {
             let inst = open_self(args, FN_NAME)?;
             let user = user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let chars: Vec<char> = buf.chars().collect();
-            let total = chars.len() as i64;
             let size = match user.first().map(|a| a.value.kind()) {
                 None | Some(ValueKind::None) => get_pos(&inst),
-                Some(ValueKind::Int(n)) if n >= 0 => n,
-                Some(ValueKind::Bool(b)) => b as i64,
-                Some(ValueKind::Int(_)) => return Err(PyError::named(
-                    "ValueError",
-                    format!("{FN_NAME}(): negative size"),
-                )),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}(): size must be an integer"),
-                )),
+                Some(_) => {
+                    let size = parse_truncate_size(&user[0].value, FN_NAME)?;
+                    if size < 0 {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("{FN_NAME}(): negative size"),
+                        ));
+                    }
+                    size
+                }
             };
-            let new_len = size.min(total).max(0) as usize;
-            let new_buf: String = chars[..new_len].iter().collect();
-            inst.borrow_mut()
-                .attrs
-                .insert("_buf", Value::string(&new_buf));
-            Ok(Value::int(new_len as i64))
+            let new_len = string_buffer::truncate(&inst, size, FN_NAME)?;
+            Ok(Value::int(new_len))
         }
 
         /// `close()` — mark the stream as closed.  Subsequent reads/writes
@@ -553,7 +507,9 @@ pyrust_module! {
             let items = _interp.collect_iterable(&args[1].value)?;
             for item in &items {
                 match item.kind() {
-                    ValueKind::Str(s) => string_io_write_at(&inst, s),
+                    ValueKind::Str(s) => {
+                        string_buffer::write(&inst, s)?;
+                    }
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
@@ -641,22 +597,10 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
             if is_closed(&inst) { return Err(closed_error()); }
-            let buf = string_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let chars: Vec<char> = buf.chars().collect();
-            let total = chars.len();
-            let start = pos.min(total);
-            if start >= total {
-                return Err(PyError::named("StopIteration", String::new()));
+            match string_buffer::next_line(&inst, FN_NAME)? {
+                Some(line) => Ok(Value::string(line)),
+                None => Err(PyError::named("StopIteration", String::new())),
             }
-            let mut count = 0;
-            for ch in &chars[start..] {
-                count += 1;
-                if *ch == '\n' { break; }
-            }
-            let line: String = chars[start..start + count].iter().collect();
-            set_pos(&inst, (start + count) as i64);
-            Ok(Value::string(line))
         }
 
         fn __repr__(args) -> Result<Value> {
@@ -699,10 +643,7 @@ pyrust_module! {
                 None => Vec::new(),
             };
             let _ = _interp;
-            let mut attrs = inst.borrow_mut();
-            attrs.attrs.insert("_buf", Value::bytes(initial));
-            attrs.attrs.insert("_pos", Value::int(0));
-            attrs.attrs.insert("_closed", Value::bool_(false));
+            bytes_buffer::initialize(&inst, initial);
             Ok(Value::none())
         }
 
@@ -712,17 +653,7 @@ pyrust_module! {
             let user = user_at_most_one(args, FN_NAME)?;
             let size = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let total = buf.len();
-            let start = pos.min(total);
-            let end = match size {
-                None => total,
-                Some(n) => (start + n).min(total),
-            };
-            let result = buf[start..end].to_vec();
-            set_pos(&inst, end as i64);
-            Ok(Value::bytes(result))
+            Ok(Value::bytes(bytes_buffer::read(&inst, size, FN_NAME)?))
         }
 
         /// `readline([size=-1])` — read up to the next `\n` byte (inclusive).
@@ -731,20 +662,9 @@ pyrust_module! {
             let user = user_at_most_one(args, FN_NAME)?;
             let size_limit = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let total = buf.len();
-            let start = pos.min(total);
-            let max_read = size_limit.unwrap_or(total - start);
-            let mut count = 0;
-            for &b in &buf[start..] {
-                if count >= max_read { break; }
-                count += 1;
-                if b == b'\n' { break; }
-            }
-            let result = buf[start..start + count].to_vec();
-            set_pos(&inst, (start + count) as i64);
-            Ok(Value::bytes(result))
+            Ok(Value::bytes(bytes_buffer::read_line(
+                &inst, size_limit, FN_NAME,
+            )?))
         }
 
         /// `readlines([hint])` — read all remaining lines into a list of bytes.
@@ -752,23 +672,10 @@ pyrust_module! {
             let inst = open_self_dot(args, FN_NAME)?;
             user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let total = buf.len();
-            let start = pos.min(total);
-            let remaining = &buf[start..];
-            set_pos(&inst, total as i64);
-            let mut lines = Vec::new();
-            let mut cur_start = 0;
-            for (i, &b) in remaining.iter().enumerate() {
-                if b == b'\n' {
-                    lines.push(Value::bytes(remaining[cur_start..=i].to_vec()));
-                    cur_start = i + 1;
-                }
-            }
-            if cur_start < remaining.len() {
-                lines.push(Value::bytes(remaining[cur_start..].to_vec()));
-            }
+            let lines = bytes_buffer::read_lines(&inst, FN_NAME)?
+                .into_iter()
+                .map(Value::bytes)
+                .collect();
             Ok(Value::list(lines))
         }
 
@@ -789,8 +696,7 @@ pyrust_module! {
                 )),
             };
             let _ = _interp;
-            let n_written = data.len();
-            bytes_io_write_at(&inst, &data);
+            let n_written = bytes_buffer::write(&inst, &data)?;
             Ok(Value::int(n_written as i64))
         }
 
@@ -804,8 +710,7 @@ pyrust_module! {
                 ));
             }
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            Ok(Value::bytes(buf))
+            Ok(Value::bytes(bytes_buffer::contents(&inst, FN_NAME)?))
         }
 
         /// `seek(pos[, whence=0])` — BytesIO supports all three whence modes
@@ -819,44 +724,15 @@ pyrust_module! {
                     format!("{FN_NAME}() takes 1 or 2 arguments"),
                 ));
             }
-            let offset = match user[0].value.kind() {
-                ValueKind::Int(n) => n,
-                ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() offset must be an integer"),
-                )),
-            };
-            let whence = match user.get(1).map(|a| a.value.kind()) {
+            let offset = parse_io_offset(&user[0].value, FN_NAME, "offset")?;
+            let whence = match user.get(1) {
                 None => 0i64,
-                Some(ValueKind::Int(n)) => n,
-                Some(ValueKind::Bool(b)) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() whence must be an integer"),
-                )),
+                Some(arg) => parse_io_whence(&arg.value, FN_NAME)?,
             };
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let buf_len = buf.len() as i64;
-            let current = get_pos(&inst);
-            let new_pos = match whence {
-                0 => offset, // SEEK_SET
-                1 => current + offset, // SEEK_CUR
-                2 => buf_len + offset, // SEEK_END
-                _ => return Err(PyError::named(
-                    "ValueError",
-                    format!("{FN_NAME}(): invalid whence value {whence}"),
-                )),
-            };
-            if new_pos < 0 {
-                return Err(PyError::named(
-                    "ValueError",
-                    format!("{FN_NAME}(): negative seek position {new_pos}"),
-                ));
-            }
-            set_pos(&inst, new_pos);
-            Ok(Value::int(new_pos))
+            Ok(Value::int(bytes_buffer::seek(
+                &inst, offset, whence, FN_NAME,
+            )?))
         }
 
         /// `tell()` — return the current position (byte offset).
@@ -877,27 +753,21 @@ pyrust_module! {
             let inst = open_self_dot(args, FN_NAME)?;
             let user = user_at_most_one(args, FN_NAME)?;
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let total = buf.len() as i64;
             let size = match user.first().map(|a| a.value.kind()) {
                 None | Some(ValueKind::None) => get_pos(&inst),
-                Some(ValueKind::Int(n)) if n >= 0 => n,
-                Some(ValueKind::Bool(b)) => b as i64,
-                Some(ValueKind::Int(_)) => return Err(PyError::named(
-                    "ValueError",
-                    format!("{FN_NAME}(): negative size"),
-                )),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}(): size must be an integer"),
-                )),
+                Some(_) => {
+                    let size = parse_truncate_size(&user[0].value, FN_NAME)?;
+                    if size < 0 {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("{FN_NAME}(): negative size"),
+                        ));
+                    }
+                    size
+                }
             };
-            let new_len = size.min(total).max(0) as usize;
-            let new_buf = buf[..new_len].to_vec();
-            inst.borrow_mut()
-                .attrs
-                .insert("_buf", Value::bytes(new_buf));
-            Ok(Value::int(new_len as i64))
+            let new_len = bytes_buffer::truncate(&inst, size, FN_NAME)?;
+            Ok(Value::int(new_len))
         }
 
         /// `close()` — mark the stream as closed.
@@ -947,9 +817,13 @@ pyrust_module! {
             let items = _interp.collect_iterable(&args[1].value)?;
             for item in &items {
                 match item.kind() {
-                    ValueKind::Bytes(b) => bytes_io_write_at(&inst, b),
+                    ValueKind::Bytes(b) => {
+                        bytes_buffer::write(&inst, b)?;
+                    }
                     _ => match pyrust_builtins::bytearray::as_bytearray_snapshot(item) {
-                        Some(b) => bytes_io_write_at(&inst, &b),
+                        Some(b) => {
+                            bytes_buffer::write(&inst, &b)?;
+                        }
                         None => return Err(PyError::named(
                             "TypeError",
                             format!(
@@ -985,14 +859,8 @@ pyrust_module! {
                 )),
             };
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let total = buf.len();
-            let start = pos.min(total);
             let mut dst = target.borrow_mut();
-            let n = (total - start).min(dst.len());
-            dst[..n].copy_from_slice(&buf[start..start + n]);
-            set_pos(&inst, (start + n) as i64);
+            let n = bytes_buffer::read_into(&inst, &mut dst, FN_NAME)?;
             Ok(Value::int(n as i64))
         }
 
@@ -1004,17 +872,7 @@ pyrust_module! {
             let user = user_at_most_one(args, FN_NAME)?;
             let size = parse_optional_size(user, FN_NAME)?;
             let _ = _interp;
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let total = buf.len();
-            let start = pos.min(total);
-            let end = match size {
-                None => total,
-                Some(n) => (start + n).min(total),
-            };
-            let result = buf[start..end].to_vec();
-            set_pos(&inst, end as i64);
-            Ok(Value::bytes(result))
+            Ok(Value::bytes(bytes_buffer::read(&inst, size, FN_NAME)?))
         }
 
         /// `seekable()` — BytesIO is always seekable.
@@ -1086,21 +944,10 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
             if is_closed(&inst) { return Err(closed_error_dot()); }
-            let buf = bytes_io_buf(&inst, FN_NAME)?;
-            let pos = get_pos(&inst) as usize;
-            let total = buf.len();
-            let start = pos.min(total);
-            if start >= total {
-                return Err(PyError::named("StopIteration", String::new()));
+            match bytes_buffer::next_line(&inst, FN_NAME)? {
+                Some(line) => Ok(Value::bytes(line)),
+                None => Err(PyError::named("StopIteration", String::new())),
             }
-            let mut count = 0;
-            for &b in &buf[start..] {
-                count += 1;
-                if b == b'\n' { break; }
-            }
-            let line = buf[start..start + count].to_vec();
-            set_pos(&inst, (start + count) as i64);
-            Ok(Value::bytes(line))
         }
 
         fn __repr__(args) -> Result<Value> {
@@ -1114,85 +961,4 @@ pyrust_module! {
             }
         }
     }
-}
-
-// ── buffer accessors ──────────────────────────────────────────────────────────
-
-fn string_io_buf(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<String> {
-    match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
-        Some(ValueKind::Str(s)) => Ok(s.to_string()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() StringIO._buf corrupted",
-        ))),
-    }
-}
-
-/// Splice `s` into the StringIO buffer at the current cursor (overwriting
-/// existing characters, NUL-padding any gap past EOF) and advance the cursor.
-/// Shared by `write` and `writelines` so both paths stay identical.
-fn string_io_write_at(inst: &Rc<RefCell<PyInstance>>, s: &str) {
-    let buf = match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
-        Some(ValueKind::Str(b)) => b.to_string(),
-        _ => String::new(),
-    };
-    let pos = get_pos(inst) as usize;
-    let chars: Vec<char> = buf.chars().collect();
-    let written: Vec<char> = s.chars().collect();
-    let n_written = written.len();
-    let total = chars.len();
-    let mut new_chars: Vec<char> = Vec::with_capacity(total.max(pos + n_written));
-    if pos > total {
-        new_chars.extend_from_slice(&chars[..]);
-        new_chars.extend(std::iter::repeat_n('\0', pos - total));
-    } else {
-        new_chars.extend_from_slice(&chars[..pos]);
-    }
-    new_chars.extend_from_slice(&written);
-    let end = (pos + n_written).min(total);
-    if end < total {
-        new_chars.extend_from_slice(&chars[end..]);
-    }
-    let new_buf: String = new_chars.into_iter().collect();
-    inst.borrow_mut()
-        .attrs
-        .insert("_buf", Value::string(&new_buf));
-    set_pos(inst, (pos + n_written) as i64);
-}
-
-fn bytes_io_buf(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<Vec<u8>> {
-    match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
-        Some(ValueKind::Bytes(b)) => Ok(b.to_vec()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() BytesIO._buf corrupted",
-        ))),
-    }
-}
-
-/// Splice `data` into the BytesIO buffer at the current cursor (overwriting
-/// existing bytes, NUL-padding any gap past EOF) and advance the cursor.
-/// Shared by `write` and `writelines`.
-fn bytes_io_write_at(inst: &Rc<RefCell<PyInstance>>, data: &[u8]) {
-    let buf = match inst.borrow().attrs.get("_buf").map(|v| v.kind()) {
-        Some(ValueKind::Bytes(b)) => b.to_vec(),
-        _ => Vec::new(),
-    };
-    let pos = get_pos(inst) as usize;
-    let n_written = data.len();
-    let total = buf.len();
-    let mut new_buf: Vec<u8> = Vec::with_capacity(total.max(pos + n_written));
-    if pos > total {
-        new_buf.extend_from_slice(&buf[..]);
-        new_buf.extend(std::iter::repeat_n(0u8, pos - total));
-    } else {
-        new_buf.extend_from_slice(&buf[..pos]);
-    }
-    new_buf.extend_from_slice(data);
-    let end = (pos + n_written).min(total);
-    if end < total {
-        new_buf.extend_from_slice(&buf[end..]);
-    }
-    inst.borrow_mut()
-        .attrs
-        .insert("_buf", Value::bytes(new_buf));
-    set_pos(inst, (pos + n_written) as i64);
 }

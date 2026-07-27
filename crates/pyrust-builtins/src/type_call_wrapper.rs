@@ -20,7 +20,7 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind, builtin_ops_is};
 
 pub struct TypeCallWrapperState {
     /// The callable the wrapper is bound to (`C` in `C.__call__`, `f` in
@@ -101,13 +101,20 @@ pub fn as_type_call_wrapper(value: &Value) -> Option<Value> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    // The state downcast is the authoritative discriminator (`method-wrapper`
-    // is a name pyrust could plausibly reuse for other slot wrappers later), so
-    // match on it rather than on `type_name`.
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<TypeCallWrapperOps>(ops) {
         return None;
     }
     let borrow = state.borrow();
     let s = borrow.downcast_ref::<TypeCallWrapperState>()?;
     Some(s.callable.clone())
+}
+
+/// Return whether `value` is this module's callable wrapper without borrowing
+/// or cloning its state.
+#[inline]
+pub fn is_type_call_wrapper(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<TypeCallWrapperOps>(ops)
+    )
 }

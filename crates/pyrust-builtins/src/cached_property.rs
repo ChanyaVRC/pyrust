@@ -6,7 +6,7 @@
 //! accessors; the actual descriptor invocation (calling the wrapped
 //! function with the instance and stashing the result in
 //! `instance.__dict__[name]`) lives in
-//! `pyrust/src/interpreter/runtime/env.rs` because it needs interpreter
+//! `pyrust/src/interpreter/runtime/attributes.rs` because it needs interpreter
 //! access to dispatch the wrapped callable.
 //!
 //! ## Why a `BuiltinObject` (not a `class { … }` block in functools.rs)
@@ -30,7 +30,9 @@
 use std::any::Any;
 
 use indexmap::IndexMap;
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Result, Value, ValueKind};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyError, Result, Value, ValueKind, builtin_ops_is,
+};
 
 /// State for a `cached_property` descriptor.
 pub struct CachedPropertyState {
@@ -125,7 +127,7 @@ pub fn with_cached_property<R>(
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<CachedPropertyOps>(ops) {
         return None;
     }
     let borrow = state.borrow();

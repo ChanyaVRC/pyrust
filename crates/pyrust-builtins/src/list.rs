@@ -3,8 +3,11 @@ use pyrust_core::{
     compare_values_via_registry,
 };
 
+use crate::method_signature::{KeywordPolicy, PositionalArity};
 use crate::mutable_sequence as ms;
 use crate::sequence;
+
+pub const TYPE_NAME: &str = "list";
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
@@ -12,58 +15,314 @@ pub const METHODS: &[&str] = &[
     "reverse", "sort",
 ];
 
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS).with_flags(
+        crate::primitive_class_attrs::PrimitiveClassFlags::NONE
+            .with_init()
+            .with_class_getitem(),
+    );
+
 /// Returns `true` if `method` is the name of a built-in `list` method.
 pub fn has_method(method: &str) -> bool {
-    METHODS.contains(&method)
+    method_spec(method).is_some()
 }
 
-/// Returns `true` if `method` may need mutable interpreter access — i.e. it
-/// can fire user-defined dunder methods (`__eq__` for `index`/`count`/`remove`,
-/// the `key=` callable for `sort`).  The VM dispatcher queries this predicate to
-/// decide whether to take the interpreter-aware slow path (`call_seq_index` /
-/// `call_seq_count` / `call_seq_remove` / precomputed-key sort) or hand off
-/// directly to the interpreter-free `call` below.  Single source of truth for
-/// the carve-out (see `crates/pyrust-builtins/README.md`).
+/// Typed list dispatch target. Name resolution, arity policy, and
+/// interpreter-routing classification all derive from one [`MethodSpec`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Method {
+    Iter,
+    Index,
+    Count,
+    Append,
+    Clear,
+    Copy,
+    Extend,
+    Insert,
+    Pop,
+    Remove,
+    Reverse,
+    Sort,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MethodSpec {
+    method: Method,
+    arity: PositionalArity,
+    keywords: KeywordPolicy,
+}
+
+impl MethodSpec {
+    #[inline(always)]
+    pub const fn method(self) -> Method {
+        self.method
+    }
+
+    #[inline]
+    pub fn validate_positional_arity(self, given: usize) -> Result<()> {
+        if self.arity.accepts(given) {
+            return Ok(());
+        }
+        self.arity
+            .reject_excess(TYPE_NAME, self.method.name(), given)
+    }
+
+    #[inline]
+    pub fn validate_keywords(self, has_keywords: bool) -> Result<()> {
+        if self.keywords.accepts(has_keywords) {
+            return Ok(());
+        }
+        self.keywords
+            .validate(TYPE_NAME, self.method.name(), has_keywords)
+    }
+
+    #[inline(always)]
+    pub const fn keyword_policy(self) -> KeywordPolicy {
+        self.keywords
+    }
+
+    #[inline(always)]
+    pub const fn interpreter_method(self) -> Option<InterpreterMethod> {
+        match self.method {
+            Method::Sort => Some(InterpreterMethod::Sort),
+            Method::Index => Some(InterpreterMethod::Index),
+            Method::Count => Some(InterpreterMethod::Count),
+            Method::Remove => Some(InterpreterMethod::Remove),
+            Method::Extend => Some(InterpreterMethod::Extend),
+            _ => None,
+        }
+    }
+}
+
+impl Method {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Iter => "__iter__",
+            Self::Index => "index",
+            Self::Count => "count",
+            Self::Append => "append",
+            Self::Clear => "clear",
+            Self::Copy => "copy",
+            Self::Extend => "extend",
+            Self::Insert => "insert",
+            Self::Pop => "pop",
+            Self::Remove => "remove",
+            Self::Reverse => "reverse",
+            Self::Sort => "sort",
+        }
+    }
+}
+
+/// Resolve a list method exactly once into its semantic route and signature.
+#[inline]
+pub fn method_spec(method: &str) -> Option<MethodSpec> {
+    let (method, arity, keywords) = match method {
+        "__iter__" => (
+            Method::Iter,
+            PositionalArity::exact(0),
+            KeywordPolicy::Reject,
+        ),
+        "index" => (
+            Method::Index,
+            PositionalArity::range(1, 3),
+            KeywordPolicy::Reject,
+        ),
+        "count" => (
+            Method::Count,
+            PositionalArity::exact(1),
+            KeywordPolicy::Reject,
+        ),
+        "append" => (
+            Method::Append,
+            PositionalArity::exact(1),
+            KeywordPolicy::Reject,
+        ),
+        "clear" => (
+            Method::Clear,
+            PositionalArity::exact(0),
+            KeywordPolicy::Reject,
+        ),
+        "copy" => (
+            Method::Copy,
+            PositionalArity::exact(0),
+            KeywordPolicy::Reject,
+        ),
+        "extend" => (
+            Method::Extend,
+            PositionalArity::exact(1),
+            KeywordPolicy::Reject,
+        ),
+        "insert" => (
+            Method::Insert,
+            PositionalArity::exact(2),
+            KeywordPolicy::Reject,
+        ),
+        "pop" => (
+            Method::Pop,
+            PositionalArity::range(0, 1),
+            KeywordPolicy::Reject,
+        ),
+        "remove" => (
+            Method::Remove,
+            PositionalArity::exact(1),
+            KeywordPolicy::Reject,
+        ),
+        "reverse" => (
+            Method::Reverse,
+            PositionalArity::exact(0),
+            KeywordPolicy::Reject,
+        ),
+        "sort" => (
+            Method::Sort,
+            PositionalArity::no_positional(),
+            KeywordPolicy::Accept,
+        ),
+        _ => return None,
+    };
+    Some(MethodSpec {
+        method,
+        arity,
+        keywords,
+    })
+}
+
+/// Positional signature for every public list method.
+pub fn positional_arity(method: &str) -> Option<PositionalArity> {
+    method_spec(method).map(|spec| spec.arity)
+}
+
+#[inline]
+pub fn validate_method_positional_arity(method: &str, given: usize) -> Result<()> {
+    if given == 0 {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(arity) => arity.reject_excess(TYPE_NAME, method, given),
+        None => Ok(()),
+    }
+}
+
+/// Enforce list's keyword policy before positional conversion or method-body
+/// work. Unknown names are left to attribute resolution.
+#[inline]
+pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> {
+    if !has_keywords {
+        return Ok(());
+    }
+    match method_spec(method) {
+        Some(spec) => spec.validate_keywords(true),
+        None => Ok(()),
+    }
+}
+
+pub fn keyword_policy(method: &str) -> Option<KeywordPolicy> {
+    method_spec(method).map(MethodSpec::keyword_policy)
+}
+
+/// Typed keyword slots accepted by `list.sort`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SortKeyword {
+    Key,
+    Reverse,
+}
+
+/// Resolve one `list.sort` keyword with CPython's Argument Clinic diagnostic.
+pub fn sort_keyword(name: &str) -> Result<SortKeyword> {
+    match name {
+        "key" => Ok(SortKeyword::Key),
+        "reverse" => Ok(SortKeyword::Reverse),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("'{name}' is an invalid keyword argument for sort()"),
+        )),
+    }
+}
+
+pub fn validate_sort_keyword_count(given: usize) -> Result<()> {
+    if given <= 2 {
+        return Ok(());
+    }
+    Err(PyError::named(
+        "TypeError",
+        format!("sort() takes at most 2 keyword arguments ({given} given)"),
+    ))
+}
+
+/// Interpreter-owned route for list methods that can invoke Python code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterpreterMethod {
+    Sort,
+    Index,
+    Count,
+    Remove,
+    Extend,
+}
+
+/// Classify a list method that needs mutable interpreter access.
+///
+/// Returning a semantic route instead of a boolean keeps the Python names in
+/// this built-in module; the VM does not need to compare the same name again
+/// after deciding that the interpreter-owned path is required.
+pub fn interpreter_method(method: &str) -> Option<InterpreterMethod> {
+    method_spec(method).and_then(MethodSpec::interpreter_method)
+}
+
+/// Compatibility predicate for callers that have not migrated to the typed
+/// [`InterpreterMethod`] route yet.
+#[deprecated(since = "0.1.0", note = "use interpreter_method(method).is_some()")]
 pub fn requires_interpreter(method: &str) -> bool {
-    // `extend` (#2522): driving a lazy-iterator / generator / user-`__iter__`
-    // argument needs the interpreter; the receiver-only `ms::extend` →
-    // `iter_values_via_registry` path only drains a `NativeIterFrame`.
-    matches!(method, "sort" | "index" | "count" | "remove" | "extend")
+    interpreter_method(method).is_some()
 }
 
 pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -> Result<Value> {
+    let Some(spec) = method_spec(method) else {
+        return Err(PyError::named(
+            "AttributeError",
+            format!("'list' object has no attribute '{method}'"),
+        ));
+    };
+    spec.validate_keywords(!kwargs.is_empty())?;
+    spec.validate_positional_arity(args.len())?;
+    call_resolved(spec.method(), receiver, args, kwargs)
+}
+
+/// Dispatch a method whose name and signature were resolved together by
+/// [`method_spec`].
+#[doc(hidden)]
+pub fn call_resolved(
+    method: Method,
+    receiver: &Value,
+    args: Vec<Value>,
+    kwargs: &PyDict,
+) -> Result<Value> {
     match method {
         // Read-only sequence operations — borrow scoped to the call.
-        "index" => receiver
+        Method::Index => receiver
             .list_with(|items| sequence::seq_index(items, &args, "list"))
             .ok_or_else(|| {
                 PyError::named("TypeError", "list.index receiver is not a list".to_string())
             })?,
-        "count" => receiver
+        Method::Count => receiver
             .list_with(|items| sequence::seq_count(items, &args, "list"))
             .ok_or_else(|| {
                 PyError::named("TypeError", "list.count receiver is not a list".to_string())
             })?,
         // Mutable Sequence Operations — each ms::* takes &Value and
         // scopes its own borrow_mut().
-        "append" => ms::append(receiver, args),
-        "clear" => ms::clear(receiver, args),
-        "copy" => ms::copy(receiver, args),
-        "extend" => ms::extend(receiver, args),
-        "insert" => ms::insert(receiver, args),
-        "pop" => ms::pop(receiver, args),
-        "remove" => ms::remove(receiver, args),
-        "reverse" => ms::reverse(receiver, args),
+        Method::Append => ms::append(receiver, args),
+        Method::Clear => ms::clear(receiver, args),
+        Method::Copy => ms::copy(receiver, args),
+        Method::Extend => ms::extend(receiver, args),
+        Method::Insert => ms::insert(receiver, args),
+        Method::Pop => ms::pop(receiver, args),
+        Method::Remove => ms::remove(receiver, args),
+        Method::Reverse => ms::reverse(receiver, args),
         // List-specific
-        "sort" => sort(receiver, &args, kwargs),
-        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
-        "__iter__" => Err(PyError::named(
+        Method::Sort => sort(receiver, &args, kwargs),
+        // Intercepted by the interpreter's iteration domain; drift sentinel.
+        Method::Iter => Err(PyError::named(
             "TypeError",
             "'list' __iter__ must be dispatched by the interpreter",
-        )),
-        _ => Err(PyError::named(
-            "AttributeError",
-            format!("'list' object has no attribute '{method}'"),
         )),
     }
 }

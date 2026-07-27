@@ -16,7 +16,9 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyBigInt, PyToPrimitive, Value, ValueKind};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyBigInt, PyToPrimitive, Value, ValueKind, builtin_ops_is,
+};
 
 // ── scalar / range read-only attribute values ───────────────────────────────
 //
@@ -154,7 +156,7 @@ pub fn as_getset_descriptor(value: &Value) -> Option<(&'static str, &'static str
     let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != GETSET_TYPE_NAME {
+    if !builtin_ops_is::<GetsetDescriptorOps>(ops) {
         return None;
     }
     let borrow = state.borrow();
@@ -206,7 +208,7 @@ pub fn as_method_descriptor(value: &Value) -> Option<(&'static str, &'static str
     let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != METHOD_DESCRIPTOR_TYPE_NAME {
+    if !builtin_ops_is::<MethodDescriptorOps>(ops) {
         return None;
     }
     let borrow = state.borrow();

@@ -1,5 +1,9 @@
 use pyrust_core::{PyDict, PyError, PyKey, Result, Value, ValueKind};
 
+use crate::method_signature::{KeywordPolicy, PositionalArity};
+
+pub const TYPE_NAME: &str = "dict";
+
 /// Canonical list of method names exposed for `dict`.
 ///
 /// **Note** (#425): of these, `get`, `pop`, `setdefault`, and `__contains__`
@@ -25,22 +29,202 @@ pub const METHODS: &[&str] = &[
     "copy",
 ];
 
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS)
+        .with_native_class_methods(&["fromkeys"])
+        .with_flags(
+            crate::primitive_class_attrs::PrimitiveClassFlags::NONE
+                .with_init()
+                .with_class_getitem(),
+        );
+
 /// Returns `true` if `method` is the name of a built-in `dict` method.
 pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
-/// Returns `true` if `method` produces a *lazy view* (`keys` / `values` /
-/// `items`) that must share the source dict's backing storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Method {
+    Iter,
+    Get,
+    Keys,
+    Values,
+    Items,
+    Update,
+    Pop,
+    Popitem,
+    Clear,
+    SetDefault,
+    Copy,
+    Contains,
+    FromKeys,
+}
+
+impl Method {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Iter => "__iter__",
+            Self::Get => "get",
+            Self::Keys => "keys",
+            Self::Values => "values",
+            Self::Items => "items",
+            Self::Update => "update",
+            Self::Pop => "pop",
+            Self::Popitem => "popitem",
+            Self::Clear => "clear",
+            Self::SetDefault => "setdefault",
+            Self::Copy => "copy",
+            Self::Contains => "__contains__",
+            Self::FromKeys => "fromkeys",
+        }
+    }
+
+    /// Whether a successful or partially-successful call can mutate the
+    /// receiver. Interpreter adapters use this to synchronize special live
+    /// namespace dictionaries after the canonical dict implementation returns.
+    #[inline(always)]
+    pub const fn mutates_receiver(self) -> bool {
+        matches!(
+            self,
+            Self::Update | Self::Pop | Self::Popitem | Self::Clear | Self::SetDefault
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MethodSpec {
+    method: Method,
+    arity: PositionalArity,
+    keywords: KeywordPolicy,
+}
+
+impl MethodSpec {
+    #[inline(always)]
+    pub const fn method(self) -> Method {
+        self.method
+    }
+
+    #[inline]
+    pub fn validate_positional_arity(self, given: usize) -> Result<()> {
+        if self.arity.accepts(given) {
+            return Ok(());
+        }
+        self.arity
+            .reject_excess(TYPE_NAME, self.method.name(), given)
+    }
+
+    #[inline]
+    pub fn validate_keywords(self, has_keywords: bool) -> Result<()> {
+        if self.keywords.accepts(has_keywords) {
+            return Ok(());
+        }
+        self.keywords
+            .validate(TYPE_NAME, self.method.name(), has_keywords)
+    }
+
+    #[inline(always)]
+    pub const fn keyword_policy(self) -> KeywordPolicy {
+        self.keywords
+    }
+
+    #[inline(always)]
+    pub const fn view_method(self) -> Option<ViewMethod> {
+        match self.method {
+            Method::Keys => Some(ViewMethod::Keys),
+            Method::Values => Some(ViewMethod::Values),
+            Method::Items => Some(ViewMethod::Items),
+            _ => None,
+        }
+    }
+}
+
+/// Resolve a dict method once into its semantic route and positional policy.
+#[inline]
+pub fn method_spec(method: &str) -> Option<MethodSpec> {
+    let (method, arity) = match method {
+        "__iter__" => (Method::Iter, PositionalArity::exact(0)),
+        "get" => (Method::Get, PositionalArity::range(1, 2)),
+        "keys" => (Method::Keys, PositionalArity::exact(0)),
+        "values" => (Method::Values, PositionalArity::exact(0)),
+        "items" => (Method::Items, PositionalArity::exact(0)),
+        "update" => (Method::Update, PositionalArity::range(0, 1)),
+        "pop" => (Method::Pop, PositionalArity::range(1, 2)),
+        "popitem" => (Method::Popitem, PositionalArity::exact(0)),
+        "clear" => (Method::Clear, PositionalArity::exact(0)),
+        "setdefault" => (Method::SetDefault, PositionalArity::range(1, 2)),
+        "copy" => (Method::Copy, PositionalArity::exact(0)),
+        "__contains__" => (Method::Contains, PositionalArity::exact(1)),
+        "fromkeys" => (Method::FromKeys, PositionalArity::range(1, 2)),
+        _ => return None,
+    };
+    let keywords = if method == Method::Update {
+        KeywordPolicy::Accept
+    } else {
+        KeywordPolicy::Reject
+    };
+    Some(MethodSpec {
+        method,
+        arity,
+        keywords,
+    })
+}
+
+/// Positional signature for dict methods, including the interpreter-owned key
+/// routes and the `fromkeys` classmethod.
+pub fn positional_arity(method: &str) -> Option<PositionalArity> {
+    method_spec(method).map(|spec| spec.arity)
+}
+
+#[inline]
+pub fn validate_method_positional_arity(method: &str, given: usize) -> Result<()> {
+    if given == 0 {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(arity) => arity.reject_excess(TYPE_NAME, method, given),
+        None => Ok(()),
+    }
+}
+
+/// Enforce dict's keyword policy. `update` consumes arbitrary keyword names as
+/// entries; every other known method is positional-only.
+#[inline]
+pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> {
+    if !has_keywords {
+        return Ok(());
+    }
+    match method_spec(method) {
+        Some(spec) => spec.validate_keywords(true),
+        None => Ok(()),
+    }
+}
+
+pub fn keyword_policy(method: &str) -> Option<KeywordPolicy> {
+    method_spec(method).map(MethodSpec::keyword_policy)
+}
+
+/// Dict methods that produce a live view sharing the source backing storage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ViewMethod {
+    Keys,
+    Values,
+    Items,
+}
+
+/// Classify a method that produces a live dict view.
 ///
 /// These three cannot go through `call` below — the interpreter-free
 /// signature only sees a `Vec<Value>` snapshot, whereas a live view needs the
-/// `Rc<RefCell<IndexMap>>`.  The VM dispatcher queries this predicate and
-/// routes matching methods to `dict_views::dict_{keys,values,items}` instead.
-/// Single source of truth for the carve-out (see
-/// `crates/pyrust-builtins/README.md`).
+/// `Rc<RefCell<IndexMap>>`.
+pub fn view_method(method: &str) -> Option<ViewMethod> {
+    method_spec(method).and_then(MethodSpec::view_method)
+}
+
+/// Compatibility predicate for callers that have not migrated to the typed
+/// [`ViewMethod`] route yet.
+#[deprecated(since = "0.1.0", note = "use view_method(method).is_some()")]
 pub fn needs_rc(method: &str) -> bool {
-    matches!(method, "keys" | "values" | "items")
+    view_method(method).is_some()
 }
 
 /// Dispatch a `dict` method.  Receiver is `&Value`; each branch
@@ -50,6 +234,25 @@ pub fn needs_rc(method: &str) -> bool {
 /// `d.update(d)` never simultaneously borrows the same `IndexMap`
 /// (#448).
 pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -> Result<Value> {
+    let Some(spec) = method_spec(method) else {
+        return Err(PyError::named(
+            "AttributeError",
+            format!("'dict' object has no attribute '{method}'"),
+        ));
+    };
+    spec.validate_keywords(!kwargs.is_empty())?;
+    spec.validate_positional_arity(args.len())?;
+    call_resolved(spec.method(), receiver, args, kwargs)
+}
+
+/// Dispatch a method whose name and arity were resolved by [`method_spec`].
+#[doc(hidden)]
+pub fn call_resolved(
+    method: Method,
+    receiver: &Value,
+    args: Vec<Value>,
+    kwargs: &PyDict,
+) -> Result<Value> {
     let not_dict = || {
         PyError::named(
             "TypeError",
@@ -57,13 +260,13 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -
         )
     };
     match method {
-        "keys" => receiver
+        Method::Keys => receiver
             .dict_with(|dict| Value::list(dict.keys().cloned().map(key_to_value).collect()))
             .ok_or_else(not_dict),
-        "values" => receiver
+        Method::Values => receiver
             .dict_with(|dict| Value::list(dict.values().cloned().collect()))
             .ok_or_else(not_dict),
-        "items" => receiver
+        Method::Items => receiver
             .dict_with(|dict| {
                 Value::list(
                     dict.iter()
@@ -72,7 +275,7 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -
                 )
             })
             .ok_or_else(not_dict),
-        "update" => {
+        Method::Update => {
             // CPython: `dict.update([mapping_or_iterable], **kwargs)` —
             // at most one positional arg.  >1 positional → TypeError.
             if args.len() > 1 {
@@ -84,32 +287,28 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>, kwargs: &PyDict) -
             // Materialise the mapping snapshot BEFORE borrow_mut so
             // a self-aliased call (`d.update(d)`) reads its pre-
             // update state and doesn't `&` the storage we'd `&mut`.
-            let snapshot = snapshot_update_arg(receiver, &args)?;
-            receiver
-                .dict_with_mut(|dict| {
-                    for (k, v) in snapshot {
-                        dict.insert(k, v);
-                    }
-                    // Keyword arguments are inserted after the positional arg,
-                    // matching CPython's order: positional mapping first, then kwargs.
-                    for (k, v) in kwargs {
-                        dict.insert(k.clone(), v.clone());
-                    }
-                })
-                .ok_or_else(not_dict)?;
+            let mut snapshot = snapshot_update_arg(receiver, &args)?;
+            // Keyword arguments are inserted after the positional arg,
+            // matching CPython's order: positional mapping first, then kwargs.
+            snapshot.extend(
+                kwargs
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone())),
+            );
+            receiver.dict_extend(snapshot)?;
             Ok(Value::none())
         }
-        "popitem" => receiver.dict_with_mut(popitem).ok_or_else(not_dict)?,
-        "clear" => {
+        Method::Popitem => receiver.dict_with_mut(popitem).ok_or_else(not_dict)?,
+        Method::Clear => {
             receiver.dict_clear()?;
             Ok(Value::none())
         }
-        "copy" => receiver
+        Method::Copy => receiver
             .dict_with(|dict| Value::dict(dict.clone()))
             .ok_or_else(not_dict),
         _ => Err(PyError::named(
             "AttributeError",
-            format!("'dict' object has no attribute '{method}'"),
+            format!("'dict' object has no attribute '{}'", method.name()),
         )),
     }
 }

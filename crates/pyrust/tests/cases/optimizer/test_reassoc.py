@@ -1,6 +1,6 @@
-# Parity fixture: pass_reassoc — compile-time reassociation of (x op c1) op c2.
-# The pass rewrites (x op c1) op c2 → x op (c1 op c2) so that pass_const_fold
-# can fold the two constants together.
+# Parity fixture for left-associated arithmetic and protocol dispatch.
+# The optimizer must preserve source evaluation order for dynamic operands;
+# fully constant expressions are handled by ordinary forward constant folding.
 
 # ── Integer Add ───────────────────────────────────────────────────────────────
 
@@ -48,16 +48,16 @@ def triple_add(a, b):
 
 assert triple_add(2, 3) == 8, triple_add(2, 3)
 
-# ── Float: must NOT be reassociated (floating-point non-associativity) ────────
+# ── Float: preserve left-to-right evaluation ─────────────────────────────────
 
 def float_no_reassoc(a):
     # (a + 1e100) + (-1e100) == 0.0 under CPython's left-to-right eval.
-    # Reassociating to a + (1e100 + -1e100) = a + 0.0 = a would change the result.
+# Regrouping to a + (1e100 + -1e100) = a + 0.0 = a would change the result.
     return (a + 1e100) + (-1e100)
 
 assert float_no_reassoc(1.0) == 0.0, float_no_reassoc(1.0)
 
-# ── String: must NOT be reassociated ─────────────────────────────────────────
+# ── String: preserve the two distinct additions ──────────────────────────────
 
 def str_concat(s):
     return (s + " ") + "world"
@@ -67,9 +67,8 @@ assert str_concat("hello") == "hello world", str_concat("hello")
 # ── Overflow: must NOT reassociate when constant fold overflows i64 ───────────
 
 # i64 max = 9223372036854775807
-# (max - 1) + 1 = max; max + 1 overflows → BigInt.  The reassociation of
-# (x + (max-1)) + 1 → x + max is fine, but (x + max) + 1 → x + (max+1)
-# would overflow at compile time; we must bail and get runtime BigInt semantics.
+# (max - 1) + 1 = max; max + 1 overflows → BigInt. Evaluation must retain
+# runtime arbitrary-precision semantics rather than precomputing an i64 result.
 i64_max = 9223372036854775807
 
 def overflow_add(x):
@@ -85,7 +84,7 @@ assert result == 9223372036854775808, result
 # (obj + 1) + 2:
 #   step 1: obj.__add__(1)  → 10   (1 * 10)
 #   step 2: (10).__add__(2) → 12   (plain int add)
-# If reassoc incorrectly fires: obj.__add__(3) → 30, which is wrong.
+# Regrouping would instead call obj.__add__(3) → 30, which is wrong.
 
 class MultiplierAdd:
     def __add__(self, other):
@@ -97,4 +96,4 @@ def user_add_chain(obj):
 result = user_add_chain(MultiplierAdd())
 assert result == 12, f"expected 12, got {result}"
 
-print("reassoc OK")
+print("left-associative ops OK")

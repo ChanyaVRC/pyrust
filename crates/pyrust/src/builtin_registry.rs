@@ -44,22 +44,132 @@ pub type BuiltinDispatchFn = fn(&mut Interpreter, &[ExpandedCallArg]) -> Result<
 /// caller guarantees `min_arity <= args.len() <= max_arity`.
 pub type BuiltinFastDispatchFn = fn(&mut Interpreter, &[Value]) -> Result<Value>;
 
+/// Python-visible callable category carried by a registry entry.
+///
+/// A dot in the internal dispatch key is not semantic: both a module function
+/// (`math.sqrt`) and an unbound type method (`list.append`) use dotted keys.
+/// Consumers must use this tag instead of reparsing [`BuiltinReg::name`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BuiltinCallableKind {
+    ModuleFunction,
+    MethodDescriptor,
+}
+
+/// Presentation metadata for a registered callable.
+///
+/// `qualname` is the name declared inside `pyrust_module!`: `sqrt` for a
+/// module function and `Counter.__getitem__` for a type member.  Some legacy
+/// flat-builtin declarations include the module prefix in that string
+/// (`builtins.TypeAliasType.__repr__`); accessors normalize it without
+/// allocating. `declaring_module` remains available for module-function
+/// `__module__` and for diagnostics.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct BuiltinCallableMetadata {
+    pub kind: BuiltinCallableKind,
+    pub declaring_module: &'static str,
+    pub qualname: &'static str,
+    canonical_owner: Option<pyrust_core::CanonicalClassTag>,
+}
+
+impl BuiltinCallableMetadata {
+    pub const fn module_function(declaring_module: &'static str, qualname: &'static str) -> Self {
+        Self {
+            kind: BuiltinCallableKind::ModuleFunction,
+            declaring_module,
+            qualname,
+            canonical_owner: None,
+        }
+    }
+
+    pub const fn method_descriptor(declaring_module: &'static str, qualname: &'static str) -> Self {
+        Self {
+            kind: BuiltinCallableKind::MethodDescriptor,
+            declaring_module,
+            qualname,
+            canonical_owner: None,
+        }
+    }
+
+    /// Construct a descriptor declared by an interpreter-owned canonical
+    /// class.  The derive macro emits this form for primitive/object owners so
+    /// slot dispatch can validate receivers without reparsing a qualified
+    /// callable name.
+    pub const fn canonical_method_descriptor(
+        declaring_module: &'static str,
+        qualname: &'static str,
+        owner: pyrust_core::CanonicalClassTag,
+    ) -> Self {
+        Self {
+            kind: BuiltinCallableKind::MethodDescriptor,
+            declaring_module,
+            qualname,
+            canonical_owner: Some(owner),
+        }
+    }
+
+    /// Python `__qualname__`, excluding a redundant registration-module prefix.
+    pub fn python_qualname(self) -> &'static str {
+        if self.kind == BuiltinCallableKind::MethodDescriptor
+            && self.qualname.starts_with(self.declaring_module)
+            && self
+                .qualname
+                .as_bytes()
+                .get(self.declaring_module.len())
+                .is_some_and(|separator| *separator == b'.')
+        {
+            &self.qualname[self.declaring_module.len() + 1..]
+        } else {
+            self.qualname
+        }
+    }
+
+    /// Python `__name__`, derived from the declared qualname.
+    pub fn python_name(self) -> &'static str {
+        self.python_qualname()
+            .rsplit_once('.')
+            .map_or(self.python_qualname(), |(_, name)| name)
+    }
+
+    /// Python `__module__`; method descriptors do not expose this attribute.
+    pub const fn python_module(self) -> Option<&'static str> {
+        match self.kind {
+            BuiltinCallableKind::ModuleFunction => Some(self.declaring_module),
+            BuiltinCallableKind::MethodDescriptor => None,
+        }
+    }
+
+    /// Descriptor owner (`list`, `Counter`, …), when this is a type member.
+    #[allow(dead_code)] // Public metadata API; most dispatchers need the typed tag below.
+    pub fn owner(self) -> Option<&'static str> {
+        match self.kind {
+            BuiltinCallableKind::ModuleFunction => None,
+            BuiltinCallableKind::MethodDescriptor => self
+                .python_qualname()
+                .rsplit_once('.')
+                .map(|(owner, _)| owner),
+        }
+    }
+
+    /// Immutable class identity for primitive/object descriptors.
+    ///
+    /// Named non-canonical owners such as `Counter` intentionally return
+    /// `None`; callers that only need Python presentation should use
+    /// [`Self::owner`].
+    pub const fn descriptor_owner_tag(self) -> Option<pyrust_core::CanonicalClassTag> {
+        match self.kind {
+            BuiltinCallableKind::ModuleFunction => None,
+            BuiltinCallableKind::MethodDescriptor => self.canonical_owner,
+        }
+    }
+}
+
 /// One entry in the registry — emitted by `pyrust_module!` (one per fn
 /// inside the macro body) or by `#[pyfunction(name = …)]`.
-///
-/// `is_pure` carries the optimizer-visible "no observable side effects,
-/// deterministic" property declared at the call site of `pyrust_module!`
-/// via a `#[pure]` attribute on the `fn`.  Default is `false`
-/// (conservative — the optimizer's dead-code elimination pass will not
-/// drop a call whose purity is unknown).  See issue #433 for the
-/// derivation rationale: the registry already knows what exists, so
-/// purity belongs next to the declaration rather than a hand-maintained
-/// list in `helpers.rs`.
 #[derive(Copy, Clone)]
 pub struct BuiltinReg {
     pub name: &'static str,
     pub dispatch: BuiltinDispatchFn,
-    pub is_pure: bool,
+    pub metadata: BuiltinCallableMetadata,
     /// Optional fast entry for a positional call (see [`BuiltinFastDispatchFn`]).
     /// `None` for legacy-dialect builtins and any typed builtin with `*args` /
     /// `**kwargs` / keyword-only params. Valid only for `min_arity..=max_arity`
@@ -74,10 +184,22 @@ pub struct BuiltinReg {
 /// caller falls back to the legacy match cascade.
 #[inline]
 pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
+    lookup_registration(name).map(|registration| registration.dispatch)
+}
+
+/// Look up the complete immutable registration for a built-in callable.
+#[inline]
+pub fn lookup_registration(name: &str) -> Option<&'static BuiltinReg> {
     REGISTRY
-        .binary_search_by_key(&name, |r| r.name)
+        .binary_search_by_key(&name, |registration| registration.name)
         .ok()
-        .map(|i| REGISTRY[i].dispatch)
+        .map(|index| &REGISTRY[index])
+}
+
+/// Look up typed presentation/ownership metadata for a built-in callable.
+#[inline]
+pub fn lookup_metadata(name: &str) -> Option<BuiltinCallableMetadata> {
+    lookup_registration(name).map(|registration| registration.metadata)
 }
 
 /// Look up the interned `&'static str` name for a registered built-in.
@@ -88,44 +210,9 @@ pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
 /// `&'static str` from a heap-leaked `Box<str>`.
 ///
 /// Returns `None` if no built-in by that name is registered.
-/// Look up the fast positional dispatch for a built-in, plus its arity bounds.
-/// Returns `None` when the name is unregistered or has no fast entry.
-#[inline]
-pub fn lookup_fast(name: &str) -> Option<(BuiltinFastDispatchFn, u8, u8)> {
-    REGISTRY
-        .binary_search_by_key(&name, |r| r.name)
-        .ok()
-        .and_then(|i| {
-            let r = &REGISTRY[i];
-            r.fast.map(|f| (f, r.min_arity, r.max_arity))
-        })
-}
-
 #[inline]
 pub fn lookup_name(name: &str) -> Option<&'static str> {
-    REGISTRY
-        .binary_search_by_key(&name, |r| r.name)
-        .ok()
-        .map(|i| REGISTRY[i].name)
-}
-
-/// Returns `true` if the built-in by this name is registered and is
-/// declared pure (no observable side effects, deterministic given the
-/// same inputs).  Returns `false` for unknown names or for known
-/// impure names — the optimizer's DCE / constant-folding passes use
-/// this single signal as the conservative gate for "may I drop or
-/// reorder this call?".
-///
-/// Replaces the hand-maintained `PURE_BUILTINS` list that used to live
-/// in `crates/pyrust/src/interpreter/helpers.rs` (see #433).  Adding a
-/// `#[pure] fn …` inside `pyrust_module! { … }` is now the only edit
-/// needed to make a new built-in optimizer-pure.
-#[inline]
-pub fn is_pure(name: &str) -> bool {
-    REGISTRY
-        .binary_search_by_key(&name, |r| r.name)
-        .ok()
-        .is_some_and(|i| REGISTRY[i].is_pure)
+    lookup_registration(name).map(|registration| registration.name)
 }
 
 /// The full registry.  Constructed via [`std::sync::LazyLock`] from
@@ -153,6 +240,18 @@ mod tests {
     use super::*;
     use crate::value::ValueKind;
 
+    fn module_attr(module: &Value, name: &str) -> Value {
+        let ValueKind::PyModule(module) = module.kind() else {
+            panic!("expected PyModule");
+        };
+        module
+            .borrow()
+            .attrs
+            .get(name)
+            .unwrap_or_else(|| panic!("module lacks {name:?}"))
+            .clone()
+    }
+
     #[test]
     fn lookup_finds_a_known_builtin() {
         // math.sqrt is one of the first migrated builtins; it must be present.
@@ -168,68 +267,25 @@ mod tests {
     }
 
     #[test]
-    fn is_pure_reflects_pure_attribute() {
-        // Spot-checks across the three buckets that the optimizer's DCE
-        // pass depends on (issue #433):
-        //
-        // 1. Definitionally pure flat builtins — `abs`, `ord` …
-        //    These have `#[pure]` in `bodies/builtins.rs` and must come back
-        //    pure here, otherwise the optimizer's call-DCE pass would
-        //    drift backwards relative to the legacy `PURE_BUILTINS` list.
-        //    `len` is intentionally absent: it dispatches user `__len__` and
-        //    is therefore impure (issue #1526).  `chr` is likewise absent: it
-        //    dispatches user `__index__` and is impure (issue #1908).  `type`
-        //    is impure too: the 3-arg `type(name, bases, ns)` constructor runs
-        //    class-creation hooks (`__set_name__`/`__init_subclass__`) that may
-        //    execute arbitrary user code (issues #2129/#2130).
-        for name in ["abs", "ord"] {
-            assert!(is_pure(name), "{name:?} must be registered as pure");
-        }
+    fn callable_metadata_distinguishes_module_functions_and_descriptors() {
+        let sqrt = lookup_metadata("math.sqrt").expect("math.sqrt must be registered");
+        assert_eq!(sqrt.kind, BuiltinCallableKind::ModuleFunction);
+        assert_eq!(sqrt.python_name(), "sqrt");
+        assert_eq!(sqrt.python_qualname(), "sqrt");
+        assert_eq!(sqrt.python_module(), Some("math"));
+        assert_eq!(sqrt.owner(), None);
+        assert_eq!(sqrt.descriptor_owner_tag(), None);
 
-        // 2. Module-namespaced pure builtins — the headline win of
-        //    #433: the legacy hardcoded list couldn't reach these.
-        for name in ["math.sqrt", "math.sin"] {
-            assert!(
-                is_pure(name),
-                "{name:?} must be registered as pure (module-namespaced)"
-            );
-        }
-
-        // math.floor / math.ceil / math.trunc dispatch user dunders
-        // (__floor__, __ceil__, __trunc__) and are therefore impure (#1399).
-        for name in ["math.floor", "math.ceil", "math.trunc"] {
-            assert!(
-                !is_pure(name),
-                "{name:?} must NOT be marked pure (dispatches user dunders)"
-            );
-        }
-
-        // 3. Known-impure / unknown — must come back `false` so the
-        //    optimizer's conservative gate still rejects them.
-        //
-        //    `str`, `bool`, `list`, `tuple`, and `sorted` dispatch user
-        //    dunders (`__str__`/`__repr__`, `__bool__`/`__len__`,
-        //    `__iter__`/`__next__`, `__lt__` etc.) and must not be folded
-        //    away even when their result is unused (#538).
-        //    `min` and `max` also dispatch user dunders (`__lt__`/`__gt__`
-        //    via `richcmp_order`) and had `#[pure]` removed in #544.
-        for name in [
-            "print", "open", "input", "str", "bool", "list", "tuple", "sorted", "min", "max",
-            // divmod dispatches __divmod__/__rdivmod__ on user instances (#1094).
-            "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
-            "ascii",  // len dispatches user __len__ on PyInstance values (#1526).
-            "len",    // chr dispatches user __index__ on PyInstance values (#1908).
-            "chr",    // type(name, bases, ns) runs class-creation hooks (#2129/#2130).
-            "type",
-        ] {
-            assert!(
-                !is_pure(name),
-                "{name:?} must NOT be marked pure (has observable side effects)"
-            );
-        }
-        assert!(
-            !is_pure("absolutely-not-a-builtin"),
-            "unknown names must not be pure",
+        let getitem =
+            lookup_metadata("list.__getitem__").expect("list.__getitem__ must be registered");
+        assert_eq!(getitem.kind, BuiltinCallableKind::MethodDescriptor);
+        assert_eq!(getitem.python_name(), "__getitem__");
+        assert_eq!(getitem.python_qualname(), "list.__getitem__");
+        assert_eq!(getitem.python_module(), None);
+        assert_eq!(getitem.owner(), Some("list"));
+        assert_eq!(
+            getitem.descriptor_owner_tag(),
+            Some(pyrust_core::CanonicalClassTag::List)
         );
     }
 
@@ -299,6 +355,66 @@ mod tests {
             "BuiltinReg.name and PyModule attr name must point to the same \
              leaked str (got {registered:p} vs {module_attr_name:p})",
         );
+    }
+
+    #[test]
+    fn module_generation_owns_native_callable_objects() {
+        // The derive layer owns the lifetime policy: ordinary native modules
+        // get one callable object per generated module, while `@flat
+        // builtins` intentionally reuses the process/thread-wide objects
+        // installed in the global namespace. The registry dispatch name
+        // remains shared in both cases.
+        let math_a =
+            crate::builtin_modules::load_builtin_module("math").expect("first math module");
+        let math_b =
+            crate::builtin_modules::load_builtin_module("math").expect("second math module");
+        let sqrt_a = module_attr(&math_a, "sqrt");
+        let sqrt_b = module_attr(&math_b, "sqrt");
+        assert_ne!(sqrt_a, sqrt_b, "math generations must not share sqrt");
+        assert_ne!(sqrt_a.value_id(), sqrt_b.value_id());
+        let (ValueKind::BuiltinFunction(name_a), ValueKind::BuiltinFunction(name_b)) =
+            (sqrt_a.kind(), sqrt_b.kind())
+        else {
+            panic!("math.sqrt must be a BuiltinFunction");
+        };
+        assert!(
+            std::ptr::eq(name_a, name_b),
+            "fresh objects must retain the interned registry dispatch name"
+        );
+
+        let itertools_a =
+            crate::builtin_modules::load_builtin_module("itertools").expect("first itertools");
+        let itertools_b =
+            crate::builtin_modules::load_builtin_module("itertools").expect("second itertools");
+        let chain_a = module_attr(&itertools_a, "chain");
+        let chain_b = module_attr(&itertools_b, "chain");
+        let descriptor = |class: &Value| {
+            let ValueKind::PyClass(class) = class.kind() else {
+                panic!("itertools.chain must be a PyClass");
+            };
+            class
+                .borrow()
+                .attrs
+                .get("__next__")
+                .expect("chain.__next__ descriptor")
+                .clone()
+        };
+        let next_a = descriptor(&chain_a);
+        let next_b = descriptor(&chain_b);
+        assert_ne!(
+            next_a, next_b,
+            "native class descriptors must be generation-local"
+        );
+        assert_ne!(next_a.value_id(), next_b.value_id());
+
+        let builtins_a =
+            crate::builtin_modules::load_builtin_module("builtins").expect("first builtins");
+        let builtins_b =
+            crate::builtin_modules::load_builtin_module("builtins").expect("second builtins");
+        let len_a = module_attr(&builtins_a, "len");
+        let len_b = module_attr(&builtins_b, "len");
+        assert_eq!(len_a, len_b, "flat builtins must retain shared identity");
+        assert_eq!(len_a.value_id(), len_b.value_id());
     }
 
     #[test]

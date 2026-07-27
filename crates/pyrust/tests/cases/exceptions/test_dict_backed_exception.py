@@ -1,8 +1,7 @@
 # Issue #2637: when an exception instance's `__dict__` is replaced wholesale
 # (`exc.__dict__ = d`), the exception-machinery sites that read the carried
-# dunders (`__traceback__` / `__cause__` / `__context__`) must route through the
-# live dict, not the raw `entries` slot map.  `sys.exc_info()[2]` was the site
-# that still used a raw `get` and handed back `None` for a dict-backed exception.
+# dunders (`__traceback__` / `__cause__` / `__context__`) live in independent
+# C-style slot storage and must survive replacement of the visible mapping.
 import sys
 
 

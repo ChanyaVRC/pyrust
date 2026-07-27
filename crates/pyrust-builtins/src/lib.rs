@@ -1,3 +1,4 @@
+pub mod abc_marker;
 pub mod bound_method;
 pub mod bytearray;
 pub mod bytes;
@@ -6,6 +7,7 @@ pub mod cell;
 pub mod classmethod;
 pub mod code;
 pub mod complex;
+pub mod deque_storage;
 pub mod dict;
 pub mod dict_views;
 pub mod file;
@@ -19,8 +21,12 @@ pub mod iter_helpers;
 pub mod list;
 pub mod mapping_proxy;
 pub mod member_descriptor;
+pub mod method_signature;
 pub mod mutable_sequence;
+pub mod native_builtin_callable;
 pub mod numeric_attrs_descriptor;
+pub mod ordered_mapping;
+pub mod primitive_class_attrs;
 pub mod property;
 pub mod sequence;
 pub mod set;
@@ -30,6 +36,7 @@ pub mod super_bound_builtin;
 pub mod traceback;
 pub mod tuple;
 pub mod type_call_wrapper;
+pub mod typing_marker;
 pub mod unbound_method_descriptor;
 pub mod unicode_data;
 pub mod union_type;
@@ -49,6 +56,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         dict_views::DICT_KEYS_TYPE_NAME => Some(dict_views::DICT_KEYS_OPS),
         dict_views::DICT_VALUES_TYPE_NAME => Some(dict_views::DICT_VALUES_OPS),
         dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),
+        deque_storage::TYPE_NAME => Some(deque_storage::DEQUE_STORAGE_OPS),
         property::TYPE_NAME => Some(property::PROPERTY_OPS),
         cached_property::TYPE_NAME => Some(cached_property::CACHED_PROPERTY_OPS),
         cell::TYPE_NAME => Some(cell::CELL_OPS),
@@ -57,7 +65,11 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         mapping_proxy::TYPE_NAME => Some(mapping_proxy::MAPPING_PROXY_OPS),
         slice::TYPE_NAME => Some(slice::SLICE_OPS),
         classmethod::CLASS_TYPE_NAME => Some(classmethod::CLASS_METHOD_ANY_OPS),
+        classmethod::NATIVE_CLASS_METHOD_DESCRIPTOR_TYPE_NAME => {
+            Some(classmethod::NATIVE_CLASS_METHOD_DESCRIPTOR_OPS)
+        }
         classmethod::STATIC_TYPE_NAME => Some(classmethod::STATIC_METHOD_ANY_OPS),
+        classmethod::CLASS_BOUND_ANY_TYPE_NAME => Some(classmethod::CLASS_BOUND_ANY_OPS),
         classmethod::CLASS_BINDER_TYPE_NAME => Some(classmethod::CLASS_METHOD_GET_BINDER_OPS),
         classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
         code::TYPE_NAME => Some(code::CODE_OPS),
@@ -236,6 +248,80 @@ mod method_table_drift_guard {
                 );
             }
         }
+    }
+
+    #[test]
+    fn splitlines_cores_require_interpreter_normalized_bool_flags() {
+        use pyrust_core::BuiltinTypeOps;
+
+        let text = Value::string("a\nb");
+        let bytes = Value::bytes(b"a\nb".to_vec());
+        for args in [
+            Vec::new(),
+            vec![Value::bool_(false)],
+            vec![Value::bool_(true)],
+        ] {
+            assert!(
+                super::string::call_prevalidated("splitlines", &text, &args).is_ok(),
+                "str core must accept only its default or a normalized Bool"
+            );
+            assert!(
+                super::bytes::call_prevalidated("splitlines", &bytes, &args, &PyDict::default(),)
+                    .is_ok(),
+                "bytes core must accept only its default or a normalized Bool"
+            );
+        }
+
+        for invalid in [Value::int(1), Value::string("truthy")] {
+            let str_error = super::string::call_prevalidated(
+                "splitlines",
+                &text,
+                std::slice::from_ref(&invalid),
+            )
+            .unwrap_err();
+            assert!(
+                str_error
+                    .to_string()
+                    .contains("keepends must be normalized to bool")
+            );
+
+            let bytes_error = super::bytes::call_prevalidated(
+                "splitlines",
+                &bytes,
+                &[invalid],
+                &PyDict::default(),
+            )
+            .unwrap_err();
+            assert!(
+                bytes_error
+                    .to_string()
+                    .contains("keepends must be normalized to bool")
+            );
+        }
+
+        let buffer = super::bytearray::bytearray(b"a\nb".to_vec());
+        let state = match buffer.kind() {
+            pyrust_core::ValueKind::BuiltinObject { state, .. } => state,
+            _ => panic!("expected bytearray BuiltinObject"),
+        };
+        assert!(
+            super::bytearray::BYTEARRAY_OPS
+                .call_method(
+                    state,
+                    "splitlines",
+                    vec![Value::bool_(true)],
+                    &IndexMap::new(),
+                )
+                .is_ok()
+        );
+        let bytearray_error = super::bytearray::BYTEARRAY_OPS
+            .call_method(state, "splitlines", vec![Value::int(1)], &IndexMap::new())
+            .unwrap_err();
+        assert!(
+            bytearray_error
+                .to_string()
+                .contains("keepends must be normalized to bool")
+        );
     }
 }
 

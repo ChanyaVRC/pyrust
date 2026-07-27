@@ -9,9 +9,34 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyDict, Result, Value, key_repr};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyDict, PyKey, Result, Value, builtin_ops_is, key_repr,
+};
 
 pub type DictRc = Rc<RefCell<PyDict>>;
+
+/// Concrete kind of a native dictionary view.
+///
+/// This is Rust-side semantic identity. Python-visible names such as
+/// `dict_keys` remain presentation metadata supplied by each operations table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictViewKind {
+    Keys,
+    Values,
+    Items,
+}
+
+impl DictViewKind {
+    /// Internal cursor code shared with the interpreter's generic live-dict
+    /// cursor (0=keys, 1=values, 2=items).
+    pub const fn live_cursor_code(self) -> u8 {
+        match self {
+            Self::Keys => 0,
+            Self::Values => 1,
+            Self::Items => 2,
+        }
+    }
+}
 
 pub struct DictView {
     pub items: DictRc,
@@ -222,11 +247,39 @@ pub fn as_dict_rc(value: &Value) -> Option<DictRc> {
     let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    let n = ops.type_name();
-    if n != DICT_KEYS_TYPE_NAME && n != DICT_VALUES_TYPE_NAME && n != DICT_ITEMS_TYPE_NAME {
-        return None;
-    }
+    view_kind_from_ops(ops)?;
     borrow_view(state)
+}
+
+// ── positional entry reads ───────────────────────────────────────────────────
+//
+// Insertion position is an entry's identity only while the mapping's order is
+// frozen. The caller owns that proof (a live iterator's unchanged mutation
+// generation); these accessors own the representation decode and hold the
+// `RefCell` borrow for exactly one indexed read.
+
+/// Read the key and value stored at `index`.
+pub fn entry_at(dict: &DictRc, index: usize) -> Option<(PyKey, Value)> {
+    dict.borrow()
+        .get_index(index)
+        .map(|(key, value)| (key.clone(), value.clone()))
+}
+
+/// Read only the value stored at `index`.
+pub fn value_at(dict: &DictRc, index: usize) -> Option<Value> {
+    dict.borrow()
+        .get_index(index)
+        .map(|(_, value)| value.clone())
+}
+
+/// Number of entries in a backing mapping.
+pub fn backing_len(dict: &DictRc) -> usize {
+    dict.borrow().len()
+}
+
+/// Snapshot the backing mapping's current key order.
+pub fn backing_keys(dict: &DictRc) -> Vec<PyKey> {
+    dict.borrow().keys().cloned().collect()
 }
 
 /// `true` if `value` is a dict view tagged as backed by a `collections.
@@ -237,8 +290,7 @@ pub fn is_ordered_view(value: &Value) -> bool {
     let pyrust_core::ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return false;
     };
-    let n = ops.type_name();
-    if n != DICT_KEYS_TYPE_NAME && n != DICT_VALUES_TYPE_NAME && n != DICT_ITEMS_TYPE_NAME {
+    if view_kind_from_ops(ops).is_none() {
         return false;
     }
     state
@@ -248,16 +300,27 @@ pub fn is_ordered_view(value: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Returns the view kind: 0=keys, 1=values, 2=items, or None if not a view.
-pub fn view_kind(value: &Value) -> Option<u8> {
+/// Returns the concrete view kind, or `None` if `value` is not a dict view.
+pub fn view_kind(value: &Value) -> Option<DictViewKind> {
     let pyrust_core::ValueKind::BuiltinObject { ops, .. } = value.kind() else {
         return None;
     };
-    match ops.type_name() {
-        DICT_KEYS_TYPE_NAME => Some(0),
-        DICT_VALUES_TYPE_NAME => Some(1),
-        DICT_ITEMS_TYPE_NAME => Some(2),
-        _ => None,
+    // The operations type is the stable discriminator. State accessors such as
+    // `as_dict_rc` validate the concrete payload separately, keeping this hot
+    // classification path borrow-free.
+    view_kind_from_ops(ops)
+}
+
+#[inline]
+fn view_kind_from_ops(ops: &dyn BuiltinTypeOps) -> Option<DictViewKind> {
+    if builtin_ops_is::<DictKeysOps>(ops) {
+        Some(DictViewKind::Keys)
+    } else if builtin_ops_is::<DictValuesOps>(ops) {
+        Some(DictViewKind::Values)
+    } else if builtin_ops_is::<DictItemsOps>(ops) {
+        Some(DictViewKind::Items)
+    } else {
+        None
     }
 }
 

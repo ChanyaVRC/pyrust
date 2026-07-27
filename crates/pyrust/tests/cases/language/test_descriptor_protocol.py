@@ -112,3 +112,28 @@ class E:
 e = E()
 print(E.ca)   # class:E  — __get__(None, E) called
 print(e.ca)   # instance:E — __get__(e, E) called
+
+# Repeated reads from one bytecode site must continue invoking a custom
+# descriptor. An attribute inline cache may retain ordinary class values and
+# methods, but it must not turn a dynamic __get__ result into the raw descriptor.
+class CountingDescriptor:
+    def __init__(self):
+        self.calls = 0
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        self.calls += 1
+        return self.calls
+
+counting = CountingDescriptor()
+class CacheOwner:
+    value = counting
+
+cache_owner = CacheOwner()
+def read_cached_site(obj):
+    return obj.value
+
+print(read_cached_site(cache_owner))
+print(read_cached_site(cache_owner))
+print(read_cached_site(cache_owner))
+print(counting.calls)

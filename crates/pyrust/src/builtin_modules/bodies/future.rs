@@ -8,7 +8,7 @@
 // Reference: <https://docs.python.org/3/library/__future__.html>
 
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
@@ -28,21 +28,49 @@ const CO_FUTURE_BARRY_AS_BDFL: i64 = 0x400000;
 const CO_FUTURE_GENERATOR_STOP: i64 = 0x800000;
 const CO_FUTURE_ANNOTATIONS: i64 = 0x1000000;
 
-// ── _Feature class singleton ──────────────────────────────────────────────────
-//
-// Built once per thread.  The `__repr__` dunder is wired to the builtin
-// registered below so pyrust's standard `repr()` / `print()` dispatch picks it
-// up without any per-site plumbing.
+// ── _Feature class generations ────────────────────────────────────────────────
 
 thread_local! {
-    static FEATURE_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
-        attrs.insert(
-            "__repr__".to_string(),
-            Value::builtin_function("__future__._Feature.__repr__"),
-        );
-        Rc::new(RefCell::new(PyClass::new("_Feature", "_Feature", None, attrs)))
-    };
+    /// Weak identities of still-live imported `__future__` generations.
+    ///
+    /// `__future__` is a Python module in CPython: deleting it from
+    /// `sys.modules` and importing again creates a fresh `_Feature` class.
+    /// Old feature objects keep their own generation alive.
+    static FEATURE_CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn new_feature_class_value() -> Value {
+    let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+    attrs.insert(
+        "__repr__".to_string(),
+        Value::builtin_function("__future__._Feature.__repr__"),
+    );
+    attrs.insert("__module__".to_string(), Value::string("__future__"));
+    let class = Rc::new(RefCell::new(PyClass::new(
+        "_Feature", "_Feature", None, attrs,
+    )));
+    FEATURE_CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        classes.retain(|registered| registered.strong_count() > 0);
+        classes.push(Rc::downgrade(&class));
+    });
+    Value::py_class(class)
+}
+
+fn current_feature_class() -> Rc<RefCell<PyClass>> {
+    let registered = FEATURE_CLASSES.with(|classes| {
+        let mut classes = classes.borrow_mut();
+        classes.retain(|class| class.strong_count() > 0);
+        classes.iter().rev().find_map(Weak::upgrade)
+    });
+    registered.unwrap_or_else(|| {
+        let value = new_feature_class_value();
+        match value.kind() {
+            ValueKind::PyClass(class) => Rc::clone(class),
+            _ => unreachable!("new_feature_class_value must return a class"),
+        }
+    })
 }
 
 /// Build a `_Feature` instance.
@@ -54,21 +82,17 @@ fn make_feature(
     mandatory: Option<(i64, i64, i64, &'static str, i64)>,
     compiler_flag: i64,
 ) -> Value {
-    FEATURE_CLASS.with(|class| {
-        let opt_tuple = version_tuple(optional);
-        let mand_val = match mandatory {
-            Some(m) => version_tuple(m),
-            None => Value::none(),
-        };
-        let mut attrs = InstanceAttrs::new();
-        attrs.insert("optional", opt_tuple);
-        attrs.insert("mandatory", mand_val);
-        attrs.insert("compiler_flag", Value::int(compiler_flag));
-        Value::py_instance(Rc::new(RefCell::new(PyInstance {
-            class: Rc::clone(class),
-            attrs,
-        })))
-    })
+    let class = current_feature_class();
+    let opt_tuple = version_tuple(optional);
+    let mand_val = match mandatory {
+        Some(m) => version_tuple(m),
+        None => Value::none(),
+    };
+    let mut attrs = InstanceAttrs::new();
+    attrs.insert("optional", opt_tuple);
+    attrs.insert("mandatory", mand_val);
+    attrs.insert("compiler_flag", Value::int(compiler_flag));
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
 /// Build a version 5-tuple `(major, minor, micro, releaselevel, serial)`.
@@ -95,7 +119,10 @@ fn repr_version_tuple(val: &Value) -> String {
                     _ => format!("{v:?}"),
                 })
                 .collect();
-            format!("({}, {}, {}, {}, {})", items[0], items[1], items[2], items[3], items[4])
+            format!(
+                "({}, {}, {}, {}, {})",
+                items[0], items[1], items[2], items[3], items[4]
+            )
         }
         _ => "???".to_string(),
     }
@@ -128,6 +155,10 @@ pyrust_module! {
             Value::string("generator_stop"),
             Value::string("annotations"),
         ]),
+
+        // `_Feature` is recreated with each module generation, matching the
+        // Python implementation of `__future__`.
+        "_Feature" => new_feature_class_value(),
 
         // Ten recognised feature objects — CPython 3.12 values.
         // <https://github.com/python/cpython/blob/3.12/Lib/__future__.py>

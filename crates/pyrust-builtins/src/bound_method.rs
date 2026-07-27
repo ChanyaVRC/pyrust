@@ -32,11 +32,20 @@ use pyrust_core::{BuiltinState, BuiltinTypeOps, Value, ValueKind};
 pub struct BoundMethodState {
     pub name: Rc<String>,
     pub receiver: Value,
+    /// Per-captured-method `__module__` slot. CPython initializes built-in
+    /// bound methods to None, permits arbitrary assignment, and resets the
+    /// slot to None on deletion.
+    pub module: Value,
 }
 
 pub struct BoundMethodOps;
 pub const BOUND_METHOD_OPS: &BoundMethodOps = &BoundMethodOps;
 pub const TYPE_NAME: &str = "builtin_function_or_method";
+
+#[inline]
+fn has_bound_method_ops(ops: &dyn BuiltinTypeOps) -> bool {
+    pyrust_core::builtin_ops_is::<BoundMethodOps>(ops)
+}
 
 impl BuiltinTypeOps for BoundMethodOps {
     fn type_name(&self) -> &'static str {
@@ -51,7 +60,9 @@ impl BuiltinTypeOps for BoundMethodOps {
         let recv_type = pyrust_core::builtin_type_name(&s.receiver);
         // Issue #2397: a bound slot dunder (`[1].__len__`) presents as a CPython
         // `method-wrapper`, including its receiver's identity address.
-        if pyrust_core::slot_wrapper_dunder(&format!("{recv_type}.{}", s.name)).is_some() {
+        if pyrust_core::builtin_callable_presentation(&format!("{recv_type}.{}", s.name))
+            .is_wrapper_descriptor()
+        {
             format!(
                 "<method-wrapper '{}' of {} object at 0x{:x}>",
                 s.name,
@@ -74,6 +85,30 @@ impl BuiltinTypeOps for BoundMethodOps {
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
         true
+    }
+
+    /// CPython compares captured built-in methods by `(function, self)`,
+    /// rather than by the transient bound-method allocation. The Rust name is
+    /// the stable function identity for Tier 1 methods; the receiver must use
+    /// object identity, not Python value equality (`1` and `True` compare
+    /// equal as values but are not the same receiver).
+    fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
+        let borrow = state.borrow();
+        let Some(method) = borrow.downcast_ref::<BoundMethodState>() else {
+            return false;
+        };
+        let ValueKind::BuiltinObject {
+            state: other_state, ..
+        } = other.kind()
+        else {
+            return false;
+        };
+        let other_borrow = other_state.borrow();
+        let Some(other_method) = other_borrow.downcast_ref::<BoundMethodState>() else {
+            return false;
+        };
+        method.name == other_method.name
+            && same_receiver_identity(&method.receiver, &other_method.receiver)
     }
 
     /// Built-in bound methods are hashable in CPython (`hash([].append)` works).
@@ -105,11 +140,56 @@ impl BuiltinTypeOps for BoundMethodOps {
     // the interpreter's dispatch.
 }
 
+fn same_receiver_identity(left: &Value, right: &Value) -> bool {
+    match (left.kind(), right.kind()) {
+        (ValueKind::None, ValueKind::None)
+        | (ValueKind::NotImplemented, ValueKind::NotImplemented)
+        | (ValueKind::Ellipsis, ValueKind::Ellipsis) => true,
+        (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
+        (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
+        (ValueKind::Float(a), ValueKind::Float(b)) => a.to_bits() == b.to_bits(),
+        (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => {
+            ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits()
+        }
+        (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
+        (ValueKind::PyClass(a), ValueKind::PyClass(b)) => Rc::ptr_eq(a, b),
+        (ValueKind::UserFunction(a), ValueKind::UserFunction(b)) => Rc::ptr_eq(a, b),
+        (ValueKind::BuiltinFunction(_), ValueKind::BuiltinFunction(_)) => {
+            match (left.as_function_rc(), right.as_function_rc()) {
+                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                _ => false,
+            }
+        }
+        (ValueKind::Generator(a), ValueKind::Generator(b)) => Rc::ptr_eq(a, b),
+        (ValueKind::Bytes(a), ValueKind::Bytes(b)) => Rc::ptr_eq(a, b),
+        (ValueKind::PyModule(a), ValueKind::PyModule(b)) => Rc::ptr_eq(a, b),
+        (ValueKind::Str(_), ValueKind::Str(_))
+        | (ValueKind::BigInt(_), ValueKind::BigInt(_))
+        | (ValueKind::List(_), ValueKind::List(_))
+        | (ValueKind::Set(_), ValueKind::Set(_))
+        | (ValueKind::Dict(_), ValueKind::Dict(_))
+        | (ValueKind::Tuple(_), ValueKind::Tuple(_))
+        | (ValueKind::BoundMethod { .. }, ValueKind::BoundMethod { .. })
+        | (ValueKind::ClassBoundMethod { .. }, ValueKind::ClassBoundMethod { .. })
+        | (ValueKind::SuperProxy { .. }, ValueKind::SuperProxy { .. })
+        | (ValueKind::SuperProxyClass { .. }, ValueKind::SuperProxyClass { .. })
+        | (ValueKind::SuperProxyUnbound { .. }, ValueKind::SuperProxyUnbound { .. })
+        | (ValueKind::BuiltinObject { .. }, ValueKind::BuiltinObject { .. }) => {
+            matches!(
+                (left.value_id(), right.value_id()),
+                (Some(a), Some(b)) if a == b
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Construct a bound-method Value pointing at `receiver.name`.
 pub fn bound_method(name: impl Into<String>, receiver: Value) -> Value {
     let state: Box<dyn Any> = Box::new(BoundMethodState {
         name: Rc::new(name.into()),
         receiver,
+        module: Value::none(),
     });
     Value::builtin_object(BOUND_METHOD_OPS, state)
 }
@@ -123,7 +203,7 @@ pub fn as_bound_method(value: &Value) -> Option<(Rc<String>, Value)> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !has_bound_method_ops(ops) {
         return None;
     }
     let borrow = state.borrow();
@@ -131,10 +211,40 @@ pub fn as_bound_method(value: &Value) -> Option<(Rc<String>, Value)> {
     Some((Rc::clone(&s.name), s.receiver.clone()))
 }
 
+/// Read the per-object `__module__` slot of a captured built-in method.
+pub fn module_value(value: &Value) -> Option<Value> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !has_bound_method_ops(ops) {
+        return None;
+    }
+    let borrow = state.borrow();
+    let method = borrow.downcast_ref::<BoundMethodState>()?;
+    Some(method.module.clone())
+}
+
+/// Assign the per-object `__module__` slot of a captured built-in method.
+/// Returns false when `value` is another BuiltinObject category.
+pub fn set_module(value: &Value, module: Value) -> bool {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return false;
+    };
+    if !has_bound_method_ops(ops) {
+        return false;
+    }
+    let mut borrow = state.borrow_mut();
+    let Some(method) = borrow.downcast_mut::<BoundMethodState>() else {
+        return false;
+    };
+    method.module = module;
+    true
+}
+
 /// Returns true if `value` is a bound-method built-in.  Mirrors what
 /// CPython exposes as `isinstance(x, builtin_function_or_method)`.
 pub fn is_bound_method(value: &Value) -> bool {
-    matches!(value.kind(), ValueKind::BuiltinObject { ops, .. } if ops.type_name() == TYPE_NAME)
+    matches!(value.kind(), ValueKind::BuiltinObject { ops, .. } if has_bound_method_ops(ops))
 }
 
 /// Issue #2397: returns `true` if `value` is a bound builtin slot dunder
@@ -145,5 +255,6 @@ pub fn is_method_wrapper(value: &Value) -> bool {
         return false;
     };
     let recv_type = pyrust_core::builtin_type_name(&receiver);
-    pyrust_core::slot_wrapper_dunder(&format!("{recv_type}.{name}")).is_some()
+    pyrust_core::builtin_callable_presentation(&format!("{recv_type}.{name}"))
+        .is_wrapper_descriptor()
 }

@@ -99,3 +99,32 @@ class Outer9:
 print(Outer9.x3)          # 10  (Outer attr must survive)
 print(Outer9.Inner9.x3)   # 20  (Inner attr must survive)
 print(Outer9.Inner9().fn())  # 99 (lambda reads module x3)
+
+# ── Case 10: a nested closure in a lambda default keeps its provenance ────────
+# Lambda parameters shadow names only in the body.  The default is evaluated in
+# the enclosing scope, so subtracting the parameter name from default reads
+# would incorrectly lose this cell dependency.
+def lambda_default_capture():
+    x = 123
+    return (lambda x=(lambda: x): x)()()
+
+print(lambda_default_capture())  # 123
+
+# ── Case 11: the same default capture across a class boundary ─────────────────
+# The nested lambda skips the class namespace and closes over the function's x.
+def class_lambda_default_capture():
+    x = 456
+    class H:
+        fn = lambda value=(lambda: x): value
+    return H.fn()()
+
+print(class_lambda_default_capture())  # 456
+
+# ── Case 12: a lambda in a nested definition header is still outer-scope code ─
+def definition_header_capture():
+    x = 789
+    def nested(callback=(lambda: x)):
+        return callback()
+    return nested()
+
+print(definition_header_capture())  # 789

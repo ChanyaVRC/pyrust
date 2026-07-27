@@ -205,7 +205,9 @@ pyrust_builtin_modules! {
     // after `os.path` in the order so the `super::os_path::module()`
     // reference in `os`'s `constants` block resolves cleanly.
     os,
-    functools,
+    // Generation-bound factory callables and dynamic helper classes are
+    // installed after the fresh module enters this Interpreter's import cache.
+    functools @inject,
     // `operator` is a pure-Python module (issue #2514): an empty native
     // `pyrust_module!` plus `operator_py.py` injected by the `@inject`
     // post-load hook (`post_load_inject` → `inject_python_members`).
@@ -316,3 +318,5 @@ pyrust_builtin_modules! {
     // hook.  The native body is empty.
     fractions @inject,
 }
+
+include!("finalization.rs");

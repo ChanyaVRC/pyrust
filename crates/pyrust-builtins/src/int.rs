@@ -2,6 +2,8 @@ use pyrust_core::{
     PyBigInt, PyBigIntSign, PyDict, PyError, PyKey, PyToPrimitive, Result, Value, ValueKind,
 };
 
+pub const TYPE_NAME: &str = "int";
+
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
 /// Note: `real`, `imag`, `numerator`, `denominator` are read-only properties
@@ -18,11 +20,19 @@ pub const METHODS: &[&str] = &[
     "__getnewargs__",
 ];
 
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS)
+        .with_native_class_methods(&["from_bytes"])
+        .with_flags(crate::primitive_class_attrs::PrimitiveClassFlags::NONE.with_new());
+
 /// Returns `true` if `method` is the name of a built-in `int` method.
 /// Used by `hasattr` / `getattr` to validate attribute names without
 /// invoking the method.
 pub fn has_method(method: &str) -> bool {
-    METHODS.contains(&method)
+    // `from_bytes` is an explicitly installed native classmethod. Let the
+    // primitive-class descriptor path bind the canonical class instead of
+    // manufacturing an ordinary instance-bound method.
+    method != "from_bytes" && METHODS.contains(&method)
 }
 
 pub fn call(method: &str, receiver: &Value, args: &[Value], kw: &PyDict) -> Result<Value> {

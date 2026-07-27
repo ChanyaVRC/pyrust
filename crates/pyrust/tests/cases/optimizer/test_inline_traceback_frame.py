@@ -1,12 +1,6 @@
-# Issue #2569: the pure-function inliner (optimizer.rs::pass_inline) splices a
-# small pure leaf function's body into its call site and eliminates the call
-# frame.  Before #2569 an error raised inside an inlined body lost the callee's
-# traceback frame (and its PEP 657 caret), diverging from CPython 3.12.
-#
-# This fixture asserts the reconstructed callee frame STRUCTURE — frame name +
-# line number per `__traceback__` node — which the parity harness can observe
-# without letting the exception escape (it strips the stderr `File "…"` / caret
-# rows, but `tb_frame.f_code.co_name` / `tb_lineno` print to stdout).
+# Small helper calls retain real Python frames. This fixture asserts the frame
+# name and line number per `__traceback__` node without letting the exception
+# escape.
 
 
 def walk(tb):
@@ -18,7 +12,7 @@ def walk(tb):
     return rows
 
 
-# --- single inlined helper: arithmetic on a bad operand ---
+# --- single helper: arithmetic on a bad operand ---
 def add_one(x):
     return 1 + x
 
@@ -26,11 +20,11 @@ def add_one(x):
 try:
     add_one("z")
 except TypeError as e:
-    # Two frames: the <module> call site, then the inlined `add_one` body.
+    # Two frames: the <module> call site, then the `add_one` body.
     print("add_one frames:", walk(e.__traceback__))
 
 
-# --- inlined helper with a subscript ---
+# --- helper with a subscript ---
 def first(seq):
     return seq[0]
 
@@ -41,7 +35,7 @@ except TypeError as e:
     print("first frames:", walk(e.__traceback__))
 
 
-# --- multi-argument inlined helper ---
+# --- multi-argument helper ---
 def add3(a, b, c):
     return a + b + c
 
@@ -52,7 +46,7 @@ except TypeError as e:
     print("add3 frames:", walk(e.__traceback__))
 
 
-# --- inlined helper called from inside another (non-inlined) function ---
+# --- helper called from inside another function ---
 def square(n):
     return n * n
 
@@ -64,11 +58,11 @@ def caller():
 try:
     caller()
 except TypeError as e:
-    # Three frames: <module>, caller, inlined square body.
+    # Three frames: <module>, caller, square body.
     print("nested frames:", walk(e.__traceback__))
 
 
-# --- inlined error caught and re-raised: the original context keeps its frames ---
+# --- caught/re-raised helper error keeps its original frames ---
 def doubler(v):
     return v * 2
 
@@ -83,7 +77,7 @@ except ValueError as e:
     print("wrapped context frames:", walk(e.__context__.__traceback__))
 
 
-# --- normal (non-error) inlined calls still return correctly ---
+# --- normal (non-error) calls still return correctly ---
 def mul(a, b):
     return a * b
 

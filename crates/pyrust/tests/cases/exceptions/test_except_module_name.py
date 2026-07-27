@@ -2,6 +2,11 @@
 # including when the handler body exits early via break/continue/return.
 # Issue #1241.
 
+# Exercise the second module-binding representation too: once globals() has
+# escaped, an except binding is mirrored into its live dictionary and PEP 3110
+# cleanup must remove both the fast-local slot and that dictionary entry.
+globals()
+
 # ── Module scope, normal exit ────────────────────────────────────────────────
 
 # After a handler exits normally, the variable is gone.

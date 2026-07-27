@@ -13,8 +13,8 @@
 //     CPython `types.MappingProxyType` *is* the type, so
 //     `type(int.__dict__) is types.MappingProxyType` holds and calling it
 //     constructs a proxy.  We bind the constant to the interpreter's
-//     `mappingproxy` class singleton; the construction call is intercepted in
-//     `calls.rs` and dispatched to `construct_mapping_proxy` below.
+//     `mappingproxy` class singleton; built-in constructor dispatch owns
+//     argument validation.
 //   * `SimpleNamespace` — a plain Python class injected from `types_py.py`.
 //
 // The `MODULE_NAME` constant is injected by the `pyrust_builtin_modules!`
@@ -26,11 +26,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::Interpreter;
-use crate::interpreter::{
-    function_type_singleton, method_type_singleton, primitive_class_by_name, value_type_name_str,
-};
+use crate::interpreter::{function_type_singleton, method_type_singleton, primitive_class_by_name};
 use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
@@ -83,50 +80,6 @@ fn primitive_type_value(name: &str, fallback: Value) -> Value {
     match primitive_class_by_name(name) {
         Some(rc) => Value::py_class(rc),
         None => fallback,
-    }
-}
-
-/// Build a `mappingproxy` from `MappingProxyType(...)` / `mappingproxy(...)`
-/// call arguments.  Shared by the `types` constant's call interception in
-/// `calls.rs`.  CPython 3.12 (Argument Clinic): the single `mapping` parameter
-/// is positional-or-keyword, so `mappingproxy(d)` and `mappingproxy(mapping=d)`
-/// both work, while a 2nd argument or a wrong keyword raises the `mappingproxy`
-/// wording.  `mapping` must be a mapping (we accept `dict`).
-pub(crate) fn construct_mapping_proxy(args: &[ExpandedCallArg]) -> Result<Value> {
-    // More than one argument (positional and/or keyword) is always rejected.
-    if args.len() > 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!(
-                "mappingproxy() takes at most 1 argument ({} given)",
-                args.len()
-            ),
-        ));
-    }
-    // Resolve the single `mapping` argument: a lone positional, or the keyword
-    // `mapping=`.  A missing positional / wrong keyword name is "missing
-    // required argument 'mapping' (pos 1)" (CPython ignores the stray keyword
-    // and reports the unfilled positional).
-    let mapping = match args.first() {
-        Some(a) if a.name.as_deref().is_none_or(|n| n == "mapping") => &a.value,
-        _ => {
-            return Err(PyError::named(
-                "TypeError",
-                "mappingproxy() missing required argument 'mapping' (pos 1)".to_string(),
-            ));
-        }
-    };
-    match mapping.get_dict_rc() {
-        Some(rc) => Ok(pyrust_builtins::mapping_proxy::mapping_proxy_dict(
-            Rc::clone(rc),
-        )),
-        None => Err(PyError::named(
-            "TypeError",
-            format!(
-                "mappingproxy() argument must be a mapping, not {}",
-                value_type_name_str(mapping)
-            ),
-        )),
     }
 }
 
@@ -198,7 +151,10 @@ pub(crate) fn inject_python_members(
         .ok_or_else(|| PyError::Runtime("types: exec namespace not a dict".into()))?;
     for name in TYPES_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
-            module.borrow_mut().attrs.insert(name.to_string(), val.clone());
+            module
+                .borrow_mut()
+                .attrs
+                .insert(name.to_string(), val.clone());
         }
     }
     Ok(())

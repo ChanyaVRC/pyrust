@@ -46,6 +46,25 @@ iterator = iter(subclassed)
 subclassed.append(30)
 print("subclass:", type(iterator).__name__, list(iterator))
 
+# Every lazy consumer shares the same builtin-subclass classifier as iter().
+subclassed = ListSubclass([40, 50])
+mapped = map(lambda value: value, subclassed)
+subclassed.append(60)
+print("subclass through map:", list(mapped))
+
+
+class SetSubclass(set):
+    pass
+
+
+subclassed_set = SetSubclass([1, 2])
+set_iterator = iter(subclassed_set)
+subclassed_set.add(3)
+try:
+    next(set_iterator)
+except RuntimeError as error:
+    print("set subclass guard:", error)
+
 
 # The type-level and bound __iter__ entry points share the lazy path.
 values = [1, 2]

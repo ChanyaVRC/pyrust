@@ -1,6 +1,6 @@
 //! All overloads share one dispatcher, so a later overload that disagrees
 //! on `#[arity_style]` with the head overload would be silently ignored.
-//! The macro rejects it, mirroring the `#[pure]` agreement check (#2331).
+//! The macro rejects it because one overload set shares one dispatcher (#2331).
 
 use pyrust_derive::pyrust_module;
 

@@ -11,13 +11,49 @@ use std::any::Any;
 use indexmap::IndexMap;
 use pyrust_core::{
     BuiltinState, BuiltinTypeOps, PyBigIntSign, PyError, PyToPrimitive, Result, Value, ValueKind,
+    builtin_ops_is,
 };
+
+use crate::method_signature::{KeywordPolicy, PositionalArity};
 
 pub const TYPE_NAME: &str = "slice";
 pub const SLICE_OPS: &SliceOps = &SliceOps;
 
 /// Method names exposed by `slice` for `dir()`.
 pub const METHODS: &[&str] = &["indices"];
+
+pub fn positional_arity(method: &str) -> Option<PositionalArity> {
+    match method {
+        "indices" => Some(PositionalArity::exact(1)),
+        _ => None,
+    }
+}
+
+#[inline]
+pub fn validate_method_positional_arity(method: &str, given: usize) -> Result<()> {
+    if given == 0 {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(arity) => arity.reject_excess(TYPE_NAME, method, given),
+        None => Ok(()),
+    }
+}
+
+#[inline]
+pub fn validate_method_keywords(method: &str, has_keywords: bool) -> Result<()> {
+    if !has_keywords {
+        return Ok(());
+    }
+    match positional_arity(method) {
+        Some(_) => KeywordPolicy::Reject.validate(TYPE_NAME, method, true),
+        None => Ok(()),
+    }
+}
+
+pub fn keyword_policy(method: &str) -> Option<KeywordPolicy> {
+    positional_arity(method).map(|_| KeywordPolicy::Reject)
+}
 
 pub struct SliceState {
     pub start: Value,
@@ -72,7 +108,7 @@ impl BuiltinTypeOps for SliceOps {
             state: other_state,
         } = other.kind()
         {
-            if other_ops.type_name() != TYPE_NAME {
+            if !is_slice_ops(other_ops) {
                 return false;
             }
             let other_borrow = other_state.borrow();
@@ -116,7 +152,7 @@ impl BuiltinTypeOps for SliceOps {
         state: &BuiltinState,
         name: &str,
         args: Vec<Value>,
-        _kwargs: &IndexMap<String, Value>,
+        kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         if name != "indices" {
             return Err(PyError::named(
@@ -124,6 +160,8 @@ impl BuiltinTypeOps for SliceOps {
                 format!("'slice' object has no attribute '{name}'"),
             ));
         }
+        validate_method_keywords(name, !kwargs.is_empty())?;
+        validate_method_positional_arity(name, args.len())?;
         let borrow = state.borrow();
         let s = borrow
             .downcast_ref::<SliceState>()
@@ -153,6 +191,21 @@ impl BuiltinTypeOps for SliceOps {
     }
 }
 
+/// Return whether `ops` is this module's concrete slice operations table.
+#[inline]
+pub fn is_slice_ops(ops: &dyn BuiltinTypeOps) -> bool {
+    builtin_ops_is::<SliceOps>(ops)
+}
+
+/// Return whether `value` is a native slice object.
+#[inline]
+pub fn is_slice(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if is_slice_ops(ops)
+    )
+}
+
 /// Construct a `slice` value from three optional bounds.
 ///
 /// `None` values are represented as Python `None`.  Matches CPython's
@@ -171,7 +224,7 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
 /// `slice_richcompare` (issue #2127).
 pub fn slice_fields(value: &Value) -> Option<(Value, Value, Value)> {
     if let ValueKind::BuiltinObject { ops, state } = value.kind()
-        && ops.type_name() == TYPE_NAME
+        && is_slice_ops(ops)
     {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<SliceState>()?;

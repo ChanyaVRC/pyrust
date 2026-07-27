@@ -338,9 +338,8 @@ fn posix_abspath(path: &str) -> Result<String> {
     let joined = if path.starts_with('/') {
         path.to_string()
     } else {
-        let cwd = std::env::current_dir().map_err(|e| {
-            PyError::named("OSError", format!("could not resolve cwd: {e}"))
-        })?;
+        let cwd = std::env::current_dir()
+            .map_err(|e| PyError::named("OSError", format!("could not resolve cwd: {e}")))?;
         let mut s = cwd.to_string_lossy().into_owned();
         if !s.ends_with('/') {
             s.push('/');
@@ -394,7 +393,11 @@ fn posix_expanduser(path: &str) -> String {
     } else {
         home
     };
-    let mut result = if home.is_empty() { "/".to_string() } else { home };
+    let mut result = if home.is_empty() {
+        "/".to_string()
+    } else {
+        home
+    };
     let rest = &path[rest_start..];
     if rest.is_empty() {
         // `~` alone → home (which may be "/").
@@ -597,7 +600,11 @@ fn nt_splitroot(p: &str) -> (String, String, String) {
             let Some(index2) = index2 else {
                 return (p.to_string(), String::new(), String::new());
             };
-            return (take(0, index2), take(index2, index2 + 1), take(index2 + 1, n));
+            return (
+                take(0, index2),
+                take(index2, index2 + 1),
+                take(index2 + 1, n),
+            );
         }
         // Relative path with root, e.g. \Windows
         return (String::new(), take(0, 1), take(1, n));
@@ -645,7 +652,11 @@ fn nt_split(p: &str) -> (String, String) {
 
 fn nt_isabs(s: &str) -> bool {
     // CPython only inspects the first three chars and treats `/` as `\`.
-    let head: String = s.chars().take(3).map(|c| if c == '/' { '\\' } else { c }).collect();
+    let head: String = s
+        .chars()
+        .take(3)
+        .map(|c| if c == '/' { '\\' } else { c })
+        .collect();
     let hb: Vec<char> = head.chars().collect();
     // UNC/device (`\\…`) or drive-with-root (`C:\…`). Note the legacy bug:
     // `isabs("/x")` is False because a bare leading separator has no drive.
@@ -704,7 +715,10 @@ fn ends_with_colon_or_sep(s: &str) -> bool {
 }
 
 fn nt_normpath(path: &str) -> String {
-    let path: String = path.chars().map(|c| if c == '/' { '\\' } else { c }).collect();
+    let path: String = path
+        .chars()
+        .map(|c| if c == '/' { '\\' } else { c })
+        .collect();
     let (drive, root, rest) = nt_splitroot(&path);
     let prefix = format!("{drive}{root}");
     let has_root = !root.is_empty();
@@ -750,7 +764,10 @@ fn nt_splitext(path: &str) -> (String, String) {
 
 fn nt_relpath(path: &str, start: &str) -> Result<String> {
     if path.is_empty() {
-        return Err(PyError::named("ValueError", "no path specified".to_string()));
+        return Err(PyError::named(
+            "ValueError",
+            "no path specified".to_string(),
+        ));
     }
     let start_abs = nt_abspath(&nt_normpath(start))?;
     let path_abs = nt_abspath(&nt_normpath(path))?;
@@ -926,9 +943,21 @@ mod nt_tests {
             let (d, r, t) = nt_splitroot(p);
             (d, r, t)
         };
-        assert_eq!(r("//server/share/"), ("//server/share".into(), "/".into(), "".into()));
-        assert_eq!(r("C:/Users/Barney"), ("C:".into(), "/".into(), "Users/Barney".into()));
-        assert_eq!(r("C:///spam///ham"), ("C:".into(), "/".into(), "//spam///ham".into()));
-        assert_eq!(r("Windows/notepad"), ("".into(), "".into(), "Windows/notepad".into()));
+        assert_eq!(
+            r("//server/share/"),
+            ("//server/share".into(), "/".into(), "".into())
+        );
+        assert_eq!(
+            r("C:/Users/Barney"),
+            ("C:".into(), "/".into(), "Users/Barney".into())
+        );
+        assert_eq!(
+            r("C:///spam///ham"),
+            ("C:".into(), "/".into(), "//spam///ham".into())
+        );
+        assert_eq!(
+            r("Windows/notepad"),
+            ("".into(), "".into(), "Windows/notepad".into())
+        );
     }
 }

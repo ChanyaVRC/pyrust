@@ -11,10 +11,12 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    get_call_depth, get_recursion_limit, instantiate_exception, lookup_name_in_module,
-    reject_keyword_args_expanded, set_recursion_limit, value_type_name_str,
+    get_call_depth, get_int_max_str_digits as interpreter_int_max_str_digits, get_recursion_limit,
+    instantiate_exception, lookup_name_in_module, reject_keyword_args_expanded,
+    set_int_max_str_digits as set_interpreter_int_max_str_digits, set_recursion_limit,
+    value_type_name_str,
 };
-use crate::value::{InstanceAttrs, PyClass, PyDict, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -49,13 +51,12 @@ pyrust_module! {
         // <https://docs.python.org/3/library/sys.html#sys.path>
         "path"         => Value::list(vec![Value::string("")]),
         // CPython: sys.modules — dictionary of already-imported modules.
-        // Backed by a per-thread shared dict (issue #2727): the importer
-        // (`env.rs::load_module`) inserts each module into the same dict as
-        // it is loaded, and every `sys.modules` access returns that one dict
-        // (by Rc-shared identity), so reads and writes are stable and the
-        // import cache is observable from Python.
+        // Module construction has no active interpreter argument, so this
+        // empty placeholder is replaced by `prepare_builtin_module` with the
+        // importing Interpreter's authoritative registry before the module is
+        // inserted into the import cache.
         // <https://docs.python.org/3/library/sys.html#sys.modules>
-        "modules"      => sys_modules_dict(),
+        "modules"      => Value::dict(crate::value::PyDict::default()),
         // CPython: sys.executable — string giving the absolute path of the
         // Python interpreter binary.  pyrust uses an empty string because
         // there is no single well-defined binary path.
@@ -151,7 +152,7 @@ pyrust_module! {
                 ),
             ));
         }
-        Ok(Value::int(get_recursion_limit() as i64))
+        Ok(Value::int(get_recursion_limit(_interp) as i64))
     }
 
     /// CPython: sys.setrecursionlimit(limit) — set the maximum depth of the
@@ -192,7 +193,7 @@ pyrust_module! {
                 ),
             ));
         }
-        set_recursion_limit(new_limit);
+        set_recursion_limit(_interp, new_limit);
         Ok(Value::none())
     }
 
@@ -210,7 +211,7 @@ pyrust_module! {
                 ),
             ));
         }
-        Ok(Value::int(pyrust_core::get_int_max_str_digits() as i64))
+        Ok(Value::int(interpreter_int_max_str_digits(_interp) as i64))
     }
 
     /// CPython: sys.set_int_max_str_digits(maxdigits) — set the integer
@@ -241,7 +242,7 @@ pyrust_module! {
                 ),
             ));
         }
-        pyrust_core::set_int_max_str_digits(n as usize);
+        set_interpreter_int_max_str_digits(_interp, n as usize);
         Ok(Value::none())
     }
 
@@ -277,11 +278,8 @@ pyrust_module! {
                 // object (its `__traceback__`), not `None`.
                 let tb = match exc_val.kind() {
                     ValueKind::PyInstance(inst) => {
-                        // `get_cloned_or_slot` routes through the live `__dict__`
-                        // for a dict-backed instance (#1981/#2637); the carried
-                        // `__traceback__` is written via `insert`, which lands in
-                        // the dict after a `__dict__` swap, so a raw `get` (entries
-                        // only) would miss it and hand back `None`.
+                        // The carried traceback lives in C-style slot storage,
+                        // independent of any replacement `__dict__`.
                         let raw = inst
                             .borrow()
                             .attrs
@@ -292,7 +290,7 @@ pyrust_module! {
                         if let Some(real) = _interp.materialize_deferred_traceback(&raw) {
                             inst.borrow_mut()
                                 .attrs
-                                .insert("__traceback__", real.clone());
+                                .insert_slot("__traceback__", real.clone());
                             real
                         } else {
                             raw
@@ -625,25 +623,6 @@ const fn sys_byteorder() -> &'static str {
     }
 }
 
-// ── sys.modules shared dict (issue #2727) ────────────────────────────────────
-//
-// `sys.modules` must be a single, interpreter-lifetime dict that the importer
-// writes into and that user code reads/mutates with stable identity.  We back
-// it with a per-thread `Value::dict` (an `Rc<RefCell<PyDict>>` under the hood),
-// so every `sys_modules_dict()` call hands back a clone of the *same* Value —
-// i.e. the same underlying dict.
-
-thread_local! {
-    static SYS_MODULES: Value = Value::dict(PyDict::default());
-}
-
-/// Return the per-thread shared `sys.modules` dict Value.  Cloning the Value
-/// shares the same underlying dict, so writes from the importer and reads from
-/// `sys.modules` see the same map.
-pub(crate) fn sys_modules_dict() -> Value {
-    SYS_MODULES.with(|d| d.clone())
-}
-
 // ── version_info helpers ─────────────────────────────────────────────────────
 
 /// The five fields of `sys.version_info`, extracted from a PyInstance.
@@ -676,7 +655,7 @@ fn vi_as_fields(val: &Value) -> Result<ViFields> {
             return Err(PyError::named(
                 "TypeError",
                 "expected a version_info instance".to_string(),
-            ))
+            ));
         }
     };
     let borrow = inst.borrow();
@@ -748,7 +727,7 @@ fn vi_cmp_order(lhs: &[Value], rhs: &[Value]) -> Result<std::cmp::Ordering> {
                         value_type_name_str(a),
                         value_type_name_str(b),
                     ),
-                ))
+                ));
             }
         };
         if ord != std::cmp::Ordering::Equal {
@@ -900,11 +879,13 @@ fn approximate_sizeof(value: &Value) -> i64 {
 
 thread_local! {
     static FLAGS_CLASS: Rc<RefCell<PyClass>> = {
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert("__module__".to_string(), Value::string("sys"));
         Rc::new(RefCell::new(PyClass::new(
             "flags",
             "flags",
             None,
-            indexmap::IndexMap::new(),
+            attrs,
         )))
     };
 }
@@ -933,7 +914,12 @@ fn make_flags() -> Value {
         attrs.insert("utf8_mode", Value::int(0));
         attrs.insert("warn_default_encoding", Value::int(0));
         attrs.insert("safe_path", Value::bool_(false));
-        attrs.insert("int_max_str_digits", Value::int(4300));
+        // This records the startup configuration and intentionally does not
+        // change after sys.set_int_max_str_digits(), matching CPython.
+        attrs.insert(
+            "int_max_str_digits",
+            Value::int(pyrust_core::INT_MAX_STR_DIGITS_DEFAULT as i64),
+        );
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
             attrs,
@@ -950,6 +936,7 @@ fn make_flags() -> Value {
 thread_local! {
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        attrs.insert("__module__".to_string(), Value::string("sys"));
         // Rich-comparison dunders — registered as `"sys.version_info_*"` in
         // the pyrust_module! block above.
         attrs.insert(

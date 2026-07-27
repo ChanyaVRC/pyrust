@@ -1,10 +1,9 @@
 # A slice bound's __index__ can run arbitrary Python code, including
 # reassigning the variable that holds the source sequence (#2114 review).
-# The tuple by-ref slice fast path must NOT borrow the source register across
-# such a dunder call: doing so dropped the tuple's backing Vec mid-slice and
-# read through a dangling reference (use-after-free), producing garbage.  The
-# fast path is gated on every bound being a plain int/None; an __index__ bound
-# falls through to the owned-clone path, matching CPython.
+# GetSlice must not borrow the source register across such a dunder call: doing
+# so can invalidate the borrow when the callback reassigns that register.
+# Retaining an owned tuple Value is now an O(1) Rc bump, so every bound follows
+# the same safe path while preserving the old no-deep-copy performance property.
 
 class Clob:
     def __index__(self):

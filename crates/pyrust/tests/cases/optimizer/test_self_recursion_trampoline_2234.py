@@ -63,7 +63,7 @@ try:
 except KeyError as e:
     print("propagated:", str(e))
 
-# Self-recursion that tail-calls a *different* function.
+# Self-recursion that ends by calling a *different* function.
 def helper(x):
     return x * 100
 

@@ -43,6 +43,37 @@ print([1, 2] in [[1, 2], [3, 4]])  # True
 print((1, 2) in [(1, 2), (3, 4)])  # True
 print([9] in [[1, 2], [3, 4]])     # False
 
+# --- re-entrant list mutation during element __eq__ ----------------------
+# The list walk is live: appended elements can be visited, while removed
+# elements disappear before their index is reached. The read borrow must be
+# released before __eq__ runs.
+class AppendDuringEq:
+    done = False
+    def __eq__(self, other):
+        if not self.done:
+            self.done = True
+            append_items.append(9)
+        return False
+
+append_items = [AppendDuringEq()]
+print(9 in append_items, len(append_items))
+
+class PopDuringEq:
+    def __eq__(self, other):
+        pop_items.pop()
+        return False
+
+pop_items = [PopDuringEq(), 9]
+print(9 in pop_items, len(pop_items))
+
+class ClearDuringEq:
+    def __eq__(self, other):
+        clear_items.clear()
+        return False
+
+clear_items = [ClearDuringEq(), 9]
+print(9 in clear_items, len(clear_items))
+
 # --- str membership is unaffected by this path ----------------------------
 print("b" in "abc")                # True
 print("z" not in "abc")            # True

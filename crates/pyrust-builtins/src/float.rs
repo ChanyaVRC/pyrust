@@ -1,8 +1,10 @@
 use pyrust_core::{PyBigInt, PyError, PyToPrimitive, PyZero, Result, Value};
 
+pub const TYPE_NAME: &str = "float";
+
 /// Canonical list of *instance* method names dispatched by [`call`].
 /// Single source of truth for `has_method` and the drift-guard test.
-/// `fromhex` is a classmethod and is registered separately in `helpers.rs`.
+/// `fromhex` is classified as a classmethod by [`CLASS_ATTRS`].
 /// Note: `real` and `imag` are read-only properties intercepted in `get_attr`;
 /// `conjugate` is a zero-arg method and lives here.
 pub const METHODS: &[&str] = &[
@@ -12,6 +14,11 @@ pub const METHODS: &[&str] = &[
     "hex",
     "__getnewargs__",
 ];
+
+pub const CLASS_ATTRS: crate::primitive_class_attrs::PrimitiveClassAttrs =
+    crate::primitive_class_attrs::PrimitiveClassAttrs::new(TYPE_NAME, METHODS)
+        .with_native_class_methods(&["fromhex"])
+        .with_flags(crate::primitive_class_attrs::PrimitiveClassFlags::NONE.with_new());
 
 pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)

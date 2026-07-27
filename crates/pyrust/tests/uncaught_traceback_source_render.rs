@@ -344,11 +344,9 @@ ValueError: boom
 }
 
 #[test]
-fn tail_call_frame_carries_its_caret() {
-    // #2443: a `return f()` fuses to a `TailCall` in the optimizer (the `Call`
-    // disappears from the stream), so its PEP 657 anchor must be recovered in
-    // `remap_lineno_and_col_tables` — otherwise the outer frame whose entire
-    // body is the tail call drew no caret.  CPython underlines just `inner()`.
+fn return_call_frame_carries_its_caret() {
+    // #2443: an outer frame whose entire body is `return f()` must retain the
+    // call instruction's PEP 657 anchor.  CPython underlines just `inner()`.
     let src = "def inner():\n    raise ValueError(\"boom\")\n\ndef outer():\n    return inner()\n\nouter()\n";
     let stderr = run_pyrust_stderr("tc.py", src);
     let expected = "\

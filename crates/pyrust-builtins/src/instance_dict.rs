@@ -29,51 +29,37 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use pyrust_core::{
     BuiltinState, BuiltinTypeOps, PyDict, PyError, PyInstance, PyKey, Result, Value, ValueKind,
+    builtin_ops_is,
 };
 
 pub const TYPE_NAME: &str = "instance_dict";
 
-/// Internal state: a live reference to the instance whose attrs are proxied.
-/// Also holds exception-class filtering state, computed once at construction.
+/// Internal state: a live reference to the instance whose visible attrs are
+/// proxied. C-style slot values live in `InstanceAttrs`' separate slot storage,
+/// so this proxy never needs class-name filtering.
 pub struct InstanceDictState {
     pub instance: Rc<RefCell<PyInstance>>,
-    /// When `true`, attrs that are exception C-level slots are hidden from
-    /// public iteration/repr (matching CPython's `__dict__` on BaseException).
-    pub is_exception: bool,
-    /// When `true`, the class (or an ancestor) declares `__slots__`, so the
-    /// `__dict__` proxy must hide slot-member keys (issue #2076).  Cached once
-    /// so the common no-slots instance pays no per-key MRO walk.
-    has_slots: bool,
-    /// Cached key snapshot for iteration (lazily materialised on first
-    /// `iter_next` call, reset by mutating methods).  Uses interior
-    /// mutability so `iter_next` can advance the cursor through `&self`.
-    iter_keys: RefCell<Option<Vec<String>>>,
-    iter_pos: RefCell<usize>,
 }
 
 impl InstanceDictState {
-    /// Returns `true` when `name` is a C-level exception slot that must be
-    /// hidden from `__dict__` for this instance.
-    fn is_hidden(&self, name: &str) -> bool {
-        // Issue #2076: a `__slots__` member is stored in the instance's attrs
-        // map but is slot storage, not a `__dict__` entry, so it is hidden from
-        // the `__dict__` proxy (relevant only for `__slots__ = (..., '__dict__')`,
-        // where both a dict and member slots coexist).  Gated on `has_slots` so
-        // the common no-slots instance skips the MRO walk.
-        if self.has_slots {
-            let class = Rc::clone(&self.instance.borrow().class);
-            if is_slot_member(name, &class) {
-                return true;
-            }
-        }
-        if !self.is_exception {
-            return false;
-        }
-        if is_exc_hidden_slot(name) {
-            return true;
-        }
-        let class = Rc::clone(&self.instance.borrow().class);
-        is_exc_class_slot(name, &class)
+    fn visible_len(&self) -> usize {
+        self.instance.borrow().attrs.inline_len()
+    }
+
+    fn visible_key_at(&self, visible_index: usize) -> Option<Value> {
+        let inst = self.instance.borrow();
+        inst.attrs
+            .get_index(visible_index)
+            .map(|(key, _)| Value::string(key.clone()))
+    }
+
+    fn visible_keys(&self) -> Vec<Value> {
+        self.instance
+            .borrow()
+            .attrs
+            .keys()
+            .map(|key| Value::string(key.clone()))
+            .collect()
     }
 }
 
@@ -86,13 +72,16 @@ impl BuiltinTypeOps for InstanceDictOps {
         TYPE_NAME
     }
 
+    fn canonical_class_tag(&self) -> Option<pyrust_core::CanonicalClassTag> {
+        Some(pyrust_core::CanonicalClassTag::Dict)
+    }
+
     fn repr(&self, state: &BuiltinState) -> String {
         let s = borrow_state(state).expect("instance_dict state");
         let inst = s.instance.borrow();
         let pairs: Vec<String> = inst
             .attrs
             .iter()
-            .filter(|(k, _)| !s.is_hidden(k))
             .map(|(k, v)| format!("{}: {}", Value::string(k.clone()).repr_raw(), v.repr_raw()))
             .collect();
         format!("{{{}}}", pairs.join(", "))
@@ -103,8 +92,7 @@ impl BuiltinTypeOps for InstanceDictOps {
             Some(s) => s,
             None => return false,
         };
-        let inst = s.instance.borrow();
-        inst.attrs.keys().any(|k| !s.is_hidden(k))
+        s.visible_len() != 0
     }
 
     fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
@@ -113,12 +101,8 @@ impl BuiltinTypeOps for InstanceDictOps {
             None => return false,
         };
         let inst = s.instance.borrow();
-        let lhs_pairs: Vec<(&str, &Value)> = inst
-            .attrs
-            .iter()
-            .filter(|(k, _)| !s.is_hidden(k))
-            .map(|(k, v)| (k.as_ref(), v))
-            .collect();
+        let lhs_pairs: Vec<(&str, &Value)> =
+            inst.attrs.iter().map(|(k, v)| (k.as_ref(), v)).collect();
         match other.kind() {
             ValueKind::Dict(rhs) => {
                 if lhs_pairs.len() != rhs.len() {
@@ -139,7 +123,7 @@ impl BuiltinTypeOps for InstanceDictOps {
             ValueKind::BuiltinObject {
                 ops,
                 state: rhs_state,
-            } if ops.type_name() == TYPE_NAME => {
+            } if builtin_ops_is::<InstanceDictOps>(ops) => {
                 let rhs_s = match borrow_state(rhs_state) {
                     Some(s) => s,
                     None => return false,
@@ -151,14 +135,13 @@ impl BuiltinTypeOps for InstanceDictOps {
                 let rhs_pairs: Vec<(&str, &Value)> = rhs_inst
                     .attrs
                     .iter()
-                    .filter(|(k, _)| !rhs_s.is_hidden(k))
                     .map(|(k, v)| (k.as_ref(), v))
                     .collect();
                 if lhs_pairs.len() != rhs_pairs.len() {
                     return false;
                 }
                 for (k, v) in &lhs_pairs {
-                    match rhs_inst.attrs.get(k) {
+                    match rhs_inst.attrs.inline_get(k) {
                         Some(other_v) => {
                             if *v != other_v {
                                 return false;
@@ -175,8 +158,7 @@ impl BuiltinTypeOps for InstanceDictOps {
 
     fn len(&self, state: &BuiltinState) -> Option<usize> {
         let s = borrow_state(state)?;
-        let inst = s.instance.borrow();
-        Some(inst.attrs.keys().filter(|k| !s.is_hidden(k)).count())
+        Some(s.visible_len())
     }
 
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
@@ -191,13 +173,9 @@ impl BuiltinTypeOps for InstanceDictOps {
                 return Err(PyError::key_error(key.clone()));
             }
         };
-        // Hidden exception C-level slots must not be accessible via subscript.
-        if s.is_hidden(key_str) {
-            return Err(PyError::key_error(Value::string(key_str)));
-        }
         let inst = s.instance.borrow();
         inst.attrs
-            .get(key_str)
+            .inline_get(key_str)
             .cloned()
             .ok_or_else(|| PyError::key_error(Value::string(key_str)))
     }
@@ -206,12 +184,7 @@ impl BuiltinTypeOps for InstanceDictOps {
         let s = borrow_state(state)
             .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
         let key_str = key_as_str(key)?.to_string();
-        s.instance.borrow_mut().attrs.insert(key_str, value);
-        // Invalidate the iteration snapshot so a mutation during iteration
-        // restarts cleanly (matches CPython's RuntimeError on dict-size-change
-        // in the middle of iteration — we simply reset rather than error).
-        s.iter_keys.borrow_mut().take();
-        *s.iter_pos.borrow_mut() = 0;
+        s.instance.borrow_mut().attrs.insert_inline(key_str, value);
         Ok(())
     }
 
@@ -226,12 +199,10 @@ impl BuiltinTypeOps for InstanceDictOps {
                 return Err(PyError::key_error(key.clone()));
             }
         };
-        let removed = s.instance.borrow_mut().attrs.shift_remove(&key_str);
+        let removed = s.instance.borrow_mut().attrs.shift_remove_inline(&key_str);
         if removed.is_none() {
             return Err(PyError::key_error(Value::string(key_str)));
         }
-        s.iter_keys.borrow_mut().take();
-        *s.iter_pos.borrow_mut() = 0;
         Ok(())
     }
 
@@ -242,45 +213,15 @@ impl BuiltinTypeOps for InstanceDictOps {
             ValueKind::Str(k) => k.to_string(),
             _ => return Ok(false),
         };
-        // Hidden exception C-level slots must not appear in __dict__.
-        if s.is_hidden(&key_str) {
-            return Ok(false);
-        }
-        Ok(s.instance.borrow().attrs.contains_key(&key_str))
+        Ok(s.instance.borrow().attrs.inline_contains_key(&key_str))
     }
 
     fn is_iterable(&self) -> bool {
         true
     }
 
-    /// Iteration over an instance dict yields its keys (strings), like `dict`.
-    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
-        let s = borrow_state(state)
-            .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
-        // Materialise key snapshot lazily on first call.
-        {
-            let mut iter_keys = s.iter_keys.borrow_mut();
-            if iter_keys.is_none() {
-                let inst = s.instance.borrow();
-                *iter_keys = Some(
-                    inst.attrs
-                        .keys()
-                        .filter(|k| !s.is_hidden(k))
-                        .map(|k| k.to_string())
-                        .collect(),
-                );
-            }
-        }
-        let iter_keys_ref = s.iter_keys.borrow();
-        let keys = iter_keys_ref.as_ref().unwrap();
-        let mut pos = s.iter_pos.borrow_mut();
-        if *pos < keys.len() {
-            let k = keys[*pos].clone();
-            *pos += 1;
-            Ok(Some(Value::string(k)))
-        } else {
-            Ok(None)
-        }
+    fn is_iterator(&self) -> bool {
+        false
     }
 
     fn has_method(&self, name: &str) -> bool {
@@ -301,6 +242,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                 | "__getitem__"
                 | "__setitem__"
                 | "__delitem__"
+                | "__iter__"
         )
     }
 
@@ -376,26 +318,23 @@ impl BuiltinTypeOps for InstanceDictOps {
                 // dict.popitem() removes and returns the last inserted (key,
                 // value) pair (LIFO), raising KeyError on an empty dict.  The
                 // attrs key iterator is not double-ended, so scan forward and
-                // keep the last visible key.  `is_hidden` borrows the instance
-                // (slotted/exception classes), so resolve the key under a
-                // shared borrow first, then take the mutable borrow to remove
-                // it — borrowing mutably across `is_hidden` would panic.
+                // keep the last key. Resolve it under a shared borrow, then
+                // take the mutable borrow to remove it.
                 let last_key = {
                     let inst = s.instance.borrow();
-                    inst.attrs
-                        .keys()
-                        .filter(|k| !s.is_hidden(k))
-                        .last()
-                        .map(|k| k.to_string())
+                    inst.attrs.keys().last().map(|k| k.to_string())
                 };
                 let Some(key) = last_key else {
                     return Err(PyError::key_error(Value::string(
                         "popitem(): dictionary is empty",
                     )));
                 };
-                let value = s.instance.borrow_mut().attrs.shift_remove(&key).unwrap();
-                s.iter_keys.borrow_mut().take();
-                *s.iter_pos.borrow_mut() = 0;
+                let value = s
+                    .instance
+                    .borrow_mut()
+                    .attrs
+                    .shift_remove_inline(&key)
+                    .unwrap();
                 Ok(Value::tuple(vec![Value::string(key), value]))
             }
             "get" => {
@@ -411,14 +350,10 @@ impl BuiltinTypeOps for InstanceDictOps {
                         return Ok(args.get(1).cloned().unwrap_or(Value::none()));
                     }
                 };
-                // Hidden exception C-level slots are not visible via get().
-                if s.is_hidden(&key_str) {
-                    return Ok(args.get(1).cloned().unwrap_or(Value::none()));
-                }
                 let inst = s.instance.borrow();
                 Ok(inst
                     .attrs
-                    .get(&key_str)
+                    .inline_get(&key_str)
                     .cloned()
                     .unwrap_or_else(|| args.get(1).cloned().unwrap_or(Value::none())))
             }
@@ -433,7 +368,6 @@ impl BuiltinTypeOps for InstanceDictOps {
                 let keys: Vec<Value> = inst
                     .attrs
                     .keys()
-                    .filter(|k| !s.is_hidden(k))
                     .map(|k| Value::string(k.clone()))
                     .collect();
                 Ok(Value::list(keys))
@@ -446,12 +380,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                     ));
                 }
                 let inst = s.instance.borrow();
-                let vals: Vec<Value> = inst
-                    .attrs
-                    .iter()
-                    .filter(|(k, _)| !s.is_hidden(k))
-                    .map(|(_, v)| v.clone())
-                    .collect();
+                let vals: Vec<Value> = inst.attrs.iter().map(|(_, v)| v.clone()).collect();
                 Ok(Value::list(vals))
             }
             "items" => {
@@ -465,7 +394,6 @@ impl BuiltinTypeOps for InstanceDictOps {
                 let items: Vec<Value> = inst
                     .attrs
                     .iter()
-                    .filter(|(k, _)| !s.is_hidden(k))
                     .map(|(k, v)| Value::tuple(vec![Value::string(k.clone()), v.clone()]))
                     .collect();
                 Ok(Value::list(items))
@@ -486,9 +414,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                         return Err(PyError::key_error(args[0].clone()));
                     }
                 };
-                let removed = s.instance.borrow_mut().attrs.shift_remove(&key_str);
-                s.iter_keys.borrow_mut().take();
-                *s.iter_pos.borrow_mut() = 0;
+                let removed = s.instance.borrow_mut().attrs.shift_remove_inline(&key_str);
                 match removed {
                     Some(v) => Ok(v),
                     None => match args.get(1) {
@@ -515,13 +441,10 @@ impl BuiltinTypeOps for InstanceDictOps {
                 };
                 let default_val = args.get(1).cloned().unwrap_or(Value::none());
                 let mut inst = s.instance.borrow_mut();
-                if let Some(existing) = inst.attrs.get(&key_str) {
+                if let Some(existing) = inst.attrs.inline_get(&key_str) {
                     Ok(existing.clone())
                 } else {
-                    inst.attrs.insert(key_str, default_val.clone());
-                    drop(inst);
-                    s.iter_keys.borrow_mut().take();
-                    *s.iter_pos.borrow_mut() = 0;
+                    inst.attrs.insert_inline(key_str, default_val.clone());
                     Ok(default_val)
                 }
             }
@@ -572,11 +495,8 @@ impl BuiltinTypeOps for InstanceDictOps {
                 if !pairs.is_empty() {
                     let mut inst = s.instance.borrow_mut();
                     for (k, v) in pairs {
-                        inst.attrs.insert(k, v);
+                        inst.attrs.insert_inline(k, v);
                     }
-                    drop(inst);
-                    s.iter_keys.borrow_mut().take();
-                    *s.iter_pos.borrow_mut() = 0;
                 }
                 Ok(Value::none())
             }
@@ -589,7 +509,7 @@ impl BuiltinTypeOps for InstanceDictOps {
                 }
                 let inst = s.instance.borrow();
                 let mut dict: PyDict = PyDict::default();
-                for (k, v) in inst.attrs.iter().filter(|(k, _)| !s.is_hidden(k)) {
+                for (k, v) in inst.attrs.iter() {
                     dict.insert(PyKey::str_from(k), v.clone());
                 }
                 Ok(Value::dict(dict))
@@ -601,33 +521,9 @@ impl BuiltinTypeOps for InstanceDictOps {
                         format!("clear() takes no arguments ({} given)", args.len()),
                     ));
                 }
-                // Only remove visible `__dict__` entries: hidden slot members
-                // (`__slots__ = (..., '__dict__')`) and exception C-level slots
-                // are stored in `attrs` but are not part of the `__dict__`
-                // proxy, so `dict.clear()` must leave them intact (CPython keeps
-                // the slot value alive after `o.__dict__.clear()`).  The common
-                // no-slots, non-exception instance has no hidden keys, so wipe
-                // the whole map in one shot.  Otherwise resolve the visible keys
-                // under a shared borrow first (`is_hidden` re-borrows the
-                // instance), then take the mutable borrow to remove only them.
-                if !s.has_slots && !s.is_exception {
-                    s.instance.borrow_mut().attrs.clear();
-                } else {
-                    let visible: Vec<String> = {
-                        let inst = s.instance.borrow();
-                        inst.attrs
-                            .keys()
-                            .filter(|k| !s.is_hidden(k))
-                            .map(|k| k.to_string())
-                            .collect()
-                    };
-                    let mut inst = s.instance.borrow_mut();
-                    for k in &visible {
-                        inst.attrs.shift_remove(k);
-                    }
-                }
-                s.iter_keys.borrow_mut().take();
-                *s.iter_pos.borrow_mut() = 0;
+                // Slots are physically separate, so clearing the visible
+                // backing is one linear drop with no hide/snapshot/restore pass.
+                s.instance.borrow_mut().attrs.clear_inline();
                 Ok(Value::none())
             }
             _ => Err(PyError::named(
@@ -644,10 +540,60 @@ pub fn as_instance_rc(value: &Value) -> Option<Rc<RefCell<PyInstance>>> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<InstanceDictOps>(ops) {
         return None;
     }
     borrow_state(state).map(|s| Rc::clone(&s.instance))
+}
+
+/// Return whether `value` is an `instance_dict` proxy owned by this module.
+#[inline]
+pub fn is_instance_dict(value: &Value) -> bool {
+    matches!(
+        value.kind(),
+        ValueKind::BuiltinObject { ops, .. } if builtin_ops_is::<InstanceDictOps>(ops)
+    )
+}
+
+/// Number of keys visible through an `instance_dict` proxy.
+///
+/// Iterator construction records this value and compares it with the live
+/// value before every step, matching a real dict iterator's permanent
+/// size-change error without putting cursor state on the reusable proxy.
+pub fn iter_visible_len(value: &Value) -> Option<usize> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !builtin_ops_is::<InstanceDictOps>(ops) {
+        return None;
+    }
+    borrow_state(state).map(|state| state.visible_len())
+}
+
+/// Read the key at a live visible insertion-order position.
+///
+/// This is one direct `Vec::get`: slot mutations use a separate backing and
+/// therefore never move the logical dict cursor.
+pub fn iter_visible_key_at(value: &Value, visible_index: usize) -> Option<Value> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !builtin_ops_is::<InstanceDictOps>(ops) {
+        return None;
+    }
+    borrow_state(state)?.visible_key_at(visible_index)
+}
+
+/// Snapshot the currently visible keys for consumers that explicitly
+/// materialise an iterable (`list(proxy)`, unpacking, and similar operations).
+pub fn iter_visible_keys(value: &Value) -> Option<Vec<Value>> {
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !builtin_ops_is::<InstanceDictOps>(ops) {
+        return None;
+    }
+    borrow_state(state).map(|state| state.visible_keys())
 }
 
 /// Extract the visible (non-hidden) attrs of an `instance_dict` as a vec of
@@ -657,7 +603,7 @@ pub fn as_instance_dict_items(value: &Value) -> Option<Vec<(PyKey, Value)>> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
     };
-    if ops.type_name() != TYPE_NAME {
+    if !builtin_ops_is::<InstanceDictOps>(ops) {
         return None;
     }
     let s = borrow_state(state)?;
@@ -665,27 +611,20 @@ pub fn as_instance_dict_items(value: &Value) -> Option<Vec<(PyKey, Value)>> {
     Some(
         inst.attrs
             .iter()
-            .filter(|(k, _)| !s.is_hidden(k))
             .map(|(k, v)| (PyKey::str_from(k), v.clone()))
             .collect(),
     )
 }
 
-/// Return the public `__dict__` state of an exception instance: the attrs that
-/// are *not* C-level exception slots (`args`, `__traceback__`, `__cause__`,
-/// `__context__`, `__suppress_context__`, plus the class-specific structured
-/// slots like `StopIteration.value` / `SyntaxError.msg` / `OSError.errno`).
+/// Return an exception instance's public `__dict__` state.
 ///
-/// This is exactly the third element of CPython's `BaseException.__reduce__`
-/// (the instance `__dict__`), and the state that `copy`/`deepcopy` carry over.
-/// Slots such as `__traceback__` are deliberately excluded — they are reset on
-/// the copy, matching CPython 3.12.  Keys keep their insertion order.
+/// Native exception fields live in `InstanceAttrs`' separate slot storage, so
+/// this returns only ordinary user attributes. It is the state carried by
+/// `BaseException.__reduce__` and `copy`/`deepcopy`; keys keep insertion order.
 pub fn exception_dict_state(instance: &Rc<RefCell<PyInstance>>) -> Vec<(String, Value)> {
     let inst = instance.borrow();
-    let class = Rc::clone(&inst.class);
     inst.attrs
         .iter()
-        .filter(|(k, _)| !is_exc_hidden_slot(k) && !is_exc_class_slot(k, &class))
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect()
 }
@@ -696,32 +635,9 @@ pub fn exception_dict_state(instance: &Rc<RefCell<PyInstance>>) -> Vec<(String, 
 /// distinct.  CPython identity (`vars(obj) is vars(obj)`) is implemented
 /// separately in `values_are_identical` by comparing the `instance` `Rc`
 /// pointers of two `instance_dict` proxies.
-pub fn instance_dict(instance: Rc<RefCell<PyInstance>>, is_exception: bool) -> Value {
-    let has_slots = class_chain_has_slots(&instance.borrow().class);
-    let state: Box<dyn Any> = Box::new(InstanceDictState {
-        instance,
-        is_exception,
-        has_slots,
-        iter_keys: RefCell::new(None),
-        iter_pos: RefCell::new(0),
-    });
+pub fn instance_dict(instance: Rc<RefCell<PyInstance>>) -> Value {
+    let state: Box<dyn Any> = Box::new(InstanceDictState { instance });
     Value::builtin_object(INSTANCE_DICT_OPS, state)
-}
-
-/// Walk the class base chain and return `true` if any class declares
-/// `__slots__` (issue #2076).  Cached on the proxy so per-key `is_hidden`
-/// checks only run the slot-member walk for slotted classes.
-fn class_chain_has_slots(class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool {
-    let (has, base, extra_bases) = {
-        let borrowed = class.borrow();
-        (
-            borrowed.slots.is_some(),
-            borrowed.base.clone(),
-            borrowed.extra_bases.clone(),
-        )
-    };
-    has || base.is_some_and(|b| class_chain_has_slots(&b))
-        || extra_bases.iter().any(class_chain_has_slots)
 }
 
 /// Return `true` if both `BuiltinState` values are `instance_dict` proxies for
@@ -739,6 +655,31 @@ pub fn same_instance(a: &BuiltinState, b: &BuiltinState) -> bool {
         None => return false,
     };
     Rc::ptr_eq(&a_s.instance, &b_s.instance)
+}
+
+/// Return `true` when both values are `instance_dict` proxies for the same
+/// underlying Python instance.
+///
+/// Keeping the concrete-type checks beside the state downcast prevents the
+/// interpreter's generic identity layer from decoding this module's Python
+/// presentation name.
+pub fn same_proxy_target(a: &Value, b: &Value) -> bool {
+    let (
+        ValueKind::BuiltinObject {
+            ops: a_ops,
+            state: a_state,
+        },
+        ValueKind::BuiltinObject {
+            ops: b_ops,
+            state: b_state,
+        },
+    ) = (a.kind(), b.kind())
+    else {
+        return false;
+    };
+    builtin_ops_is::<InstanceDictOps>(a_ops)
+        && builtin_ops_is::<InstanceDictOps>(b_ops)
+        && same_instance(a_state, b_state)
 }
 
 fn borrow_state(state: &BuiltinState) -> Option<std::cell::Ref<'_, InstanceDictState>> {
@@ -782,103 +723,4 @@ fn key_as_str(key: &Value) -> Result<&str> {
             ),
         )),
     }
-}
-
-/// Returns `true` when `name` is a C-level slot on the given exception class
-/// that CPython 3.12 hides from `__dict__`.
-///
-/// Mirrors the full logic of `is_exc_c_slot` in the interpreter's `helpers.rs`
-/// but operates solely on `PyInstance` / `PyClass` types from `pyrust-core`
-/// (no interpreter dependency).
-fn is_exc_hidden_slot(name: &str) -> bool {
-    // Universal BaseException C-level slots — always hidden for any exception.
-    matches!(
-        name,
-        "args" | "__cause__" | "__context__" | "__suppress_context__" | "__traceback__"
-    )
-}
-
-/// Returns `true` when `name` is a class-specific C-level slot that must be
-/// hidden for instances of `class_name` or its subclasses.
-fn is_exc_class_slot(name: &str, class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool {
-    // StopIteration.value
-    if name == "value" && class_chain_has(class, "StopIteration") {
-        return true;
-    }
-    // SystemExit.code
-    if name == "code" && class_chain_has(class, "SystemExit") {
-        return true;
-    }
-    // SyntaxError structured attrs
-    if matches!(
-        name,
-        "msg"
-            | "filename"
-            | "lineno"
-            | "offset"
-            | "text"
-            | "end_lineno"
-            | "end_offset"
-            | "print_file_and_line"
-    ) && class_chain_has(class, "SyntaxError")
-    {
-        return true;
-    }
-    // OSError attrs
-    if matches!(name, "errno" | "strerror" | "filename" | "filename2")
-        && class_chain_has(class, "OSError")
-    {
-        return true;
-    }
-    // ImportError: name/path
-    if matches!(name, "name" | "path") && class_chain_has(class, "ImportError") {
-        return true;
-    }
-    false
-}
-
-/// Walk the class base chain and return `true` if `name` resolves to a
-/// `__slots__` member_descriptor (issue #2076).  Such names are stored in the
-/// instance's `attrs` map but represent slot storage, not the per-instance
-/// `__dict__`, so they must be hidden from the `__dict__` proxy when the class
-/// also has a `__dict__` slot (`__slots__ = ('q', '__dict__')`).
-fn is_slot_member(name: &str, class: &Rc<RefCell<pyrust_core::PyClass>>) -> bool {
-    let (attr, base, extra_bases) = {
-        let borrowed = class.borrow();
-        (
-            borrowed.attrs.get(name).cloned(),
-            borrowed.base.clone(),
-            borrowed.extra_bases.clone(),
-        )
-    };
-    if let Some(v) = attr {
-        return crate::member_descriptor::as_member_descriptor(&v).is_some();
-    }
-    if let Some(b) = base
-        && is_slot_member(name, &b)
-    {
-        return true;
-    }
-    extra_bases.iter().any(|b| is_slot_member(name, b))
-}
-
-/// Walk the class base chain and return `true` if any class has `target_name`.
-fn class_chain_has(class: &Rc<RefCell<pyrust_core::PyClass>>, target_name: &str) -> bool {
-    let (name, base, extra_bases) = {
-        let borrowed = class.borrow();
-        (
-            borrowed.name.clone(),
-            borrowed.base.clone(),
-            borrowed.extra_bases.clone(),
-        )
-    };
-    if name == target_name {
-        return true;
-    }
-    if let Some(b) = base
-        && class_chain_has(&b, target_name)
-    {
-        return true;
-    }
-    extra_bases.iter().any(|b| class_chain_has(b, target_name))
 }

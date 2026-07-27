@@ -211,6 +211,26 @@ class MethodOver(bytearray):
         return "UP_CALLED"
 
 
+# A builtin descriptor copied into the subclass's own dict is still an
+# explicit override.  Its qualified builtin name is identical to the inherited
+# descriptor, so the runtime must decide from MRO ownership/provenance rather
+# than parsing `BuiltinFunction("object.__eq__")`.
+class ObjectEqList(list):
+    __eq__ = object.__eq__
+
+
+class ObjectEqDict(dict):
+    __eq__ = object.__eq__
+
+
+class BytesIterList(list):
+    __iter__ = bytes.__iter__
+
+
+class BytesIterBytearray(bytearray):
+    __iter__ = bytes.__iter__
+
+
 show("ov-iter", lambda: list(IterOver([1, 2, 3])))
 show("ov-repr", lambda: repr(ReprOver(b"ab")))
 show("ov-str", lambda: str(StrOver(b"ab")))
@@ -221,3 +241,7 @@ show("ov-getitem", lambda: GetItemOver([1, 2])[0])
 show("ov-contains", lambda: 99 in ContainsOver([1, 2]))
 show("ov-len", lambda: len(LenOver([1, 2])))
 show("ov-method", lambda: MethodOver(b"ab").upper())
+show("ov-object-eq-list", lambda: ObjectEqList([1]) == ObjectEqList([1]))
+show("ov-object-eq-dict", lambda: ObjectEqDict(a=1) == ObjectEqDict(a=1))
+show("ov-bytes-iter-list", lambda: list(BytesIterList([1, 2])))
+show("ov-bytes-iter-bytearray", lambda: list(BytesIterBytearray(b"ab")))

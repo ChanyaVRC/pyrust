@@ -56,6 +56,38 @@ use syn::{
     Block, Expr, Ident, ItemFn, LitStr, Meta, Token, parse_macro_input, punctuated::Punctuated,
 };
 
+/// Emit the immutable class-identity tag for a primitive/object descriptor
+/// owner.  The owner is the segment immediately before the callable name;
+/// this also handles legacy suffixes such as
+/// `builtins.TypeAliasType.__repr__` without treating the registration-module
+/// prefix as the owner.
+fn canonical_descriptor_owner(qualname: &str, span: Span) -> Option<proc_macro2::TokenStream> {
+    let owner_qualname = qualname.rsplit_once('.')?.0;
+    let owner = owner_qualname.rsplit('.').next()?;
+    let variant = match owner {
+        "object" => "Object",
+        "bool" => "Bool",
+        "bytearray" => "Bytearray",
+        "bytes" => "Bytes",
+        "complex" => "Complex",
+        "dict" => "Dict",
+        "ellipsis" => "Ellipsis",
+        "float" => "Float",
+        "frozenset" => "Frozenset",
+        "int" => "Int",
+        "list" => "List",
+        "mappingproxy" => "MappingProxy",
+        "NoneType" => "NoneType",
+        "NotImplementedType" => "NotImplementedType",
+        "set" => "Set",
+        "str" => "Str",
+        "tuple" => "Tuple",
+        _ => return None,
+    };
+    let variant = Ident::new(variant, span);
+    Some(quote! { pyrust_core::CanonicalClassTag::#variant })
+}
+
 // ─── `#[pyfunction]` (one-off attribute form) ────────────────────────────────
 
 /// `#[pyfunction(name = "module.fn")]` — emits a sibling registration
@@ -68,7 +100,6 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
 
     let mut name: Option<LitStr> = None;
-    let mut is_pure = false;
     for meta in metas {
         match &meta {
             Meta::NameValue(nv)
@@ -79,12 +110,6 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }) = &nv.value =>
             {
                 name = Some(s.clone());
-            }
-            // Marker form: `#[pyfunction(name = "…", pure)]` opts the
-            // one-off arm into optimizer purity, mirroring `#[pure]` on
-            // `pyrust_module!` fns.  See `BuiltinReg::is_pure` and #433.
-            Meta::Path(p) if p.is_ident("pure") => {
-                is_pure = true;
             }
             _ => {}
         }
@@ -101,6 +126,12 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
             .into();
         }
     };
+    let py_name_value = py_name.value();
+    let (py_module, py_short_name) = py_name_value
+        .rsplit_once('.')
+        .unwrap_or(("builtins", py_name_value.as_str()));
+    let py_module = LitStr::new(py_module, py_name.span());
+    let py_short_name = LitStr::new(py_short_name, py_name.span());
 
     let fn_ident = &func.sig.ident;
     // Strip a leading `r#` from raw idents (`r#type` → `type`) before
@@ -118,7 +149,10 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
             crate::builtin_registry::BuiltinReg {
                 name: #py_name,
                 dispatch: #fn_ident,
-                is_pure: #is_pure,
+                metadata: crate::builtin_registry::BuiltinCallableMetadata::module_function(
+                    #py_module,
+                    #py_short_name,
+                ),
                 fast: None,
                 min_arity: 0,
                 max_arity: 0,
@@ -152,13 +186,6 @@ struct ModuleFn {
     /// `#[py_name = "..."]`.  Used when the desired Python name is a Rust
     /// strict keyword that can't be a raw identifier (`super`, etc.).
     py_name_override: Option<LitStr>,
-    /// `true` when the declaration carries a `#[pure]` outer attribute.
-    /// The optimizer reads this off the registry to decide whether a
-    /// call may be DCE'd / constant-folded.  Defaults to `false`
-    /// (conservative — unknown purity means "treat as side-effectful").
-    /// See `crates/pyrust/src/builtin_registry.rs::is_pure` and
-    /// issue #433.
-    is_pure: bool,
     /// The argument-list dialect this fn uses.  See [`ModuleFnArgs`].
     args: ModuleFnArgs,
     /// Arity-error wording style, set via `#[arity_style(...)]`.  Defaults
@@ -337,13 +364,9 @@ impl ModuleInput {
     /// is the outer-attr list already harvested by the caller (so `#[py_name]`
     /// dispatch happens once at the boundary between fn and class blocks).
     fn parse_fn(input: ParseStream, raw_attrs: Vec<syn::Attribute>) -> syn::Result<ModuleFn> {
-        // Pull `#[py_name = "..."]` and `#[pure]` out of the attr list so
-        // they're not emitted on the generated Rust fn (which wouldn't
-        // recognise either).  `#[pure]` is a marker attribute consumed by
-        // the macro to set `BuiltinReg::is_pure = true`; absence means
-        // `false` (conservative default — see issue #433).
+        // Pull `#[py_name = "..."]` out of the attr list so it is not emitted
+        // on the generated Rust fn (which would not recognise it).
         let mut py_name_override: Option<LitStr> = None;
-        let mut is_pure = false;
         let mut arity_style = ArityStyle::Standard;
         let mut arity_style_set = false;
         let mut bare_name = false;
@@ -420,23 +443,6 @@ impl ModuleInput {
                         "`#[py_name = \"...\"]` value must be a string literal",
                     ));
                 }
-            } else if attr.path().is_ident("pure") {
-                // Marker attribute — must be path-form (`#[pure]`), no
-                // arguments.  Reject `#[pure = …]` / `#[pure(…)]` so a
-                // typo doesn't silently fall through as "not pure".
-                if !matches!(attr.meta, Meta::Path(_)) {
-                    return Err(syn::Error::new_spanned(
-                        &attr,
-                        "`#[pure]` is a marker attribute and takes no arguments",
-                    ));
-                }
-                if is_pure {
-                    return Err(syn::Error::new_spanned(
-                        &attr,
-                        "`#[pure]` may appear at most once per fn",
-                    ));
-                }
-                is_pure = true;
             } else {
                 attrs.push(attr);
             }
@@ -513,7 +519,6 @@ impl ModuleInput {
             attrs,
             short_name,
             py_name_override,
-            is_pure,
             args,
             arity_style,
             bare_name,
@@ -888,12 +893,36 @@ fn emit_fn_artefacts(
         #fast_fn_item
     };
 
-    let is_pure_lit = f.is_pure;
+    let metadata = if name_suffix.contains('.') {
+        if let Some(owner) = canonical_descriptor_owner(name_suffix, suffix_lit.span()) {
+            quote! {
+                crate::builtin_registry::BuiltinCallableMetadata::canonical_method_descriptor(
+                    MODULE_NAME,
+                    #suffix_lit,
+                    #owner,
+                )
+            }
+        } else {
+            quote! {
+                crate::builtin_registry::BuiltinCallableMetadata::method_descriptor(
+                    MODULE_NAME,
+                    #suffix_lit,
+                )
+            }
+        }
+    } else {
+        quote! {
+            crate::builtin_registry::BuiltinCallableMetadata::module_function(
+                MODULE_NAME,
+                #suffix_lit,
+            )
+        }
+    };
     let reg_entry = quote! {
         crate::builtin_registry::BuiltinReg {
             name: *#name_static_ident,
             dispatch: #rust_fn_ident,
-            is_pure: #is_pure_lit,
+            metadata: #metadata,
             #fast_reg_fields
         }
     };
@@ -913,7 +942,6 @@ fn synthesized_iter_self(span: Span) -> ModuleFn {
         attrs: Vec::new(),
         short_name: Ident::new("__iter__", span),
         py_name_override: None,
-        is_pure: false,
         args: ModuleFnArgs::Legacy { args_ident },
         arity_style: ArityStyle::Standard,
         bare_name: false,
@@ -1394,8 +1422,7 @@ fn emit_overload_set_artefacts(
     // Arity-error wording for the overload set (#2331).  The whole set
     // shares one registry entry and one dispatcher, so every overload
     // must agree on `#[arity_style]` / `#[bare_name]`; validation below
-    // (mirroring the `#[pure]` agreement check) enforces that, so it is
-    // safe to read both off the head overload here.
+    // enforces that, so it is safe to read both off the head overload here.
     let head_arity_style = head.arity_style;
     let head_bare_name = head.bare_name;
     let bare_lit = LitStr::new(py_short, head_span);
@@ -1476,28 +1503,11 @@ fn emit_overload_set_artefacts(
     items.extend(body_fns);
     items.push(dispatcher);
 
-    // Overload sets share one registry entry, so all overloads of a
-    // single Python-level name must agree on purity — otherwise a
-    // single Python call site `foo(x)` would be optimizer-pure when `x:
-    // int` and impure when `x: str`, which is impossible to express
-    // before runtime dispatch.  Reject mismatches at macro-expand time
-    // with the offending overload's span (per issue #433's design).
-    let head_is_pure = group[0].is_pure;
     for (idx, f) in group.iter().enumerate().skip(1) {
-        if f.is_pure != head_is_pure {
-            return Err(syn::Error::new(
-                f.short_name.span(),
-                format!(
-                    "overload #{idx} disagrees on `#[pure]` with the first \
-                     overload — all overloads of one Python-level name share \
-                     a single registry entry and must agree on purity",
-                ),
-            ));
-        }
         // The dispatcher is shared, so its arity/name wording is fixed by
         // the head overload; a divergent `#[arity_style]` / `#[bare_name]`
         // on a later overload would be silently ignored (#2331).  Reject
-        // it at macro-expand time, mirroring the `#[pure]` agreement check.
+        // it at macro-expand time.
         if f.arity_style != head_arity_style {
             return Err(syn::Error::new(
                 f.short_name.span(),
@@ -1565,11 +1575,36 @@ fn emit_overload_set_artefacts(
         };
     items.push(fast_fn_item);
 
+    let metadata = if py_short.contains('.') {
+        if let Some(owner) = canonical_descriptor_owner(py_short, suffix_lit.span()) {
+            quote! {
+                crate::builtin_registry::BuiltinCallableMetadata::canonical_method_descriptor(
+                    MODULE_NAME,
+                    #suffix_lit,
+                    #owner,
+                )
+            }
+        } else {
+            quote! {
+                crate::builtin_registry::BuiltinCallableMetadata::method_descriptor(
+                    MODULE_NAME,
+                    #suffix_lit,
+                )
+            }
+        }
+    } else {
+        quote! {
+            crate::builtin_registry::BuiltinCallableMetadata::module_function(
+                MODULE_NAME,
+                #suffix_lit,
+            )
+        }
+    };
     let reg_entry = quote! {
         crate::builtin_registry::BuiltinReg {
             name: *#name_static_ident,
             dispatch: #dispatcher_ident,
-            is_pure: #head_is_pure,
+            metadata: #metadata,
             #fast_reg_fields
         }
     };
@@ -1867,7 +1902,11 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         attr_entries.push(quote! {
             attrs.insert(
                 #short_lit.to_string(),
-                crate::value::Value::builtin_function(*#name_static_ident),
+                if FN_PREFIX.is_empty() {
+                    crate::value::Value::builtin_function(*#name_static_ident)
+                } else {
+                    crate::value::Value::fresh_builtin_function(*#name_static_ident)
+                },
             );
         });
     }
@@ -1914,7 +1953,11 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             method_attr_inserts.push(quote! {
                 attrs.insert(
                     #short_lit.to_string(),
-                    crate::value::Value::builtin_function(*#name_static_ident),
+                    if FN_PREFIX.is_empty() {
+                        crate::value::Value::builtin_function(*#name_static_ident)
+                    } else {
+                        crate::value::Value::fresh_builtin_function(*#name_static_ident)
+                    },
                 );
             });
         }
@@ -2001,10 +2044,9 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             // `emit_fn_artefacts` for the alloc-once leak pattern that's
             // shared with module-level fns.
             #(#class_items)*
-            crate::value::Value::py_module(Rc::new(RefCell::new(crate::value::PyModule {
-                name: MODULE_NAME.to_string(),
-                attrs,
-            })))
+            crate::value::Value::py_module(Rc::new(RefCell::new(
+                crate::value::PyModule::new(MODULE_NAME.to_string(), attrs)
+            )))
         }
     };
 

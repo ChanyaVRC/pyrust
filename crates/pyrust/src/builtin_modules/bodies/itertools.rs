@@ -15,19 +15,23 @@
 // CPython's algorithms walk the pool by index repeatedly — that's
 // equivalent to one materialisation, not "drain the source per yield".
 //
-// `chain` is the only function that's still lazy *across sources* but
-// eager *within* each source (it pre-dates the class-based pattern;
-// converting it is tracked separately).
+// `chain` is lazy both across sources and within each source; it does not call
+// `iter()` for a later source until the previous source is exhausted.
 //
 // Reference: <https://docs.python.org/3/library/itertools.html>
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
-use crate::value::{InstanceAttrs, PyInstance, Value, ValueKind};
+use crate::value::{InstanceAttrs, PyClass, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 use std::cell::RefCell;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+
+#[path = "itertools/combinatoric_cursors.rs"]
+mod combinatoric_cursors;
+#[path = "itertools/native_iterators.rs"]
+pub(crate) mod native_iterators;
 
 pyrust_module! {
     /// CPython: itertools.chain(*iterables) — concatenate iterables.
@@ -42,21 +46,11 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
             reject_keyword_args_expanded("chain", user)?;
-            // Turn each source into an *iterator* up-front via `make_iterator`
-            // (the same primitive `chain.from_iterable` uses).  This invokes a
-            // user `__iter__` at construction time — preserving the #446
-            // timing requirement that user `__iter__` dispatch / generator
-            // resumption happen here rather than mid-walk — WITHOUT draining
-            // the source.  Draining (the old `materialize_user_iter`) hung
-            // forever on infinite iterators such as `itertools.repeat` /
-            // `count` / `cycle` (e.g. `chain([3], repeat(3))`, which the
-            // `decimal` formatter relies on).  `__next__` calls `make_iter`
-            // (i.e. `iter()`) on each stored source again; `iter()` of an
-            // already-iterator returns it unchanged, so iteration stays lazy.
-            let sources: Vec<Value> = user
-                .iter()
-                .map(|a| super::builtins::make_iterator(_interp, &a.value))
-                .collect::<Result<_>>()?;
+            // Keep the original sources untouched.  `__next__` calls `iter()`
+            // only when it reaches that source, matching CPython's observable
+            // timing: constructing a chain must not run `__iter__` on sources
+            // that may never be consumed.
+            let sources: Vec<Value> = user.iter().map(|a| a.value.clone()).collect();
             let mut a = inst.borrow_mut();
             a.attrs.insert("_sources", Value::list(sources));
             a.attrs.insert("_src_idx", Value::int(0));
@@ -126,28 +120,19 @@ pyrust_module! {
         /// `type(chain.from_iterable(...))` reports `<class 'itertools.chain'>`.
         /// <https://docs.python.org/3/library/itertools.html#itertools.chain.from_iterable>
         fn from_iterable(args) -> Result<Value> {
-            // CPython's `from_iterable` is a classmethod callable on both the
-            // class (`chain.from_iterable(it)`) and an instance
-            // (`chain([]).from_iterable(it)`), with cls/self silently dropped.
-            //
-            // Class access returns this BuiltinFunction *unbound* — `args` is
-            // exactly the user-supplied positionals.  Instance access binds the
-            // chain instance as a receiver, prepending it as `args[0]`.  We strip
-            // a leading receiver only when `args[0]` is itself a `chain` instance
-            // (the only thing the dispatcher ever prepends here).  Counting alone
-            // would misclassify a 2-arg *unbound* error call whose first arg
-            // happens to be e.g. a user iterator — `chain.from_iterable(it, it)`
-            // — silently dropping `it` instead of raising the arity TypeError;
-            // and it would inflate the bound form's error count (the prepended
-            // receiver would leak into "(N given)").  Identity-checking the
-            // receiver keeps the valid `chain.from_iterable(chain([[1]]))`
-            // (unbound, len == 1) correct while raising for the error spellings.
-            let strip_receiver = args.len() >= 2
-                && matches!(args[0].value.kind(), ValueKind::PyInstance(inst)
-                    if crate::interpreter::itertools_chain_class().is_some_and(|c| {
-                        crate::interpreter::class_is_subclass_of(&inst.borrow().class, &c)
-                    }));
-            let user: &[ExpandedCallArg] = if strip_receiver { &args[1..] } else { args };
+            // Module finalization installs this registry function as a native
+            // classmethod descriptor. Its first argument is therefore the
+            // concrete owner class: the current module generation, an older
+            // retained generation, or a subclass. Keep that exact identity on
+            // the native iterator state. The fallback covers direct internal
+            // registry calls before a module has been finalized.
+            let (class, user): (_, &[ExpandedCallArg]) = match args.split_first() {
+                Some((receiver, user)) => match receiver.value.kind() {
+                    ValueKind::PyClass(class) => (Some(Rc::clone(class)), user),
+                    _ => (crate::interpreter::itertools_chain_class(), args),
+                },
+                None => (crate::interpreter::itertools_chain_class(), args),
+            };
             reject_keyword_args_expanded("chain.from_iterable", user)?;
             if user.len() != 1 {
                 return Err(PyError::named(
@@ -161,19 +146,12 @@ pyrust_module! {
             // `iter(arg)` over the outer iterable.  This does not consume any
             // element yet (for a generator source it just returns the generator);
             // the first element is pulled on the first `__next__`, matching
-            // CPython's lazy timing.  The returned `ChainFromIterableIter` is a
-            // generator-state iterator (like `map` / `filter`), so per-element
-            // iteration goes through the dedicated `step_chain_from_iterable`
-            // dispatch in `ForIter` / `call_next` — no PyInstance `__next__` VM
+            // CPython's lazy timing. The module-owned cursor is exposed to the
+            // generic iterator machinery only through its typed provider
+            // advance interface, so there is no PyInstance `__next__` VM
             // re-entry per element (#2362).
-            let outer = crate::builtin_modules::builtins::make_iterator(_interp, &user[0].value)?;
-            Ok(Value::generator(Box::new(
-                crate::interpreter::ChainFromIterableIter {
-                    outer,
-                    inner: None,
-                    done: false,
-                },
-            )))
+            let outer = crate::interpreter::make_iterator(_interp, &user[0].value)?;
+            Ok(native_iterators::chain_from_outer(class, outer))
         }
     }
 
@@ -227,16 +205,15 @@ pyrust_module! {
                 ));
             }
             let iter = make_iter(_interp, &user[0].value)?;
-            for _ in 0..start {
-                match _interp.call_next(&iter, None) {
-                    Ok(_) => {}
-                    Err(e) if is_stop_iteration(&e) => break,
-                    Err(e) => return Err(e),
-                }
-            }
             let remaining: Option<i64> = stop.map(|s| (s - start).max(0));
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter", iter);
+            // CPython creates the source iterator at construction, but does
+            // not advance it until the first __next__. Even an empty slice
+            // with start > stop consumes `start` items when first driven.
+            a.attrs.insert("_skip", Value::int(start));
+            a.attrs.insert("_initial_skip", Value::bool_(true));
+            a.attrs.insert("_exhausted", Value::bool_(false));
             a.attrs.insert(
                 "_remaining_stop",
                 remaining.map_or_else(Value::none, Value::int),
@@ -247,29 +224,82 @@ pyrust_module! {
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let (iter, remaining, step) = read_islice_state(&inst, FN_NAME)?;
+            check_not_exhausted(&inst, "_exhausted")?;
+            let (iter, mut skip, mut remaining, step) =
+                read_islice_state(&inst, FN_NAME)?;
+            // Skipping belongs to the *next* requested result.  In
+            // particular, after yielding index 0 from islice(src, 0, None,
+            // 3), CPython has consumed only that one source item; indices 1
+            // and 2 are not pulled until the following __next__ call.
+            //
+            // For a bounded slice, never discard beyond `stop`.  The initial
+            // `start` skip is deliberately left unbounded by `remaining`:
+            // CPython consumes `start` items when a start >= stop slice is
+            // first driven.
+            let initial_skip = matches!(
+                inst.borrow().attrs.get("_initial_skip").map(|v| v.kind()),
+                Some(ValueKind::Bool(true))
+            );
+            let skip_now = if initial_skip {
+                skip
+            } else {
+                remaining.map_or(skip, |r| skip.min(r))
+            };
+            let target_skip = skip - skip_now;
+            while skip > target_skip {
+                match _interp.call_next(&iter, None) {
+                    Ok(_) => {
+                        skip -= 1;
+                        if !initial_skip {
+                            remaining = remaining.map(|r| r - 1);
+                        }
+                    }
+                    Err(e) => {
+                        // CPython clears islice's source pointer on any
+                        // iterator failure, including a non-StopIteration
+                        // exception.  The original error is reported once;
+                        // subsequent next() calls are exhausted.
+                        inst.borrow_mut()
+                            .attrs
+                            .insert("_exhausted", Value::bool_(true));
+                        return Err(e);
+                    }
+                }
+            }
+            {
+                let mut attrs = inst.borrow_mut();
+                attrs.attrs.insert("_skip", Value::int(0));
+                attrs.attrs.insert("_initial_skip", Value::bool_(false));
+            }
             if let Some(r) = remaining
                 && r <= 0
             {
+                inst.borrow_mut()
+                    .attrs
+                    .insert("_exhausted", Value::bool_(true));
                 return Err(PyError::named("StopIteration", String::new()));
             }
-            let item = _interp.call_next(&iter, None)?;
-            let mut tail_exhausted = false;
-            for _ in 0..(step - 1) {
-                match _interp.call_next(&iter, None) {
-                    Ok(_) => {}
-                    Err(e) if is_stop_iteration(&e) => {
-                        tail_exhausted = true;
-                        break;
-                    }
-                    Err(e) => return Err(e),
+            let item = match _interp.call_next(&iter, None) {
+                Ok(item) => item,
+                Err(error) => {
+                    inst.borrow_mut()
+                        .attrs
+                        .insert("_exhausted", Value::bool_(true));
+                    return Err(error);
                 }
+            };
+            remaining = remaining.map(|r| r - 1);
+            // Defer step-1 discards until the next __next__ call.  Besides
+            // preserving laziness, this also means an abandoned islice does
+            // not advance its source beyond the last value actually yielded.
+            {
+                let mut attrs = inst.borrow_mut();
+                attrs.attrs.insert("_skip", Value::int(step - 1));
+                attrs.attrs.insert(
+                    "_remaining_stop",
+                    remaining.map_or_else(Value::none, Value::int),
+                );
             }
-            let new_remaining = remaining.map(|r| if tail_exhausted { 0 } else { r - step });
-            inst.borrow_mut().attrs.insert(
-                "_remaining_stop",
-                new_remaining.map_or_else(Value::none, Value::int),
-            );
             Ok(item)
         }
     }
@@ -423,8 +453,7 @@ pyrust_module! {
                     a.attrs.get("_remaining").cloned().ok_or_else(|| internal(FN_NAME))?,
                 )
             };
-            let obj_repr =
-                crate::builtin_modules::builtins::render_value_repr(_interp, &object)?;
+            let obj_repr = crate::interpreter::render_value_repr(_interp, &object)?;
             match remaining.kind() {
                 ValueKind::Int(n) => {
                     Ok(Value::string(format!("repeat({obj_repr}, {n})")))
@@ -858,138 +887,48 @@ pyrust_module! {
                     "repeat argument cannot be negative".to_string(),
                 ));
             }
+            let repeat = usize::try_from(repeat)
+                .map_err(|_| PyError::named("MemoryError", String::new()))?;
             // Build the pool list — each input iterable materialised, the
             // whole sequence repeated `repeat` times.  Use
             // `collect_iterable` (not the bare `iter_values`) so generator
             // and `__iter__`/`__next__`-class sources work.
-            let mut pools: Vec<Value> =
-                Vec::with_capacity(positional.len() * repeat as usize);
+            //
+            // Reserve the repeated dimension count before running user code.
+            // The old `positional.len() * repeat` / `Vec::with_capacity`
+            // pair could overflow or abort on allocation failure.
+            let mut pools =
+                combinatoric_cursors::reserve_product_pools(positional.len(), repeat)?;
             // Materialise each distinct input once. Repeated dimensions share
             // the private, never-mutated list backing through Value's O(1) Rc
             // clone instead of cloning every element for every repeat.
             let single_pass: Vec<Value> = if repeat == 0 || positional.is_empty() {
                 Vec::new()
             } else {
-                positional
-                    .iter()
-                    .map(|v| _interp.collect_iterable(v).map(Value::list))
-                    .collect::<Result<_>>()?
+                let mut materialized =
+                    combinatoric_cursors::reserve_distinct_pools(positional.len())?;
+                for value in &positional {
+                    materialized.push(Value::list(_interp.collect_iterable(value)?));
+                }
+                materialized
             };
             if !single_pass.is_empty() {
                 for _ in 0..repeat {
                     pools.extend(single_pass.iter().cloned());
                 }
             }
-            // Three boundary cases:
-            //   - `product()` with no iterables → `pools` is empty, the
-            //     odometer is zero-width, and we yield one empty tuple.
-            //   - `product(*its, repeat=0)` → also yields one empty tuple
-            //     (the zero-fold product is the empty product).
-            //   - any input iterable is empty AND `repeat > 0` → yield
-            //     nothing (an empty pool short-circuits the Cartesian
-            //     product to ∅).  `empty_input` flips `_exhausted` to
-            //     pre-empt the first `__next__`.
-            let empty_input = pools.iter().any(|p| match p.kind() {
-                ValueKind::List(items) => items.is_empty(),
-                _ => false,
-            });
-            let mut a = inst.borrow_mut();
-            a.attrs.insert("_pools", Value::list(pools));
-            a.attrs.insert(
-                "_indices",
-                Value::list(Vec::new()),
+            inst.borrow_mut().attrs.insert(
+                "_cursor",
+                combinatoric_cursors::product_cursor_value(pools)?,
             );
-            a.attrs.insert("_started", Value::bool_(false));
-            a.attrs.insert("_exhausted", Value::bool_(empty_input));
             Ok(Value::none())
         }
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            // One immutable borrow does all the reading: pool lengths,
-            // current indices, and the element at each index for the
-            // outgoing tuple.  No full-pool clone (the old
-            // `read_list_of_lists` path was O(total input size) per
-            // yield).
-            check_not_exhausted(&inst, "_exhausted")?;
-            let outcome: ProductStep = {
-                let attrs = inst.borrow();
-                let started = matches!(
-                    attrs.attrs.get("_started").map(|v| v.kind()),
-                    Some(ValueKind::Bool(true))
-                );
-                let pools_outer = match attrs.attrs.get("_pools").map(|v| v.kind()) {
-                    Some(ValueKind::List(outer)) => outer,
-                    _ => return Err(internal(FN_NAME)),
-                };
-                let mut indices: Vec<usize> = if started {
-                    match attrs.attrs.get("_indices").map(|v| v.kind()) {
-                        Some(ValueKind::List(items)) => items
-                            .iter()
-                            .map(|v| match v.kind() {
-                                ValueKind::Int(n) => n as usize,
-                                _ => 0,
-                            })
-                            .collect(),
-                        _ => return Err(internal(FN_NAME)),
-                    }
-                } else {
-                    vec![0; pools_outer.len()]
-                };
-                if started {
-                    let mut i = pools_outer.len();
-                    let exhausted = loop {
-                        if i == 0 {
-                            break true;
-                        }
-                        i -= 1;
-                        let len_i = match pools_outer[i].kind() {
-                            ValueKind::List(items) => items.len(),
-                            _ => 0,
-                        };
-                        indices[i] += 1;
-                        if indices[i] < len_i {
-                            break false;
-                        }
-                        indices[i] = 0;
-                    };
-                    if exhausted {
-                        ProductStep::Exhausted
-                    } else {
-                        ProductStep::Yield {
-                            tuple: tuple_from_pools(&pools_outer[..], &indices),
-                            indices,
-                            already_started: true,
-                        }
-                    }
-                } else {
-                    ProductStep::Yield {
-                        tuple: tuple_from_pools(&pools_outer[..], &indices),
-                        indices,
-                        already_started: false,
-                    }
-                }
-            };
-            match outcome {
-                ProductStep::Exhausted => {
-                    inst.borrow_mut()
-                        .attrs
-                        .insert("_exhausted", Value::bool_(true));
-                    Err(PyError::named("StopIteration", String::new()))
-                }
-                ProductStep::Yield {
-                    tuple,
-                    indices,
-                    already_started,
-                } => {
-                    if !already_started {
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_started", Value::bool_(true));
-                    }
-                    write_indices(&inst, "_indices", &indices);
-                    Ok(Value::tuple(tuple))
-                }
+            match combinatoric_cursors::next_product(&inst, FN_NAME)? {
+                Some(tuple) => Ok(Value::tuple(tuple)),
+                None => Err(PyError::named("StopIteration", String::new())),
             }
         }
     }
@@ -1055,145 +994,43 @@ pyrust_module! {
             }
             // `collect_iterable` walks generators / __iter__ classes too.
             let pool: Vec<Value> = _interp.collect_iterable(&user[0].value)?;
-            // CPython splits negative-r (ValueError) from non-int-r
-            // (TypeError); match that so user `except` blocks behave
-            // identically.
-            let r = match user.get(1).map(|a| a.value.kind()) {
+            let r = match user.get(1).map(|argument| argument.value.kind()) {
                 None | Some(ValueKind::None) => pool.len(),
-                Some(ValueKind::Int(n)) if n >= 0 => n as usize,
-                Some(ValueKind::Int(_)) => return Err(PyError::named(
-                    "ValueError",
-                    "r must be non-negative".to_string(),
-                )),
-                Some(ValueKind::Bool(b)) => b as usize,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "Expected int as r".to_string(),
-                )),
+                // Preserve the original one-tag common path for plain ints.
+                Some(ValueKind::Int(r)) if r >= 0 => r as usize,
+                Some(ValueKind::Int(_)) => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "r must be non-negative".to_string(),
+                    ));
+                }
+                Some(ValueKind::Bool(r)) => r as usize,
+                Some(ValueKind::BigInt(_) | ValueKind::PyInstance(_)) => {
+                    permutations_non_plain_r(_interp, &user[1].value)?
+                }
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "Expected int as r".to_string(),
+                    ));
+                }
             };
-            // CPython's algorithm: keep `indices` (running combination) and
-            // `cycles` (countdowns per position).  If r > pool, the
-            // generator is immediately exhausted — short-circuit the
-            // cycles computation (where `pool.len() - i` would underflow
-            // for `r > pool.len() + 1`).
-            let exhausted = r > pool.len();
-            let indices: Vec<usize> = (0..pool.len()).collect();
-            let cycles: Vec<usize> = if exhausted {
-                Vec::new()
-            } else {
-                (0..r).map(|i| pool.len() - i).collect()
-            };
-            let mut a = inst.borrow_mut();
-            a.attrs.insert("_pool", Value::list(pool));
-            a.attrs.insert("_r", Value::int(r as i64));
-            a.attrs.insert(
-                "_indices",
-                Value::list(indices.into_iter().map(|i| Value::int(i as i64)).collect()),
+            // The cursor is Rust-only state.  Keeping indices/cycles as Python
+            // list attributes forced every yield to decode both lists into
+            // Vec<usize>, then allocate and encode them again.
+            inst.borrow_mut().attrs.insert(
+                "_cursor",
+                combinatoric_cursors::permutations_cursor_value(pool, r)?,
             );
-            a.attrs.insert(
-                "_cycles",
-                Value::list(cycles.into_iter().map(|i| Value::int(i as i64)).collect()),
-            );
-            a.attrs.insert("_started", Value::bool_(false));
-            a.attrs.insert("_exhausted", Value::bool_(exhausted));
             Ok(Value::none())
         }
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            // Single immutable borrow to read pool, r, indices, cycles,
-            // started — and build the outgoing tuple by direct index
-            // lookup.  The old version did `pool.to_vec()` per yield,
-            // making each step O(n).
-            enum Step {
-                Yield {
-                    tuple: Vec<Value>,
-                    indices: Vec<usize>,
-                    cycles: Vec<usize>,
-                    already_started: bool,
-                },
-                Exhausted,
+            match combinatoric_cursors::next_permutations(&inst, FN_NAME)? {
+                Some(tuple) => Ok(Value::tuple(tuple)),
+                None => Err(PyError::named("StopIteration", String::new())),
             }
-            check_not_exhausted(&inst, "_exhausted")?;
-            let outcome: Step = {
-                let attrs = inst.borrow();
-                let pool_items = match attrs.attrs.get("_pool").map(|v| v.kind()) {
-                    Some(ValueKind::List(items)) => items,
-                    _ => return Err(internal(FN_NAME)),
-                };
-                let r = match attrs.attrs.get("_r").map(|v| v.kind()) {
-                    Some(ValueKind::Int(n)) => n as usize,
-                    _ => return Err(internal(FN_NAME)),
-                };
-                let mut indices: Vec<usize> = read_indices(&inst, "_indices", FN_NAME)?;
-                let mut cycles: Vec<usize> = read_indices(&inst, "_cycles", FN_NAME)?;
-                let started = matches!(
-                    attrs.attrs.get("_started").map(|v| v.kind()),
-                    Some(ValueKind::Bool(true))
-                );
-                if started {
-                    let n = pool_items.len();
-                    let mut i = r;
-                    let exhausted = loop {
-                        if i == 0 {
-                            break true;
-                        }
-                        i -= 1;
-                        cycles[i] -= 1;
-                        if cycles[i] == 0 {
-                            let head = indices[i];
-                            for k in i..(n - 1) {
-                                indices[k] = indices[k + 1];
-                            }
-                            indices[n - 1] = head;
-                            cycles[i] = n - i;
-                        } else {
-                            let j = n - cycles[i];
-                            indices.swap(i, j);
-                            break false;
-                        }
-                    };
-                    if exhausted {
-                        Step::Exhausted
-                    } else {
-                        Step::Yield {
-                            tuple: tuple_from_pool(&pool_items[..], &indices, r),
-                            indices,
-                            cycles,
-                            already_started: true,
-                        }
-                    }
-                } else {
-                    Step::Yield {
-                        tuple: tuple_from_pool(&pool_items[..], &indices, r),
-                        indices,
-                        cycles,
-                        already_started: false,
-                    }
-                }
-            };
-            let (tuple, indices, cycles, already_started) = match outcome {
-                Step::Exhausted => {
-                    inst.borrow_mut()
-                        .attrs
-                        .insert("_exhausted", Value::bool_(true));
-                    return Err(PyError::named("StopIteration", String::new()));
-                }
-                Step::Yield {
-                    tuple,
-                    indices,
-                    cycles,
-                    already_started,
-                } => (tuple, indices, cycles, already_started),
-            };
-            if !already_started {
-                inst.borrow_mut()
-                    .attrs
-                    .insert("_started", Value::bool_(true));
-            }
-            write_indices(&inst, "_indices", &indices);
-            write_indices(&inst, "_cycles", &cycles);
-            Ok(Value::tuple(tuple))
         }
     }
 
@@ -1271,6 +1108,7 @@ pyrust_module! {
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let parent = args[0].value.clone();
+            let groupby_class = Rc::clone(&inst.borrow().class);
             // Bump the group id: this invalidates any grouper handed out
             // for the previous group (CPython's `gbo->id` token).
             let new_id = {
@@ -1325,7 +1163,7 @@ pyrust_module! {
             attrs.insert("_parent", parent);
             attrs.insert("_tgtkey", currkey.clone());
             attrs.insert("_id", Value::int(new_id));
-            let grouper = make_itertools_instance("_grouper", attrs)?;
+            let grouper = make_grouper_instance(&groupby_class, attrs)?;
             Ok(Value::tuple(vec![currkey, grouper]))
         }
     }
@@ -1479,8 +1317,8 @@ pyrust_module! {
                     None => positional.push(a.value.clone()),
                 }
             }
-            // Build iterators from each input; pre-materialise only
-            // PyInstance / Generator sources (same as chain/compress).
+            // Build lazy iterators from each input through the shared
+            // iteration-domain classifier.
             let iters: Vec<Value> = positional
                 .iter()
                 .map(|v| make_iter(_interp, v))
@@ -1516,11 +1354,10 @@ pyrust_module! {
                     a.attrs.get("_fillvalue").cloned().ok_or_else(|| internal(FN_NAME))?,
                 )
             };
-            let iter_list = match iters.kind() {
-                ValueKind::List(lst) => lst,
+            let n = match iters.kind() {
+                ValueKind::List(lst) => lst.len(),
                 _ => return Err(internal(FN_NAME)),
             };
-            let n = iter_list.len();
             let mut tuple: Vec<Value> = Vec::with_capacity(n);
             let mut new_active = active;
             // Read current _done flags.
@@ -1530,21 +1367,34 @@ pyrust_module! {
                 .get("_done")
                 .cloned()
                 .ok_or_else(|| internal(FN_NAME))?;
-            let done_vals = match done_val.kind() {
-                ValueKind::List(lst) => lst,
+            // Snapshot the tiny parallel flag vector. In particular, do not
+            // retain its List Ref guard while an iterator's user __next__
+            // implementation can re-enter this zip_longest instance.
+            let mut new_done = match done_val.kind() {
+                ValueKind::List(lst) => lst.to_vec(),
                 _ => return Err(internal(FN_NAME)),
             };
-            let mut new_done: Vec<Value> = done_vals.clone();
-            for i in 0..n {
-                let already_done = matches!(done_vals[i].kind(), ValueKind::Bool(true));
+            if new_done.len() != n {
+                return Err(internal(FN_NAME));
+            }
+            for (i, done) in new_done.iter_mut().enumerate() {
+                let already_done = matches!(done.kind(), ValueKind::Bool(true));
                 if already_done {
                     tuple.push(fillvalue.clone());
                 } else {
-                    match _interp.call_next(&iter_list[i], None) {
+                    // Clone only the iterator needed by this step, releasing
+                    // the `_iters` List guard before arbitrary user code runs.
+                    let iter = match iters.kind() {
+                        ValueKind::List(lst) => {
+                            lst.get(i).cloned().ok_or_else(|| internal(FN_NAME))?
+                        }
+                        _ => return Err(internal(FN_NAME)),
+                    };
+                    match _interp.call_next(&iter, None) {
                         Ok(v) => tuple.push(v),
                         Err(e) if is_stop_iteration(&e) => {
                             tuple.push(fillvalue.clone());
-                            new_done[i] = Value::bool_(true);
+                            *done = Value::bool_(true);
                             new_active -= 1;
                         }
                         Err(e) => return Err(e),
@@ -1664,25 +1514,11 @@ pyrust_module! {
                 n as usize
             }
         };
-        // Materialise the source into a list eagerly, then return n list_iterator
-        // views all starting at index 0.  Fully lazy tee requires a shared
-        // buffer cell (Rc<RefCell<…>>) which can't be stored in Value attrs
-        // without an Rc<dyn Any> escape hatch.  Materialising is simpler and
-        // matches the observable contract: any use of tee iterators
-        // after exhausting the source is safe.
-        let items = _interp.collect_iterable(&positional[0])?;
-        let shared = Value::list(items);
-        // Each tee iterator is a list_iterator-style instance with a
-        // `_source` (the shared list) and `_pos` index.
-        let mut result: Vec<Value> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let iter = _interp.call_function_expanded(
-                Value::builtin_function("iter"),
-                &[ExpandedCallArg { name: None, value: shared.clone() }],
-            )?;
-            result.push(iter);
-        }
-        Ok(Value::tuple(result))
+        Ok(Value::tuple(native_iterators::tee_iterators(
+            _interp,
+            &positional[0],
+            n,
+        )?))
     }
 
     /// CPython: itertools.pairwise(iterable) — yield successive
@@ -1705,24 +1541,10 @@ pyrust_module! {
                 ));
             }
             let iter = make_iter(_interp, &user[0].value)?;
-            // Pull the first element so we always have a `_prev` to pair
-            // with.  If the source is empty or has only one element the
-            // iterator is immediately exhausted.
-            let prev = match _interp.call_next(&iter, None) {
-                Ok(v) => v,
-                Err(e) if is_stop_iteration(&e) => {
-                    // Empty source — mark exhausted immediately.
-                    let mut a = inst.borrow_mut();
-                    a.attrs.insert("_iter", iter);
-                    a.attrs.insert("_prev", Value::none());
-                    a.attrs.insert("_exhausted", Value::bool_(true));
-                    return Ok(Value::none());
-                }
-                Err(e) => return Err(e),
-            };
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter", iter);
-            a.attrs.insert("_prev", prev);
+            a.attrs.insert("_prev", Value::none());
+            a.attrs.insert("_started", Value::bool_(false));
             a.attrs.insert("_exhausted", Value::bool_(false));
             Ok(Value::none())
         }
@@ -1730,13 +1552,32 @@ pyrust_module! {
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             check_not_exhausted(&inst, "_exhausted")?;
-            let (prev, iter) = {
+            let (mut prev, iter, started) = {
                 let a = inst.borrow();
                 (
                     a.attrs.get("_prev").cloned().ok_or_else(|| internal(FN_NAME))?,
                     a.attrs.get("_iter").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    matches!(
+                        a.attrs.get("_started").map(|value| value.kind()),
+                        Some(ValueKind::Bool(true))
+                    ),
                 )
             };
+            if !started {
+                prev = match _interp.call_next(&iter, None) {
+                    Ok(value) => value,
+                    Err(e) if is_stop_iteration(&e) => {
+                        inst.borrow_mut()
+                            .attrs
+                            .insert("_exhausted", Value::bool_(true));
+                        return Err(e);
+                    }
+                    Err(e) => return Err(e),
+                };
+                let mut attrs = inst.borrow_mut();
+                attrs.attrs.insert("_prev", prev.clone());
+                attrs.attrs.insert("_started", Value::bool_(true));
+            }
             match _interp.call_next(&iter, None) {
                 Ok(next) => {
                     inst.borrow_mut()
@@ -1830,561 +1671,9 @@ pyrust_module! {
     }
 }
 
-// ── shared helpers ───────────────────────────────────────────────────────────
-
-/// Method-shared `self` extractor — `args[0]` is the instance.
-fn expect_self(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-) -> Result<Rc<std::cell::RefCell<PyInstance>>> {
-    match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::PyInstance(rc)) => Ok(Rc::clone(rc)),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() self must be a PyInstance",
-        ))),
-    }
-}
-
-/// Single source of truth for the "iterator already exhausted →
-/// `StopIteration`" prologue shared by every itertools `__next__`.  Reads
-/// the boolean sentinel stored under `flag` (`_exhausted` / `_done`) and
-/// raises `StopIteration` (empty message, matching CPython) when it's
-/// `True`.  Takes the instance and borrows internally so call sites that
-/// already hold an `attrs` borrow can call it *before* opening their own
-/// borrow block.
-fn check_not_exhausted(inst: &Rc<std::cell::RefCell<PyInstance>>, flag: &str) -> Result<()> {
-    if matches!(
-        inst.borrow().attrs.get(flag).map(|v| v.kind()),
-        Some(ValueKind::Bool(true))
-    ) {
-        return Err(PyError::named("StopIteration", String::new()));
-    }
-    Ok(())
-}
-
-/// Read the (`_iter`, `_remaining_stop`, `_step`) triple for `islice`.
-fn read_islice_state(
-    inst: &Rc<std::cell::RefCell<PyInstance>>,
-    fn_name: &str,
-) -> Result<(Value, Option<i64>, i64)> {
-    let attrs = inst.borrow();
-    let iter = attrs
-        .attrs
-        .get("_iter")
-        .cloned()
-        .ok_or_else(|| internal(fn_name))?;
-    let remaining = match attrs.attrs.get("_remaining_stop").map(|v| v.kind()) {
-        Some(ValueKind::Int(n)) => Some(n),
-        Some(ValueKind::None) | None => None,
-        _ => return Err(internal(fn_name)),
-    };
-    let step = match attrs.attrs.get("_step").map(|v| v.kind()) {
-        Some(ValueKind::Int(n)) => n,
-        _ => return Err(internal(fn_name)),
-    };
-    Ok((iter, remaining, step))
-}
-
-/// Extract a non-negative `i64` (or `None`) from an `islice` slot.
-fn slice_arg(interp: &mut crate::Interpreter, _fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
-    // CPython's `evaluate_slice_index` honors the `__index__` protocol (an
-    // int-subclass or `__index__` object is accepted), but unlike the
-    // canonical index contexts it raises a *ValueError* — not a TypeError —
-    // for anything that isn't an integer (#2022).  Resolve `__index__` via the
-    // shared protocol; only the non-index case takes the ValueError path.
-    let resolved = match v.kind() {
-        ValueKind::None => return Ok(None),
-        ValueKind::Int(_) | ValueKind::Bool(_) => Ok(v.clone()),
-        ValueKind::PyInstance(_) => {
-            interp.value_to_index(v, |_| PyError::named("__pyrust_NotIndex__", String::new()))
-        }
-        _ => Err(PyError::named("__pyrust_NotIndex__", String::new())),
-    };
-    // CPython's `itertools_islice` coerces each slot with
-    // `PyNumber_AsSsize_t(v, NULL)`, which *clears* any exception (missing/bad
-    // `__index__`, a raising `__index__`, a non-int return, or out-of-ssize_t
-    // overflow) and yields a sentinel `-1`.  The slot-specific ValueError is
-    // then raised.  The one quirk: a `stop` that *successfully* coerces to a
-    // negative value <= -2 is reported with the generic "Indices" message,
-    // whereas a `stop` that fails to coerce (or coerces to exactly -1, or
-    // overflows ssize_t) gets the "Stop argument" message.  `start`/`step`
-    // always use their own single message.  This mirrors CPython 3.12 exactly.
-    let indices_msg =
-        || "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize.".to_string();
-    let slot_err = |coerced_neg_in_range: bool| {
-        let msg = match slot {
-            "step" => "Step for islice() must be a positive integer or None.".to_string(),
-            // A valid in-range negative `stop` (<= -2) reports as "Indices";
-            // every other `stop` failure reports as "Stop argument".
-            "stop" if !coerced_neg_in_range => {
-                "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
-                    .to_string()
-            }
-            _ => indices_msg(),
-        };
-        PyError::named("ValueError", msg)
-    };
-    match resolved {
-        Ok(r) => match r.kind() {
-            ValueKind::Int(n) if n >= 0 => Ok(Some(n)),
-            ValueKind::Bool(b) => Ok(Some(b as i64)),
-            // A negative `stop` that still fits in ssize_t takes the "Indices"
-            // message *unless* it is the -1 sentinel; a negative `start` always
-            // takes "Indices".
-            ValueKind::Int(n) => Err(slot_err(n <= -2)),
-            // A bigint bound is out of the `0 <= x <= sys.maxsize` range; it
-            // never coerced to an in-range negative, so `stop` reports as
-            // "Stop argument".
-            ValueKind::BigInt(_) => Err(slot_err(false)),
-            _ => unreachable!("value_to_index guarantees an integer"),
-        },
-        // Coercion failed entirely (non-int, raising `__index__`, missing
-        // `__index__`): CPython clears the error and reports the slot message
-        // ("Stop argument" for `stop`).
-        Err(_) => Err(slot_err(false)),
-    }
-}
-
-/// `count.__init__` validation — start/step must be numeric.
-/// BigInt is accepted so `count(10**30)` works the same as
-/// `count(10)` (matching Python's arbitrary-precision ints); the
-/// running `_cur` may then transition between `Int` and `BigInt`
-/// as values cross the i64 boundary, but `eval_binary(Add)`
-/// handles both directions of that conversion.
-fn require_numeric(v: &Value, _fn_name: &str, _slot: &str) -> Result<()> {
-    if matches!(
-        v.kind(),
-        ValueKind::Int(_) | ValueKind::Float(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-    ) {
-        Ok(())
-    } else {
-        Err(PyError::named(
-            "TypeError",
-            "a number is required".to_string(),
-        ))
-    }
-}
-
-/// Construct an iterator from an iterable.  Equivalent to Python's
-/// `iter(obj)`; we go through the interpreter's `iter` builtin so
-/// `__iter__`-providing classes are handled uniformly.
-fn make_iter(interp: &mut crate::Interpreter, iterable: &Value) -> Result<Value> {
-    interp.call_function_expanded(
-        Value::builtin_function("iter"),
-        &[ExpandedCallArg {
-            name: None,
-            value: iterable.clone(),
-        }],
-    )
-}
-
-/// Recognise StopIteration in all PyError forms, including user-defined
-/// subclasses carried as `PyError::Raised`.  `class_name_is` walks the base
-/// chain for `Raised` variants so this is subclass-aware.
-fn is_stop_iteration(e: &PyError) -> bool {
-    e.class_name_is("StopIteration")
-}
-
-/// Apply `key_fn(item)` if it's callable (i.e. not None); otherwise the
-/// item is its own key.
-fn compute_key(interp: &mut crate::Interpreter, key_fn: &Value, item: &Value) -> Result<Value> {
-    if key_fn.is_none() {
-        Ok(item.clone())
-    } else {
-        interp.call_function_expanded(
-            key_fn.clone(),
-            &[ExpandedCallArg {
-                name: None,
-                value: item.clone(),
-            }],
-        )
-    }
-}
-
-/// Internal-error shorthand — should never fire in practice; reaching
-/// it means an attr was wiped externally or never written by `__init__`.
-fn internal(fn_name: &str) -> PyError {
-    PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
-}
-
-/// Compare two group keys for `groupby`/`_grouper` equality.  Goes through
-/// `eval_binary(Eq)` + `truthy_value` rather than Rust `==`: Rust-side `==`
-/// is identity-based for `PyInstance`, but `groupby(items, key=K)` keys may
-/// be user objects whose `__eq__` defines grouping (and may itself return a
-/// `PyInstance` routed through `__bool__`/`__len__`).
-fn keys_equal(interp: &mut crate::Interpreter, a: &Value, b: &Value) -> Result<bool> {
-    let eq_val = interp.eval_binary(a.clone(), crate::ast::BinaryOp::Eq, b.clone())?;
-    interp.truthy_value(&eq_val)
-}
-
-/// Read the `groupby` shared-cursor lookahead: `(has_curr, currkey,
-/// has_tgt, tgtkey)`.
-fn read_groupby_curr(
-    inst: &Rc<RefCell<PyInstance>>,
-    fn_name: &str,
-) -> Result<(bool, Value, bool, Value)> {
-    let a = inst.borrow();
-    let has_curr = matches!(
-        a.attrs.get("_has_curr").map(|v| v.kind()),
-        Some(ValueKind::Bool(true))
-    );
-    let has_tgt = matches!(
-        a.attrs.get("_has_tgt").map(|v| v.kind()),
-        Some(ValueKind::Bool(true))
-    );
-    let currkey = a
-        .attrs
-        .get("_currkey")
-        .cloned()
-        .ok_or_else(|| internal(fn_name))?;
-    let tgtkey = a
-        .attrs
-        .get("_tgtkey")
-        .cloned()
-        .ok_or_else(|| internal(fn_name))?;
-    Ok((has_curr, currkey, has_tgt, tgtkey))
-}
-
-/// Ensure a `groupby`'s shared cursor holds an element.  If the cursor is
-/// already loaded (`_has_curr == true`) this is a no-op.  Otherwise it
-/// pulls the next item from the source iterator, computes its key, and
-/// stores both as the new `_currvalue`/`_currkey` lookahead.  Returns
-/// `Ok(true)` if the cursor now holds an element, `Ok(false)` if the source
-/// iterator is exhausted.
-///
-/// The fetch is lazy on purpose: CPython only advances the underlying
-/// iterator when its `currvalue` slot is empty, so a side-effecting source
-/// is consumed exactly when CPython consumes it.
-fn groupby_ensure_curr(
-    interp: &mut crate::Interpreter,
-    inst: &Rc<RefCell<PyInstance>>,
-    fn_name: &str,
-) -> Result<bool> {
-    let (has_curr, iter, key_fn) = {
-        let a = inst.borrow();
-        let has_curr = matches!(
-            a.attrs.get("_has_curr").map(|v| v.kind()),
-            Some(ValueKind::Bool(true))
-        );
-        (
-            has_curr,
-            a.attrs.get("_iter").cloned().ok_or_else(|| internal(fn_name))?,
-            a.attrs.get("_keyfn").cloned().ok_or_else(|| internal(fn_name))?,
-        )
-    };
-    if has_curr {
-        return Ok(true);
-    }
-    let item = match interp.call_next(&iter, None) {
-        Ok(v) => v,
-        Err(e) if is_stop_iteration(&e) => {
-            let mut a = inst.borrow_mut();
-            a.attrs.insert("_has_curr", Value::bool_(false));
-            a.attrs.insert("_exhausted", Value::bool_(true));
-            return Ok(false);
-        }
-        Err(e) => return Err(e),
-    };
-    let key = compute_key(interp, &key_fn, &item)?;
-    let mut a = inst.borrow_mut();
-    a.attrs.insert("_currvalue", item);
-    a.attrs.insert("_currkey", key);
-    a.attrs.insert("_has_curr", Value::bool_(true));
-    Ok(true)
-}
-
-/// Mark a `groupby`'s shared cursor as consumed, so the next
-/// `groupby_ensure_curr` pulls a fresh element.  Mirrors CPython clearing
-/// `gbo->currvalue`/`gbo->currkey` after a value is handed out.
-fn groupby_clear_curr(inst: &Rc<RefCell<PyInstance>>) {
-    let mut a = inst.borrow_mut();
-    a.attrs.insert("_has_curr", Value::bool_(false));
-}
-
-/// Set `__module__ = "itertools"` on every class exposed by this module so
-/// that `type(x).__module__` and the generic instance repr
-/// (`<itertools.X object at 0x..>`) match CPython, instead of defaulting to
-/// `__main__` (issue #2098).  The macro-generated `module()` builds bare
-/// `PyClass`es with no `__module__` entry; patch them here, the single point
-/// every consumer of `module()` funnels through.
-pub(crate) fn patch_class_modules(module_val: &Value) {
-    let ValueKind::PyModule(m) = module_val.kind() else {
-        return;
-    };
-    for v in m.borrow().attrs.values() {
-        if let ValueKind::PyClass(class) = v.kind() {
-            class
-                .borrow_mut()
-                .attrs
-                .insert("__module__".to_string(), Value::string("itertools"));
-        }
-    }
-}
-
-/// `itertools::module()` with `__module__` patched onto every class.  This is
-/// the entry point `load_builtin_module` and the internal class-minting helper
-/// both use, so the module qualifier is correct everywhere.
-pub(crate) fn module_with_qualifiers() -> Value {
-    let module_val = module();
-    patch_class_modules(&module_val);
-    module_val
-}
-
-/// Pull the `itertools` class named `name` out of this module's `module()`
-/// and build a `PyInstance` of it carrying `attrs`, bypassing `__init__`.
-/// Used by `groupby.__next__` to mint a `_grouper` seeded with private
-/// state (parent back-reference, target key, group id).
-fn make_itertools_instance(name: &str, attrs: InstanceAttrs) -> Result<Value> {
-    let module_val = module_with_qualifiers();
-    let ValueKind::PyModule(m) = module_val.kind() else {
-        return Err(PyError::Runtime(
-            "internal: itertools module() did not return a PyModule".to_string(),
-        ));
-    };
-    let class_val = m
-        .borrow()
-        .attrs
-        .get(name)
-        .cloned()
-        .ok_or_else(|| PyError::Runtime(format!("internal: itertools class {name} missing")))?;
-    let ValueKind::PyClass(class) = class_val.kind() else {
-        return Err(PyError::Runtime(format!(
-            "internal: itertools {name} is not a PyClass"
-        )));
-    };
-    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
-        class: Rc::clone(class),
-        attrs,
-    }))))
-}
-
-/// Read an `_indices`/`_cycles` attribute back as `Vec<usize>`.
-fn read_indices(
-    inst: &Rc<std::cell::RefCell<PyInstance>>,
-    name: &str,
-    fn_name: &str,
-) -> Result<Vec<usize>> {
-    let v = inst
-        .borrow()
-        .attrs
-        .get(name)
-        .cloned()
-        .ok_or_else(|| internal(fn_name))?;
-    match v.kind() {
-        ValueKind::List(items) => items
-            .iter()
-            .map(|x| match x.kind() {
-                ValueKind::Int(n) => Ok(n as usize),
-                _ => Err(internal(fn_name)),
-            })
-            .collect(),
-        _ => Err(internal(fn_name)),
-    }
-}
-
-fn write_indices(inst: &Rc<std::cell::RefCell<PyInstance>>, name: &str, indices: &[usize]) {
-    inst.borrow_mut().attrs.insert(
-        name,
-        Value::list(indices.iter().map(|&i| Value::int(i as i64)).collect()),
-    );
-}
-
-/// product.__next__ outcome — built under the inst borrow and consumed
-/// after the borrow drops to update state without aliasing the cell.
-enum ProductStep {
-    Yield {
-        tuple: Vec<Value>,
-        indices: Vec<usize>,
-        already_started: bool,
-    },
-    Exhausted,
-}
-
-/// Build a tuple by reading `pools[i][indices[i]]` from a `[Value]`
-/// holding nested lists.  Per-element clone is unavoidable (each Value
-/// gets returned by value), but no whole-pool clone happens.
-fn tuple_from_pools(pools: &[Value], indices: &[usize]) -> Vec<Value> {
-    indices
-        .iter()
-        .enumerate()
-        .map(|(i, &j)| match pools[i].kind() {
-            ValueKind::List(items) => items[j].clone(),
-            _ => Value::none(),
-        })
-        .collect()
-}
-
-/// Build a tuple by reading `pool[indices[k]]` for `k in 0..take`.
-fn tuple_from_pool(pool: &[Value], indices: &[usize], take: usize) -> Vec<Value> {
-    indices.iter().take(take).map(|&i| pool[i].clone()).collect()
-}
-
-// ── combinations / combinations_with_replacement shared algorithm ────────────
-
-fn init_combo_state(
-    interp: &mut crate::Interpreter,
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-    with_replacement: bool,
-) -> Result<Value> {
-    let inst = expect_self(args, fn_name)?;
-    let user = &args[1..];
-    reject_keyword_args_expanded(fn_name, user)?;
-    if user.is_empty() {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() missing required argument 'iterable' (pos 1)"),
-        ));
-    }
-    if user.len() == 1 {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() missing required argument 'r' (pos 2)"),
-        ));
-    }
-    if user.len() > 2 {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() takes at most 2 arguments ({} given)", user.len()),
-        ));
-    }
-    // `collect_iterable` walks generators / __iter__ classes.
-    let pool: Vec<Value> = interp.collect_iterable(&user[0].value)?;
-    // `r` honors the `__index__` protocol (#2022): a non-int raises the
-    // canonical TypeError, a bigint that overflows Py_ssize_t raises
-    // OverflowError, and a negative int raises `ValueError: r must be
-    // non-negative` — matching CPython 3.12's distinctions.
-    let r_i64 = interp.value_to_isize(
-        &user[1].value,
-        "Python int too large to convert to C ssize_t",
-    )?;
-    if r_i64 < 0 {
-        return Err(PyError::named("ValueError", "r must be non-negative".to_string()));
-    }
-    let r = r_i64 as usize;
-    // For combinations (no replacement), `r > pool.len()` yields nothing.
-    let n = pool.len();
-    let exhausted = !with_replacement && r > n;
-    // Initial indices: all zeros (for replacement) or 0..r (without).
-    let indices: Vec<usize> = if with_replacement {
-        vec![0; r]
-    } else {
-        (0..r).collect()
-    };
-    let mut a = inst.borrow_mut();
-    a.attrs.insert("_pool", Value::list(pool));
-    a.attrs.insert("_r", Value::int(r as i64));
-    a.attrs.insert(
-        "_indices",
-        Value::list(indices.iter().map(|&i| Value::int(i as i64)).collect()),
-    );
-    a.attrs.insert("_started", Value::bool_(false));
-    a.attrs.insert("_exhausted", Value::bool_(exhausted));
-    Ok(Value::none())
-}
-
-fn advance_combinations(
-    args: &[ExpandedCallArg],
-    fn_name: &str,
-    with_replacement: bool,
-) -> Result<Value> {
-    let inst = expect_self(args, fn_name)?;
-    enum Outcome {
-        Yield { tuple: Vec<Value>, indices: Vec<usize>, set_started: bool },
-        EmptyTuple,
-        Exhausted,
-    }
-    check_not_exhausted(&inst, "_exhausted")?;
-    // Single immutable borrow: read pool slice (no clone), r, started,
-    // indices; build the tuple by direct index lookup.
-    let outcome: Outcome = {
-        let attrs = inst.borrow();
-        let pool_items = match attrs.attrs.get("_pool").map(|v| v.kind()) {
-            Some(ValueKind::List(items)) => items,
-            _ => return Err(internal(fn_name)),
-        };
-        let r = match attrs.attrs.get("_r").map(|v| v.kind()) {
-            Some(ValueKind::Int(n)) => n as usize,
-            _ => return Err(internal(fn_name)),
-        };
-        let n = pool_items.len();
-        let started = matches!(
-            attrs.attrs.get("_started").map(|v| v.kind()),
-            Some(ValueKind::Bool(true))
-        );
-        // Edge case: r == 0 yields exactly one empty tuple, then stops.
-        if r == 0 {
-            if started {
-                Outcome::Exhausted
-            } else {
-                Outcome::EmptyTuple
-            }
-        } else if n == 0 {
-            // Empty pool, r > 0 — only with_replacement path can hit
-            // this; no-replacement marks _exhausted at init.
-            Outcome::Exhausted
-        } else {
-            let mut indices = read_indices(&inst, "_indices", fn_name)?;
-            if started {
-                // Find rightmost index that can still grow.
-                let mut i = r;
-                let exhausted = loop {
-                    if i == 0 {
-                        break true;
-                    }
-                    i -= 1;
-                    let max_val = if with_replacement { n - 1 } else { n - r + i };
-                    if indices[i] < max_val {
-                        indices[i] += 1;
-                        for j in (i + 1)..r {
-                            indices[j] = if with_replacement {
-                                indices[i]
-                            } else {
-                                indices[j - 1] + 1
-                            };
-                        }
-                        break false;
-                    }
-                };
-                if exhausted {
-                    Outcome::Exhausted
-                } else {
-                    Outcome::Yield {
-                        tuple: tuple_from_pool(&pool_items[..], &indices, r),
-                        indices,
-                        set_started: false,
-                    }
-                }
-            } else {
-                Outcome::Yield {
-                    tuple: tuple_from_pool(&pool_items[..], &indices, r),
-                    indices,
-                    set_started: true,
-                }
-            }
-        }
-    };
-    match outcome {
-        Outcome::Yield { tuple, indices, set_started } => {
-            if set_started {
-                inst.borrow_mut()
-                    .attrs
-                    .insert("_started", Value::bool_(true));
-            }
-            write_indices(&inst, "_indices", &indices);
-            Ok(Value::tuple(tuple))
-        }
-        Outcome::EmptyTuple => {
-            inst.borrow_mut()
-                .attrs
-                .insert("_started", Value::bool_(true));
-            Ok(Value::tuple(Vec::new()))
-        }
-        Outcome::Exhausted => {
-            inst.borrow_mut()
-                .attrs
-                .insert("_exhausted", Value::bool_(true));
-            Err(PyError::named("StopIteration", String::new()))
-        }
-    }
-}
+// Non-macro responsibilities are kept in focused implementation fragments.
+include!("itertools/support.inc.rs");
+include!("itertools/islice_helpers.inc.rs");
+include!("itertools/groupby_helpers.inc.rs");
+include!("itertools/combinatoric_adapters.inc.rs");
+include!("itertools/class_registry.inc.rs");

@@ -21,10 +21,10 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value> /*, kwargs */) -> R
 Method-call dispatch enters the VM at `Insn::CallMethod` /
 `Insn::CallMethodExpanded`, handled by
 `Interpreter::exec_call_method` / `exec_call_method_expanded`
-(`crates/pyrust/src/interpreter/runtime/calls.rs`). For the five tagged
-container types both opcodes route through a single shared dispatcher,
-`Interpreter::dispatch_builtin_container_method` (#431). That dispatcher
-decides, **per method**, one of three things:
+(`crates/pyrust/src/interpreter/runtime/builtin_methods/container_dispatch.rs`).
+For the five classified container types, both opcodes route through a shared
+dispatcher, `Interpreter::dispatch_builtin_container_method` (#431). That
+dispatcher decides, **per method**, one of three things:
 
 1. **Pure builtin** — hand straight to `pyrust_builtins::<type>::call`. The
    common case; no interpreter needed.
@@ -34,22 +34,30 @@ decides, **per method**, one of three things:
 3. **Needs the `Rc` backing** — the method returns a *live view* that shares
    storage with the source container. Routed to `dict_views::*`.
 
-The decision is **predicate-driven**, not ad-hoc inline string matching. Each
-type module owns the predicate, so it is the single source of truth and the VM
-never re-encodes the carve-out list:
+The decision is **route-driven**, not ad-hoc inline string matching. Each type
+module classifies the Python method name into a semantic enum, so it is the
+single source of truth and the VM does not compare the name again:
 
-| Predicate | Methods | Why upstream |
+| Classifier | Methods | Why upstream |
 |---|---|---|
-| `list::requires_interpreter` | `sort`, `index`, `count`, `remove` | `sort(key=)` runs a user callable; `index`/`count`/`remove` may fire user `__eq__` |
-| `tuple::requires_interpreter` | `index`, `count` | may fire user `__eq__` while scanning the tuple (mirrors `list`) |
-| `dict::needs_rc` | `keys`, `values`, `items` | live views need the `Rc<RefCell<IndexMap>>`, not a `Vec` snapshot |
-| `string::requires_vm_template` | `format`, `format_map`, `maketrans` | `format` needs kwargs + the interpreter's templating; `maketrans` is a staticmethod forwarded to `str_maketrans` |
+| `list::interpreter_method` | `sort`, `index`, `count`, `remove`, `extend` | may run a callable, comparison dunder, or user iterator |
+| `tuple::interpreter_method` | `index`, `count` | may fire user `__eq__` while scanning the tuple |
+| `dict::view_method` | `keys`, `values`, `items` | live views need the `Rc<RefCell<IndexMap>>`, not a snapshot |
+| `string::interpreter_method` | `format`, `format_map`, `maketrans` | needs interpreter templating or staticmethod forwarding |
 
 One narrow exception is *not* a routing predicate: `list.insert` / `list.pop`
 accept any `__index__` object as their index argument, so the dispatcher
 coerces `pos[0]` through `value_to_index` before delegating (#2022). This is
 argument coercion, not a "which path" decision, so it stays inline in the
-`list` arm rather than in `requires_interpreter`.
+`list` arm rather than in the `interpreter_method` route.
+
+Subscript assignment has the same boundary without being a named-method
+route. `expressions::exec_set_item` resolves callback-capable bytearray slice
+bounds, drives a generator or user `__iter__`, and resolves element
+`__index__` methods before calling `BuiltinTypeOps::set_item`. The bytearray
+storage implementation receives an owned, materialised RHS and never reaches
+back into the interpreter. This also keeps all callbacks outside the
+bytearray's mutable `RefCell` borrow.
 
 A second layer of interception lives *inside* `Interpreter::call_<type>_method`
 — these are not VM-visible predicates because the methods always enter the
@@ -75,9 +83,9 @@ consistent) — see the comments in `dict.rs` / `list.rs` / `tuple.rs` /
 1. Add it to the type module's `METHODS` table (so `hasattr`/`getattr` see it)
    and give it a `call` arm.
 2. If it can reach user Python code or needs `Rc` backing, **add it to the
-   relevant predicate** (`requires_interpreter` / `needs_rc` /
-   `requires_vm_template`) and implement the interpreter-side path. Do **not**
-   add an inline `if method == "…"` check in `vm.rs` — that is exactly the
-   fragmentation #431 removed.
+   relevant classifier** (`interpreter_method` / `view_method` /
+   `interpreter_method`) and implement the interpreter-side route. Do **not**
+   add a second inline `if method == "…"` check in the VM — that is exactly the
+   fragmentation these classifiers avoid.
 3. If it is intercepted inside `call_<type>_method`, leave its `call` arm as a
    drift-guard stub and note it in the table above.

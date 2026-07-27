@@ -76,6 +76,43 @@ pub enum AssignTarget {
     Starred(Box<AssignTarget>),
 }
 
+impl AssignTarget {
+    /// Visit expressions that Python evaluates while resolving this target.
+    ///
+    /// A bare name is a binding, not an expression evaluation.  Attribute,
+    /// item and slice targets evaluate their receiver/key/bounds even though
+    /// they occur on the left-hand side.  Keeping that shape traversal next to
+    /// the AST prevents scope, yield and walrus analyses from independently
+    /// forgetting augmented-assignment target reads.
+    pub(crate) fn visit_evaluated_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        match self {
+            AssignTarget::Name(_) => {}
+            AssignTarget::Attr(target, ..) => visitor(target),
+            AssignTarget::Index(target, index) => {
+                visitor(target);
+                visitor(index);
+            }
+            AssignTarget::Slice {
+                target,
+                lower,
+                upper,
+                step,
+            } => {
+                visitor(target);
+                for expr in [lower, upper, step].iter().flat_map(|expr| expr.as_deref()) {
+                    visitor(expr);
+                }
+            }
+            AssignTarget::Tuple(targets) => {
+                for target in targets {
+                    target.visit_evaluated_exprs(visitor);
+                }
+            }
+            AssignTarget::Starred(target) => target.visit_evaluated_exprs(visitor),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Assign(AssignTarget, Expr),
@@ -249,13 +286,314 @@ pub enum Stmt {
     /// PEP 695 type alias statement: `type <name>[T, U: int] = <value>`.
     /// Creates a `TypeAliasType` object and binds it to `name`.
     /// `type_params` holds the generic type parameters (name + optional bound).
-    /// When non-empty, each param becomes a `TypeVar` bound in the scope where `value` is
-    /// evaluated; the resulting alias gets a `__type_params__` attribute.
+    /// When non-empty, each param becomes a `TypeVar` bound in the alias's
+    /// annotation scope; the lazy `value` evaluator captures that scope and the
+    /// resulting alias gets a `__type_params__` attribute.
     TypeAlias {
         name: String,
         type_params: Vec<TypeParam>,
         value: Expr,
     },
+}
+
+impl Stmt {
+    /// Visit expressions evaluated directly in the statement's enclosing
+    /// lexical scope.
+    ///
+    /// Nested statement blocks and function/class bodies are intentionally not
+    /// descended into: callers own the scope transition before visiting those.
+    ///
+    /// PEP 695 introduces an important second boundary: type-parameter bounds,
+    /// generic annotations/bases and type-alias values resolve in a dedicated
+    /// annotation scope rather than this enclosing scope. Those expressions
+    /// are deliberately excluded here and exposed by
+    /// [`Stmt::visit_type_parameter_scope_exprs`]. This distinction matters to
+    /// declaration ordering (`global x` must not see a lazy `T: x` as a prior
+    /// use), closure capture and side-effect timing.
+    pub(crate) fn visit_evaluated_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        match self {
+            // Plain assignment evaluates the RHS before any store-target
+            // receiver/key. Augmented assignment must read its target first.
+            Stmt::Assign(target, value) => {
+                visitor(value);
+                target.visit_evaluated_exprs(visitor);
+            }
+            Stmt::AugAssign {
+                target,
+                expr: value,
+                ..
+            } => {
+                target.visit_evaluated_exprs(visitor);
+                visitor(value);
+            }
+            Stmt::AnnAssign {
+                annotation, value, ..
+            } => {
+                if let Some(value) = value {
+                    visitor(value);
+                }
+                visitor(annotation);
+            }
+            Stmt::AttrAssign { target, expr, .. } => {
+                visitor(expr);
+                visitor(target);
+            }
+            Stmt::IndexAssign {
+                target,
+                index,
+                expr,
+            } => {
+                visitor(expr);
+                visitor(target);
+                visitor(index);
+            }
+            Stmt::SliceAssign {
+                target,
+                lower,
+                upper,
+                step,
+                expr,
+            } => {
+                visitor(expr);
+                visitor(target);
+                for bound in [lower, upper, step].into_iter().flatten() {
+                    visitor(bound);
+                }
+            }
+            Stmt::Expr(expr) => visitor(expr),
+            Stmt::Def {
+                params,
+                decorators,
+                return_annotation,
+                type_params,
+                ..
+            } => {
+                // Decorators are evaluated first, in source order, before the
+                // definition's defaults/annotations are materialized.
+                for decorator in decorators {
+                    visitor(decorator);
+                }
+                for parameter in params {
+                    if let Some(default) = &parameter.default {
+                        visitor(default);
+                    }
+                    if type_params.is_empty()
+                        && let Some(annotation) = &parameter.annotation
+                    {
+                        visitor(annotation);
+                    }
+                }
+                if type_params.is_empty()
+                    && let Some(annotation) = return_annotation
+                {
+                    visitor(annotation);
+                }
+            }
+            Stmt::Class {
+                bases,
+                metaclass,
+                keywords,
+                decorators,
+                type_params,
+                ..
+            } => {
+                for decorator in decorators {
+                    visitor(decorator);
+                }
+                if type_params.is_empty() {
+                    for base in bases {
+                        visitor(base);
+                    }
+                    if let Some(metaclass) = metaclass {
+                        visitor(metaclass);
+                    }
+                    for (_, value) in keywords {
+                        visitor(value);
+                    }
+                }
+            }
+            Stmt::If { branches, .. } => {
+                for (condition, _) in branches {
+                    visitor(condition);
+                }
+            }
+            Stmt::While { cond, .. } => visitor(cond),
+            Stmt::For { target, iter, .. } => {
+                visitor(iter);
+                target.visit_evaluated_exprs(visitor);
+            }
+            Stmt::Try { handlers, .. } => {
+                for handler in handlers {
+                    if let Some(kind) = &handler.kind {
+                        visitor(kind);
+                    }
+                }
+            }
+            Stmt::Raise { expr, cause, .. } => {
+                if let Some(expr) = expr {
+                    visitor(expr);
+                }
+                if let Some(cause) = cause {
+                    visitor(cause);
+                }
+            }
+            Stmt::Return(value) => {
+                if let Some(value) = value {
+                    visitor(value);
+                }
+            }
+            Stmt::Delete(targets) => {
+                for target in targets {
+                    visitor(target);
+                }
+            }
+            Stmt::Assert { test, msg } => {
+                visitor(test);
+                if let Some(msg) = msg {
+                    visitor(msg);
+                }
+            }
+            Stmt::With { items, .. } => {
+                for (context, target) in items {
+                    visitor(context);
+                    if let Some(target) = target {
+                        target.visit_evaluated_exprs(visitor);
+                    }
+                }
+            }
+            Stmt::Match { subject, arms } => {
+                visitor(subject);
+                for arm in arms {
+                    arm.pattern.visit_evaluated_exprs(visitor);
+                    if let Some(guard) = &arm.guard {
+                        visitor(guard);
+                    }
+                }
+            }
+            // A PEP 695 alias value is evaluated lazily in its annotation
+            // scope when `__value__` is first read.
+            Stmt::TypeAlias { .. } => {}
+            Stmt::Global(_)
+            | Stmt::Nonlocal(_)
+            | Stmt::Import { .. }
+            | Stmt::ImportFrom { .. }
+            | Stmt::Break
+            | Stmt::Continue
+            | Stmt::Pass => {}
+        }
+    }
+
+    /// Visit expressions owned by a PEP 695 type-parameter annotation scope.
+    ///
+    /// These names are semantically outside the enclosing statement scope even
+    /// when code generation happens at definition time (generic annotations,
+    /// bases and keywords). Bounds/constraints and type-alias values are a
+    /// further deferred subset exposed by
+    /// [`Stmt::visit_deferred_annotation_exprs`].
+    pub(crate) fn visit_type_parameter_scope_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        fn visit_type_params(type_params: &[TypeParam], visitor: &mut impl FnMut(&Expr)) {
+            for parameter in type_params {
+                match &parameter.bound {
+                    Some(TypeParamBound::Bound(bound)) => visitor(bound),
+                    Some(TypeParamBound::Constraints(constraints)) => {
+                        for constraint in constraints {
+                            visitor(constraint);
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        match self {
+            Stmt::Def {
+                params,
+                return_annotation,
+                type_params,
+                ..
+            } if !type_params.is_empty() => {
+                visit_type_params(type_params, visitor);
+                for parameter in params {
+                    if let Some(annotation) = &parameter.annotation {
+                        visitor(annotation);
+                    }
+                }
+                if let Some(annotation) = return_annotation {
+                    visitor(annotation);
+                }
+            }
+            Stmt::Class {
+                bases,
+                metaclass,
+                keywords,
+                type_params,
+                ..
+            } if !type_params.is_empty() => {
+                visit_type_params(type_params, visitor);
+                for base in bases {
+                    visitor(base);
+                }
+                if let Some(metaclass) = metaclass {
+                    visitor(metaclass);
+                }
+                for (_, value) in keywords {
+                    visitor(value);
+                }
+            }
+            Stmt::TypeAlias {
+                type_params, value, ..
+            } => {
+                visit_type_params(type_params, visitor);
+                visitor(value);
+            }
+            _ => {}
+        }
+    }
+
+    /// Visit PEP 695 expressions compiled as zero-argument lazy thunks.
+    ///
+    /// Unlike generic annotations/bases, these expressions must capture
+    /// enclosing fastlocals and must not run until the corresponding
+    /// `__bound__`, `__constraints__` or `__value__` attribute is read.
+    pub(crate) fn visit_deferred_annotation_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        fn visit_type_params(type_params: &[TypeParam], visitor: &mut impl FnMut(&Expr)) {
+            for parameter in type_params {
+                match &parameter.bound {
+                    Some(TypeParamBound::Bound(bound)) => visitor(bound),
+                    Some(TypeParamBound::Constraints(constraints)) => {
+                        for constraint in constraints {
+                            visitor(constraint);
+                        }
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        match self {
+            Stmt::Def { type_params, .. } | Stmt::Class { type_params, .. } => {
+                visit_type_params(type_params, visitor);
+            }
+            Stmt::TypeAlias {
+                type_params, value, ..
+            } => {
+                visit_type_params(type_params, visitor);
+                visitor(value);
+            }
+            _ => {}
+        }
+    }
+
+    /// Visit every expression whose name dependencies are owned by this
+    /// statement rather than by a nested function/class body.
+    ///
+    /// This is for free-variable/cell dependency analysis only. Syntax and
+    /// declaration-order checks should select the narrower visitor matching
+    /// their evaluation boundary.
+    pub(crate) fn visit_scope_dependency_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        self.visit_evaluated_exprs(visitor);
+        self.visit_type_parameter_scope_exprs(visitor);
+    }
 }
 
 /// A single `case <pattern> [if <guard>]: <body>` arm in a `match` statement.
@@ -302,6 +640,50 @@ pub enum Pattern {
     /// `pattern as name` — matches `pattern` and, if it succeeds, binds the
     /// entire subject (not just the matched portion) to `name`.
     As { pattern: Box<Pattern>, name: String },
+}
+
+impl Pattern {
+    /// Visit expressions evaluated by a structural-match pattern.
+    ///
+    /// Capture names are bindings.  Literal/value expressions, mapping keys and
+    /// the class expression are runtime reads and must remain visible to every
+    /// scope/effect walker.
+    pub(crate) fn visit_evaluated_exprs(&self, visitor: &mut impl FnMut(&Expr)) {
+        match self {
+            Pattern::Wildcard | Pattern::Capture(_) => {}
+            Pattern::Literal(expr) | Pattern::Value(expr) => visitor(expr),
+            Pattern::Or(patterns) => {
+                for pattern in patterns {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::Sequence(elements) => {
+                for (pattern, _) in elements {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::Mapping(pairs, _) => {
+                for (key, pattern) in pairs {
+                    visitor(key);
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::Class {
+                cls,
+                positional,
+                kwargs,
+            } => {
+                visitor(cls);
+                for pattern in positional {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+                for (_, pattern) in kwargs {
+                    pattern.visit_evaluated_exprs(visitor);
+                }
+            }
+            Pattern::As { pattern, .. } => pattern.visit_evaluated_exprs(visitor),
+        }
+    }
 }
 
 /// An entry in a dict literal: either a `key: value` pair or a `**expr` splat
@@ -518,6 +900,152 @@ pub enum Expr {
     YieldFrom(Box<Expr>),
     /// `await expr` — only valid inside an async function
     Await(Box<Expr>),
+}
+
+impl Expr {
+    /// Visit assignment-expression targets that bind the nearest enclosing
+    /// non-comprehension scope.
+    ///
+    /// Comprehensions do not form a binding boundary for `:=` (PEP 572), so
+    /// their value, filters, and iterables are traversed. A lambda body does
+    /// form a real function scope and is skipped, while its defaults and
+    /// annotations are evaluated in the surrounding scope and remain visible.
+    ///
+    /// Keeping this boundary rule on the AST prevents the compiler's cell
+    /// analysis, comprehension validation, and interpreter symbol-table pass
+    /// from drifting apart.
+    pub(crate) fn visit_enclosing_walrus_targets(&self, visitor: &mut impl FnMut(&str)) {
+        match self {
+            Expr::Named { target, value } => {
+                visitor(target);
+                value.visit_enclosing_walrus_targets(visitor);
+            }
+            Expr::Lambda { params, .. } => {
+                for parameter in params {
+                    if let Some(default) = &parameter.default {
+                        default.visit_enclosing_walrus_targets(visitor);
+                    }
+                    if let Some(annotation) = &parameter.annotation {
+                        annotation.visit_enclosing_walrus_targets(visitor);
+                    }
+                }
+            }
+            Expr::ListComp { elt, clauses }
+            | Expr::SetComp { elt, clauses }
+            | Expr::GenExp { elt, clauses } => {
+                elt.visit_enclosing_walrus_targets(visitor);
+                for clause in clauses {
+                    clause.iter.visit_enclosing_walrus_targets(visitor);
+                    if let Some(condition) = &clause.cond {
+                        condition.visit_enclosing_walrus_targets(visitor);
+                    }
+                }
+            }
+            Expr::DictComp { key, val, clauses } => {
+                key.visit_enclosing_walrus_targets(visitor);
+                val.visit_enclosing_walrus_targets(visitor);
+                for clause in clauses {
+                    clause.iter.visit_enclosing_walrus_targets(visitor);
+                    if let Some(condition) = &clause.cond {
+                        condition.visit_enclosing_walrus_targets(visitor);
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                left.visit_enclosing_walrus_targets(visitor);
+                right.visit_enclosing_walrus_targets(visitor);
+            }
+            Expr::Unary { expr, .. }
+            | Expr::Starred(expr)
+            | Expr::YieldFrom(expr)
+            | Expr::Await(expr) => expr.visit_enclosing_walrus_targets(visitor),
+            Expr::Yield(expr) => {
+                if let Some(expr) = expr {
+                    expr.visit_enclosing_walrus_targets(visitor);
+                }
+            }
+            Expr::Compare { left, ops } => {
+                left.visit_enclosing_walrus_targets(visitor);
+                for (_, operand) in ops {
+                    operand.visit_enclosing_walrus_targets(visitor);
+                }
+            }
+            Expr::Ternary { cond, then, else_ } => {
+                cond.visit_enclosing_walrus_targets(visitor);
+                then.visit_enclosing_walrus_targets(visitor);
+                else_.visit_enclosing_walrus_targets(visitor);
+            }
+            Expr::Call { func, args, .. } => {
+                func.visit_enclosing_walrus_targets(visitor);
+                for argument in args {
+                    argument.value.visit_enclosing_walrus_targets(visitor);
+                }
+            }
+            Expr::Attr { target, .. } => target.visit_enclosing_walrus_targets(visitor),
+            Expr::Index { target, index, .. } => {
+                target.visit_enclosing_walrus_targets(visitor);
+                index.visit_enclosing_walrus_targets(visitor);
+            }
+            Expr::Slice {
+                target,
+                lower,
+                upper,
+                step,
+            } => {
+                target.visit_enclosing_walrus_targets(visitor);
+                for bound in [lower, upper, step]
+                    .iter()
+                    .flat_map(|bound| bound.as_deref())
+                {
+                    bound.visit_enclosing_walrus_targets(visitor);
+                }
+            }
+            Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+                for item in items {
+                    item.visit_enclosing_walrus_targets(visitor);
+                }
+            }
+            Expr::Dict(items) => {
+                for item in items {
+                    match item {
+                        DictItem::Pair(key, value) => {
+                            key.visit_enclosing_walrus_targets(visitor);
+                            value.visit_enclosing_walrus_targets(visitor);
+                        }
+                        DictItem::DoubleSplat(expr) => {
+                            expr.visit_enclosing_walrus_targets(visitor);
+                        }
+                    }
+                }
+            }
+            Expr::FString(parts) => {
+                fn visit_parts(parts: &[FStringPart], visitor: &mut impl FnMut(&str)) {
+                    for part in parts {
+                        if let FStringPart::Expr {
+                            expr, format_spec, ..
+                        } = part
+                        {
+                            expr.visit_enclosing_walrus_targets(visitor);
+                            if let Some(format_spec) = format_spec {
+                                visit_parts(format_spec, visitor);
+                            }
+                        }
+                    }
+                }
+                visit_parts(parts, visitor);
+            }
+            Expr::Var(_, _)
+            | Expr::Int(_)
+            | Expr::BigInt(_)
+            | Expr::Float(_)
+            | Expr::Complex(_, _)
+            | Expr::Str(_)
+            | Expr::Bytes(_)
+            | Expr::Bool(_)
+            | Expr::None
+            | Expr::Ellipsis => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

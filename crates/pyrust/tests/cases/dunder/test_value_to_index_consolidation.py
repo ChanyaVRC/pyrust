@@ -34,6 +34,11 @@ class BadIndex:
         return "not an int"
 
 
+class RaisingIndex:
+    def __index__(self):
+        raise ValueError("index boom")
+
+
 def show(label, fn):
     try:
         print(label, "=", fn())
@@ -104,6 +109,9 @@ show("list.pop(str)", lambda: [1, 2].pop("x"))
 show("to_bytes(Idx)", lambda: (255).to_bytes(Idx(2), "big"))
 show("to_bytes(MyInt)", lambda: (1).to_bytes(MyInt(3), "big"))
 show("to_bytes(float)", lambda: (1).to_bytes(2.0, "big"))
+show("to_bytes(IntOnly)", lambda: (1).to_bytes(IntOnly(), "big"))
+show("to_bytes(BadIndex)", lambda: (1).to_bytes(BadIndex(), "big"))
+show("to_bytes(RaisingIndex)", lambda: (1).to_bytes(RaisingIndex(), "big"))
 
 # ---- itertools counts ----
 import itertools

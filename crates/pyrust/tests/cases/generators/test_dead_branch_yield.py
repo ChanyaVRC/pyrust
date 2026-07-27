@@ -103,3 +103,50 @@ try:
     print("FAIL: should raise StopIteration")
 except StopIteration:
     print("ok-skipped-elif")  # ok-skipped-elif
+
+# 10. Lambda defaults execute in the enclosing function scope. Even though the
+# branch is optimized away, the yield in the default still makes this a
+# generator; the lambda body itself would remain a separate scope.
+def dead_lambda_default_yield():
+    if False:
+        (lambda value=(yield 1): value)
+    return 10
+
+g8 = dead_lambda_default_yield()
+print(type(g8).__name__)
+try:
+    next(g8)
+    print("FAIL")
+except StopIteration:
+    print("ok-lambda-default")
+
+# 11. A comprehension's first iterable is also evaluated in the enclosing
+# scope, including when the comprehension occurs in an assignment target.
+def dead_comp_outer_iter_yield():
+    if False:
+        sink[[item for item in (yield [1])]] += 1
+    return 11
+
+g9 = dead_comp_outer_iter_yield()
+print(type(g9).__name__)
+try:
+    next(g9)
+    print("FAIL")
+except StopIteration:
+    print("ok-comp-outer-iter")
+
+# 12. Definition headers belong to the enclosing scope; only the nested body
+# is excluded from generator detection.
+def dead_def_header_yield():
+    if False:
+        def inner(value=(yield 1)):
+            return value
+    return 12
+
+g10 = dead_def_header_yield()
+print(type(g10).__name__)
+try:
+    next(g10)
+    print("FAIL")
+except StopIteration:
+    print("ok-def-header")

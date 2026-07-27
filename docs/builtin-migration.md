@@ -176,7 +176,7 @@ Bindings like `_interp.env` work because `Interpreter::env` is
 ## One-off: `#[pyfunction]`
 
 For migrating a single arm that doesn't justify a whole module file
-(e.g. moving `__vcall__` incrementally), you can still use the
+(e.g. moving one legacy compatibility service incrementally), you can still use the
 per-function attribute form:
 
 ```rust

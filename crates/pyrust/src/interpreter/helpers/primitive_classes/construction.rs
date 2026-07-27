@@ -1,0 +1,171 @@
+/// Fast-path dispatch lookup for primitive classes (#462 perf).
+/// Returns the registry's `BuiltinDispatchFn` for the constructor of
+/// the named primitive (`int`, `str`, …), or `None` for any other
+/// class.  Called from `call_function_expanded`'s `PyClass` arm to
+/// skip the `call_class_expanded` PyInstance-alloc + `__init__`-walk
+/// + recursive `call_function_expanded` chain — three layers of
+///   dispatch collapsed into one `HashMap` lookup and one fn-pointer
+///   call.
+#[inline]
+pub(crate) fn primitive_class_dispatch(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<crate::builtin_registry::BuiltinDispatchFn> {
+    let ptr = Rc::as_ptr(class);
+    PRIMITIVE_CLASS_DISPATCH.with(|m| m.borrow().get(&ptr).copied())
+}
+
+/// Construct the backing value for a primitive subclass from its immutable
+/// canonical identity.
+///
+/// Construction code deliberately does not translate the identity back into a
+/// Python-visible built-in name. The helper layer owns the canonical singleton
+/// and constructor-dispatch association.
+#[inline]
+pub(crate) fn construct_primitive_backing(
+    interp: &mut Interpreter,
+    kind: PrimitiveClassKind,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    let class = canonical_class_by_tag(kind);
+    let dispatch = primitive_class_dispatch(&class).ok_or_else(|| {
+        PyError::Runtime(format!(
+            "missing constructor dispatch for canonical primitive {kind:?}"
+        ))
+    })?;
+    dispatch(interp, args)
+}
+
+/// Constructor for `NoneType` (issue #1451).
+///
+/// CPython 3.12: `type(None)()` returns `None`; any arguments raise
+/// `TypeError: NoneType takes no arguments`.
+fn none_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "NoneType takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::none())
+}
+
+/// Constructor for `NotImplementedType` (issue #1451).
+///
+/// CPython 3.12: `type(NotImplemented)()` returns `NotImplemented`; any
+/// arguments raise `TypeError: NotImplementedType takes no arguments`.
+fn notimplemented_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "NotImplementedType takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::not_implemented())
+}
+
+/// Constructor for `ellipsis` (issue #1451).
+///
+/// CPython 3.12: `type(...)()` returns `Ellipsis`; any arguments raise
+/// `TypeError: EllipsisType takes no arguments`.
+fn ellipsis_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "EllipsisType takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::ellipsis())
+}
+
+/// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
+/// 11 primitive class singletons, skip the `class_is_subclass_of`
+/// walk (which would require materialising `obj`'s class via
+/// `primitive_class_for_value`'s thread_local + Rc::clone) and do a
+/// direct `ValueKind` tag check.  `Some(true/false)` on a hit,
+/// `None` if `cls` isn't a primitive class — fall through to the
+/// general walk.  Issue #462 perf.
+#[inline]
+pub(crate) fn primitive_class_isinstance_fast(
+    obj: &Value,
+    cls: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    // Issue #976: a PyInstance may subclass a primitive.  Skip the fast-path
+    // tag check and return None so the caller falls through to the general
+    // `class_is_subclass_of` MRO walk, which correctly handles
+    // `isinstance(MyDict(), dict)` when MyDict inherits from dict.
+    if matches!(obj.kind(), ValueKind::PyInstance(_)) {
+        return None;
+    }
+    let cls_ptr = Rc::as_ptr(cls);
+    PRIMITIVE_CLASSES.with(|c| {
+        // bool ⊂ int: an int-class test matches both Int and Bool.
+        // Every other primitive is a tag identity.
+        if cls_ptr == Rc::as_ptr(&c.int_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bool_class) {
+            return Some(matches!(obj.kind(), ValueKind::Bool(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.str_class) {
+            return Some(matches!(obj.kind(), ValueKind::Str(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.float_class) {
+            return Some(matches!(obj.kind(), ValueKind::Float(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.list_class) {
+            return Some(matches!(obj.kind(), ValueKind::List(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.tuple_class) {
+            return Some(matches!(obj.kind(), ValueKind::Tuple(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.dict_class) {
+            return Some(matches!(obj.kind(), ValueKind::Dict(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.set_class) {
+            return Some(matches!(obj.kind(), ValueKind::Set(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bytes_class) {
+            return Some(matches!(obj.kind(), ValueKind::Bytes(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bytearray_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.canonical_class_tag()
+                        == Some(pyrust_core::CanonicalClassTag::Bytearray)
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.complex_class) {
+            return Some(matches!(obj.kind(), ValueKind::Complex(_, _)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.frozenset_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.canonical_class_tag()
+                        == Some(pyrust_core::CanonicalClassTag::Frozenset)
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.mappingproxy_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.canonical_class_tag()
+                        == Some(pyrust_core::CanonicalClassTag::MappingProxy)
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.none_class) {
+            return Some(matches!(obj.kind(), ValueKind::None));
+        }
+        if cls_ptr == Rc::as_ptr(&c.notimplemented_class) {
+            return Some(matches!(obj.kind(), ValueKind::NotImplemented));
+        }
+        if cls_ptr == Rc::as_ptr(&c.ellipsis_class) {
+            return Some(matches!(obj.kind(), ValueKind::Ellipsis));
+        }
+        None
+    })
+}
