@@ -15,7 +15,7 @@
 #     coercion of `default` and the positional-only argument list.
 
 import operator
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 
 
 def show(label, fn):
@@ -198,6 +198,46 @@ next(it)
 show("dictrev-partial", lambda: operator.length_hint(it))
 d[9] = 9
 show("dictrev-after-insert", lambda: operator.length_hint(it))
+
+# `Counter` and `defaultdict` cursors reach the same size-stamp rule down a
+# separate path: their frames carry no container guard, so the size comparison
+# in the cursor itself is what zeroes the hint.  Without these rows the branch
+# is unexercised.
+for name, make in (
+    ("counter", lambda: Counter({1: 1, 2: 2, 3: 3})),
+    ("defaultdict", lambda: defaultdict(int, {1: 1, 2: 2, 3: 3})),
+):
+    c = make()
+    it = iter(c)
+    probe(name + "-fresh", lambda c=c: iter(c))
+    next(it)
+    show(name + "-partial", lambda it=it: operator.length_hint(it))
+    c[9] = 9
+    show(name + "-after-insert", lambda it=it: operator.length_hint(it))
+    show(name + "-next-raises", lambda it=it: next(it))
+    show(name + "-hint-after-latch", lambda it=it: operator.length_hint(it))
+
+    c = make()
+    it = iter(c)
+    next(it)
+    del c[3]
+    show(name + "-after-delete", lambda it=it: operator.length_hint(it))
+
+    c = make()
+    it = iter(c)
+    next(it)
+    c[2] = 99
+    show(name + "-value-replaced", lambda it=it: operator.length_hint(it))
+
+    c = make()
+    it = iter(c)
+    next(it)
+    del c[2]
+    c[7] = 7
+    show(name + "-same-size-swap", lambda it=it: operator.length_hint(it))
+
+    show(name + "-view", lambda c=make(): operator.length_hint(iter(c.items())))
+    show(name + "-rev", lambda c=make(): operator.length_hint(reversed(c)))
 
 print("--- legacy __len__ + __getitem__ sequences ---")
 
