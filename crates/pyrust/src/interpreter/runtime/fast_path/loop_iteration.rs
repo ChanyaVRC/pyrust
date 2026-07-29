@@ -252,7 +252,7 @@ fn ensure_loop_collection_unchanged(
         return Ok(());
     }
     let message = if provider_sequence != 0 {
-        ordered_mapping_guard_message(container, recorded_len, provider_sequence)
+        ordered_mapping_guard_outcome(container, recorded_len, provider_sequence).message
     } else {
         default_message
     };

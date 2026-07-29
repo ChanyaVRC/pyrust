@@ -111,6 +111,12 @@ pub fn clear_sequence() -> u64 {
 
 /// Record a clear of the canonical mapping's backing dict.
 pub fn note_clear(backing_id: i64, previous_len: usize) {
+    // Clearing an already-empty mapping changes no length, so no guard can
+    // ever attribute a size change to it. Recording one would only displace
+    // the earlier clear a live iterator still needs to be diagnosed against.
+    if previous_len == 0 {
+        return;
+    }
     let sequence = CLEAR_SEQUENCE.with(|counter| {
         let current = counter.get();
         // A wrapped generation could make a post-creation clear look older
@@ -135,14 +141,31 @@ pub fn note_clear(backing_id: i64, previous_len: usize) {
     });
 }
 
-/// Select the provider-owned guard diagnostic after generic iteration has
+/// Provider-owned guard decision: the diagnostic plus how the raising
+/// iterator latches afterwards.
+#[derive(Clone, Copy)]
+pub struct GuardOutcome {
+    pub message: &'static str,
+    /// Whether the raise leaves the iterator permanently exhausted.
+    ///
+    /// CPython's `odict_iterator` reports the two arms with opposite latches.
+    /// The mutation arm drops the iterator's owning-mapping reference
+    /// (`Py_CLEAR(di->di_odict)`), so the `RuntimeError` surfaces once and
+    /// every later step reports plain exhaustion. The size arm instead stamps
+    /// `di_size = -1`, which can never match a real length again, so it
+    /// re-raises for the rest of the iterator's life — the same sticky
+    /// behavior a plain dict/set cursor has for its own size guard.
+    pub exhaust_after_raise: bool,
+}
+
+/// Select the provider-owned guard decision after generic iteration has
 /// resolved the backing identity and current length.
-pub fn guard_message(
+pub fn guard_outcome(
     backing_id: Option<i64>,
     recorded_len: usize,
     current_len: Option<usize>,
     iterator_sequence: u64,
-) -> &'static str {
+) -> GuardOutcome {
     let cleared = backing_id
         .and_then(|id| CLEAR_REGISTRY.with(|registry| registry.borrow().get(&id).copied()))
         .is_some_and(|mark| {
@@ -151,15 +174,21 @@ pub fn guard_message(
                 && current_len == Some(0)
         });
     if cleared {
-        "OrderedDict changed size during iteration"
+        GuardOutcome {
+            message: "OrderedDict changed size during iteration",
+            exhaust_after_raise: false,
+        }
     } else {
-        POLICY.mutation_message
+        GuardOutcome {
+            message: POLICY.mutation_message,
+            exhaust_after_raise: true,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CLEAR_REGISTRY, CLEAR_SEQUENCE, clear_sequence, guard_message, note_clear};
+    use super::{CLEAR_REGISTRY, CLEAR_SEQUENCE, clear_sequence, guard_outcome, note_clear};
 
     #[test]
     fn clear_sequence_saturates_without_hiding_later_mutation() {
@@ -167,12 +196,29 @@ mod tests {
         note_clear(17, 3);
 
         assert_eq!(clear_sequence(), u64::MAX);
-        assert_eq!(
-            guard_message(Some(17), 3, Some(0), u64::MAX),
-            "OrderedDict changed size during iteration"
-        );
+        let outcome = guard_outcome(Some(17), 3, Some(0), u64::MAX);
+        assert_eq!(outcome.message, "OrderedDict changed size during iteration");
 
         CLEAR_REGISTRY.with(|registry| registry.borrow_mut().remove(&17));
         CLEAR_SEQUENCE.with(|sequence| sequence.set(1));
+    }
+
+    /// The two arms latch in opposite directions: a clear keeps re-raising,
+    /// every other structural mutation reports once and then exhausts.
+    #[test]
+    fn only_the_clear_arm_keeps_raising() {
+        // No recorded clear for this backing: the mutation arm, which exhausts.
+        assert!(guard_outcome(Some(23), 3, Some(0), clear_sequence()).exhaust_after_raise);
+
+        note_clear(23, 3);
+        let cleared = guard_outcome(Some(23), 3, Some(0), 0);
+        assert_eq!(cleared.message, "OrderedDict changed size during iteration");
+        assert!(!cleared.exhaust_after_raise);
+
+        let mutated = guard_outcome(Some(23), 4, Some(5), 0);
+        assert_eq!(mutated.message, "OrderedDict mutated during iteration");
+        assert!(mutated.exhaust_after_raise);
+
+        CLEAR_REGISTRY.with(|registry| registry.borrow_mut().remove(&23));
     }
 }

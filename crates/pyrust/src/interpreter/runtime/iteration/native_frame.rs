@@ -348,6 +348,15 @@ impl NativeIterFrame {
         if self.exhausted {
             return Ok(Vec::new());
         }
+        // Same ordering `advance` uses: a provider that asks for
+        // exhaustion-first never reports a mutation to a cursor already at its
+        // end, so draining one yields nothing instead of raising.
+        if self.guard.as_ref().is_some_and(|guard| guard.exhaust_first)
+            && self.pos >= self.source_len()
+        {
+            self.latch_exhausted();
+            return Ok(Vec::new());
+        }
         self.guard_check()?;
         let len = self.source_len();
         let mut remaining = Vec::with_capacity(len.saturating_sub(self.pos));
@@ -383,7 +392,7 @@ impl NativeIterFrame {
 
     /// Check a dict/set/deque/provider-tagged mapping mutation guard.
     #[inline]
-    fn guard_check(&self) -> Result<()> {
+    fn guard_check(&mut self) -> Result<()> {
         // Live-key cursors own a shared mutation generation and perform their
         // size read only when that generation changes.
         if matches!(&self.source, NativeIterSource::LiveKeys { .. }) {
@@ -397,15 +406,23 @@ impl NativeIterFrame {
             GuardVersion::DequeState { counter } => Some(counter.get()),
         };
         if live != Some(guard.version) {
-            let message = if guard.provider_sequence != 0 {
-                ordered_mapping_guard_message(
+            let (message, exhaust_after_raise) = if guard.provider_sequence != 0 {
+                let outcome = ordered_mapping_guard_outcome(
                     &guard.container,
                     guard.version as usize,
                     guard.provider_sequence,
-                )
+                );
+                (outcome.message, outcome.exhaust_after_raise)
             } else {
-                guard.msg
+                (guard.msg, false)
             };
+            // A provider whose guard reports once leaves the iterator
+            // permanently exhausted, so every later step is plain
+            // StopIteration instead of a re-raise. Latching before returning
+            // keeps that true for `next()` and for native consumers alike.
+            if exhaust_after_raise {
+                self.latch_exhausted();
+            }
             return Err(PyError::Runtime(message.to_string()));
         }
         Ok(())
