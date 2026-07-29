@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
+use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
 
 use crate::object_model::{ModuleMutationState, PyClass, PyDict, StrKey, Value};

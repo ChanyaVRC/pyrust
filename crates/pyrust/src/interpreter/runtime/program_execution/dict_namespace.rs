@@ -164,13 +164,8 @@ impl Interpreter {
                 drop(namespace_mirror_guard);
                 self.vm_frame_views.pop();
                 record_exec_string_frame(self, &vm_result, &code.filename);
-                // Write fastlocals back to module env.
-                for (name, &idx) in local_index.iter() {
-                    if !regs[idx as usize].is_unset() {
-                        let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                        self.assign_name(name, val);
-                    }
-                }
+                // Write fastlocals back to module env, in binding order.
+                self.write_back_script_locals(&local_index, &mut regs);
                 vm_result.map(|_| ())
             }
             Some(gdict) => {

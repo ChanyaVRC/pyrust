@@ -1,11 +1,9 @@
 # Issue #389: globals() / locals() built-ins.
 #
-# Output is deliberately order-independent: we read specific keys from
-# the returned dicts rather than printing the dict itself, because
-# pyrust populates the module namespace from its own iteration order
-# (env values + active script-frame fastlocals) which need not match
-# CPython's insertion order across the boilerplate (`__builtins__`,
-# `__name__`, etc.).
+# This fixture reads specific keys from the returned dicts rather than
+# printing them, so it stays focused on lookup behaviour.  Module-namespace
+# key order is pinned separately by
+# `scoping/test_globals_insertion_order.py` (issue #2903).
 
 x = 5
 y = "hello"

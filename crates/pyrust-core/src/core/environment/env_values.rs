@@ -30,8 +30,13 @@ const ENV_INLINE_CAP: usize = 2;
 /// common 1–2 cell capture) and shares the name string via `Rc<str>` rather
 /// than owning a per-scope `String`. A scope that grows past `ENV_INLINE_CAP`
 /// (the module namespace, a class body with many attributes) promotes to a
-/// hashed `HashMap<Rc<str>, Value>`, so module-global lookups keep their
+/// hashed `IndexMap<Rc<str>, Value>`, so module-global lookups keep their
 /// near-O(1) cost.
+///
+/// Both representations are **insertion ordered** (issue #2903): a module
+/// namespace materialised from these bindings is a Python dict, and CPython
+/// guarantees dict order. Rebinding an existing name keeps its position;
+/// removing and re-inserting moves it to the end, exactly like `dict`.
 ///
 /// The public surface is deliberately small — `get` / `insert` / `remove` /
 /// `clear` / `iter` / `keys` / `values` / `is_empty` / `len` /
@@ -42,8 +47,9 @@ const ENV_INLINE_CAP: usize = 2;
 pub enum EnvValues {
     /// Few bindings, stored inline (function / closure / generator scopes).
     Inline(smallvec::SmallVec<[(Rc<str>, Value); ENV_INLINE_CAP]>),
-    /// Many bindings (module / class scope), hashed by name.
-    Map(HashMap<Rc<str>, Value, FxBuildHasher>),
+    /// Many bindings (module / class scope), hashed by name and kept in
+    /// insertion order.
+    Map(IndexMap<Rc<str>, Value, FxBuildHasher>),
 }
 
 impl Default for EnvValues {
@@ -98,7 +104,9 @@ impl EnvValues {
                 .iter()
                 .position(|(k, _)| &**k == name)
                 .map(|i| v.remove(i).1),
-            EnvValues::Map(m) => m.remove(name),
+            // `shift_remove` keeps the surviving bindings in insertion order,
+            // so a later re-insertion appends like `del d[k]; d[k] = v` does.
+            EnvValues::Map(m) => m.shift_remove(name),
         }
     }
 
@@ -179,8 +187,8 @@ impl EnvValues {
     /// the scope is known to be growing).
     fn promote(&mut self) {
         if let EnvValues::Inline(v) = self {
-            let mut m: HashMap<Rc<str>, Value, FxBuildHasher> =
-                HashMap::with_capacity_and_hasher(v.len() * 2, FxBuildHasher);
+            let mut m: IndexMap<Rc<str>, Value, FxBuildHasher> =
+                IndexMap::with_capacity_and_hasher(v.len() * 2, FxBuildHasher);
             for (k, val) in v.drain(..) {
                 m.insert(k, val);
             }

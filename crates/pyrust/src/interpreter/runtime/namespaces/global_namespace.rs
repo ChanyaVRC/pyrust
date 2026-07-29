@@ -128,18 +128,11 @@ impl Interpreter {
             // has not yet been read back through LoadGlobal.
             return globals;
         }
-        let pairs: Vec<(String, Value)> = root
-            .borrow()
-            .values
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.clone()))
-            .collect();
+        // Binding order, not map order: the dictionary this produces is a
+        // Python dict and CPython guarantees module-namespace insertion order
+        // (issue #2903).
+        let pairs = root.borrow().namespace_materialization_snapshot();
         for (name, value) in pairs {
-            let _ = globals.dict_insert(PyKey::str_from(&name), value);
-        }
-
-        let fastlocals = root.borrow().namespace_fastlocals_snapshot();
-        for (name, value) in fastlocals {
             let _ = globals.dict_insert(PyKey::str_from(&name), value);
         }
         root.borrow().activate_namespace_globals_alias(&globals);
