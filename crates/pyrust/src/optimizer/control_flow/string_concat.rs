@@ -457,6 +457,8 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | CmpJumpIfFalseConst(s, _, _, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | JumpIfNotInt(s, _)
+        | JumpIfNotBuiltinLen(s, _)
+        | LenSeqOrExit(_, s, _)
         | MatchExcept(s, _)
         | RecordClassStore(s)
         | RecordClassDel(s)
@@ -478,7 +480,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
-        | GetItemSeqOrExit(_, a, b, _)
+        | GetItemSeqIntOrExit(_, a, b, _)
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => {
             f(*a);

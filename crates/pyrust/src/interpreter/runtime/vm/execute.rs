@@ -927,12 +927,34 @@ impl Interpreter {
                         pc = jump_pc!(*offset);
                     }
                 }
-                Insn::GetItemSeqOrExit(dst, obj, idx, offset) => {
+                Insn::JumpIfNotBuiltinLen(reg, offset) => {
+                    // Entry guard for the out-of-line native-len loop copy: the
+                    // header's `LoadGlobal len` has just run, so this checks the
+                    // value it produced.  A shadowed or patched `len` diverts to
+                    // the original loop, which calls whatever the name now holds.
+                    if !value_is_builtin_len(&regs[*reg as usize]) {
+                        pc = jump_pc!(*offset);
+                    }
+                }
+                Insn::LenSeqOrExit(dst, seq, offset) => {
+                    // Mid-loop side exit: reading a canonical sequence's length
+                    // is the whole observable effect of the `len(seq)` call this
+                    // replaces, and it runs every iteration, so a mid-loop
+                    // resize moves the loop bound exactly as the call would.
+                    match try_builtin_sequence_len(&regs[*seq as usize]) {
+                        Some(length) => regs[*dst as usize] = Value::int(length),
+                        None => pc = jump_pc!(*offset),
+                    }
+                }
+                Insn::GetItemSeqIntOrExit(dst, obj, idx, offset) => {
                     // Mid-loop side exit: a canonical in-range sequence read is
                     // the whole observable effect, so on any other operand
                     // shape the deferred syncs are flushed by the stub at
                     // `offset` and the original subscript re-runs unchanged.
-                    match try_indexed_sequence_element(&regs[*obj as usize], &regs[*idx as usize]) {
+                    match try_indexed_sequence_int_element(
+                        &regs[*obj as usize],
+                        &regs[*idx as usize],
+                    ) {
                         Some(element) => regs[*dst as usize] = element,
                         None => pc = jump_pc!(*offset),
                     }

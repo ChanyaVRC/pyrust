@@ -12,7 +12,9 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::JumpIfIterNotIntRange(_, offset)
         | Insn::JumpIfIterNotIndexedSeq(_, offset)
         | Insn::JumpIfIterNotIntRangeExact(_, offset)
-        | Insn::GetItemSeqOrExit(_, _, _, offset)
+        | Insn::GetItemSeqIntOrExit(_, _, _, offset)
+        | Insn::JumpIfNotBuiltinLen(_, offset)
+        | Insn::LenSeqOrExit(_, _, offset)
         | Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
         | Insn::CmpJumpIfFalseConst(_, _, _, offset)
@@ -40,7 +42,7 @@ fn versioned_with_names(
 ) -> IntLoopVersioningResult {
     let mut num_regs = 16;
     let mut constants = constants.to_vec();
-    pass_int_loop_version(input, &mut constants, names, &mut num_regs)
+    pass_int_loop_version(input, &mut constants, names, 0, &mut num_regs)
 }
 
 fn version(input: Vec<Insn>, constants: &[Value]) -> Vec<Insn> {
@@ -326,7 +328,7 @@ fn constant_stop_fusion_allocates_one_temporary_and_uses_it() {
     let mut constants = vec![Value::int(10)];
     let mut num_regs = 2;
 
-    let result = pass_int_loop_version(input, &mut constants, &[], &mut num_regs);
+    let result = pass_int_loop_version(input, &mut constants, &[], 0, &mut num_regs);
 
     assert_eq!(num_regs, 3);
     assert!(
@@ -355,7 +357,7 @@ fn constant_stop_fusion_respects_the_frame_register_limit() {
     let mut constants = vec![Value::int(10)];
     let mut num_regs = MAX_FRAME_REGS;
 
-    let result = pass_int_loop_version(input.clone(), &mut constants, &[], &mut num_regs);
+    let result = pass_int_loop_version(input.clone(), &mut constants, &[], 0, &mut num_regs);
 
     assert_eq!(num_regs, MAX_FRAME_REGS);
     assert_eq!(result.insns, input);
@@ -375,7 +377,7 @@ fn interior_landing_rejects_fusion_without_allocating_a_temporary() {
     let mut constants = vec![Value::int(10)];
     let mut num_regs = 2;
 
-    let result = pass_int_loop_version(input.clone(), &mut constants, &[], &mut num_regs);
+    let result = pass_int_loop_version(input.clone(), &mut constants, &[], 0, &mut num_regs);
 
     assert_eq!(num_regs, 2);
     assert_eq!(result.insns, input);
@@ -738,34 +740,35 @@ fn a_subscript_side_exit_resumes_the_original_get_item() {
         .expect("the original subscript must stay in place as the deopt target");
     let fast_pc = insns
         .iter()
-        .position(|insn| matches!(insn, Insn::GetItemSeqOrExit(..)))
+        .position(|insn| matches!(insn, Insn::GetItemSeqIntOrExit(..)))
         .expect("the fast copy must run the deopting subscript form");
-    let Insn::GetItemSeqOrExit(dst, obj, idx, _) = insns[fast_pc] else {
+    let Insn::GetItemSeqIntOrExit(dst, obj, idx, _) = insns[fast_pc] else {
         unreachable!()
     };
     assert!(
         matches!(insns[original_get_item], Insn::GetItem(d, o, i) if (d, o, i) == (dst, obj, idx)),
         "the deopting form must carry the original operands: {insns:?}"
     );
-    let Insn::JumpIfNotInt(guarded, _) = insns[fast_pc + 1] else {
-        panic!("the element type is a per-iteration fact: {insns:?}");
-    };
-    assert_eq!(guarded, dst, "the side exit must guard the loaded element");
+    // The element type is a per-iteration fact carried by the same
+    // instruction: it shares the subscript's deopt target, so it needs no
+    // separate `JumpIfNotInt`.
+    assert!(
+        !matches!(insns[fast_pc + 1], Insn::JumpIfNotInt(guarded, _) if guarded == dst),
+        "the element check folds into the read rather than following it: {insns:?}"
+    );
 
-    // Both the out-of-range/non-sequence deopt and the non-int-element deopt
-    // resume at the original subscript, which re-reads the same element — or
-    // raises with its own line and caret.
-    for pc in [fast_pc, fast_pc + 1] {
-        let (syncs, resume) = stub_at(
-            insns,
-            jump_target(pc, &insns[pc]).expect("a side exit jumps to its stub"),
-        );
-        assert_eq!(syncs.len(), 2, "every deferred sync is flushed: {insns:?}");
-        assert_eq!(
-            resume, original_get_item,
-            "pc {pc} must resume at the original subscript: {insns:?}"
-        );
-    }
+    // The out-of-range, non-sequence and non-int-element deopts all resume at
+    // the original subscript, which re-reads the same element — or raises with
+    // its own line and caret.
+    let (syncs, resume) = stub_at(
+        insns,
+        jump_target(fast_pc, &insns[fast_pc]).expect("a side exit jumps to its stub"),
+    );
+    assert_eq!(syncs.len(), 2, "every deferred sync is flushed: {insns:?}");
+    assert_eq!(
+        resume, original_get_item,
+        "the subscript side exit must resume at the original subscript: {insns:?}"
+    );
 }
 
 #[test]
@@ -789,30 +792,50 @@ fn a_subscript_clobbering_its_own_operand_is_not_versioned() {
 
 #[test]
 fn side_exit_opcodes_participate_in_register_analysis_and_compaction() {
-    let subscript = Insn::GetItemSeqOrExit(4, 5, 6, 0);
+    let subscript = Insn::GetItemSeqIntOrExit(4, 5, 6, 0);
     let iter_guard = Insn::JumpIfIterNotIndexedSeq(0, 0);
+    let length = Insn::LenSeqOrExit(7, 8, 0);
+    let len_guard = Insn::JumpIfNotBuiltinLen(9, 0);
 
     assert!(insn_reads_reg(&subscript, 5));
     assert!(insn_reads_reg(&subscript, 6));
     assert!(!insn_reads_reg(&subscript, 4));
     assert!(!insn_reads_reg(&iter_guard, 0));
+    assert!(insn_reads_reg(&length, 8));
+    assert!(!insn_reads_reg(&length, 7));
+    assert!(insn_reads_reg(&len_guard, 9));
     let mut writes = HashSet::new();
     collect_writes(&subscript, &mut writes);
     assert_eq!(writes, HashSet::from([4]));
+    let mut writes = HashSet::new();
+    collect_writes(&length, &mut writes);
+    assert_eq!(writes, HashSet::from([7]));
+    let mut writes = HashSet::new();
+    collect_writes(&len_guard, &mut writes);
+    assert!(
+        writes.is_empty(),
+        "a value guard writes nothing: {writes:?}"
+    );
 
-    // Removing old pc 2 shifts both forward targets by one instruction.
+    // Removing old pc 3 shifts every forward target by one instruction.
     let compacted = compact(
         vec![
-            Insn::JumpIfIterNotIndexedSeq(0, 3),
-            Insn::GetItemSeqOrExit(1, 2, 3, 2),
-            Insn::LoadNone(4),
+            Insn::JumpIfIterNotIndexedSeq(0, 4),
+            Insn::GetItemSeqIntOrExit(1, 2, 3, 3),
+            Insn::JumpIfNotBuiltinLen(4, 2),
             Insn::LoadNone(5),
+            Insn::LenSeqOrExit(6, 7, 1),
             Insn::ReturnNone,
         ],
-        &[true, true, false, true, true],
+        &[true, true, true, false, true, true],
     );
-    assert!(matches!(compacted[0], Insn::JumpIfIterNotIndexedSeq(0, 2)));
-    assert!(matches!(compacted[1], Insn::GetItemSeqOrExit(1, 2, 3, 1)));
+    assert!(matches!(compacted[0], Insn::JumpIfIterNotIndexedSeq(0, 3)));
+    assert!(matches!(
+        compacted[1],
+        Insn::GetItemSeqIntOrExit(1, 2, 3, 2)
+    ));
+    assert!(matches!(compacted[2], Insn::JumpIfNotBuiltinLen(4, 1)));
+    assert!(matches!(compacted[3], Insn::LenSeqOrExit(6, 7, 1)));
 }
 
 #[test]
@@ -845,7 +868,9 @@ fn every_guarded_opcode_this_pass_emits_is_classified_late_stage() {
             }),
             1,
         ),
-        Insn::GetItemSeqOrExit(0, 1, 2, 1),
+        Insn::GetItemSeqIntOrExit(0, 1, 2, 1),
+        Insn::JumpIfNotBuiltinLen(0, 1),
+        Insn::LenSeqOrExit(0, 1, 1),
         Insn::CountCmpJumpTrue(0, BinaryOp::Lt, 1, 1, -1),
         Insn::CountCmpJumpFalse(0, BinaryOp::Lt, 1, 1, -1),
     ] {
@@ -959,6 +984,7 @@ fn closed_form_constants_hold_the_exact_fold() {
         const_range_loop(&[0, 1, 2], body),
         &mut constants,
         &range_names(),
+        0,
         &mut num_regs,
     );
 
@@ -1154,7 +1180,7 @@ fn closed_form_traces_a_negated_literal_bound() {
     let mut constants = vec![Value::int(100), Value::int(0), Value::int(7)];
     let mut num_regs = 16;
 
-    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), 0, &mut num_regs);
 
     let guard = result
         .insns
@@ -1202,7 +1228,7 @@ fn closed_form_declines_a_negated_literal_that_leaves_i64() {
     let mut constants = vec![Value::int(i64::MIN)];
     let mut num_regs = 16;
 
-    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), 0, &mut num_regs);
 
     assert!(
         !has_closed_form_guard(&result),
@@ -1230,7 +1256,7 @@ fn closed_form_declines_a_computed_bound_in_the_call_setup() {
     let mut constants = vec![Value::int(1000)];
     let mut num_regs = 16;
 
-    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), 0, &mut num_regs);
 
     assert!(
         !has_closed_form_guard(&result),
@@ -1435,5 +1461,241 @@ fn a_continue_reentered_header_exit_flushes_the_deferred_syncs() {
             > 0,
         "the copied header's exit must land on a deferred-sync stub, not the \
          original exit target: header_exit={header_exit} stream={insns:?}"
+    );
+}
+
+// ── `while i < len(seq):` headers ─────────────────────────────────────────
+
+fn len_names() -> Vec<String> {
+    ["len", "total", "i"].map(String::from).to_vec()
+}
+
+/// The module-scope shape the compiler emits for
+///
+/// ```text
+/// while i < len(xs):
+///     total += xs[i]
+///     i += 1
+/// ```
+///
+/// R0 is the sequence, R1 the accumulator, R2 the cursor, R3 the element
+/// scratch, R4 the call base and R5 its argument slot.  `pass_loop_inversion`
+/// leaves this shape alone: the back-edge has to re-run the whole call, so it
+/// stays an unconditional `Jump` to the `LoadGlobal`.
+fn len_header_loop(body: Vec<Insn>) -> Vec<Insn> {
+    let region = 3 + body.len() + 1;
+    let mut insns = vec![
+        Insn::LoadGlobal(4, 0),
+        Insn::Move(5, 0),
+        Insn::Call(4, 1),
+        Insn::CmpJumpIfFalse(2, BinaryOp::Lt, 4, (region - 3) as i32),
+    ];
+    insns.extend(body);
+    insns.push(Insn::Jump(-(region as i32 + 1)));
+    insns.push(Insn::Return(1));
+    insns
+}
+
+fn len_header_body() -> Vec<Insn> {
+    vec![
+        Insn::GetItem(3, 0, 2),
+        Insn::BinOpInPlace(1, 1, BinaryOp::Add, 3),
+        Insn::SyncModuleGlobal(1, 1),
+        Insn::BinOpImm(2, 2, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(2, 2),
+    ]
+}
+
+#[test]
+fn len_header_copy_reads_the_length_natively_every_iteration() {
+    let result = versioned_with_names(
+        len_header_loop(len_header_body()),
+        &[Value::int(1)],
+        &len_names(),
+    );
+    let insns = &result.insns;
+    let fast = &insns[result.source_prefix_len..];
+
+    assert!(
+        insns[..result.source_prefix_len]
+            .iter()
+            .any(|insn| matches!(insn, Insn::JumpIfNotBuiltinLen(4, _))),
+        "the entry guard must value-check the loaded callee: {insns:?}"
+    );
+    let len_read = fast
+        .iter()
+        .position(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
+        .expect("the header triple must become a native length read");
+    assert_eq!(
+        len_read, 0,
+        "the length read opens the copy, so the back-edge re-runs it: {insns:?}"
+    );
+    assert!(
+        !fast.iter().any(|insn| matches!(insn, Insn::Call(..))),
+        "the copy must not keep the call it specializes: {insns:?}"
+    );
+    // The copy rotates the header down to the latch, so the *loop* carries a
+    // second length read: the bound is re-derived on every pass, which is what
+    // lets a body that resizes the sequence move it.
+    let latch = fast
+        .iter()
+        .rposition(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
+        .expect("the latch re-reads the length");
+    assert!(
+        latch > 0,
+        "the latch read must be distinct from the entry read: {insns:?}"
+    );
+    let back = fast
+        .iter()
+        .position(|insn| matches!(insn, Insn::CountCmpJumpTrue(2, BinaryOp::Lt, 4, 1, _)))
+        .expect("the counter increment fuses into the rotated comparison");
+    assert_eq!(
+        back,
+        latch + 1,
+        "the fused latch must follow its length read: {insns:?}"
+    );
+    assert_eq!(
+        jump_target(result.source_prefix_len + back, &fast[back]),
+        Some(result.source_prefix_len + 2),
+        "the latch must jump back to the body top, past the entry test: {insns:?}"
+    );
+}
+
+#[test]
+fn len_header_latch_deopt_resumes_at_the_counter_increment() {
+    // The rotated latch reads the length *above* the increment, so a deopt
+    // there must resume the original at the increment — not at the region
+    // head, which would re-run the body for an index already consumed.
+    let result = versioned_with_names(
+        len_header_loop(len_header_body()),
+        &[Value::int(1)],
+        &len_names(),
+    );
+    let insns = &result.insns;
+    let latch = result.source_prefix_len
+        + insns[result.source_prefix_len..]
+            .iter()
+            .rposition(|insn| matches!(insn, Insn::LenSeqOrExit(4, 0, _)))
+            .expect("the latch re-reads the length");
+
+    let stub = jump_target(latch, &insns[latch]).expect("the latch read side-exits");
+    let terminal = stub
+        + insns[stub..]
+            .iter()
+            .position(|insn| !matches!(insn, Insn::SyncModuleGlobal(..)))
+            .expect("the stub ends in a jump");
+    let resume = jump_target(terminal, &insns[terminal]).expect("the stub jumps");
+    assert!(
+        matches!(insns[resume], Insn::BinOpImm(2, 2, BinaryOp::Add, 1, true)),
+        "the latch deopt must resume at the un-run increment: resume={resume} {insns:?}"
+    );
+}
+
+#[test]
+fn len_header_call_base_is_not_entry_guarded() {
+    // The call base is unset until the original `LoadGlobal` runs, so an entry
+    // `JumpIfNotInt` on it would divert every first entry and the copy would
+    // never execute — the #2922 body-temporary failure mode.
+    let result = versioned_with_names(
+        len_header_loop(len_header_body()),
+        &[Value::int(1)],
+        &len_names(),
+    );
+    assert!(
+        !result
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::JumpIfNotInt(4, _))),
+        "the call base must not be entry-guarded: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn len_header_side_exit_resumes_the_original_loop_not_the_guard_block() {
+    // Deopting to `jump_target[head]` would re-enter the entry guards, pass
+    // them again, and jump straight back into the copy that just failed.
+    let result = versioned_with_names(
+        len_header_loop(len_header_body()),
+        &[Value::int(1)],
+        &len_names(),
+    );
+    let insns = &result.insns;
+    let len_pc = result.source_prefix_len;
+    let Insn::LenSeqOrExit(..) = insns[len_pc] else {
+        panic!("the copy opens with its length read: {insns:?}");
+    };
+
+    let stub = jump_target(len_pc, &insns[len_pc]).expect("the length read side-exits");
+    let terminal = stub
+        + insns[stub..]
+            .iter()
+            .position(|insn| !matches!(insn, Insn::SyncModuleGlobal(..)))
+            .expect("the stub ends in a jump");
+    let resume = jump_target(terminal, &insns[terminal]).expect("the stub jumps");
+    assert!(
+        matches!(insns[resume], Insn::LoadGlobal(4, 0)),
+        "the deopt must resume at the original LoadGlobal: resume={resume} {insns:?}"
+    );
+    assert!(
+        !matches!(insns[resume + 1], Insn::JumpIfNotBuiltinLen(..)),
+        "resuming inside the guard block would spin on the failed check: {insns:?}"
+    );
+}
+
+#[test]
+fn len_header_declines_when_the_body_touches_the_call_scratch() {
+    // The copy never materialises the argument slot and rewrites the call base
+    // from the sequence, so a body that reads either would observe a register
+    // the copy does not maintain.
+    for extra in [Insn::Move(1, 5), Insn::Move(1, 4)] {
+        let mut body = len_header_body();
+        body.insert(0, extra.clone());
+        let input = len_header_loop(body);
+        assert_eq!(
+            versioned_with_names(input.clone(), &[Value::int(1)], &len_names()).insns,
+            input,
+            "a body reading {extra:?} must keep the original loop"
+        );
+    }
+}
+
+#[test]
+fn len_header_declines_when_the_call_base_aliases_a_fast_local() {
+    // With six fast locals the call base R4 and its argument slot R5 are named
+    // module bindings, visible through the namespace mirror; the copy leaves
+    // both stale, so the shape is not admitted at all.
+    let input = len_header_loop(len_header_body());
+    let mut constants = vec![Value::int(1)];
+    let mut num_regs = 16;
+    let names = len_names();
+    let result = pass_int_loop_version(input.clone(), &mut constants, &names, 6, &mut num_regs);
+    assert_eq!(
+        result.insns, input,
+        "a fast-local call base must keep the original loop"
+    );
+}
+
+#[test]
+fn len_header_declines_when_the_comparison_ignores_the_length() {
+    // Nothing reads the call's result, so specializing the header would elide
+    // a call whose only purpose is its side effects.
+    let mut input = len_header_loop(len_header_body());
+    input[3] = Insn::CmpJumpIfFalse(2, BinaryOp::Lt, 1, 6);
+    assert_eq!(
+        versioned_with_names(input.clone(), &[Value::int(1)], &len_names()).insns,
+        input,
+        "a header that does not compare against the length must not version"
+    );
+}
+
+#[test]
+fn len_header_declines_for_a_non_len_global() {
+    let names = ["size", "total", "i"].map(String::from).to_vec();
+    let input = len_header_loop(len_header_body());
+    assert_eq!(
+        versioned_with_names(input.clone(), &[Value::int(1)], &names).insns,
+        input,
+        "only the built-in `len` header shape is admitted"
     );
 }

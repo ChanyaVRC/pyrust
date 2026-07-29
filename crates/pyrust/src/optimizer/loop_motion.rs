@@ -356,7 +356,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | GetAttrForWith(r, _, _, _)
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
-        | GetItemSeqOrExit(r, _, _, _)
+        | GetItemSeqIntOrExit(r, _, _, _)
+        | LenSeqOrExit(r, _, _)
         | GetSlice(r, _, _)
         | GetAwaitable(r, _)
         | Call(r, _)
@@ -440,6 +441,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | CmpJumpIfFalseConst(..)
         | CmpJumpIfTrueConst(..)
         | JumpIfNotInt(..)
+        | JumpIfNotBuiltinLen(..)
         | Return(..)
         | ReturnNone
         | RaiseValue(..)
@@ -677,7 +679,9 @@ fn is_control_flow(insn: &Insn) -> bool {
             | JumpIfIterNotIntRange(..)
             | JumpIfIterNotIndexedSeq(..)
             | JumpIfIterNotIntRangeExact(..)
-            | GetItemSeqOrExit(..)
+            | GetItemSeqIntOrExit(..)
+            | JumpIfNotBuiltinLen(..)
+            | LenSeqOrExit(..)
             | CountCmpJumpTrue(..)
             | CountCmpJumpFalse(..)
             | CallInlineBinOp { .. }
