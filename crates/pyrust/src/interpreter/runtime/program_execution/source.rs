@@ -99,12 +99,7 @@ impl Interpreter {
                 record_exec_string_frame(self, &vm_result, &code.filename);
                 // Write fastlocals back to module env so names are visible
                 // after exec() returns, matching top-level assignment semantics.
-                for (name, &idx) in local_index.iter() {
-                    if !regs[idx as usize].is_unset() {
-                        let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                        self.assign_name(name, val);
-                    }
-                }
+                self.write_back_script_locals(&local_index, &mut regs);
                 vm_result.map(|_| ())
             }
             Some(gdict) => {

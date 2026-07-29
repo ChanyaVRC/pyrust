@@ -711,12 +711,7 @@ impl Interpreter {
         // StoreGlobal from nested scopes already updated the register via
         // the script-frame view (#520), so the write-back naturally carries
         // the correct value.
-        for (name, &idx) in local_index.iter() {
-            if !regs[idx as usize].is_unset() {
-                let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                self.assign_name(name, val);
-            }
-        }
+        self.write_back_script_locals(&local_index, &mut regs);
         // If a traceback was formatted, return it as a pre-formatted Runtime
         // error.  The `run_file` thread boundary extracts the raw message from
         // `PyError::Runtime` (without the "Runtime error: " prefix) so the
