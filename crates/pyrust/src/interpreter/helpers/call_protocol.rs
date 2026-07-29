@@ -191,6 +191,59 @@ fn resolve_and_validate_builtin_method(
     }
 }
 
+/// Apply `staticmethod` / `classmethod` descriptor binding to a special-method
+/// slot whose `UserFunction::kind` is not `Regular`, and invoke it.
+///
+/// `None` means "not a descriptor wrapper after all" (a `Builtin`-kind
+/// function, or a classmethod whose receiver has no resolvable class); the
+/// caller then falls through to its ordinary receiver-prepending path.
+///
+/// Deliberately `#[cold]` + `#[inline(never)]`: a staticmethod-in-a-dunder-slot
+/// is rare, but [`invoke_class_method`] is the shared implicit-dunder dispatch
+/// path that every `__init__`, `__getitem__`, `__len__` and `__eq__` call goes
+/// through.  Inlining these arms into that hot function regressed ordinary
+/// class construction by ~10% purely through lost inlining, so the cold work is
+/// kept out-of-line (issue #2939).
+#[cold]
+#[inline(never)]
+fn bind_descriptor_slot(
+    interp: &mut Interpreter,
+    f: &Rc<pyrust_core::UserFunction>,
+    instance: &Value,
+    args: &[ExpandedCallArg],
+) -> Option<Result<Value>> {
+    match f.kind {
+        // `staticmethod.__get__` yields the wrapped callable untouched — no
+        // receiver is passed.
+        pyrust_core::UserFunctionKind::StaticMethod => {
+            let unwrapped = match f.wrapped_func.as_ref() {
+                Some(inner) => Value::user_function(Rc::clone(inner)),
+                None => {
+                    Value::with_function_kind(Rc::clone(f), pyrust_core::UserFunctionKind::Regular)
+                }
+            };
+            Some(interp.call_function_expanded(unwrapped, args))
+        }
+        // `classmethod.__get__` binds the owning class in place of the
+        // receiver.  Resolve it exactly as the wrapped-classmethod branch in
+        // `invoke_class_method` does, so both spellings of `@classmethod` agree
+        // on what `cls` is.
+        pyrust_core::UserFunctionKind::ClassMethod => {
+            let owner = match instance.kind() {
+                ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                ValueKind::PyInstance(object) => Some(Rc::clone(&object.borrow().class)),
+                _ => match value_class(instance).kind() {
+                    ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                    _ => None,
+                },
+            }?;
+            let bound = Value::class_bound_method(Rc::clone(f), owner);
+            Some(interp.call_function_expanded(bound, args))
+        }
+        _ => None,
+    }
+}
+
 /// Invoke a method that was looked up on a class — handling both
 /// `UserFunction` methods (compiled Python bytecode, bound via the
 /// interpreter's user-function path) and `BuiltinFunction` methods
@@ -249,45 +302,19 @@ pub(crate) fn invoke_class_method(
             // stray `self`, and a classmethod dunder received the instance
             // where CPython passes the class (issue #2939).
             //
-            // CPython's `_PyObject_LookupSpecial` binds the type-level slot
-            // through the descriptor protocol, so honour the same outcomes
-            // here.  `Regular` (the overwhelmingly common case) and `Builtin`
-            // fall through the `_` arm into the unchanged receiver-prepending
-            // tail below, so the hot dunder dispatch pays one discriminant
-            // compare on a `Copy` tag already resident in the `UserFunction`
-            // this arm just matched — no extra load, no extra allocation.
-            match f.kind {
-                pyrust_core::UserFunctionKind::StaticMethod => {
-                    // `staticmethod.__get__` yields the wrapped callable
-                    // untouched — no receiver is passed.
-                    let unwrapped = match f.wrapped_func.as_ref() {
-                        Some(inner) => Value::user_function(Rc::clone(inner)),
-                        None => Value::with_function_kind(
-                            Rc::clone(f),
-                            pyrust_core::UserFunctionKind::Regular,
-                        ),
-                    };
-                    return interp.call_function_expanded(unwrapped, args);
-                }
-                pyrust_core::UserFunctionKind::ClassMethod => {
-                    // `classmethod.__get__` binds the owning class in place of
-                    // the receiver.  Resolve it exactly as the wrapped-
-                    // classmethod branch above does, so both spellings of
-                    // `@classmethod` agree on what `cls` is.
-                    let owner = match instance.kind() {
-                        ValueKind::PyClass(class) => Some(Rc::clone(class)),
-                        ValueKind::PyInstance(object) => Some(Rc::clone(&object.borrow().class)),
-                        _ => match value_class(&instance).kind() {
-                            ValueKind::PyClass(class) => Some(Rc::clone(class)),
-                            _ => None,
-                        },
-                    };
-                    if let Some(owner) = owner {
-                        let bound = Value::class_bound_method(Rc::clone(f), owner);
-                        return interp.call_function_expanded(bound, args);
-                    }
-                }
-                _ => {}
+            // The binding itself lives in the `#[cold]` `bind_descriptor_slot`
+            // so this arm keeps the exact shape (and inlining budget) it had
+            // before: a `Regular` slot — the overwhelmingly common case, and
+            // the one every `__init__` / `__getitem__` / `__len__` dispatch
+            // takes — pays one discriminant compare on a `Copy` tag already
+            // resident in the `UserFunction` just matched, then falls into the
+            // unchanged receiver-prepending tail.  Inlining the wrapper arms
+            // here instead cost ~10% on class construction even though the
+            // added code never ran on that path.
+            if f.kind != pyrust_core::UserFunctionKind::Regular
+                && let Some(result) = bind_descriptor_slot(interp, f, &instance, args)
+            {
+                return result;
             }
             let func = Rc::clone(f);
             return interp.call_user_function_expanded(func, args, &[instance]);
