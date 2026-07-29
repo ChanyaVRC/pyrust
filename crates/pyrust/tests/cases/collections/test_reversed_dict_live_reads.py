@@ -29,7 +29,9 @@
 # and not at another.  test_live_cursor_same_size_mutation.py documents the
 # same regime for forward walks.  The invariant pyrust does hold, and which is
 # checked below, is that no removed entry is ever yielded and no surviving
-# entry is yielded twice.
+# entry is yielded twice -- the second half on a mapping built large and then
+# deleted down, so that CPython has entry slots to spare, cannot compact, and
+# is duplicate-free too.
 
 from collections import OrderedDict
 
@@ -279,6 +281,42 @@ def structural(size, cut, victim):
 for size in (3, 5, 9):
     for victim in ("a", "c", chr(97 + size - 1)):
         print("structural", size, victim, structural(size, 1, victim))
+
+
+# ── The descending cursor re-anchors instead of holding a raw position ───────
+#
+# The three invariants above cannot tell a re-anchoring walk from one that
+# keeps a raw index: a mapping that renumbers its entries on delete shifts the
+# next live entry down into the slot the cursor already read, so re-reading
+# that slot yields a *duplicate of a surviving key* -- which is not a removed
+# entry, not the appended key, and does match the live mapping.  Only counting
+# duplicates separates the two, and at the sizes above CPython produces some of
+# its own from compaction, so the count is not comparable there.
+#
+# Building the mapping large and then deleting down to size fixes that: CPython
+# compacts only when an insert finds no free entry slot, and a mapping that was
+# built at `build` keys has slots to spare once it holds `keep`.  Its insert
+# therefore appends for every table size below, and the walk is duplicate-free
+# on both sides -- which is what re-anchoring on the last yielded key
+# reproduces, and what a raw descending position does not.
+def slack(build, keep, cut, victim):
+    mapping = {"k%03d" % index: index for index in range(build)}
+    for index in range(keep, build):
+        del mapping["k%03d" % index]
+    iterator = reversed(mapping.items())
+    observed = [next(iterator) for _ in range(cut)]
+    del mapping[victim]
+    mapping["kZZZ"] = 99
+    observed.extend(iterator)
+    keys = [key for key, _ in observed]
+    duplicates = sorted({key for key in keys if keys.count(key) > 1})
+    return keys, duplicates
+
+
+for build, keep in ((17, 5), (17, 9), (33, 9), (65, 17)):
+    for cut in (1, 2, 3):
+        for victim in ("k000", "k001"):
+            print("slack", build, keep, cut, victim, slack(build, keep, cut, victim))
 
 
 # ── The sticky size guard reaches every mapping iterator, not just dicts ─────
