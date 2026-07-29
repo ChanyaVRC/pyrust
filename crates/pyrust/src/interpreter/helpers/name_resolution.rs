@@ -100,34 +100,32 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
         // overwrite mutations performed through that dict after exec returned.
         return;
     }
-    let target_namespace = if explicit_globals.is_some() {
-        // With exec(code, globals, locals), ordinary module-code bindings live
-        // in locals while declared-global stores are already mirrored directly
-        // to globals by assign_name.  Never copy the merged root EnvValues
-        // snapshot into globals: it cannot distinguish those two providers.
-        interp
-            .explicit_locals_for_environment(&interp.env)
-            .expect("explicit globals registration also defines active locals")
-    } else {
+    if explicit_globals.is_none() {
         let me = module_env(&interp.env);
         let already_exposed = me.borrow().namespace_globals_exposed();
         let target = me.borrow().expose_namespace_globals();
         if already_exposed {
             return;
         }
-        // Sync env.values (dunders, names stored via StoreGlobal or
-        // assign_name) only into this root namespace's own provider.
-        let pairs: Vec<(String, Value)> = me
-            .borrow()
-            .values
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-        for (k, v) in pairs {
-            let _ = target.dict_insert(PyKey::str_from(&k), v);
+        // One ordered walk of this root: env-only bindings (dunders, names
+        // stored via StoreGlobal or assign_name) followed by every name the
+        // live Script layouts declare, in register order. The dict this fills
+        // is Python-visible, so its order is the module's binding order
+        // (issue #2903).
+        let pairs = me.borrow().namespace_materialization_snapshot();
+        for (name, value) in pairs {
+            let _ = target.dict_insert(PyKey::str_from(&name), value);
         }
-        target
-    };
+        me.borrow().activate_namespace_globals_alias(&target);
+        return;
+    }
+    // With exec(code, globals, locals), ordinary module-code bindings live in
+    // locals while declared-global stores are already mirrored directly to
+    // globals by assign_name.  Never copy the merged root EnvValues snapshot
+    // into globals: it cannot distinguish those two providers.
+    let target_namespace = interp
+        .explicit_locals_for_environment(&interp.env)
+        .expect("explicit globals registration also defines active locals");
     // Merge every live Script register file owned by this root. A nested exec
     // is registered after its outer frame, so its bound values win. Keeping
     // this snapshot in core also covers first exposure from a child
@@ -137,11 +135,6 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
         .namespace_fastlocals_snapshot();
     for (name, value) in fastlocals {
         let _ = target_namespace.dict_insert(PyKey::str_from(&name), value);
-    }
-    if explicit_globals.is_none() {
-        module_env(&interp.env)
-            .borrow()
-            .activate_namespace_globals_alias(&target_namespace);
     }
 }
 

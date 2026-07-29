@@ -211,43 +211,49 @@ impl Interpreter {
                 me.values.get_or_insert_with($name, || $val)
             }};
         }
+        // Seeding order is Python-visible: `list(globals())` starts with these
+        // keys in insertion order (issue #2903).  CPython 3.12 creates
+        // `__main__` with `__name__ __doc__ __package__ __loader__ __spec__`,
+        // then `__annotations__` and `__builtins__`, and the script runner
+        // appends `__file__` / `__cached__` last.
         seed_env!("__name__", intern_string("__main__"));
         seed_env!("__doc__", Value::none());
         seed_env!("__package__", Value::none());
-        seed_env!("__spec__", Value::none());
         seed_env!("__loader__", Value::none());
+        seed_env!("__spec__", Value::none());
+        seed_env!("__annotations__", Value::dict(PyDict::default()));
+        seed_env!("__builtins__", builtins_val);
         let script_file = self.script_filename.as_deref().map(Value::string);
         let has_script_file = script_file.is_some();
         if let Some(file) = script_file {
             seed_env!("__file__", file);
         }
         seed_env!("__cached__", Value::none());
-        seed_env!("__annotations__", Value::dict(PyDict::default()));
-        seed_env!("__builtins__", builtins_val);
-        // Mirror env values into the root-owned globals backing (issue #706).
+        // Mirror env values into the root-owned globals backing (issue #706)
+        // in the same order.
         // Only insert keys not already present in the dict (REPL re-run safety).
         let dunders: &[&str] = if has_script_file {
             &[
                 "__name__",
                 "__doc__",
                 "__package__",
-                "__spec__",
                 "__loader__",
-                "__file__",
-                "__cached__",
+                "__spec__",
                 "__annotations__",
                 "__builtins__",
+                "__file__",
+                "__cached__",
             ]
         } else {
             &[
                 "__name__",
                 "__doc__",
                 "__package__",
-                "__spec__",
                 "__loader__",
-                "__cached__",
+                "__spec__",
                 "__annotations__",
                 "__builtins__",
+                "__cached__",
             ]
         };
         for name in dunders {

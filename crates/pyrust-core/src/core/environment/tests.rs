@@ -375,6 +375,79 @@ mod tests {
     }
 
     #[test]
+    fn materialization_snapshot_follows_binding_order() {
+        // Issue #2903: the namespace dictionary this snapshot fills is a
+        // Python dict, so its order is the module's binding order.
+        let root = Environment::new(None);
+        {
+            let mut root = root.borrow_mut();
+            root.values.insert("__name__", Value::string("__main__"));
+            root.values.insert("captured", Value::int(1));
+            root.values.insert("from_function", Value::int(2));
+        }
+        // Registers are allocated in source binding order; `captured` is a
+        // module-level cell variable whose value lives in the env instead.
+        let local_index = Rc::new(HashMap::from([
+            ("imported".to_string(), 0_u32),
+            ("captured".to_string(), 1_u32),
+            ("later".to_string(), 2_u32),
+            ("never_bound".to_string(), 3_u32),
+        ]));
+        let mut regs = vec![
+            Value::int(10),
+            Value::unset(),
+            Value::int(30),
+            Value::unset(),
+        ];
+        let regs_ptr = NonNull::new(regs.as_mut_ptr()).expect("Vec storage is non-null");
+        let _guard = unsafe {
+            root.borrow()
+                .register_namespace_fastlocals(regs_ptr, regs.len(), &local_index)
+        };
+
+        let names: Vec<String> = root
+            .borrow()
+            .namespace_materialization_snapshot()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                // env-only bindings keep their own insertion order,
+                "__name__",
+                "from_function",
+                // then every declared name in register order; an unset
+                // register with an env binding keeps its declared position,
+                // and a never-bound register contributes no key.
+                "imported",
+                "captured",
+                "later",
+            ]
+        );
+    }
+
+    #[test]
+    fn env_values_keep_insertion_order_across_promotion() {
+        let mut values = super::EnvValues::new();
+        values.insert("first", Value::int(1));
+        values.insert("second", Value::int(2));
+        // Past ENV_INLINE_CAP the store promotes to its hashed form, which
+        // must stay insertion ordered (issue #2903).
+        values.insert("third", Value::int(3));
+        values.insert("fourth", Value::int(4));
+        // Rebinding does not move a key; removing and re-inserting appends.
+        values.insert("first", Value::int(11));
+        values.remove("second");
+        values.insert("second", Value::int(22));
+
+        let names: Vec<&str> = values.keys().collect();
+        assert_eq!(names, vec!["first", "third", "fourth", "second"]);
+        assert_eq!(values.get("first").and_then(Value::as_int), Some(11));
+        assert_eq!(values.get("second").and_then(Value::as_int), Some(22));
+    }
+
+    #[test]
     fn root_namespace_generations_saturate() {
         let root = Environment::new(None);
         {

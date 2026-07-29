@@ -258,23 +258,80 @@ impl Environment {
     /// Mirrors are visited in registration order so a nested Script frame is
     /// authoritative over an outer frame for names it has already bound.
     /// Unset inner slots do not erase an outer/root binding.
+    ///
+    /// Within one mirror the slots are visited in register order. The compiler
+    /// allocates a script's registers from `collect_local_names`, which walks
+    /// the module body in source order, so register order *is* the module's
+    /// binding order — the order CPython's module dict preserves (issue
+    /// #2903). The result keeps each name at the position of its first
+    /// binding while taking its value from the innermost mirror that bound it.
     pub fn namespace_fastlocals_snapshot(&self) -> Vec<(String, Value)> {
-        let mut snapshot = HashMap::new();
+        self.declared_bindings_in_binding_order(false)
+            .into_iter()
+            .collect()
+    }
+
+    /// Shared slot walk behind the two namespace snapshots.
+    ///
+    /// `env_fallback` additionally resolves a declared name whose register is
+    /// unset from this environment's own bindings, keeping it at its declared
+    /// position instead of appending it later.
+    fn declared_bindings_in_binding_order(&self, env_fallback: bool) -> IndexMap<String, Value> {
+        let mut declared: IndexMap<String, Value> = IndexMap::new();
         for mirror in self.root_namespace.live_mirrors() {
-            for (name, &slot) in mirror.local_index.iter() {
-                let slot = slot as usize;
-                if slot >= mirror.regs_len {
-                    continue;
-                }
+            let mut by_slot: Vec<(u32, &String)> = mirror
+                .local_index
+                .iter()
+                .map(|(name, &slot)| (slot, name))
+                .filter(|(slot, _)| (*slot as usize) < mirror.regs_len)
+                .collect();
+            // The name tie-breaker only matters for a layout that maps two
+            // names onto one register; it keeps the result independent of the
+            // layout map's iteration order in every case.
+            by_slot.sort_unstable();
+            for (slot, name) in by_slot {
                 // SAFETY: `live_mirrors` retains the mirror guard lifetime and
-                // the slot has been bounds checked.
-                let value = unsafe { mirror.regs_ptr.add(slot).as_ref() };
+                // the slot was bounds checked by the filter above.
+                let value = unsafe { mirror.regs_ptr.add(slot as usize).as_ref() };
                 if !value.is_unset() {
-                    snapshot.insert(name.clone(), value.clone());
+                    declared.insert(name.clone(), value.clone());
+                } else if env_fallback
+                    && !declared.contains_key(name.as_str())
+                    && let Some(value) = self.values.get(name)
+                {
+                    declared.insert(name.clone(), value.clone());
                 }
             }
         }
-        snapshot.into_iter().collect()
+        declared
+    }
+
+    /// Ordered `(name, value)` pairs that materialise this root's Python-visible
+    /// namespace dictionary (issue #2903).
+    ///
+    /// A module namespace is a Python dict, so its iteration order is part of
+    /// the language semantics. This walk reproduces the module's binding order:
+    ///
+    /// 1. bindings that only exist in `EnvValues` — the pre-seeded module
+    ///    dunders, names created by a `global` write from a function, earlier
+    ///    REPL statements — in their own insertion order;
+    /// 2. every name a live Script layout declares, in register order, which is
+    ///    the compiler's source binding order. A declared name whose register
+    ///    is unset because its value lives in `EnvValues` (a module-level cell
+    ///    variable captured by a nested function) keeps its declared position.
+    ///
+    /// Names already present in the target dictionary keep the position they
+    /// were first inserted at, exactly like `dict.__setitem__`.
+    pub fn namespace_materialization_snapshot(&self) -> Vec<(String, Value)> {
+        let declared = self.declared_bindings_in_binding_order(true);
+        let mut ordered: Vec<(String, Value)> = self
+            .values
+            .iter()
+            .filter(|(name, _)| !declared.contains_key(*name))
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
+        ordered.extend(declared);
+        ordered
     }
 
     /// Read the innermost live Script fast-local binding for one name.

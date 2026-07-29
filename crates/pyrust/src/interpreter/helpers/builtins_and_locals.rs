@@ -239,12 +239,15 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
         Some(view) if view.kind == FrameKind::Script => {
             // Module scope: include the module env (built-in
             // classes + already-spilled bindings) so the user sees the
-            // same complete view as `globals()`.
+            // same complete view as `globals()`.  The root's ordered
+            // materialisation walk covers both the env bindings and the live
+            // script registers, so module-scope `locals()` has exactly the
+            // key order `globals()` has (issue #2903).
             let me = module_env(&interp.env);
-            for (k, v) in me.borrow().values.iter() {
-                dict.insert(PyKey::str_from(k), v.clone());
+            let pairs = me.borrow().namespace_materialization_snapshot();
+            for (name, value) in pairs {
+                dict.insert(PyKey::str_from(&name), value);
             }
-            merge_frame_view_into_dict(view, &mut dict);
         }
         Some(view) if view.kind == FrameKind::Class => {
             // Class-body scope (issue #487): return the partially-built class
