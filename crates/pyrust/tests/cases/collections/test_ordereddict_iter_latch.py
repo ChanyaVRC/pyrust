@@ -118,23 +118,14 @@ MUTATIONS = (
 
 
 # ── The full latch matrix: one raise then exhaustion, except for clear() ─────
-def covered(view, kind):
-    # reversed(view.values()/items()) resolves its values eagerly here, so a
-    # value replaced mid-walk reads stale.  That is a separate defect from the
-    # latch (it affects plain dict identically and predates this fixture), and
-    # every other mutation kind is structural or a no-op, so only the kinds
-    # that actually rewrite an existing value are skipped for those two views.
-    return not (
-        kind in ("update_existing", "ior_existing")
-        and view in ("reversed_values", "reversed_items")
-    )
-
-
+#
+# Every view/mutation pair is covered.  The reversed value and item views used
+# to be excluded for the kinds that rewrite an existing value: they resolved
+# their values eagerly and read stale.  Issue #2932 made them live walks, so
+# they now belong in the matrix like every other view.
 for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
     for view in VIEWS:
         for kind in MUTATIONS:
-            if not covered(view, kind):
-                continue
             mapping = factory(a=1, b=2, c=3)
             iterator = get_iter(mapping, view)
             next(iterator)

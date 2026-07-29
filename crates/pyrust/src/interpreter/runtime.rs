@@ -297,8 +297,9 @@ pub(crate) use iteration::{
     LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard, ProviderIterator, RangeIter,
     ZipIter, builtin_iterator_has_length_hint, indexed_sequence_item, iter_values,
     live_collection_len, live_dict_view_item, make_iterator, make_reversed_dict_iter,
-    make_reversed_getitem_iterator, make_reversed_range_iterator, make_reversed_sequence_iterator,
-    ordered_mapping_guard_outcome, value_has_length_hint,
+    make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
+    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_outcome,
+    value_has_length_hint,
 };
 
 mod type_objects {

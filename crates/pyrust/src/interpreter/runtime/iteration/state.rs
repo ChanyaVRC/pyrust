@@ -33,6 +33,13 @@ pub(crate) enum NativeIterSource {
         value: Value,
         next_index: usize,
     },
+    /// Reverse walk over a live mapping's entries (`reversed(dict)` and the
+    /// three reversed dict views).
+    ///
+    /// Boxed so the reverse cursor's state does not widen every native
+    /// iterator frame — a frame is written whole on each loop entry and copied
+    /// with the frame of every suspended generator.
+    ReverseDict(Box<ReverseDictCursor>),
     /// Dict-view keys are snapshotted for stable order while values are read
     /// from the live backing mapping on each step.
     DictView {
@@ -52,6 +59,44 @@ pub(crate) enum NativeIterSource {
     },
     /// Permanently released after exhaustion or transfer to a loop fast path.
     Exhausted,
+}
+
+/// Descending entry cursor over a live mapping.
+///
+/// CPython's reverse dict iterators are a descending index into the mapping's
+/// entry array: both the key and the value are read from the entry the cursor
+/// reaches, so a value replaced mid-walk is observed (#2932). An unchanged
+/// mutation generation proves insertion order is frozen, which makes the
+/// descending position the entry's identity and reduces the ordinary step to
+/// one generation compare plus one indexed read. A changed generation drops
+/// back to the frame's size guard before the entry is read.
+pub(crate) struct ReverseDictCursor {
+    /// The `dict`, dict view, `mappingproxy`, or subclass carrier whose live
+    /// entries are read.
+    pub(crate) container: Value,
+    /// Backing mapping resolved once, for containers whose backing identity
+    /// cannot move. `None` re-probes `container` on every step.
+    pub(crate) backing: Option<pyrust_builtins::dict_views::DictRc>,
+    pub(crate) mutation_state: Option<pyrust_core::CollectionMutationState>,
+    pub(crate) observed_mutation: u64,
+    /// Entries still below the cursor. The next entry read is at index
+    /// `next_index - 1`, so this is also the walk's remaining count.
+    pub(crate) next_index: usize,
+    /// Key of the entry yielded last, used to re-anchor `next_index` after the
+    /// mapping is written. Kept only while the walk is live.
+    pub(crate) last_key: Option<PyKey>,
+    /// The mutation generation moved, so the raw position must be re-anchored
+    /// before the next entry is read.
+    pub(crate) relocate: bool,
+    /// 0 = key, 1 = value, 2 = item pair.
+    pub(crate) kind: u8,
+    /// Builtin subclasses can replace `__builtin_data__`; primitive containers
+    /// and views have a stable backing identity.
+    pub(crate) dynamic_backing: bool,
+    /// A size change has been reported. The generation shortcut must not
+    /// silence the frame's guard again, because CPython keeps re-raising for
+    /// the rest of the iterator's life (#2915).
+    pub(crate) size_changed: bool,
 }
 
 #[derive(Clone)]
