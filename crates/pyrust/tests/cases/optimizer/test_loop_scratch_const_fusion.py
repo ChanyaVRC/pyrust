@@ -152,3 +152,45 @@ try:
     _x / 2
 except OverflowError:
     print("bare binop line:", sys.exc_info()[2].tb_lineno)
+
+
+# The same, but *inside a loop body* and with a second fused op ahead of it, so
+# the raising op is no longer the first binop of its statement group.  Fusing a
+# `BinOp` into a `BinOpConst` removes the opcode the line table anchored on, and
+# the loop header's own comparison — itself fused into a `CmpJump*` — is what the
+# running-prefix fallback would blame instead of the raising statement.
+def bare_binop_lines_in_loop(b):
+    seen = []
+    i = 0
+    while i < 3:
+        b / 2
+        try:
+            b // 0
+        except ZeroDivisionError:
+            seen.append(sys.exc_info()[2].tb_lineno)
+        i += 1
+    return seen
+
+
+print("bare binop line in loop:", bare_binop_lines_in_loop(8))
+
+
+# A raising statement nested in `if` inside a `while` inside a *generator*: the
+# loop is inverted, so the header comparison exists twice in the optimized
+# stream while the source has it once.
+def raising_generator(n):
+    i = 0
+    while i < n:
+        yield i * 2
+        if i == 2:
+            i // 0
+        i += 1
+
+
+try:
+    list(raising_generator(5))
+except ZeroDivisionError:
+    tb = sys.exc_info()[2]
+    while tb.tb_next is not None:
+        tb = tb.tb_next
+    print("raising line in generator:", tb.tb_lineno)
