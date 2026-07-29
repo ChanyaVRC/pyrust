@@ -165,10 +165,19 @@ struct ClosedForm {
 /// This is a *proposal*, not a proof.  A rebound `range`, an aliased iterable,
 /// or a computed argument can all make the runtime iterator disagree with the
 /// triple returned here — which is precisely what the exact-bounds entry guard
-/// is for.  Requiring the whole `LoadGlobal range` + `LoadConst`s + `Call` +
+/// is for.  Requiring the whole `LoadGlobal range` + argument setup + `Call` +
 /// `GetIter` sequence to sit adjacent to the header, in the register layout the
 /// call convention dictates, just keeps the pass from proposing triples that
 /// could never match.
+///
+/// The setup is *interpreted* over a small int-constant environment rather than
+/// assumed to be one `LoadConst` per argument, because it is not: a negated
+/// literal reaches this pass as `LoadConst` + `UnaryOp(Neg)` + `Move`.
+/// `pass_unary_fold` would normally collapse that to a single `LoadConst`, but
+/// it declines whenever a back edge follows the pair — and a back edge always
+/// does here, since the whole point of the sequence is to feed a loop header.
+/// Reading only the rigid one-instruction-per-argument shape would therefore
+/// leave every negative bound and every negative step permanently unfoldable.
 fn traced_const_range_bounds(
     insns: &[Insn],
     consts: &[Value],
@@ -176,36 +185,68 @@ fn traced_const_range_bounds(
     head: usize,
     slot: u8,
 ) -> Option<(i64, i64, i64)> {
+    /// Instructions the compiler may spend materialising one argument:
+    /// `LoadConst` + `UnaryOp(Neg)` + `Move` is the widest shape admitted here.
+    const MAX_SETUP_PER_ARG: usize = 3;
+
     let Insn::GetIter(iter_slot, base) = *insns.get(head.checked_sub(1)?)? else {
         return None;
     };
-    let Insn::Call(callee, argc) = *insns.get(head.checked_sub(2)?)? else {
+    let call_at = head.checked_sub(2)?;
+    let Insn::Call(callee, argc) = insns[call_at] else {
         return None;
     };
     if iter_slot != slot || callee != base || !(1..=3).contains(&argc) {
         return None;
     }
     let argc = usize::from(argc);
-    let load_global = head.checked_sub(3 + argc)?;
-    let Insn::LoadGlobal(dst, name_idx) = insns[load_global] else {
-        return None;
-    };
-    if dst != base || names.get(usize::from(name_idx)).map(String::as_str) != Some("range") {
-        return None;
+    // The setup is not a fixed length, so the producing `LoadGlobal` is not at a
+    // fixed distance: take the nearest one that loads the call base, no further
+    // back than the widest setup this trace admits.
+    let window_start = call_at.saturating_sub(1 + argc * MAX_SETUP_PER_ARG);
+    let load_global = (window_start..call_at).rev().find(|&i| {
+        matches!(
+            insns[i],
+            Insn::LoadGlobal(dst, name_idx)
+                if dst == base
+                    && names.get(usize::from(name_idx)).map(String::as_str) == Some("range")
+        )
+    })?;
+
+    // Interpret the setup.  Anything outside this whitelist — a computed bound,
+    // a call, a register defined before the window — abandons the proposal
+    // rather than guessing, so the pass never emits a copy whose guard could
+    // not match.
+    let mut env: Vec<(Reg, i64)> = Vec::new();
+    for insn in &insns[load_global + 1..call_at] {
+        let (dst, value) = match *insn {
+            Insn::LoadConst(dst, cidx) => {
+                let value = consts.get(usize::from(cidx))?;
+                if value.is_unset() || !matches!(value.kind(), ValueKind::Int(_)) {
+                    return None;
+                }
+                (dst, value.as_int()?)
+            }
+            // `-i64::MIN` promotes to `BigInt`, which no machine-int cursor can
+            // hold, so declining on the overflow is also the right answer.
+            Insn::UnaryOp(dst, crate::ast::UnaryOp::Neg, src) => (
+                dst,
+                env.iter().find(|(reg, _)| *reg == src)?.1.checked_neg()?,
+            ),
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                (dst, env.iter().find(|(reg, _)| *reg == src)?.1)
+            }
+            _ => return None,
+        };
+        match env.iter_mut().find(|(reg, _)| *reg == dst) {
+            Some((_, current)) => *current = value,
+            None => env.push((dst, value)),
+        }
     }
+
     let mut args = [0i64; 3];
     for (k, arg) in args.iter_mut().take(argc).enumerate() {
-        let Insn::LoadConst(dst, cidx) = insns[load_global + 1 + k] else {
-            return None;
-        };
-        if dst != base + 1 + k as Reg {
-            return None;
-        }
-        let value = consts.get(usize::from(cidx))?;
-        if value.is_unset() || !matches!(value.kind(), ValueKind::Int(_)) {
-            return None;
-        }
-        *arg = value.as_int()?;
+        *arg = env.iter().find(|(reg, _)| *reg == base + 1 + k as Reg)?.1;
     }
     match argc {
         1 => Some((0, args[0], 1)),

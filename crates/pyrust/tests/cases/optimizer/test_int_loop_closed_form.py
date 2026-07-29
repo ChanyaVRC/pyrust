@@ -32,6 +32,27 @@ for m in range(100, 0, -7):
     down += m
 print("negative step", down, m)
 
+# Negative literals reach the pass as an un-folded `UnaryOp(Neg)` sequence
+# (`pass_unary_fold` declines to fold across the loop's back edge), so the whole
+# negative-bound family exercises the trace's constant interpretation.
+neg = 0
+for na in range(-20, -3):
+    neg += na
+print("negative start", neg, na)
+
+both = 0
+for nb in range(-2, -40, -5):
+    both -= nb
+print("negative everything", both, nb)
+
+# A negative step that overshoots binds only the first value.
+short = 0
+for nc in range(5, 4, -1):
+    short += nc
+print("negative one-trip", short, nc)
+
+print("negative zero-trip", [nd for nd in range(0, 10, -1)], "nd" in globals())
+
 # A step wider than the span yields exactly one value.
 wide = 0
 for n in range(0, 10, 100):

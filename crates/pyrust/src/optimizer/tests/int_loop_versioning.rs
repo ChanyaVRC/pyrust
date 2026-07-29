@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::ast::BinaryOp;
+use crate::ast::{BinaryOp, UnaryOp};
 use crate::bytecode::EXC_NO_HANDLER;
 
 fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
@@ -1128,4 +1128,113 @@ fn closed_form_guard_leads_the_chain_without_displacing_the_ordinary_copies() {
             );
         }
     }
+}
+
+#[test]
+fn closed_form_traces_a_negated_literal_bound() {
+    // `for v in range(100, 0, -7): total += v`.  A negative literal survives as
+    // `LoadConst` + `UnaryOp(Neg)` + `Move` because `pass_unary_fold` declines
+    // to fold across the loop's back edge, so the trace must interpret the
+    // setup rather than assume one instruction per argument.
+    let insns = vec![
+        Insn::LoadGlobal(2, 0),
+        Insn::LoadConst(3, 0),
+        Insn::LoadConst(4, 1),
+        Insn::LoadConst(6, 2),
+        Insn::UnaryOp(6, UnaryOp::Neg, 6),
+        Insn::Move(5, 6),
+        Insn::Call(2, 3),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpInPlace(0, 0, BinaryOp::Add, 1),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+    let mut constants = vec![Value::int(100), Value::int(0), Value::int(7)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+
+    let guard = result
+        .insns
+        .iter()
+        .find_map(|insn| match insn {
+            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard.clone()),
+            _ => None,
+        })
+        .expect("a negated constant bound must still fold");
+    assert_eq!(
+        (guard.slot, guard.start, guard.stop, guard.step),
+        (0, 100, 0, -7),
+        "the guard must pin the negated step it folded"
+    );
+
+    let copies = fast_copies(&result);
+    let Insn::LoadConst(1, var_slot) = copies[0] else {
+        panic!("expected the loop variable's final binding: {copies:?}")
+    };
+    let Insn::BinOpConst(0, 0, BinaryOp::Add, delta_slot, _) = copies[1] else {
+        panic!("expected the folded accumulator add: {copies:?}")
+    };
+    // range(100, 0, -7) yields 15 values, 100 down to 2, summing to 765.
+    assert_eq!(constants[usize::from(var_slot)].as_int(), Some(2));
+    assert_eq!(constants[usize::from(delta_slot)].as_int(), Some(765));
+}
+
+#[test]
+fn closed_form_declines_a_negated_literal_that_leaves_i64() {
+    // `-i64::MIN` promotes to `BigInt`, which the machine-int cursor the guard
+    // tests for can never hold.
+    let insns = vec![
+        Insn::LoadGlobal(2, 0),
+        Insn::LoadConst(4, 0),
+        Insn::UnaryOp(4, UnaryOp::Neg, 4),
+        Insn::Move(3, 4),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+    let mut constants = vec![Value::int(i64::MIN)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a bound that leaves i64 under negation must not fold: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_computed_bound_in_the_call_setup() {
+    // The setup whitelist is closed: an instruction it cannot interpret ends
+    // the proposal instead of leaving a stale register to be read as a bound.
+    let insns = vec![
+        Insn::LoadGlobal(2, 0),
+        Insn::LoadConst(4, 0),
+        Insn::BinOpImm(3, 4, BinaryOp::Add, 1, false),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+    let mut constants = vec![Value::int(1000)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a computed bound must not be traced as a constant: {:?}",
+        result.insns
+    );
 }
