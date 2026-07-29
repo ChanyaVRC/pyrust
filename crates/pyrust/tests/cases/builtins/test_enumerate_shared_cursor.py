@@ -167,3 +167,131 @@ for pair in enumerate([1, 2, 3, 4]):
     box.append(pair)
     box.append(pair[0])
 print("boxed", box, all_distinct([entry for entry in box if isinstance(entry, tuple)]))
+
+
+# ===========================================================================
+# enumerate(range(...)): the same sharing obligations for a generated element
+# source. The inner cursor is the range iterator's own, so nothing below may
+# observe the loop having moved it out of an object another name can reach.
+# ===========================================================================
+
+# --- the inner range iterator stays shared ---
+it = iter(range(6))
+e = enumerate(it)
+print("range alias", next(e), next(it))
+for i, x in e:
+    print("range loop", i, x)
+    if i == 2:
+        break
+print("range inner left", list(it))
+
+# --- break, then resume the same enumerate ---
+e = enumerate(range(5))
+for i, x in e:
+    if i == 2:
+        break
+print("range after break", next(e))
+for i, x in e:
+    print("range resumed", i, x)
+print("range drained", list(e))
+
+# --- next() interleaved with the loop consumes from the same cursor ---
+e = enumerate(range(6))
+seen = []
+for pair in e:
+    seen.append(pair)
+    try:
+        seen.append(next(e))
+    except StopIteration:
+        seen.append("stop")
+print("range interleaved", seen)
+
+# --- two loops over one enumerate object continue, never restart ---
+e = enumerate(range(4), 10)
+for i, x in e:
+    for j, y in e:
+        print("range nested", i, x, j, y)
+        break
+print("range nested left", list(e))
+
+# --- step, negative step, and zero-trip ranges ---
+for src in (range(0), range(0, 0, -1), range(5, 5), range(1), range(0, 10, 4),
+            range(10, 0, -3), range(-3, 3), range(2, -8, -5)):
+    walked = []
+    for i, x in enumerate(src, 1):
+        walked.append((i, x))
+    print("range walk", src.start, src.stop, src.step, walked)
+
+# --- i64-boundary cursors, and the arbitrary-precision ranges beside them ---
+top = 1 << 63
+for src in (range(-top, -top + 3), range(top - 3, top - 1), range(-top, -top + 6, 2),
+            range(top - 1, top - 7, -3), range(1 << 70, (1 << 70) + 3),
+            range(-(1 << 70), -(1 << 70) + 3), range(0, 1 << 100, 1 << 99),
+            range(top - 2, -top, -(1 << 62))):
+    walked = []
+    for i, x in enumerate(src):
+        walked.append((i, x))
+    print("range boundary", walked)
+
+# --- the counter promotes past the i64 boundary over a range too (#2125) ---
+walked = []
+for i, x in enumerate(range(4), (1 << 63) - 2):
+    walked.append(i)
+print("range counter", walked)
+for i, x in enumerate(range(2), 1 << 70):
+    print("range bigstart", i, x)
+for i, x in enumerate(range(2), -(1 << 64)):
+    print("range negstart", i, x)
+for i, x in enumerate(range(2), True):
+    print("range boolstart", i, x)
+
+# --- loop targets that must not take the fused two-register store ---
+for pair in enumerate(range(3), 7):
+    print("range single", pair, type(pair).__name__)
+for i, *rest in enumerate(range(2)):
+    print("range star", i, rest)
+for i, (a, b) in enumerate(zip(range(2), range(10, 12)), 5):
+    print("range nested target", i, a, b)
+try:
+    for i, x, y in enumerate(range(2)):
+        pass
+except ValueError as exc:
+    print("range ValueError", exc)
+
+# --- the loop step survives an exception and a generator suspension ---
+e = enumerate(range(4))
+try:
+    for i, x in e:
+        if i == 1:
+            raise RuntimeError("boom")
+except RuntimeError as exc:
+    print("range caught", exc)
+print("range after raise", list(e))
+
+
+def drive_range(n):
+    for i, x in enumerate(range(n), 100):
+        yield (i, x)
+
+
+g = drive_range(3)
+print("range gen", next(g))
+print("range gen rest", list(g))
+
+# --- a partly consumed range iterator still enumerates from the start ---
+it = iter(range(4))
+next(it)
+for i, x in enumerate(it, 1):
+    print("range partial", i, x)
+
+# --- reversed(range(...)) is a range cursor too ---
+for i, x in enumerate(reversed(range(4)), 1):
+    print("range reversed", i, x)
+for i, x in enumerate(reversed(range(0, 9, 4))):
+    print("range reversed step", i, x)
+
+# --- a single-target loop over a range yields a fresh tuple every iteration ---
+kept = []
+for pair in enumerate(range(3)):
+    kept.append(pair)
+print("range fresh", kept, all_distinct(kept), kept == list(enumerate(range(3))))

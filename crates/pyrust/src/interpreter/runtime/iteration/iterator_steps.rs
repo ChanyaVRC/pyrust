@@ -31,7 +31,8 @@ fn next_enumerate_counter(counter: &Value) -> Value {
 }
 
 /// Advance an `enumerate(...)` whose inner iterator is an unguarded built-in
-/// element cursor, yielding the `(counter, element)` pair unwrapped.
+/// element cursor or an i64 range cursor, yielding the `(counter, element)`
+/// pair unwrapped.
 ///
 /// This is the same state transition as [`Interpreter::step_enumerate_iter`]
 /// with the adapter chain's per-step dispatch removed: the concrete types were
@@ -48,35 +49,59 @@ fn next_enumerate_counter(counter: &Value) -> Value {
 pub(crate) fn advance_enumerate_elements(
     cursor: &EnumerateElementCursor,
 ) -> Option<(Value, Value)> {
-    let counter = {
-        let borrow = cursor.enumerate.borrow();
-        let state = borrow
-            .downcast_ref::<EnumerateIter>()
-            .expect("classified enumerate cursor keeps its state type");
-        if state.done {
-            return None;
-        }
-        state.counter.clone()
-    };
-    let item = cursor
-        .frame
-        .borrow_mut()
-        .downcast_mut::<NativeIterFrame>()
-        .expect("classified enumerate source keeps its frame type")
-        .advance_element();
+    // The counter cell is held across the inner advance. The two cells are
+    // always distinct — one holds an `EnumerateIter`, the other a
+    // `NativeIterFrame` or a `RangeIter` — and neither inner step can run
+    // Python code, so nothing can re-enter the enumerate object here.
     let mut borrow = cursor.enumerate.borrow_mut();
     let state = borrow
         .downcast_mut::<EnumerateIter>()
         .expect("classified enumerate cursor keeps its state type");
-    match item {
-        Some(item) => {
-            state.counter = next_enumerate_counter(&counter);
-            Some((counter, item))
+    if state.done {
+        return None;
+    }
+    let item = match &cursor.inner {
+        EnumerateInnerCursor::Frame(frame) => frame
+            .borrow_mut()
+            .downcast_mut::<NativeIterFrame>()
+            .expect("classified enumerate source keeps its frame type")
+            .advance_element(),
+        EnumerateInnerCursor::Range(range) => range
+            .borrow_mut()
+            .downcast_mut::<RangeIter>()
+            .expect("classified enumerate source keeps its range cursor type")
+            .advance(),
+    };
+    let Some(item) = item else {
+        state.done = true;
+        return None;
+    };
+    let next = next_enumerate_counter(&state.counter);
+    Some((std::mem::replace(&mut state.counter, next), item))
+}
+
+impl RangeIter {
+    /// Yield `cur` and move the cursor one step, or `None` once `stop` is
+    /// reached.
+    ///
+    /// Shared by [`Interpreter::step_range_iter`] and the enumerate loop step
+    /// so the two cannot drift at the cursor's final increment.
+    #[inline]
+    pub(crate) fn advance(&mut self) -> Option<Value> {
+        let exhausted = if self.step > 0 {
+            self.cur >= self.stop
+        } else {
+            self.cur <= self.stop
+        };
+        if exhausted {
+            return None;
         }
-        None => {
-            state.done = true;
-            None
-        }
+        let value = self.cur;
+        // A valid range never yields an out-of-i64 value. Saturation handles
+        // the final overshooting addition without wrapping the cursor back
+        // across the stop boundary.
+        self.cur = self.cur.saturating_add(self.step);
+        Some(Value::int(value))
     }
 }
 
@@ -414,21 +439,7 @@ impl Interpreter {
         let state = borrow.downcast_mut::<RangeIter>().ok_or_else(|| {
             PyError::Runtime("step_range_iter on non-RangeIter state".to_string())
         })?;
-        let exhausted = if state.step > 0 {
-            state.cur >= state.stop
-        } else {
-            state.cur <= state.stop
-        };
-        if exhausted {
-            return Ok(None);
-        }
-
-        let value = state.cur;
-        // A valid range never yields an out-of-i64 value. Saturation handles
-        // the final overshooting addition without wrapping the cursor back
-        // across the stop boundary.
-        state.cur = state.cur.saturating_add(state.step);
-        Ok(Some(Value::int(value)))
+        Ok(state.advance())
     }
 
     /// One step of the lazy `zip(it1, it2, ..., strict=False)` iterator.

@@ -62,9 +62,10 @@ pub(crate) enum IterState {
     },
     /// Iterator object produced by the generic Python iteration protocol.
     UserDefined(Value),
-    /// `enumerate(...)` over a built-in element iterator. The counter and the
-    /// element position stay in the cells the enumerate object and its inner
-    /// iterator own, so this is a cost specialization only.
+    /// `enumerate(...)` over a built-in element iterator or a range cursor.
+    /// The counter and the element position stay in the cells the enumerate
+    /// object and its inner iterator own, so this is a cost specialization
+    /// only.
     EnumerateElements(EnumerateElementCursor),
     /// Snapshot plus a live collection-size guard.
     MaterializedGuarded {
@@ -350,15 +351,17 @@ impl Interpreter {
     }
 }
 
-/// Classify `enumerate(sequence)` for the loop's inline pair step.
+/// Classify `enumerate(sequence)` / `enumerate(range(...))` for the loop's
+/// inline pair step.
 ///
 /// Succeeds whenever the inner iterator is an unguarded element walk over a
-/// list, tuple, snapshot, `bytes`, or `str`, including a partly consumed one:
-/// the specialization retains both shared cells rather than moving their
-/// cursors, so there is nothing to prove about aliasing. Every other inner
-/// iterator — a generator, `map`, a guarded dict/set cursor, a user iterator —
-/// keeps the generic adapter path, whose per-step protocol dispatch is exactly
-/// the observable behaviour.
+/// list, tuple, snapshot, `bytes`, or `str`, or the i64-backed range cursor —
+/// including a partly consumed one: the specialization retains both shared
+/// cells rather than moving their cursors, so there is nothing to prove about
+/// aliasing. Every other inner iterator — a generator, `map`, an
+/// arbitrary-precision `BigRangeIter`, a guarded dict/set cursor, a user
+/// iterator — keeps the generic adapter path, whose per-step protocol dispatch
+/// is exactly the observable behaviour.
 fn enumerate_element_cursor(source: &Value) -> Option<EnumerateElementCursor> {
     let ValueKind::Generator(enumerate) = source.kind() else {
         return None;
@@ -367,20 +370,23 @@ fn enumerate_element_cursor(source: &Value) -> Option<EnumerateElementCursor> {
         let borrow = enumerate.try_borrow().ok()?;
         borrow.downcast_ref::<EnumerateIter>()?.source.clone()
     };
-    let ValueKind::Generator(frame) = inner.kind() else {
+    let ValueKind::Generator(cell) = inner.kind() else {
         return None;
     };
-    let unguarded_elements = frame
-        .try_borrow()
-        .ok()?
-        .downcast_ref::<NativeIterFrame>()?
-        .is_unguarded_element_source();
-    if !unguarded_elements {
+    let borrow = cell.try_borrow().ok()?;
+    let inner = if let Some(frame) = borrow.downcast_ref::<NativeIterFrame>() {
+        if !frame.is_unguarded_element_source() {
+            return None;
+        }
+        EnumerateInnerCursor::Frame(Rc::clone(cell))
+    } else if borrow.is::<RangeIter>() {
+        EnumerateInnerCursor::Range(Rc::clone(cell))
+    } else {
         return None;
-    }
+    };
     Some(EnumerateElementCursor {
         enumerate: Rc::clone(enumerate),
-        frame: Rc::clone(frame),
+        inner,
     })
 }
 
