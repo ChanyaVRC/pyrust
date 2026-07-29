@@ -80,6 +80,16 @@ impl Interpreter {
                         target.clone(),
                     ));
                 }
+                // Issue #2920: only the concrete built-in iterators carry a
+                // remaining-count slot.  A generator, `map`/`filter`/`zip`,
+                // `enumerate`, and `callable_iterator` have none, so this
+                // attribute must stay absent for them.
+                "__length_hint__" if value_has_length_hint(target) => {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name.to_string(),
+                        target.clone(),
+                    ));
+                }
                 _ => {}
             }
         }

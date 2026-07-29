@@ -26,8 +26,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::Interpreter;
-use crate::value::PyKey;
+use crate::interpreter::{ExpandedCallArg, Interpreter};
+use crate::value::{PyKey, Value};
 use pyrust_derive::pyrust_module;
 
 /// Python-source definitions for every public `operator` member.  Exec'd once
@@ -35,8 +35,14 @@ use pyrust_derive::pyrust_module;
 const OPERATOR_PY_SOURCE: &str = include_str!("operator_py.py");
 
 /// Public names from `OPERATOR_PY_SOURCE` exported onto the `operator` module.
-/// Matches CPython 3.12's `operator.__all__` exactly.
-const OPERATOR_PY_EXPORTS: [&str; 55] = [
+///
+/// Matches CPython 3.12's `operator.__all__` minus `length_hint`: CPython's
+/// `Lib/operator.py` ends with `from _operator import *`, so the accelerated C
+/// definitions shadow the Python ones, and `length_hint` is the one member
+/// whose two implementations observably differ (issue #2920).  It is declared
+/// natively below instead, and must not be overwritten from the Python
+/// namespace here.
+const OPERATOR_PY_EXPORTS: [&str; 54] = [
     "abs",
     "add",
     "and_",
@@ -73,7 +79,6 @@ const OPERATOR_PY_EXPORTS: [&str; 55] = [
     "itruediv",
     "ixor",
     "le",
-    "length_hint",
     "lshift",
     "lt",
     "matmul",
@@ -117,4 +122,55 @@ pub(crate) fn inject_python_members(
     Ok(())
 }
 
-pyrust_module! {}
+pyrust_module! {
+    /// CPython: operator.length_hint(obj, default=0) → int.
+    /// <https://docs.python.org/3/library/operator.html#operator.length_hint>
+    ///
+    /// The accelerated `_operator.length_hint` (which shadows the Python
+    /// definition in `Lib/operator.py`) is a thin wrapper over
+    /// `PyObject_LengthHint`, so this body only parses the argument list and
+    /// hands off to the interpreter's shared hint protocol
+    /// (`Interpreter::object_length_hint`).  Keeping the protocol there is
+    /// what lets a built-in iterator answer from its own cursor rather than
+    /// from a special case here (issue #2920).
+    ///
+    /// The legacy argument dialect is deliberate: CPython's C signature is
+    /// positional-only with `METH_VARARGS` arity wording that the typed
+    /// prelude's `_operator.`-qualified keyword rejection cannot reproduce.
+    fn length_hint(args) -> Result<Value> {
+        if args.iter().any(|arg| arg.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "_operator.length_hint() takes no keyword arguments".to_string(),
+            ));
+        }
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "length_hint expected at least 1 argument, got 0".to_string(),
+            ));
+        }
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "length_hint expected at most 2 arguments, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        // `default` is a plain `Py_ssize_t` in the C signature: it goes through
+        // `__index__` and may legitimately be negative, so it does not share
+        // the `>= 0` validation the hint result gets.
+        let default = match args.get(1) {
+            Some(arg) => _interp.value_to_isize(
+                &arg.value,
+                "Python int too large to convert to C ssize_t",
+            )?,
+            None => 0,
+        };
+        _interp
+            .object_length_hint(&args[0].value, default)
+            .map(Value::int)
+    }
+}

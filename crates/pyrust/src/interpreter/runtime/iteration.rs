@@ -7,6 +7,7 @@ include!("iteration/materialize.rs");
 include!("iteration/iterator_factory.rs");
 include!("iteration/iterator_steps.rs");
 include!("iteration/next.rs");
+include!("iteration/length_hint.rs");
 include!("iteration/consumer_cursor.rs");
 include!("iteration/collect.rs");
 include!("iteration/unpack.rs");

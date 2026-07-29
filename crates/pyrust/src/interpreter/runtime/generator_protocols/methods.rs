@@ -83,6 +83,34 @@ impl Interpreter {
                 }
                 self.call_next(&receiver, None)
             }
+            // Issue #2920: the built-in iterators' remaining-element count.
+            // The iteration domain owns the per-cursor arithmetic; this arm
+            // only presents it under CPython's method name and arity.
+            "__length_hint__" => {
+                if !value_has_length_hint(&receiver) {
+                    return Err(PyError::attribute_error(
+                        format!(
+                            "'{}' object has no attribute '__length_hint__'",
+                            full_type_name_str(&receiver)
+                        ),
+                        Some(method.to_string()),
+                        Some(receiver.clone()),
+                    ));
+                }
+                if !args.is_empty() {
+                    return Err(pyrust_core::type_err!(
+                        "{}.__length_hint__() takes no arguments ({} given)",
+                        full_type_name_str(&receiver),
+                        args.len()
+                    ));
+                }
+                // The check above proved the slot is present; a state that
+                // cannot report a count degrades to `NotImplemented`, which is
+                // exactly what CPython's `seqiter` returns for a sequence with
+                // no length.
+                self.builtin_iterator_length_hint_value(&receiver)
+                    .map(|hint| hint.unwrap_or_else(Value::not_implemented))
+            }
             "close" => {
                 if !args.is_empty() {
                     return Err(pyrust_core::type_err!(

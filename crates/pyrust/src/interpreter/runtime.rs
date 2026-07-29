@@ -119,8 +119,8 @@ mod builtin_methods {
         BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorFrame, IndexMap,
         Interpreter, PrimitiveClassKind, PrintOptions, PyBigInt, PyClass, PyDict, PyError,
         PyInstance, PyKey, PySet, PyToPrimitive, Rc, RefCell, RegSlice, Result, Value, ValueKind,
-        apply_format_spec, builtin_data_backing, c3_linearize_classes,
-        call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
+        apply_format_spec, builtin_data_backing, builtin_iterator_has_length_hint,
+        c3_linearize_classes, call_bytes_method_coerced_prevalidated, canonical_class_by_tag,
         class_descriptor_display_name, class_direct_subclasses, class_is_subclass_of,
         class_mro_items, coerce_bytes_subclass_arg, coerce_bytes_subclass_join_iterable,
         coerce_bytes_subclass_method_args, coerce_bytes_subclass_method_kwargs,
@@ -286,8 +286,8 @@ mod iteration {
         i64_range_native_cursor_safe, instance_builtin_data, instantiate_exception,
         invoke_class_method, is_coroutine_value, is_inherited_builtin_iter_sentinel,
         is_sequence_iter_terminator, is_stop_iteration_error, key_ref_to_value, key_to_value,
-        lookup_class_attr, metaclass_dunder, range_len, value_from_bigint, value_to_bigint,
-        value_type_name_str,
+        lookup_class_attr, lookup_value_special_method, metaclass_dunder, range_len,
+        value_from_bigint, value_to_bigint, value_type_name_str,
     };
     include!("runtime/iteration.rs");
 }
@@ -295,9 +295,10 @@ pub(crate) use iteration::{
     BigRangeIter, BigRangeState, CallableIter, ConsumerIterator, EnumerateIter, FilterIter,
     GetItemIter, GuardVersion, IterCacheBuf, IterSrcBuf, IterState, ItersBuf, LiveDictViewItem,
     LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard, ProviderIterator, RangeIter,
-    ZipIter, indexed_sequence_item, iter_values, live_collection_len, live_dict_view_item,
-    make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
-    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_outcome,
+    ZipIter, builtin_iterator_has_length_hint, indexed_sequence_item, iter_values,
+    live_collection_len, live_dict_view_item, make_iterator, make_reversed_dict_iter,
+    make_reversed_getitem_iterator, make_reversed_range_iterator, make_reversed_sequence_iterator,
+    ordered_mapping_guard_outcome, value_has_length_hint,
 };
 
 mod type_objects {
@@ -352,8 +353,9 @@ mod generator_protocols {
     use super::{
         AsyncGenASend, CoroStep, ExpandedCallArg, GenDriving, GeneratorFrame, GetItemIter,
         Interpreter, NativeIterFrame, PyError, Rc, RefCell, Result, Value, ValueKind,
-        class_is_builtin_exception_subclass, class_is_subclass_of, instantiate_exception,
-        invoke_class_method, lookup_class_attr, lookup_exc_class, value_type_name_str,
+        class_is_builtin_exception_subclass, class_is_subclass_of, full_type_name_str,
+        instantiate_exception, invoke_class_method, lookup_class_attr, lookup_exc_class,
+        value_has_length_hint, value_type_name_str,
     };
     include!("runtime/generator_protocols.rs");
 }
