@@ -118,6 +118,20 @@ pub enum Insn {
     DeleteAttr(Reg, u16),
     /// R[dst] = R[obj][R[idx]]
     GetItem(Reg, Reg, Reg),
+    /// Deopting form of `GetItem` for the int-loop versioning pass: when
+    /// R[obj] is a canonical `list`/`tuple` and R[idx] is a built-in integer
+    /// in `0..len`, `R[dst] = R[obj][R[idx]]`; otherwise jump and leave R[dst]
+    /// unchanged.
+    ///
+    /// Emitted only inside an out-of-line specialized loop copy, whose jump
+    /// target is a side-exit stub that flushes the deferred module syncs and
+    /// resumes the original loop at this very subscript.  Reading a canonical
+    /// sequence element is a pure, non-reentrant copy, so re-executing the
+    /// original `GetItem` after a deopt observes exactly the same state — and
+    /// negative, out-of-range, non-int, `dict`, user-`__getitem__`, and unset
+    /// operands all raise (or run user code) on the original path with their
+    /// own source line and PEP 657 caret span.
+    GetItemSeqOrExit(Reg, Reg, Reg, i32),
     /// R[dst] = R[obj][R[base] : R[base+1] : R[base+2]]  (rvalue slice read).
     /// CPython's BINARY_SLICE analogue: reads the three contiguous bound
     /// registers (start, stop, step; `None` = absent) and slices `obj` directly,
@@ -198,6 +212,16 @@ pub enum Insn {
     /// loop exits.  Any other iterator (BigInt range, list, generator, user
     /// object, empty slot) diverts to the original in-place loop unchanged.
     JumpIfIterNotIntRange(u8, i32),
+    /// Jump when iterator slot `slot` does not currently hold the canonical
+    /// list/tuple index cursor.
+    ///
+    /// The sibling entry guard of `JumpIfIterNotIntRange` for the second
+    /// iterator kind the versioning pass admits: stepping an index cursor over
+    /// a canonical `list`/`tuple` clones one element and bumps a counter,
+    /// invoking no Python-visible protocol.  Unlike a machine-int range the
+    /// element *type* is a per-iteration fact, so the specialized copy pairs
+    /// this entry guard with a `JumpIfNotInt` side exit on the loop variable.
+    JumpIfIterNotIndexedSeq(u8, i32),
     /// Guarded numeric leaf-call inlining site (emitted only by the
     /// optimizer, always immediately before the original call sequence it
     /// specializes, which stays in place as the deopt path).

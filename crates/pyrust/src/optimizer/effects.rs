@@ -39,3 +39,42 @@ fn may_invalidate_named_locals(insn: &crate::bytecode::Insn) -> bool {
             | MakeFunction(..)
     )
 }
+
+/// Instructions that only the late-stage guarded passes (`pass_int_loop_version`,
+/// `pass_inline_leaf_binop`) may produce.
+///
+/// The earlier register-rewriting passes (copy propagation, constant folding,
+/// constant-register propagation, dead code, dead stores, CSE) intentionally do
+/// not model these opcodes: today they run strictly before the producers, so
+/// the opcodes cannot appear in their input.  Their kill-set helpers use
+/// wildcard arms, which would fail *silently* (miscompile) rather than loudly
+/// if a future driver reorder moved a producer earlier.  Each of those passes
+/// asserts this predicate over its input in debug builds so a reorder fails
+/// fast in CI instead.
+fn is_late_stage_guard_insn(insn: &crate::bytecode::Insn) -> bool {
+    use crate::bytecode::Insn::*;
+    matches!(
+        insn,
+        JumpIfNotInt(..)
+            | JumpIfIterNotIntRange(..)
+            | JumpIfIterNotIndexedSeq(..)
+            | GetItemSeqOrExit(..)
+            | CountCmpJumpTrue(..)
+            | CountCmpJumpFalse(..)
+            | CallInlineBinOp { .. }
+    )
+}
+
+/// Debug-build guard for passes that must run before the late-stage producers.
+/// See [`is_late_stage_guard_insn`].
+#[inline]
+fn debug_assert_no_late_stage_insns(insns: &[crate::bytecode::Insn], pass: &str) {
+    if cfg!(debug_assertions)
+        && let Some(found) = insns.iter().find(|insn| is_late_stage_guard_insn(insn))
+    {
+        panic!(
+            "{pass} ran after a late-stage guarded pass: {found:?} in its input; \
+             this pass does not model late-stage opcodes and would miscompile"
+        );
+    }
+}

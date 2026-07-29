@@ -14,6 +14,7 @@
 /// Python code or cross a namespace-storage boundary: live namespace aliases
 /// can update those registers without an explicit bytecode write.
 fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> Vec<Insn> {
+    debug_assert_no_late_stage_insns(&insns, "pass_const_fold");
     // Pre-pass: collect every instruction index that is the target of *any*
     // jump (forward or backward).  At every such basic-block boundary the
     // known-constant map must be cleared, otherwise a value that was assigned

@@ -155,7 +155,13 @@ namespace and hides which domain a caller depends on.
     code, including arithmetic and comparison protocols. A specialized loop
     rewrite may preserve one final sync only when it proves the relevant
     operations are non-reentrant primitive operations and preserves every
-    externally observable value.
+    externally observable value. A per-iteration fact — a sequence element's
+    type, a subscript's bounds — is proven by a guard inside the specialized
+    copy whose failure edge flushes every deferred sync before resuming the
+    original stream at the corresponding instruction. Such a mid-loop side exit
+    may only target an operation that reproduces the fast copy's effect when
+    re-executed, so the raise, the source line, and the caret span stay on the
+    original path.
 30. Python slot-result validation belongs to `value_protocols`, not to the
     built-in entry point that first exposed a bug. In particular, `__len__`
     results pass through one index-protocol and Py_ssize_t boundary shared by

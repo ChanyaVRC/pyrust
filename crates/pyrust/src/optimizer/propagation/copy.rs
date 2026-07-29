@@ -16,6 +16,7 @@
 ///
 /// Reference: GCC `-ftree-copy-prop`; Shi/Gregg/Beatty/Ertl *VEE'05*.
 fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    debug_assert_no_late_stage_insns(&insns, "pass_copy_prop");
     use std::collections::HashMap;
 
     let n = insns.len();
