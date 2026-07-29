@@ -244,6 +244,59 @@ fn bind_descriptor_slot(
     }
 }
 
+/// Invoke a `__get__` slot the way CPython's `slot_tp_descr_get` does.
+///
+/// `__get__` is the one special method CPython deliberately does *not* run
+/// through the descriptor protocol: `slot_tp_descr_get` resolves it with a raw
+/// `_PyType_Lookup` and calls whatever it finds directly, as
+/// `get(self, obj, objtype)`.  Consequences, all verified against CPython 3.12:
+///
+/// - a `staticmethod` `__get__` still receives the descriptor itself as its
+///   first argument (a `staticmethod` object is callable since 3.10 and just
+///   forwards), so `__get__(a, b, c)` works and `__get__(obj, objtype=None)`
+///   raises `TypeError: … takes from 1 to 2 positional arguments but 3 were
+///   given`;
+/// - a `classmethod` `__get__` is a plain `TypeError` — a `classmethod` object
+///   is not callable at all.
+///
+/// This is deliberately asymmetric with `__set__` / `__delete__`, which go
+/// through `vectorcall_method` and therefore *do* bind — those keep using
+/// [`invoke_class_method`].  Routing `__get__` through the descriptor binding
+/// too would silently invoke a `staticmethod`/`classmethod` getter that CPython
+/// rejects (issue #2939 review).
+///
+/// `None` means the slot carries no descriptor semantics of its own, so the
+/// caller falls through to its ordinary [`invoke_class_method`] path.
+///
+/// Deliberately `#[cold]` + `#[inline(never)]`, and deliberately *not* wrapped
+/// in a helper that itself calls [`invoke_class_method`]: handing that function
+/// an extra call site perturbs its inlining and cost ~6.6% on ordinary class
+/// construction — a path that never executes any of this code.  The caller
+/// therefore keeps its single, unchanged `invoke_class_method` tail call and
+/// merely guards it with a `kind != Regular` compare (issue #2939 review).
+#[cold]
+#[inline(never)]
+pub(crate) fn descriptor_get_slot_raw_call(
+    interp: &mut Interpreter,
+    f: &Rc<pyrust_core::UserFunction>,
+    instance: &Value,
+    args: &[ExpandedCallArg],
+) -> Option<Result<Value>> {
+    match f.kind {
+        pyrust_core::UserFunctionKind::ClassMethod => Some(Err(pyrust_core::py_err!(
+            "TypeError",
+            "'classmethod' object is not callable"
+        ))),
+        // Raw call: the descriptor is passed positionally, exactly as
+        // `PyObject_CallFunctionObjArgs(get, self, obj, type)` does.
+        pyrust_core::UserFunctionKind::StaticMethod => {
+            let func = Rc::clone(f);
+            Some(interp.call_user_function_expanded(func, args, std::slice::from_ref(instance)))
+        }
+        _ => None,
+    }
+}
+
 /// Invoke a method that was looked up on a class — handling both
 /// `UserFunction` methods (compiled Python bytecode, bound via the
 /// interpreter's user-function path) and `BuiltinFunction` methods

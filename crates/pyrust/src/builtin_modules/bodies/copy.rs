@@ -387,7 +387,33 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
                 // Call `__copy__(self)` — use invoke_class_method so that
                 // UserFunction and BuiltinFunction are both handled and
                 // `self` is bound via the bound_prefix slot.
-                invoke_class_method(interp, method, Value::py_instance(Rc::clone(&rc)), &[])
+                //
+                // CPython's `copy.copy` is pure Python and resolves the hook as
+                // a *class* attribute, then passes the object explicitly:
+                // `copier = getattr(cls, "__copy__", None); copier(x)`.  For a
+                // plain `def` that class-level lookup is unbound, so the single
+                // explicit argument lands on `self` — identical to prepending
+                // the receiver.  A `staticmethod` / `classmethod` hook, though,
+                // still receives `x` as a real argument *on top of* its own
+                // descriptor binding, so it needs one explicit positional
+                // (issue #2939 review).  Note `__deepcopy__` is different:
+                // `copy.deepcopy` uses an *instance* getattr and passes only
+                // `memo`, which the plain binding path already models.
+                let instance = Value::py_instance(Rc::clone(&rc));
+                let binds_own_receiver = matches!(
+                    method.kind(),
+                    ValueKind::UserFunction(f)
+                        if f.kind != pyrust_core::UserFunctionKind::Regular
+                );
+                if binds_own_receiver {
+                    let call_args = [ExpandedCallArg {
+                        name: None,
+                        value: instance.clone(),
+                    }];
+                    invoke_class_method(interp, method, instance, &call_args)
+                } else {
+                    invoke_class_method(interp, method, instance, &[])
+                }
             } else if is_exception_class(&rc.borrow().class) {
                 // #2360 / #2361: exceptions copy via their `__reduce__` value —
                 // reconstruct `type(*args)` and re-apply the non-slot state.

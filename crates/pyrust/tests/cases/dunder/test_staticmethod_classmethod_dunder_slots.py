@@ -405,3 +405,173 @@ class Plain:
 
 p = Plain()
 print(len(p), p[4], p == 1, hash(p))
+
+
+# ── `__get__` is the ONE slot CPython does not descriptor-bind ───────────────
+# `slot_tp_descr_get` resolves `__get__` with a raw `_PyType_Lookup` and calls
+# it directly as `get(self, obj, objtype)`, so a staticmethod `__get__` still
+# receives the descriptor positionally and a classmethod `__get__` is simply not
+# callable.  `__set__` / `__delete__` go through `vectorcall_method` and DO bind
+# — the asymmetry is deliberate and is what this section pins down.
+
+
+class GetStatic3:
+    @staticmethod
+    def __get__(desc, obj, objtype):
+        return ("g3", type(desc).__name__, obj is None, objtype.__name__)
+
+
+class UsesGetStatic3:
+    d = GetStatic3()
+
+
+class GetStatic2:
+    @staticmethod
+    def __get__(obj, objtype=None):
+        return "g2"
+
+
+class UsesGetStatic2:
+    d = GetStatic2()
+
+
+class GetClass:
+    @classmethod
+    def __get__(cls, obj, objtype=None):
+        return "gc"
+
+
+class UsesGetClass:
+    d = GetClass()
+
+
+class GetPlain:
+    def __get__(self, obj, objtype=None):
+        return ("gp", obj is None)
+
+
+class UsesGetPlain:
+    d = GetPlain()
+
+
+show("static __get__/3 instance", lambda: UsesGetStatic3().d)
+show("static __get__/3 class", lambda: UsesGetStatic3.d)
+show("static __get__/2 (raw call passes 3)", lambda: UsesGetStatic2().d)
+show("cls __get__ (not callable)", lambda: UsesGetClass().d)
+show("plain __get__ instance", lambda: UsesGetPlain().d)
+show("plain __get__ class", lambda: UsesGetPlain.d)
+
+
+class SetStatic:
+    @staticmethod
+    def __get__(desc, obj, objtype):
+        return "sget"
+
+    @staticmethod
+    def __set__(obj, value):
+        print("static __set__ value:", value)
+
+    @staticmethod
+    def __delete__(obj):
+        print("static __delete__ ran")
+
+
+class UsesSetStatic:
+    d = SetStatic()
+
+
+class SetCls:
+    @staticmethod
+    def __get__(desc, obj, objtype):
+        return "cget"
+
+    @classmethod
+    def __set__(cls, obj, value):
+        print("cls __set__ cls:", cls.__name__, "value:", value)
+
+
+class UsesSetCls:
+    d = SetCls()
+
+
+def do_static_set():
+    u = UsesSetStatic()
+    u.d = 1
+    del u.d
+    return "ok"
+
+
+def do_cls_set():
+    u = UsesSetCls()
+    u.d = 2
+    return "ok"
+
+
+show("static __set__/__delete__ bind", do_static_set)
+show("cls __set__ binds owner", do_cls_set)
+
+
+# ── copy.copy passes the object explicitly; copy.deepcopy does not ──────────
+# `copy.copy` is pure Python: `copier = getattr(cls, "__copy__"); copier(x)`.
+# The class-level getattr applies the descriptor binding AND `x` is still passed
+# as a real argument, so a staticmethod `__copy__` needs one parameter and a
+# classmethod one needs two.  `copy.deepcopy` uses an *instance* getattr and
+# passes only `memo`.
+import copy as _copy
+
+
+class CopyStatic0:
+    @staticmethod
+    def __copy__():
+        return "cs0"
+
+
+class CopyStatic1:
+    @staticmethod
+    def __copy__(x):
+        return "cs1"
+
+
+class CopyCls0:
+    @classmethod
+    def __copy__(cls):
+        return "cc0"
+
+
+class CopyCls1:
+    @classmethod
+    def __copy__(cls, x):
+        return "cc1:" + cls.__name__
+
+
+class CopyPlain:
+    def __copy__(self):
+        return "cp"
+
+
+class DeepStatic1:
+    @staticmethod
+    def __deepcopy__(memo):
+        return "ds1"
+
+
+class DeepStatic2:
+    @staticmethod
+    def __deepcopy__(x, memo):
+        return "ds2"
+
+
+class DeepCls:
+    @classmethod
+    def __deepcopy__(cls, memo):
+        return "dc:" + cls.__name__
+
+
+show("copy static/0", lambda: _copy.copy(CopyStatic0()))
+show("copy static/1", lambda: _copy.copy(CopyStatic1()))
+show("copy cls/0", lambda: _copy.copy(CopyCls0()))
+show("copy cls/1", lambda: _copy.copy(CopyCls1()))
+show("copy plain", lambda: _copy.copy(CopyPlain()))
+show("deepcopy static/1", lambda: _copy.deepcopy(DeepStatic1()))
+show("deepcopy static/2", lambda: _copy.deepcopy(DeepStatic2()))
+show("deepcopy cls", lambda: _copy.deepcopy(DeepCls()))

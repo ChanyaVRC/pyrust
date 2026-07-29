@@ -75,21 +75,28 @@ fn call_descriptor_get(
     if let ValueKind::PyInstance(inst) = descriptor.kind() {
         let desc_class = Rc::clone(&inst.borrow().class);
         if let Some(get_fn) = lookup_class_attr(&desc_class, "__get__") {
-            return invoke_class_method(
-                interp,
-                get_fn,
-                descriptor.clone(),
-                &[
-                    ExpandedCallArg {
-                        name: None,
-                        value: instance,
-                    },
-                    ExpandedCallArg {
-                        name: None,
-                        value: owner,
-                    },
-                ],
-            );
+            let get_args = [
+                ExpandedCallArg {
+                    name: None,
+                    value: instance,
+                },
+                ExpandedCallArg {
+                    name: None,
+                    value: owner,
+                },
+            ];
+            // `__get__` is the one special method CPython does *not* run through
+            // the descriptor protocol: `slot_tp_descr_get` resolves it with a
+            // raw `_PyType_Lookup` and calls it as `get(self, obj, objtype)`.
+            // See `descriptor_get_slot_raw_call` — `__set__` / `__delete__`
+            // above deliberately keep the binding path (issue #2939 review).
+            if let ValueKind::UserFunction(f) = get_fn.kind()
+                && f.kind != UserFunctionKind::Regular
+                && let Some(result) = descriptor_get_slot_raw_call(interp, f, descriptor, &get_args)
+            {
+                return result;
+            }
+            return invoke_class_method(interp, get_fn, descriptor.clone(), &get_args);
         }
     }
     // Fallback: return the descriptor itself (shouldn't happen if callers

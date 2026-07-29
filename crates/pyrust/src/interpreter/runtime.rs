@@ -218,12 +218,12 @@ mod attributes {
         Value, ValueKind, adapt_builtin_subclass_method, bind_builtin_class_special,
         builtin_callable_metadata, builtin_class_doc, canonical_class_by_tag,
         class_chain_new_slot_wrapped, class_hash_inherits_builtin_none, class_is_subclass_of,
-        class_suppresses_instance_dict, exception_slot_policy, instance_builtin_data,
-        invoke_class_method, is_exception_class, is_type_alias_class, is_typevar_class,
-        lookup_class_attr, metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor,
-        mro_slot_allows, object_class_singleton, primitive_owned_object_dunder,
-        replace_instance_dict, type_alias_readonly_attr_error, typevar_readonly_attr_error,
-        value_class, value_type_name_str,
+        class_suppresses_instance_dict, descriptor_get_slot_raw_call, exception_slot_policy,
+        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
+        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
+        mro_has_unslotted_ancestor, mro_slot_allows, object_class_singleton,
+        primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
+        typevar_readonly_attr_error, value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }
