@@ -19,7 +19,11 @@
 # Not covered: pyrust detects OrderedDict mutation by length, so a structural
 # change that preserves length (move_to_end, del + reinsert) is not yet
 # observed at all.  That is a separate false-negative from the latch direction
-# and is deliberately left out of the matrix below.
+# and is deliberately left out of the matrix below.  It also reaches one case
+# that looks like a latch bug but is not: refilling a cleared mapping back to
+# the recorded length un-silences an already-diagnosed iterator, which CPython
+# reports on its od_state (mutation) arm rather than by keeping the size arm
+# sticky.  Pinning it would need the od_state counter, not a stickier latch.
 
 from collections import OrderedDict
 
@@ -64,11 +68,24 @@ def mutate(mapping, kind):
         mapping.popitem(last=False)
     elif kind == "setdefault_new":
         mapping.setdefault("z", 9)
+    elif kind == "setdefault_existing":
+        mapping.setdefault("a", 100)
+    elif kind == "pop_missing_default":
+        mapping.pop("nope", None)
     elif kind == "update_new":
         mapping.update({"z": 9})
     elif kind == "update_existing":
         mapping["a"] = 99
+    elif kind == "ior_new":
+        mapping |= {"z": 9}
+    elif kind == "ior_existing":
+        mapping |= {"a": 99}
     elif kind == "clear":
+        mapping.clear()
+    elif kind == "double_clear":
+        # The second clear finds an empty mapping.  It changes no length, so
+        # it must not displace the mark the live iterator is diagnosed against.
+        mapping.clear()
         mapping.clear()
 
 
@@ -89,9 +106,14 @@ MUTATIONS = (
     "popitem",
     "popitem_first",
     "setdefault_new",
+    "setdefault_existing",
+    "pop_missing_default",
     "update_new",
     "update_existing",
+    "ior_new",
+    "ior_existing",
     "clear",
+    "double_clear",
 )
 
 
@@ -100,8 +122,12 @@ def covered(view, kind):
     # reversed(view.values()/items()) resolves its values eagerly here, so a
     # value replaced mid-walk reads stale.  That is a separate defect from the
     # latch (it affects plain dict identically and predates this fixture), and
-    # every other mutation kind is structural, so only this pair is skipped.
-    return not (kind == "update_existing" and view in ("reversed_values", "reversed_items"))
+    # every other mutation kind is structural or a no-op, so only the kinds
+    # that actually rewrite an existing value are skipped for those two views.
+    return not (
+        kind in ("update_existing", "ior_existing")
+        and view in ("reversed_values", "reversed_items")
+    )
 
 
 for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
@@ -127,6 +153,33 @@ mapping["z"] = 9
 steps(iterator, 1)
 del mapping["z"]
 print("poison survives restore", steps(iterator, 2))
+
+
+# ── A later clear() does not disturb the sticky size arm ────────────────────
+#
+# CPython stamps di_size = -1 on the first size report, so nothing a later
+# clear() does can retire the iterator.  pyrust reconstructs the arm from a
+# recorded clear mark instead, which makes "which clear is the iterator
+# diagnosed against" load-bearing: a clear of an already-empty mapping changes
+# no length and must not displace the earlier mark.
+mapping = OrderedDict(a=1, b=2, c=3)
+iterator = iter(mapping)
+next(iterator)
+mapping.clear()
+print("clear then clear first", steps(iterator, 1))
+mapping.clear()
+print("clear then clear rest", steps(iterator, 2))
+
+# Refilling between the two clears makes the insert a real structural mutation,
+# so the iterator retires on the mutation arm instead of staying sticky.
+mapping = OrderedDict(a=1, b=2, c=3)
+iterator = iter(mapping)
+next(iterator)
+mapping.clear()
+print("clear then refill first", steps(iterator, 1))
+mapping["z"] = 9
+mapping.clear()
+print("clear then refill rest", steps(iterator, 2))
 
 
 # ── Native consumers agree with next() on both arms ──────────────────────────
