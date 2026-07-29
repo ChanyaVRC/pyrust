@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn collection_mutation_state_is_shared_and_removed_after_last_iterator() {
+    fn collection_mutation_state_is_shared_and_unobserved_after_last_iterator() {
         let dict = Value::dict(PyDict::default());
         let first = dict.dict_iteration_mutation_state().unwrap();
         let second = dict.dict_iteration_mutation_state().unwrap();
@@ -350,10 +350,25 @@ mod tests {
         assert_eq!(second.version(), 1);
 
         drop(first);
-        COLLECTION_MUTATION_STATES.with(|states| assert_eq!(states.borrow().len(), 1));
+        ACTIVE_COLLECTION_MUTATION_STATES.with(|active| assert_eq!(active.get(), 1));
         drop(second);
-        COLLECTION_MUTATION_STATES.with(|states| assert!(states.borrow().is_empty()));
+        // The registration is retained for the next iterator over the same
+        // backing store, but it is no longer observed: writes must stop paying
+        // for generation tracking exactly as they did when it was dropped.
         ACTIVE_COLLECTION_MUTATION_STATES.with(|active| assert_eq!(active.get(), 0));
+        COLLECTION_MUTATION_STATES.with(|states| assert_eq!(states.borrow().len(), 1));
+
+        dict.dict_insert(PyKey::str_from("unobserved"), Value::int(2))
+            .unwrap();
+
+        let reused = dict.dict_iteration_mutation_state().unwrap();
+        assert_eq!(reused.version(), 1);
+        ACTIVE_COLLECTION_MUTATION_STATES.with(|active| assert_eq!(active.get(), 1));
+        COLLECTION_MUTATION_STATES.with(|states| assert_eq!(states.borrow().len(), 1));
+
+        dict.dict_insert(PyKey::str_from("observed"), Value::int(3))
+            .unwrap();
+        assert_eq!(reused.version(), 2);
     }
 
     #[test]

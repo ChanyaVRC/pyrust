@@ -45,10 +45,44 @@ pub struct SetInner {
 /// Iterator generations keep wrapping so a cursor spanning `u64::MAX` still
 /// observes the next mutation; long-lived equality caches are disabled by a
 /// sticky exhaustion flag after the first wrap.
-#[derive(Clone)]
+///
+/// Existence of this handle — not existence of the registration — is what
+/// makes a backing store observed. A released registration may be retained
+/// for reuse (see [`retain_idle_mutation_state`]) without making unrelated
+/// writes pay for generation tracking.
 pub struct CollectionMutationState(Rc<CollectionMutationStateInner>);
 
+impl Clone for CollectionMutationState {
+    fn clone(&self) -> Self {
+        Self::attach(Rc::clone(&self.0))
+    }
+}
+
+impl Drop for CollectionMutationState {
+    fn drop(&mut self) {
+        let remaining = self.0.observers.get().saturating_sub(1);
+        self.0.observers.set(remaining);
+        if remaining == 0 {
+            let _ = ACTIVE_COLLECTION_MUTATION_STATES.try_with(|active| {
+                active.set(active.get().saturating_sub(1));
+            });
+        }
+    }
+}
+
 impl CollectionMutationState {
+    /// Take an observing handle, enabling generation tracking for the backing
+    /// store while at least one handle is alive.
+    fn attach(inner: Rc<CollectionMutationStateInner>) -> Self {
+        let observers = inner.observers.get();
+        inner.observers.set(observers + 1);
+        if observers == 0 {
+            ACTIVE_COLLECTION_MUTATION_STATES
+                .with(|active| active.set(active.get().saturating_add(1)));
+        }
+        Self(inner)
+    }
+
     #[inline]
     pub fn version(&self) -> u64 {
         self.0.version.get()
@@ -81,7 +115,10 @@ impl CollectionMutationState {
     /// ordinary per-item path does not maintain an entry-generation table.
     pub fn watch_key_reinsertion(&self, key: &PyKey) -> usize {
         let mut watchers = self.0.removal_watchers.borrow_mut();
-        *watchers.entry(key.clone()).or_insert(0) += 1;
+        match watchers.iter_mut().find(|(watched, _)| watched == key) {
+            Some((_, count)) => *count += 1,
+            None => watchers.push((key.clone(), 1)),
+        }
         self.0
             .dict_layout
             .borrow()
@@ -92,18 +129,29 @@ impl CollectionMutationState {
     /// Release a matching terminal-key removal watch.
     pub fn unwatch_key_reinsertion(&self, key: &PyKey) {
         let mut watchers = self.0.removal_watchers.borrow_mut();
-        let remove = match watchers.get_mut(key) {
-            Some(count) if *count > 1 => {
-                *count -= 1;
-                false
-            }
-            Some(_) => true,
-            None => false,
+        let Some(index) = watchers.iter().position(|(watched, _)| watched == key) else {
+            return;
         };
-        if remove {
-            watchers.remove(key);
-            self.0.pending_removed_keys.borrow_mut().remove(key);
-            self.0.reinserted_keys.borrow_mut().remove(key);
+        if watchers[index].1 > 1 {
+            watchers[index].1 -= 1;
+            return;
+        }
+        watchers.swap_remove(index);
+        drop(watchers);
+        // Both follow-up tables are populated only by a mutation observed while
+        // this watch was installed, so a walk that ran to completion without one
+        // scans two empty tables here.
+        let mut pending = self.0.pending_removed_keys.borrow_mut();
+        if let Some(index) = pending.iter().position(|pending| pending == key) {
+            pending.swap_remove(index);
+        }
+        drop(pending);
+        let mut reinserted = self.0.reinserted_keys.borrow_mut();
+        if let Some(index) = reinserted
+            .iter()
+            .position(|(reinserted, _, _)| reinserted == key)
+        {
+            reinserted.swap_remove(index);
         }
     }
 
@@ -118,9 +166,9 @@ impl CollectionMutationState {
         self.0
             .reinserted_keys
             .borrow()
-            .get(key)
-            .is_some_and(|(inserted_at, position)| {
-                *inserted_at > version && *position >= entry_cursor
+            .iter()
+            .any(|(reinserted, inserted_at, position)| {
+                reinserted == key && *inserted_at > version && *position >= entry_cursor
             })
     }
 }
@@ -199,14 +247,22 @@ struct CollectionMutationStateInner {
     /// near `u64::MAX` observes the next mutation. Equality-based long-lived
     /// caches use this flag and remain disabled permanently after wraparound.
     cache_exhausted: Cell<bool>,
+    /// Live handles. Generation tracking costs unrelated writes nothing while
+    /// this is zero, so a retained-but-unobserved registration is as cheap as
+    /// no registration at all.
+    observers: Cell<usize>,
     /// Ref-counted because multiple exhausted-at-the-boundary iterators may
     /// watch the same final key.
-    removal_watchers: RefCell<HashMap<PyKey, usize>>,
+    ///
+    /// All three watch tables are bounded by the number of iterators sitting
+    /// exactly on their terminal entry — one in practice — so linear scans
+    /// avoid hashing a `PyKey` on the loop-entry and loop-exit paths.
+    removal_watchers: RefCell<Vec<(PyKey, usize)>>,
     /// Watched keys currently absent after an entry deletion/table reset.
-    pending_removed_keys: RefCell<HashSet<PyKey>>,
+    pending_removed_keys: RefCell<Vec<PyKey>>,
     /// Latest reinsertion generation and virtual compact-dict entry position.
     /// Its size is bounded by the number of terminal iterators.
-    reinserted_keys: RefCell<HashMap<PyKey, (u64, usize)>>,
+    reinserted_keys: RefCell<Vec<(PyKey, u64, usize)>>,
     /// CPython-compatible compact-entry accounting, active only while a dict
     /// iterator retains this state.
     dict_layout: RefCell<Option<DictIterationLayout>>,
@@ -227,9 +283,6 @@ impl Drop for CollectionMutationStateInner {
             if points_to_self {
                 states.remove(&self.key);
             }
-        });
-        let _ = ACTIVE_COLLECTION_MUTATION_STATES.try_with(|active| {
-            active.set(active.get().saturating_sub(1));
         });
     }
 }
@@ -262,51 +315,118 @@ struct MutableContainerKey {
 }
 
 thread_local! {
+    /// Keyed by backing address, so the registry is a pointer-identity lookup
+    /// on the loop-entry and tracked-write paths. The stdlib's DoS-resistant
+    /// default hash costs more than the lookup it protects.
     static COLLECTION_MUTATION_STATES:
-        RefCell<HashMap<MutableContainerKey, Weak<CollectionMutationStateInner>>> =
-        RefCell::new(HashMap::new());
+        RefCell<HashMap<MutableContainerKey, Weak<CollectionMutationStateInner>, FxBuildHasher>> =
+        RefCell::new(HashMap::default());
     /// Cheap per-interpreter-thread gate for the mutation-state registry.
     ///
     /// Values and their backing stores are thread-confined, so a process-wide
     /// counter made an iterator on one thread force unrelated dict/set writes
     /// on every other thread through a TLS HashMap probe.
     static ACTIVE_COLLECTION_MUTATION_STATES: Cell<usize> = const { Cell::new(0) };
+    /// Recently registered states kept alive after their last observer left.
+    ///
+    /// Registration is the dominant cost of entering a loop over a small
+    /// dict/set: allocating the state, seeding its layout, publishing the weak
+    /// entry, and tearing all of it down again one loop later. Retaining the
+    /// last few registrations turns a repeated `for k in d` into a registry
+    /// hit. Only weak container targets are held, so this never extends the
+    /// lifetime of a container or its contents.
+    static IDLE_COLLECTION_MUTATION_STATES:
+        RefCell<Vec<Rc<CollectionMutationStateInner>>> = const { RefCell::new(Vec::new()) };
+    static IDLE_MUTATION_STATE_CURSOR: Cell<usize> = const { Cell::new(0) };
+}
+
+/// How many released registrations stay resident for reuse.
+///
+/// Sized for the loop nests that actually recur (a handful of containers), not
+/// for programs that stream through unrelated containers — those simply rotate
+/// through the slots and drop the evicted registrations as before.
+const IDLE_MUTATION_STATE_SLOTS: usize = 8;
+
+/// Keep `state` registered after its observers leave.
+fn retain_idle_mutation_state(state: &Rc<CollectionMutationStateInner>) {
+    IDLE_COLLECTION_MUTATION_STATES.with(|idle| {
+        let mut idle = idle.borrow_mut();
+        if idle.len() < IDLE_MUTATION_STATE_SLOTS {
+            idle.push(Rc::clone(state));
+            return;
+        }
+        let slot = IDLE_MUTATION_STATE_CURSOR.with(|cursor| {
+            let slot = cursor.get();
+            cursor.set((slot + 1) % IDLE_MUTATION_STATE_SLOTS);
+            slot
+        });
+        idle[slot] = Rc::clone(state);
+    });
+}
+
+/// Restart a retained registration for its first new observer.
+///
+/// While `observers` is zero the state is not tracked by mutation helpers, so
+/// its accounting may have gone stale exactly as it would have if the
+/// registration had been dropped and rebuilt. Restoring the freshly-created
+/// shape keeps reuse indistinguishable from re-registration.
+fn restart_idle_mutation_state(
+    state: &CollectionMutationStateInner,
+    target: &MutableContainerTarget,
+) {
+    state.removal_watchers.borrow_mut().clear();
+    state.pending_removed_keys.borrow_mut().clear();
+    state.reinserted_keys.borrow_mut().clear();
+    *state.dict_layout.borrow_mut() = dict_target_len(target).map(DictIterationLayout::for_len);
+}
+
+fn dict_target_len(target: &MutableContainerTarget) -> Option<usize> {
+    match target {
+        MutableContainerTarget::Dict(dict) => dict.upgrade().map(|dict| dict.borrow().len()),
+        MutableContainerTarget::Set(_) => None,
+    }
 }
 
 fn collection_mutation_state(
     key: MutableContainerKey,
     target: MutableContainerTarget,
 ) -> CollectionMutationState {
-    COLLECTION_MUTATION_STATES.with(|states| {
-        let mut states = states.borrow_mut();
-        if let Some(state) = states
+    let registered = COLLECTION_MUTATION_STATES.with(|states| {
+        states
+            .borrow()
             .get(&key)
             .and_then(Weak::upgrade)
             .filter(|state| state.target.matches(&target))
-        {
-            return CollectionMutationState(state);
+    });
+    if let Some(state) = registered {
+        if state.observers.get() == 0 {
+            restart_idle_mutation_state(&state, &target);
         }
+        return CollectionMutationState::attach(state);
+    }
+    let dict_len = dict_target_len(&target);
+    let state = Rc::new(CollectionMutationStateInner {
+        version: Cell::new(0),
+        cache_exhausted: Cell::new(false),
+        observers: Cell::new(0),
+        removal_watchers: RefCell::new(Vec::new()),
+        pending_removed_keys: RefCell::new(Vec::new()),
+        reinserted_keys: RefCell::new(Vec::new()),
+        dict_layout: RefCell::new(dict_len.map(DictIterationLayout::for_len)),
+        key,
+        target,
+    });
+    COLLECTION_MUTATION_STATES.with(|states| {
+        let mut states = states.borrow_mut();
         if states.len() >= 1024 {
             states.retain(|_, state| state.strong_count() != 0);
         }
-        let dict_len = match &target {
-            MutableContainerTarget::Dict(dict) => dict.upgrade().map(|dict| dict.borrow().len()),
-            MutableContainerTarget::Set(_) => None,
-        };
-        let state = Rc::new(CollectionMutationStateInner {
-            version: Cell::new(0),
-            cache_exhausted: Cell::new(false),
-            removal_watchers: RefCell::new(HashMap::new()),
-            pending_removed_keys: RefCell::new(HashSet::new()),
-            reinserted_keys: RefCell::new(HashMap::new()),
-            dict_layout: RefCell::new(dict_len.map(DictIterationLayout::for_len)),
-            key,
-            target,
-        });
         states.insert(key, Rc::downgrade(&state));
-        ACTIVE_COLLECTION_MUTATION_STATES.with(|active| active.set(active.get().saturating_add(1)));
-        CollectionMutationState(state)
-    })
+    });
+    // Evicting a retained registration drops it, which re-enters the registry;
+    // publish first so no registry borrow is live at that point.
+    retain_idle_mutation_state(&state);
+    CollectionMutationState::attach(state)
 }
 
 #[inline(always)]
@@ -319,7 +439,11 @@ fn active_collection_mutation_state(
     {
         return None;
     }
-    COLLECTION_MUTATION_STATES.with(|states| states.borrow().get(&key).and_then(Weak::upgrade))
+    // A retained-but-unobserved registration must behave exactly like one that
+    // was dropped: no generation bump, no compact-entry accounting.
+    COLLECTION_MUTATION_STATES
+        .with(|states| states.borrow().get(&key).and_then(Weak::upgrade))
+        .filter(|state| state.observers.get() != 0)
 }
 
 struct TrackedDictMutation {
@@ -346,8 +470,8 @@ fn begin_tracked_dict_mutation(
     let watched_presence = state
         .removal_watchers
         .borrow()
-        .keys()
-        .map(|key| (key.clone(), dict.contains_key(key)))
+        .iter()
+        .map(|(key, _)| (key.clone(), dict.contains_key(key)))
         .collect();
     Some(TrackedDictMutationProbe {
         before_len: dict.len(),
@@ -418,7 +542,9 @@ fn bump_active_collection_mutation_state(
     {
         let mut pending = state.pending_removed_keys.borrow_mut();
         for key in dict_mutation.removed_watched {
-            pending.insert(key);
+            if !pending.contains(&key) {
+                pending.push(key);
+            }
         }
     }
 
@@ -439,11 +565,23 @@ fn bump_active_collection_mutation_state(
             .is_some_and(|(watched_ordinal, _)| *watched_ordinal == ordinal)
         {
             let (_, key) = inserted_watched.next().expect("peeked watched insertion");
-            if state.pending_removed_keys.borrow_mut().remove(&key) {
-                state
-                    .reinserted_keys
-                    .borrow_mut()
-                    .insert(key, (next_version, position));
+            let was_removed = {
+                let mut pending = state.pending_removed_keys.borrow_mut();
+                pending
+                    .iter()
+                    .position(|pending| *pending == key)
+                    .map(|index| pending.swap_remove(index))
+                    .is_some()
+            };
+            if was_removed {
+                let mut reinserted = state.reinserted_keys.borrow_mut();
+                match reinserted
+                    .iter_mut()
+                    .find(|(reinserted, _, _)| *reinserted == key)
+                {
+                    Some(entry) => *entry = (key, next_version, position),
+                    None => reinserted.push((key, next_version, position)),
+                }
             }
         }
     }
@@ -742,9 +880,9 @@ impl Clone for Opaque {
 #[cfg(test)]
 mod mutation_version_tests {
     use super::{
-        CollectionMutationState, CollectionMutationStateInner, DictIterationLayout, HashMap,
-        HashSet, MutableContainerKey, MutableContainerKind, MutableContainerTarget, PyDict, Rc,
-        RefCell, Weak, bump_active_collection_mutation_state,
+        CollectionMutationState, CollectionMutationStateInner, DictIterationLayout,
+        MutableContainerKey, MutableContainerKind, MutableContainerTarget, PyDict, Rc, RefCell,
+        Weak, bump_active_collection_mutation_state,
     };
     use std::cell::Cell;
 
@@ -758,14 +896,15 @@ mod mutation_version_tests {
         let inner = Rc::new(CollectionMutationStateInner {
             version: Cell::new(u64::MAX - 1),
             cache_exhausted: Cell::new(false),
-            removal_watchers: RefCell::new(HashMap::new()),
-            pending_removed_keys: RefCell::new(HashSet::new()),
-            reinserted_keys: RefCell::new(HashMap::new()),
+            observers: Cell::new(0),
+            removal_watchers: RefCell::new(Vec::new()),
+            pending_removed_keys: RefCell::new(Vec::new()),
+            reinserted_keys: RefCell::new(Vec::new()),
             dict_layout: RefCell::new(Some(DictIterationLayout::for_len(0))),
             key,
             target: MutableContainerTarget::Dict(Weak::clone(&Rc::downgrade(&dict))),
         });
-        let state = CollectionMutationState(Rc::clone(&inner));
+        let state = CollectionMutationState::attach(Rc::clone(&inner));
         state.0.version.set(u64::MAX - 1);
         bump_active_collection_mutation_state(Some(Rc::clone(&inner)), None);
         assert_eq!(state.version(), u64::MAX);

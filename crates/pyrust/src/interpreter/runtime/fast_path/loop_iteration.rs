@@ -134,6 +134,9 @@ pub(super) fn advance_loop_fast_state(
             }
         }
         IterState::LiveKeysGuarded { cursor, container } => {
+            if let Some(value) = crate::interpreter::iteration::next_frozen_key(cursor) {
+                return advanced_item!(value);
+            }
             if cursor.snapshot.is_some() {
                 match fast_try!(
                     crate::interpreter::iteration::advance_stable_snapshot_cursor(

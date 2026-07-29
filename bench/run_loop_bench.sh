@@ -28,6 +28,7 @@ CASES=(
     nested
     enumerate
     dict_items
+    dict_small_iteration
 )
 
 ARGS=()

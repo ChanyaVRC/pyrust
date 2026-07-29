@@ -92,25 +92,206 @@ fn live_collection_key_at(container: &Value, index: usize) -> Option<PyKey> {
 }
 
 fn live_collection_keys(container: &Value) -> Option<Vec<PyKey>> {
-    if let Some(keys) = container.dict_with(|dict| dict.keys().cloned().collect()) {
-        return Some(keys);
+    let mut keys = Vec::new();
+    extend_live_collection_keys(container, &mut keys).then_some(keys)
+}
+
+/// Append the live key order of `container` to `keys`.
+///
+/// Written as an append so a cursor can refill a recycled buffer instead of
+/// allocating one per loop entry.
+fn extend_live_collection_keys(container: &Value, keys: &mut Vec<PyKey>) -> bool {
+    if container
+        .dict_with(|dict| keys.extend(dict.keys().cloned()))
+        .is_some()
+    {
+        return true;
     }
-    if let Some(keys) = container.set_with(|set| set.iter().cloned().collect()) {
-        return Some(keys);
+    if container
+        .set_with(|set| keys.extend(set.iter().cloned()))
+        .is_some()
+    {
+        return true;
     }
     if let Some(backing) = builtin_data_backing(container) {
-        if let Some(keys) = backing.dict_with(|dict| dict.keys().cloned().collect()) {
-            return Some(keys);
+        if backing
+            .dict_with(|dict| keys.extend(dict.keys().cloned()))
+            .is_some()
+        {
+            return true;
         }
-        if let Some(keys) = backing.set_with(|set| set.iter().cloned().collect()) {
-            return Some(keys);
+        if backing
+            .set_with(|set| keys.extend(set.iter().cloned()))
+            .is_some()
+        {
+            return true;
         }
     }
     if let Some(dict) = pyrust_builtins::dict_views::as_dict_rc(container) {
-        return Some(dict.borrow().keys().cloned().collect());
+        keys.extend(dict.borrow().keys().cloned());
+        return true;
+    }
+    if let Some(dict) = pyrust_builtins::mapping_proxy::as_dict_rc(container) {
+        keys.extend(dict.borrow().keys().cloned());
+        return true;
+    }
+    false
+}
+
+/// Per-thread free list of released snapshot buffers.
+///
+/// Entering a loop over a small container otherwise allocates and frees one
+/// order buffer every time. The containers that recur in a hot loop are few, so
+/// a handful of recycled buffers removes that traffic entirely.
+struct SnapshotBufferPool<T> {
+    buffers: RefCell<Vec<Vec<T>>>,
+}
+
+/// Recycled buffers held per thread, and the largest capacity worth keeping.
+const SNAPSHOT_BUFFER_SLOTS: usize = 4;
+const SNAPSHOT_BUFFER_CAPACITY: usize = 2 * ADAPTIVE_KEY_SNAPSHOT_THRESHOLD;
+
+impl<T> SnapshotBufferPool<T> {
+    const fn new() -> Self {
+        Self {
+            buffers: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn take(&self) -> Vec<T> {
+        self.buffers.borrow_mut().pop().unwrap_or_default()
+    }
+
+    /// Large adaptive snapshots are dropped rather than retained: they belong
+    /// to walks whose per-entry allocation is already amortised over the
+    /// container they walk.
+    fn release(&self, mut buffer: Vec<T>) {
+        if buffer.capacity() == 0 || buffer.capacity() > SNAPSHOT_BUFFER_CAPACITY {
+            return;
+        }
+        buffer.clear();
+        let mut buffers = self.buffers.borrow_mut();
+        if buffers.len() < SNAPSHOT_BUFFER_SLOTS {
+            buffers.push(buffer);
+        }
+    }
+}
+
+thread_local! {
+    static KEY_SNAPSHOT_BUFFERS: SnapshotBufferPool<PyKey> =
+        const { SnapshotBufferPool::new() };
+    static FROZEN_KEY_BUFFERS: SnapshotBufferPool<Value> =
+        const { SnapshotBufferPool::new() };
+}
+
+fn take_key_snapshot_buffer() -> Vec<PyKey> {
+    KEY_SNAPSHOT_BUFFERS.with(SnapshotBufferPool::take)
+}
+
+pub(crate) fn release_key_snapshot_buffer(buffer: Vec<PyKey>) {
+    KEY_SNAPSHOT_BUFFERS.with(|pool| pool.release(buffer));
+}
+
+pub(crate) fn release_frozen_key_buffer(buffer: Vec<Value>) {
+    FROZEN_KEY_BUFFERS.with(|pool| pool.release(buffer));
+}
+
+/// Whether `key` is reproduced exactly by converting it to a `Value` and back.
+///
+/// The frozen key walk stores its order in yielded form, so it can only be used
+/// where mutation recovery can rebuild the original keys. Container keys and
+/// instances that carry a precomputed hash are excluded rather than
+/// round-tripped through a conversion that would have to re-derive it.
+fn key_round_trips_through_value(key: &PyKey) -> bool {
+    matches!(
+        key,
+        PyKey::Int(_)
+            | PyKey::Str(_)
+            | PyKey::Bool(_)
+            | PyKey::None
+            | PyKey::Ellipsis
+            | PyKey::Float(_)
+            | PyKey::BigInt(_)
+            | PyKey::Bytes(_)
+            | PyKey::Complex(_, _)
+    )
+}
+
+/// Convert one key order into yielded form, refusing keys that cannot be
+/// converted back.
+fn push_frozen_key_order<'a>(
+    keys: impl Iterator<Item = &'a PyKey>,
+    order: &mut Vec<Value>,
+) -> bool {
+    for key in keys {
+        if !key_round_trips_through_value(key) {
+            return false;
+        }
+        order.push(key_ref_to_value(key));
+    }
+    true
+}
+
+/// `Some(false)` means the container was recognised but its keys are not
+/// eligible; `None` means it is not one of the key-ordered shapes.
+fn extend_frozen_key_order(container: &Value, order: &mut Vec<Value>) -> Option<bool> {
+    if let Some(ok) = container.dict_with(|dict| push_frozen_key_order(dict.keys(), order)) {
+        return Some(ok);
+    }
+    if let Some(ok) = container.set_with(|set| push_frozen_key_order(set.iter(), order)) {
+        return Some(ok);
+    }
+    if let Some(dict) = pyrust_builtins::dict_views::as_dict_rc(container) {
+        return Some(push_frozen_key_order(dict.borrow().keys(), order));
     }
     pyrust_builtins::mapping_proxy::as_dict_rc(container)
-        .map(|dict| dict.borrow().keys().cloned().collect())
+        .map(|dict| push_frozen_key_order(dict.borrow().keys(), order))
+}
+
+/// Capture a small key/set walk's order already converted to yielded form.
+///
+/// A key walk yields exactly these values, so holding the order this way turns
+/// the steady-state step into one indexed `Value` read — the per-item cost the
+/// snapshot representation was paying twice, once to clone each `PyKey` into the
+/// snapshot and again to convert it back on the way out.
+///
+/// Subclass carriers are excluded with the rest of the dynamic-backing cases,
+/// so this only walks a container whose backing identity cannot move.
+pub(crate) fn initial_frozen_key_order(
+    container: &Value,
+    dynamic_backing: bool,
+    kind: u8,
+    len: usize,
+) -> Option<Vec<Value>> {
+    if dynamic_backing || (kind != 0 && kind != 3) || len > ADAPTIVE_KEY_SNAPSHOT_THRESHOLD {
+        return None;
+    }
+    let mut order = FROZEN_KEY_BUFFERS.with(SnapshotBufferPool::take);
+    if extend_frozen_key_order(container, &mut order) == Some(true) && order.len() == len {
+        return Some(order);
+    }
+    release_frozen_key_buffer(order);
+    None
+}
+
+/// Restore the `PyKey` snapshot representation from a frozen key order.
+///
+/// Every path other than the steady-state stepper — a mutated order, the
+/// terminal entry's reinsertion watch, exhaustion — runs on the general state
+/// machine, so a walk that stops being ordinary converts back once and is
+/// afterwards indistinguishable from one that never took the fast form.
+fn deoptimize_frozen_key_order(cursor: &mut LiveKeyCursor) {
+    let Some(frozen) = cursor.frozen_keys.take() else {
+        return;
+    };
+    let mut snapshot = take_key_snapshot_buffer();
+    snapshot.extend(frozen.iter().map(|value| {
+        value
+            .to_key()
+            .expect("frozen key order admits only round-tripping keys")
+    }));
+    release_frozen_key_buffer(frozen);
+    cursor.snapshot = Some(snapshot);
 }
 
 fn live_collection_key_index(container: &Value, key: &PyKey) -> Option<usize> {
@@ -188,7 +369,12 @@ pub(crate) fn initial_key_snapshot(
     if dynamic_backing || len > ADAPTIVE_KEY_SNAPSHOT_THRESHOLD {
         return None;
     }
-    live_collection_keys(container).filter(|keys| keys.len() == len)
+    let mut keys = take_key_snapshot_buffer();
+    if !extend_live_collection_keys(container, &mut keys) || keys.len() != len {
+        release_key_snapshot_buffer(keys);
+        return None;
+    }
+    Some(keys)
 }
 
 /// How many items a larger container's walk must yield before one whole-order
@@ -242,6 +428,31 @@ pub(crate) fn advance_stable_snapshot_cursor(
     })
 }
 
+/// Yield the next key of a walk whose order is still frozen.
+///
+/// This is the whole steady state of `for k in dict` and `for k in set`: the
+/// order is already held in yielded form, so the step is a generation compare
+/// and one indexed read. Everything else — exhaustion, the terminal entry that
+/// installs the reinsertion watch, mutated orders, value and item walks, and
+/// subclass backing that can move — declines here and runs the general state
+/// machine, which keeps this stepper free of the dispatch those cases need.
+#[inline(always)]
+pub(crate) fn next_frozen_key(cursor: &mut LiveKeyCursor) -> Option<Value> {
+    let pos = cursor.snapshot_pos;
+    // Leaving the final entry to the general path also covers exhaustion,
+    // release, and the terminal-key reinsertion watch.
+    if pos + 1 >= cursor.recorded_len {
+        return None;
+    }
+    let state = cursor.mutation_state.as_ref()?;
+    if state.version() != cursor.observed_mutation {
+        return None;
+    }
+    let item = cursor.frozen_keys.as_ref()?.get(pos)?.clone();
+    cursor.snapshot_pos = pos + 1;
+    Some(item)
+}
+
 fn emit_live_key_item(
     container: &Value,
     cursor: &mut LiveKeyCursor,
@@ -288,6 +499,32 @@ fn emit_live_key_item(
         cursor.watching_terminal_key = true;
     }
     Ok(item)
+}
+
+/// Finish a frozen key walk: its terminal entry, then exhaustion.
+///
+/// [`next_frozen_key`] hands both cases here so that installing the
+/// reinsertion watch — the one step that needs the original key back — stays
+/// out of the per-item path.
+fn advance_frozen_key_cursor(cursor: &mut LiveKeyCursor) -> Option<LiveDictViewItem> {
+    let pos = cursor.snapshot_pos;
+    let Some(item) = cursor
+        .frozen_keys
+        .as_ref()
+        .and_then(|frozen| frozen.get(pos))
+        .cloned()
+    else {
+        cursor.release();
+        return None;
+    };
+    cursor.snapshot_pos = pos + 1;
+    if cursor.remaining.is_some()
+        && !cursor.watching_terminal_key
+        && cursor.snapshot_pos == cursor.recorded_len
+    {
+        watch_terminal_key(cursor, item.to_key(), pos);
+    }
+    Some(LiveDictViewItem::Item(item))
 }
 
 /// One entry read from a backing mapping whose order is currently frozen.
@@ -450,6 +687,13 @@ pub(crate) fn advance_live_key_cursor(
         return Err(PyError::Runtime(message.to_string()));
     }
 
+    if cursor.frozen_keys.is_some() {
+        if !mutated {
+            return Ok(advance_frozen_key_cursor(cursor));
+        }
+        deoptimize_frozen_key_order(cursor);
+    }
+
     if !mutated && cursor.snapshot.is_some() {
         return advance_snapshot_key_cursor(container, cursor);
     }
@@ -476,7 +720,7 @@ pub(crate) fn advance_live_key_cursor(
             } else {
                 seen.extend(cursor.yielded.drain(..));
             }
-            cursor.seen = Some(seen);
+            cursor.seen = Some(Box::new(seen));
         }
         if let Some(last_key) = &cursor.last_key
             && live_collection_key_index(container, last_key) != Some(cursor.last_index)
@@ -510,7 +754,7 @@ pub(crate) fn advance_live_key_cursor(
         } else {
             let mut seen = pyrust_core::PySet::default();
             seen.extend(cursor.yielded.drain(..));
-            cursor.seen = Some(seen);
+            cursor.seen = Some(Box::new(seen));
             cursor.next_index = 0;
             cursor.structurally_changed = true;
         }
