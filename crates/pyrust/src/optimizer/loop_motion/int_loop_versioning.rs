@@ -49,9 +49,14 @@
 ///   Jump(→ original instruction t)      ; resume the original loop mid-body
 /// ```
 ///
-/// Flushing *every* deferred sync is always correct: a synced register either
-/// still holds the value the previous iteration published, or holds the value
-/// the original would already have published at that program point.  The
+/// Flushing *every* deferred sync is correct for an admitted candidate: a
+/// synced register either still holds the value the previous iteration
+/// published, or holds the value the original would already have published at
+/// that program point.  That is a property of the region, not a given — a
+/// module-scope `name = <expr>` publishes from the scratch register the next
+/// expression reuses, so a candidate is admitted only when every sync source
+/// still holds its published value at the exits (see
+/// `sync_sources_republish_exactly`).  The
 /// iterator slot is shared by both copies, so resuming the original loop needs
 /// no cursor fix-up, and any subsequent raise happens on the original path with
 /// its own source line, PEP 657 caret span, and a synchronized namespace.
@@ -121,9 +126,16 @@
 ///   conditionally assigned names can first execute in a different order from
 ///   their lexical `SyncModuleGlobal` order.  Branching loops stay on the
 ///   original per-assignment sync path.
-/// - The header copy's exit edge bypasses the sync stubs: on a zero-trip entry
-///   no body instruction has executed, and the original would not have synced
-///   either.  The back-edge fall-through goes through a stub.
+/// - Every deferred sync is replayed by a stub whose source register still
+///   holds the value the original published there.  A region that publishes two
+///   names from one register, or overwrites a sync source before the exit, is
+///   declined rather than deferred.
+/// - A once-entered header copy's exit edge bypasses the sync stubs: on a
+///   zero-trip entry no body instruction has executed, and the original would
+///   not have synced either.  The back-edge fall-through goes through a stub —
+///   and so does the header exit of a region whose `continue` edge re-enters
+///   the header, because there the header is also the exhaustion test for every
+///   iteration that took that edge.
 /// - Regions containing another back-edge (nested loops), `Yield`, calls, or
 ///   any instruction outside the whitelist are rejected; outer loops simply
 ///   keep their original form while their inner loop is versioned.
@@ -767,11 +779,69 @@ fn pass_int_loop_version(
                     .any(|insn| matches!(insn, Insn::SyncModuleGlobal(r2, n2) if *r2 == r && *n2 == name_idx))
             })
         };
+        // Deferring a `SyncModuleGlobal` to an exit stub republishes what the
+        // original published only while the source register still *holds* that
+        // value when the stub runs.  A module-scope `name = <expr>` reaches
+        // this pass as `BinOpConst(t, …)` + `Move(local, t)` +
+        // `SyncModuleGlobal(t, …)` over a scratch register `t` that the next
+        // expression immediately reuses, so a single register is routinely the
+        // source of several names and is overwritten between its sync and the
+        // loop exit.  Flushing that at the stub publishes the register's last
+        // value under every name it ever synced — and on a first entry binds
+        // names the original loop never bound at all.
+        //
+        // A source is safe to defer exactly when its value at every exit is
+        // what its own last executed sync published: it feeds one name, and
+        // every write to it reaches that sync before any other write to it and
+        // without passing a branch that could skip it.  A source the region
+        // never writes is trivially safe — the stub rewrites the entry value
+        // the original republished every iteration.
+        let writes_reg = |insn: &Insn, r: Reg| match insn {
+            Insn::Jump(..)
+            | Insn::JumpIfFalse(..)
+            | Insn::JumpIfTrue(..)
+            | Insn::CmpJumpIfFalse(..)
+            | Insn::CmpJumpIfTrue(..)
+            | Insn::CmpJumpIfFalseConst(..)
+            | Insn::CmpJumpIfTrueConst(..)
+            | Insn::SyncModuleGlobal(..) => false,
+            Insn::LoadConst(dst, _)
+            | Insn::Move(dst, _)
+            | Insn::CopyReg(dst, _)
+            | Insn::BinOp(dst, ..)
+            | Insn::BinOpInPlace(dst, ..)
+            | Insn::BinOpImm(dst, ..)
+            | Insn::BinOpConst(dst, ..)
+            | Insn::GetItem(dst, ..)
+            | Insn::ForIter(dst, ..) => *dst == r,
+            // Outside the region whitelist: assume it clobbers.
+            _ => true,
+        };
+        let write_reaches_its_sync = |r: Reg, k: usize| {
+            for s in k + 1..=back {
+                if matches!(insns[s], Insn::SyncModuleGlobal(r2, _) if r2 == r) {
+                    return true;
+                }
+                if writes_reg(&insns[s], r) || targets(s, &insns[s]).is_some() {
+                    return false;
+                }
+            }
+            false
+        };
+        let sync_sources_republish_exactly = || {
+            syncs.iter().all(|&(r, name_idx)| {
+                (h..=back).all(|s| {
+                    !matches!(insns[s], Insn::SyncModuleGlobal(r2, n2) if r2 == r && n2 != name_idx)
+                }) && (h..=back)
+                    .all(|k| !writes_reg(&insns[k], r) || write_reaches_its_sync(r, k))
+            })
+        };
         if !eligible
             || guards.len() > MAX_GUARDS
             || (!syncs.is_empty()
-                && has_interior_control_flow
-                && (function_deletes_bindings() || !syncs_pre_bound()))
+                && (!sync_sources_republish_exactly()
+                    || (has_interior_control_flow
+                        && (function_deletes_bindings() || !syncs_pre_bound()))))
         {
             h += 1;
             continue;
@@ -1163,6 +1233,16 @@ fn pass_int_loop_version(
                 "a side exit must precede a later instruction in the region"
             );
         }
+        // An inverted-while header normally runs once, on entry — but a
+        // `continue` edge jumps back to it, which makes it the recurring
+        // exhaustion test for every iteration that takes that edge.  Its exit
+        // is then a real loop exit and has to flush the deferred syncs like any
+        // other, or a loop whose last iteration `continue`d leaves the live
+        // namespace at its pre-loop values.
+        let header_is_reentered =
+            (cand.head + 1..=cand.back).any(|k| targets(k, &insns[k]) == Some(cand.head));
+        let header_exit_skips_syncs =
+            matches!(cand.kind, CandidateKind::Inverted) && !header_is_reentered;
         // Resolve, per external target, a stub slot.  The back-edge's
         // fall-through (the normal loop exit, `back + 1`) always needs one and
         // is emitted first so execution falls straight into it.
@@ -1180,14 +1260,15 @@ fn pass_int_loop_version(
                     if internal {
                         continue;
                     }
-                    // An inverted-while header runs once, on entry: its exit
-                    // edge is the zero-trip path and must not flush syncs the
-                    // original never executed.  A `for` header is the recurring
-                    // exhaustion test, so its exit flushes like any body exit
-                    // (a zero-trip pass is safe there: never-assigned registers
-                    // are unset and the sync skips them, and already-synced
-                    // names rewrite identical values).
-                    if fpos == 0 && matches!(cand.kind, CandidateKind::Inverted) {
+                    // A once-only inverted-while header's exit edge is the
+                    // zero-trip path and must not flush syncs the original never
+                    // executed.  A `for` header — and a header a `continue`
+                    // re-enters — is the recurring exhaustion test, so its exit
+                    // flushes like any body exit (a zero-trip pass is safe
+                    // there: never-assigned registers are unset and the sync
+                    // skips them, and already-synced names rewrite identical
+                    // values).
+                    if fpos == 0 && header_exit_skips_syncs {
                         continue;
                     }
                     t
@@ -1223,9 +1304,8 @@ fn pass_int_loop_version(
             // deliberately routed through a deferred-sync stub; registering
             // those source edges here would overwrite the stub destination
             // during the final-length patch and silently skip the syncs.
-            let directly_targets_past_end = targets(*old_i, insn) == Some(n)
-                && fpos == 0
-                && matches!(cand.kind, CandidateKind::Inverted);
+            let directly_targets_past_end =
+                targets(*old_i, insn) == Some(n) && fpos == 0 && header_exit_skips_syncs;
             let new_insn = match targets(*old_i, insn) {
                 Some(t) => {
                     let internal = t >= cand.head && t <= cand.back;
@@ -1236,7 +1316,7 @@ fn pass_int_loop_version(
                             rel += 1;
                         }
                         fast_base + fast_index[rel]
-                    } else if fpos == 0 && matches!(cand.kind, CandidateKind::Inverted) {
+                    } else if fpos == 0 && header_exit_skips_syncs {
                         jump_target[t]
                     } else {
                         stub_abs(t, &stub_targets)
