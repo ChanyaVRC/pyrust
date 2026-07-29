@@ -361,10 +361,23 @@ pub(crate) struct EnumerateIter {
 pub(crate) struct EnumerateElementCursor {
     /// The `enumerate` object's own state cell, holding the running counter.
     pub(crate) enumerate: Rc<RefCell<Box<dyn std::any::Any>>>,
-    /// The enumerate's inner iterator cell, a [`NativeIterFrame`] whose source
-    /// is an unguarded element walk over a list, tuple, snapshot, or an
-    /// immutable `bytes` / `str`.
-    pub(crate) frame: Rc<RefCell<Box<dyn std::any::Any>>>,
+    /// The enumerate's inner iterator cell.
+    pub(crate) inner: EnumerateInnerCursor,
+}
+
+/// The inner iterator cell an [`EnumerateElementCursor`] steps.
+///
+/// Each variant names the concrete state the cell was proven to hold when the
+/// loop classified it. A cell's state type never changes, so one classification
+/// covers the whole walk.
+#[derive(Clone)]
+pub(crate) enum EnumerateInnerCursor {
+    /// A [`NativeIterFrame`] whose source is an unguarded element walk over a
+    /// list, tuple, snapshot, or an immutable `bytes` / `str`.
+    Frame(Rc<RefCell<Box<dyn std::any::Any>>>),
+    /// A [`RangeIter`], the canonical i64-backed range cursor. Elements are
+    /// generated from the cursor rather than read out of storage.
+    Range(Rc<RefCell<Box<dyn std::any::Any>>>),
 }
 
 pub(crate) struct BigRangeIter {
