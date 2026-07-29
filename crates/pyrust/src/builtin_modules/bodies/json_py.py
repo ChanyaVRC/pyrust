@@ -295,6 +295,16 @@ def _parse_unicode(s, idx):
 
 _NUMBER_CHARS = '0123456789+-.eE'
 
+# CPython's ``json/decoder.py`` builds these once at import and hands the *same*
+# object back for every ``NaN`` / ``Infinity`` token, so
+# ``json.loads('NaN') is json.loads('NaN')`` is True and
+# ``len(set(json.loads('[NaN, NaN]')))`` is 1.  That is only observable for NaN,
+# now that each ``float('nan')`` mints its own object identity (#2911) — minting
+# one per token would put every parsed NaN in its own dict/set slot.
+NaN = float('nan')
+PosInf = float('inf')
+NegInf = float('-inf')
+
 
 def _parse_number(s, idx):
     start = idx
@@ -333,11 +343,11 @@ def _parse_value(s, idx):
     if s[idx:idx + 5] == 'false':
         return False, idx + 5
     if s[idx:idx + 3] == 'NaN':
-        return float('nan'), idx + 3
+        return NaN, idx + 3
     if s[idx:idx + 8] == 'Infinity':
-        return float('inf'), idx + 8
+        return PosInf, idx + 8
     if s[idx:idx + 9] == '-Infinity':
-        return float('-inf'), idx + 9
+        return NegInf, idx + 9
     if ch in '-0123456789':
         return _parse_number(s, idx)
     raise JSONDecodeError('Expecting value', s, idx)

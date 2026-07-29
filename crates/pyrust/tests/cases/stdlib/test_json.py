@@ -75,3 +75,14 @@ try:
     json.dumps(object(), default=None)
 except TypeError as e:
     print("TypeError:", str(e))
+
+# CPython's json decoder builds NaN / Infinity / -Infinity once at import and
+# returns the *same* object for every occurrence of the token.  Only observable
+# for NaN, now that each `float('nan')` carries its own object identity (#2911):
+# minting one per token would give every parsed NaN its own dict/set slot.
+print(json.loads("NaN") is json.loads("NaN"))
+print(json.loads("[NaN, NaN]")[0] is json.loads("[NaN, NaN]")[1])
+print(len(set(json.loads("[NaN, NaN, NaN]"))), len(json.loads("[NaN, NaN, NaN]")))
+print(len({json.loads("NaN"): 1, json.loads("NaN"): 2}))
+print(json.loads("Infinity") is json.loads("Infinity"))
+print(json.dumps(json.loads('[NaN, Infinity, -Infinity]')))
