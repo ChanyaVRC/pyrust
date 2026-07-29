@@ -799,12 +799,12 @@ fn ordered_mapping_backing_id(container: &Value) -> Option<i64> {
     pyrust_builtins::dict_views::as_dict_rc(container).map(|rc| Rc::as_ptr(&rc) as i64)
 }
 
-pub(crate) fn ordered_mapping_guard_message(
+pub(crate) fn ordered_mapping_guard_outcome(
     container: &Value,
     recorded_len: usize,
     iter_seq: u64,
-) -> &'static str {
-    pyrust_builtins::ordered_mapping::guard_message(
+) -> pyrust_builtins::ordered_mapping::GuardOutcome {
+    pyrust_builtins::ordered_mapping::guard_outcome(
         ordered_mapping_backing_id(container),
         recorded_len,
         live_collection_len(container),

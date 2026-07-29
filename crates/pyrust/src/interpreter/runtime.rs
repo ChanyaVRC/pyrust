@@ -177,7 +177,7 @@ mod fast_path {
         ReadMethodCachePlan, RegSlice, Result, UserFunction, Value, ValueKind,
         bind_builtin_attribute, bind_cached_native_class_method, comp_read_is_free, float_divmod,
         indexed_sequence_item, invoke_class_method, live_collection_len, live_dict_view_item,
-        ordered_mapping_guard_message, py_mod_i64, read_attribute_cache_plan,
+        ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
         read_method_cache_plan, value_from_bigint, write_attribute_cache_class,
     };
     include!("runtime/fast_path.rs");
@@ -297,7 +297,7 @@ pub(crate) use iteration::{
     LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard, ProviderIterator, RangeIter,
     ZipIter, indexed_sequence_item, iter_values, live_collection_len, live_dict_view_item,
     make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
-    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_message,
+    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_outcome,
 };
 
 mod type_objects {
