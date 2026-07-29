@@ -1319,6 +1319,11 @@ fn pass_int_loop_version(
                             }
                         });
                     }
+                    for g in &cand.guards {
+                        let gpos = out.len();
+                        let fail_off = placement[i] as i64 - gpos as i64 - 1;
+                        out.push(Insn::JumpIfNotInt(*g, fail_off as i32));
+                    }
                     if let CandidateKind::LenHeaderWhile {
                         callee, name_idx, ..
                     } = cand.kind
@@ -1329,15 +1334,20 @@ fn pass_int_loop_version(
                         // it observes the same binding the original would, and a
                         // `def len` shadow or a `builtins.len` patch fails the
                         // guard and runs the real call.
+                        //
+                        // Emitted *after* the register chain: the back-edge of a
+                        // loop that keeps failing a `JumpIfNotInt` re-enters this
+                        // block every iteration, and resolving the name first
+                        // made each of those passes pay a global lookup whose
+                        // result the very next guard discarded.  Nothing in the
+                        // chain reads `callee` — the eligibility walk excludes it
+                        // — so the order is free, and the failure edge now leaves
+                        // `callee` for the original `LoadGlobal` to set, exactly
+                        // as it does when the value guard itself fails.
                         out.push(Insn::LoadGlobal(callee, name_idx));
                         let gpos = out.len();
                         let fail_off = placement[i] as i64 - gpos as i64 - 1;
                         out.push(Insn::JumpIfNotBuiltinLen(callee, fail_off as i32));
-                    }
-                    for g in &cand.guards {
-                        let gpos = out.len();
-                        let fail_off = placement[i] as i64 - gpos as i64 - 1;
-                        out.push(Insn::JumpIfNotInt(*g, fail_off as i32));
                     }
                     if let Some((tmp, cidx)) = cand.const_fuse {
                         out.push(Insn::LoadConst(tmp, cidx));
