@@ -9,6 +9,19 @@ pub type Reg = u32;
 /// ever allocated at `u32::MAX`, so it can never collide with a live operand.
 pub const NO_KWARGS: Reg = Reg::MAX;
 
+/// The exact machine-int range cursor state [`Insn::JumpIfIterNotIntRangeExact`]
+/// admits.  Boxed so the rare closed-form guard does not widen every `Insn`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct IntRangeExactGuard {
+    /// Iterator slot the guard inspects.
+    pub slot: u8,
+    /// Required cursor position — the range's `start`, so a matching slot has
+    /// not yet been stepped.
+    pub start: i64,
+    pub stop: i64,
+    pub step: i64,
+}
+
 /// How a `DictMergeKwCall` / `SetItemKwCall` recovers the callee's qualified
 /// name for the `… got multiple values for keyword argument …` error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -222,6 +235,20 @@ pub enum Insn {
     /// element *type* is a per-iteration fact, so the specialized copy pairs
     /// this entry guard with a `JumpIfNotInt` side exit on the loop variable.
     JumpIfIterNotIndexedSeq(u8, i32),
+    /// Jump unless the iterator slot holds the canonical machine-int `range`
+    /// cursor in *exactly* the state the boxed guard describes — same `stop`,
+    /// same `step`, and a cursor still parked at `start`.
+    ///
+    /// The strongest of the three int-loop versioning entry guards, and the
+    /// only one that pins the iterated values themselves rather than just the
+    /// cursor kind.  That is what a closed-form loop copy needs: knowing the
+    /// slot holds *some* int range says nothing about its trip count, so a
+    /// copy that folds the whole loop into constants must confirm the exact
+    /// bounds it folded.  Because the check reads the live cursor, nothing
+    /// about how the range was produced matters — a rebound `range` returning
+    /// a differently-bounded range, an aliased iterable, or a partially
+    /// consumed cursor all simply fail the guard and run the original loop.
+    JumpIfIterNotIntRangeExact(Box<IntRangeExactGuard>, i32),
     /// Guarded numeric leaf-call inlining site (emitted only by the
     /// optimizer, always immediately before the original call sequence it
     /// specializes, which stays in place as the deopt path).

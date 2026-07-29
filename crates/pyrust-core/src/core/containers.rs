@@ -759,6 +759,30 @@ pub fn range_len(start: i64, stop: i64, step: i64) -> i128 {
     }
 }
 
+/// Whether every cursor value, including the one-past-the-end increment, fits
+/// in the compact i64 range-iterator state.
+///
+/// The stop bound fitting in i64 is not enough: a final yielded value may be
+/// near one extreme while `step` crosses that extreme. The direct VM loop, the
+/// concrete iterator object, and the optimizer's closed-form loop folding all
+/// share this construction invariant — the last decides whether a range can
+/// ever reach the compact cursor its guard tests for.
+pub fn i64_range_native_cursor_safe(start: i64, stop: i64, step: i64) -> bool {
+    let len = range_len(start, stop, step);
+    if len == 0 {
+        return true;
+    }
+
+    let start_wide = i128::from(start);
+    let step_wide = i128::from(step);
+    let last = start_wide + (len - 1) * step_wide;
+    let after_last = last + step_wide;
+    len <= i128::from(i64::MAX)
+        && after_last >= i128::from(i64::MIN)
+        && after_last <= i128::from(i64::MAX)
+        && step != i64::MIN
+}
+
 /// Element count of a big range, as CPython computes `len(range(...))`: the count
 /// of `start, start+step, …` strictly before `stop`.  Mirrors [`range_len`] but in
 /// `BigInt` arithmetic; returns a non-negative `BigInt` (0 when empty).

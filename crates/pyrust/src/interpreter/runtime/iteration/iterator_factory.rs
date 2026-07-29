@@ -37,28 +37,6 @@ pub(crate) fn builtin_iter_type_name(value: &Value) -> &'static str {
     }
 }
 
-/// Whether every cursor value, including the one-past-the-end increment, fits
-/// in the compact i64 range-iterator state.
-///
-/// The stop bound fitting in i64 is not enough: a final yielded value may be
-/// near one extreme while `step` crosses that extreme. The direct VM loop and
-/// concrete iterator object share this construction invariant.
-fn i64_range_native_cursor_safe(start: i64, stop: i64, step: i64) -> bool {
-    let len = range_len(start, stop, step);
-    if len == 0 {
-        return true;
-    }
-
-    let start_wide = i128::from(start);
-    let step_wide = i128::from(step);
-    let last = start_wide + (len - 1) * step_wide;
-    let after_last = last + step_wide;
-    len <= i128::from(i64::MAX)
-        && after_last >= i128::from(i64::MIN)
-        && after_last <= i128::from(i64::MAX)
-        && step != i64::MIN
-}
-
 /// Construct the concrete lazy iterator CPython uses for an i64-backed range.
 ///
 /// Most ranges fit [`RangeIter`]. If the cursor's final increment or its

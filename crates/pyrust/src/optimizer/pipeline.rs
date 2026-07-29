@@ -4,10 +4,10 @@ use std::rc::Rc;
 
 use crate::ast::BinaryOp;
 use crate::bytecode::{
-    AttrCacheEntry, BinOpCacheEntry, FnCode, FnProto, GlobalCacheEntry, Insn, KwCallCacheEntry,
-    MAX_FRAME_REGS, Reg,
+    AttrCacheEntry, BinOpCacheEntry, FnCode, FnProto, GlobalCacheEntry, Insn, IntRangeExactGuard,
+    KwCallCacheEntry, MAX_FRAME_REGS, Reg,
 };
-use crate::value::{Value, ValueKind};
+use crate::value::{Value, ValueKind, i64_range_native_cursor_safe, range_len};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
 /// Applies a sequence of peephole passes over each instruction list.

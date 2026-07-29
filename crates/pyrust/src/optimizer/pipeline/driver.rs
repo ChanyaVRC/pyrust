@@ -83,7 +83,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // is not in the versioning whitelist, so a loop containing a call site
     // simply keeps its original form.
     let insns = pass_inline_leaf_binop(insns, &fn_protos);
-    let versioned = pass_int_loop_version(insns, &consts, &mut num_regs);
+    let versioned = pass_int_loop_version(insns, &mut consts, &names, &mut num_regs);
     let insns = versioned.insns;
     let source_prefix_len = versioned.source_prefix_len;
 

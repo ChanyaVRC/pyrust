@@ -53,12 +53,13 @@ pub use object_model::{
     class_chain_contains_builtin_exception, class_chain_contains_exception, classify_sort,
     compare_values_via_registry, cp_is_printable, dict_iteration_mutation_state,
     format_unicode_decode_str, format_unicode_encode_str, format_unicode_translate_str,
-    get_int_max_str_digits, install_builtin_callable_presentation_provider,
-    install_builtin_registry, install_compare_values, install_iter_values,
-    int_max_str_digits_format_error, int_str_base_is_exempt, intern_attr_key,
-    is_exception_instance, iter_values_via_registry, key_repr, lookup_builtin_ops, next_fn_id,
-    py_hash_ellipsis, py_hash_none, py_hash_not_implemented, py_hash_pykey, py_value_display_name,
-    range_len, scoped_int_max_str_digits, set_int_max_str_digits, value_may_exceed_int_str_limit,
+    get_int_max_str_digits, i64_range_native_cursor_safe,
+    install_builtin_callable_presentation_provider, install_builtin_registry,
+    install_compare_values, install_iter_values, int_max_str_digits_format_error,
+    int_str_base_is_exempt, intern_attr_key, is_exception_instance, iter_values_via_registry,
+    key_repr, lookup_builtin_ops, next_fn_id, py_hash_ellipsis, py_hash_none,
+    py_hash_not_implemented, py_hash_pykey, py_value_display_name, range_len,
+    scoped_int_max_str_digits, set_int_max_str_digits, value_may_exceed_int_str_limit,
 };
 pub use string_interning::{intern_string, intern_string_value};
 pub use traceback::{

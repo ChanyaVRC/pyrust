@@ -22,6 +22,7 @@ fn insn_is_back_edge(insn: &Insn) -> bool {
         | Insn::JumpIfNotInt(_, k)
         | Insn::JumpIfIterNotIntRange(_, k)
         | Insn::JumpIfIterNotIndexedSeq(_, k)
+        | Insn::JumpIfIterNotIntRangeExact(_, k)
         | Insn::GetItemSeqOrExit(_, _, _, k)
         | Insn::CountCmpJumpTrue(_, _, _, _, k)
         | Insn::CountCmpJumpFalse(_, _, _, _, k)
@@ -257,6 +258,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | Jump(..)
         | JumpIfIterNotIntRange(..)
         | JumpIfIterNotIndexedSeq(..)
+        | JumpIfIterNotIntRangeExact(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept
@@ -449,6 +451,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | Jump(..)
         | JumpIfIterNotIntRange(..)
         | JumpIfIterNotIndexedSeq(..)
+        | JumpIfIterNotIntRangeExact(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept

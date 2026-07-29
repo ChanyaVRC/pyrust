@@ -58,6 +58,7 @@ fn is_late_stage_guard_insn(insn: &crate::bytecode::Insn) -> bool {
         JumpIfNotInt(..)
             | JumpIfIterNotIntRange(..)
             | JumpIfIterNotIndexedSeq(..)
+            | JumpIfIterNotIntRangeExact(..)
             | GetItemSeqOrExit(..)
             | CountCmpJumpTrue(..)
             | CountCmpJumpFalse(..)

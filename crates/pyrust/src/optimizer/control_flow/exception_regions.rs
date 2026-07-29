@@ -70,6 +70,7 @@ fn analyze_active_handler_stacks(insns: &[Insn]) -> Option<Vec<Option<Vec<usize>
             | Insn::JumpIfNotInt(_, offset)
             | Insn::JumpIfIterNotIntRange(_, offset)
             | Insn::JumpIfIterNotIndexedSeq(_, offset)
+            | Insn::JumpIfIterNotIntRangeExact(_, offset)
             | Insn::GetItemSeqOrExit(_, _, _, offset)
             | Insn::CmpJumpIfFalse(_, _, _, offset)
             | Insn::CmpJumpIfTrue(_, _, _, offset)
