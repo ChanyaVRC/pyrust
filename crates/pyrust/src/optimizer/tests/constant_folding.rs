@@ -96,6 +96,71 @@ fn binop_const_fusion_skips_reused_scratch_when_value_is_live() {
 }
 
 #[test]
+fn binop_const_fusion_fires_for_loop_bound_reloaded_each_iteration() {
+    use crate::ast::BinaryOp;
+    // Issue #2889: the `while i < N: if i % 2 == 0: …` shape.  Scratch reg 3
+    // holds the bound at the loop header and is then reloaded with each of the
+    // body's operand constants, so `last_read[3]` points past every candidate
+    // and `scratch_dead_after` runs into the header's conditional jump.  Both
+    // approximations veto fusion, yet reg 3 is block-local — every read is fed
+    // by the write immediately before it — so no path can observe a stale
+    // value and every pair is safe to fold.  num_locals = 2.
+    let insns = vec![
+        Insn::LoadConst(3, 0),                        // 0: t = N  ← back-edge target
+        Insn::BinOp(2, 0, BinaryOp::Lt, 3),           // 1: r2 = i < t   ← fuse
+        Insn::JumpIfFalse(2, 6),                      // 2: exit
+        Insn::LoadConst(3, 1),                        // 3: t = 2
+        Insn::BinOp(2, 0, BinaryOp::Mod, 3),          // 4: r2 = i % t   ← fuse
+        Insn::LoadConst(3, 2),                        // 5: t = 0
+        Insn::BinOp(2, 2, BinaryOp::Eq, 3),           // 6: r2 = r2 == t ← fuse
+        Insn::JumpIfFalse(2, 1),                      // 7: skip
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true), // 8: i += 1
+        Insn::Jump(-10),                              // 9: back-edge to 0
+        Insn::Return(0),                              // 10
+    ];
+    let out = pass_binop_const_fusion(insns, 2);
+
+    assert!(
+        !out.iter().any(|insn| matches!(insn, Insn::LoadConst(3, _))),
+        "every reloaded scratch constant folds into its consumer: {out:?}"
+    );
+    assert!(
+        matches!(out[0], Insn::BinOpConst(2, 0, BinaryOp::Lt, 0, false)),
+        "the loop bound must fuse so the back-edge lands on the comparison: {:?}",
+        out[0]
+    );
+    // The back-edge is retargeted onto the surviving comparison, which is what
+    // lets loop inversion and int-loop versioning recognise the loop.
+    assert!(
+        matches!(out[6], Insn::Jump(-7)),
+        "back-edge must target the fused header: {:?}",
+        out[6]
+    );
+}
+
+#[test]
+fn binop_const_fusion_skips_scratch_that_crosses_a_jump_target() {
+    use crate::ast::BinaryOp;
+    // Reg 3 is loaded once before a loop and read inside it, so its value has
+    // to survive the back-edge into the next iteration.  The read at index 3 is
+    // reached from the jump target at index 1 without re-executing the load, so
+    // reg 3 is not block-local and the pair must not fuse.
+    let insns = vec![
+        Insn::LoadConst(3, 0),               // 0: t = 2
+        Insn::BinOp(2, 0, BinaryOp::Lt, 3),  // 1: ← jump target
+        Insn::JumpIfFalse(2, 2),             // 2: exit
+        Insn::BinOp(4, 0, BinaryOp::Add, 3), // 3: reads t again
+        Insn::Jump(-4),                      // 4: back-edge to 1
+        Insn::Return(0),                     // 5
+    ];
+    let out = pass_binop_const_fusion(insns.clone(), 2);
+    assert_eq!(
+        out, insns,
+        "a scratch value that crosses a control-flow edge must not fuse"
+    );
+}
+
+#[test]
 fn binop_const_fusion_skips_when_reg_is_local() {
     use crate::ast::BinaryOp;
     // r=1 < num_locals=3  → must NOT fuse (register could be a local variable)

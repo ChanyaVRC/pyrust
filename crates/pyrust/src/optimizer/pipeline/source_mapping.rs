@@ -410,6 +410,90 @@ fn remap_lineno_and_col_tables_with_source_prefix(
         }
     }
 
+    // Exact 1:1 origin map for *binop-derived* opcodes (issue #2889).  Both
+    // fusions rewrite a `BinOp` into an opcode that exists nowhere in the old
+    // stream — `pass_binop_const_fusion` into `BinOpConst`/`BinOpImm`, comparison
+    // -jump fusion into a `Cmp*Jump*` — so neither the structural nor the
+    // discriminant match can anchor it, and the recoveries above cover only some
+    // shapes: the monotone cursor is disabled as soon as a comparison became a
+    // `Cmp*Jump*` (that drops the surviving binop count below the old one), and
+    // the `(dst, lhs)` pin needs a *unique* candidate, which a loop body reusing
+    // one scratch temp rarely has.  A fused op with no origin falls back to the
+    // running prefix and reports the enclosing statement's line — after #2889
+    // made fusion fire inside loop bodies, that is a raising `b // 0` statement
+    // blaming its `while` header.
+    //
+    // Both fusions are 1:1 replacements that preserve source order and the
+    // operator, so the old and new binop-derived opcodes can be paired greedily
+    // in order.  Every old op must find a partner (otherwise a fold dropped one
+    // and the alignment is guesswork); the only new ops allowed to go unpaired
+    // are comparison jumps, which loop inversion and the int-loop version guard
+    // legitimately duplicate from one source comparison.  Any other surplus
+    // means the streams are not a 1:1 rewrite of each other and the whole map is
+    // abandoned (a missing anchor beats a wrong one, #2426).
+    let binop_derived_op = |insn: &Insn| -> Option<crate::ast::BinaryOp> {
+        match insn {
+            Insn::BinOp(_, _, op, _)
+            | Insn::BinOpConst(_, _, op, _, false)
+            | Insn::BinOpImm(_, _, op, _, false)
+            | Insn::CmpJumpIfFalse(_, op, _, _)
+            | Insn::CmpJumpIfTrue(_, op, _, _)
+            | Insn::CmpJumpIfFalseConst(_, op, _, _)
+            | Insn::CmpJumpIfTrueConst(_, op, _, _)
+            | Insn::CountCmpJumpTrue(_, op, _, _, _)
+            | Insn::CountCmpJumpFalse(_, op, _, _, _) => Some(*op),
+            _ => None,
+        }
+    };
+    let is_cmp_jump = |insn: &Insn| {
+        matches!(
+            insn,
+            Insn::CmpJumpIfFalse(..)
+                | Insn::CmpJumpIfTrue(..)
+                | Insn::CmpJumpIfFalseConst(..)
+                | Insn::CmpJumpIfTrueConst(..)
+                | Insn::CountCmpJumpTrue(..)
+                | Insn::CountCmpJumpFalse(..)
+        )
+    };
+    let old_derived: Vec<(usize, crate::ast::BinaryOp)> = old_insns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, insn)| binop_derived_op(insn).map(|op| (i, op)))
+        .collect();
+    let new_derived: Vec<(usize, crate::ast::BinaryOp)> = origin_new_insns
+        .iter()
+        .enumerate()
+        .filter_map(|(i, insn)| binop_derived_op(insn).map(|op| (i, op)))
+        .collect();
+    let mut binop_derived_origin: HashMap<usize, usize> = HashMap::new();
+    {
+        let mut ni = 0usize;
+        let mut aligned_ok = true;
+        for &(old_i, op) in &old_derived {
+            while ni < new_derived.len() && new_derived[ni].1 != op {
+                if !is_cmp_jump(&origin_new_insns[new_derived[ni].0]) {
+                    aligned_ok = false;
+                    break;
+                }
+                ni += 1;
+            }
+            if !aligned_ok || ni == new_derived.len() {
+                aligned_ok = false;
+                break;
+            }
+            binop_derived_origin.insert(new_derived[ni].0, old_i);
+            ni += 1;
+        }
+        if !aligned_ok
+            || new_derived[ni.min(new_derived.len())..]
+                .iter()
+                .any(|&(new_i, _)| !is_cmp_jump(&origin_new_insns[new_i]))
+        {
+            binop_derived_origin.clear();
+        }
+    }
+
     // Per-destination-register index of the old `BinOp`s (issue #2580).  The
     // monotone `binop_col_cursor` scan above assumes the surviving fused op is the
     // *next* old `BinOp` in source order — true when fusion is a clean 1:1
@@ -427,12 +511,13 @@ fn remap_lineno_and_col_tables_with_source_prefix(
     // same destination temp (`(a + b) + "s"`) — so the `lhs` register breaks the
     // tie.  Still "never a wrong caret": a non-unique match falls through to no
     // anchor.
+    //
+    // Both this index and the monotone cursor also carry the fused op's *line*
+    // (issue #2889), so it is built unconditionally rather than only for carets.
     let mut old_binop_reg_positions: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    if want_cols {
-        for &p in &old_binop_positions {
-            if let Insn::BinOp(d, l, _, _) = old_insns[p] {
-                old_binop_reg_positions.entry((d, l)).or_default().push(p);
-            }
+    for &p in &old_binop_positions {
+        if let Insn::BinOp(d, l, _, _) = old_insns[p] {
+            old_binop_reg_positions.entry((d, l)).or_default().push(p);
         }
     }
 
@@ -626,47 +711,84 @@ fn remap_lineno_and_col_tables_with_source_prefix(
                         old_pos = i + 1;
                     }
                     None => {
-                        // Optimizer-created instruction with no eligible opcode match:
-                        // approximate the line from the running prefix; line anchor
-                        // stays on the running prefix.  For a fused binary op
-                        // (`BinOpConst`/`BinOpImm`), recover the PEP 657 caret
-                        // anchor from the originating `BinOp` via a monotone scan
-                        // over `old_binop_positions` (issue #2411); col-only, so
-                        // the #1962/#2002 line contract is untouched.
-                        linenos.push(old_prefix.get(old_pos).copied().unwrap_or(0));
-                        if want_cols && binop_recovery_sound && insn_is_fused_binop(new_insn) {
+                        // Optimizer-created instruction with no eligible opcode
+                        // match.  For a fused binary op (`BinOpConst`/`BinOpImm`)
+                        // recover the originating `BinOp`'s position — by a
+                        // monotone scan over `old_binop_positions` (issue #2411),
+                        // or, when a fold made that scan unsound, by the surviving
+                        // op's `(dst, lhs)` register pair (issue #2580).
+                        let fused_origin = if !insn_is_fused_binop(new_insn) {
+                            None
+                        } else if binop_recovery_sound {
                             while binop_col_cursor < old_binop_positions.len()
                                 && old_binop_positions[binop_col_cursor] < old_pos
                             {
                                 binop_col_cursor += 1;
                             }
-                            if let Some(&i) = old_binop_positions.get(binop_col_cursor) {
-                                *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
+                            let found = old_binop_positions.get(binop_col_cursor).copied();
+                            if found.is_some() {
                                 binop_col_cursor += 1;
                             }
-                        } else if want_cols && insn_is_fused_binop(new_insn) {
+                            found
+                        } else {
                             // The monotone recovery is unsound (an inner binop was
                             // folded away, so the surviving op is not the next old
                             // `BinOp` in order — issue #2580).  Pin the origin by the
                             // surviving op's `(dst, lhs)` registers: fusion preserves
                             // them, so a *unique* old `BinOp` at-or-after the cursor
                             // with the same register pair is unambiguously the origin.
-                            // A non-unique match stays caret-free (never a wrong one).
+                            // A non-unique match stays anchor-free (never a wrong one).
                             let new_regs = match new_insn {
                                 Insn::BinOpConst(d, l, _, _, _) | Insn::BinOpImm(d, l, _, _, _) => {
                                     Some((*d, *l))
                                 }
                                 _ => None,
                             };
-                            if let Some(key) = new_regs
-                                && let Some(locs) = old_binop_reg_positions.get(&key)
-                            {
-                                let candidates: Vec<usize> =
-                                    locs.iter().copied().filter(|&p| p >= old_pos).collect();
-                                if let [i] = candidates[..] {
-                                    *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
-                                }
-                            }
+                            new_regs
+                                .and_then(|key| old_binop_reg_positions.get(&key))
+                                .and_then(|locs| {
+                                    let candidates: Vec<usize> =
+                                        locs.iter().copied().filter(|&p| p >= old_pos).collect();
+                                    match candidates[..] {
+                                        [i] => Some(i),
+                                        _ => None,
+                                    }
+                                })
+                        };
+                        // The folded-statement suffix alignment (issues #2577 /
+                        // #2578) pins this op's origin exactly when it applies and
+                        // is authoritative — it already overrides the caret below,
+                        // so it must decide the line too, or a fused op gets one
+                        // statement's caret printed under another's line.  The
+                        // binop-derived diagonal is the last resort: it is the only
+                        // recovery that fires for a fused op in a loop whose header
+                        // comparison became a `Cmp*Jump*` (#2889).
+                        let fused_origin = suffix_binop_old_pos
+                            .get(&new_idx)
+                            .copied()
+                            .or(fused_origin)
+                            .or_else(|| {
+                                insn_is_fused_binop(new_insn)
+                                    .then(|| binop_derived_origin.get(&new_idx).copied())
+                                    .flatten()
+                            });
+                        // Fusion is a 1:1 replacement of the old `BinOp` (it only
+                        // additionally consumes the preceding `LoadConst`), so a
+                        // pinned origin gives the fused op's true source line, not
+                        // just its caret.  Without this a raising bare `a / b`
+                        // statement reports the *previous* statement's line once it
+                        // fuses — issue #2439's defect re-entered through the fused
+                        // opcode, which #2889's precise fusion liveness makes
+                        // reachable for ordinary straight-line code.  Everything
+                        // else still approximates from the running prefix, keeping
+                        // the #1962/#2002 contract.
+                        linenos.push(
+                            fused_origin
+                                .and_then(|i| old_prefix.get(i).copied())
+                                .unwrap_or_else(|| old_prefix.get(old_pos).copied().unwrap_or(0)),
+                        );
+                        if want_cols && let Some(i) = fused_origin {
+                            *out_col = old_cols.get(i).copied().unwrap_or((0, 0, 0, 0));
                         }
                         // Recover the caret anchor of a conditional jump synthesized
                         // from `UnaryOp(Not) + JumpIf*` by `pass_not_invert` (issue
