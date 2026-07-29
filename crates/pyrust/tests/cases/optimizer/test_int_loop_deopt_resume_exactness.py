@@ -71,8 +71,10 @@ for tuple_index in range(4):
     tuple_total += tuple_source[tuple_index]
 print("tuple subscript", bits(tuple_total))
 
-# The same shape driven by a counted `while`, whose comparison becomes a
-# `CountCmpJump*` in the specialized copy.
+# The same shape driven by a counted `while`.  Whether its back edge fuses into
+# a `CountCmpJump*` depends on the deferred syncs around it; the counted-compare
+# opcodes themselves are driven from `counted_bounds()` below, where the fusion
+# is not at the mercy of the rest of this module.
 while_total = 0
 while_index = 0
 while while_index < 8:
@@ -213,6 +215,72 @@ for empty_index in range(0):
 print("zero-trip range", "empty_index" in namespace)
 
 # ── i64 boundary bounds and BigInt promotion through the counted compare ─────
+# Run every bound twice: once in a function, where an empty deferred-sync set
+# leaves the `BinOpImm + CmpJump` back edge free to fuse into `CountCmpJump*`,
+# and once at module scope, where the surrounding sync deferral may decline the
+# fusion.  The two must agree — a fused counted compare is exactly the
+# composition of the pair it replaces, at the i64 edges as much as anywhere.
+def counted_bounds():
+    seen = []
+    index = (1 << 63) - 3
+    while index < (1 << 63) + 2:
+        seen.append(index - (1 << 63))
+        index += 1
+    boundary = (seen, index - (1 << 63))
+
+    total = (1 << 63) - 4
+    index = 0
+    while index < 8:
+        total += 1
+        index += 1
+    promotion = (total - (1 << 63), type(total).__name__)
+
+    total = 0
+    index = (1 << 63) + 3
+    while index > (1 << 63) - 2:
+        total += 1
+        index -= 1
+    descending = (total, index - (1 << 63))
+
+    index = -(1 << 63)
+    total = 0
+    while index < -(1 << 63) + 4:
+        total += 1
+        index += 1
+    minimum = (total, index + (1 << 63))
+
+    # A `break`-terminated counted loop fuses into the opposite polarity, so the
+    # sibling opcode runs the same bounds.
+    total = (1 << 63) - 4
+    index = 0
+    while True:
+        if index >= 8:
+            break
+        total += 1
+        index += 1
+    inverted = (total - (1 << 63), type(total).__name__, index)
+
+    total = 0
+    index = -(1 << 63)
+    while True:
+        if index >= -(1 << 63) + 4:
+            break
+        total += 1
+        index += 1
+    inverted_min = (total, index + (1 << 63))
+
+    # `!=` is a counted compare too, and must stop exactly at the bound.
+    total = 0
+    index = (1 << 63) - 3
+    while index != (1 << 63) + 2:
+        total += 1
+        index += 1
+    unequal = (total, index - (1 << 63))
+    return boundary, promotion, descending, minimum, inverted, inverted_min, unequal
+
+
+print("counted bounds in a function", counted_bounds())
+
 boundary_seen = []
 boundary_index = (1 << 63) - 3
 while boundary_index < (1 << 63) + 2:
