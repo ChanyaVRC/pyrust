@@ -290,28 +290,19 @@ impl Value {
                 UserFunctionKind::Builtin(name) => format!("<built-in function {name}>"),
             },
             ValueKind::PyClass(class) => {
-                let (qualname, module, custom_repr) = {
-                    let c = class.borrow();
-                    let qualname = c.qualname.clone();
-                    let module = c
-                        .attrs
-                        .get("__module__")
-                        .and_then(|v| v.as_str().map(|s| s.to_string()));
-                    // Some pseudo-classes (e.g. the deprecated `typing.List`
-                    // aliases, CPython's `_SpecialGenericAlias`) render without
-                    // the `<class '...'>` wrapper.  This is keyed off a dedicated
-                    // `override_repr` field — never a `__dict__` attribute — so a
-                    // user class cannot hijack its own repr (issue #2608).
-                    let custom_repr = c.override_repr.as_ref().map(|s| s.to_string());
-                    (qualname, module, custom_repr)
-                };
-                if let Some(r) = custom_repr {
-                    return r;
+                let c = class.borrow();
+                // Some pseudo-classes (e.g. the deprecated `typing.List`
+                // aliases, CPython's `_SpecialGenericAlias`) render without
+                // the `<class '...'>` wrapper.  This is keyed off a dedicated
+                // `override_repr` field — never a `__dict__` attribute — so a
+                // user class cannot hijack its own repr (issue #2608).
+                if let Some(custom_repr) = c.override_repr.as_ref() {
+                    return custom_repr.to_string();
                 }
-                match module.as_deref() {
-                    Some("builtins") | None => format!("<class '{qualname}'>"),
-                    Some(m) => format!("<class '{m}.{qualname}'>"),
-                }
+                let mut out = String::from("<class '");
+                c.push_repr_display_name(&mut out);
+                out.push_str("'>");
+                out
             }
             ValueKind::PyInstance(instance) => {
                 if is_exception_instance(instance) {
@@ -324,19 +315,16 @@ impl Value {
                 if let Some(backing) = instance_backing_for_repr(instance) {
                     return backing.repr_raw();
                 }
-                let (qualname, module) = {
+                let mut out = String::from("<");
+                {
                     let inst = instance.borrow();
                     let class = inst.class.borrow();
-                    let qualname = class.qualname.clone();
-                    let module = class
-                        .attrs
-                        .get("__module__")
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "__main__".to_string());
-                    (qualname, module)
-                };
+                    class.push_repr_display_name(&mut out);
+                }
+                use std::fmt::Write as _;
                 let addr = Rc::as_ptr(instance) as usize;
-                format!("<{module}.{qualname} object at 0x{addr:x}>")
+                let _ = write!(out, " object at 0x{addr:x}>");
+                out
             }
             ValueKind::BoundMethod { function, receiver } => {
                 let class_name = receiver.borrow().class.borrow().name.clone();

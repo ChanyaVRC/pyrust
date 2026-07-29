@@ -685,12 +685,12 @@ impl BuiltinTypeOps for ClassBoundAnyOps {
             .downcast_ref::<ClassBoundAnyState>()
             .expect("ClassBoundAnyState");
         let class = bound.class.borrow();
-        let module = class
-            .attrs
-            .get("__module__")
-            .and_then(|value| value.as_str().map(str::to_string))
-            .unwrap_or_else(|| "__main__".to_string());
-        format!("<bound method ? of <class '{module}.{}'>>", class.qualname)
+        // The owner spelling follows the same `__module__ == "builtins"`
+        // omission rule as the plain `type` repr (issue #2927).
+        format!(
+            "<bound method ? of <class '{}'>>",
+            class.repr_display_name()
+        )
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {

@@ -224,12 +224,94 @@ impl Default for PyClass {
     }
 }
 
+/// The text carried by a `str` *subclass* `__module__` entry, or `None` for any
+/// value that CPython's `type_repr` would treat as an absent module.
+///
+/// Only reached once the exact-`str` case has been ruled out.  CPython's gate is
+/// `PyUnicode_Check`, which accepts a subclass, and the `%U` that follows formats
+/// the raw unicode payload — a subclass `__str__` / `__repr__` override never
+/// participates.  So `C.__module__ = SubStr("m")` still reprs as `<class 'm.C'>`.
+fn str_subclass_module_text(value: &Value) -> Option<Value> {
+    // A `str` subclass instance keeps its text in `__builtin_data__`.  Gate on
+    // the immutable canonical tag of the class chain, never on the presence of
+    // that attribute alone: `__builtin_data__` is assignable from Python on any
+    // instance, so trusting it would let an unrelated object spoof a module name.
+    let ValueKind::PyInstance(instance) = value.kind() else {
+        return None;
+    };
+    let borrowed = instance.borrow();
+    if !class_chain_is_str(&borrowed.class) {
+        return None;
+    }
+    let backing = borrowed.attrs.get("__builtin_data__")?;
+    backing.is_str().then(|| backing.clone())
+}
+
+/// Whether `class` inherits from the canonical `str` class.
+fn class_chain_is_str(class: &Rc<RefCell<PyClass>>) -> bool {
+    let borrowed = class.borrow();
+    borrowed.canonical_tag == Some(CanonicalClassTag::Str)
+        || borrowed.base.as_ref().is_some_and(class_chain_is_str)
+        || borrowed.extra_bases.iter().any(class_chain_is_str)
+}
+
 impl PyClass {
     /// Advance this class's direct-mutation version without permitting ABA.
     #[inline]
     pub fn bump_mutation_version(&self) {
         self.mutation_version
             .set(self.mutation_version.get().saturating_add(1));
+    }
+
+    /// The class name used by the default `type` / instance reprs, following
+    /// CPython's shared rule (`typeobject.c::type_repr` and `object_repr`).
+    ///
+    /// The qualified `{module}.{qualname}` form is used only when `__module__`
+    /// is present **and** is a string other than `"builtins"`; otherwise the
+    /// bare `__name__` is used with no module prefix.  So `repr(object())` is
+    /// `<object object at 0x...>`, and a class whose `__module__` was mutated
+    /// to `"builtins"` / `None` / a non-string reprs as `<class 'Name'>`
+    /// (issue #2927).  Note the asymmetry is CPython's: the qualified form
+    /// spells the *qualname* (`Outer.Inner`), the bare form the *name*
+    /// (`Inner`, CPython's `tp_name` for a heap type).
+    pub fn repr_display_name(&self) -> String {
+        let mut out = String::new();
+        self.push_repr_display_name(&mut out);
+        out
+    }
+
+    /// [`PyClass::repr_display_name`] appended to an existing buffer.
+    ///
+    /// Every caller wraps the name in a larger repr, so the rule writes straight
+    /// into that buffer: materialising the name as its own `String` first costs a
+    /// second allocation plus a copy, worth ~6% on a `repr(cls)`-saturated loop.
+    pub fn push_repr_display_name(&self, out: &mut String) {
+        let Some(raw) = self.attrs.get("__module__") else {
+            out.push_str(&self.name);
+            return;
+        };
+        // Common case: an exact `str`, borrowed in place with no clone.
+        if let Some(module) = raw.as_str() {
+            self.push_display_with_module(out, module);
+            return;
+        }
+        // Rare case: a `str` subclass, whose text lives in the instance's backing
+        // store and so has to outlive the borrow taken to reach it.
+        match str_subclass_module_text(raw) {
+            Some(module) => self.push_display_with_module(out, module.as_str().unwrap_or_default()),
+            None => out.push_str(&self.name),
+        }
+    }
+
+    /// Apply the qualifier rule for a `__module__` that is known to be a string.
+    fn push_display_with_module(&self, out: &mut String, module: &str) {
+        if module == "builtins" {
+            out.push_str(&self.name);
+        } else {
+            out.push_str(module);
+            out.push('.');
+            out.push_str(&self.qualname);
+        }
     }
 
     /// Construct a `PyClass` from the four commonly-varying fields, defaulting
