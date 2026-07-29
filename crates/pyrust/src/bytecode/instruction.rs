@@ -132,9 +132,13 @@ pub enum Insn {
     /// R[dst] = R[obj][R[idx]]
     GetItem(Reg, Reg, Reg),
     /// Deopting form of `GetItem` for the int-loop versioning pass: when
-    /// R[obj] is a canonical `list`/`tuple` and R[idx] is a built-in integer
-    /// in `0..len`, `R[dst] = R[obj][R[idx]]`; otherwise jump and leave R[dst]
-    /// unchanged.
+    /// R[obj] is a canonical `list`/`tuple`, R[idx] is a built-in integer in
+    /// `0..len`, and the element read out is itself an `int`,
+    /// `R[dst] = R[obj][R[idx]]`; otherwise jump and leave R[dst] unchanged.
+    ///
+    /// The element-type half is the same per-iteration fact a `JumpIfNotInt`
+    /// on R[dst] would establish, folded in because both share this
+    /// instruction as their deopt target.
     ///
     /// Emitted only inside an out-of-line specialized loop copy, whose jump
     /// target is a side-exit stub that flushes the deferred module syncs and
@@ -144,7 +148,7 @@ pub enum Insn {
     /// negative, out-of-range, non-int, `dict`, user-`__getitem__`, and unset
     /// operands all raise (or run user code) on the original path with their
     /// own source line and PEP 657 caret span.
-    GetItemSeqOrExit(Reg, Reg, Reg, i32),
+    GetItemSeqIntOrExit(Reg, Reg, Reg, i32),
     /// R[dst] = R[obj][R[base] : R[base+1] : R[base+2]]  (rvalue slice read).
     /// CPython's BINARY_SLICE analogue: reads the three contiguous bound
     /// registers (start, stop, step; `None` = absent) and slices `obj` directly,
@@ -249,6 +253,32 @@ pub enum Insn {
     /// a differently-bounded range, an aliased iterable, or a partially
     /// consumed cursor all simply fail the guard and run the original loop.
     JumpIfIterNotIntRangeExact(Box<IntRangeExactGuard>, i32),
+    /// Jump when R[reg] is not the canonical built-in `len`.
+    ///
+    /// The entry guard for a `while i < len(xs):` loop copy that reads the
+    /// sequence length natively instead of calling `len`.  The optimizer only
+    /// ever proposes that copy after seeing `LoadGlobal len` in the header, but
+    /// a module-level `def len` / `len = …` / `builtins.len = …` rebinding —
+    /// or a namespace-mirror write between loop entries (rule 27) — makes the
+    /// name resolve to something else entirely.  Like
+    /// `JumpIfIterNotIntRangeExact`, the guard reads the *value* the header
+    /// just loaded rather than trusting the name, so any rebinding simply runs
+    /// the original loop with its real call.
+    JumpIfNotBuiltinLen(Reg, i32),
+    /// Deopting native `len()` for the int-loop versioning pass: when R[seq] is
+    /// a canonical `list`/`tuple`/`str`/`bytes`, `R[dst] = len(R[seq])`;
+    /// otherwise jump and leave R[dst] unchanged.
+    ///
+    /// Emitted only inside an out-of-line specialized loop copy, in place of
+    /// the `LoadGlobal len` + `Move` + `Call` header triple it replaces, and
+    /// re-executed on **every** iteration — a mid-loop `append` / `pop` moves
+    /// the loop bound exactly as the original per-iteration call would.  On any
+    /// other operand shape (user `__len__`, `dict`, `set`, a `range` whose
+    /// length overflows `i64`, an unset slot) the jump target is a side-exit
+    /// stub that flushes the deferred module syncs and resumes the original
+    /// loop at its `LoadGlobal`, so the real `len` owns the raise, the protocol
+    /// dispatch, and the diagnostics.
+    LenSeqOrExit(Reg, Reg, i32),
     /// Guarded numeric leaf-call inlining site (emitted only by the
     /// optimizer, always immediately before the original call sequence it
     /// specializes, which stays in place as the deopt path).

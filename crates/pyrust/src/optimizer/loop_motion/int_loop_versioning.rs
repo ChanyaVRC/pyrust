@@ -32,17 +32,18 @@
 ///
 /// ## Mid-loop side exits
 ///
-/// Entry guards can only establish loop-invariant facts.  Two operations the
-/// pass admits produce values whose type is a *per-iteration* fact — a
-/// `ForIter` step over a canonical list/tuple, and a canonical sequence
-/// subscript — so the specialized copy carries **mid-loop side exits**:
+/// Entry guards can only establish loop-invariant facts.  Three operations the
+/// pass admits produce values that are a *per-iteration* fact — a `ForIter`
+/// step over a canonical list/tuple, a canonical sequence subscript, and a
+/// canonical sequence length — so the specialized copy carries **mid-loop side
+/// exits**:
 ///
 /// ```text
 /// fast_head:
 ///   ForIter(x, slot, → stub(exit))
 ///   JumpIfNotInt(x, → side(head+1))    ; element type is per-iteration
-///   GetItemSeqOrExit(v, xs, i, → side(i_sub))
-///   JumpIfNotInt(v, → side(i_sub))     ; element type is per-iteration
+///   GetItemSeqIntOrExit(v, xs, i, → side(i_sub))   ; read *and* element type
+///   LenSeqOrExit(c, xs, → side(i_len)) ; the length is per-iteration too
 ///   …
 /// side(t):                              ; same shape as an exit stub
 ///   SyncModuleGlobal(…)                 ; every deferred sync, flushed
@@ -68,6 +69,61 @@
 /// instruction reproduces the fast copy's effect — or raises, which is the
 /// point.  Candidates whose subscript would clobber its own operand register,
 /// or that could branch around a guarded definition, are rejected instead.
+///
+/// A subscript's *element type* is folded into `GetItemSeqIntOrExit` rather
+/// than following it as a separate `JumpIfNotInt`: both facts deopt to the same
+/// instruction, and a region carrying a subscript admits no interior branch
+/// that could land between a read and its check.
+///
+/// ## `while i < len(seq):` headers
+///
+/// A `len` call in a while header is re-evaluated on every iteration, so
+/// `pass_loop_inversion` cannot collapse the back-edge and the region opens
+/// with the call triple instead of a comparison:
+///
+/// ```text
+/// head:   LoadGlobal(c, "len") + Move(c+1, seq) + Call(c, 1)
+/// hdr:    CmpJumpIfFalse(i, <, c, → exit)
+///         …body…
+///         BinOpImm(i, i, Add, 1)
+/// back:   Jump(→ head)
+/// ```
+///
+/// The copy replaces the triple with a native length read and rotates the
+/// header down to the latch, where the counter increment fuses into it:
+///
+/// ```text
+/// pre:
+///   LoadGlobal(c, "len")
+///   JumpIfNotBuiltinLen(c, → orig_head)  ; a rebound `len` runs the real call
+///   JumpIfNotInt(…)                       ; the usual register chain
+///   Jump(→ fast_head)
+/// fast_head:
+///   LenSeqOrExit(c, seq, → side(head))
+///   CmpJumpIfFalse(i, <, c, → stub(exit)) ; zero-trip test, runs once
+/// body:
+///   …
+///   LenSeqOrExit(c, seq, → side(the increment))
+///   CountCmpJumpTrue(i, <, c, 1, → body)  ; increment + re-derived bound
+/// ```
+///
+/// The length read stays **inside** the loop.  That is the correctness line the
+/// historical AST rewrite (#289) crossed by hoisting it: a per-iteration read
+/// keeps `len` observable exactly where CPython observes it, so a body that
+/// moves the bound moves it here too, and nothing about the sequence's identity
+/// or size is assumed across iterations.
+///
+/// Two guards make the substitution legitimate.  `JumpIfNotBuiltinLen` checks
+/// the *value* the header just loaded, so a `def len` shadow, an assignment, a
+/// `globals()` write, or a `builtins.len` patch all run the original call.
+/// `LenSeqOrExit` checks its argument on every read, so a user `__len__`, a
+/// `dict`, or an oversized `range` deopts to the original `LoadGlobal` — which
+/// owns the protocol dispatch, the raise, and the diagnostics.
+///
+/// Rotating the latch reads the length *above* the increment.  The two touch
+/// disjoint registers and neither can raise or re-enter, so the reorder is
+/// unobservable — provided the rotated read's side exit resumes the original at
+/// the increment it has not yet run, which is what its stub does.
 ///
 /// ## Closed-form copies
 ///
@@ -138,7 +194,14 @@
 ///   iteration that took that edge.
 /// - Regions containing another back-edge (nested loops), `Yield`, calls, or
 ///   any instruction outside the whitelist are rejected; outer loops simply
-///   keep their original form while their inner loop is versioned.
+///   keep their original form while their inner loop is versioned.  A `len`
+///   header's own call triple is the single exception, and only because the
+///   copy replaces it with a guarded native read rather than executing it.
+/// - A `len` header's call scratch (`callee` and the argument slot at
+///   `callee + 1`) must be register-file scratch, not a module fast-local, and
+///   nothing past the header comparison may touch either: the copy rewrites
+///   `callee` from the sequence each pass and never materialises the argument
+///   slot at all.
 struct IntLoopVersioningResult {
     insns: Vec<Insn>,
     /// Exclusive end of the source-derived main stream. Instructions after
@@ -379,10 +442,14 @@ fn pass_int_loop_version(
     insns: Vec<Insn>,
     consts: &mut Vec<Value>,
     names: &[String],
+    num_locals: u32,
     num_regs: &mut u32,
 ) -> IntLoopVersioningResult {
     const MAX_REGION: usize = 48;
     const MAX_GUARDS: usize = 8;
+    /// `LoadGlobal len` + `Move` + `Call` — the instructions a `len(seq)` loop
+    /// bound occupies ahead of the comparison that tests it.
+    const LEN_HEADER_TRIPLE: usize = 3;
 
     enum CandidateKind {
         /// Inverted while loop: conditional header, conditional back-edge.
@@ -390,6 +457,27 @@ fn pass_int_loop_version(
         /// `for … in <iterable>`: `ForIter` header, unconditional back-edge;
         /// the guard block additionally checks the iterator slot's kind.
         ForIter { slot: u8 },
+        /// `while <i> < len(<seq>):` — a header the loop re-evaluates in full
+        /// on every iteration, so `pass_loop_inversion` cannot collapse its
+        /// back-edge and the region opens with the call triple rather than
+        /// with a comparison.
+        ///
+        /// The copy replaces the triple with one native length read, still
+        /// executed per iteration: `len` on a canonical sequence is a field
+        /// read that can neither raise nor re-enter, but its *result* is not
+        /// loop-invariant — a body that appends to or pops from the sequence
+        /// moves the bound, and CPython observes exactly that.  Eliding the
+        /// re-read is what made the historical AST rewrite (#289) unsound.
+        LenHeaderWhile {
+            /// Call base the header's `LoadGlobal` writes; also the register
+            /// the comparison reads the length from.
+            callee: Reg,
+            /// The register holding the sequence — re-read every iteration, so
+            /// rebinding it mid-loop is observed, not assumed away.
+            seq: Reg,
+            /// Name-table slot of `"len"`, for the guard block's re-load.
+            name_idx: u16,
+        },
     }
 
     /// One out-of-line copy of a candidate region, reached through its own
@@ -412,6 +500,20 @@ fn pass_int_loop_version(
         ClosedForm,
     }
 
+    /// The rotated latch of a `len`-header copy: the counter increment the
+    /// copy folds into the header comparison at the region end.
+    struct LenLatch {
+        /// Old index of the `BinOpImm(v, v, Add, imm)` the fusion consumes.
+        /// A deopt out of the rotated length read resumes the original here,
+        /// because the copy re-reads the length *before* incrementing.
+        add: usize,
+        var: Reg,
+        op: BinaryOp,
+        imm: i16,
+        /// Whether the fused latch jumps back on a true comparison.
+        jump_when_true: bool,
+    }
+
     struct Candidate {
         kind: CandidateKind,
         head: usize,
@@ -427,16 +529,40 @@ fn pass_int_loop_version(
         /// Present when the body folds to a closed form; drives the
         /// `FastVariant::ClosedForm` copy at the head of the guard chain.
         closed_form: Option<ClosedForm>,
+        /// Present when a `len` header's copy rotates its length read and
+        /// comparison into a fused latch.
+        len_latch: Option<LenLatch>,
     }
 
     impl Candidate {
         /// Instructions the guard block contributes ahead of the original head.
         fn guard_block_len(&self) -> usize {
-            let per_variant = usize::from(matches!(self.kind, CandidateKind::ForIter { .. }))
+            let per_variant = self.shape_guard_len()
                 + self.guards.len()
                 + usize::from(self.const_fuse.is_some())
                 + 1;
             self.variants.len() * per_variant
+        }
+
+        /// Guard-block instructions the candidate's *shape* contributes, ahead
+        /// of the per-register `JumpIfNotInt` chain.
+        fn shape_guard_len(&self) -> usize {
+            match self.kind {
+                CandidateKind::Inverted => 0,
+                CandidateKind::ForIter { .. } => 1,
+                // `LoadGlobal len` + the value guard on what it produced.
+                CandidateKind::LenHeaderWhile { .. } => 2,
+            }
+        }
+
+        /// Index of the comparison that decides whether the loop body runs.
+        /// It is the region's first instruction except for a `len` header,
+        /// whose call triple precedes it.
+        fn header(&self) -> usize {
+            match self.kind {
+                CandidateKind::LenHeaderWhile { .. } => self.head + LEN_HEADER_TRIPLE,
+                _ => self.head,
+            }
         }
     }
 
@@ -503,7 +629,9 @@ fn pass_int_loop_version(
             | Insn::JumpIfIterNotIntRange(_, k)
             | Insn::JumpIfIterNotIndexedSeq(_, k)
             | Insn::JumpIfIterNotIntRangeExact(_, k)
-            | Insn::GetItemSeqOrExit(_, _, _, k)
+            | Insn::GetItemSeqIntOrExit(_, _, _, k)
+            | Insn::JumpIfNotBuiltinLen(_, k)
+            | Insn::LenSeqOrExit(_, _, k)
             | Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -520,13 +648,76 @@ fn pass_int_loop_version(
         Some((i as i64 + 1 + off as i64) as usize)
     };
 
+    // Whether `insn` writes register `r`.  Whitelisted region instructions
+    // report their real destination; anything else is assumed to clobber.
+    let writes_reg = |insn: &Insn, r: Reg| match insn {
+        Insn::Jump(..)
+        | Insn::JumpIfFalse(..)
+        | Insn::JumpIfTrue(..)
+        | Insn::CmpJumpIfFalse(..)
+        | Insn::CmpJumpIfTrue(..)
+        | Insn::CmpJumpIfFalseConst(..)
+        | Insn::CmpJumpIfTrueConst(..)
+        | Insn::SyncModuleGlobal(..) => false,
+        Insn::LoadConst(dst, _)
+        | Insn::Move(dst, _)
+        | Insn::CopyReg(dst, _)
+        | Insn::BinOp(dst, ..)
+        | Insn::BinOpInPlace(dst, ..)
+        | Insn::BinOpImm(dst, ..)
+        | Insn::BinOpConst(dst, ..)
+        | Insn::GetItem(dst, ..)
+        | Insn::ForIter(dst, ..) => *dst == r,
+        // Outside the region whitelist: assume it clobbers.
+        _ => true,
+    };
+
+    // The `LoadGlobal len` + `Move` + `Call` triple a `while … len(seq)` header
+    // opens with, as `(callee, seq, name_idx)`.
+    //
+    // This only *proposes* that the call computes a built-in length: the name is
+    // matched textually and the value it resolves to is checked at runtime by
+    // the `JumpIfNotBuiltinLen` entry guard, exactly as the closed-form copy
+    // trusts `JumpIfIterNotIntRangeExact` rather than the traced `range(...)`
+    // arguments.
+    let len_header = |h: usize| -> Option<(Reg, Reg, u16)> {
+        let Insn::LoadGlobal(callee, name_idx) = insns[h] else {
+            return None;
+        };
+        if names.get(usize::from(name_idx)).map(String::as_str) != Some("len") {
+            return None;
+        }
+        // The call convention places the sole argument at `callee + 1`.  Both
+        // registers must be call scratch: the copy never materialises the
+        // argument slot and leaves `callee` holding the native length, which
+        // would be visible through the namespace mirror if either aliased a
+        // module fast-local.
+        if callee < num_locals {
+            return None;
+        }
+        let seq = match insns.get(h + 1)? {
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) if *dst == callee + 1 => *src,
+            _ => return None,
+        };
+        if seq == callee || seq == callee + 1 {
+            return None;
+        }
+        match insns.get(h + 2)? {
+            Insn::Call(base, 1) | Insn::CallMemo(base, 1) if *base == callee => {
+                Some((callee, seq, name_idx))
+            }
+            _ => None,
+        }
+    };
+
     // ── Find candidates ────────────────────────────────────────────────────
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut h = 0usize;
     while h < n {
-        // Header: forward conditional jump (inverted while) or ForIter
-        // (for-range) over the whole region.
-        let (kind, k) = match &insns[h] {
+        // Header: forward conditional jump (inverted while), ForIter
+        // (for-range), or the `len(seq)` call triple that precedes a
+        // never-inverted `while i < len(seq)` comparison.
+        let (kind, hdr, k) = match &insns[h] {
             Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -535,24 +726,49 @@ fn pass_int_loop_version(
             | Insn::JumpIfTrue(_, k)
                 if *k > 1 =>
             {
-                (CandidateKind::Inverted, *k as usize)
+                (CandidateKind::Inverted, h, *k as usize)
             }
             Insn::ForIter(_, slot, k) if *k > 1 => {
-                (CandidateKind::ForIter { slot: *slot }, *k as usize)
+                (CandidateKind::ForIter { slot: *slot }, h, *k as usize)
+            }
+            Insn::LoadGlobal(..) => {
+                let hdr = h + LEN_HEADER_TRIPLE;
+                // The comparison must read the length the triple produced;
+                // otherwise the call's result is used for something the copy
+                // does not model and eliding the call would be wrong.
+                match (len_header(h), insns.get(hdr)) {
+                    (
+                        Some((callee, seq, name_idx)),
+                        Some(Insn::CmpJumpIfFalse(a, _, b, k) | Insn::CmpJumpIfTrue(a, _, b, k)),
+                    ) if *k > 1 && (*a == callee || *b == callee) => (
+                        CandidateKind::LenHeaderWhile {
+                            callee,
+                            seq,
+                            name_idx,
+                        },
+                        hdr,
+                        *k as usize,
+                    ),
+                    _ => {
+                        h += 1;
+                        continue;
+                    }
+                }
             }
             _ => {
                 h += 1;
                 continue;
             }
         };
-        let back = h + k;
-        if back >= n || k > MAX_REGION {
+        let back = hdr + k;
+        if back >= n || back - h > MAX_REGION {
             h += 1;
             continue;
         }
         // Back-edge: an inverted while re-checks its condition at the body
         // end (the shape produced by `pass_loop_inversion`); a for-range
-        // returns to its ForIter with an unconditional Jump.
+        // returns to its ForIter, and a `len` header to its `LoadGlobal`, with
+        // an unconditional Jump.
         let back_targets_body = match (&kind, &insns[back]) {
             (
                 CandidateKind::Inverted,
@@ -564,6 +780,9 @@ fn pass_int_loop_version(
                 | Insn::JumpIfTrue(_, kb),
             ) => *kb == -(k as i32),
             (CandidateKind::ForIter { .. }, Insn::Jump(kb)) => *kb == -(k as i32 + 1),
+            (CandidateKind::LenHeaderWhile { .. }, Insn::Jump(kb)) => {
+                (back as i64 + 1 + i64::from(*kb)) == h as i64
+            }
             _ => false,
         };
         if !back_targets_body {
@@ -582,13 +801,16 @@ fn pass_int_loop_version(
         };
         let mut eligible = true;
         // Old indices of `GetItem`s the fast copy may run as the deopting
-        // `GetItemSeqOrExit`.
+        // `GetItemSeqIntOrExit`.
         let mut subscripts: Vec<usize> = Vec::new();
+        // `hdr` doubles as the start of everything the whitelist walk and the
+        // sync analysis reason about: only a `len` header has instructions
+        // ahead of it, and the copy replaces that call triple wholesale.
         let walk_start = match kind {
             // The ForIter header is not in the body whitelist; the runtime
             // iterator-slot guard owns its semantics.
             CandidateKind::ForIter { .. } => h + 1,
-            CandidateKind::Inverted => h,
+            CandidateKind::Inverted | CandidateKind::LenHeaderWhile { .. } => hdr,
         };
         for i in walk_start..=back {
             match &insns[i] {
@@ -623,11 +845,11 @@ fn pass_int_loop_version(
                 }
                 Insn::CmpJumpIfFalse(a, op, b, off) | Insn::CmpJumpIfTrue(a, op, b, off) => {
                     let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
-                    if !cmp_op(op) || (i != h && i != back && *off < 0 && !continue_edge) {
+                    if !cmp_op(op) || (i != hdr && i != back && *off < 0 && !continue_edge) {
                         eligible = false;
                         break;
                     }
-                    has_interior_control_flow |= i != h && i != back;
+                    has_interior_control_flow |= i != hdr && i != back;
                     guard(*a, &mut guards);
                     guard(*b, &mut guards);
                 }
@@ -636,21 +858,21 @@ fn pass_int_loop_version(
                     let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
                     if !cmp_op(op)
                         || !const_is_int(*idx)
-                        || (i != h && i != back && *off < 0 && !continue_edge)
+                        || (i != hdr && i != back && *off < 0 && !continue_edge)
                     {
                         eligible = false;
                         break;
                     }
-                    has_interior_control_flow |= i != h && i != back;
+                    has_interior_control_flow |= i != hdr && i != back;
                     guard(*a, &mut guards);
                 }
                 Insn::JumpIfFalse(r, off) | Insn::JumpIfTrue(r, off) => {
                     let continue_edge = *off < 0 && (i as i64 + 1 + *off as i64) == h as i64;
-                    if i != h && i != back && *off < 0 && !continue_edge {
+                    if i != hdr && i != back && *off < 0 && !continue_edge {
                         eligible = false;
                         break;
                     }
-                    has_interior_control_flow |= i != h && i != back;
+                    has_interior_control_flow |= i != hdr && i != back;
                     guard(*r, &mut guards);
                 }
                 Insn::Jump(off) => {
@@ -664,11 +886,11 @@ fn pass_int_loop_version(
                         eligible = false;
                         break;
                     }
-                    has_interior_control_flow |= i != h && i != back;
+                    has_interior_control_flow |= i != hdr && i != back;
                 }
                 Insn::GetItem(dst, obj, idx) => {
                     // Admitted through a mid-loop side exit: the fast copy runs
-                    // the deopting `GetItemSeqOrExit` and guards its result.
+                    // the deopting `GetItemSeqIntOrExit` and guards its result.
                     // Neither operand may be entry-guarded (the sequence is not
                     // an int, and the index may legitimately be the loop
                     // variable), and the deopt only reproduces the original
@@ -699,6 +921,24 @@ fn pass_int_loop_version(
             if let Insn::ForIter(dst, _, _) = &insns[h] {
                 guards.retain(|g| g != dst);
             }
+        }
+        if let CandidateKind::LenHeaderWhile { callee, .. } = kind {
+            // `callee` is the length, rewritten by the copy's opening
+            // `LenSeqOrExit` before the comparison reads it — so, like a
+            // `ForIter` target, its entry state is irrelevant and guarding it
+            // would divert every first entry (it is unset until the original
+            // `LoadGlobal` runs).  Beyond the comparison nothing in the region
+            // may touch it, and nothing at all may touch the argument slot the
+            // copy never materialises.
+            let touches =
+                |i: usize, r: Reg| insn_reads_reg(&insns[i], r) || writes_reg(&insns[i], r);
+            if (hdr + 1..=back).any(|i| touches(i, callee) || touches(i, callee + 1))
+                || insn_reads_reg(&insns[hdr], callee + 1)
+                || syncs.iter().any(|&(r, _)| r == callee || r == callee + 1)
+            {
+                eligible = false;
+            }
+            guards.retain(|g| *g != callee);
         }
         // A subscript destination is likewise rewritten every iteration, and
         // its side exit dominates every later read only while the body is
@@ -796,27 +1036,6 @@ fn pass_int_loop_version(
         // without passing a branch that could skip it.  A source the region
         // never writes is trivially safe — the stub rewrites the entry value
         // the original republished every iteration.
-        let writes_reg = |insn: &Insn, r: Reg| match insn {
-            Insn::Jump(..)
-            | Insn::JumpIfFalse(..)
-            | Insn::JumpIfTrue(..)
-            | Insn::CmpJumpIfFalse(..)
-            | Insn::CmpJumpIfTrue(..)
-            | Insn::CmpJumpIfFalseConst(..)
-            | Insn::CmpJumpIfTrueConst(..)
-            | Insn::SyncModuleGlobal(..) => false,
-            Insn::LoadConst(dst, _)
-            | Insn::Move(dst, _)
-            | Insn::CopyReg(dst, _)
-            | Insn::BinOp(dst, ..)
-            | Insn::BinOpInPlace(dst, ..)
-            | Insn::BinOpImm(dst, ..)
-            | Insn::BinOpConst(dst, ..)
-            | Insn::GetItem(dst, ..)
-            | Insn::ForIter(dst, ..) => *dst == r,
-            // Outside the region whitelist: assume it clobbers.
-            _ => true,
-        };
         let write_reaches_its_sync = |r: Reg, k: usize| {
             for s in k + 1..=back {
                 if matches!(insns[s], Insn::SyncModuleGlobal(r2, _) if r2 == r) {
@@ -828,11 +1047,15 @@ fn pass_int_loop_version(
             }
             false
         };
+        // Scanned from `hdr`: a `len` header's call triple writes only its own
+        // call scratch, which the eligibility walk already forbids as a sync
+        // source, and `writes_reg` would otherwise read the `Call` through its
+        // conservative "assume it clobbers" arm and decline every candidate.
         let sync_sources_republish_exactly = || {
             syncs.iter().all(|&(r, name_idx)| {
-                (h..=back).all(|s| {
+                (hdr..=back).all(|s| {
                     !matches!(insns[s], Insn::SyncModuleGlobal(r2, n2) if r2 == r && n2 != name_idx)
-                }) && (h..=back)
+                }) && (hdr..=back)
                     .all(|k| !writes_reg(&insns[k], r) || write_reaches_its_sync(r, k))
             })
         };
@@ -893,7 +1116,40 @@ fn pass_int_loop_version(
         } else {
             None
         };
-        let has_fusion = has_reg_fusion || const_fuse.is_some();
+        // A `len` header's back-edge is an unconditional `Jump`, so there is no
+        // compare at the region end to fuse the counter increment into.  The
+        // copy makes one: it rotates the length read and the header comparison
+        // down to the latch, leaving the entry pair as the zero-trip test.  Per
+        // iteration that replaces `add` + `jump` + `length` + `compare` with a
+        // `length` + one fused `CountCmpJump*`.
+        //
+        // Reading the length *above* the increment is unobservable — the two
+        // touch disjoint registers and neither can raise or re-enter — provided
+        // the deopt out of the rotated read resumes the original *at* the
+        // increment, which has not run yet.  That is the side-exit target below.
+        let len_latch = if let CandidateKind::LenHeaderWhile { callee, seq, .. } = kind
+            && let Some(add) = prev_non_sync
+            && let Insn::BinOpImm(dst, src, BinaryOp::Add, imm, _) = insns[add]
+            && dst == src
+            && dst != seq
+            && let Insn::CmpJumpIfFalse(a, op, b, _) | Insn::CmpJumpIfTrue(a, op, b, _) = insns[hdr]
+            && a == dst
+            && b == callee
+            && !has_fusion_interior_landing
+        {
+            Some(LenLatch {
+                add,
+                var: dst,
+                op,
+                imm,
+                // The header jumps *out* when its test fails, so the latch
+                // jumps *back* on the opposite polarity.
+                jump_when_true: matches!(insns[hdr], Insn::CmpJumpIfFalse(..)),
+            })
+        } else {
+            None
+        };
+        let has_fusion = has_reg_fusion || const_fuse.is_some() || len_latch.is_some();
         if syncs.is_empty() && !has_fusion {
             h += 1;
             continue;
@@ -925,7 +1181,9 @@ fn pass_int_loop_version(
         // straight-line, so the opening side exit dominates every use of the
         // loop variable — the canonical list/tuple index cursor.
         let mut variants = match kind {
-            CandidateKind::Inverted => vec![FastVariant::Plain],
+            CandidateKind::Inverted | CandidateKind::LenHeaderWhile { .. } => {
+                vec![FastVariant::Plain]
+            }
             CandidateKind::ForIter { .. } if has_interior_control_flow => {
                 vec![FastVariant::IntRange]
             }
@@ -940,7 +1198,7 @@ fn pass_int_loop_version(
             CandidateKind::ForIter { slot } => {
                 closed_form_for(&insns, consts, names, h, back, slot)
             }
-            CandidateKind::Inverted => None,
+            CandidateKind::Inverted | CandidateKind::LenHeaderWhile { .. } => None,
         };
         if closed_form.is_some() {
             variants.insert(0, FastVariant::ClosedForm);
@@ -954,6 +1212,7 @@ fn pass_int_loop_version(
             const_fuse,
             variants,
             closed_form,
+            len_latch,
         });
         h = back + 1;
     }
@@ -1065,6 +1324,31 @@ fn pass_int_loop_version(
                         let fail_off = placement[i] as i64 - gpos as i64 - 1;
                         out.push(Insn::JumpIfNotInt(*g, fail_off as i32));
                     }
+                    if let CandidateKind::LenHeaderWhile {
+                        callee, name_idx, ..
+                    } = cand.kind
+                    {
+                        // Resolve the name once per entry and guard the value it
+                        // produced.  Loading it here is exactly the header's own
+                        // first instruction — which the deopt edge re-runs — so
+                        // it observes the same binding the original would, and a
+                        // `def len` shadow or a `builtins.len` patch fails the
+                        // guard and runs the real call.
+                        //
+                        // Emitted *after* the register chain: the back-edge of a
+                        // loop that keeps failing a `JumpIfNotInt` re-enters this
+                        // block every iteration, and resolving the name first
+                        // made each of those passes pay a global lookup whose
+                        // result the very next guard discarded.  Nothing in the
+                        // chain reads `callee` — the eligibility walk excludes it
+                        // — so the order is free, and the failure edge now leaves
+                        // `callee` for the original `LoadGlobal` to set, exactly
+                        // as it does when the value guard itself fails.
+                        out.push(Insn::LoadGlobal(callee, name_idx));
+                        let gpos = out.len();
+                        let fail_off = placement[i] as i64 - gpos as i64 - 1;
+                        out.push(Insn::JumpIfNotBuiltinLen(callee, fail_off as i32));
+                    }
                     if let Some((tmp, cidx)) = cand.const_fuse {
                         out.push(Insn::LoadConst(tmp, cidx));
                     }
@@ -1152,6 +1436,73 @@ fn pass_int_loop_version(
                 }
                 fast_index[i - cand.head] = entry_pos;
                 match &insns[i] {
+                    _ if i < cand.header() => {
+                        // The `LoadGlobal len` + `Move` + `Call` triple becomes
+                        // a single native length read.  It stays *inside* the
+                        // loop — the back-edge returns here — so a body that
+                        // appends to or pops from the sequence moves the bound
+                        // on the next iteration exactly as the call did.  Any
+                        // non-canonical receiver side-exits to the original
+                        // `LoadGlobal`, which owns the protocol dispatch, the
+                        // raise, and the diagnostics.
+                        let CandidateKind::LenHeaderWhile { callee, seq, .. } = cand.kind else {
+                            unreachable!(
+                                "only a len header has instructions before its comparison"
+                            );
+                        };
+                        if i == cand.head {
+                            fast.push(FastEntry::SideExit(
+                                cand.head,
+                                Insn::LenSeqOrExit(callee, seq, 0),
+                            ));
+                        }
+                    }
+                    Insn::BinOpImm(..)
+                        if cand.len_latch.as_ref().is_some_and(|latch| latch.add == i) =>
+                    {
+                        // Rotated latch: re-read the length, then run the
+                        // counter increment and the header comparison as one
+                        // fused back-edge.  Only syncs separate this add from
+                        // the region's unconditional back-edge, so the copy
+                        // ends here and the fall-through is the loop exit —
+                        // the same stub the copied header exits to.
+                        let latch = cand
+                            .len_latch
+                            .as_ref()
+                            .expect("the arm guard proved the latch is present");
+                        let CandidateKind::LenHeaderWhile { callee, seq, .. } = cand.kind else {
+                            unreachable!("only a len header carries a rotated latch");
+                        };
+                        fast.push(FastEntry::SideExit(i, Insn::LenSeqOrExit(callee, seq, 0)));
+                        // The fused latch is attributed to the back-edge index,
+                        // and its offset names the body top so the generic
+                        // rewrite maps it inside the copy rather than to the
+                        // region head the original `Jump` targets.
+                        let to_body_top = (cand.header() as i64 - cand.back as i64) as i32;
+                        fast_index[cand.back - cand.head] = fast.len();
+                        fast.push(FastEntry::Copied(
+                            cand.back,
+                            if latch.jump_when_true {
+                                Insn::CountCmpJumpTrue(
+                                    latch.var,
+                                    latch.op,
+                                    callee,
+                                    latch.imm,
+                                    to_body_top,
+                                )
+                            } else {
+                                Insn::CountCmpJumpFalse(
+                                    latch.var,
+                                    latch.op,
+                                    callee,
+                                    latch.imm,
+                                    to_body_top,
+                                )
+                            },
+                        ));
+                        i = cand.back + 1;
+                        continue;
+                    }
                     Insn::SyncModuleGlobal(..) => {}
                     Insn::ForIter(dst, _, _)
                         if i == cand.head && variant == FastVariant::IndexedSeq =>
@@ -1164,13 +1515,17 @@ fn pass_int_loop_version(
                         pending.push((*dst, cand.head + 1));
                     }
                     Insn::GetItem(dst, obj, idx) => {
+                        // One instruction covers both per-iteration facts: the
+                        // operands are a canonical sequence read, and the
+                        // element that comes out is an int.  They share this
+                        // subscript as their deopt target — re-running the
+                        // original reads the same element — and a region
+                        // carrying a subscript admits no interior branch, so
+                        // nothing can land between the read and its check.
                         fast.push(FastEntry::SideExit(
                             i,
-                            Insn::GetItemSeqOrExit(*dst, *obj, *idx, 0),
+                            Insn::GetItemSeqIntOrExit(*dst, *obj, *idx, 0),
                         ));
-                        // Re-running the original subscript after a deopt reads
-                        // the same element, so both guards resume at it.
-                        pending.push((*dst, i));
                     }
                     Insn::BinOpImm(d, s, BinaryOp::Add, imm, _) if d == s && i < cand.back => {
                         // Try to fuse with the back-edge compare-jump when the
@@ -1341,7 +1696,18 @@ fn pass_int_loop_version(
             if t == n {
                 past_end_patches.push(abs);
             }
-            out.push(Insn::Jump((jump_target[t] as i64 - abs as i64 - 1) as i32));
+            // A side exit resumes the *original* instruction it deopted from,
+            // so an in-region target lands on `placement`, not `jump_target`.
+            // Only the region head differs between the two, and there the
+            // difference matters: `jump_target` re-enters the guard block,
+            // which would pass its entry guards again and jump straight back
+            // into the copy that just deopted.
+            let dest = if (cand.head..=cand.back).contains(&t) {
+                placement[t]
+            } else {
+                jump_target[t]
+            };
+            out.push(Insn::Jump((dest as i64 - abs as i64 - 1) as i32));
         }
     }
 
@@ -1368,7 +1734,9 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         JumpIfIterNotIntRange(s2, _) => JumpIfIterNotIntRange(s2, off),
         JumpIfIterNotIndexedSeq(s2, _) => JumpIfIterNotIndexedSeq(s2, off),
         JumpIfIterNotIntRangeExact(guard, _) => JumpIfIterNotIntRangeExact(guard, off),
-        GetItemSeqOrExit(dst, obj, idx, _) => GetItemSeqOrExit(dst, obj, idx, off),
+        GetItemSeqIntOrExit(dst, obj, idx, _) => GetItemSeqIntOrExit(dst, obj, idx, off),
+        JumpIfNotBuiltinLen(r, _) => JumpIfNotBuiltinLen(r, off),
+        LenSeqOrExit(dst, seq, _) => LenSeqOrExit(dst, seq, off),
         CmpJumpIfFalse(a, op, b, _) => CmpJumpIfFalse(a, op, b, off),
         CmpJumpIfTrue(a, op, b, _) => CmpJumpIfTrue(a, op, b, off),
         CmpJumpIfFalseConst(a, op, c, _) => CmpJumpIfFalseConst(a, op, c, off),

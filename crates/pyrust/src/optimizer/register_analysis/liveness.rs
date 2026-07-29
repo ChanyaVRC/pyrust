@@ -23,7 +23,9 @@ fn insn_is_back_edge(insn: &Insn) -> bool {
         | Insn::JumpIfIterNotIntRange(_, k)
         | Insn::JumpIfIterNotIndexedSeq(_, k)
         | Insn::JumpIfIterNotIntRangeExact(_, k)
-        | Insn::GetItemSeqOrExit(_, _, _, k)
+        | Insn::GetItemSeqIntOrExit(_, _, _, k)
+        | Insn::JumpIfNotBuiltinLen(_, k)
+        | Insn::LenSeqOrExit(_, _, k)
         | Insn::CountCmpJumpTrue(_, _, _, _, k)
         | Insn::CountCmpJumpFalse(_, _, _, _, k)
         | Insn::CallInlineBinOp { skip: k, .. }
@@ -300,6 +302,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | BinOpImm(_, s, _, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | JumpIfNotInt(s, _)
+        | JumpIfNotBuiltinLen(s, _)
+        | LenSeqOrExit(_, s, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
         | RecordClassStore(s)
@@ -321,7 +325,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
-        | GetItemSeqOrExit(_, a, b, _)
+        | GetItemSeqIntOrExit(_, a, b, _)
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => *a == r || *b == r,
 
@@ -492,6 +496,8 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | BinOpImm(_, s, _, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | JumpIfNotInt(s, _)
+        | JumpIfNotBuiltinLen(s, _)
+        | LenSeqOrExit(_, s, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
         | RecordClassStore(s)
@@ -517,7 +523,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
-        | GetItemSeqOrExit(_, a, b, _)
+        | GetItemSeqIntOrExit(_, a, b, _)
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => {
             reads.insert(*a);

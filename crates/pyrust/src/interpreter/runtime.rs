@@ -327,9 +327,9 @@ mod execution {
     use super::fast_path::{
         LoopFastOutcome, MemoCallProbe, advance_loop_fast_state, build_string_fast,
         iter_slot_is_indexed_sequence, iter_slot_is_int_range, iter_slot_is_int_range_exact,
-        list_reserve_hint, try_constant_compare_fast, try_indexed_sequence_element,
-        try_inline_leaf_binop, try_integer_compare_fast, try_scalar_truthiness_fast,
-        try_tagged_int_unary,
+        list_reserve_hint, try_builtin_sequence_len, try_constant_compare_fast,
+        try_indexed_sequence_int_element, try_inline_leaf_binop, try_integer_compare_fast,
+        try_scalar_truthiness_fast, try_tagged_int_unary, value_is_builtin_len,
     };
     use super::{
         CallDepthGuard, EnvRef, FrameKind, HashMap, Interpreter, IterCacheBuf, IterState, ItersBuf,
