@@ -37,6 +37,7 @@
 /// Reference: Aho, Lam, Sethi, Ullman *Compilers* §9.1 (available expressions);
 /// Kennedy *A Survey of Data-Flow Analysis Techniques* §3 (CSE).
 fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    debug_assert_no_late_stage_insns(&insns, "pass_cse");
     use std::collections::HashMap;
 
     #[derive(Eq, PartialEq, Hash, Clone)]

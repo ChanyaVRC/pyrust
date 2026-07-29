@@ -804,3 +804,14 @@ fn side_exit_opcodes_participate_in_register_analysis_and_compaction() {
     assert!(matches!(compacted[0], Insn::JumpIfIterNotIndexedSeq(0, 2)));
     assert!(matches!(compacted[1], Insn::GetItemSeqOrExit(1, 2, 3, 1)));
 }
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "ran after a late-stage guarded pass")]
+fn early_passes_reject_late_stage_opcodes_in_debug() {
+    // A driver reorder that fed guarded-pass output back into an early
+    // register-rewriting pass would miscompile silently (their kill-set
+    // helpers use wildcard arms).  The debug guard must fail loudly instead.
+    let insns = vec![Insn::JumpIfNotInt(0, 1), Insn::ReturnNone];
+    let _ = pass_copy_prop(insns, 1);
+}

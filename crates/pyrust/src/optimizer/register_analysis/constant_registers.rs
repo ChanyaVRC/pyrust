@@ -41,6 +41,7 @@
 /// namespace mirror while user code is re-entered.  Temporaries are not exposed
 /// through that mirror, so write-once is a valid immutability proof for them.
 fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec<Insn> {
+    debug_assert_no_late_stage_insns(&insns, "pass_const_reg_prop");
     // Pre-scan: count writes and record LoadConst targets.
     //
     // Use collect_writes (not writable_dst) to capture ALL write destinations,

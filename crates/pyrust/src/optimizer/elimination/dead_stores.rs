@@ -19,6 +19,7 @@
 /// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
 ///   is the initial value consumed by a later loop iteration.
 fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    debug_assert_no_late_stage_insns(&insns, "pass_dead_store_elim");
     let n = insns.len();
     let mut keep = vec![true; n];
 

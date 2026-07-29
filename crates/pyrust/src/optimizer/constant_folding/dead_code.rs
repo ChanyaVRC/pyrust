@@ -4,6 +4,7 @@
 /// Uses a BFS reachability pass that follows all possible instruction successors
 /// (both fallthrough and jump targets, including exception handler targets).
 fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
+    debug_assert_no_late_stage_insns(&insns, "pass_dead_code");
     let n = insns.len();
     let mut reachable = vec![false; n];
     let mut queue = vec![0usize];

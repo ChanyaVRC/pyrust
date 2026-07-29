@@ -10,6 +10,16 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         })
         .collect();
 
+    // Already-optimized code (re-entering `optimize`, e.g. through exec of a
+    // cached code object or the idempotence tests) contains late-stage guarded
+    // opcodes that the early register-rewriting passes do not model — their
+    // wildcard kill-set arms would silently miscompile around them (a
+    // CallInlineBinOp writes its dst; copy propagation would keep stale copy
+    // facts alive across it).  The pipeline is single-shot by design: return
+    // the code unchanged instead of re-running any pass over it.
+    if code.insns.iter().any(is_late_stage_guard_insn) {
+        return FnCode { fn_protos, ..code };
+    }
     let num_locals = code.num_locals;
     let mut num_regs = code.num_regs;
     let mut consts = code.consts;
