@@ -2,6 +2,9 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
 fn run_and_capture(program: &Path, args: &[&Path]) -> Result<String, String> {
     let output = Command::new(program)
@@ -190,6 +193,71 @@ fn collect_test_scripts(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Focused mismatch report: the first divergent (normalized) line with ±3
+/// lines of context from both interpreters, so the signal is not buried in two
+/// full transcripts.  Capped raw transcripts follow for orientation.
+fn mismatch_report(name: &str, py_norm: &str, rust_norm: &str) -> String {
+    const CONTEXT: usize = 3;
+    const RAW_CAP: usize = 40;
+
+    let py_lines: Vec<&str> = py_norm.lines().collect();
+    let rust_lines: Vec<&str> = rust_norm.lines().collect();
+    let common = py_lines.len().min(rust_lines.len());
+    let divergence = (0..common)
+        .find(|&i| py_lines[i] != rust_lines[i])
+        .unwrap_or(common);
+    let start = divergence.saturating_sub(CONTEXT);
+
+    let mut out = format!(
+        "[{name}] output mismatch (first divergence at normalized line {}; \
+         Python {} lines, PyRust {} lines)\n",
+        divergence + 1,
+        py_lines.len(),
+        rust_lines.len()
+    );
+    let side = |label: &str, lines: &[&str]| {
+        let mut s = format!("--- {label} around divergence ---\n");
+        for (offset, line) in lines
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(CONTEXT * 2 + 1)
+            .map(|(i, l)| (i, *l))
+        {
+            let marker = if offset == divergence { ">>" } else { "  " };
+            s.push_str(&format!("{marker} {:>4} | {line}\n", offset + 1));
+        }
+        if divergence >= lines.len() {
+            s.push_str(&format!(">> {:>4} | <end of output>\n", lines.len() + 1));
+        }
+        s
+    };
+    out.push_str(&side("Python", &py_lines));
+    out.push_str(&side("PyRust", &rust_lines));
+
+    let capped = |label: &str, text: &str| {
+        let lines: Vec<&str> = text.lines().collect();
+        let shown = lines.len().min(RAW_CAP);
+        let mut s = format!("--- {label} (normalized, first {shown} lines) ---\n");
+        s.push_str(&lines[..shown].join("\n"));
+        if lines.len() > RAW_CAP {
+            s.push_str(&format!("\n… {} more lines", lines.len() - RAW_CAP));
+        }
+        s.push('\n');
+        s
+    };
+    out.push_str(&capped("Python", py_norm));
+    out.push_str(&capped("PyRust", rust_norm));
+    out.push_str(&format!(
+        "re-run just this fixture: PYRUST_PARITY_FILTER={} cargo test --release --test parity_compare\n",
+        Path::new(name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name)
+    ));
+    out
+}
+
 #[test]
 fn compare_against_python_reference_for_all_py_tests() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -205,51 +273,93 @@ fn compare_against_python_reference_for_all_py_tests() {
 
     let mut scripts: Vec<PathBuf> = Vec::new();
     collect_test_scripts(&cases_dir, &mut scripts);
-
     scripts.sort();
     assert!(!scripts.is_empty(), "no test_*.py found under tests/cases/");
 
-    let mut failures: Vec<String> = Vec::new();
-
-    for script in scripts {
-        let name = script
-            .strip_prefix(&root)
-            .ok()
-            .and_then(|p| p.to_str())
-            .unwrap_or("<unknown>");
-
-        let py_out = match run_and_capture(&python, &[script.as_path()]) {
-            Ok(out) => out,
-            Err(err) => {
-                failures.push(format!("[{name}] Python run failed:\n{err}"));
-                continue;
-            }
-        };
-
-        let rust_out = match run_and_capture(&pyrust_bin, &[script.as_path()]) {
-            Ok(out) => out,
-            Err(err) => {
-                failures.push(format!("[{name}] PyRust run failed:\n{err}"));
-                continue;
-            }
-        };
-
-        let py_norm = normalize_pythonish_output(&py_out);
-        let rust_norm = normalize_pythonish_output(&rust_out);
-
-        if py_norm != rust_norm {
-            failures.push(format!(
-                "[{name}] output mismatch\n--- Python (normalized) ---\n{}\n--- PyRust (normalized) ---\n{}\n\n--- Python (raw) ---\n{}\n--- PyRust (raw) ---\n{}",
-                py_norm, rust_norm, py_out, rust_out
-            ));
-        }
+    // PYRUST_PARITY_FILTER narrows the run to fixtures whose repo-relative
+    // path contains the given substring — the per-fixture debugging loop.
+    if let Ok(filter) = env::var("PYRUST_PARITY_FILTER") {
+        scripts.retain(|p| p.to_str().is_some_and(|s| s.contains(&filter)));
+        assert!(
+            !scripts.is_empty(),
+            "PYRUST_PARITY_FILTER={filter} matched no fixture under tests/cases/"
+        );
     }
 
+    // Fixtures are independent processes: run them across a worker pool.
+    // The CPython and pyrust runs of one fixture stay sequential on one
+    // worker, so fixtures that create fixture-named scratch files keep their
+    // existing single-run file discipline.  PYRUST_PARITY_JOBS=1 restores the
+    // serial order.
+    let jobs = env::var("PYRUST_PARITY_JOBS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, |n| n.get()))
+        .clamp(1, 32)
+        .min(scripts.len());
+
+    let next = AtomicUsize::new(0);
+    let failures: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+    thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(script) = scripts.get(index) else {
+                        break;
+                    };
+                    let name = script
+                        .strip_prefix(&root)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                        .unwrap_or("<unknown>")
+                        .to_string();
+
+                    let py_out = match run_and_capture(&python, &[script.as_path()]) {
+                        Ok(out) => out,
+                        Err(err) => {
+                            failures.lock().unwrap().push((
+                                name.clone(),
+                                format!("[{name}] Python run failed:\n{err}"),
+                            ));
+                            continue;
+                        }
+                    };
+                    let rust_out = match run_and_capture(&pyrust_bin, &[script.as_path()]) {
+                        Ok(out) => out,
+                        Err(err) => {
+                            failures.lock().unwrap().push((
+                                name.clone(),
+                                format!("[{name}] PyRust run failed:\n{err}"),
+                            ));
+                            continue;
+                        }
+                    };
+
+                    let py_norm = normalize_pythonish_output(&py_out);
+                    let rust_norm = normalize_pythonish_output(&rust_out);
+                    if py_norm != rust_norm {
+                        let report = mismatch_report(&name, &py_norm, &rust_norm);
+                        failures.lock().unwrap().push((name, report));
+                    }
+                }
+            });
+        }
+    });
+
+    let mut failures = failures.into_inner().unwrap();
+    failures.sort();
     if !failures.is_empty() {
         panic!(
             "Python parity failed for {} file(s):\n\n{}",
             failures.len(),
-            failures.join("\n\n")
+            failures
+                .iter()
+                .map(|(_, report)| report.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
         );
     }
 }
