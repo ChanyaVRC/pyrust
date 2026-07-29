@@ -282,11 +282,12 @@ mod iteration {
     use super::{
         ExpandedArgBuf, ExpandedCallArg, GenDriving, GeneratorFrame, Interpreter, PyBigInt,
         PyBigIntSign, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
-        builtin_data_backing, effective_user_iter, full_type_name_str, instance_builtin_data,
-        instantiate_exception, invoke_class_method, is_coroutine_value,
-        is_inherited_builtin_iter_sentinel, is_sequence_iter_terminator, is_stop_iteration_error,
-        key_ref_to_value, key_to_value, lookup_class_attr, metaclass_dunder, range_len,
-        value_from_bigint, value_to_bigint, value_type_name_str,
+        builtin_data_backing, effective_user_iter, full_type_name_str,
+        i64_range_native_cursor_safe, instance_builtin_data, instantiate_exception,
+        invoke_class_method, is_coroutine_value, is_inherited_builtin_iter_sentinel,
+        is_sequence_iter_terminator, is_stop_iteration_error, key_ref_to_value, key_to_value,
+        lookup_class_attr, metaclass_dunder, range_len, value_from_bigint, value_to_bigint,
+        value_type_name_str,
     };
     include!("runtime/iteration.rs");
 }
@@ -325,9 +326,10 @@ pub(crate) fn is_ordered_dict_class_or_subclass(class: &Rc<RefCell<PyClass>>) ->
 mod execution {
     use super::fast_path::{
         LoopFastOutcome, MemoCallProbe, advance_loop_fast_state, build_string_fast,
-        iter_slot_is_indexed_sequence, iter_slot_is_int_range, list_reserve_hint,
-        try_constant_compare_fast, try_indexed_sequence_element, try_inline_leaf_binop,
-        try_integer_compare_fast, try_scalar_truthiness_fast, try_tagged_int_unary,
+        iter_slot_is_indexed_sequence, iter_slot_is_int_range, iter_slot_is_int_range_exact,
+        list_reserve_hint, try_constant_compare_fast, try_indexed_sequence_element,
+        try_inline_leaf_binop, try_integer_compare_fast, try_scalar_truthiness_fast,
+        try_tagged_int_unary,
     };
     use super::{
         CallDepthGuard, EnvRef, FrameKind, HashMap, Interpreter, IterCacheBuf, IterState, ItersBuf,

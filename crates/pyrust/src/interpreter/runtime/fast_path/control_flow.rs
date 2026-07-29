@@ -32,6 +32,27 @@ pub(super) fn iter_slot_is_int_range(state: Option<&IterState>) -> bool {
     matches!(state, Some(IterState::Range { .. }))
 }
 
+/// Whether an iterator slot currently holds the canonical machine-int range
+/// cursor in exactly the state `guard` describes: a cursor still parked at
+/// `start`, over the same `stop` and `step`.
+///
+/// This is the entry guard for a closed-form loop copy, so it must pin the
+/// iterated values, not merely the cursor kind.  Matching all three fields
+/// does exactly that — the yielded sequence of an `IterState::Range` is a
+/// function of nothing else — which is why the copy needs no assumption about
+/// how the range was produced.
+#[inline(always)]
+pub(super) fn iter_slot_is_int_range_exact(
+    state: Option<&IterState>,
+    guard: &crate::bytecode::IntRangeExactGuard,
+) -> bool {
+    matches!(
+        state,
+        Some(IterState::Range { cur, stop, step })
+            if *cur == guard.start && *stop == guard.stop && *step == guard.step
+    )
+}
+
 /// Whether an iterator slot currently holds the canonical list/tuple index
 /// cursor — the second iterator kind the int-loop versioning guard admits,
 /// because stepping it clones one element and bumps a counter without

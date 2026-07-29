@@ -64,6 +64,42 @@
 /// point.  Candidates whose subscript would clobber its own operand register,
 /// or that could branch around a guarded definition, are rejected instead.
 ///
+/// ## Closed-form copies
+///
+/// A `for … in range(<int constants>)` whose body is nothing but
+/// `acc += <constant>` / `acc += <loop variable>` steps has an effect that is a
+/// closed-form function of the trip count, so its copy need not iterate at all:
+///
+/// ```text
+/// pre:
+///   JumpIfIterNotIntRangeExact(slot, {start, stop, step}, → next guard chain)
+///   JumpIfNotInt(acc, → orig_head)
+///   Jump(→ closed_head)
+/// …
+/// closed_head:
+///   LoadConst(v, <last value the range yields>)
+///   BinOpConst(acc, acc, Add, <total delta>)
+///   ; falls through into the exit stub — no back-edge, no exit jump
+/// ```
+///
+/// The entry guard is the strong one: `JumpIfIterNotIntRangeExact` pins the
+/// cursor's exact `(start, stop, step)`, because a copy that folded a specific
+/// trip count is wrong for any other. Reading the live cursor is what makes the
+/// fold sound where the old compile-time `pass_linear_loop_fold` was not — the
+/// optimizer's trace of `LoadGlobal range` + `LoadConst`s + `Call` + `GetIter`
+/// only *proposes* a triple, and a rebound `range`, an aliased iterable, or a
+/// partly consumed cursor simply fails the guard and runs the original loop.
+/// The region's own back-edge routes through the guard chain too, and a stepped
+/// cursor no longer sits at `start`, so a deopted loop cannot re-enter the
+/// closed form mid-run.
+///
+/// The fold runs in `i128` and every result must land back in `i64`, which
+/// keeps the folded delta exactly equal to the sum the iterated adds would have
+/// produced — so a single `acc + delta` promotes to `BigInt` at the same value
+/// the original loop reached by promoting mid-run. Zero-trip ranges are
+/// declined outright rather than folded to an empty copy, leaving the ordinary
+/// copy to bind nothing exactly as the original does.
+///
 /// ## Soundness
 ///
 /// - Eligible regions contain only `Move`/`CopyReg`, int-pool `LoadConst`,
@@ -100,9 +136,237 @@ struct IntLoopVersioningResult {
     source_prefix_len: usize,
 }
 
+/// The compile-time closed form of a counted loop whose body is a proven
+/// linear accumulation over a constant `range`.
+///
+/// Every field is derived from the `(start, stop, step)` triple in `guard`, so
+/// the copy this describes is correct exactly when that guard matches at
+/// runtime.  Nothing here depends on the *provenance* of the range: the
+/// argument trace only proposes a triple, and the runtime guard confirms the
+/// iterator really is it.
+struct ClosedForm {
+    /// Exact iterator state the copy is specialized for.
+    guard: IntRangeExactGuard,
+    /// The loop variable, and the last value the range yields into it.  The
+    /// original loop leaves that value bound after a non-empty run.
+    var: Reg,
+    var_final: i64,
+    /// `(accumulator, total delta)` in first-write order, matching the order
+    /// the exit stub's deferred syncs publish them.
+    acc_deltas: Vec<(Reg, i64)>,
+    /// Constant-pool slots allocated once the candidate search releases the
+    /// pool: `var_final` first, then one per accumulator delta.
+    const_slots: Vec<u16>,
+}
+
+/// The `(start, stop, step)` produced by a `range(...)` call with visible
+/// int-constant arguments in the call sequence immediately ahead of `head`.
+///
+/// This is a *proposal*, not a proof.  A rebound `range`, an aliased iterable,
+/// or a computed argument can all make the runtime iterator disagree with the
+/// triple returned here — which is precisely what the exact-bounds entry guard
+/// is for.  Requiring the whole `LoadGlobal range` + argument setup + `Call` +
+/// `GetIter` sequence to sit adjacent to the header, in the register layout the
+/// call convention dictates, just keeps the pass from proposing triples that
+/// could never match.
+///
+/// The setup is *interpreted* over a small int-constant environment rather than
+/// assumed to be one `LoadConst` per argument, because it is not: a negated
+/// literal reaches this pass as `LoadConst` + `UnaryOp(Neg)` + `Move`.
+/// `pass_unary_fold` would normally collapse that to a single `LoadConst`, but
+/// it declines whenever a back edge follows the pair — and a back edge always
+/// does here, since the whole point of the sequence is to feed a loop header.
+/// Reading only the rigid one-instruction-per-argument shape would therefore
+/// leave every negative bound and every negative step permanently unfoldable.
+fn traced_const_range_bounds(
+    insns: &[Insn],
+    consts: &[Value],
+    names: &[String],
+    head: usize,
+    slot: u8,
+) -> Option<(i64, i64, i64)> {
+    /// Instructions the compiler may spend materialising one argument:
+    /// `LoadConst` + `UnaryOp(Neg)` + `Move` is the widest shape admitted here.
+    const MAX_SETUP_PER_ARG: usize = 3;
+
+    let Insn::GetIter(iter_slot, base) = *insns.get(head.checked_sub(1)?)? else {
+        return None;
+    };
+    let call_at = head.checked_sub(2)?;
+    let Insn::Call(callee, argc) = insns[call_at] else {
+        return None;
+    };
+    if iter_slot != slot || callee != base || !(1..=3).contains(&argc) {
+        return None;
+    }
+    let argc = usize::from(argc);
+    // The setup is not a fixed length, so the producing `LoadGlobal` is not at a
+    // fixed distance: take the nearest one that loads the call base, no further
+    // back than the widest setup this trace admits.
+    let window_start = call_at.saturating_sub(1 + argc * MAX_SETUP_PER_ARG);
+    let load_global = (window_start..call_at).rev().find(|&i| {
+        matches!(
+            insns[i],
+            Insn::LoadGlobal(dst, name_idx)
+                if dst == base
+                    && names.get(usize::from(name_idx)).map(String::as_str) == Some("range")
+        )
+    })?;
+
+    // Interpret the setup.  Anything outside this whitelist — a computed bound,
+    // a call, a register defined before the window — abandons the proposal
+    // rather than guessing, so the pass never emits a copy whose guard could
+    // not match.
+    let mut env: Vec<(Reg, i64)> = Vec::new();
+    for insn in &insns[load_global + 1..call_at] {
+        let (dst, value) = match *insn {
+            Insn::LoadConst(dst, cidx) => {
+                let value = consts.get(usize::from(cidx))?;
+                if value.is_unset() || !matches!(value.kind(), ValueKind::Int(_)) {
+                    return None;
+                }
+                (dst, value.as_int()?)
+            }
+            // `-i64::MIN` promotes to `BigInt`, which no machine-int cursor can
+            // hold, so declining on the overflow is also the right answer.
+            Insn::UnaryOp(dst, crate::ast::UnaryOp::Neg, src) => (
+                dst,
+                env.iter().find(|(reg, _)| *reg == src)?.1.checked_neg()?,
+            ),
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                (dst, env.iter().find(|(reg, _)| *reg == src)?.1)
+            }
+            _ => return None,
+        };
+        match env.iter_mut().find(|(reg, _)| *reg == dst) {
+            Some((_, current)) => *current = value,
+            None => env.push((dst, value)),
+        }
+    }
+
+    let mut args = [0i64; 3];
+    for (k, arg) in args.iter_mut().take(argc).enumerate() {
+        *arg = env.iter().find(|(reg, _)| *reg == base + 1 + k as Reg)?.1;
+    }
+    match argc {
+        1 => Some((0, args[0], 1)),
+        2 => Some((args[0], args[1], 1)),
+        _ => Some((args[0], args[1], args[2])),
+    }
+}
+
+/// Fold a straight-line accumulation body over a constant int range into its
+/// closed form, or `None` when any part of the loop is not provably linear.
+///
+/// The admitted body is a sequence of `acc += <int constant>` and
+/// `acc += <loop variable>` steps, in any mix, plus the module syncs the copy
+/// defers to its exit stub.  Each such step contributes a delta that is a
+/// closed-form function of the trip count, and nothing else in the body may
+/// read or write an accumulator, so the whole loop collapses to one add per
+/// accumulator plus the loop variable's final binding.
+///
+/// All the arithmetic runs in `i128` and every result must land back in `i64`.
+/// That is not merely an overflow guard: it keeps the folded delta *exactly*
+/// equal to the sum the iterated adds would have produced, so `acc + delta`
+/// promotes to `BigInt` at the same value the original loop would have reached
+/// by promoting mid-run.
+fn closed_form_for(
+    insns: &[Insn],
+    consts: &[Value],
+    names: &[String],
+    head: usize,
+    back: usize,
+    slot: u8,
+) -> Option<ClosedForm> {
+    let Insn::ForIter(var, _, _) = insns[head] else {
+        return None;
+    };
+    let (start, stop, step) = traced_const_range_bounds(insns, consts, names, head, slot)?;
+    // A range outside the compact cursor's reach becomes `BigRange` at runtime
+    // and could never match the guard, so the copy would be dead weight.
+    if step == 0 || !i64_range_native_cursor_safe(start, stop, step) {
+        return None;
+    }
+    let trips = range_len(start, stop, step);
+    // A zero-trip range binds nothing and accumulates nothing.  Rather than
+    // emit an empty copy whose exit stub would publish bindings the original
+    // never made, leave the case to the ordinary per-iteration copy.
+    if trips == 0 {
+        return None;
+    }
+    let start_wide = i128::from(start);
+    let step_wide = i128::from(step);
+    let var_final = i64::try_from(start_wide + (trips - 1) * step_wide).ok()?;
+    // Sum of the yielded values: `trips*start + step*trips*(trips-1)/2`.
+    let sum = start_wide
+        .checked_mul(trips)?
+        .checked_add(step_wide.checked_mul(trips.checked_mul(trips - 1)? / 2)?)?;
+
+    let mut acc_deltas: Vec<(Reg, i128)> = Vec::new();
+    for insn in &insns[head + 1..back] {
+        // `step_total` is what the step contributes over the whole run before
+        // the operator's sign is applied.
+        let (dst, src, op, step_total) = match insn {
+            // Deferred to the exit stub, exactly as in the ordinary copy.
+            Insn::SyncModuleGlobal(..) => continue,
+            Insn::BinOpImm(dst, src, op, imm, _) => {
+                (*dst, *src, *op, i128::from(*imm).checked_mul(trips)?)
+            }
+            Insn::BinOpConst(dst, src, op, cidx, _) => {
+                let constant = consts
+                    .get(usize::from(*cidx))
+                    .filter(|value| !value.is_unset())
+                    .and_then(Value::as_int)?;
+                (*dst, *src, *op, i128::from(constant).checked_mul(trips)?)
+            }
+            Insn::BinOp(dst, src, op, rhs) | Insn::BinOpInPlace(dst, src, op, rhs)
+                if *rhs == var =>
+            {
+                (*dst, *src, *op, sum)
+            }
+            _ => return None,
+        };
+        // Only the two operators that make repeated application a sum fold;
+        // anything else (`*=`, bitwise, …) is not linear in the trip count.
+        let delta = match op {
+            BinaryOp::Add => step_total,
+            BinaryOp::Sub => step_total.checked_neg()?,
+            _ => return None,
+        };
+        // `acc = acc ± x` is the only linear shape: reading a different
+        // register makes the step depend on values this fold does not track,
+        // and writing the loop variable invalidates the traced sequence.
+        if dst != src || dst == var {
+            return None;
+        }
+        match acc_deltas.iter_mut().find(|(reg, _)| *reg == dst) {
+            Some((_, total)) => *total = total.checked_add(delta)?,
+            None => acc_deltas.push((dst, delta)),
+        }
+    }
+
+    let acc_deltas = acc_deltas
+        .into_iter()
+        .map(|(reg, delta)| i64::try_from(delta).ok().map(|delta| (reg, delta)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ClosedForm {
+        guard: IntRangeExactGuard {
+            slot,
+            start,
+            stop,
+            step,
+        },
+        var,
+        var_final,
+        acc_deltas,
+        const_slots: Vec::new(),
+    })
+}
+
 fn pass_int_loop_version(
     insns: Vec<Insn>,
-    consts: &[Value],
+    consts: &mut Vec<Value>,
+    names: &[String],
     num_regs: &mut u32,
 ) -> IntLoopVersioningResult {
     const MAX_REGION: usize = 48;
@@ -129,6 +393,11 @@ fn pass_int_loop_version(
         /// so the copy opens with a `JumpIfNotInt` side exit on the loop
         /// variable.
         IndexedSeq,
+        /// `for … in range(<int constants>)` with a provably linear body: the
+        /// copy is the loop's closed form, so it runs in constant time no
+        /// matter how many iterations the range describes.  Its guard pins the
+        /// exact cursor state, not just the kind.
+        ClosedForm,
     }
 
     struct Candidate {
@@ -143,6 +412,9 @@ fn pass_int_loop_version(
         const_fuse: Option<(Reg, u16)>,
         /// One appended fast copy per entry, in guard-chain order.
         variants: Vec<FastVariant>,
+        /// Present when the body folds to a closed form; drives the
+        /// `FastVariant::ClosedForm` copy at the head of the guard chain.
+        closed_form: Option<ClosedForm>,
     }
 
     impl Candidate {
@@ -218,6 +490,7 @@ fn pass_int_loop_version(
             | Insn::JumpIfNotInt(_, k)
             | Insn::JumpIfIterNotIntRange(_, k)
             | Insn::JumpIfIterNotIndexedSeq(_, k)
+            | Insn::JumpIfIterNotIntRangeExact(_, k)
             | Insn::GetItemSeqOrExit(_, _, _, k)
             | Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
@@ -539,7 +812,7 @@ fn pass_int_loop_version(
         // chain and copy: the machine-int range cursor, and — when the body is
         // straight-line, so the opening side exit dominates every use of the
         // loop variable — the canonical list/tuple index cursor.
-        let variants = match kind {
+        let mut variants = match kind {
             CandidateKind::Inverted => vec![FastVariant::Plain],
             CandidateKind::ForIter { .. } if has_interior_control_flow => {
                 vec![FastVariant::IntRange]
@@ -548,6 +821,18 @@ fn pass_int_loop_version(
                 vec![FastVariant::IntRange, FastVariant::IndexedSeq]
             }
         };
+        // A closed form subsumes the per-iteration copies, so its guard leads
+        // the chain; the others stay behind it as the fallback for every
+        // iterator state it does not pin.
+        let closed_form = match kind {
+            CandidateKind::ForIter { slot } => {
+                closed_form_for(&insns, consts, names, h, back, slot)
+            }
+            CandidateKind::Inverted => None,
+        };
+        if closed_form.is_some() {
+            variants.insert(0, FastVariant::ClosedForm);
+        }
         candidates.push(Candidate {
             kind,
             head: h,
@@ -556,6 +841,7 @@ fn pass_int_loop_version(
             syncs,
             const_fuse,
             variants,
+            closed_form,
         });
         h = back + 1;
     }
@@ -565,6 +851,29 @@ fn pass_int_loop_version(
             insns,
             source_prefix_len: n,
         };
+    }
+
+    // Materialise the closed forms' constants now that the candidate search has
+    // released the pool.  A pool that cannot address another entry simply loses
+    // the closed form; its candidate keeps the per-iteration copies behind it.
+    for cand in &mut candidates {
+        let Some(closed_form) = &mut cand.closed_form else {
+            continue;
+        };
+        let values = std::iter::once(closed_form.var_final)
+            .chain(closed_form.acc_deltas.iter().map(|&(_, delta)| delta));
+        closed_form.const_slots = values
+            .map(|value| {
+                let slot = u16::try_from(consts.len()).ok()?;
+                consts.push(Value::int(value));
+                Some(slot)
+            })
+            .collect::<Option<Vec<_>>>()
+            .unwrap_or_default();
+        if closed_form.const_slots.is_empty() {
+            cand.closed_form = None;
+            cand.variants.retain(|v| *v != FastVariant::ClosedForm);
+        }
     }
 
     // ── Rebuild ────────────────────────────────────────────────────────────
@@ -623,6 +932,16 @@ fn pass_int_loop_version(
                             FastVariant::IntRange => Insn::JumpIfIterNotIntRange(slot, fail_off),
                             FastVariant::IndexedSeq => {
                                 Insn::JumpIfIterNotIndexedSeq(slot, fail_off)
+                            }
+                            FastVariant::ClosedForm => {
+                                let closed_form = cand
+                                    .closed_form
+                                    .as_ref()
+                                    .expect("a ClosedForm variant carries its plan");
+                                Insn::JumpIfIterNotIntRangeExact(
+                                    Box::new(closed_form.guard.clone()),
+                                    fail_off,
+                                )
                             }
                             FastVariant::Plain => {
                                 unreachable!("a for header always guards its iterator kind")
@@ -683,7 +1002,32 @@ fn pass_int_loop_version(
         // usize::MAX for skipped syncs / fused-away insns.
         let mut fast_index = vec![usize::MAX; cand.back - cand.head + 1];
         let mut fast: Vec<FastEntry> = Vec::new();
-        {
+        if variant == FastVariant::ClosedForm {
+            // The whole loop, evaluated at compile time: bind the loop variable
+            // to the range's last value and settle each accumulator with a
+            // single add.  There is no back-edge and no exit jump — the copy
+            // falls straight into the deferred-sync stub for `back + 1`, which
+            // is always emitted first.
+            let closed_form = cand
+                .closed_form
+                .as_ref()
+                .expect("a ClosedForm variant carries its plan");
+            let (&var_slot, delta_slots) = closed_form
+                .const_slots
+                .split_first()
+                .expect("a retained closed form allocated its constant slots");
+            fast_index[0] = 0;
+            fast.push(FastEntry::Copied(
+                cand.head,
+                Insn::LoadConst(closed_form.var, var_slot),
+            ));
+            for (&(acc, _), &delta_slot) in closed_form.acc_deltas.iter().zip(delta_slots) {
+                fast.push(FastEntry::Copied(
+                    cand.head,
+                    Insn::BinOpConst(acc, acc, BinaryOp::Add, delta_slot, true),
+                ));
+            }
+        } else {
             // Side exits are emitted immediately *before* the next original
             // instruction rather than after their producer, so an internal edge
             // landing there re-runs the guard instead of skipping it.
@@ -901,6 +1245,7 @@ fn replace_jump_offset(insn: Insn, off: i32) -> Insn {
         JumpIfNotInt(r, _) => JumpIfNotInt(r, off),
         JumpIfIterNotIntRange(s2, _) => JumpIfIterNotIntRange(s2, off),
         JumpIfIterNotIndexedSeq(s2, _) => JumpIfIterNotIndexedSeq(s2, off),
+        JumpIfIterNotIntRangeExact(guard, _) => JumpIfIterNotIntRangeExact(guard, off),
         GetItemSeqOrExit(dst, obj, idx, _) => GetItemSeqOrExit(dst, obj, idx, off),
         CmpJumpIfFalse(a, op, b, _) => CmpJumpIfFalse(a, op, b, off),
         CmpJumpIfTrue(a, op, b, _) => CmpJumpIfTrue(a, op, b, off),

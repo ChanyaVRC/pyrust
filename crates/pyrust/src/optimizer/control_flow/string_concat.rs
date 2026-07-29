@@ -415,6 +415,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | Jump(..)
         | JumpIfIterNotIntRange(..)
         | JumpIfIterNotIndexedSeq(..)
+        | JumpIfIterNotIntRangeExact(..)
         | SetupExcept(..)
         | PopExcept
         | EndExcept

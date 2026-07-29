@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::ast::BinaryOp;
+use crate::ast::{BinaryOp, UnaryOp};
 use crate::bytecode::EXC_NO_HANDLER;
 
 fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
@@ -11,6 +11,7 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
         | Insn::JumpIfNotInt(_, offset)
         | Insn::JumpIfIterNotIntRange(_, offset)
         | Insn::JumpIfIterNotIndexedSeq(_, offset)
+        | Insn::JumpIfIterNotIntRangeExact(_, offset)
         | Insn::GetItemSeqOrExit(_, _, _, offset)
         | Insn::CmpJumpIfFalse(_, _, _, offset)
         | Insn::CmpJumpIfTrue(_, _, _, offset)
@@ -29,8 +30,17 @@ fn jump_target(pc: usize, insn: &Insn) -> Option<usize> {
 }
 
 fn versioned(input: Vec<Insn>, constants: &[Value]) -> IntLoopVersioningResult {
+    versioned_with_names(input, constants, &[])
+}
+
+fn versioned_with_names(
+    input: Vec<Insn>,
+    constants: &[Value],
+    names: &[String],
+) -> IntLoopVersioningResult {
     let mut num_regs = 16;
-    pass_int_loop_version(input, constants, &mut num_regs)
+    let mut constants = constants.to_vec();
+    pass_int_loop_version(input, &mut constants, names, &mut num_regs)
 }
 
 fn version(input: Vec<Insn>, constants: &[Value]) -> Vec<Insn> {
@@ -313,10 +323,10 @@ fn constant_stop_fusion_allocates_one_temporary_and_uses_it() {
         Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
         Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -2),
     ];
-    let constants = vec![Value::int(10)];
+    let mut constants = vec![Value::int(10)];
     let mut num_regs = 2;
 
-    let result = pass_int_loop_version(input, &constants, &mut num_regs);
+    let result = pass_int_loop_version(input, &mut constants, &[], &mut num_regs);
 
     assert_eq!(num_regs, 3);
     assert!(
@@ -342,10 +352,10 @@ fn constant_stop_fusion_respects_the_frame_register_limit() {
         Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
         Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -2),
     ];
-    let constants = vec![Value::int(10)];
+    let mut constants = vec![Value::int(10)];
     let mut num_regs = MAX_FRAME_REGS;
 
-    let result = pass_int_loop_version(input.clone(), &constants, &mut num_regs);
+    let result = pass_int_loop_version(input.clone(), &mut constants, &[], &mut num_regs);
 
     assert_eq!(num_regs, MAX_FRAME_REGS);
     assert_eq!(result.insns, input);
@@ -362,10 +372,10 @@ fn interior_landing_rejects_fusion_without_allocating_a_temporary() {
         Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
         Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -3),
     ];
-    let constants = vec![Value::int(10)];
+    let mut constants = vec![Value::int(10)];
     let mut num_regs = 2;
 
-    let result = pass_int_loop_version(input.clone(), &constants, &mut num_regs);
+    let result = pass_int_loop_version(input.clone(), &mut constants, &[], &mut num_regs);
 
     assert_eq!(num_regs, 2);
     assert_eq!(result.insns, input);
@@ -814,4 +824,417 @@ fn early_passes_reject_late_stage_opcodes_in_debug() {
     // helpers use wildcard arms).  The debug guard must fail loudly instead.
     let insns = vec![Insn::JumpIfNotInt(0, 1), Insn::ReturnNone];
     let _ = pass_copy_prop(insns, 1);
+}
+
+#[test]
+fn every_guarded_opcode_this_pass_emits_is_classified_late_stage() {
+    // The driver's re-entry skip and the early passes' debug assert both key
+    // off `is_late_stage_guard_insn`. An opcode this pass emits but that
+    // predicate does not recognise would slip past both and reach a
+    // register-rewriting pass whose wildcard kill-set arms cannot model it.
+    for insn in [
+        Insn::JumpIfNotInt(0, 1),
+        Insn::JumpIfIterNotIntRange(0, 1),
+        Insn::JumpIfIterNotIndexedSeq(0, 1),
+        Insn::JumpIfIterNotIntRangeExact(
+            Box::new(IntRangeExactGuard {
+                slot: 0,
+                start: 0,
+                stop: 10,
+                step: 1,
+            }),
+            1,
+        ),
+        Insn::GetItemSeqOrExit(0, 1, 2, 1),
+        Insn::CountCmpJumpTrue(0, BinaryOp::Lt, 1, 1, -1),
+        Insn::CountCmpJumpFalse(0, BinaryOp::Lt, 1, 1, -1),
+    ] {
+        assert!(
+            is_late_stage_guard_insn(&insn),
+            "{insn:?} is emitted by a late-stage guarded pass but is not classified as one"
+        );
+    }
+}
+
+// ── Closed-form counted loops ─────────────────────────────────────────────
+
+/// The module-scope shape the compiler emits for
+/// `for v in range(<args>): <body>`, with the producing call sitting adjacent
+/// to the header exactly as the closed-form trace requires.  R2 is the call
+/// base, R1 the loop variable, R0 the accumulator.
+fn const_range_loop(args: &[u16], body: Vec<Insn>) -> Vec<Insn> {
+    let mut insns = vec![Insn::LoadGlobal(2, 0)];
+    for (k, &cidx) in args.iter().enumerate() {
+        insns.push(Insn::LoadConst(3 + k as Reg, cidx));
+    }
+    insns.push(Insn::Call(2, args.len() as u8));
+    insns.push(Insn::GetIter(0, 2));
+    let k = (body.len() + 1) as i32;
+    insns.push(Insn::ForIter(1, 0, k));
+    insns.extend(body);
+    // The back-edge sits at `head + k` and returns to the header.
+    insns.push(Insn::Jump(-(k + 1)));
+    insns
+}
+
+fn range_names() -> Vec<String> {
+    vec!["range".to_string(), "total".to_string(), "v".to_string()]
+}
+
+/// `for v in range(<args>): total += 1` — the shape
+/// `bench/cases/for_range_const.py` compiles to, one sync per assignment.
+fn counted_loop(args: &[u16]) -> Vec<Insn> {
+    const_range_loop(
+        args,
+        vec![
+            Insn::SyncModuleGlobal(1, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+            Insn::SyncModuleGlobal(0, 1),
+        ],
+    )
+}
+
+/// The appended out-of-line copies, i.e. everything past the source prefix.
+fn fast_copies(result: &IntLoopVersioningResult) -> &[Insn] {
+    &result.insns[result.source_prefix_len..]
+}
+
+fn has_closed_form_guard(result: &IntLoopVersioningResult) -> bool {
+    result
+        .insns
+        .iter()
+        .any(|insn| matches!(insn, Insn::JumpIfIterNotIntRangeExact(..)))
+}
+
+#[test]
+fn closed_form_folds_a_constant_counted_loop_into_a_straight_line_copy() {
+    // `for v in range(1000): total += 1`
+    let result = versioned_with_names(counted_loop(&[0]), &[Value::int(1000)], &range_names());
+
+    let guard = result
+        .insns
+        .iter()
+        .find_map(|insn| match insn {
+            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard.clone()),
+            _ => None,
+        })
+        .expect("a constant counted loop must get a closed-form guard");
+    assert_eq!(
+        (guard.slot, guard.start, guard.stop, guard.step),
+        (0, 0, 1000, 1),
+        "the guard must pin the exact traced bounds, not just the cursor kind"
+    );
+
+    // The closed-form copy leads the appended copies: the loop variable's last
+    // value, one add per accumulator, then straight into the sync stub. No
+    // back-edge and no exit jump.
+    let copies = fast_copies(&result);
+    assert!(
+        matches!(copies[0], Insn::LoadConst(1, _)),
+        "the loop variable must be bound to the range's last value: {copies:?}"
+    );
+    assert!(
+        matches!(copies[1], Insn::BinOpConst(0, 0, BinaryOp::Add, _, _)),
+        "the accumulator must be settled with one add: {copies:?}"
+    );
+    assert!(
+        matches!(copies[2], Insn::SyncModuleGlobal(1, 2)),
+        "the copy must fall straight into its deferred-sync stub: {copies:?}"
+    );
+}
+
+#[test]
+fn closed_form_constants_hold_the_exact_fold() {
+    // `for v in range(10, 1000, 3): total += v` — the delta is the sum of the
+    // yielded values, not a per-step constant.
+    let body = vec![
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpInPlace(0, 0, BinaryOp::Add, 1),
+        Insn::SyncModuleGlobal(0, 1),
+    ];
+    let mut constants = vec![Value::int(10), Value::int(1000), Value::int(3)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(
+        const_range_loop(&[0, 1, 2], body),
+        &mut constants,
+        &range_names(),
+        &mut num_regs,
+    );
+
+    let copies = fast_copies(&result);
+    let Insn::LoadConst(1, var_slot) = copies[0] else {
+        panic!("expected the loop variable's final binding: {copies:?}")
+    };
+    let Insn::BinOpConst(0, 0, BinaryOp::Add, delta_slot, _) = copies[1] else {
+        panic!("expected the folded accumulator add: {copies:?}")
+    };
+    // range(10, 1000, 3) yields 330 values, 10 through 997, summing to 166155.
+    assert_eq!(constants[usize::from(var_slot)].as_int(), Some(997));
+    assert_eq!(
+        constants[usize::from(delta_slot)].as_int(),
+        Some(166_155),
+        "the delta must be the exact sum the iterated adds would produce"
+    );
+}
+
+#[test]
+fn closed_form_declines_a_register_stop() {
+    // `range(n)`: the argument is a register, so no triple can be proposed and
+    // the guard would have nothing to pin.
+    let mut insns = counted_loop(&[0]);
+    insns[1] = Insn::Move(3, 7);
+
+    let result = versioned_with_names(insns, &[Value::int(1000)], &range_names());
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a non-constant bound must not fold: {:?}",
+        result.insns
+    );
+    assert!(
+        result
+            .insns
+            .iter()
+            .any(|insn| matches!(insn, Insn::JumpIfIterNotIntRange(..))),
+        "the ordinary per-iteration copy must still be emitted: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_zero_trip_range() {
+    // `for v in range(0)` binds nothing and accumulates nothing; folding it
+    // would hand the exit stub bindings the original never made.
+    let result = versioned_with_names(counted_loop(&[0]), &[Value::int(0)], &range_names());
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a zero-trip range must be left to the ordinary copy: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_bounds_beyond_the_compact_cursor() {
+    // A range whose one-past-the-end cursor leaves i64 becomes `BigRange` at
+    // runtime, so an exact machine-int guard could never match it.
+    let result = versioned_with_names(
+        counted_loop(&[0, 1]),
+        &[Value::int(i64::MIN), Value::int(i64::MAX)],
+        &range_names(),
+    );
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a range outside the compact cursor must not fold: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_shadowed_range_name() {
+    // The producing call resolves some other global. A rebound `range` would
+    // still be caught by the runtime guard, but the pass has no reason to
+    // propose a triple for a name it cannot recognise.
+    let names = vec!["shadow".to_string(), "total".to_string(), "v".to_string()];
+
+    let result = versioned_with_names(counted_loop(&[0]), &[Value::int(1000)], &names);
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "only a call to the name `range` proposes a triple: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_non_linear_body() {
+    // `total *= 2` does not accumulate a per-trip delta.
+    let body = vec![
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Mul, 2, true),
+        Insn::SyncModuleGlobal(0, 1),
+    ];
+
+    let result = versioned_with_names(
+        const_range_loop(&[0], body),
+        &[Value::int(1000)],
+        &range_names(),
+    );
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a non-linear body must not fold: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_body_that_rebinds_the_loop_variable() {
+    // Writing `v` invalidates the traced sequence the fold is built from.
+    let body = vec![
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(1, 1, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+    ];
+
+    let result = versioned_with_names(
+        const_range_loop(&[0], body),
+        &[Value::int(1000)],
+        &range_names(),
+    );
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a body that rebinds the loop variable must not fold: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_guard_leads_the_chain_without_displacing_the_ordinary_copies() {
+    let result = versioned_with_names(counted_loop(&[0]), &[Value::int(1000)], &range_names());
+
+    let guards: Vec<usize> = result
+        .insns
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, insn)| {
+            matches!(
+                insn,
+                Insn::JumpIfIterNotIntRangeExact(..)
+                    | Insn::JumpIfIterNotIntRange(..)
+                    | Insn::JumpIfIterNotIndexedSeq(..)
+            )
+            .then_some(pc)
+        })
+        .collect();
+    assert_eq!(guards.len(), 3, "all three iterator guards must be emitted");
+    assert!(
+        matches!(
+            result.insns[guards[0]],
+            Insn::JumpIfIterNotIntRangeExact(..)
+        ),
+        "the closed form must be tried first: {:?}",
+        result.insns
+    );
+
+    for (pc, insn) in result.insns.iter().enumerate() {
+        if let Some(target) = jump_target(pc, insn) {
+            assert!(
+                target <= result.insns.len(),
+                "pc {pc} has out-of-range target {target}: {insn:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn closed_form_traces_a_negated_literal_bound() {
+    // `for v in range(100, 0, -7): total += v`.  A negative literal survives as
+    // `LoadConst` + `UnaryOp(Neg)` + `Move` because `pass_unary_fold` declines
+    // to fold across the loop's back edge, so the trace must interpret the
+    // setup rather than assume one instruction per argument.
+    let insns = vec![
+        Insn::LoadGlobal(2, 0),
+        Insn::LoadConst(3, 0),
+        Insn::LoadConst(4, 1),
+        Insn::LoadConst(6, 2),
+        Insn::UnaryOp(6, UnaryOp::Neg, 6),
+        Insn::Move(5, 6),
+        Insn::Call(2, 3),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpInPlace(0, 0, BinaryOp::Add, 1),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+    let mut constants = vec![Value::int(100), Value::int(0), Value::int(7)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+
+    let guard = result
+        .insns
+        .iter()
+        .find_map(|insn| match insn {
+            Insn::JumpIfIterNotIntRangeExact(guard, _) => Some(guard.clone()),
+            _ => None,
+        })
+        .expect("a negated constant bound must still fold");
+    assert_eq!(
+        (guard.slot, guard.start, guard.stop, guard.step),
+        (0, 100, 0, -7),
+        "the guard must pin the negated step it folded"
+    );
+
+    let copies = fast_copies(&result);
+    let Insn::LoadConst(1, var_slot) = copies[0] else {
+        panic!("expected the loop variable's final binding: {copies:?}")
+    };
+    let Insn::BinOpConst(0, 0, BinaryOp::Add, delta_slot, _) = copies[1] else {
+        panic!("expected the folded accumulator add: {copies:?}")
+    };
+    // range(100, 0, -7) yields 15 values, 100 down to 2, summing to 765.
+    assert_eq!(constants[usize::from(var_slot)].as_int(), Some(2));
+    assert_eq!(constants[usize::from(delta_slot)].as_int(), Some(765));
+}
+
+#[test]
+fn closed_form_declines_a_negated_literal_that_leaves_i64() {
+    // `-i64::MIN` promotes to `BigInt`, which the machine-int cursor the guard
+    // tests for can never hold.
+    let insns = vec![
+        Insn::LoadGlobal(2, 0),
+        Insn::LoadConst(4, 0),
+        Insn::UnaryOp(4, UnaryOp::Neg, 4),
+        Insn::Move(3, 4),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+    let mut constants = vec![Value::int(i64::MIN)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a bound that leaves i64 under negation must not fold: {:?}",
+        result.insns
+    );
+}
+
+#[test]
+fn closed_form_declines_a_computed_bound_in_the_call_setup() {
+    // The setup whitelist is closed: an instruction it cannot interpret ends
+    // the proposal instead of leaving a stale register to be read as a bound.
+    let insns = vec![
+        Insn::LoadGlobal(2, 0),
+        Insn::LoadConst(4, 0),
+        Insn::BinOpImm(3, 4, BinaryOp::Add, 1, false),
+        Insn::Call(2, 1),
+        Insn::GetIter(0, 2),
+        Insn::ForIter(1, 0, 4),
+        Insn::SyncModuleGlobal(1, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::SyncModuleGlobal(0, 1),
+        Insn::Jump(-5),
+    ];
+    let mut constants = vec![Value::int(1000)];
+    let mut num_regs = 16;
+
+    let result = pass_int_loop_version(insns, &mut constants, &range_names(), &mut num_regs);
+
+    assert!(
+        !has_closed_form_guard(&result),
+        "a computed bound must not be traced as a constant: {:?}",
+        result.insns
+    );
 }

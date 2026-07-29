@@ -909,6 +909,15 @@ impl Interpreter {
                         pc = jump_pc!(*offset);
                     }
                 }
+                Insn::JumpIfIterNotIntRangeExact(guard, offset) => {
+                    // Entry guard for a closed-form loop copy.  The copy folds
+                    // the whole loop into constants derived from these exact
+                    // bounds, so unlike its cursor-kind-only sibling this guard
+                    // must confirm the slot really holds that range, unstepped.
+                    if !iter_slot_is_int_range_exact(iters[guard.slot as usize].as_ref(), guard) {
+                        pc = jump_pc!(*offset);
+                    }
+                }
                 Insn::JumpIfIterNotIndexedSeq(slot, offset) => {
                     // Entry guard for the out-of-line list/tuple loop copy: an
                     // index cursor over a canonical sequence steps without
