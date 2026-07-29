@@ -102,6 +102,14 @@ pub(crate) struct LiveKeyCursor {
     /// CPython permanently exhausts a dict iterator after the one-shot
     /// "dictionary keys changed" error.
     pub(crate) keys_changed: bool,
+    /// A size change is the one terminal state that keeps raising. CPython
+    /// stamps `di_used` / `si_used` with -1 and compares against it on every
+    /// later step, so the same `RuntimeError` is re-raised for the rest of the
+    /// iterator's life — including after the container is restored to its
+    /// original size, and for every native consumer that drains it. This
+    /// outlives [`LiveKeyCursor::release`], which only drops the walk's
+    /// storage and its mutation registration.
+    pub(crate) size_changed: bool,
     /// Once a dict iterator has yielded its original key quota, keep a
     /// one-key removal watch until the next advance. This distinguishes
     /// delete/reinsert of the final entry from an unrelated temporary
@@ -146,6 +154,7 @@ impl LiveKeyCursor {
             remaining: Some(len),
             kind,
             keys_changed: false,
+            size_changed: false,
             watching_terminal_key: false,
             terminal_entry_cursor: 0,
             structurally_changed: false,
@@ -180,6 +189,7 @@ impl LiveKeyCursor {
             remaining: None,
             kind: 3,
             keys_changed: false,
+            size_changed: false,
             watching_terminal_key: false,
             terminal_entry_cursor: 0,
             structurally_changed: false,

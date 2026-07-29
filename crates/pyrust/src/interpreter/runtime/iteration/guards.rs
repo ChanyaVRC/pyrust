@@ -632,10 +632,17 @@ fn watch_terminal_key(cursor: &mut LiveKeyCursor, key: Option<PyKey>, index: usi
 }
 
 /// Advance a live dict/set cursor after its size guard has passed.
+///
+/// A cursor has three terminal states, and CPython distinguishes them: a size
+/// change re-raises forever, the "keys changed" error fires once and then
+/// reports exhaustion, and an ordinary walk reports exhaustion from the start.
 pub(crate) fn advance_live_key_cursor(
     container: &Value,
     cursor: &mut LiveKeyCursor,
 ) -> Result<Option<LiveDictViewItem>> {
+    if cursor.size_changed {
+        return Err(PyError::Runtime(cursor.size_change_message.to_string()));
+    }
     if cursor.exhausted || cursor.keys_changed {
         return Ok(None);
     }
@@ -683,6 +690,10 @@ pub(crate) fn advance_live_key_cursor(
     // RefCell traffic to every ordinary iteration step.
     if mutated && live_collection_len(container) != Some(cursor.recorded_len) {
         let message = cursor.size_change_message;
+        // Latch before releasing: `release` drops the walk's storage and its
+        // mutation registration, but this iterator must keep reporting the
+        // size change rather than falling back to plain exhaustion.
+        cursor.size_changed = true;
         cursor.release();
         return Err(PyError::Runtime(message.to_string()));
     }
