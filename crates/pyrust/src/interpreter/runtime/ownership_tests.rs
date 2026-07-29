@@ -512,6 +512,7 @@ fn vm_opcode_loop_delegates_cache_implementations() {
         "IterState::MaterializedGuarded",
         "IterState::ItemsGuarded",
         "IterState::Range",
+        "IterState::EnumerateElements",
         "ends_with(\"_getframe\")",
         "pyrust_builtins::",
         "value_to_pykey",

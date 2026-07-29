@@ -13,6 +13,73 @@
 // built-in API boundary.
 // ---------------------------------------------------------------------------
 
+/// The counter `enumerate` yields after `counter`.
+///
+/// Promotes to `BigInt` at the `i64` boundary instead of wrapping to a negative
+/// index (#2125); the common inline-int case stays a single `checked_add`.
+#[inline]
+fn next_enumerate_counter(counter: &Value) -> Value {
+    match counter.as_int() {
+        Some(n) => match n.checked_add(1) {
+            Some(m) => Value::int(m),
+            None => value_from_bigint(PyBigInt::from(n) + 1),
+        },
+        None => value_from_bigint(
+            value_to_bigint(counter).expect("enumerate counter is always an int") + 1,
+        ),
+    }
+}
+
+/// Advance an `enumerate(...)` whose inner iterator is an unguarded built-in
+/// element cursor, yielding the `(counter, element)` pair unwrapped.
+///
+/// This is the same state transition as [`Interpreter::step_enumerate_iter`]
+/// with the adapter chain's per-step dispatch removed: the concrete types were
+/// proven once when the loop classified the iterator, and neither cell can
+/// change type afterwards. The counter and the element position stay in the
+/// cells the Python objects own, so an aliased `next()` on either object still
+/// shares one cursor with the loop, and a list mutated mid-iteration is
+/// observed by the same live index walk.
+///
+/// Returning the pair unwrapped lets the caller store it into two registers
+/// without materialising a tuple the loop would immediately unpack. Callers
+/// that need the Python-visible tuple use `step_enumerate_iter`.
+#[inline]
+pub(crate) fn advance_enumerate_elements(
+    cursor: &EnumerateElementCursor,
+) -> Option<(Value, Value)> {
+    let counter = {
+        let borrow = cursor.enumerate.borrow();
+        let state = borrow
+            .downcast_ref::<EnumerateIter>()
+            .expect("classified enumerate cursor keeps its state type");
+        if state.done {
+            return None;
+        }
+        state.counter.clone()
+    };
+    let item = cursor
+        .frame
+        .borrow_mut()
+        .downcast_mut::<NativeIterFrame>()
+        .expect("classified enumerate source keeps its frame type")
+        .advance_element();
+    let mut borrow = cursor.enumerate.borrow_mut();
+    let state = borrow
+        .downcast_mut::<EnumerateIter>()
+        .expect("classified enumerate cursor keeps its state type");
+    match item {
+        Some(item) => {
+            state.counter = next_enumerate_counter(&counter);
+            Some((counter, item))
+        }
+        None => {
+            state.done = true;
+            None
+        }
+    }
+}
+
 fn zip_shorter_message(short_idx: usize) -> String {
     if short_idx == 1 {
         format!(
@@ -297,18 +364,7 @@ impl Interpreter {
         };
         match self.call_next(&iter_val, None) {
             Ok(item) => {
-                // Increment the counter, promoting to BigInt on i64 overflow
-                // instead of wrapping to a negative index (#2125).  The common
-                // inline-int case stays a single `checked_add`.
-                let next = match counter.as_int() {
-                    Some(n) => match n.checked_add(1) {
-                        Some(m) => Value::int(m),
-                        None => value_from_bigint(PyBigInt::from(n) + 1),
-                    },
-                    None => value_from_bigint(
-                        value_to_bigint(&counter).expect("enumerate counter is always an int") + 1,
-                    ),
-                };
+                let next = next_enumerate_counter(&counter);
                 let mut borrow = state_rc.borrow_mut();
                 let s = borrow.downcast_mut::<EnumerateIter>().unwrap();
                 s.counter = next;

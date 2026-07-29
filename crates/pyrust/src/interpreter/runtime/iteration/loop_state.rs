@@ -62,6 +62,10 @@ pub(crate) enum IterState {
     },
     /// Iterator object produced by the generic Python iteration protocol.
     UserDefined(Value),
+    /// `enumerate(...)` over a built-in element iterator. The counter and the
+    /// element position stay in the cells the enumerate object and its inner
+    /// iterator own, so this is a cost specialization only.
+    EnumerateElements(EnumerateElementCursor),
     /// Snapshot plus a live collection-size guard.
     MaterializedGuarded {
         items: Vec<Value>,
@@ -158,7 +162,10 @@ impl Interpreter {
                     step,
                 })))
             }
-            IterKind::Generator => Ok(IterState::UserDefined(source)),
+            IterKind::Generator => Ok(match enumerate_element_cursor(&source) {
+                Some(cursor) => IterState::EnumerateElements(cursor),
+                None => IterState::UserDefined(source),
+            }),
             IterKind::IndexedValue => Ok(IterState::ValueIndexed {
                 value: source,
                 pos: 0,
@@ -341,6 +348,40 @@ impl Interpreter {
             provider_sequence,
         }
     }
+}
+
+/// Classify `enumerate(sequence)` for the loop's inline pair step.
+///
+/// Succeeds whenever the inner iterator is an unguarded element walk over a
+/// list, tuple, snapshot, `bytes`, or `str`, including a partly consumed one:
+/// the specialization retains both shared cells rather than moving their
+/// cursors, so there is nothing to prove about aliasing. Every other inner
+/// iterator — a generator, `map`, a guarded dict/set cursor, a user iterator —
+/// keeps the generic adapter path, whose per-step protocol dispatch is exactly
+/// the observable behaviour.
+fn enumerate_element_cursor(source: &Value) -> Option<EnumerateElementCursor> {
+    let ValueKind::Generator(enumerate) = source.kind() else {
+        return None;
+    };
+    let inner = {
+        let borrow = enumerate.try_borrow().ok()?;
+        borrow.downcast_ref::<EnumerateIter>()?.source.clone()
+    };
+    let ValueKind::Generator(frame) = inner.kind() else {
+        return None;
+    };
+    let unguarded_elements = frame
+        .try_borrow()
+        .ok()?
+        .downcast_ref::<NativeIterFrame>()?
+        .is_unguarded_element_source();
+    if !unguarded_elements {
+        return None;
+    }
+    Some(EnumerateElementCursor {
+        enumerate: Rc::clone(enumerate),
+        frame: Rc::clone(frame),
+    })
 }
 
 pub(crate) enum LiveDictViewItem {
