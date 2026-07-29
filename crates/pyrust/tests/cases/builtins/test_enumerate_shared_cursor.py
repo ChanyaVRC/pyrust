@@ -129,3 +129,41 @@ it = iter([10, 20, 30, 40])
 next(it)
 for i, x in enumerate(it, 1):
     print("partial", i, x)
+
+
+# --- a single-target loop yields a fresh tuple every iteration ---
+# The two-target form writes registers directly and builds nothing; the
+# single-target form must still hand out a distinct object each step, so a
+# caller that keeps every pair never sees one of them change underneath it.
+def all_distinct(items):
+    for outer in range(len(items)):
+        for inner in range(outer + 1, len(items)):
+            if items[outer] is items[inner]:
+                return False
+    return True
+
+
+for source in ([10, 20, 30], (10, 20, 30), "abc", b"abc", bytearray(b"abc")):
+    kept = []
+    for pair in enumerate(source):
+        kept.append(pair)
+    print("fresh", type(source).__name__, kept, all_distinct(kept), kept == list(enumerate(source)))
+
+# Equal-valued pairs from two enumerates over equal sources are distinct objects.
+left = [pair for pair in enumerate([0, 0])]
+right = [pair for pair in enumerate([0, 0])]
+print("cross fresh", left, left == right, left[0] is not right[0])
+
+# A pair captured by a closure keeps the value it was created with.
+captured = []
+for pair in enumerate("xyz", 5):
+    captured.append(lambda bound=pair: bound)
+print("captured", [make() for make in captured])
+
+# The single-target pair survives being stored into a container the loop keeps
+# mutating, and is not reused as the next iteration's scratch.
+box = []
+for pair in enumerate([1, 2, 3, 4]):
+    box.append(pair)
+    box.append(pair[0])
+print("boxed", box, all_distinct([entry for entry in box if isinstance(entry, tuple)]))
