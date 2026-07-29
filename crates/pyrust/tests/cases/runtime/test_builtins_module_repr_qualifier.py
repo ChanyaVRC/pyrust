@@ -222,3 +222,79 @@ Plain.__module__ = "builtins"
 p = Plain()
 print(mask(str(p)) == mask(repr(p)), mask(str(p)))
 print(str(object), str(C))
+
+
+# --- a str SUBCLASS __module__ is still a string (CPython gates on
+# PyUnicode_Check) and the raw text is used, ignoring any __str__/__repr__
+# override on the subclass.
+class SubStr(str):
+    def __str__(self):
+        return "STR-OVERRIDE"
+
+    def __repr__(self):
+        return "REPR-OVERRIDE"
+
+
+class SubMod:
+    pass
+
+
+SubMod.__module__ = SubStr("submod")
+print(repr(SubMod), mask(repr(SubMod())))
+SubMod.__module__ = SubStr("builtins")
+print(repr(SubMod), mask(repr(SubMod())))
+
+
+class DeepStr(SubStr):
+    pass
+
+
+class DeepMod:
+    pass
+
+
+DeepMod.__module__ = DeepStr("deepmod")
+print(repr(DeepMod), mask(repr(DeepMod())))
+
+
+# ...while a subclass of a *non-str* builtin stays "absent".
+class SubInt(int):
+    pass
+
+
+class IntMod:
+    pass
+
+
+IntMod.__module__ = SubInt(7)
+print(repr(IntMod), mask(repr(IntMod())))
+
+
+class SubBytes(bytes):
+    pass
+
+
+class BytesMod:
+    pass
+
+
+BytesMod.__module__ = SubBytes(b"nope")
+print(repr(BytesMod), mask(repr(BytesMod())))
+
+
+# A plain instance cannot spoof a module name by carrying string-ish internal
+# state; only a real str subclass counts.
+class NotAStr:
+    pass
+
+
+spoof = NotAStr()
+spoof.__builtin_data__ = "spoofed"
+
+
+class SpoofMod:
+    pass
+
+
+SpoofMod.__module__ = spoof
+print(repr(SpoofMod), mask(repr(SpoofMod())))
