@@ -568,6 +568,82 @@ mod tests {
     }
 
     #[test]
+    fn minted_nans_carry_distinct_object_identities() {
+        // #2911: each boxed NaN gets its own payload so that "same object" is
+        // exactly "same bits" — the test `is_identical_nan` performs.
+        let a = Value::float(f64::NAN);
+        let b = Value::float(f64::NAN);
+
+        for v in [&a, &b] {
+            assert!(v.is_float(), "a minted NaN must still classify as float");
+            assert!(matches!(v.kind(), ValueKind::Float(f) if f.is_nan()));
+        }
+
+        assert!(a.is_identical_nan(&a), "a NaN must be identical to itself");
+        assert!(
+            !a.is_identical_nan(&b),
+            "two independently boxed NaNs must be distinct objects"
+        );
+        assert!(
+            a.clone().is_identical_nan(&a),
+            "cloning must preserve NaN identity"
+        );
+        // Bare equality is untouched: NaN never equals anything.
+        assert!(a != b);
+        assert!(a != a);
+    }
+
+    #[test]
+    fn minted_nans_never_alias_the_reserved_sentinels() {
+        // The sentinels live at payloads 0xBAD0/0xBAD2/0xBAD4 in the same
+        // positive-NaN family.  A collision would be silent and severe: a
+        // 0xBAD0-payload NaN makes `is_unset()` true, and release builds only
+        // `debug_assert!` against reading an unset slot.  `NAN_IDENTITY_BIT`
+        // keeps every payload above that region — pin it over many mintings.
+        for _ in 0..100_000 {
+            let v = Value::float(f64::NAN);
+            assert!(!v.is_unset(), "minted NaN aliased UNSET_BITS");
+            assert!(
+                !v.is_not_implemented(),
+                "minted NaN aliased NOT_IMPLEMENTED_BITS"
+            );
+            assert!(
+                !matches!(v.kind(), ValueKind::Ellipsis | ValueKind::NotImplemented),
+                "minted NaN decoded as a singleton sentinel"
+            );
+            assert!(v.is_float());
+        }
+    }
+
+    #[test]
+    fn float_from_bits_preserves_nan_identity_and_normalises_the_rest() {
+        // Container iteration rebuilds a key through this constructor; it must
+        // hand back the *same* NaN object the container stores (#2911).
+        let n = Value::float(f64::NAN);
+        let ValueKind::Float(raw) = n.kind() else {
+            unreachable!("NaN must be a float");
+        };
+        let restored = Value::float_from_bits(raw.to_bits());
+        assert!(
+            n.is_identical_nan(&restored),
+            "restoring a key's bits must preserve NaN identity"
+        );
+
+        // Ordinary floats round-trip by value, unchanged.
+        for f in [0.0f64, -0.0, 1.0, -1.5, f64::INFINITY, f64::NEG_INFINITY] {
+            let v = Value::float_from_bits(f.to_bits());
+            assert_eq!(v, Value::float(f));
+        }
+
+        // A negative NaN never minted by `float()` must be normalised rather
+        // than stored verbatim — its top 16 bits overlap the pointer tags.
+        let hostile = Value::float_from_bits(0xFFFF_0000_0000_0000);
+        assert!(hostile.is_float());
+        assert!(matches!(hostile.kind(), ValueKind::Float(f) if f.is_nan()));
+        assert!(!hostile.is_unset() && !hostile.is_not_implemented());
+    }
+
+    #[test]
     fn unset_as_some_returns_none() {
         // as_some() is the safe way to probe an unset slot.
         let v = Value::unset();
@@ -1183,6 +1259,102 @@ mod tests {
         let bt = PyKey::Bool(true);
         assert_eq!(f1, bt, "Float(1.0) must equal Bool(true)");
         assert_eq!(key_hash(&f1), key_hash(&bt), "hash contract for 1.0/true");
+    }
+
+    #[test]
+    fn pykey_real_valued_complex_unifies_with_the_numeric_types() {
+        // #2900: `1+0j` stays a complex key but shares one dict slot with
+        // `1`, `1.0` and `True`, so it must compare *and* hash equal to them.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn key_hash(k: &PyKey) -> u64 {
+            let mut h = DefaultHasher::new();
+            k.hash(&mut h);
+            h.finish()
+        }
+
+        let z1 = PyKey::Complex(1.0, 0.0);
+        for equivalent in [
+            PyKey::Int(1),
+            PyKey::Float(1.0f64.to_bits()),
+            PyKey::Bool(true),
+        ] {
+            assert_eq!(z1, equivalent, "1+0j must equal {equivalent:?}");
+            assert_eq!(equivalent, z1, "equality must be symmetric");
+            assert_eq!(
+                key_hash(&z1),
+                key_hash(&equivalent),
+                "Hash+Eq contract for 1+0j vs {equivalent:?}"
+            );
+            assert_eq!(
+                py_hash_pykey(&z1),
+                py_hash_pykey(&equivalent),
+                "CPython hash(1+0j) == hash({equivalent:?})"
+            );
+        }
+
+        // A negative zero imaginary part still counts as real-valued, and
+        // `-0.0` real still unifies with `0` / `False`.
+        assert_eq!(PyKey::Complex(1.0, -0.0), PyKey::Int(1));
+        assert_eq!(PyKey::Complex(-0.0, 0.0), PyKey::Int(0));
+        assert_eq!(PyKey::Complex(-0.0, 0.0), PyKey::Bool(false));
+        assert_eq!(
+            key_hash(&PyKey::Complex(-0.0, 0.0)),
+            key_hash(&PyKey::Int(0))
+        );
+
+        // A non-zero imaginary part is a separate key.
+        assert_ne!(PyKey::Complex(1.0, 1.0), PyKey::Int(1));
+        assert_ne!(PyKey::Complex(1.0, 1.0), PyKey::Float(1.0f64.to_bits()));
+        assert_ne!(PyKey::Complex(0.5, 0.0), PyKey::Int(0));
+
+        // Large integer-valued reals unify across the BigInt arm, matching
+        // `{1e20: 'a', 10**20: 'b'}` collapsing to one entry.
+        let big = num_bigint::BigInt::from(10u8).pow(20);
+        let z_big = PyKey::Complex(1e20, 0.0);
+        assert_eq!(z_big, PyKey::BigInt(Box::new(big.clone())));
+        assert_eq!(
+            key_hash(&z_big),
+            key_hash(&PyKey::BigInt(Box::new(big))),
+            "Hash+Eq contract for complex(1e20) vs 10**20"
+        );
+
+        // NaN: a complex NaN key finds itself, but is not equal to the plain
+        // float NaN (CPython reports `complex(nan, 0) == nan` as False).
+        let nan_bits = f64::NAN.to_bits();
+        assert_eq!(PyKey::Complex(f64::NAN, 0.0), PyKey::Complex(f64::NAN, 0.0));
+        assert_ne!(PyKey::Complex(f64::NAN, 0.0), PyKey::Float(nan_bits));
+    }
+
+    #[test]
+    fn pykey_distinct_nan_floats_are_distinct_keys() {
+        // #2911: two independently boxed NaNs occupy two dict slots, while a
+        // NaN still finds itself.  `0.0` / `-0.0` must keep collapsing.
+        let a = Value::float(f64::NAN).to_key().expect("NaN is hashable");
+        let b = Value::float(f64::NAN).to_key().expect("NaN is hashable");
+
+        assert_eq!(a, a.clone(), "a NaN key must find itself");
+        assert_ne!(a, b, "two distinct NaN objects must be distinct keys");
+
+        let mut set = PySet::default();
+        set.insert(a.clone());
+        set.insert(b.clone());
+        set.insert(a.clone());
+        assert_eq!(set.len(), 2, "distinct NaNs occupy two slots, repeats none");
+        assert!(set.contains(&a) && set.contains(&b));
+
+        // Value-equal floats still collapse — the identity rule is NaN-only.
+        let mut zeros = PySet::default();
+        for key in [
+            Value::float(0.0).to_key().unwrap(),
+            Value::float(-0.0).to_key().unwrap(),
+            Value::int(0).to_key().unwrap(),
+            Value::bool_(false).to_key().unwrap(),
+        ] {
+            zeros.insert(key);
+        }
+        assert_eq!(zeros.len(), 1, "0.0/-0.0/0/False must stay one key");
     }
 
     #[test]

@@ -40,8 +40,13 @@ pub fn call(method: &str, receiver: f64, args: &[Value]) -> Result<Value> {
                     ),
                 ));
             }
-            // float.conjugate() returns self (float has no imaginary part).
-            Ok(Value::float(receiver))
+            // float.conjugate() returns self (float has no imaginary part),
+            // so `n.conjugate() is n` holds in CPython.  Rebuild from the raw
+            // bits rather than via `Value::float`: the latter mints a fresh
+            // object identity for a NaN, which would break that (#2911).  The
+            // receiver f64 was decoded from the Value's bits, so its payload
+            // still carries the original identity.
+            Ok(Value::float_from_bits(receiver.to_bits()))
         }
         "is_integer" => {
             if !args.is_empty() {

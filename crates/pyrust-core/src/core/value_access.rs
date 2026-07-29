@@ -118,16 +118,14 @@ impl Value {
     /// `a is b` as equal *before* calling `__eq__`, which is observable only for
     /// `NaN` — the one primitive where `x == x` is `False`.
     ///
-    /// pyrust's floats are NaN-boxed values, not heap objects, so true object
-    /// identity doesn't exist for them.  The achievable approximation is raw
-    /// bit-pattern equality: two floats holding the same NaN payload are
-    /// bit-identical and are reported as "the same object" here.  This is
-    /// slightly *looser* than CPython for two distinct-but-bitwise-equal NaN
-    /// objects (CPython reports `False`; we report `True`), but it fixes the
-    /// common `n in [n]` case and the container invariant that an element you
-    /// just inserted is findable.  Restricted to floats and complex (whose
-    /// components are also bit-copied f64s) so no other type's equality
-    /// semantics change.
+    /// pyrust's floats are NaN-boxed immediates, not heap objects, so object
+    /// identity is carried in the NaN payload instead: `Value::float` mints a
+    /// fresh payload for every NaN it boxes, which makes raw bit-pattern
+    /// equality an *exact* identity test rather than an approximation (#2911).
+    /// Two NaNs are reported as the same object here precisely when they came
+    /// from the same boxing, matching CPython's `a is b`.  Restricted to floats
+    /// and complex (whose components are also bit-copied f64s) so no other
+    /// type's equality semantics change.
     #[inline]
     pub fn is_identical_nan(&self, other: &Self) -> bool {
         if self.0 == other.0 {

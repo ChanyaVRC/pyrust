@@ -133,7 +133,7 @@ pub(crate) fn key_ref_to_value(key: &PyKey) -> Value {
         PyKey::Bool(v) => Value::bool_(*v),
         PyKey::None => Value::none(),
         PyKey::Ellipsis => Value::ellipsis(),
-        PyKey::Float(v) => Value::float(f64::from_bits(*v)),
+        PyKey::Float(v) => Value::float_from_bits(*v),
         PyKey::Object { value, .. } => value.clone(),
         _ => key_to_value(key.clone()),
     }
@@ -143,7 +143,7 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
     match key {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),
-        PyKey::Float(v) => Value::float(f64::from_bits(v)),
+        PyKey::Float(v) => Value::float_from_bits(v),
         PyKey::Str(v) => v,
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),
