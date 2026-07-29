@@ -95,6 +95,21 @@ impl BuiltinTypeOps for InstanceDictOps {
         s.visible_len() != 0
     }
 
+    /// `copy.copy(obj.__dict__)` — CPython copies the mapping, so the result
+    /// is a detached `dict`, not a second live view onto the instance.
+    /// Returning the proxy itself would let writes to the copy rewrite the
+    /// object's attributes (issue #2935).
+    fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
+        let s = borrow_state(state)?;
+        let inst = s.instance.borrow();
+        let mut dict: PyDict =
+            PyDict::with_capacity_and_hasher(inst.attrs.inline_len(), Default::default());
+        for (key, value) in inst.attrs.iter() {
+            dict.insert(PyKey::str_from(key.as_ref()), value.clone());
+        }
+        Some(Value::dict(dict))
+    }
+
     fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
         let s = match borrow_state(state) {
             Some(s) => s,

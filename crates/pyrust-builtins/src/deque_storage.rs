@@ -50,6 +50,35 @@ impl BuiltinTypeOps for DequeStorageOps {
     fn len(&self, state: &BuiltinState) -> Option<usize> {
         storage_data(state).map(|data| data.borrow().len())
     }
+
+    /// A fresh buffer holding the same elements — and a fresh mutation
+    /// counter, so a deque copied mid-iteration does not inherit the
+    /// original's structural-mutation stamps.
+    fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
+        let data = storage_data(state)?;
+        let items: Vec<Value> = data.borrow().iter().cloned().collect();
+        Some(deque_storage(items))
+    }
+
+    fn storage_elements(&self, state: &BuiltinState) -> Option<Vec<Value>> {
+        let data = storage_data(state)?;
+        let items = data.borrow().iter().cloned().collect();
+        Some(items)
+    }
+
+    fn set_storage_elements(&self, state: &BuiltinState, elements: Vec<Value>) -> bool {
+        match storage_data(state) {
+            Some(data) => {
+                *data.borrow_mut() = VecDeque::from(elements);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn is_internal_storage(&self) -> bool {
+        true
+    }
 }
 
 fn storage_data(state: &BuiltinState) -> Option<DequeData> {

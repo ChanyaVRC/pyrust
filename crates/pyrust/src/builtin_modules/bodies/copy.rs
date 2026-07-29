@@ -372,6 +372,14 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
             Ok(Value::set(new_items))
         }
 
+        // Opaque built-in storage (bytearray, an instance `__dict__` view,
+        // a deque's `VecDeque` payload, …).  The type owns the knowledge of
+        // how to detach its backing; types that are safe to share (immutable
+        // or identity-like) return None and are returned unchanged.
+        ValueKind::BuiltinObject { ops, state } => {
+            Ok(ops.copy_storage(state).unwrap_or_else(|| obj.clone()))
+        }
+
         // PyInstance — check for __copy__ dunder first (MRO-aware).
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
@@ -423,7 +431,51 @@ fn shallow_copy_via_protocol(
         attrs: InstanceAttrs::new(),
     }));
     restore_state(&new_rc, state, interp)?;
+    detach_internal_storage(rc, &new_rc, interp)?;
     Ok(Value::py_instance(new_rc))
+}
+
+/// Is this attribute the instance's own built-in payload rather than one of
+/// its element values?  Two forms exist: the `__builtin_data__` backing every
+/// `dict` / `list` / `set` / `bytearray` / … subclass instance carries, and an
+/// opaque storage object a built-in class parks in a named attribute (a
+/// `deque`'s `VecDeque`).  Both are storage the copy must own outright.
+fn is_internal_storage_attr(name: &str, value: &Value) -> bool {
+    name == crate::interpreter::BUILTIN_DATA_ATTR
+        || matches!(value.kind(), ValueKind::BuiltinObject { ops, .. } if ops.is_internal_storage())
+}
+
+/// Give a freshly built shallow copy its *own* built-in payload (#2935).
+///
+/// A built-in-backed instance — `OrderedDict`, `Counter`, `defaultdict`,
+/// `deque`, and every user subclass of `dict` / `list` / `set` / `bytearray` —
+/// keeps its contents in an internal attribute.  That storage is the object's
+/// own state, not a shared element value, so leaving the attribute pointing at
+/// the original's backing makes writes to the copy rewrite the original.
+/// Shallow-copying the backing keeps CPython's semantics: the structure is
+/// independent while the values inside stay shared.
+///
+/// The storage is taken from the *original* rather than from the restored
+/// state so that a class customising `__getstate__` can neither alias nor drop
+/// its own backing.
+fn detach_internal_storage(
+    rc: &Rc<RefCell<PyInstance>>,
+    new_rc: &Rc<RefCell<PyInstance>>,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<()> {
+    let storages: Vec<(String, Value)> = rc
+        .borrow()
+        .attrs
+        .items_snapshot()
+        .into_iter()
+        .filter(|(name, value)| is_internal_storage_attr(name.as_ref(), value))
+        .map(|(name, value)| (name.to_string(), value))
+        .collect();
+    for (name, storage) in storages {
+        let independent = shallow_copy(storage, interp)?;
+        new_rc.borrow_mut().attrs.insert(&name, independent);
+    }
+    Ok(())
 }
 
 // ── deep_copy ─────────────────────────────────────────────────────────────────
@@ -594,6 +646,46 @@ fn deep_copy(
                 PyError::named("TypeError", "deepcopy: set rebuild failed".to_string())
             })?;
             Ok(new_set_val)
+        }
+
+        // Opaque built-in storage (bytearray, an instance `__dict__` view, a
+        // deque's `VecDeque` payload, …).  Detach the backing through the
+        // type's own hook, then recurse into the payload it holds — the
+        // detached storage is memoised first so a cycle running back through
+        // its elements terminates.
+        ValueKind::BuiltinObject { ops, state } => {
+            let Some(copied) = ops.copy_storage(state) else {
+                return Ok(obj.clone());
+            };
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, copied.clone());
+            }
+            if let Some(elements) = ops.storage_elements(state) {
+                let mut deep_elements = Vec::with_capacity(elements.len());
+                for element in elements {
+                    deep_elements.push(deep_copy(element, memo, interp)?);
+                }
+                if let ValueKind::BuiltinObject {
+                    ops: copied_ops,
+                    state: copied_state,
+                } = copied.kind()
+                {
+                    copied_ops.set_storage_elements(copied_state, deep_elements);
+                }
+            } else if let Some(pairs) = copied.dict_with(|d| {
+                d.iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect::<Vec<_>>()
+            }) {
+                // A storage that detaches into an ordinary container: an
+                // instance `__dict__` copies into a plain `dict` whose keys are
+                // attribute names (always `str`, so only the values recurse).
+                for (key, value) in pairs {
+                    let deep_value = deep_copy(value, memo, interp)?;
+                    let _ = copied.dict_insert(key, deep_value);
+                }
+            }
+            Ok(copied)
         }
 
         // PyInstance — check for __deepcopy__ dunder first (MRO-aware).
