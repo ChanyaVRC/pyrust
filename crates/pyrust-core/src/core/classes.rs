@@ -232,6 +232,24 @@ impl PyClass {
             .set(self.mutation_version.get().saturating_add(1));
     }
 
+    /// The class name used by the default `type` / instance reprs, following
+    /// CPython's shared rule (`typeobject.c::type_repr` and `object_repr`).
+    ///
+    /// The qualified `{module}.{qualname}` form is used only when `__module__`
+    /// is present **and** is a string other than `"builtins"`; otherwise the
+    /// bare `__name__` is used with no module prefix.  So `repr(object())` is
+    /// `<object object at 0x...>`, and a class whose `__module__` was mutated
+    /// to `"builtins"` / `None` / a non-string reprs as `<class 'Name'>`
+    /// (issue #2927).  Note the asymmetry is CPython's: the qualified form
+    /// spells the *qualname* (`Outer.Inner`), the bare form the *name*
+    /// (`Inner`, CPython's `tp_name` for a heap type).
+    pub fn repr_display_name(&self) -> String {
+        match self.attrs.get("__module__").and_then(Value::as_str) {
+            Some(module) if module != "builtins" => format!("{module}.{}", self.qualname),
+            _ => self.name.clone(),
+        }
+    }
+
     /// Construct a `PyClass` from the four commonly-varying fields, defaulting
     /// the rest (`extra_bases` empty, `metatype` `None`, `slots` `None`, fresh
     /// `mutation_version`, empty `subclasses`).  Sites that need a non-default
