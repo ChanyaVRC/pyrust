@@ -704,6 +704,48 @@ fn pass_int_loop_version(
         if has_interior_control_flow && !subscripts.is_empty() {
             eligible = false;
         }
+        // The same reasoning generalises to any body temporary the region
+        // defines before it reads: `t = i % 2` gives `t` an int-family value
+        // from already-guarded inputs on every pass, so `t`'s entry state is
+        // irrelevant.  Guarding it anyway is not merely redundant — a body
+        // temporary is legitimately *unset* the first time the loop is
+        // entered, so `JumpIfNotInt` always diverts to the original stream and
+        // the fast copy is never executed at all.
+        //
+        // Only the whitelisted int-family definitions count.  `GetItem` and
+        // the `ForIter` target produce a value of unproven type and keep the
+        // per-iteration side exits installed above.
+        let defines_int_family = |insn: &Insn, g: Reg| {
+            matches!(
+                insn,
+                Insn::LoadConst(dst, _)
+                    | Insn::Move(dst, _)
+                    | Insn::CopyReg(dst, _)
+                    | Insn::BinOp(dst, ..)
+                    | Insn::BinOpInPlace(dst, ..)
+                    | Insn::BinOpImm(dst, ..)
+                    | Insn::BinOpConst(dst, ..)
+                if *dst == g
+            )
+        };
+        let entry_state_is_dead = |g: Reg| {
+            for d in walk_start..=back {
+                if insn_reads_reg(&insns[d], g) {
+                    return false;
+                }
+                if defines_int_family(&insns[d], g) {
+                    // Every branch ahead of the definition must land at or
+                    // before it, or leave the region entirely; otherwise some
+                    // path reaches a later read without running the definition.
+                    // An edge out of the region is harmless: the copy performs
+                    // no further operation on `g` after taking it.
+                    return (walk_start..d)
+                        .all(|b| targets(b, &insns[b]).is_none_or(|t| t <= d || t > back));
+                }
+            }
+            false
+        };
+        guards.retain(|g| !entry_state_is_dead(*g));
         // Interior control flow is compatible with sync deferral only when no
         // synced name can be first-inserted into the live globals dict by this
         // loop: conditionally-executed first insertions could otherwise change

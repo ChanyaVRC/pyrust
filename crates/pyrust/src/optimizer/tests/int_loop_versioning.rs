@@ -1238,3 +1238,97 @@ fn closed_form_declines_a_computed_bound_in_the_call_setup() {
         result.insns
     );
 }
+
+fn entry_guarded_registers(insns: &[Insn]) -> Vec<u32> {
+    insns
+        .iter()
+        .filter_map(|insn| match insn {
+            Insn::JumpIfNotInt(reg, _) => Some(*reg),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn entry_guards_skip_a_body_temporary_defined_before_it_is_read() {
+    // `while i < N: if i % 2 != 0: total += i; i += 1` computes its branch
+    // operand into a temporary that is legitimately unset when the loop is
+    // first entered.  Guarding that temporary would divert every entry to the
+    // original stream and make the fast copy unreachable.
+    let input = vec![
+        Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 5),
+        Insn::BinOpConst(2, 0, BinaryOp::Mod, 1, false),
+        Insn::CmpJumpIfFalseConst(2, BinaryOp::Ne, 2, 1),
+        Insn::BinOpInPlace(1, 1, BinaryOp::Add, 0),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -5),
+        Insn::Return(1),
+    ];
+
+    let output = version(input, &[Value::int(10), Value::int(2), Value::int(0)]);
+    let guarded = entry_guarded_registers(&output);
+
+    assert!(
+        !guarded.is_empty(),
+        "the loop must still be versioned: {output:?}"
+    );
+    assert!(
+        !guarded.contains(&2),
+        "the body temporary is defined before it is read: {output:?}"
+    );
+    assert!(
+        guarded.contains(&0) && guarded.contains(&1),
+        "loop-carried registers still need entry guards: {output:?}"
+    );
+    for (pc, insn) in output.iter().enumerate() {
+        if let Some(target) = jump_target(pc, insn) {
+            assert!(
+                target <= output.len(),
+                "pc {pc} has out-of-range target {target}: {insn:?}; stream={output:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn entry_guards_keep_a_register_read_before_the_region_redefines_it() {
+    // `r2` is read by the header comparison and only then recomputed, so its
+    // entry value is live and its guard must stay.
+    let input = vec![
+        Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 2, 3),
+        Insn::BinOpConst(2, 0, BinaryOp::Add, 0, false),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::CmpJumpIfTrue(0, BinaryOp::Lt, 2, -3),
+        Insn::Return(0),
+    ];
+
+    let output = version(input, &[Value::int(1)]);
+
+    assert!(
+        entry_guarded_registers(&output).contains(&2),
+        "a register read before its in-region definition keeps its guard: {output:?}"
+    );
+}
+
+#[test]
+fn entry_guards_stay_when_a_branch_can_skip_the_definition() {
+    // The interior branch jumps past the definition of `r2`, so a path reaches
+    // the add that reads `r2` without ever running that definition.
+    let input = vec![
+        Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 6),
+        Insn::CmpJumpIfFalseConst(1, BinaryOp::Ne, 2, 2),
+        Insn::BinOpConst(2, 0, BinaryOp::Mod, 1, false),
+        Insn::BinOpInPlace(1, 1, BinaryOp::Add, 2),
+        Insn::BinOpImm(0, 0, BinaryOp::Add, 1, true),
+        Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -6),
+        Insn::Return(1),
+    ];
+
+    let output = version(input, &[Value::int(10), Value::int(2), Value::int(0)]);
+    let guarded = entry_guarded_registers(&output);
+
+    assert!(
+        guarded.is_empty() || guarded.contains(&2),
+        "a definition a branch can skip does not retire its guard: {output:?}"
+    );
+}
