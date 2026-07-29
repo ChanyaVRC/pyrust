@@ -431,7 +431,7 @@ fn shallow_copy_via_protocol(
         attrs: InstanceAttrs::new(),
     }));
     restore_state(&new_rc, state, interp)?;
-    detach_internal_storage(rc, &new_rc, interp)?;
+    detach_internal_storage(rc, &new_rc, interp, shallow_copy)?;
     Ok(Value::py_instance(new_rc))
 }
 
@@ -457,11 +457,22 @@ fn is_internal_storage_attr(name: &str, value: &Value) -> bool {
 ///
 /// The storage is taken from the *original* rather than from the restored
 /// state so that a class customising `__getstate__` can neither alias nor drop
-/// its own backing.
+/// its own backing.  Dropping it is not a milder failure than aliasing it: a
+/// `dict` subclass instance with no `__builtin_data__` is not an empty mapping
+/// but a broken one, and `len()` on it recurses until the native stack
+/// overflows.  Both `copy` and `deepcopy` therefore run this step —
+/// `copy_val` supplies the per-storage copy (identity-preserving for shallow,
+/// memo-aware recursion for deep).
+///
+/// For the common case (no `__getstate__`) this is idempotent: the state
+/// snapshot already carried the backing, so the copy re-derived here is the
+/// very value `restore_state` installed — under `deepcopy` the memo returns it
+/// verbatim rather than building a second one.
 fn detach_internal_storage(
     rc: &Rc<RefCell<PyInstance>>,
     new_rc: &Rc<RefCell<PyInstance>>,
     interp: &mut crate::interpreter::Interpreter,
+    mut copy_val: impl FnMut(Value, &mut crate::interpreter::Interpreter) -> Result<Value>,
 ) -> Result<()> {
     let storages: Vec<(String, Value)> = rc
         .borrow()
@@ -472,7 +483,7 @@ fn detach_internal_storage(
         .map(|(name, value)| (name.to_string(), value))
         .collect();
     for (name, storage) in storages {
-        let independent = shallow_copy(storage, interp)?;
+        let independent = copy_val(storage, interp)?;
         new_rc.borrow_mut().attrs.insert(&name, independent);
     }
     Ok(())
@@ -767,5 +778,8 @@ fn deep_copy_via_protocol(
     let state = capture_state(rc, interp)?;
     let deep_state = deep_copy(state, memo, interp)?;
     restore_state(&new_rc, deep_state, interp)?;
+    detach_internal_storage(rc, &new_rc, interp, |value, interp| {
+        deep_copy(value, memo, interp)
+    })?;
     Ok(new_val)
 }

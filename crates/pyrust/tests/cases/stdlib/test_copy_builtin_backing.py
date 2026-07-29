@@ -208,6 +208,9 @@ for source, mutate in (
 
 # A custom __getstate__ covers the instance attributes, never the container's
 # own payload — the copy still gets the original's contents, independently.
+# This holds for deepcopy exactly as for copy: a state that omits the payload
+# must not leave the copy without one (a backing-less dict subclass is broken,
+# not empty).
 
 
 class Stateful(dict):
@@ -228,6 +231,66 @@ clone["z"] = 9
 assert sorted(stateful) == ["a"], sorted(stateful)
 assert sorted(clone) == ["a", "z"], sorted(clone)
 assert clone.note == "n!"
+
+deep = copy.deepcopy(stateful)
+assert len(deep) == 1, len(deep)
+assert sorted(deep.items()) == [("a", 1)], sorted(deep.items())
+assert deep.note == "n!"
+deep["z"] = 9
+assert sorted(stateful) == ["a"], sorted(stateful)
+
+
+class StatefulList(list):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.note = "n"
+
+    def __getstate__(self):
+        return {"note": self.note + "!"}
+
+    def __setstate__(self, state):
+        self.note = state["note"]
+
+
+stateful_list = StatefulList([1, 2])
+for clone in (copy.copy(stateful_list), copy.deepcopy(stateful_list)):
+    assert list(clone) == [1, 2], list(clone)
+    assert clone.note == "n!"
+    clone.append(3)
+    assert list(stateful_list) == [1, 2], list(stateful_list)
+
+
+class StatefulOrdered(OrderedDict):
+    def __getstate__(self):
+        return {"tag": 1}
+
+    def __setstate__(self, state):
+        self.tag = state["tag"]
+
+
+stateful_ordered = StatefulOrdered(a=1, b=2)
+for clone in (copy.copy(stateful_ordered), copy.deepcopy(stateful_ordered)):
+    assert list(clone) == ["a", "b"], list(clone)
+    assert clone.tag == 1
+    clone["z"] = 9
+    assert list(stateful_ordered) == ["a", "b"], list(stateful_ordered)
+
+
+# A deque subclass whose state omits the opaque `_items` storage: the deep copy
+# must still carry the elements, and independently.
+class StatefulDeque(deque):
+    def __getstate__(self):
+        return {}
+
+    def __setstate__(self, state):
+        pass
+
+
+stateful_deque = StatefulDeque([1, 2])
+for clone in (copy.copy(stateful_deque), copy.deepcopy(stateful_deque)):
+    assert list(clone) == [1, 2], list(clone)
+    clone.append(3)
+    assert list(stateful_deque) == [1, 2], list(stateful_deque)
 
 # ── plain bytearray ──────────────────────────────────────────────────────────
 
