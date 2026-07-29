@@ -202,6 +202,14 @@ fn resolve_and_validate_builtin_method(
 /// (`__getitem__`, `__iter__`, `__call__`, `__len__`, `__init__`,
 /// …) don't have to repeat the UserFunction-vs-BuiltinFunction
 /// branching at every call site.
+///
+/// The receiver is *not* prepended when the resolved slot carries its own
+/// descriptor semantics: a `staticmethod` slot is called with `args` alone and
+/// a `classmethod` slot receives the owning class instead.  Both spellings —
+/// the `UserFunction` kind tag that `@staticmethod` / `@classmethod` over a
+/// Python function produces, and the `BuiltinObject` wrappers used for every
+/// other wrapped value — are honoured here so no dunder dispatch site has to
+/// know the difference (issue #2939).
 pub(crate) fn invoke_class_method(
     interp: &mut Interpreter,
     method_val: Value,
@@ -231,6 +239,55 @@ pub(crate) fn invoke_class_method(
 
     match method_val.kind() {
         ValueKind::UserFunction(f) => {
+            // `@classmethod` / `@staticmethod` over a Python function do NOT
+            // produce a wrapper value in pyrust — they Rc-share the original
+            // body and are distinguished only by `UserFunction::kind` (see
+            // `UserFunctionKind`).  The `as_*_method_any` probes above therefore
+            // only catch the *non*-function wrappers, and every implicit dunder
+            // dispatch used to prepend the receiver regardless of the tag:
+            // `__len__ = staticmethod(lambda: 3)` called the lambda with a
+            // stray `self`, and a classmethod dunder received the instance
+            // where CPython passes the class (issue #2939).
+            //
+            // CPython's `_PyObject_LookupSpecial` binds the type-level slot
+            // through the descriptor protocol, so honour the same three
+            // outcomes here.  `Regular` (the overwhelmingly common case) and
+            // `Builtin` keep the previous receiver-prepending path and stay
+            // first in the match, so the hot dunder dispatch pays only an
+            // already-loaded enum-tag compare.
+            match f.kind {
+                pyrust_core::UserFunctionKind::StaticMethod => {
+                    // `staticmethod.__get__` yields the wrapped callable
+                    // untouched — no receiver is passed.
+                    let unwrapped = match f.wrapped_func.as_ref() {
+                        Some(inner) => Value::user_function(Rc::clone(inner)),
+                        None => Value::with_function_kind(
+                            Rc::clone(f),
+                            pyrust_core::UserFunctionKind::Regular,
+                        ),
+                    };
+                    return interp.call_function_expanded(unwrapped, args);
+                }
+                pyrust_core::UserFunctionKind::ClassMethod => {
+                    // `classmethod.__get__` binds the owning class in place of
+                    // the receiver.  Resolve it exactly as the wrapped-
+                    // classmethod branch above does, so both spellings of
+                    // `@classmethod` agree on what `cls` is.
+                    let owner = match instance.kind() {
+                        ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                        ValueKind::PyInstance(object) => Some(Rc::clone(&object.borrow().class)),
+                        _ => match value_class(&instance).kind() {
+                            ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                            _ => None,
+                        },
+                    };
+                    if let Some(owner) = owner {
+                        let bound = Value::class_bound_method(Rc::clone(f), owner);
+                        return interp.call_function_expanded(bound, args);
+                    }
+                }
+                _ => {}
+            }
             let func = Rc::clone(f);
             return interp.call_user_function_expanded(func, args, &[instance]);
         }

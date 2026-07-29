@@ -212,18 +212,22 @@ fn isinstance_check(
         // precedence, mirroring CPython's `type(cls).__instancecheck__(cls, x)`
         // dispatch.  `metaclass_dunder` returns `Some` only for a user
         // override, so ordinary classes skip this and keep the fast path.
+        //
+        // Issue #2939: bind through `invoke_class_method` so a `staticmethod` /
+        // `classmethod` hook follows the same descriptor rules as every other
+        // implicit dunder instead of unconditionally receiving `cls`.
         if let Some(ic_fn) = crate::interpreter::metaclass_dunder(cls_rc, "__instancecheck__")
-            && let ValueKind::UserFunction(f) = ic_fn.kind()
+            && matches!(ic_fn.kind(), ValueKind::UserFunction(_))
         {
-            let func = Rc::clone(f);
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
                 value: obj.clone(),
             }];
-            let result = interp.call_user_function_expanded(
-                func,
+            let result = crate::interpreter::invoke_class_method(
+                interp,
+                ic_fn,
+                Value::py_class(Rc::clone(cls_rc)),
                 &call_args,
-                &[Value::py_class(Rc::clone(cls_rc))],
             )?;
             return interp.truthy_value(&result);
         }
@@ -487,18 +491,21 @@ fn issubclass_check(
         // Issue #1955: a metaclass `__subclasscheck__` override takes
         // precedence, mirroring CPython's
         // `type(classinfo).__subclasscheck__(classinfo, cls)` dispatch.
+        // Issue #2939: bind through `invoke_class_method` so a `staticmethod` /
+        // `classmethod` hook follows the same descriptor rules as every other
+        // implicit dunder instead of unconditionally receiving `classinfo`.
         if let Some(sc_fn) = crate::interpreter::metaclass_dunder(classinfo_rc, "__subclasscheck__")
-            && let ValueKind::UserFunction(f) = sc_fn.kind()
+            && matches!(sc_fn.kind(), ValueKind::UserFunction(_))
         {
-            let func = Rc::clone(f);
             let call_args = [crate::interpreter::ExpandedCallArg {
                 name: None,
                 value: cls.clone(),
             }];
-            let result = interp.call_user_function_expanded(
-                func,
+            let result = crate::interpreter::invoke_class_method(
+                interp,
+                sc_fn,
+                Value::py_class(Rc::clone(classinfo_rc)),
                 &call_args,
-                &[Value::py_class(Rc::clone(classinfo_rc))],
             )?;
             return interp.truthy_value(&result);
         }
