@@ -250,11 +250,12 @@ pub(crate) fn invoke_class_method(
             // where CPython passes the class (issue #2939).
             //
             // CPython's `_PyObject_LookupSpecial` binds the type-level slot
-            // through the descriptor protocol, so honour the same three
-            // outcomes here.  `Regular` (the overwhelmingly common case) and
-            // `Builtin` keep the previous receiver-prepending path and stay
-            // first in the match, so the hot dunder dispatch pays only an
-            // already-loaded enum-tag compare.
+            // through the descriptor protocol, so honour the same outcomes
+            // here.  `Regular` (the overwhelmingly common case) and `Builtin`
+            // fall through the `_` arm into the unchanged receiver-prepending
+            // tail below, so the hot dunder dispatch pays one discriminant
+            // compare on a `Copy` tag already resident in the `UserFunction`
+            // this arm just matched — no extra load, no extra allocation.
             match f.kind {
                 pyrust_core::UserFunctionKind::StaticMethod => {
                     // `staticmethod.__get__` yields the wrapped callable
