@@ -15,6 +15,15 @@ normalization).
   runs of one fixture always stay sequential, so a fixture may use scratch
   files if their names are unique to that fixture.
 - `PYRUST_PYTHON=/path/to/python` overrides interpreter discovery.
+- Every child runs capped: 4 GiB of address space (`RLIMIT_AS`/`RLIMIT_DATA`,
+  unix only) and a 120 s wall clock, so no fixture can exhaust the host. A
+  fixture that trips either cap is reported as a failed run, not a hang.
+  `PYRUST_PARITY_MEM_MB=<n>` and `PYRUST_PARITY_TIMEOUT_S=<n>` raise the caps
+  for a fixture that legitimately needs more — prefer shrinking the fixture.
+  Captured output is truncated at 64 MiB per stream (with a marker in the
+  diff); fixtures should print orders of magnitude less than that.
+- Ad-hoc interpreter runs outside the harness (repros, benches) should go
+  through `tools/run-limited.sh -- <cmd>`, which applies the same caps.
 
 ## Directory taxonomy
 
