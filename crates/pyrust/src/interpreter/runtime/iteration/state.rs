@@ -80,7 +80,9 @@ pub(crate) enum NativeIterSource {
     /// `list_iterator` over its remainder whether or not that remainder is
     /// empty, while a sequence walk keeps its own type (#2974). The latch
     /// therefore carries the one bit the reduce path would otherwise lose.
-    Exhausted { reduces_to_list: bool },
+    Exhausted {
+        reduces_to_list: bool,
+    },
 }
 
 impl NativeIterSource {
