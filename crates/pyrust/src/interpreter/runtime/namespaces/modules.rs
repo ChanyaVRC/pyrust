@@ -368,7 +368,16 @@ impl Interpreter {
                     // Seed the import identity before execution. The script
                     // dunder initializer uses get-or-insert and therefore
                     // preserves these filesystem-module values.
+                    //
+                    // `__doc__` is seeded between them purely for position:
+                    // these keys are inserted before the script initializer
+                    // runs, so they fix the head of `list(vars(module))`, and
+                    // CPython's module dict starts `__name__`, `__doc__`,
+                    // `__package__` (issue #2918 — the same head the built-in
+                    // module paths now produce). A module docstring overwrites
+                    // the `None` in place when the body executes.
                     module.insert_attr("__name__".to_string(), Value::string(name));
+                    module.insert_attr("__doc__".to_string(), Value::none());
                     module.insert_attr("__package__".to_string(), Value::string(""));
                 }
                 let module = Value::py_module(Rc::clone(&module_rc));

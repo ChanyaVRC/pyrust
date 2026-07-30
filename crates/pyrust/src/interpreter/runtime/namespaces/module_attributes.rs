@@ -144,25 +144,30 @@ impl Interpreter {
                 // `__package__`, `__loader__`, `__spec__` before executing the
                 // method table — `list(vars(math))[:5]` is those five names.
                 let attrs_snapshot = module.borrow().attrs.clone();
-                // Add a synthetic dunder only if the key is neither already
-                // present in attrs (user override — it keeps its stored
-                // position) nor tombstoned (explicitly deleted by the user).
-                let is_absent = |key: &str| !attrs_snapshot.contains_key(key);
+                // A slot keeps its head position even when the module stores
+                // its own binding for that name: in CPython the key is already
+                // in the dict, so `math.__name__ = 'x'` rebinds it in place
+                // rather than moving it to the end. Reserve the position with
+                // the synthetic default here and let the `extend` below
+                // overwrite the value — `IndexMap::insert` on a present key
+                // keeps its index. A tombstoned slot (explicitly deleted by
+                // the user) is omitted entirely.
+                let is_live = |key: &str| !attrs_snapshot.get(key).is_some_and(Value::is_unset);
                 let mut d: PyDict =
                     PyDict::with_capacity_and_hasher(attrs_snapshot.len() + 5, Default::default());
-                if is_absent("__name__") {
+                if is_live("__name__") {
                     d.insert(PyKey::str_from("__name__"), Value::string(mod_name));
                 }
-                if is_absent("__doc__") {
+                if is_live("__doc__") {
                     d.insert(PyKey::str_from("__doc__"), Value::none());
                 }
-                if is_absent("__package__") {
+                if is_live("__package__") {
                     d.insert(PyKey::str_from("__package__"), Value::string(String::new()));
                 }
-                if is_absent("__loader__") {
+                if is_live("__loader__") {
                     d.insert(PyKey::str_from("__loader__"), Value::none());
                 }
-                if is_absent("__spec__") {
+                if is_live("__spec__") {
                     d.insert(PyKey::str_from("__spec__"), Value::none());
                 }
                 d.extend(

@@ -16,15 +16,22 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Every built-in module, so a newly added one cannot reintroduce hash-ordered
-/// storage unnoticed. The list deliberately spans all the distinct namespace
-/// kinds: `math` keeps the compact direct `attrs` storage and synthesises
-/// `__dict__`; `sys` moves its namespace into a live dict
-/// (`attach_live_namespace`); `builtins` is composed from several sub-module
-/// attr maps *plus* the exception-class table, which was a second, separate
-/// hash-ordered source.
+/// Every module declared by `pyrust_builtin_modules!`, so that reintroducing
+/// hash-ordered storage anywhere is caught. Keep this list in step with that
+/// macro — a module missing here is a module whose namespace order is unpinned.
+///
+/// The list deliberately spans all the distinct namespace kinds: `math` keeps
+/// the compact direct `attrs` storage and synthesises `__dict__`; `sys` moves
+/// its namespace into a live dict (`attach_live_namespace`); `builtins` is
+/// composed from several sub-module attr maps *plus* the exception-class table,
+/// which was a second, separate hash-ordered source. The dotted names
+/// (`os.path`, `collections.abc`) are bound through their parent package rather
+/// than `__import__`, which returns the top-level module for a dotted name.
 const PROBE: &str = r#"
 import math
+import os.path
+import collections.abc
+import __future__
 names = ["abc", "asyncio", "bisect", "builtins", "collections", "contextlib",
          "copy", "csv", "dataclasses", "decimal", "enum", "errno",
          "fractions", "functools", "heapq", "io", "itertools", "json", "math",
@@ -32,6 +39,10 @@ names = ["abc", "asyncio", "bisect", "builtins", "collections", "contextlib",
          "string", "sys", "textwrap", "time", "types", "typing", "warnings"]
 for name in names:
     print(name, list(vars(__import__(name))))
+for name, module in [("os.path", os.path),
+                     ("collections.abc", collections.abc),
+                     ("__future__", __future__)]:
+    print(name, list(vars(module)))
 print(list(math.__dict__))
 "#;
 

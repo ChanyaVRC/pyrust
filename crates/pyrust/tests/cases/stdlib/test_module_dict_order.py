@@ -67,3 +67,20 @@ math.pyrust_probe_2918 = 7
 print(list(math.__dict__)[-1] == "pyrust_probe_2918")
 del math.pyrust_probe_2918
 print(list(math.__dict__) == after_rebind)
+
+# Rebinding one of the five slots is also a rebind, not an append: the key is
+# already in the dict, so it keeps its head position and only its value changes.
+saved_name = math.__name__
+math.__name__ = "renamed"
+print(list(math.__dict__)[:5] == SLOTS, math.__dict__["__name__"] == "renamed")
+math.__name__ = saved_name
+print(list(math.__dict__)[:5] == SLOTS, math.__name__ == "math")
+
+# A source-backed module keeps the same five-slot head.  Its own names follow in
+# execution order; the tail past the head holds extra interpreter bookkeeping
+# keys whose order is not pinned here.
+import _module_dict_order_source as source
+
+print(list(vars(source))[:5] == SLOTS)
+print([name for name in vars(source) if not name.startswith("__")])
+print(list(vars(source)) == list(source.__dict__))
