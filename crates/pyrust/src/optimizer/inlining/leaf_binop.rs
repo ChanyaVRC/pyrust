@@ -26,8 +26,9 @@
 /// user code, read any namespace, or observe its own frame, so eliding the
 /// frame is unobservable.  The call site must be the canonical
 /// `Move ×3 + Call/CallMemo(c, 2)` shape.  The proto index wired into the
-/// guard comes from scanning `MakeFunction` stores; a stale guess is safe —
-/// the VM compares code-object identity at runtime and deopts.
+/// guard comes from the latest `MakeFunction` store *before* the site (see the
+/// forward scan below); a stale guess is safe — the VM compares code-object
+/// identity at runtime and deopts.
 ///
 /// Jumps that target the sequence head are redirected to the guard (a loop
 /// whose body starts at the call keeps the guard on its hot path); jumps into
@@ -85,28 +86,6 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
     }
 
     let n = insns.len();
-    // Best-effort binding of a register to the proto whose function the
-    // compiler stored there: `MakeFunction(f, p, …)` or
-    // `MakeFunction(r, p, …); Move(f, r)`.  Later bindings win; the runtime
-    // identity check makes a wrong guess merely a missed optimization.
-    let mut reg_proto: HashMap<Reg, u16> = HashMap::new();
-    for (i, insn) in insns.iter().enumerate() {
-        if let Insn::MakeFunction(r, p, ..) = insn {
-            if eligible.get(*p as usize).copied().flatten().is_some() {
-                reg_proto.insert(*r, *p);
-                if let Some(Insn::Move(f, src)) = insns.get(i + 1)
-                    && src == r
-                {
-                    reg_proto.insert(*f, *p);
-                }
-            } else {
-                reg_proto.remove(r);
-            }
-        }
-    }
-    if reg_proto.is_empty() {
-        return insns;
-    }
 
     // Collect sites: (seq_start, guard insn without offsets resolved).
     struct Site {
@@ -121,8 +100,52 @@ fn pass_inline_leaf_binop(insns: Vec<Insn>, fn_protos: &[FnProto]) -> Vec<Insn> 
         resume: usize,
     }
     let mut sites: Vec<Site> = Vec::new();
+    // Best-effort binding of a register to the proto whose function the
+    // compiler stored there: `MakeFunction(f, p, …)` or
+    // `MakeFunction(r, p, …); Move(f, r)`.  The map is carried forward *while*
+    // sites are collected, so a site at instruction `i` binds the latest store
+    // before `i` rather than the whole-function last write — a name re-`def`ed
+    // later in the module no longer wires its earlier call sites to the final
+    // proto, which made them fail the runtime identity check on every call.
+    //
+    // The order that matters here is stream order, not dominance: a
+    // `MakeFunction` in one arm of an `if` is the "latest before `i`" for sites
+    // after the join even though it reaches them on only one path.  That is
+    // deliberate — a wrong guess is not a miscompile, because the guard
+    // compares code-object identity at runtime and falls through into the
+    // untouched call sequence, so the worst case is one failed compare per
+    // call.  Tracking dominance instead would buy nothing on the shapes this
+    // pass targets (a leaf `def` at the top of a scope).
+    let mut reg_proto: HashMap<Reg, u16> = HashMap::new();
     let mut i = 0usize;
-    while i + 3 < n {
+    while i < n {
+        if let Insn::MakeFunction(r, p, ..) = &insns[i] {
+            let bind = eligible
+                .get(*p as usize)
+                .copied()
+                .flatten()
+                .is_some()
+                .then_some(*p);
+            let aliased = match insns.get(i + 1) {
+                Some(Insn::Move(f, src)) if src == r => Some(*f),
+                _ => None,
+            };
+            // A re-`def` to an *ineligible* proto must kill the old binding as
+            // well, or later sites keep guarding against a proto the name no
+            // longer holds.
+            for reg in std::iter::once(*r).chain(aliased) {
+                match bind {
+                    Some(p) => reg_proto.insert(reg, p),
+                    None => reg_proto.remove(&reg),
+                };
+            }
+            i += 1;
+            continue;
+        }
+        if i + 3 >= n {
+            i += 1;
+            continue;
+        }
         // Argument loader: `Move(c+k, src)` keeps its source readable before
         // the sequence; `LoadConst(c+k, _)` only materialises inside it.
         enum ArgSrc {

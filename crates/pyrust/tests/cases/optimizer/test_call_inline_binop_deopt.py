@@ -12,11 +12,12 @@
 # Two shapes are load-bearing for the guard actually being *there*, and both are
 # deliberate throughout this file:
 #
-#   * each mutated callee has its own name, bound by exactly one `def`.  The
-#     pass wires one proto index into the guard and lets later bindings win, so
-#     re-`def`-ing one name across sections points every site at the last proto
-#     and turns every guard into a permanent deopt — the success path would then
-#     never run anywhere in the file.
+#   * each mutated callee has its own name, bound by exactly one `def`, so the
+#     runtime rebinding a section performs is the only thing that can move the
+#     binding out from under its guard.  A second `def` of the same name would
+#     open a fresh region wired to its own proto (see
+#     test_call_inline_binop_rebound_regions.py) and the site being probed here
+#     would no longer be the one the section rebinds.
 #   * both arguments are registers that already hold their value at the call.
 #     A literal spelled at the call site is materialised inside the sequence,
 #     which is a different (and here, frequently unmatched) site shape.

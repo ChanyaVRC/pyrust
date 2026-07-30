@@ -51,6 +51,59 @@ fn leaf_binop_inlining_guards_a_one_shot_literal_call() {
 }
 
 #[test]
+fn leaf_binop_inlining_binds_each_site_to_the_proto_live_before_it() {
+    // A name re-`def`ed later in the module must not drag its earlier call
+    // sites onto the final proto: the guard's runtime code-object identity
+    // check would then fail on every call, making the earlier region a
+    // permanent deopt (one wasted dispatch per call, never an inline hit).
+    let code = optimize(compile_fn(
+        "def leaf(a, b):\n    return a + b\nfirst_left = 3\nfirst_right = 4\nfirst = leaf(first_left, first_right)\ndef leaf(a, b):\n    return a * b\nsecond = leaf(first_left, first_right)\n",
+    ));
+
+    let guards: Vec<(u16, BinaryOp)> = code
+        .insns
+        .iter()
+        .filter_map(|insn| match insn {
+            Insn::CallInlineBinOp { proto, op, .. } => Some((*proto, *op)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        guards.len(),
+        2,
+        "both call regions should be guarded: {:?}",
+        code.insns
+    );
+    assert_ne!(
+        guards[0].0, guards[1].0,
+        "each site must wire the proto bound at that point in the stream, not the last one in the function: {guards:?}"
+    );
+    // The op is read out of the same proto slot, so it is a second, independent
+    // witness that the earlier site kept the earlier `def`.
+    assert_eq!(
+        (guards[0].1, guards[1].1),
+        (BinaryOp::Add, BinaryOp::Mul),
+        "guards should carry their own region's leaf body: {guards:?}"
+    );
+}
+
+#[test]
+fn leaf_binop_inlining_drops_a_binding_rebound_to_an_ineligible_proto() {
+    // The kill side of the same rule: once the name holds a proto this pass
+    // cannot inline, later sites must not keep guarding against the old one.
+    let code = optimize(compile_fn(
+        "def leaf(a, b):\n    return a + b\nleft = 3\nright = 4\nfirst = leaf(left, right)\ndef leaf(a, b):\n    return a / b\nsecond = leaf(left, right)\n",
+    ));
+
+    assert_eq!(
+        inline_guard_count(&code),
+        1,
+        "only the region whose binding is an eligible leaf should be guarded: {:?}",
+        code.insns
+    );
+}
+
+#[test]
 fn leaf_binop_inlining_rejects_explicit_environment_bindings() {
     let global = optimize(compile_fn(
         "def leaf(a, b):\n    global marker\n    return a + b\nresult = leaf(1, 2)\n",
