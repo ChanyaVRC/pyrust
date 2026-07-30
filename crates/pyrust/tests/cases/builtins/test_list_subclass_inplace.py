@@ -233,6 +233,22 @@ try:
 except OverflowError as e:
     print(type(e).__name__, e)
 
+# A count that fits an index-sized integer but cannot be allocated raises
+# MemoryError -- the repeat must range-check before copying rather than let the
+# allocator abort the process.
+p = LSub([1])
+q = p
+try:
+    p *= 2**62
+except MemoryError as e:
+    print(type(e).__name__, p is q, type(p).__name__)
+
+p = [1]
+try:
+    p *= 2**62
+except MemoryError as e:
+    print(type(e).__name__, p)
+
 
 # --- plain lists keep their existing behaviour ---
 p = [1]

@@ -64,7 +64,7 @@ impl Interpreter {
                     let Some(n) = int_repeat_count(right) else {
                         return Ok(None); // fall through to TypeError
                     };
-                    list_repeat_in_place(left, n);
+                    list_repeat_in_place(left, n)?;
                     return Ok(Some(left.clone()));
                 }
                 _ => {}
@@ -583,7 +583,7 @@ impl Interpreter {
                         n
                     }
                 };
-                list_repeat_in_place(backing, n);
+                list_repeat_in_place(backing, n)?;
                 Ok(true)
             }
             _ => Ok(false),
@@ -606,16 +606,33 @@ fn int_repeat_count(v: &Value) -> Option<i64> {
 
 /// Repeat a `ValueKind::List`'s elements in place, the storage half of
 /// `list.__imul__`.  A count of zero or less empties the list.
+///
+/// The resulting length is range-checked and the growth reserved with
+/// `try_reserve` *before* any element is copied, so a count too large to
+/// allocate raises CPython's `MemoryError` instead of letting the allocator
+/// abort the whole process (`[1] *= 2**62`).  This is the same guard the
+/// non-mutating `seq_repeat_list` applies for `list * n`.
 #[inline]
-fn list_repeat_in_place(target: &Value, n: i64) {
-    target.list_with_mut(|items| {
-        if n <= 0 {
-            items.clear();
-        } else {
+fn list_repeat_in_place(target: &Value, n: i64) -> Result<()> {
+    target
+        .list_with_mut(|items| {
+            if n <= 0 {
+                items.clear();
+                return Ok(());
+            }
+            let len = items.len();
+            let Some(total) = len.checked_mul(n as usize) else {
+                return Err(pyrust_core::py_err!("MemoryError", String::new()));
+            };
+            if items.try_reserve(total - len).is_err() {
+                return Err(pyrust_core::py_err!("MemoryError", String::new()));
+            }
             let orig = items.clone();
             for _ in 1..n {
                 items.extend_from_slice(&orig);
             }
-        }
-    });
+            Ok(())
+        })
+        // Both call sites have already matched `ValueKind::List`.
+        .unwrap_or(Ok(()))
 }
