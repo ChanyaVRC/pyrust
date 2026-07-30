@@ -284,3 +284,89 @@ def outer(n):
 
 
 print("nested regions", outer(10))
+
+
+# ── Binders other than `def` open regions the same way ───────────────────────
+# The pass keys off `MakeFunction`, which is the only opcode that builds a
+# function value, so a `lambda` and a `def` inside a class body split into
+# regions on exactly the same rule as a module-level `def`.
+lam = lambda a, b: a + b  # noqa: E731
+
+lam_add = 0
+for i in range(30):
+    lam_add += lam(i, ONE)
+
+lam = lambda a, b: a * b  # noqa: E731
+
+lam_mul = 1
+for i in range(1, 8):
+    lam_mul = lam(lam_mul, TWO)
+print("lambda regions", lam_add, lam_mul)
+
+
+class Regions:
+    def shared(a, b):
+        return a + b
+
+    added = shared(3, 4)
+
+    def shared(a, b):
+        return a * b
+
+    multiplied = shared(3, 4)
+
+
+print("class body regions", Regions.added, Regions.multiplied)
+
+
+# A decorated `def` binds the wrapper, not the leaf, so the call sitting
+# between it and the next `def` of that name holds no inlinable proto at all —
+# the binding has to be absent there, not carried over from either neighbour.
+def tag(fn):
+    def wrapped(a, b):
+        return fn(a, b) + 1000
+
+    return wrapped
+
+
+@tag
+def decorated(a, b):
+    return a + b
+
+
+print("decorated", decorated(5, 6))
+
+
+def decorated(a, b):
+    return a - b
+
+
+print("decorated redef", decorated(5, 6))
+
+
+# ── Rebinding through the `globals()` alias, per region ──────────────────────
+# `globals()[name] = …` writes the module namespace rather than the register
+# the guard reads, so each region's identity check has to notice the swap on
+# its own.
+def via_globals(a, b):
+    return a + b
+
+
+globals_first = []
+for i in range(6):
+    globals_first.append(via_globals(i, ONE))
+    if i == 2:
+        globals()["via_globals"] = lambda a, b: b - a  # noqa: E731
+print("globals region 1", globals_first)
+
+
+def via_globals(a, b):
+    return a * b
+
+
+globals_second = []
+for i in range(6):
+    globals_second.append(via_globals(i, TWO))
+    if i == 2:
+        globals()["via_globals"] = lambda a, b: b - a  # noqa: E731
+print("globals region 2", globals_second)

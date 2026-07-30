@@ -85,6 +85,26 @@ fn leaf_binop_inlining_binds_each_site_to_the_proto_live_before_it() {
         (BinaryOp::Add, BinaryOp::Mul),
         "guards should carry their own region's leaf body: {guards:?}"
     );
+
+    // The pass's `CallInlineBinOp` early return is a whole-stream `any`, so a
+    // second run must leave *every* region alone, not just the first one it
+    // meets.  The sibling idempotence test only ever has one guard in flight,
+    // which cannot tell a working bail apart from one that stops after the
+    // region it happens to hit first.
+    let twice = optimize(code);
+    let again: Vec<(u16, BinaryOp)> = twice
+        .insns
+        .iter()
+        .filter_map(|insn| match insn {
+            Insn::CallInlineBinOp { proto, op, .. } => Some((*proto, *op)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        again, guards,
+        "re-optimizing multi-region guarded code must not stack or re-point guards: {:?}",
+        twice.insns
+    );
 }
 
 #[test]
