@@ -74,7 +74,31 @@ pub(crate) enum NativeIterSource {
         byte_pos: usize,
     },
     /// Permanently released after exhaustion or transfer to a loop fast path.
-    Exhausted,
+    ///
+    /// A released source no longer says what shape it had, but its *reduction*
+    /// still does depend on it: a mapping or set cursor reduces to a
+    /// `list_iterator` over its remainder whether or not that remainder is
+    /// empty, while a sequence walk keeps its own type (#2974). The latch
+    /// therefore carries the one bit the reduce path would otherwise lose.
+    Exhausted { reduces_to_list: bool },
+}
+
+impl NativeIterSource {
+    /// True when CPython reduces this source to `(iter, ([remaining, …],))` —
+    /// a `list_iterator` — rather than to an iterator over the source itself.
+    pub(crate) fn reduces_to_list(&self) -> bool {
+        matches!(
+            self,
+            NativeIterSource::Materialized(_)
+                | NativeIterSource::LiveKeys { .. }
+                | NativeIterSource::InstanceDict { .. }
+                | NativeIterSource::ReverseDict(_)
+                | NativeIterSource::DictView { .. }
+                | NativeIterSource::Exhausted {
+                    reduces_to_list: true
+                }
+        )
+    }
 }
 
 /// Descending entry cursor over a live mapping.

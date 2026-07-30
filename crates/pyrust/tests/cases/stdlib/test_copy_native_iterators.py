@@ -196,6 +196,51 @@ for _ in range(2):
         pass
 assert rest(c) == [2, 3]
 
+# Reducing a cursor drains a *probe*, and the probe must not retire the
+# terminal-key removal watch the original still relies on: after any number of
+# copies the original still separates a delete/reinsert of its final key from an
+# unrelated churn.
+d = {"a": 1}
+it = iter(d)
+next(it)
+for _ in range(5):
+    copy.copy(it)
+del d["a"]
+d["a"] = 1
+try:
+    rest(it)
+    raise AssertionError("the reinserted terminal key must still be detected")
+except RuntimeError as e:
+    print("watch survived copies:", e)
+
+# The same watch must not fire for an insert/remove that leaves it alone.
+d = {"a": 1}
+it = iter(d)
+next(it)
+for _ in range(5):
+    copy.copy(it)
+d["tmp"] = 0
+del d["tmp"]
+assert rest(it) == []
+
+# Two cursors over one mapping, each copied, keep their own watches.
+d = {"a": 1, "b": 2}
+ahead, behind = iter(d), iter(d)
+next(ahead)
+next(ahead)
+next(behind)
+assert rest(copy.copy(ahead)) == []
+assert rest(copy.copy(behind)) == ["b"]
+del d["b"]
+d["b"] = 22
+try:
+    rest(ahead)
+    raise AssertionError("the finished cursor must report the reinsertion")
+except RuntimeError:
+    pass
+assert rest(behind) == ["b"]
+
+
 # Copying the copy stays independent, and it is a plain list walk by then.
 d = {1: "a", 2: "b", 3: "c"}
 it = iter(d)
@@ -264,6 +309,49 @@ for make in (
         raise AssertionError("the exhausted original must stay exhausted")
     except StopIteration:
         pass
+
+# Exhaustion does not change the *shape* of the reduction: a cursor still
+# reduces to `(iter, ([],))`, so its copy is a list_iterator with an empty list
+# rather than another cursor over the mapping it already left.
+mapping = {1: "a", 2: "b"}
+
+
+class Holder:
+    pass
+
+
+holder = Holder()
+holder.x = 1
+for make in (
+    lambda: iter(mapping),
+    lambda: iter(mapping.keys()),
+    lambda: iter(mapping.values()),
+    lambda: iter(mapping.items()),
+    lambda: reversed(mapping),
+    lambda: reversed(mapping.values()),
+    lambda: reversed(mapping.items()),
+    lambda: iter({1, 2}),
+    lambda: iter(frozenset({1, 2})),
+    lambda: iter(holder.__dict__),
+):
+    it = make()
+    rest(it)
+    c = copy.copy(it)
+    assert type(c).__name__ == "list_iterator", (make, type(c).__name__)
+    assert rest(c) == []
+    assert c.__length_hint__() == 0
+
+# A sequence walk keeps its own type across exhaustion.
+for make, name in (
+    (lambda: iter([1, 2]), "list_iterator"),
+    (lambda: iter((1, 2)), "tuple_iterator"),
+    (lambda: iter(range(2)), "range_iterator"),
+    (lambda: reversed([1, 2]), "list_reverseiterator"),
+    (lambda: reversed((1, 2)), "reversed"),
+):
+    it = make()
+    rest(it)
+    assert type(copy.copy(it)).__name__ == name
 
 # Empty sources copy to empty iterators.
 for make in (
@@ -365,5 +453,43 @@ for op in (copy.copy, copy.deepcopy):
         raise AssertionError("a genexpr must not be copyable")
     except TypeError as e:
         print(e)
+
+# Copying consults the reduction, never the frame, so a generator that is
+# *running* when it is copied is refused exactly like a suspended one — a
+# TypeError, not a re-entrancy error.
+running = []
+
+
+def copies_itself():
+    for op in (copy.copy, copy.deepcopy):
+        try:
+            op(self_gen)
+            running.append("copied")
+        except TypeError as e:
+            running.append(str(e))
+    yield 1
+
+
+self_gen = copies_itself()
+next(self_gen)
+print(running)
+
+# Same through the for-loop trampoline, which parks the frame elsewhere.
+driven = []
+
+
+def copies_itself_in_loop():
+    try:
+        copy.copy(loop_gen)
+        driven.append("copied")
+    except TypeError as e:
+        driven.append(str(e))
+    yield 1
+
+
+loop_gen = copies_itself_in_loop()
+for _ in loop_gen:
+    break
+print(driven)
 
 print("ok")
