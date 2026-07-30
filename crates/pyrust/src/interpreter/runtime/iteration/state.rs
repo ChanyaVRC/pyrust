@@ -1,6 +1,10 @@
 /// Small source list used by native `map` and related adapters.
 pub(crate) type IterSrcBuf = smallvec::SmallVec<[Value; 2]>;
 
+/// A `bytearray`'s shared storage cell, as handed out by
+/// `pyrust_builtins::bytearray::as_bytearray_rc`.
+pub(crate) type ByteArrayBuffer = Rc<RefCell<Vec<u8>>>;
+
 /// Backing source for a built-in iterator object.
 pub(crate) enum NativeIterSource {
     Materialized(Vec<Value>),
@@ -52,6 +56,18 @@ pub(crate) enum NativeIterSource {
     Deque(pyrust_builtins::deque_storage::DequeData),
     /// Immutable bytes indexed lazily, one integer per step.
     Bytes(Value),
+    /// Live `bytearray` buffer walked by index.
+    ///
+    /// CPython's `bytearray_iterator` holds the object plus a position and
+    /// re-reads the buffer's size on every step, so bytes appended mid-walk are
+    /// yielded and a shrink below the cursor ends the walk (#2921).
+    ///
+    /// The storage cell *is* the retained source: a `bytearray` allocates it
+    /// once and only ever writes it in place, so it stays the object's live
+    /// backing and outlives every binding to it — the walk keeps reading the
+    /// same buffer after the source variable is rebound or deleted. Resolving
+    /// it at construction also keeps each step a single indexed read.
+    Bytearray(ByteArrayBuffer),
     /// Immutable UTF-8/CESU-8 string with an incremental byte cursor.
     String {
         value: Value,

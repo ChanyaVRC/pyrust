@@ -55,6 +55,16 @@ pub(crate) enum IterState {
         value: Value,
         pos: usize,
     },
+    /// Walks a `bytearray`'s live buffer by index, re-reading its size on every
+    /// step exactly as CPython's `bytearray_iterator` does (#2921).
+    ///
+    /// The storage cell is the retained source: a `bytearray` allocates it once
+    /// and only ever writes it in place, so the walk keeps reading the object's
+    /// live buffer after the source variable is rebound or deleted.
+    BytearrayIndexed {
+        data: ByteArrayBuffer,
+        pos: usize,
+    },
     /// Walks a non-ASCII UTF-8/CESU-8 string with an incremental byte cursor.
     StrCodepointIndexed {
         value: Value,
@@ -211,6 +221,9 @@ impl Interpreter {
                     pos: 0,
                 });
             }
+            if let Some(data) = pyrust_builtins::bytearray::as_bytearray_rc(&backing) {
+                return Ok(IterState::BytearrayIndexed { data, pos: 0 });
+            }
             if backing.is_dict() {
                 let recorded_len = backing.dict_len().unwrap_or(0);
                 let ordered_policy = pyrust_builtins::ordered_mapping::class_policy(&class);
@@ -275,6 +288,9 @@ impl Interpreter {
                 value: source,
                 pos: 0,
             });
+        }
+        if let Some(data) = pyrust_builtins::bytearray::as_bytearray_rc(&source) {
+            return Ok(IterState::BytearrayIndexed { data, pos: 0 });
         }
         if let Some(recorded_len) = source.dict_len() {
             return Ok(IterState::LiveKeysGuarded {

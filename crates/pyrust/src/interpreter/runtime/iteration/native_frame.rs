@@ -142,6 +142,21 @@ impl NativeIterFrame {
         }
     }
 
+    /// Construct a live indexed walk over a `bytearray`'s buffer.
+    ///
+    /// `None` when `value` is not a `bytearray`, so callers can use this as the
+    /// classification test as well as the constructor.
+    pub(crate) fn bytearray(value: Value, type_name: &'static str) -> Option<Self> {
+        let data = pyrust_builtins::bytearray::as_bytearray_rc(&value)?;
+        Some(NativeIterFrame {
+            source: NativeIterSource::Bytearray(data),
+            pos: 0,
+            type_name,
+            guard: None,
+            exhausted: false,
+        })
+    }
+
     /// Construct a lazy UTF-8/CESU-8 codepoint iterator.
     pub(crate) fn string(value: Value, type_name: &'static str) -> Self {
         debug_assert!(matches!(value.kind(), ValueKind::Str(_)));
@@ -170,6 +185,7 @@ impl NativeIterFrame {
                 NativeIterSource::Materialized(_)
                     | NativeIterSource::Indexed(_)
                     | NativeIterSource::Bytes(_)
+                    | NativeIterSource::Bytearray(_)
                     | NativeIterSource::String { .. }
                     | NativeIterSource::Exhausted
             )
@@ -197,6 +213,9 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.get(pos).map(|byte| Value::int(*byte as i64)),
                 _ => None,
             },
+            NativeIterSource::Bytearray(data) => {
+                data.borrow().get(pos).map(|byte| Value::int(*byte as i64))
+            }
             NativeIterSource::String { value, byte_pos } => {
                 match value
                     .as_str()
@@ -248,6 +267,7 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.len(),
                 _ => 0,
             },
+            NativeIterSource::Bytearray(data) => data.borrow().len(),
             NativeIterSource::String { value, .. } => value.as_str().map_or(0, str::len),
             NativeIterSource::Exhausted => 0,
         }
@@ -353,6 +373,10 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.get(index).map(|byte| Value::int(*byte as i64)),
                 _ => None,
             }),
+            NativeIterSource::Bytearray(data) => Ok(data
+                .borrow()
+                .get(index)
+                .map(|byte| Value::int(*byte as i64))),
             NativeIterSource::String { value, byte_pos } => {
                 let Some(text) = value.as_str() else {
                     return Ok(None);
@@ -413,6 +437,7 @@ impl NativeIterFrame {
                 | NativeIterSource::DictView { .. }
                 | NativeIterSource::Deque(_)
                 | NativeIterSource::Bytes(_)
+                | NativeIterSource::Bytearray(_)
                 | NativeIterSource::String { .. }
         ) {
             self.source = NativeIterSource::Exhausted;
