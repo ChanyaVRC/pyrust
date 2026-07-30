@@ -6,12 +6,102 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+/// Address-space cap for each interpreter child (bytes).  An adversarial
+/// fixture or repro must never be able to out-allocate the host: a runaway
+/// interpreter (unbounded native recursion, allocation storms) has taken down
+/// the whole WSL2 VM.  Override with PYRUST_PARITY_MEM_MB when a fixture
+/// legitimately needs more.
+#[cfg(unix)]
+fn child_address_space_limit() -> u64 {
+    let mb = env::var("PYRUST_PARITY_MEM_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(4096);
+    mb * 1024 * 1024
+}
+
+/// Wall-clock cap for each interpreter child (seconds).  Override with
+/// PYRUST_PARITY_TIMEOUT_S.
+fn child_timeout_secs() -> u64 {
+    env::var("PYRUST_PARITY_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(120)
+}
+
 fn run_and_capture(program: &Path, args: &[&Path]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .env("PYTHONIOENCODING", "utf-8")
-        .output()
+    let mut command = Command::new(program);
+    command.args(args).env("PYTHONIOENCODING", "utf-8");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let limit = child_address_space_limit();
+        // SAFETY: setrlimit is async-signal-safe and the closure touches no
+        // locks or allocations beyond the syscall itself.
+        unsafe {
+            command.pre_exec(move || {
+                let rlim = libc::rlimit {
+                    rlim_cur: limit as libc::rlim_t,
+                    rlim_max: limit as libc::rlim_t,
+                };
+                libc::setrlimit(libc::RLIMIT_AS, &rlim);
+                libc::setrlimit(libc::RLIMIT_DATA, &rlim);
+                Ok(())
+            });
+        }
+    }
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to run {}: {e}", program.display()))?;
+
+    // Drain the pipes on threads so a chatty child cannot dead-lock against
+    // the timeout loop below.
+    let mut child_stdout = child.stdout.take().expect("stdout piped");
+    let mut child_stderr = child.stderr.take().expect("stderr piped");
+    let stdout_reader = thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = child_stdout.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(child_timeout_secs());
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(format!(
+                        "{} timed out after {}s (killed; raise PYRUST_PARITY_TIMEOUT_S if legitimate)",
+                        program.display(),
+                        child_timeout_secs()
+                    ));
+                }
+                thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(format!("failed to wait on {}: {e}", program.display())),
+        }
+    };
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr,
+    };
 
     let mut merged = String::new();
     merged.push_str(&String::from_utf8_lossy(&output.stdout));
