@@ -173,7 +173,7 @@ fn native_frame_remaining(frame: &NativeIterFrame) -> i64 {
         // shrink past the cursor drops it to zero (#2921).
         NativeIterSource::Bytearray(data) => remaining_from(data.borrow().len()),
         NativeIterSource::String { value, .. } => remaining_from(value.str_codepoint_len()),
-        NativeIterSource::Exhausted => 0,
+        NativeIterSource::Exhausted { .. } => 0,
     }
 }
 

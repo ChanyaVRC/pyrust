@@ -74,7 +74,33 @@ pub(crate) enum NativeIterSource {
         byte_pos: usize,
     },
     /// Permanently released after exhaustion or transfer to a loop fast path.
-    Exhausted,
+    ///
+    /// A released source no longer says what shape it had, but its *reduction*
+    /// still does depend on it: a mapping or set cursor reduces to a
+    /// `list_iterator` over its remainder whether or not that remainder is
+    /// empty, while a sequence walk keeps its own type (#2974). The latch
+    /// therefore carries the one bit the reduce path would otherwise lose.
+    Exhausted {
+        reduces_to_list: bool,
+    },
+}
+
+impl NativeIterSource {
+    /// True when CPython reduces this source to `(iter, ([remaining, …],))` —
+    /// a `list_iterator` — rather than to an iterator over the source itself.
+    pub(crate) fn reduces_to_list(&self) -> bool {
+        matches!(
+            self,
+            NativeIterSource::Materialized(_)
+                | NativeIterSource::LiveKeys { .. }
+                | NativeIterSource::InstanceDict { .. }
+                | NativeIterSource::ReverseDict(_)
+                | NativeIterSource::DictView { .. }
+                | NativeIterSource::Exhausted {
+                    reduces_to_list: true
+                }
+        )
+    }
 }
 
 /// Descending entry cursor over a live mapping.
@@ -86,6 +112,7 @@ pub(crate) enum NativeIterSource {
 /// descending position the entry's identity and reduces the ordinary step to
 /// one generation compare plus one indexed read. A changed generation drops
 /// back to the frame's size guard before the entry is read.
+#[derive(Clone)]
 pub(crate) struct ReverseDictCursor {
     /// The `dict`, dict view, `mappingproxy`, or subclass carrier whose live
     /// entries are read.
@@ -307,6 +334,7 @@ pub(crate) struct NativeIterFrame {
 }
 
 /// Live-collection mutation guard attached to a native iterator.
+#[derive(Clone)]
 pub(crate) struct NativeIterGuard {
     pub(crate) container: Value,
     pub(crate) version: i64,

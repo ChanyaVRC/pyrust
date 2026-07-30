@@ -187,7 +187,7 @@ impl NativeIterFrame {
                     | NativeIterSource::Bytes(_)
                     | NativeIterSource::Bytearray(_)
                     | NativeIterSource::String { .. }
-                    | NativeIterSource::Exhausted
+                    | NativeIterSource::Exhausted { .. }
             )
     }
 
@@ -269,7 +269,7 @@ impl NativeIterFrame {
             },
             NativeIterSource::Bytearray(data) => data.borrow().len(),
             NativeIterSource::String { value, .. } => value.as_str().map_or(0, str::len),
-            NativeIterSource::Exhausted => 0,
+            NativeIterSource::Exhausted { .. } => 0,
         }
     }
 
@@ -391,7 +391,7 @@ impl NativeIterFrame {
                     codepoint,
                 ))))
             }
-            NativeIterSource::Exhausted => Ok(None),
+            NativeIterSource::Exhausted { .. } => Ok(None),
         }
     }
 
@@ -421,7 +421,9 @@ impl NativeIterFrame {
             self.pos += 1;
         }
         self.exhausted = true;
-        self.source = NativeIterSource::Exhausted;
+        self.source = NativeIterSource::Exhausted {
+            reduces_to_list: self.source.reduces_to_list(),
+        };
         Ok(remaining)
     }
 
@@ -440,7 +442,9 @@ impl NativeIterFrame {
                 | NativeIterSource::Bytearray(_)
                 | NativeIterSource::String { .. }
         ) {
-            self.source = NativeIterSource::Exhausted;
+            self.source = NativeIterSource::Exhausted {
+                reduces_to_list: self.source.reduces_to_list(),
+            };
         }
     }
 
@@ -520,7 +524,9 @@ impl NativeIterFrame {
                 }
                 StableSnapshotAdvance::Exhausted => {
                     self.exhausted = true;
-                    self.source = NativeIterSource::Exhausted;
+                    self.source = NativeIterSource::Exhausted {
+                        reduces_to_list: self.source.reduces_to_list(),
+                    };
                     return Ok(None);
                 }
                 StableSnapshotAdvance::Changed => {}
@@ -587,6 +593,6 @@ mod bytearray_frame_tests {
 
         data.borrow_mut().push(100);
         assert!(frame.advance_element().is_none());
-        assert!(matches!(frame.source, NativeIterSource::Exhausted));
+        assert!(matches!(frame.source, NativeIterSource::Exhausted { .. }));
     }
 }

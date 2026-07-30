@@ -293,12 +293,13 @@ mod iteration {
 }
 pub(crate) use iteration::{
     BigRangeIter, BigRangeState, CallableIter, ConsumerIterator, EnumerateIter, FilterIter,
-    GetItemIter, GuardVersion, IterCacheBuf, IterSrcBuf, IterState, ItersBuf, LiveDictViewItem,
-    LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard, ProviderIterator, RangeIter,
-    ZipIter, builtin_iterator_has_length_hint, indexed_sequence_item, iter_values,
-    live_collection_len, live_dict_view_item, make_iterator, make_reversed_dict_iter,
-    make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
-    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_outcome,
+    GetItemIter, GuardVersion, IterCacheBuf, IterSrcBuf, IterState, IteratorCopy, ItersBuf,
+    LiveDictViewItem, LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard,
+    ProviderIterator, RangeIter, ZipIter, builtin_iterator_has_length_hint, copy_iterator_object,
+    indexed_sequence_item, iter_values, iterator_retained_values, live_collection_len,
+    live_dict_view_item, make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
+    make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
+    make_reversed_sequence_iterator, ordered_mapping_guard_outcome, set_iterator_retained_values,
     value_has_length_hint,
 };
 
