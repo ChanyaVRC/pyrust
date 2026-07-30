@@ -22,9 +22,9 @@ mod value_protocols {
 pub(crate) use value_protocols::{
     coerce_numeric, coerce_subclass_backing, lookup_value_special_method,
     normalize_complex_slot_result, normalize_float_slot_result, normalize_int_slot_result,
-    slot_is_callable,
+    slot_is_callable, slot_is_descriptor, slot_is_dispatchable,
 };
-use value_protocols::{coerce_operand_backing, is_callable_method, is_not_implemented};
+use value_protocols::{coerce_operand_backing, is_not_implemented};
 
 mod formatting {
     use super::{
@@ -151,7 +151,7 @@ mod collection_keys {
         Interpreter, PyDict, PyError, PyKey, PySet, Rc, Result, StrKey, Value, ValueKind,
         class_hash_inherits_builtin_none, coerce_numeric, coerce_subclass_backing,
         invoke_class_method, lookup_class_attr, py_hash_bigint, py_hash_float, py_hash_int,
-        range_len, slot_is_callable, value_type_name_str,
+        range_len, slot_is_dispatchable, value_type_name_str,
     };
     include!("runtime/collection_keys.rs");
 }
@@ -197,11 +197,11 @@ mod expressions {
         builtin_data_backing, class_is_subclass_of, coerce_bytes_subclass_arg, coerce_numeric,
         coerce_operand_backing, coerce_str_subclass_arg, compare_values_with_op,
         effective_builtin_receiver, float_divmod, int_pow_promoting, invoke_class_method,
-        is_async_generator_value, is_builtin_class_getitem_sentinel, is_callable_method,
-        is_coroutine_value, is_not_implemented, is_stop_iteration_error, is_type_alias_class,
-        key_contains_object, lookup_class_attr, make_builtin_generic_alias, make_slice_value,
-        metaclass_dunder, nested_object_tuple_key, normalize_index, normalize_index_write,
-        py_mod_i64, range_len, type_class_singleton, value_type_name_str, values_are_identical,
+        is_async_generator_value, is_builtin_class_getitem_sentinel, is_coroutine_value,
+        is_not_implemented, is_stop_iteration_error, is_type_alias_class, key_contains_object,
+        lookup_class_attr, make_builtin_generic_alias, make_slice_value, metaclass_dunder,
+        nested_object_tuple_key, normalize_index, normalize_index_write, py_mod_i64, range_len,
+        slot_is_dispatchable, type_class_singleton, value_type_name_str, values_are_identical,
         vm_read,
     };
     include!("runtime/expr.rs");
@@ -217,21 +217,21 @@ mod attributes {
         ExceptionSlotPolicy, ExpandedCallArg, Interpreter, PyClass, PyDict, PyError, PyInstance,
         PyKey, Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind, Value, ValueKind,
         adapt_builtin_subclass_method, bind_builtin_class_special, builtin_callable_metadata,
-        builtin_class_doc, canonical_class_by_tag, class_chain_new_slot_wrapped,
-        class_hash_inherits_builtin_none, class_is_subclass_of, class_suppresses_instance_dict,
-        descriptor_get_slot_raw_call, exception_slot_policy, instance_builtin_data,
-        invoke_class_method, is_exception_class, is_type_alias_class, is_typevar_class,
-        lookup_class_attr, metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor,
-        mro_slot_allows, object_class_singleton, primitive_owned_object_dunder,
-        replace_instance_dict, type_alias_readonly_attr_error, typevar_readonly_attr_error,
-        value_class, value_type_name_str,
+        builtin_class_doc, call_slot_value_unbound, canonical_class_by_tag,
+        class_chain_new_slot_wrapped, class_hash_inherits_builtin_none, class_is_subclass_of,
+        class_suppresses_instance_dict, descriptor_get_slot_raw_call, exception_slot_policy,
+        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
+        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
+        mro_has_unslotted_ancestor, mro_slot_allows, object_class_singleton,
+        primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
+        typevar_readonly_attr_error, value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }
 pub(crate) use attributes::{
-    ReadAttributeCachePlan, ReadMethodCachePlan, class_descriptor_display_name,
-    dispatch_property_method, read_attribute_cache_plan, read_method_cache_plan,
-    write_attribute_cache_class,
+    ReadAttributeCachePlan, ReadMethodCachePlan, call_descriptor_get,
+    class_descriptor_display_name, dispatch_property_method, read_attribute_cache_plan,
+    read_method_cache_plan, write_attribute_cache_class,
 };
 use attributes::{class_direct_subclasses, class_mro_items};
 

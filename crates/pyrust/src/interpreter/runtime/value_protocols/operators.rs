@@ -168,7 +168,7 @@ impl Interpreter {
         inst: &Rc<RefCell<PyInstance>>,
         other: &Value,
     ) -> Option<Result<Value>> {
-        if !slot_is_callable(&m) {
+        if !slot_is_dispatchable(&m) {
             return Some(Err(PyError::named(
                 "TypeError",
                 format!("'{}' object is not callable", value_type_name_str(&m)),
@@ -200,7 +200,7 @@ impl Interpreter {
                 // Issue #2055: a slot that exists but is non-callable
                 // (`__neg__ = 5`) raises `TypeError: 'int' object is not
                 // callable`, matching CPython, rather than silently skipping.
-                if !slot_is_callable(&m) {
+                if !slot_is_dispatchable(&m) {
                     return Some(Err(PyError::named(
                         "TypeError",
                         format!("'{}' object is not callable", value_type_name_str(&m)),

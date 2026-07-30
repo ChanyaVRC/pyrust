@@ -296,11 +296,13 @@ impl Interpreter {
     /// Dispatch a single binary method (e.g. `__iadd__`) on a
     /// PyInstance receiver.  Returns `Some(result)` when the method
     /// exists and was called (possibly returning `NotImplemented`),
-    /// `None` when the method isn't defined on the class.  Like
+    /// `None` when the method isn't defined on the class, and `Err` when
+    /// the slot exists but is neither callable nor a descriptor.  Like
     /// `try_dunder_binary`, this routes both user-defined and
     /// `pyrust_module!`-generated class methods through
     /// `invoke_class_method` so Counter's `__iadd__` (a BuiltinFunction
-    /// in the class's attr map) participates in `+=` dispatch.
+    /// in the class's attr map) participates in `+=` dispatch — and so a
+    /// descriptor in the slot is bound through `__get__` (issue #2944).
     fn try_call_binary_method(
         &mut self,
         receiver: &Value,
@@ -315,8 +317,24 @@ impl Interpreter {
         let Some(method_value) = lookup_class_attr(&class, method) else {
             return Ok(None);
         };
-        if !is_callable_method(&method_value) {
-            return Ok(None);
+        // Issue #2944: the in-place slot obeys the same rules as every other
+        // special-method slot, so gate it exactly like `dispatch_binary_slot`.
+        // The previous `UserFunction | BuiltinFunction` test answered "not
+        // defined" for anything else, which silently skipped the slot and fell
+        // through to `__add__` / the backing fallback: a descriptor `__iadd__`
+        // (`property`, user `__get__`) was never bound and its getter never
+        // ran, a callable-instance `__iadd__` was ignored (issue #2054), and
+        // `__iadd__ = 5` reported `unsupported operand type(s) for +=` where
+        // CPython raises `TypeError: 'int' object is not callable` (issue
+        // #2055).  All thirteen in-place operators shared the one gate.
+        if !slot_is_dispatchable(&method_value) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object is not callable",
+                    value_type_name_str(&method_value)
+                ),
+            ));
         }
         // Issue #2122: inherited primitive in-place sentinels are not
         // overrides; they must reach the identity-preserving backing fallback.

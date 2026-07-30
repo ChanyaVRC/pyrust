@@ -562,19 +562,83 @@ pub(crate) fn invoke_class_method(
         // moved out of the borrow taken by `method_val.kind()` above.
         _ => {}
     }
-    // Issue #2054: the resolved slot is not a plain function but may still be
-    // callable — a bound method, a class object, or a callable *instance* (an
-    // object whose class defines `__call__`).  CPython invokes whatever the slot
-    // resolves to.  Such a slot is *not* a descriptor, so (unlike a function
-    // slot) it does NOT receive the receiver as `self`: `__len__ = Caller()`
-    // calls `Caller()()` with no implicit self, `__add__ = Caller()` calls
-    // `Caller()(other)`.  Route through the normal call machinery with `args`.
-    //
-    // Genuinely non-callable slots (`Foo.__len__ = 5`) raise the standard
-    // "object is not callable" keyed on the *resolved value's* type, not the
-    // owning class: `len(D())` with `__len__ = 5` -> "'int' object is not
-    // callable".  Match that exactly so every implicit-dunder dispatch path
-    // agrees with CPython 3.12 (issue #1963 / #2055).
+    // Issue #2944: the resolved slot is not a plain function.  Before deciding
+    // whether it is callable, honour the descriptor protocol — CPython's slot
+    // lookup binds *any* descriptor, not just the function / staticmethod /
+    // classmethod shapes handled above, so a `property` or a user object with
+    // `__get__` runs its getter here and the getter's *result* is what gets
+    // called.  That ordering is also what makes the not-callable error name the
+    // bound value: `__len__ = property(lambda self: 4)` reports `'int' object is
+    // not callable`, not `'property'`.
+    if let Some(result) = bind_slot_descriptor(interp, &method_val, &instance, args) {
+        return result;
+    }
+    call_slot_value_unbound(interp, method_val, args)
+}
+
+/// Bind a descriptor sitting in a special-method slot the way CPython's
+/// `lookup_maybe_method` does — `__get__(instance, type(instance))` — and call
+/// the result with the slot's own arguments.
+///
+/// `None` means the slot is not a descriptor and the caller should dispatch it
+/// directly.
+///
+/// The `__get__` result is dispatched *unbound*: CPython calls it once and
+/// never re-enters `tp_descr_get`, so a descriptor that returns another
+/// descriptor yields "not callable" rather than binding a second time.
+///
+/// `#[cold]` + `#[inline(never)]` for the same reason as
+/// [`bind_descriptor_slot`]: [`invoke_class_method`] is the shared implicit
+/// dunder path, and a descriptor in a dunder slot is rare enough that this must
+/// not cost the common `UserFunction` / `BuiltinFunction` arms any inlining
+/// budget (issue #2939).
+#[cold]
+#[inline(never)]
+fn bind_slot_descriptor(
+    interp: &mut Interpreter,
+    method_val: &Value,
+    instance: &Value,
+    args: &[ExpandedCallArg],
+) -> Option<Result<Value>> {
+    if !slot_is_descriptor(method_val) {
+        return None;
+    }
+    // CPython passes `type(instance)` as the descriptor's `objtype`; for a slot
+    // resolved on a metaclass the receiver *is* the class, so `value_class`
+    // yields the metaclass exactly as `Py_TYPE(self)` would.
+    let owner = value_class(instance);
+    let bound = match call_descriptor_get(interp, method_val, instance.clone(), owner, "") {
+        Ok(bound) => bound,
+        Err(e) => return Some(Err(e)),
+    };
+    Some(call_slot_value_unbound(interp, bound, args))
+}
+
+/// Call a resolved special-method slot value directly, with no descriptor
+/// binding and no receiver prepended, or raise CPython's "not callable" keyed
+/// on that value's type.
+///
+/// Issue #2054: such a slot may still be callable — a bound method, a class
+/// object, or a callable *instance* (an object whose class defines `__call__`).
+/// CPython invokes whatever the slot resolves to.  Having already been found
+/// *not* to be a descriptor, it does NOT receive the receiver as `self`:
+/// `__len__ = Caller()` calls `Caller()()` with no implicit self, and
+/// `__add__ = Caller()` calls `Caller()(other)`.
+///
+/// Genuinely non-callable slots (`Foo.__len__ = 5`) raise the standard "object
+/// is not callable" keyed on the *resolved value's* type, not the owning class:
+/// `len(D())` with `__len__ = 5` -> "'int' object is not callable".  Match that
+/// exactly so every implicit-dunder dispatch path agrees with CPython 3.12
+/// (issue #1963 / #2055).
+///
+/// Split out of [`invoke_class_method`] so the descriptor-binding path can
+/// dispatch a `__get__` result through the identical rules, and so
+/// `call_descriptor_get`'s raw `__get__` invocation can reuse them.
+pub(crate) fn call_slot_value_unbound(
+    interp: &mut Interpreter,
+    method_val: Value,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
     if slot_is_callable(&method_val) {
         interp.call_function_expanded(method_val, args)
     } else {

@@ -23,8 +23,15 @@ impl Interpreter {
         // `type.__call__` sentinel is a `BuiltinFunction` and still falls
         // straight through to `default_construct`, keeping the ordinary
         // construction fast path free of any extra dispatch.
+        //
+        // Issue #2944: a descriptor `__call__` (a `property`, or any object
+        // whose class defines `__get__`) joins the same gate, so
+        // `invoke_class_method` can bind it.  `slot_is_descriptor` is false for
+        // the `BuiltinFunction` `type.__call__` sentinel, so the ordinary
+        // construction fast path still falls straight through.
         if let Some(call_fn) = crate::interpreter::metaclass_dunder(&class, "__call__")
-            && matches!(call_fn.kind(), ValueKind::UserFunction(_))
+            && (matches!(call_fn.kind(), ValueKind::UserFunction(_))
+                || crate::interpreter::slot_is_descriptor(&call_fn))
         {
             return invoke_class_method(self, call_fn, Value::py_class(Rc::clone(&class)), args);
         }
@@ -267,12 +274,19 @@ impl Interpreter {
         }
 
         match init {
-            Some(method_val)
-                if matches!(
-                    method_val.kind(),
-                    ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
-                ) =>
-            {
+            // Issue #2944: `__init__` is dispatched by the same rules as every
+            // other implicit dunder, so hand the resolved slot straight to
+            // `invoke_class_method` instead of re-deciding here which value
+            // kinds are acceptable.  This arm previously accepted only
+            // `UserFunction` / `BuiltinFunction` and answered everything else
+            // with a bare `RuntimeError: __init__ attribute is not callable` —
+            // which rejected a descriptor `__init__` (`property`, user
+            // `__get__`) that CPython binds and runs, rejected a callable
+            // instance that CPython calls (issue #2054), and reported
+            // `__init__ = 5` with the wrong exception type and wording where
+            // CPython says `TypeError: 'int' object is not callable`
+            // (issue #2055).  All three now fall out of the shared path.
+            Some(method_val) => {
                 let result = invoke_class_method(
                     self,
                     method_val,
@@ -285,11 +299,6 @@ impl Interpreter {
                         pyrust_core::builtin_type_name(&result),
                     )));
                 }
-            }
-            Some(_) => {
-                return Err(PyError::Runtime(
-                    "__init__ attribute is not callable".to_string(),
-                ));
             }
             None => {
                 // No `__init__` in the MRO.  If the class inherits from a

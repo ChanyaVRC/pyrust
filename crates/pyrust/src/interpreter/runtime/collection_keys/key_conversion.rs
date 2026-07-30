@@ -206,7 +206,7 @@ impl Interpreter {
                 // matching CPython, instead of silently falling back to the
                 // identity hash.  A callable instance / bound method is invoked
                 // (issue #2054) via `invoke_class_method`.
-                if !slot_is_callable(&hash_method) {
+                if !slot_is_dispatchable(&hash_method) {
                     return Err(PyError::named(
                         "TypeError",
                         format!(

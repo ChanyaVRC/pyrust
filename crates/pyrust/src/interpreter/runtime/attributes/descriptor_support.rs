@@ -1,7 +1,7 @@
 // Shared descriptor invocation support.
 /// Handles both `property` (BuiltinObject with fget) and user-defined
 /// descriptors (PyInstance with a class `__get__` method).
-fn call_descriptor_get(
+pub(crate) fn call_descriptor_get(
     interp: &mut Interpreter,
     descriptor: &Value,
     instance: Value,
@@ -71,6 +71,43 @@ fn call_descriptor_get(
             )
         };
     }
+    // `functools.cached_property`: call the wrapped accessor with the instance
+    // and stash the result in the instance's __dict__ under the `__set_name__`
+    // name, so a later access resolves from instance storage instead of
+    // re-running the accessor.  The instance-attribute path pre-empts this
+    // branch with the same logic; the special-method path (`__len__ =
+    // cached_property(...)`, issue #2944) has no such pre-emption and reaches
+    // it here.
+    if let Some((func, attr_name)) =
+        pyrust_builtins::cached_property::with_cached_property(descriptor, |s| {
+            (s.func.clone(), s.attr_name.clone())
+        })
+    {
+        if instance.is_none() {
+            return Ok(descriptor.clone());
+        }
+        // CPython's `cached_property.__get__` consults the instance dict itself
+        // before calling the accessor, so a *slot* lookup — which always re-runs
+        // `__get__` because it never reads instance storage — still sees the
+        // cache: `len(obj)` runs the accessor once per instance, not per call.
+        if let ValueKind::PyInstance(inst) = instance.kind()
+            && let Some(cached) = inst.borrow().attrs.get(attr_name.as_str())
+        {
+            return Ok(cached.clone());
+        }
+        let holder = instance.clone();
+        let result = interp.call_function_expanded(
+            func,
+            &[ExpandedCallArg {
+                name: None,
+                value: instance,
+            }],
+        )?;
+        if let ValueKind::PyInstance(inst) = holder.kind() {
+            inst.borrow_mut().attrs.insert(attr_name, result.clone());
+        }
+        return Ok(result);
+    }
     // General user-defined descriptor: look up __get__ on the descriptor's class.
     if let ValueKind::PyInstance(inst) = descriptor.kind() {
         let desc_class = Rc::clone(&inst.borrow().class);
@@ -95,6 +132,30 @@ fn call_descriptor_get(
                 && let Some(result) = descriptor_get_slot_raw_call(interp, f, descriptor, &get_args)
             {
                 return result;
+            }
+            // Same raw-lookup rule for a `__get__` that is not a plain
+            // function: `slot_tp_descr_get` calls whatever `_PyType_Lookup`
+            // returned as `get(descr, obj, objtype)` — the descriptor itself is
+            // passed positionally and is never bound a second time.  Handing
+            // such a value to `invoke_class_method` instead would descriptor-
+            // bind it (issue #2944), which both diverges from CPython — a
+            // `__get__` that is itself a descriptor must report `'InnerGet'
+            // object is not callable` — and recurses forever for a class whose
+            // `__get__` is an instance of that same class.  `UserFunction` /
+            // `BuiltinFunction` keep their existing `invoke_class_method` tail,
+            // where binding is exactly "prepend the receiver" and so already
+            // agrees with the raw 3-argument call.
+            if !matches!(
+                get_fn.kind(),
+                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+            ) {
+                let mut raw_args = Vec::with_capacity(3);
+                raw_args.push(ExpandedCallArg {
+                    name: None,
+                    value: descriptor.clone(),
+                });
+                raw_args.extend(get_args);
+                return call_slot_value_unbound(interp, get_fn, &raw_args);
             }
             return invoke_class_method(interp, get_fn, descriptor.clone(), &get_args);
         }
