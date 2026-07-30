@@ -374,6 +374,59 @@ pub(crate) fn invoke_class_method(
         }
         ValueKind::BuiltinFunction(name) => {
             let resolution = resolve_and_validate_builtin_method(&method_val, &instance)?;
+            // Issue #2948: a flat builtin function (`len`, `repr`, `iter`, `id`) is a
+            // `builtin_function_or_method`, which implements NO descriptor protocol.
+            // CPython therefore calls it with `args` alone: `class C: __len__ = len`
+            // makes `len(C())` evaluate `len()` and raise `TypeError: len() takes
+            // exactly one argument (0 given)`, and `C.__len__ is len` /
+            // `C().__len__ is len` are both True.
+            //
+            // Prepending the receiver instead made `len(C())` evaluate `len(self)`,
+            // which re-entered the same slot and overflowed the *native* stack —
+            // aborting the process (SIGABRT) with no catchable Python exception.
+            // `__hash__ = id` does not re-enter and so silently returned `id(self)`.
+            //
+            // The explicit attribute path already treats these as non-descriptors
+            // (see `bind_builtin_attribute` / `instance_attributes.rs`), so calling
+            // the slot unbound here simply makes implicit dunder dispatch agree with
+            // `getattr(C(), "__len__")`.  The arity error then falls out of the
+            // builtin's own signature check, which reproduces CPython's wording for
+            // free.
+            //
+            // Two guards keep this off every path that legitimately binds a receiver:
+            //
+            // * `canonical_owner.is_none()` — every primitive slot wrapper
+            //   (`list.__len__`, `dict.__contains__`, `bytes.__iter__`, the
+            //   `bytearray` ops-table methods) is claimed by a canonical owner and
+            //   short-circuits before the metadata probe.
+            // * the `builtins` declaring module — the registry's `ModuleFunction` tag
+            //   alone is NOT sufficient.  `pyrust-derive` infers the tag from a dot
+            //   in the declared `py_name`, and some interpreter-owned class-slot
+            //   sentinels deliberately use an undotted name to steer a separate
+            //   name-based check elsewhere: `typing._generic_cgi` / `_union_cgi` /
+            //   `_optional_cgi` are installed as `__class_getitem__` slots and read
+            //   the receiver class to pick the alias origin (see the comment above
+            //   `_generic_cgi` in `builtin_modules/bodies/typing.rs`), yet they
+            //   register as `ModuleFunction`.  Unbinding them silently resolved
+            //   `Union[...].__origin__` against the current `typing` generation
+            //   instead of the receiver's.  Restricting the rule to the flat
+            //   `builtins` namespace covers exactly the user-nameable bare builtins
+            //   this issue is about and cannot reach those sentinels.  Non-`builtins`
+            //   module functions in dunder slots (`__len__ = math.sqrt`) therefore
+            //   still bind and remain divergent — tracked as a follow-up, because
+            //   fixing them means re-modelling those sentinels rather than widening
+            //   this gate.
+            if resolution.canonical_owner.is_none() {
+                let metadata = builtin_methods::builtin_callable_metadata(name);
+                if metadata.kind == crate::builtin_registry::BuiltinCallableKind::ModuleFunction
+                    && metadata.python_module() == Some("builtins")
+                {
+                    // `method_val` is still borrowed by the enclosing `match`, so
+                    // hand the callable over by clone (an Rc bump on an already-cold
+                    // path) rather than restructuring the hot arm's control flow.
+                    return interp.call_function_expanded(method_val.clone(), args);
+                }
+            }
             // Issue #1909: container protocol-dunder sentinels
             // (`dict.__contains__`, `list.__setitem__`, …) registered on the
             // primitive class objects have no registry body — they dispatch
