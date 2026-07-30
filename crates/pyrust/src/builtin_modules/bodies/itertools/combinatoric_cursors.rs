@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::value::{PyInstance, Value, ValueKind};
-use pyrust_core::BuiltinTypeOps;
+use pyrust_core::{BuiltinState, BuiltinTypeOps};
 
 fn memory_error() -> PyError {
     PyError::named("MemoryError", String::new())
@@ -64,10 +64,45 @@ pub(super) fn reserve_distinct_pools(distinct_pool_count: usize) -> Result<Vec<V
     try_value_vec(distinct_pool_count)
 }
 
+/// Cloning duplicates the index vectors and the pool *handles*; the pooled
+/// element `Value`s are shared by `Rc` clone. That is exactly `copy.copy`'s
+/// shallow contract, and it is what makes a copied iterator independent: the
+/// pool is materialised once and never mutated, so only the indices — the part
+/// that gets its own allocation here — distinguish two cursors over it.
+#[derive(Clone)]
 enum Cursor {
     Product(ProductCursor),
     Combinations(CombinationsCursor),
     Permutations(PermutationsCursor),
+}
+
+impl Cursor {
+    /// The pooled `Value`s `deepcopy` must recurse into. `product` holds one
+    /// list per dimension; the other two hold the elements directly.
+    fn pool_elements(&self) -> Vec<Value> {
+        match self {
+            Cursor::Product(cursor) => cursor.pools.clone(),
+            Cursor::Combinations(cursor) => cursor.pool.clone(),
+            Cursor::Permutations(cursor) => cursor.pool.clone(),
+        }
+    }
+
+    /// Re-seat deep-copied pool contents. The replacement comes from
+    /// `deepcopy`-ing `pool_elements()`, so it is the same length and the live
+    /// indices stay in range; a mismatch is rejected rather than silently
+    /// desynchronising the cursor from its pool.
+    fn set_pool_elements(&mut self, elements: Vec<Value>) -> bool {
+        let pool = match self {
+            Cursor::Product(cursor) => &mut cursor.pools,
+            Cursor::Combinations(cursor) => &mut cursor.pool,
+            Cursor::Permutations(cursor) => &mut cursor.pool,
+        };
+        if pool.len() != elements.len() {
+            return false;
+        }
+        *pool = elements;
+        true
+    }
 }
 
 struct CursorOps;
@@ -76,6 +111,41 @@ const CURSOR_OPS: &CursorOps = &CursorOps;
 impl BuiltinTypeOps for CursorOps {
     fn type_name(&self) -> &'static str {
         "_itertools_combinatoric_cursor"
+    }
+
+    /// A cursor at the same position over the same pool, advancing on its own
+    /// (issue #2952). CPython's combinatoric iterators reconstruct through
+    /// `__reduce__` — `(type, (pool, r), indices)` — so a copy taken
+    /// mid-iteration resumes exactly where the original stood and neither
+    /// iterator can move the other; duplicating the index vectors reproduces
+    /// that without a Python-visible reduce round-trip.
+    ///
+    /// The clone is infallible, matching the other storage hooks: it re-asks
+    /// for allocations whose sizes were already granted when the original
+    /// cursor was built.
+    fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
+        let borrow = state.borrow();
+        let cursor = borrow.downcast_ref::<Cursor>()?;
+        Some(cursor_value(cursor.clone()))
+    }
+
+    fn storage_elements(&self, state: &BuiltinState) -> Option<Vec<Value>> {
+        let borrow = state.borrow();
+        Some(borrow.downcast_ref::<Cursor>()?.pool_elements())
+    }
+
+    fn set_storage_elements(&self, state: &BuiltinState, elements: Vec<Value>) -> bool {
+        let mut borrow = state.borrow_mut();
+        borrow
+            .downcast_mut::<Cursor>()
+            .is_some_and(|cursor| cursor.set_pool_elements(elements))
+    }
+
+    /// The cursor lives in the iterator's `_cursor` attribute as an
+    /// implementation detail, not as one of its element values, so copying the
+    /// iterator must detach it (issue #2935's mechanism).
+    fn is_internal_storage(&self) -> bool {
+        true
     }
 }
 
@@ -107,6 +177,7 @@ fn with_cursor<R>(
     action(cursor)
 }
 
+#[derive(Clone)]
 struct ProductCursor {
     pools: Vec<Value>,
     indices: Vec<usize>,
@@ -189,6 +260,7 @@ pub(super) fn next_product(
     })
 }
 
+#[derive(Clone)]
 struct CombinationsCursor {
     pool: Vec<Value>,
     indices: Vec<usize>,
@@ -295,6 +367,7 @@ pub(super) fn next_combinations(
     })
 }
 
+#[derive(Clone)]
 struct PermutationsCursor {
     pool: Vec<Value>,
     r: usize,
