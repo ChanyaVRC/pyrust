@@ -8,6 +8,7 @@
 # answered without touching the frame at all.
 
 import asyncio
+import operator
 
 
 # --- 1. The issue's repro ---------------------------------------------------
@@ -190,5 +191,74 @@ for obj in (
     iter({"a": 1}),
 ):
     print(type(obj).__name__, isinstance(obj, type(obj)))
+
+
+# --- 8. Slots a frame does not have are absent, not busy --------------------
+#
+# `__length_hint__` is a built-in-iterator slot; a frame has none, so
+# `operator.length_hint` returns its default rather than reporting the frame's
+# run state.  Probing the checked-out cell instead answered with a re-entrancy
+# error that CPython never raises here.
+
+
+def hints():
+    yield (operator.length_hint(hinted, 7), hasattr(hinted, "__length_hint__"))
+
+
+hinted = hints()
+print(next(hinted))
+
+
+# Materialising a coroutine or an async generator is a type error under the
+# object's own noun — the running frame is refused for what it is, not for
+# being busy.
+def materialize(obj):
+    out = []
+    for fn in (list, tuple):
+        try:
+            fn(obj)
+            out.append("materialized")
+        except TypeError as e:
+            out.append(str(e))
+    return out
+
+
+async def coro_materializes_itself():
+    return (operator.length_hint(the_coro, 7), materialize(the_coro))
+
+
+the_coro = coro_materializes_itself()
+print(asyncio.run(the_coro))
+
+
+async def agen_materializes_itself():
+    yield (operator.length_hint(the_agen, 7), materialize(the_agen))
+
+
+the_agen = agen_materializes_itself()
+
+
+async def drive_materializer():
+    return await the_agen.__anext__()
+
+
+print(asyncio.run(drive_materializer()))
+
+
+# The same nouns off the running path, where the frame is merely suspended.
+async def suspended_coro():
+    return 1
+
+
+sc = suspended_coro()
+print(materialize(sc))
+asyncio.run(sc)
+
+
+async def suspended_agen():
+    yield 1
+
+
+print(materialize(suspended_agen()))
 
 print("ok")
