@@ -2,6 +2,7 @@
 
 include!("iteration/state.rs");
 include!("iteration/native_frame.rs");
+include!("iteration/reduce_copy.rs");
 include!("iteration/guards.rs");
 include!("iteration/materialize.rs");
 include!("iteration/iterator_factory.rs");

@@ -380,6 +380,18 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
             Ok(ops.copy_storage(state).unwrap_or_else(|| obj.clone()))
         }
 
+        // Built-in iterator objects (#2974).  CPython copies each one through
+        // its own `__reduce__`, so the iteration domain — which owns every
+        // cursor representation — rebuilds the reduce-equivalent state.
+        ValueKind::Generator(_) => match crate::interpreter::copy_iterator_object(&obj, false)? {
+            crate::interpreter::IteratorCopy::Rebuilt(copy) => Ok(copy),
+            crate::interpreter::IteratorCopy::Unpicklable(noun) => Err(PyError::named(
+                "TypeError",
+                format!("cannot pickle '{noun}' object"),
+            )),
+            crate::interpreter::IteratorCopy::Unowned => Ok(obj.clone()),
+        },
+
         // PyInstance — check for __copy__ dunder first (MRO-aware).
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
@@ -723,6 +735,34 @@ fn deep_copy(
                 }
             }
             Ok(copied)
+        }
+
+        // Built-in iterator objects (#2974).  Rebuild the reduce-equivalent
+        // cursor, memoise it, then deep-copy the sources it retained — the same
+        // two-step the opaque-storage arm above uses, so an iterator reachable
+        // from its own source terminates instead of recursing.
+        ValueKind::Generator(_) => {
+            let rebuilt = match crate::interpreter::copy_iterator_object(&obj, true)? {
+                crate::interpreter::IteratorCopy::Rebuilt(copy) => copy,
+                crate::interpreter::IteratorCopy::Unpicklable(noun) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("cannot pickle '{noun}' object"),
+                    ));
+                }
+                crate::interpreter::IteratorCopy::Unowned => return Ok(obj.clone()),
+            };
+            if let Some(id) = value_identity(&obj) {
+                memo_insert(memo, id, rebuilt.clone());
+            }
+            if let Some(sources) = crate::interpreter::iterator_retained_values(&rebuilt) {
+                let mut deep_sources = Vec::with_capacity(sources.len());
+                for source in sources {
+                    deep_sources.push(deep_copy(source, memo, interp)?);
+                }
+                crate::interpreter::set_iterator_retained_values(&rebuilt, deep_sources);
+            }
+            Ok(rebuilt)
         }
 
         // PyInstance — check for __deepcopy__ dunder first (MRO-aware).

@@ -86,6 +86,7 @@ pub(crate) enum NativeIterSource {
 /// descending position the entry's identity and reduces the ordinary step to
 /// one generation compare plus one indexed read. A changed generation drops
 /// back to the frame's size guard before the entry is read.
+#[derive(Clone)]
 pub(crate) struct ReverseDictCursor {
     /// The `dict`, dict view, `mappingproxy`, or subclass carrier whose live
     /// entries are read.
@@ -307,6 +308,7 @@ pub(crate) struct NativeIterFrame {
 }
 
 /// Live-collection mutation guard attached to a native iterator.
+#[derive(Clone)]
 pub(crate) struct NativeIterGuard {
     pub(crate) container: Value,
     pub(crate) version: i64,
