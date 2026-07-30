@@ -284,11 +284,11 @@ mod iteration {
         ExpandedArgBuf, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame, Interpreter,
         PyBigInt, PyBigIntSign, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
         builtin_data_backing, effective_user_iter, full_type_name_str,
-        i64_range_native_cursor_safe, instance_builtin_data, instantiate_exception,
-        invoke_class_method, is_coroutine_value, is_inherited_builtin_iter_sentinel,
-        is_sequence_iter_terminator, is_stop_iteration_error, key_ref_to_value, key_to_value,
-        lookup_class_attr, lookup_value_special_method, metaclass_dunder, range_len,
-        value_from_bigint, value_to_bigint, value_type_name_str,
+        i64_range_native_cursor_safe, instance_builtin_data, invoke_class_method,
+        is_coroutine_value, is_inherited_builtin_iter_sentinel, is_sequence_iter_terminator,
+        is_stop_iteration_error, key_ref_to_value, key_to_value, lookup_class_attr,
+        lookup_value_special_method, metaclass_dunder, range_len, value_from_bigint,
+        value_to_bigint, value_type_name_str,
     };
     include!("runtime/iteration.rs");
 }
