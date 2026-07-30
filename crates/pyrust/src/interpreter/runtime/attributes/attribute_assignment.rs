@@ -142,7 +142,7 @@ impl Interpreter {
                     )),
                 }
             }
-            ValueKind::Generator(state_rc) => {
+            ValueKind::Generator(cell) => {
                 // CPython 3.12 allows setting __name__ and __qualname__ on
                 // generator objects (str only; TypeError on non-string).
                 // gi_running, gi_yieldfrom, gi_frame, gi_code are read-only
@@ -157,13 +157,16 @@ impl Interpreter {
                                 "{name} must be set to a string object"
                             ));
                         };
-                        let mut borrow = state_rc.borrow_mut();
-                        if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
-                            if name == "__name__" {
-                                frame.fn_name = std::sync::Arc::from(s.as_str());
-                            } else {
-                                frame.qualname = std::sync::Arc::from(s.as_str());
-                            }
+                        // The writable pair lives beside the execution state,
+                        // so assigning works on a running generator too — the
+                        // old `borrow_mut` aborted the process there (#2978).
+                        // The frame keeps its own compile-time name for
+                        // tracebacks and `co_name` / `co_qualname`, which
+                        // CPython likewise leaves untouched by this write.
+                        if name == "__name__" {
+                            cell.set_name(&s);
+                        } else {
+                            cell.set_qualname(&s);
                         }
                         Ok(())
                     }

@@ -147,11 +147,14 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
         }
         ValueKind::Generator(state_rc) => {
             // Drain a NativeIterFrame (created by iter() on builtins) into a Vec.
-            let mut borrow = state_rc.borrow_mut();
-            if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
-                native.drain_remaining()
-            } else {
-                Err(pyrust_core::type_err!("object is not iterable"))
+            // A cell checked out by its own running body is never one, and
+            // taking it here would abort the process (#2978).
+            match state_rc.try_borrow_mut() {
+                Ok(mut borrow) => match borrow.downcast_mut::<NativeIterFrame>() {
+                    Some(native) => native.drain_remaining(),
+                    None => Err(pyrust_core::type_err!("object is not iterable")),
+                },
+                Err(_) => Err(pyrust_core::type_err!("object is not iterable")),
             }
         }
         _ => Err(pyrust_core::type_err!(

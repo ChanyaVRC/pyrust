@@ -65,12 +65,12 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             // A provider iterator may retain the exact class generation that
             // created it. Consulting this typed identity keeps old objects
             // stable across removal and re-import of their owning module.
-            ValueKind::Generator(state_rc) => {
-                let state = state_rc.borrow();
-                state
-                    .downcast_ref::<ProviderIterator>()
-                    .and_then(ProviderIterator::class)
-            }
+            // Only a built-in iterator can be one; a running frame's cell is
+            // checked out, and reading it here aborted the process (#2978).
+            ValueKind::Generator(cell) if cell.kind() == GeneratorKind::Iterator => cell
+                .borrow()
+                .downcast_ref::<ProviderIterator>()
+                .and_then(ProviderIterator::class),
             // Issue #2733: `isinstance(list[int], type(list[int]))` is True —
             // a PEP 585 alias is an instance of the `types.GenericAlias` class.
             ValueKind::BuiltinObject { .. }

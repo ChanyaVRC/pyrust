@@ -55,7 +55,13 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::SuperProxy { .. }
         | ValueKind::SuperProxyClass { .. }
         | ValueKind::SuperProxyUnbound { .. } => Cow::Borrowed("super"),
-        ValueKind::Generator(_) => Cow::Borrowed("generator"),
+        // Built-in iterators share this tag and have no single name here; the
+        // interpreter's `full_type_name_str` refines them.  The three frame
+        // kinds are distinguished by their immutable tag, which stays readable
+        // while the frame is running (#2978).
+        ValueKind::Generator(cell) => {
+            Cow::Borrowed(cell.kind().frame_type_name().unwrap_or("generator"))
+        }
         ValueKind::NotImplemented => Cow::Borrowed("NotImplementedType"),
         ValueKind::Ellipsis => Cow::Borrowed("ellipsis"),
         ValueKind::BuiltinObject { ops, .. } => Cow::Borrowed(ops.display_type_name()),

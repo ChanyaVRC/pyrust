@@ -1794,7 +1794,7 @@ impl Interpreter {
                     // Generator trampoline (#2253): set inside the match when the
                     // iterator is a drivable generator; the switch-in is performed
                     // after the match closes (it needs `&mut iters`, borrowed here).
-                    let mut gen_to_drive: Option<Rc<RefCell<Box<dyn std::any::Any>>>> = None;
+                    let mut gen_to_drive: Option<Rc<GeneratorCell>> = None;
                     match iters[*slot as usize].as_mut() {
                         Some(state) => {
                             match advance_loop_fast_state(state, code, &mut regs, &mut pc, *dst) {

@@ -210,6 +210,14 @@ impl Interpreter {
         let ValueKind::Generator(state_rc) = target.kind() else {
             return Ok(None);
         };
+        // A generator / coroutine / async generator has no `__length_hint__`
+        // at all, which the immutable kind tag reports without reading the
+        // cell — the borrow probe below turned `operator.length_hint(g, 7)`
+        // taken from inside `g`'s own body into a spurious
+        // `ValueError: generator already executing` (#2978).
+        if state_rc.kind().frame_type_name().is_some() {
+            return Ok(None);
+        }
         let classified = {
             let borrow = state_rc
                 .try_borrow()

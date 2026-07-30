@@ -143,7 +143,7 @@ impl Interpreter {
     #[inline]
     pub(crate) fn step_getitem_iter(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         let snapshot: Option<(Value, Value, i64, i64)> = {
             let borrow = state_rc.borrow();
@@ -195,7 +195,7 @@ impl Interpreter {
     #[inline]
     pub(crate) fn step_callable_iter(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         // Extract callable and sentinel while releasing the borrow, so that
         // call_function_expanded can re-enter the interpreter without aliasing.
@@ -239,10 +239,7 @@ impl Interpreter {
     /// `Ok(Some(v))` → next mapped value; `Ok(None)` → exhausted;
     /// `Err(e)` → error from `func` or an iterator.
     #[inline]
-    pub(crate) fn step_map_iter(
-        &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
-    ) -> Result<Option<Value>> {
+    pub(crate) fn step_map_iter(&mut self, state_rc: &Rc<GeneratorCell>) -> Result<Option<Value>> {
         // Snapshot func + source iterators with a SINGLE borrow+downcast.  The
         // `func`/`sources` fields are immutable after construction (only `done`
         // is mutated), so the clones — cheap Rc bumps — stay valid across the
@@ -294,7 +291,7 @@ impl Interpreter {
     #[inline]
     pub(crate) fn step_filter_iter(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         // Snapshot func + source iterator ONCE with a single borrow+downcast.
         // Both fields are immutable after construction (only `done` is mutated),
@@ -351,7 +348,7 @@ impl Interpreter {
     #[inline]
     pub(crate) fn step_provider_iterator(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         let (advance, provider_state) = {
             let state = state_rc.borrow();
@@ -375,7 +372,7 @@ impl Interpreter {
     #[inline]
     pub(crate) fn step_enumerate_iter(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         let (iter_val, counter): (Value, Value) = {
             let borrow = state_rc.borrow();
@@ -411,7 +408,7 @@ impl Interpreter {
     /// Yields `cur` then advances by `step`; `Ok(None)` once `stop` is reached.
     pub(crate) fn step_bigrange_iter(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         let mut borrow = state_rc.borrow_mut();
         let s = borrow.downcast_mut::<BigRangeIter>().ok_or_else(|| {
@@ -433,7 +430,7 @@ impl Interpreter {
     /// One step of the lazy i64-backed range iterator.
     pub(crate) fn step_range_iter(
         &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: &Rc<GeneratorCell>,
     ) -> Result<Option<Value>> {
         let mut borrow = state_rc.borrow_mut();
         let state = borrow.downcast_mut::<RangeIter>().ok_or_else(|| {
@@ -453,10 +450,7 @@ impl Interpreter {
     /// `Ok(Some(v))` → next row tuple; `Ok(None)` → exhausted;
     /// `Err(e)` → error from a source or strict-mode mismatch.
     #[inline]
-    pub(crate) fn step_zip_iter(
-        &mut self,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
-    ) -> Result<Option<Value>> {
+    pub(crate) fn step_zip_iter(&mut self, state_rc: &Rc<GeneratorCell>) -> Result<Option<Value>> {
         // Read only scalar metadata — do NOT clone the sources Vec.
         let (n_sources, strict) = {
             let borrow = state_rc.borrow();

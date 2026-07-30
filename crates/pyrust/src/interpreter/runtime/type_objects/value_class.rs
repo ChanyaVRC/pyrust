@@ -30,8 +30,18 @@ pub(crate) fn value_class(value: &Value) -> Value {
         ValueKind::SuperProxy { .. }
         | ValueKind::SuperProxyClass { .. }
         | ValueKind::SuperProxyUnbound { .. } => Value::builtin_function("super"),
-        ValueKind::Generator(state) => {
-            let state = state.borrow();
+        ValueKind::Generator(cell) => {
+            // A generator / coroutine / async generator answers from its
+            // immutable kind tag.  Reading the state instead used to abort the
+            // process whenever the question was asked from inside the running
+            // body (`type(g)` via a callback), because the resume path holds
+            // the cell mutably checked out for the whole of it (#2978).
+            if let Some(name) = cell.kind().frame_type_name() {
+                return Value::builtin_function(name);
+            }
+            // Built-in iterators drop the cell before running user code, so
+            // their concrete cursor type is always readable here.
+            let state = cell.borrow();
             if state.downcast_ref::<MapIter>().is_some() {
                 Value::builtin_function("map")
             } else if state.downcast_ref::<FilterIter>().is_some() {
@@ -61,14 +71,6 @@ pub(crate) fn value_class(value: &Value) -> Value {
                 Value::builtin_function(native.type_name)
             } else if state.downcast_ref::<AsyncGenASend>().is_some() {
                 Value::builtin_function("async_generator_asend")
-            } else if let Some(frame) = state.downcast_ref::<GeneratorFrame>() {
-                if frame.is_async_generator() {
-                    Value::builtin_function("async_generator")
-                } else if frame.is_coroutine {
-                    Value::builtin_function("coroutine")
-                } else {
-                    Value::builtin_function("generator")
-                }
             } else {
                 Value::builtin_function("generator")
             }

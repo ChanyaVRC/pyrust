@@ -2,7 +2,7 @@ impl Interpreter {
     pub(super) fn get_generator_attribute(
         &mut self,
         target: &Value,
-        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        cell: &Rc<GeneratorCell>,
         name: &str,
     ) -> Result<Value> {
         // Generator introspection attributes (issue #1270).
@@ -23,20 +23,15 @@ impl Interpreter {
         //     __iter__/__next__ — coroutines are awaitable, not
         //     iterable; issue #2314)
         //   - async generator: __aiter__/__anext__/asend/athrow/aclose
-        let (is_async_gen, is_coroutine_only) = {
-            state_rc
-                .try_borrow()
-                .ok()
-                .and_then(|b| {
-                    b.downcast_ref::<GeneratorFrame>().map(|f| {
-                        (
-                            f.is_async_generator(),
-                            f.is_coroutine && !f.code.is_generator,
-                        )
-                    })
-                })
-                .unwrap_or((false, false))
-        };
+        //
+        // The subtype comes from the object's immutable kind tag, so the
+        // surface stays correct even when the attribute is read from inside
+        // the running body — where the state cell is checked out and the old
+        // `try_borrow`-and-default read silently degraded every coroutine and
+        // async generator to the plain-generator surface (#2978).
+        let kind = cell.kind();
+        let is_async_gen = kind == GeneratorKind::AsyncGenerator;
+        let is_coroutine_only = kind == GeneratorKind::Coroutine;
         if is_async_gen {
             match name {
                 "__aiter__" | "__anext__" | "asend" | "athrow" | "aclose" => {
@@ -93,9 +88,9 @@ impl Interpreter {
                 _ => {}
             }
         }
-        let state_rc = Rc::clone(state_rc);
-        let borrow = state_rc.borrow();
-        if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
+        // Only the three Python frame kinds carry the introspection surface
+        // below; built-in iterators have none.
+        if kind != GeneratorKind::Iterator {
             // CPython exposes introspection attributes under a
             // type-specific prefix: `gi_*` on a plain generator,
             // `ag_*` on an async generator, `cr_*` on a coroutine
@@ -111,7 +106,7 @@ impl Interpreter {
             //   - plain generator: gi_running / gi_frame / gi_code /
             //     gi_yieldfrom  (no gi_await in CPython).
             // `__name__` / `__qualname__` apply to all three.
-            let is_coroutine_only = frame.is_coroutine && !frame.code.is_generator;
+            //
             // Split off a 3-byte introspection prefix. `name.get(..3)`
             // is UTF-8-boundary-safe (returns None when byte index 3
             // falls inside a multibyte char, e.g. `getattr(g, "agé")`),
@@ -121,26 +116,49 @@ impl Interpreter {
             let prefix_matches = match prefix {
                 "ag_" => is_async_gen,
                 "cr_" => is_coroutine_only,
-                "gi_" => !is_async_gen && !is_coroutine_only,
+                "gi_" => kind == GeneratorKind::Generator,
                 _ => false,
             };
             match name {
-                "__name__" => return Ok(Value::string(frame.fn_name.as_ref())),
-                "__qualname__" => return Ok(Value::string(frame.qualname.as_ref())),
+                // The writable name pair lives beside the state, not in it,
+                // so it reads back while the body runs (#2978).
+                "__name__" => {
+                    if let Some(value) = cell.name() {
+                        return Ok(Value::string(value.as_ref()));
+                    }
+                }
+                "__qualname__" => {
+                    if let Some(value) = cell.qualname() {
+                        return Ok(Value::string(value.as_ref()));
+                    }
+                }
                 _ if prefix_matches => match suffix {
-                    // running is always False when accessed from outside
-                    // the body (True is only observable from within —
-                    // pyrust does not expose re-entrant guards, matching
-                    // CPython's "False unless currently on the C call
-                    // stack" rule).
-                    "running" => return Ok(Value::bool_(false)),
-                    // frame: the suspended frame object (or None once
-                    // exhausted), built from the retained FnCode (#2185).
-                    "frame" => return Ok(self.build_generator_frame_object(frame)),
+                    // running: True exactly while the body is on the call
+                    // stack — the state is checked out for the whole of a
+                    // resume, which is the same fact `next(g)` re-entrancy
+                    // reports as "generator already executing" (#2285).
+                    "running" => return Ok(Value::bool_(generator_is_running(cell))),
                     // code: pyrust does not expose a standalone code
                     // object here; return None to avoid AttributeError
                     // (issue #1270).
                     "code" => return Ok(Value::none()),
+                    // frame: the suspended frame object (or None once
+                    // exhausted), built from the retained FnCode (#2185).
+                    // A *running* frame is checked out and unreadable, so it
+                    // reports None rather than a live frame object — a
+                    // documented limitation.
+                    "frame" => {
+                        let qualname = cell.qualname().unwrap_or_else(|| "?".into());
+                        return Ok(cell
+                            .try_borrow()
+                            .ok()
+                            .and_then(|borrow| {
+                                borrow.downcast_ref::<GeneratorFrame>().map(|frame| {
+                                    self.build_generator_frame_object(frame, &qualname)
+                                })
+                            })
+                            .unwrap_or_else(Value::none));
+                    }
                     // gi_yieldfrom / ag_await / cr_await: the sub-iterator
                     // being delegated to via `yield from`, or awaited via
                     // an inner `await` (both compile to YieldFrom), else
@@ -149,48 +167,42 @@ impl Interpreter {
                     // hasn't started — don't inspect insns[0] (iter_reg
                     // unloaded).  CPython spells this `yieldfrom` for a
                     // plain generator and `await` for an async gen /
-                    // coroutine, but never both on one object.
+                    // coroutine, but never both on one object.  A running
+                    // frame is not suspended at a `yield from` at all, which
+                    // is exactly the None the unreadable-cell path returns.
                     "yieldfrom" if prefix == "gi_" => {
-                        if !frame.done
-                            && frame.pc != 0
-                            && let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
-                                frame.code.insns.get(frame.pc)
-                        {
-                            let sub_iter = frame.regs[*iter_reg as usize].clone();
-                            return Ok(sub_iter);
-                        }
-                        return Ok(Value::none());
+                        return Ok(Self::generator_delegate(cell));
                     }
                     "await" if prefix == "ag_" || prefix == "cr_" => {
-                        if !frame.done
-                            && frame.pc != 0
-                            && let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
-                                frame.code.insns.get(frame.pc)
-                        {
-                            let sub_iter = frame.regs[*iter_reg as usize].clone();
-                            return Ok(sub_iter);
-                        }
-                        return Ok(Value::none());
+                        return Ok(Self::generator_delegate(cell));
                     }
                     _ => {}
                 },
                 _ => {}
             }
         }
-        let obj_name = if is_async_gen {
-            "async_generator"
-        } else if borrow
-            .downcast_ref::<GeneratorFrame>()
-            .is_some_and(|f| f.is_coroutine)
-        {
-            "coroutine"
-        } else {
-            "generator"
-        };
+        let obj_name = kind.frame_type_name().unwrap_or("generator");
         Err(PyError::attribute_error(
             format!("'{obj_name}' object has no attribute '{name}'"),
             Some(name.to_string()),
             Some(target.clone()),
         ))
+    }
+
+    /// The sub-iterator a suspended frame is delegating to (`yield from` /
+    /// inner `await`), or `None` when it is not suspended at one.
+    fn generator_delegate(cell: &Rc<GeneratorCell>) -> Value {
+        let Ok(borrow) = cell.try_borrow() else {
+            return Value::none();
+        };
+        if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>()
+            && !frame.done
+            && frame.pc != 0
+            && let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
+                frame.code.insns.get(frame.pc)
+        {
+            return frame.regs[*iter_reg as usize].clone();
+        }
+        Value::none()
     }
 }

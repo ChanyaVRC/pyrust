@@ -21,6 +21,13 @@ impl Interpreter {
         let ValueKind::Generator(state_rc) = val.kind() else {
             return Ok(());
         };
+        // Only a built-in iterator can be the legacy `__getitem__` walk this
+        // probes for.  Reading the cell of a Python frame instead answered
+        // `list(coro)` taken from inside the coroutine with the re-entrancy
+        // error, ahead of the `is_coroutine_value` refusal below (#2978).
+        if state_rc.kind().frame_type_name().is_some() {
+            return Ok(());
+        }
         let snapshot = {
             let state = state_rc
                 .try_borrow()
@@ -62,7 +69,12 @@ impl Interpreter {
         // A coroutine (`async def`, issue #1039) is not iterable — `list(coro)`,
         // `tuple(coro)`, unpacking, etc. all raise TypeError, matching CPython.
         if is_coroutine_value(val) {
-            return Err(pyrust_core::type_err!("'coroutine' object is not iterable"));
+            // Name the exact type, as every sibling refusal does: an async
+            // generator is a coroutine frame here but reports its own noun.
+            let type_name = full_type_name_str(val);
+            return Err(pyrust_core::type_err!(
+                "'{type_name}' object is not iterable"
+            ));
         }
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);

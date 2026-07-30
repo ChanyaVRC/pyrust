@@ -686,8 +686,10 @@ pub enum Opaque {
     },
     /// A live generator object.  The concrete execution state (registers, pc,
     /// iterator slots, etc.) is stored as a type-erased `Box<dyn Any>` so that
-    /// `pyrust-core` does not need to depend on `pyrust`'s bytecode types.
-    Generator(Rc<RefCell<Box<dyn std::any::Any>>>),
+    /// `pyrust-core` does not need to depend on `pyrust`'s bytecode types;
+    /// [`GeneratorCell`] pairs it with the object-model facts that must stay
+    /// readable while the state is checked out (its type tag and names).
+    Generator(Rc<GeneratorCell>),
     /// An immutable byte string.  Constructed via the `b"..."` literal or
     /// the `bytes(...)` builtin.  Stored behind `Rc` for cheap clones.
     Bytes(Rc<Vec<u8>>),

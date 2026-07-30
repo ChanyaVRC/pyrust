@@ -28,7 +28,7 @@ enum WeakValueCacheKind {
     PyClass(Weak<RefCell<PyClass>>),
     PyInstance(Weak<RefCell<PyInstance>>),
     PyModule(Weak<RefCell<PyModule>>),
-    Generator(Weak<RefCell<Box<dyn Any>>>),
+    Generator(Weak<GeneratorCell>),
     Bytes(Weak<Vec<u8>>),
     BuiltinObject {
         ops: &'static dyn BuiltinTypeOps,
