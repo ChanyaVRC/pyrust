@@ -40,6 +40,77 @@ pub(crate) fn slot_is_callable(v: &Value) -> bool {
     }
 }
 
+/// Whether a resolved class-attribute slot value carries *descriptor*
+/// semantics — i.e. CPython's special-method lookup binds it through
+/// `__get__(instance, type(instance))` and then calls the **result** with the
+/// slot's own arguments, instead of calling the slot value directly.
+///
+/// `_PyObject_LookupSpecial` / `lookup_maybe_method` are uniform about this:
+/// after `_PyType_Lookup` finds the slot they consult `Py_TYPE(slot)->
+/// tp_descr_get`, so a `property`, a `functools.cached_property`, or any user
+/// object whose class defines `__get__` is bound exactly like a plain function
+/// is.  `__len__ = property(lambda self: lambda: 4)` therefore runs the getter
+/// with the instance and calls its `lambda` result — while
+/// `__len__ = property(lambda self: 4)` runs the getter and then raises
+/// `TypeError: 'int' object is not callable`, naming the *getter's result*
+/// (issue #2944).
+///
+/// Deliberately **not** folded into [`slot_is_callable`]: the two answer
+/// different questions, and the "not callable" error text is keyed on whichever
+/// value is ultimately called.  Callability is also irrelevant to this test —
+/// CPython binds a descriptor slot whether or not it is itself callable — so
+/// callers must consult this *before* the callable check.
+///
+/// `UserFunction` / `BoundMethod` are excluded even though a Python function is
+/// a descriptor: their binding is exactly "prepend the receiver", which
+/// `invoke_class_method`'s own arms already do, and routing them here would
+/// wrap every ordinary dunder call in a needless `__get__`.
+///
+/// Only a `BuiltinObject` (`property` / `cached_property`) or a `PyInstance`
+/// can carry `__get__`, so the discriminant test is kept here, `#[inline]`, and
+/// the actual probing lives out of line.  Every hot caller — the binary/unary
+/// operator slot gates and the per-instantiation metaclass `__call__` gate —
+/// sees a `UserFunction` or `BuiltinFunction` and folds to `false` with no call
+/// at all; inlining the probes themselves instead cost ~6% on a user-`__dunder__`
+/// loop, which constructs an instance per iteration.
+#[inline]
+pub(crate) fn slot_is_descriptor(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::BuiltinObject { .. } | ValueKind::PyInstance(_) => slot_is_descriptor_probe(v),
+        _ => false,
+    }
+}
+
+#[inline(never)]
+fn slot_is_descriptor_probe(v: &Value) -> bool {
+    match v.kind() {
+        // A `property` in a partial slot (`.getter` / `.setter` builder state)
+        // is not a live descriptor; mirror `call_descriptor_get`'s gate.
+        ValueKind::BuiltinObject { .. } => {
+            pyrust_builtins::property::property_partial_slot(v) == Some(None)
+                || pyrust_builtins::cached_property::with_cached_property(v, |_| ()).is_some()
+        }
+        ValueKind::PyInstance(inst) => {
+            let class = Rc::clone(&inst.borrow().class);
+            lookup_class_attr(&class, "__get__").is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Whether `invoke_class_method` can dispatch this slot value at all — it is
+/// either directly callable or a descriptor that binds to something callable.
+///
+/// Slot pre-checks that reject a non-callable slot up front (`__add__ = 5`,
+/// `__neg__ = 5`, `__hash__ = 5`) must use this rather than
+/// [`slot_is_callable`], or a descriptor slot is rejected before it is ever
+/// bound and its getter never runs (issue #2944).  The error itself stays in
+/// `invoke_class_method`, which alone knows the post-binding value to name.
+#[inline]
+pub(crate) fn slot_is_dispatchable(v: &Value) -> bool {
+    slot_is_callable(v) || slot_is_descriptor(v)
+}
+
 /// Look up a user-defined special method on a Python-level value.
 ///
 /// Instance special methods live on the instance's class, while special
