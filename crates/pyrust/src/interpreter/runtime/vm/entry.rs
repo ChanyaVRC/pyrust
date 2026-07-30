@@ -619,6 +619,24 @@ impl Interpreter {
             err = pep479_wrap_stop_iteration(err);
             // Re-raise at the consumer's `ForIter` instruction.
             let ccode: &crate::bytecode::FnCode = unsafe { &**st.code_ptr };
+            // PEP 657: from here on the error belongs to the *consumer*, raised at
+            // its `ForIter` — so that instruction's anchor is the consumer's caret.
+            // Publish it *before* dispatching, because a handler that catches here
+            // snapshots `get_current_vm_col_span()` into the deferred traceback's
+            // `catch_col_span` (`introspection::tracebacks`) while dispatching; the
+            // generator body's own span is still standing otherwise and gets
+            // painted onto the consumer's `for _ in g():` line when the caught
+            // exception is later re-raised or chained (#2904 review).  It is also
+            // the innermost caret for the frames unwound on the next outer-loop
+            // iteration when the error escapes the consumer too (#2443).  `ForIter`
+            // carries no span of its own, so this normally clears the anchor —
+            // matching CPython, which leaves the `for` frame caret-free.
+            innermost_col = ccode
+                .col_table
+                .get(foriter_pc)
+                .copied()
+                .filter(|&s| s != (0, 0, 0, 0));
+            pyrust_core::set_current_vm_col_span(innermost_col);
             match self.handle_vm_error(
                 err,
                 st.exc_handlers,
@@ -633,15 +651,6 @@ impl Interpreter {
                 }
                 Err(e2) => {
                     err = e2;
-                    // The error now escapes the *consumer* at its `ForIter` site;
-                    // that instruction's anchor is the innermost caret for the
-                    // frames unwound on the next outer-loop iteration (#2443).
-                    let ccode: &crate::bytecode::FnCode = unsafe { &**st.code_ptr };
-                    innermost_col = ccode
-                        .col_table
-                        .get(foriter_pc)
-                        .copied()
-                        .filter(|&s| s != (0, 0, 0, 0));
                     continue;
                 }
             }

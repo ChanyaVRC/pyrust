@@ -693,6 +693,55 @@ ValueError: thrown
 }
 
 #[test]
+fn caught_generator_error_does_not_paint_the_consumer_frame() {
+    // The mirror image of the `throw()` stale-span hazard above, on the *catch*
+    // side: the consumer catches the generator's error at its `ForIter` and
+    // re-raises it.  The frame the re-raise reports for the consumer is built
+    // from the span published when the handler was entered, so the gen-drive
+    // unwind must re-publish the `ForIter` anchor (it has none) before
+    // dispatching — otherwise the generator body's `1/0` span is still standing
+    // and gets painted onto the consumer's `for _ in g():` line.  CPython leaves
+    // that frame caret-free and underlines only the generator's `1/0`.
+    let src = "def g():\n    yield 1/0\ntry:\n    for _ in g():\n        pass\nexcept ZeroDivisionError:\n    raise\n";
+    let stderr = run_pyrust_stderr("caught_gen_reraise.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"caught_gen_reraise.py\", line 4, in <module>
+    for _ in g():
+  File \"caught_gen_reraise.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn chained_generator_error_does_not_paint_the_consumer_frame() {
+    // Same hazard reached through `raise ... from e`: the __cause__ chain's
+    // consumer frame must stay caret-free too.
+    let src = "def g():\n    yield 1/0\ntry:\n    for _ in g():\n        pass\nexcept ZeroDivisionError as e:\n    raise RuntimeError(\"wrapped\") from e\n";
+    let stderr = run_pyrust_stderr("chained_gen_cause.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"chained_gen_cause.py\", line 4, in <module>
+    for _ in g():
+  File \"chained_gen_cause.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File \"chained_gen_cause.py\", line 7, in <module>
+    raise RuntimeError(\"wrapped\") from e
+RuntimeError: wrapped
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
 fn constfold_sibling_subtree_fold_underlines_raising_op() {
     // `(a+b) + "s" + (c+d)` with `a`/`b`/`c`/`d` bound to ints: the variable
     // sub-adds `a+b` and `c+d` do NOT const-fold, so all four `+` binops survive.
