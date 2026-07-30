@@ -371,10 +371,10 @@ impl Interpreter {
 /// inline pair step.
 ///
 /// Succeeds whenever the inner iterator is an unguarded element walk over a
-/// list, tuple, snapshot, `bytes`, or `str`, or the i64-backed range cursor —
-/// including a partly consumed one: the specialization retains both shared
-/// cells rather than moving their cursors, so there is nothing to prove about
-/// aliasing. Every other inner iterator — a generator, `map`, an
+/// list, tuple, snapshot, `bytes`, `bytearray`, or `str`, or the i64-backed
+/// range cursor — including a partly consumed one: the specialization retains
+/// both shared cells rather than moving their cursors, so there is nothing to
+/// prove about aliasing. Every other inner iterator — a generator, `map`, an
 /// arbitrary-precision `BigRangeIter`, a guarded dict/set cursor, a user
 /// iterator — keeps the generic adapter path, whose per-step protocol dispatch
 /// is exactly the observable behaviour.

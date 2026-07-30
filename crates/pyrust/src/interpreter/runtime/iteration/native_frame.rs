@@ -545,3 +545,48 @@ impl NativeIterFrame {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod bytearray_frame_tests {
+    use pyrust_core::Value;
+
+    use super::{NativeIterFrame, NativeIterSource};
+
+    fn frame(bytes: &[u8]) -> (Value, NativeIterFrame) {
+        let value = pyrust_builtins::bytearray::bytearray(bytes.to_vec());
+        let frame = NativeIterFrame::bytearray(value.clone(), "bytearray_iterator")
+            .expect("a bytearray must classify as a live indexed walk");
+        (value, frame)
+    }
+
+    /// Dropping `Bytearray` from the unguarded classification is invisible to
+    /// the parity fixtures — the generic adapter yields exactly the same live
+    /// elements — but costs ~2.9x on `enumerate(bytearray)`, because the loop
+    /// then steps the pair through the protocol instead of the shared cursor.
+    /// Only a direct assertion pins it (#2921).
+    #[test]
+    fn bytearray_frame_is_an_unguarded_element_source() {
+        let (_value, frame) = frame(b"ab");
+        assert!(frame.guard.is_none());
+        assert!(frame.is_unguarded_element_source());
+    }
+
+    /// The element walk re-reads the buffer's size on every step, and the
+    /// exhaustion it reaches is permanent — CPython's `bytearray_iterator`
+    /// drops its buffer reference on the first `StopIteration`.
+    #[test]
+    fn bytearray_element_walk_reads_the_live_buffer_then_latches() {
+        let (value, mut frame) = frame(b"ab");
+        let data = pyrust_builtins::bytearray::as_bytearray_rc(&value).expect("bytearray storage");
+
+        assert_eq!(frame.advance_element().and_then(|v| v.as_int()), Some(97));
+        data.borrow_mut().push(99);
+        assert_eq!(frame.advance_element().and_then(|v| v.as_int()), Some(98));
+        assert_eq!(frame.advance_element().and_then(|v| v.as_int()), Some(99));
+        assert!(frame.advance_element().is_none());
+
+        data.borrow_mut().push(100);
+        assert!(frame.advance_element().is_none());
+        assert!(matches!(frame.source, NativeIterSource::Exhausted));
+    }
+}
