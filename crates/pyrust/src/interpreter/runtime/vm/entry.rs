@@ -245,7 +245,13 @@ impl Interpreter {
                 source_line: None,
                 funcname: frame.fn_name.clone(),
                 globals: Some(pyrust_core::FrameGlobals::for_environment(&frame.saved_env)),
-                col_span: None,
+                // PEP 657 (#2904): the generator body just escaped, so the
+                // published anchor is the col span of the instruction that
+                // propagated the error inside it (the `1/0` BinOp of `yield 1/0`,
+                // the `f()` Call of `yield f()`, …) — exactly the same rule the
+                // plain-function frame uses in `calls::user_frame`.  Generator
+                // frames used to hardcode `None` here and stayed caret-free.
+                col_span: pyrust_core::get_current_vm_col_span(),
             });
         }
         self.vm_frame_views.pop();
@@ -585,7 +591,13 @@ impl Interpreter {
                     globals: Some(pyrust_core::FrameGlobals::for_environment(
                         &gd.gframe.saved_env,
                     )),
-                    col_span: None,
+                    // PEP 657 (#2904): `innermost_col` now holds the anchor of the
+                    // instruction that propagated the error inside the generator
+                    // body — either the raising instruction itself (body raised
+                    // directly, e.g. `yield 1/0`) or the body's call site carried
+                    // forward by the trampoline loop above (`yield f()`).  The
+                    // gen-drive frame used to hardcode `None` and stayed caret-free.
+                    col_span: innermost_col,
                 });
             }
             // Restore the consumer frame.

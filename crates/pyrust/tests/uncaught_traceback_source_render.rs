@@ -462,6 +462,236 @@ TypeError: can only concatenate str (not \"int\") to str
     assert_eq!(stderr, expected, "got:\n{stderr}");
 }
 
+// ── #2904: generator frames carry the anchor of their raising instruction ───
+//
+// A generator frame's `FrameInfo` used to be recorded with `col_span: None` at
+// both recording sites (the `for`-loop gen-drive trampoline in
+// `vm::entry::vm_unwind_error` and the plain `next()` / `.send()` / `.throw()`
+// resume in `vm::entry::resume_generator_with_exc`), so *every* generator frame
+// rendered caret-free regardless of what the body raised.  Both sites now
+// publish the same anchor a plain function frame does — the col span of the
+// instruction that propagated the error inside the body.  Every expectation
+// below was captured from `python3.12`.
+
+#[test]
+fn yield_binop_caret_is_byte_exact() {
+    // `yield 1/0`: CPython underlines the `1/0` BinOp (`~^~`), NOT the whole
+    // `yield ...` line.
+    let src = "def g():\n    yield 1/0\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("yield_div.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yield_div.py\", line 3, in <module>
+    for _ in g(): pass
+  File \"yield_div.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_call_caret_is_byte_exact() {
+    // `yield f()` with a raising `f`: the generator frame underlines `f()`.
+    let src =
+        "def f():\n    raise ValueError(\"boom\")\ndef g():\n    yield f()\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("yield_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yield_call.py\", line 5, in <module>
+    for _ in g(): pass
+  File \"yield_call.py\", line 4, in g
+    yield f()
+          ^^^
+  File \"yield_call.py\", line 2, in f
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn assigned_yield_call_caret_is_byte_exact() {
+    // `x = yield f()`: the anchor is still just the `f()` call, offset by the
+    // assignment prefix.
+    let src = "def f():\n    raise ValueError(\"boom\")\ndef g():\n    x = yield f()\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("yield_assign_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yield_assign_call.py\", line 5, in <module>
+    for _ in g(): pass
+  File \"yield_assign_call.py\", line 4, in g
+    x = yield f()
+              ^^^
+  File \"yield_assign_call.py\", line 2, in f
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_from_call_caret_is_byte_exact() {
+    // `yield from f()` where `f` raises *at the call* (before any delegation):
+    // the raising instruction is the `f()` Call, so CPython underlines `f()`.
+    let src = "def f():\n    raise ValueError(\"boom\")\ndef g():\n    yield from f()\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("yield_from_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yield_from_call.py\", line 5, in <module>
+    for _ in g(): pass
+  File \"yield_from_call.py\", line 4, in g
+    yield from f()
+               ^^^
+  File \"yield_from_call.py\", line 2, in f
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn yield_binop_call_caret_is_byte_exact() {
+    // `yield 1 + f()`: the Call raises before the BinOp runs, so the anchor is
+    // the call's, not the operator's.
+    let src = "def f():\n    raise ValueError(\"boom\")\ndef g():\n    yield 1 + f()\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("yield_binop_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"yield_binop_call.py\", line 5, in <module>
+    for _ in g(): pass
+  File \"yield_binop_call.py\", line 4, in g
+    yield 1 + f()
+              ^^^
+  File \"yield_binop_call.py\", line 2, in f
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn generator_statement_before_yield_caret_is_byte_exact() {
+    // The defect was never specific to the `yield` operand — a plain statement
+    // in a generator body was caret-free too.
+    let src = "def g():\n    x = 1/0\n    yield x\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("gen_stmt_before_yield.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"gen_stmt_before_yield.py\", line 4, in <module>
+    for _ in g(): pass
+  File \"gen_stmt_before_yield.py\", line 2, in g
+    x = 1/0
+        ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn next_resumed_generator_caret_is_byte_exact() {
+    // `next(g())` resumes through `resume_generator_with_exc`, not the `for`
+    // gen-drive trampoline — the second recording site.
+    let src = "def g():\n    yield 1/0\nnext(g())\n";
+    let stderr = run_pyrust_stderr("next_yield_div.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"next_yield_div.py\", line 3, in <module>
+    next(g())
+  File \"next_yield_div.py\", line 2, in g
+    yield 1/0
+          ~^~
+ZeroDivisionError: division by zero
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn send_resumed_generator_caret_is_byte_exact() {
+    // `.send()` takes the same non-trampolined resume path as `next()`.
+    let src = "def f():\n    raise ValueError(\"boom\")\ndef g():\n    yield f()\ng().send(None)\n";
+    let stderr = run_pyrust_stderr("send_yield_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"send_yield_call.py\", line 5, in <module>
+    g().send(None)
+  File \"send_yield_call.py\", line 4, in g
+    yield f()
+          ^^^
+  File \"send_yield_call.py\", line 2, in f
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn delegating_generator_frames_each_carry_their_own_caret() {
+    // Two stacked generator frames: the inner one underlines its `f()` call; the
+    // delegating `yield from inner()` is a whole-line anchor, which CPython
+    // renders caret-free (pyrust must not invent one for it either).
+    let src = "def f():\n    raise ValueError(\"boom\")\ndef inner():\n    yield f()\ndef outer():\n    yield from inner()\nfor _ in outer(): pass\n";
+    let stderr = run_pyrust_stderr("nested_gen.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"nested_gen.py\", line 7, in <module>
+    for _ in outer(): pass
+  File \"nested_gen.py\", line 6, in outer
+    yield from inner()
+  File \"nested_gen.py\", line 4, in inner
+    yield f()
+          ^^^
+  File \"nested_gen.py\", line 2, in f
+    raise ValueError(\"boom\")
+ValueError: boom
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn generator_over_deep_call_chain_carets_are_byte_exact() {
+    // The generator frame's anchor is the call site carried forward by the
+    // trampoline unwind loop, so it must not be confused with the trampolined
+    // callee frames' own anchors below it.
+    let src = "def a():\n    raise ValueError(\"deep\")\ndef b():\n    return 10 * a()\ndef g():\n    yield b()\nfor _ in g(): pass\n";
+    let stderr = run_pyrust_stderr("gen_deep_call.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"gen_deep_call.py\", line 7, in <module>
+    for _ in g(): pass
+  File \"gen_deep_call.py\", line 6, in g
+    yield b()
+          ^^^
+  File \"gen_deep_call.py\", line 4, in b
+    return 10 * a()
+                ^^^
+  File \"gen_deep_call.py\", line 2, in a
+    raise ValueError(\"deep\")
+ValueError: deep
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
+#[test]
+fn thrown_exception_at_yield_does_not_inherit_a_stale_caret() {
+    // `gen.throw()` injects at the suspended `yield`, which carries no anchor.
+    // The body already raised-and-caught a `1/0` earlier, so the published span
+    // is stale; the injection escape path must clear it rather than let the
+    // generator frame paint `~^~` onto `yield 1`.  CPython prints no caret row.
+    let src = "def g():\n    try:\n        1/0\n    except ZeroDivisionError:\n        pass\n    yield 1\ngen = g()\nnext(gen)\ngen.throw(ValueError(\"thrown\"))\n";
+    let stderr = run_pyrust_stderr("throw_after_caught.py", src);
+    let expected = "\
+Traceback (most recent call last):
+  File \"throw_after_caught.py\", line 9, in <module>
+    gen.throw(ValueError(\"thrown\"))
+  File \"throw_after_caught.py\", line 6, in g
+    yield 1
+ValueError: thrown
+";
+    assert_eq!(stderr, expected, "got:\n{stderr}");
+}
+
 #[test]
 fn constfold_sibling_subtree_fold_underlines_raising_op() {
     // `(a+b) + "s" + (c+d)` with `a`/`b`/`c`/`d` bound to ints: the variable
