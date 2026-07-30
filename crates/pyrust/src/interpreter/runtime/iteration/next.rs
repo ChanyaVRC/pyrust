@@ -130,13 +130,15 @@ impl Interpreter {
                 }
                 if frame.done {
                     drop(borrow);
-                    // Exhausted generator: StopIteration() with no args → .value is None.
-                    let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
-                        PyError::Raised(instantiate_exception(cls, vec![]))
-                    } else {
-                        pyrust_core::py_err!("StopIteration", String::new())
-                    };
-                    return Err(exc);
+                    // Exhausted generator: a bare `StopIteration` with no args,
+                    // reported in the same cheap `Named` shape as every other
+                    // cursor's exhaustion.  Materialising an instance here is
+                    // unobservable — `.value` and `.args` are None/`()` either
+                    // way — but it is not free: `call_next` discards it unread
+                    // whenever a `default` was supplied, which made re-polling
+                    // a finished generator 1.77x slower than materialising
+                    // lazily.
+                    return Self::step_or_stop(None);
                 }
                 // A `StopIteration` from the body is returned verbatim so
                 // that `.value` survives for a bare `next(g)` (PEP 380 /

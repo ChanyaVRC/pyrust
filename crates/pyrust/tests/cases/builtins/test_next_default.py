@@ -151,6 +151,42 @@ try:
 except StopIteration as e:
     print("repeat_no_default !!", repr(e.value), repr(e.args))
 
+# Re-polling a generator that has ALREADY finished takes a different arm from
+# the poll that finishes it: the frame is flagged done, so the body never
+# resumes.  Pin both the default and the no-default shape here — `.value` is
+# None and `.args` is empty either way, and the exception must stay a real
+# StopIteration for `raise ... from` / `__context__` to chain correctly.
+_gd = gen_one()
+next(_gd)
+try:
+    next(_gd)
+except StopIteration:
+    pass
+show("gen_done_repoll_default", lambda: next(_gd, "D"))
+show("gen_done_repoll_default_again", lambda: next(_gd, "D"))
+try:
+    next(_gd)
+except StopIteration as e:
+    print("gen_done_repoll_no_default !!", repr(e.value), repr(e.args), repr(str(e)))
+    print("  is_StopIteration", type(e) is StopIteration, isinstance(e, Exception))
+    try:
+        raise ValueError("after") from e
+    except ValueError as v:
+        print("  chained_cause", type(v.__cause__).__name__, v.__cause__ is e)
+
+# Same arm reached after a return-value stop: the discarded StopIteration must
+# not leak its value into a later poll.
+_gdv = gen_return_value()
+try:
+    next(_gdv)
+except StopIteration:
+    pass
+show("gen_done_after_return_default", lambda: next(_gdv, "D"))
+try:
+    next(_gdv)
+except StopIteration as e:
+    print("gen_done_after_return_no_default !!", repr(e.value), repr(e.args))
+
 print("== user __next__ ==")
 
 
