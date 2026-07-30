@@ -340,22 +340,15 @@ pyrust_module! {
                     instance,
                 )))
             }
-            ValueKind::PyModule(module) => {
-                if let Some(namespace) = module.borrow().live_namespace() {
-                    return Ok(namespace);
-                }
-                if let Some(globals) = _interp.filesystem_module_globals(module) {
-                    return Ok(globals);
-                }
-                let mut dict: PyDict = PyDict::default();
-                for (k, v) in module.borrow().attrs.iter() {
-                    // Skip Value::unset() tombstones (deletion markers for
-                    // synthetic dunders written by delete_attr).
-                    if !v.is_unset() {
-                        dict.insert(PyKey::str_from(k), v.clone());
-                    }
-                }
-                Ok(Value::dict(dict))
+            ValueKind::PyModule(_) => {
+                // `vars(m)` is defined as `m.__dict__`, so read it through the
+                // module attribute path instead of re-deriving the namespace
+                // here. That path returns the live dict for a `sys`-style or
+                // source-backed module and otherwise synthesises the built-in
+                // module namespace — including the `__name__` / `__doc__` /
+                // `__package__` / `__loader__` / `__spec__` slots CPython
+                // exposes, which this arm previously dropped (issue #2918).
+                _interp.get_attr(&args[0].value, "__dict__")
             }
             ValueKind::PyClass(class) => {
                 Ok(pyrust_builtins::mapping_proxy::mapping_proxy(Rc::clone(class)))

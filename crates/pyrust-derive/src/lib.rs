@@ -2033,9 +2033,16 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         /// interpreter's `load_module` path on first `import`.
         pub(crate) fn module() -> crate::value::Value {
             use std::cell::RefCell;
-            use std::collections::HashMap;
             use std::rc::Rc;
-            let mut attrs: HashMap<String, crate::value::Value> = HashMap::with_capacity(#map_capacity);
+            // Insertion-ordered (issue #2918): the sequence of `insert` calls
+            // below is this module body's declaration order — constants, then
+            // functions, then classes — so `vars(module)` is stable across
+            // runs and reflects the source, not a hash seed.
+            let mut attrs: crate::value::ModuleAttrs =
+                crate::value::ModuleAttrs::with_capacity_and_hasher(
+                    #map_capacity,
+                    Default::default(),
+                );
             #(#const_entries)*
             #(#attr_entries)*
             // `class` blocks expand to `attrs.insert(<ClassName>, …PyClass…)`.

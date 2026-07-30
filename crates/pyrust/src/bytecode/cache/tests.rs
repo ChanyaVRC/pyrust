@@ -67,7 +67,7 @@ fn global_cache_entries_guard_namespace_and_shared_module_mutation() {
 
     let provider = Rc::new(RefCell::new(PyModule::new(
         "builtins".to_string(),
-        HashMap::new(),
+        crate::value::ModuleAttrs::default(),
     )));
     let provider_state = provider.borrow().mutation_state();
     let builtin =

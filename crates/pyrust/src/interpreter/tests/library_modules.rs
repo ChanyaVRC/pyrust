@@ -655,7 +655,7 @@ fn replacement_registry_disables_module_class_cache_and_respects_internal_priori
         .expect("typing.Protocol must be a class");
     assert!(!Rc::ptr_eq(&original_alias_class, &replacement_alias_class));
 
-    let mut replacement_attrs = HashMap::new();
+    let mut replacement_attrs = crate::value::ModuleAttrs::default();
     replacement_attrs.insert(
         "_GenericAlias".to_string(),
         Value::py_class(Rc::clone(&replacement_alias_class)),

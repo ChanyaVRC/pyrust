@@ -167,16 +167,25 @@ impl Interpreter {
             .map(|dir| Value::string(dir.to_string_lossy()))
             .unwrap_or_else(|| Value::string(""));
         let mut sys = sys.borrow_mut();
-        sys.attach_live_namespace();
-        for (name, value) in [
+        // Seed the module slots at the *front* of the still-ordered `attrs`
+        // before it is moved into the live dict, so `list(vars(sys))` starts
+        // with CPython's five module-object slots in CPython's order — the
+        // same head the synthesised built-in `__dict__` produces for a module
+        // that keeps direct `attrs` storage (issue #2918). Appending them
+        // after `attach_live_namespace` put them at the tail instead.
+        for (index, (name, value)) in [
             ("__name__", Value::string("sys")),
+            ("__doc__", Value::none()),
             ("__package__", Value::string("")),
             ("__loader__", Value::none()),
             ("__spec__", Value::none()),
-            ("__doc__", Value::none()),
-        ] {
-            sys.insert_attr(name.to_string(), value);
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sys.attrs.shift_insert(index, name.to_string(), value);
         }
+        sys.attach_live_namespace();
         sys.insert_attr("path".to_string(), Value::list(vec![initial_path]));
         sys.insert_attr(
             "modules".to_string(),
@@ -351,7 +360,7 @@ impl Interpreter {
                 // direct strong PyModule/Environment ownership cycle.
                 let module_rc = Rc::new(RefCell::new(PyModule::new(
                     name.to_string(),
-                    HashMap::new(),
+                    crate::value::ModuleAttrs::default(),
                 )));
                 {
                     let mut module = module_rc.borrow_mut();
@@ -359,7 +368,16 @@ impl Interpreter {
                     // Seed the import identity before execution. The script
                     // dunder initializer uses get-or-insert and therefore
                     // preserves these filesystem-module values.
+                    //
+                    // `__doc__` is seeded between them purely for position:
+                    // these keys are inserted before the script initializer
+                    // runs, so they fix the head of `list(vars(module))`, and
+                    // CPython's module dict starts `__name__`, `__doc__`,
+                    // `__package__` (issue #2918 — the same head the built-in
+                    // module paths now produce). A module docstring overwrites
+                    // the `None` in place when the body executes.
                     module.insert_attr("__name__".to_string(), Value::string(name));
+                    module.insert_attr("__doc__".to_string(), Value::none());
                     module.insert_attr("__package__".to_string(), Value::string(""));
                 }
                 let module = Value::py_module(Rc::clone(&module_rc));

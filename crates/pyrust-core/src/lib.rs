@@ -43,7 +43,7 @@ pub use object_model::{
     BuiltinRegistry, BuiltinState, BuiltinTypeOps, CachedConstructionPlan, CanonicalClassTag,
     CollectionMutationState, CompareValuesFn, DefaultsOverride, FilesystemModuleNamespace,
     FnNameOverrides, FrozenSetKey, INT_MAX_STR_DIGITS_DEFAULT, INT_MAX_STR_DIGITS_MIN,
-    InstanceAttrs, IntMaxStrDigitsGuard, IterValuesFn, ListInner, MemberSlotId,
+    InstanceAttrs, IntMaxStrDigitsGuard, IterValuesFn, ListInner, MemberSlotId, ModuleAttrs,
     ModuleMutationState, Opaque, ParamBind, PyBigInt, PyBigIntSign, PyClass, PyDict, PyHasher,
     PyInstance, PyKey, PyModule, PyPow, PySet, PyToPrimitive, PyZero, SetInner, SortKind, StrKey,
     TupleInner, UserFunction, UserFunctionKind, UserFunctionParam, Value, ValueKind,
