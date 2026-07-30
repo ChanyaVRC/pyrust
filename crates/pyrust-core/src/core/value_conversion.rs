@@ -389,17 +389,15 @@ impl Value {
             ValueKind::None => Some(PyKey::None),
             ValueKind::Ellipsis => Some(PyKey::Ellipsis),
             ValueKind::Bytes(rc) => Some(PyKey::Bytes(Rc::clone(rc))),
-            // Complex with zero imaginary part maps to PyKey::Float(re.to_bits()) so
-            // that cross-type equality (1+0j == 1 == 1.0) is handled by the existing
-            // Float <-> Int arms in PyKey::PartialEq without extra special-casing.
-            // -0.0 imaginary is treated as zero (IEEE 754: -0.0 == 0.0).
-            ValueKind::Complex(re, im) => {
-                if im == 0.0 {
-                    Some(PyKey::Float(re.to_bits()))
-                } else {
-                    Some(PyKey::Complex(re, im))
-                }
-            }
+            // Every complex maps to `PyKey::Complex`, including a zero imaginary
+            // part.  Collapsing `1+0j` to `PyKey::Float(1.0)` used to lose the
+            // inserted key object, so `{1+0j: 'a'}` listed `1.0` instead of
+            // `(1+0j)` (#2900).  Cross-type unification (`1+0j == 1 == 1.0`) is
+            // instead provided by the real-valued `Complex <-> Int/Bool/Float/
+            // BigInt` arms in `PyKey::PartialEq` plus the matching `Hash` arm,
+            // so the four numeric types still share a single dict/set slot with
+            // CPython's first-inserted-key-wins behaviour.
+            ValueKind::Complex(re, im) => Some(PyKey::Complex(re, im)),
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
             ValueKind::Tuple(items) => {
                 // Recursively hash each element.  If any element is itself

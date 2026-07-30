@@ -29,12 +29,15 @@ pub(crate) fn eval_builtin_unary(op: UnaryOp, value: Value) -> Result<Value> {
             )),
         },
         UnaryOp::Pos => {
-            if matches!(value.kind(), ValueKind::BigInt(_)) {
+            // `float.__pos__` / `int.__pos__` return *self* in CPython, so
+            // `+x is x` holds.  Floats must take this path rather than being
+            // re-boxed below: re-boxing a NaN would mint a fresh object
+            // identity and break `+n is n` (#2911).
+            if matches!(value.kind(), ValueKind::BigInt(_) | ValueKind::Float(_)) {
                 return Ok(value);
             }
             match value.kind() {
                 ValueKind::Int(integer) => Ok(Value::int(integer)),
-                ValueKind::Float(float) => Ok(Value::float(float)),
                 ValueKind::Complex(real, imag) => Ok(Value::complex(real, imag)),
                 ValueKind::Bool(boolean) => Ok(Value::int(if boolean { 1 } else { 0 })),
                 _ => Err(pyrust_core::type_err!(

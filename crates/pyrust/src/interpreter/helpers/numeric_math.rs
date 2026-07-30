@@ -388,9 +388,13 @@ pub(crate) fn py_hash_float(v: f64) -> i64 {
         return if v > 0.0 { 314159 } else { -314159 };
     }
     if v.is_nan() {
-        // CPython calls PyObject_GenericHash (id-based) for NaN; pyrust
-        // doesn't have stable float object identity, so return the canonical
-        // sys.hash_info.nan value (0) as a stable substitute.
+        // CPython calls PyObject_GenericHash (id-based) for NaN, so two NaNs
+        // report different `hash()` values there.  We deliberately keep the
+        // stable `sys.hash_info.nan` value (0) instead: exposing a raw NaN
+        // payload as a Python-visible hash would leak an allocation counter.
+        // Container behaviour does not depend on it — distinct NaN keys are
+        // separated by `PyKey`'s Rust `Hash` impl, which buckets on the full
+        // bit pattern, and by the identity-aware `PartialEq` (#2911).
         return 0;
     }
     if v == 0.0 {

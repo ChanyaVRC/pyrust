@@ -384,7 +384,7 @@ fn key_to_value(key: &PyKey) -> Value {
     match key.clone() {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),
-        PyKey::Float(v) => Value::float(f64::from_bits(v)),
+        PyKey::Float(v) => Value::float_from_bits(v),
         PyKey::Str(v) => v,
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),

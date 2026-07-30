@@ -21,6 +21,67 @@ const NOT_IMPLEMENTED_BITS: u64 = 0x7FF8_0000_0000_BAD2;
 /// in the same positive-NaN family as `UNSET_BITS` and `NOT_IMPLEMENTED_BITS`.
 /// Must be tested explicitly before the float arm in `kind()` / `is_float()`.
 const ELLIPSIS_BITS: u64 = 0x7FF8_0000_0000_BAD4;
+/// Bit 47 of the NaN payload.  Always set on a NaN minted by [`Value::float`].
+///
+/// The reserved sentinels [`UNSET_BITS`], [`NOT_IMPLEMENTED_BITS`] and
+/// [`ELLIPSIS_BITS`] occupy payloads `0xBAD0` / `0xBAD2` / `0xBAD4` in the very
+/// same positive-NaN family, so a naive counter starting at zero would collide
+/// with them after ~48k NaNs.  That is not a cosmetic clash: a `0xBAD0`-payload
+/// NaN makes `is_unset()` return `true`, and release builds only
+/// `debug_assert!` against reading an unset slot, so the value would silently
+/// behave as an uninitialised register.  Forcing bit 47 keeps every minted
+/// payload at or above 2^47 and therefore permanently clear of that region.
+const NAN_IDENTITY_BIT: u64 = 1 << 47;
+/// Counter bits available below [`NAN_IDENTITY_BIT`] (2^47 distinct identities).
+const NAN_IDENTITY_MASK: u64 = NAN_IDENTITY_BIT - 1;
+
+thread_local! {
+    /// Per-thread source of NaN object identities (#2911).  Values are
+    /// thread-confined, so a non-atomic `Cell` matches the ownership model.
+    static NAN_IDENTITY_COUNTER: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Mint a fresh NaN bit pattern carrying a distinct object identity.
+///
+/// CPython gives every `float('nan')` its own object, and that is observable:
+/// two distinct NaNs occupy two dict slots, `b in {a}` is `False`, and
+/// `[a] == [b]` is `False` while `[a] == [a]` is `True`.  pyrust's floats are
+/// NaN-boxed immediates with no heap allocation to hang an identity off, so the
+/// identity is carried in the otherwise-unused NaN payload.  "Same object" then
+/// becomes exactly "same bits" — which is precisely what `is_identical_nan` and
+/// `values_are_identical` already test, so those call sites gain CPython
+/// semantics without changing.
+///
+/// The counter wraps after 2^47 mintings and identities are then reused; that
+/// is the same practical caveat CPython carries when a freed object's address
+/// is recycled.
+#[cold]
+#[inline(never)]
+fn mint_nan_identity() -> u64 {
+    // A `Value` may be constructed while thread-locals are being torn down
+    // (drop glue running after this key's destructor).  Fall back to the bare
+    // identity pattern rather than panicking; it stays a valid, in-family NaN.
+    let payload = NAN_IDENTITY_COUNTER
+        .try_with(|counter| {
+            let next = counter.get().wrapping_add(1) & NAN_IDENTITY_MASK;
+            counter.set(next);
+            next
+        })
+        .unwrap_or(0);
+    CANONICAL_NAN | NAN_IDENTITY_BIT | payload
+}
+
+/// Whether `bits` is a NaN pattern minted by [`mint_nan_identity`].
+///
+/// Used to decide when a raw bit pattern may be restored verbatim.  Anything
+/// else — in particular a *negative* NaN, whose top 16 bits overlap `TAG_STR`
+/// through `TAG_OPAQUE` — must be normalised through `Value::float` instead, or
+/// it would be decoded as a heap pointer.
+#[inline]
+fn is_minted_nan(bits: u64) -> bool {
+    bits & !NAN_IDENTITY_MASK == CANONICAL_NAN | NAN_IDENTITY_BIT
+}
+
 const TAG_BOOL_BITS: u64 = 0xFFFA_0000_0000_0000;
 const TAG_INT_BITS: u64 = 0xFFFB_0000_0000_0000;
 const TAG_STR_BITS: u64 = 0xFFFC_0000_0000_0000;

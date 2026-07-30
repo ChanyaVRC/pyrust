@@ -244,7 +244,7 @@ fn key_to_value(key: PyKey) -> Value {
     match key {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),
-        PyKey::Float(bits) => Value::float(f64::from_bits(bits)),
+        PyKey::Float(bits) => Value::float_from_bits(bits),
         PyKey::Str(s) => s,
         PyKey::Bool(b) => Value::bool_(b),
         PyKey::None => Value::none(),

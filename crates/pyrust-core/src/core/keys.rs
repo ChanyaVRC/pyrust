@@ -69,10 +69,15 @@ pub enum PyKey {
     /// CPython.  Holds the backing `Rc<Vec<u8>>` directly to avoid
     /// re-allocation on the hot dict/set lookup path.
     Bytes(Rc<Vec<u8>>),
-    /// Complex key with non-zero imaginary part.  Complex values with zero
-    /// imaginary part are stored as `PyKey::Float(re.to_bits())` so that
-    /// cross-type equality (`1+0j == 1 == 1.0`) works via the existing
-    /// `Float <-> Int` arms without additional special-casing.
+    /// Complex key.  Used for *every* complex value, including one with a zero
+    /// imaginary part: retaining `1+0j` as a complex key is what makes
+    /// `list({1+0j: 'a'})` yield `[(1+0j)]` rather than `[1.0]` (#2900).
+    ///
+    /// A real-valued complex (`im == 0.0`) still unifies with the other numeric
+    /// key types — `1+0j == 1 == 1.0 == True` occupy one dict/set slot — via
+    /// the dedicated `Complex <-> Int/Bool/Float/BigInt` arms in `PartialEq`
+    /// and the delegating `Hash` arm.  Whichever key was inserted *first* is
+    /// the one the container keeps, matching CPython.
     Complex(f64, f64),
     /// Key constructed for a user-defined `PyInstance` (or any non-builtin
     /// Value that defines `__hash__`).  The `hash` is precomputed by the
@@ -219,6 +224,81 @@ fn py_hash_complex(re: f64, im: f64) -> i64 {
     if result == -1 { -2 } else { result }
 }
 
+/// Feed the IEEE-754 bit pattern `bits` into `state` using the bucket scheme
+/// that `PyKey::Float` relies on.
+///
+/// Shared by the `Float` and real-valued `Complex` arms of `PyKey::Hash`: the
+/// two compare equal (`1+0j == 1.0`), so the `Hash + Eq` contract requires them
+/// to produce identical hasher input.  Keeping one implementation means the
+/// invariant cannot drift.
+///
+/// - Integer-valued and within `i64`: tag 0 + the `i64`, identical to
+///   `PyKey::Int` / `PyKey::Bool`.
+/// - Integer-valued beyond `i64`: tag 1 + Mersenne-prime reduction, identical
+///   to the `PyKey::BigInt` out-of-range arm (so `1e20` and `10**20` collide).
+/// - Fractional or non-finite: tag 1 + the raw bits.
+#[inline]
+fn hash_float_bits<H: Hasher>(bits: u64, state: &mut H) {
+    if let Some(i) = float_bits_as_exact_i64(bits) {
+        0u8.hash(state);
+        i.hash(state);
+        return;
+    }
+    let f = f64::from_bits(bits);
+    1u8.hash(state);
+    if f.is_finite()
+        && f.fract() == 0.0
+        && let Some(big) = BigInt::from_f64(f)
+    {
+        pykey_hash_bigint(&big).hash(state);
+        return;
+    }
+    bits.hash(state);
+}
+
+/// Equality between a complex key and a *non-complex* key.
+///
+/// A complex with a zero imaginary part (either sign of zero) is numerically
+/// real, so CPython puts `1+0j`, `1`, `1.0` and `True` in one dict slot; a
+/// non-zero imaginary part matches nothing else (#2900).
+///
+/// Deliberately no NaN bit-equality fallback: CPython reports
+/// `complex(nan, 0) == nan` as False.  The identity short-circuit that keeps
+/// `{z: 1}[z]` working lives in the `Complex`/`Complex` arm of [`PyKey::eq`].
+///
+/// Kept `#[cold]` and out-of-line: complex dict keys are rare, while
+/// `PyKey::eq` is inlined into every dict/set probe, so this code earns its
+/// place off the hot path.
+#[cold]
+#[inline(never)]
+fn real_valued_complex_eq(re: f64, im: f64, other: &PyKey) -> bool {
+    if im != 0.0 {
+        return false;
+    }
+    match other {
+        PyKey::Float(bits) => re == f64::from_bits(*bits),
+        PyKey::Int(i) => float_bits_as_exact_i64(re.to_bits()).is_some_and(|fi| fi == *i),
+        PyKey::Bool(b) => float_bits_as_exact_i64(re.to_bits()).is_some_and(|fi| fi == *b as i64),
+        PyKey::BigInt(n) => bigint_float_eq(n, re),
+        _ => false,
+    }
+}
+
+/// Hash a complex key, mirroring [`real_valued_complex_eq`]'s notion of "real".
+///
+/// A real-valued complex delegates to the float hasher so `1+0j` and `1.0`
+/// share a bucket; anything else uses the CPython complex formula so that this
+/// impl and [`py_hash_pykey`] agree.  Cold and out-of-line for the same reason.
+#[cold]
+#[inline(never)]
+fn hash_complex_key<H: Hasher>(re: f64, im: f64, state: &mut H) {
+    if im == 0.0 {
+        hash_float_bits(re.to_bits(), state);
+    } else {
+        (py_hash_complex(re, im) as u64).hash(state);
+    }
+}
+
 impl PartialEq for PyKey {
     fn eq(&self, other: &Self) -> bool {
         // In CPython, `True == 1` and `False == 0`, and they hash equal, so
@@ -293,6 +373,14 @@ impl PartialEq for PyKey {
                 (ar == br || ar.to_bits() == br.to_bits())
                     && (ai == bi || ai.to_bits() == bi.to_bits())
             }
+            // Cross-type: a *real-valued* complex equals the int / bool / float
+            // / BigInt with the same value (#2900).  Outlined so that the four
+            // extra arms don't inflate `eq` itself — this function is inlined
+            // into every dict/set probe, and growing it measurably slowed
+            // `set.add` for Int and Str keys.
+            (PyKey::Complex(re, im), other) | (other, PyKey::Complex(re, im)) => {
+                real_valued_complex_eq(*re, *im, other)
+            }
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
@@ -328,30 +416,7 @@ impl Hash for PyKey {
                 0u8.hash(state);
                 (*b as i64).hash(state);
             }
-            PyKey::Float(bits) => {
-                if let Some(i) = float_bits_as_exact_i64(*bits) {
-                    // Integer-valued float in i64 range: hash identically to
-                    // PyKey::Int(i) so that equal keys land in the same bucket.
-                    0u8.hash(state);
-                    i.hash(state);
-                } else {
-                    // Float beyond i64 range (or fractional, or non-finite).
-                    // For integer-valued floats beyond i64 range, CPython's
-                    // `hash(float)` uses the Mersenne-prime reduction, matching
-                    // `hash(int)` for the same value.  We reproduce that here so
-                    // `PyKey::Float(1e20)` and `PyKey::BigInt(10**20)` collide.
-                    let f = f64::from_bits(*bits);
-                    1u8.hash(state);
-                    if f.is_finite()
-                        && f.fract() == 0.0
-                        && let Some(big) = BigInt::from_f64(f)
-                    {
-                        pykey_hash_bigint(&big).hash(state);
-                        return;
-                    }
-                    bits.hash(state);
-                }
-            }
+            PyKey::Float(bits) => hash_float_bits(*bits, state),
             PyKey::BigInt(n) => {
                 // BigInt that fits in i64 must hash identically to PyKey::Int
                 // with the same value, because PartialEq makes them equal (the
@@ -395,12 +460,12 @@ impl Hash for PyKey {
                 6u8.hash(state);
                 b.as_ref().hash(state);
             }
-            // Complex with non-zero imaginary: hash using the CPython formula
-            // so that py_hash_pykey(Complex(re, im)) and this Rust Hash impl
-            // agree (equal keys must hash equal per the Hash+Eq contract).
-            PyKey::Complex(re, im) => {
-                (py_hash_complex(*re, *im) as u64).hash(state);
-            }
+            // A real-valued complex compares equal to the Int / Bool / Float /
+            // BigInt with the same value, so it must hash identically to the
+            // equivalent float key or the two would land in different buckets
+            // and never be deduplicated (Hash + Eq contract, #2900).  Outlined
+            // for the same reason as `real_valued_complex_eq`.
+            PyKey::Complex(re, im) => hash_complex_key(*re, *im, state),
             PyKey::Object { hash, .. } => hash.hash(state),
         }
     }
@@ -613,6 +678,11 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             let result = h as i64;
             if result == -1 { -2 } else { result }
         }
+        // A real-valued complex must report the *float* hash: CPython's
+        // `hash(1+0j) == hash(1.0) == hash(1)`.  Delegating (rather than
+        // relying on `py_hash_complex(re, 0.0)` reducing to the same number)
+        // makes the invariant structural (#2900).
+        PyKey::Complex(re, im) if *im == 0.0 => py_hash_pykey(&PyKey::Float(re.to_bits())),
         PyKey::Complex(re, im) => py_hash_complex(*re, *im),
         PyKey::Object { hash, .. } => *hash as i64,
     }

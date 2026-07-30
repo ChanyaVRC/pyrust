@@ -3,12 +3,9 @@
 # where this is observable (`x == x` is False), so a NaN searching for
 # *itself* is found even though plain equality misses it.
 #
-# Caveat: pyrust's floats are NaN-boxed values, not heap objects, so two
-# *distinct* `float('nan')` calls can't be told apart and would compare equal
-# under our bit-pattern approximation — so this fixture deliberately only
-# asserts the same-NaN-object cases that a value representation can match
-# (it never asserts `float('nan') in [float('nan')]`, which CPython reports
-# as False).
+# This fixture pins the same-NaN-object half of the rule.  The distinct-object
+# half (`float('nan') in [float('nan')]` being False) lives in
+# collections/test_nan_object_identity.py.
 
 n = float("nan")
 
@@ -61,10 +58,7 @@ print([w].count(w))
 print([w] == [w])
 
 # Hash-based containers (set / frozenset / dict) short-circuit on identity too:
-# a NaN key finds *itself* even though `nan == nan` is False.  Same caveat as
-# above — only same-NaN-object cases are asserted (pyrust's value-NaN can't tell
-# two distinct `float('nan')` calls apart, so e.g. `len({float('nan'),
-# float('nan')})` is intentionally not asserted here).
+# a NaN key finds *itself* even though `nan == nan` is False.
 print(n in {n})
 print(n in {1, n, 2})
 print(n in frozenset({n}))

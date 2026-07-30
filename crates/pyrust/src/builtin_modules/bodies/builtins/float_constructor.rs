@@ -10,7 +10,10 @@ pyrust_module! {
         match args.len() {
             0 => Ok(Value::float(0.0)),
             1 => match args[0].value.kind() {
-                ValueKind::Float(v) => Ok(Value::float(v)),
+                // CPython's `float(x)` returns `x` itself when it is already an
+                // exact float, so `float(n) is n`.  Re-boxing would mint a
+                // fresh identity for a NaN and break that (#2911).
+                ValueKind::Float(_) => Ok(args[0].value.clone()),
                 ValueKind::Int(v) => Ok(Value::float(v as f64)),
                 ValueKind::Bool(b) => Ok(Value::float(if b { 1.0 } else { 0.0 })),
                 ValueKind::BigInt(b) => b

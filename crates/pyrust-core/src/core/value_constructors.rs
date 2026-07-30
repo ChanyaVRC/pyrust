@@ -54,12 +54,42 @@ impl Value {
         Value::opaque(Opaque::PyBigInt(Rc::new(n)))
     }
 
+    /// Box an `f64`.
+    ///
+    /// Every NaN gets a *fresh* object identity (see [`mint_nan_identity`]) so
+    /// that distinct NaNs behave like distinct CPython objects in dicts, sets
+    /// and sequence comparisons (#2911).  Non-NaN floats are stored verbatim,
+    /// so this is bit-for-bit unchanged on the arithmetic hot path — the
+    /// `is_nan()` branch was already here.
+    ///
+    /// Use [`Value::float_from_bits`] instead when *restoring* a float whose
+    /// identity must be preserved (e.g. rebuilding a `PyKey::Float`).
     pub fn float(f: f64) -> Self {
         if f.is_nan() {
-            Value::from_bits(CANONICAL_NAN)
+            Value::from_bits(mint_nan_identity())
         } else {
             Value::from_bits(f.to_bits())
         }
+    }
+
+    /// Rebuild a float from the exact bit pattern held by a `PyKey::Float`,
+    /// preserving NaN object identity.
+    ///
+    /// [`Value::float`] mints a fresh identity for every NaN, so reconstructing
+    /// a container key with it would hand back a NaN that is no longer the
+    /// object the container stores — `list(d)[0] is n` would be `False` and
+    /// `d[list(d)[0]]` would raise `KeyError`.  Dict/set iteration, `keys()`,
+    /// and the frozen-key-order walk must all round-trip through here.
+    ///
+    /// Patterns that are not a minted NaN are normalised through
+    /// [`Value::float`], which keeps a stale or hostile pattern from aliasing a
+    /// pointer tag; for every ordinary float that normalisation is the identity
+    /// function.
+    pub fn float_from_bits(bits: u64) -> Self {
+        if is_minted_nan(bits) {
+            return Value::from_bits(bits);
+        }
+        Value::float(f64::from_bits(bits))
     }
 
     pub fn string(s: impl AsRef<str>) -> Self {
