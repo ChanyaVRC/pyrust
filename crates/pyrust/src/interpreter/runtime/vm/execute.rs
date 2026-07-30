@@ -545,6 +545,18 @@ impl Interpreter {
                     }
                     Err(e) => {
                         pyrust_core::set_current_vm_line(cur_line);
+                        // #2904: the injected exception escapes at the suspended
+                        // yield, so publish *that* instruction's PEP 657 anchor
+                        // (`Yield` / `YieldFrom` carry none, so this is normally
+                        // `None`).  Without it the generator frame's `FrameInfo`
+                        // would inherit a stale span from an unrelated earlier
+                        // raise and paint a caret on the wrong columns.
+                        pyrust_core::set_current_vm_col_span(
+                            code.col_table
+                                .get(inject_pc)
+                                .copied()
+                                .filter(|&s| s != (0, 0, 0, 0)),
+                        );
                         return Err(e);
                     }
                 }
