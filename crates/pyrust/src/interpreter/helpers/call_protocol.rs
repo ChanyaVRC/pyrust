@@ -191,6 +191,112 @@ fn resolve_and_validate_builtin_method(
     }
 }
 
+/// Apply `staticmethod` / `classmethod` descriptor binding to a special-method
+/// slot whose `UserFunction::kind` is not `Regular`, and invoke it.
+///
+/// `None` means "not a descriptor wrapper after all" (a `Builtin`-kind
+/// function, or a classmethod whose receiver has no resolvable class); the
+/// caller then falls through to its ordinary receiver-prepending path.
+///
+/// Deliberately `#[cold]` + `#[inline(never)]`: a staticmethod-in-a-dunder-slot
+/// is rare, but [`invoke_class_method`] is the shared implicit-dunder dispatch
+/// path that every `__init__`, `__getitem__`, `__len__` and `__eq__` call goes
+/// through.  Inlining these arms into that hot function regressed ordinary
+/// class construction by ~10% purely through lost inlining, so the cold work is
+/// kept out-of-line (issue #2939).
+#[cold]
+#[inline(never)]
+fn bind_descriptor_slot(
+    interp: &mut Interpreter,
+    f: &Rc<pyrust_core::UserFunction>,
+    instance: &Value,
+    args: &[ExpandedCallArg],
+) -> Option<Result<Value>> {
+    match f.kind {
+        // `staticmethod.__get__` yields the wrapped callable untouched — no
+        // receiver is passed.
+        pyrust_core::UserFunctionKind::StaticMethod => {
+            let unwrapped = match f.wrapped_func.as_ref() {
+                Some(inner) => Value::user_function(Rc::clone(inner)),
+                None => {
+                    Value::with_function_kind(Rc::clone(f), pyrust_core::UserFunctionKind::Regular)
+                }
+            };
+            Some(interp.call_function_expanded(unwrapped, args))
+        }
+        // `classmethod.__get__` binds the owning class in place of the
+        // receiver.  Resolve it exactly as the wrapped-classmethod branch in
+        // `invoke_class_method` does, so both spellings of `@classmethod` agree
+        // on what `cls` is.
+        pyrust_core::UserFunctionKind::ClassMethod => {
+            let owner = match instance.kind() {
+                ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                ValueKind::PyInstance(object) => Some(Rc::clone(&object.borrow().class)),
+                _ => match value_class(instance).kind() {
+                    ValueKind::PyClass(class) => Some(Rc::clone(class)),
+                    _ => None,
+                },
+            }?;
+            let bound = Value::class_bound_method(Rc::clone(f), owner);
+            Some(interp.call_function_expanded(bound, args))
+        }
+        _ => None,
+    }
+}
+
+/// Invoke a `__get__` slot the way CPython's `slot_tp_descr_get` does.
+///
+/// `__get__` is the one special method CPython deliberately does *not* run
+/// through the descriptor protocol: `slot_tp_descr_get` resolves it with a raw
+/// `_PyType_Lookup` and calls whatever it finds directly, as
+/// `get(self, obj, objtype)`.  Consequences, all verified against CPython 3.12:
+///
+/// - a `staticmethod` `__get__` still receives the descriptor itself as its
+///   first argument (a `staticmethod` object is callable since 3.10 and just
+///   forwards), so `__get__(a, b, c)` works and `__get__(obj, objtype=None)`
+///   raises `TypeError: … takes from 1 to 2 positional arguments but 3 were
+///   given`;
+/// - a `classmethod` `__get__` is a plain `TypeError` — a `classmethod` object
+///   is not callable at all.
+///
+/// This is deliberately asymmetric with `__set__` / `__delete__`, which go
+/// through `vectorcall_method` and therefore *do* bind — those keep using
+/// [`invoke_class_method`].  Routing `__get__` through the descriptor binding
+/// too would silently invoke a `staticmethod`/`classmethod` getter that CPython
+/// rejects (issue #2939 review).
+///
+/// `None` means the slot carries no descriptor semantics of its own, so the
+/// caller falls through to its ordinary [`invoke_class_method`] path.
+///
+/// Deliberately `#[cold]` + `#[inline(never)]`, and deliberately *not* wrapped
+/// in a helper that itself calls [`invoke_class_method`]: handing that function
+/// an extra call site perturbs its inlining and cost ~6.6% on ordinary class
+/// construction — a path that never executes any of this code.  The caller
+/// therefore keeps its single, unchanged `invoke_class_method` tail call and
+/// merely guards it with a `kind != Regular` compare (issue #2939 review).
+#[cold]
+#[inline(never)]
+pub(crate) fn descriptor_get_slot_raw_call(
+    interp: &mut Interpreter,
+    f: &Rc<pyrust_core::UserFunction>,
+    instance: &Value,
+    args: &[ExpandedCallArg],
+) -> Option<Result<Value>> {
+    match f.kind {
+        pyrust_core::UserFunctionKind::ClassMethod => Some(Err(pyrust_core::py_err!(
+            "TypeError",
+            "'classmethod' object is not callable"
+        ))),
+        // Raw call: the descriptor is passed positionally, exactly as
+        // `PyObject_CallFunctionObjArgs(get, self, obj, type)` does.
+        pyrust_core::UserFunctionKind::StaticMethod => {
+            let func = Rc::clone(f);
+            Some(interp.call_user_function_expanded(func, args, std::slice::from_ref(instance)))
+        }
+        _ => None,
+    }
+}
+
 /// Invoke a method that was looked up on a class — handling both
 /// `UserFunction` methods (compiled Python bytecode, bound via the
 /// interpreter's user-function path) and `BuiltinFunction` methods
@@ -202,6 +308,14 @@ fn resolve_and_validate_builtin_method(
 /// (`__getitem__`, `__iter__`, `__call__`, `__len__`, `__init__`,
 /// …) don't have to repeat the UserFunction-vs-BuiltinFunction
 /// branching at every call site.
+///
+/// The receiver is *not* prepended when the resolved slot carries its own
+/// descriptor semantics: a `staticmethod` slot is called with `args` alone and
+/// a `classmethod` slot receives the owning class instead.  Both spellings —
+/// the `UserFunction` kind tag that `@staticmethod` / `@classmethod` over a
+/// Python function produces, and the `BuiltinObject` wrappers used for every
+/// other wrapped value — are honoured here so no dunder dispatch site has to
+/// know the difference (issue #2939).
 pub(crate) fn invoke_class_method(
     interp: &mut Interpreter,
     method_val: Value,
@@ -231,6 +345,30 @@ pub(crate) fn invoke_class_method(
 
     match method_val.kind() {
         ValueKind::UserFunction(f) => {
+            // `@classmethod` / `@staticmethod` over a Python function do NOT
+            // produce a wrapper value in pyrust — they Rc-share the original
+            // body and are distinguished only by `UserFunction::kind` (see
+            // `UserFunctionKind`).  The `as_*_method_any` probes above therefore
+            // only catch the *non*-function wrappers, and every implicit dunder
+            // dispatch used to prepend the receiver regardless of the tag:
+            // `__len__ = staticmethod(lambda: 3)` called the lambda with a
+            // stray `self`, and a classmethod dunder received the instance
+            // where CPython passes the class (issue #2939).
+            //
+            // The binding itself lives in the `#[cold]` `bind_descriptor_slot`
+            // so this arm keeps the exact shape (and inlining budget) it had
+            // before: a `Regular` slot — the overwhelmingly common case, and
+            // the one every `__init__` / `__getitem__` / `__len__` dispatch
+            // takes — pays one discriminant compare on a `Copy` tag already
+            // resident in the `UserFunction` just matched, then falls into the
+            // unchanged receiver-prepending tail.  Inlining the wrapper arms
+            // here instead cost ~10% on class construction even though the
+            // added code never ran on that path.
+            if f.kind != pyrust_core::UserFunctionKind::Regular
+                && let Some(result) = bind_descriptor_slot(interp, f, &instance, args)
+            {
+                return result;
+            }
             let func = Rc::clone(f);
             return interp.call_user_function_expanded(func, args, &[instance]);
         }

@@ -15,15 +15,18 @@ impl Interpreter {
         // `type.__call__` (see `default_construct`).  Ordinary classes (metatype
         // is the built-in `type`) return `None` here and fall through to the
         // existing default construct, preserving the fast path.
+        //
+        // Issue #2939: bind through `invoke_class_method` rather than
+        // prepending the class here, so a `staticmethod` / `classmethod`
+        // metaclass `__call__` follows the same descriptor rules as every other
+        // implicit dunder.  The `UserFunction` gate is unchanged: the built-in
+        // `type.__call__` sentinel is a `BuiltinFunction` and still falls
+        // straight through to `default_construct`, keeping the ordinary
+        // construction fast path free of any extra dispatch.
         if let Some(call_fn) = crate::interpreter::metaclass_dunder(&class, "__call__")
-            && let ValueKind::UserFunction(f) = call_fn.kind()
+            && matches!(call_fn.kind(), ValueKind::UserFunction(_))
         {
-            let func = Rc::clone(f);
-            return self.call_user_function_expanded(
-                func,
-                args,
-                &[Value::py_class(Rc::clone(&class))],
-            );
+            return invoke_class_method(self, call_fn, Value::py_class(Rc::clone(&class)), args);
         }
 
         self.default_construct(class, args)
