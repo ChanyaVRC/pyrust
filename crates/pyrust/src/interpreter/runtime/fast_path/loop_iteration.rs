@@ -80,6 +80,19 @@ pub(super) fn advance_loop_fast_state(
                 LoopFastOutcome::Exhausted
             }
         }
+        IterState::BytearrayIndexed { data, pos } => {
+            let current = *pos;
+            // The buffer's guard is released before the element is stored: the
+            // size is re-read on the next step, so a mid-loop append is
+            // yielded and a shrink past the cursor ends the loop (#2921).
+            let byte = data.borrow().get(current).copied();
+            if let Some(byte) = byte {
+                *pos = current + 1;
+                advanced_item!(Value::int(byte as i64))
+            } else {
+                LoopFastOutcome::Exhausted
+            }
+        }
         IterState::StrCodepointIndexed { value, byte_pos } => {
             let Some(text) = value.as_str() else {
                 return LoopFastOutcome::Exhausted;

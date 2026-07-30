@@ -142,6 +142,21 @@ impl NativeIterFrame {
         }
     }
 
+    /// Construct a live indexed walk over a `bytearray`'s buffer.
+    ///
+    /// `None` when `value` is not a `bytearray`, so callers can use this as the
+    /// classification test as well as the constructor.
+    pub(crate) fn bytearray(value: Value, type_name: &'static str) -> Option<Self> {
+        let data = pyrust_builtins::bytearray::as_bytearray_rc(&value)?;
+        Some(NativeIterFrame {
+            source: NativeIterSource::Bytearray(data),
+            pos: 0,
+            type_name,
+            guard: None,
+            exhausted: false,
+        })
+    }
+
     /// Construct a lazy UTF-8/CESU-8 codepoint iterator.
     pub(crate) fn string(value: Value, type_name: &'static str) -> Self {
         debug_assert!(matches!(value.kind(), ValueKind::Str(_)));
@@ -170,6 +185,7 @@ impl NativeIterFrame {
                 NativeIterSource::Materialized(_)
                     | NativeIterSource::Indexed(_)
                     | NativeIterSource::Bytes(_)
+                    | NativeIterSource::Bytearray(_)
                     | NativeIterSource::String { .. }
                     | NativeIterSource::Exhausted
             )
@@ -197,6 +213,9 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.get(pos).map(|byte| Value::int(*byte as i64)),
                 _ => None,
             },
+            NativeIterSource::Bytearray(data) => {
+                data.borrow().get(pos).map(|byte| Value::int(*byte as i64))
+            }
             NativeIterSource::String { value, byte_pos } => {
                 match value
                     .as_str()
@@ -248,6 +267,7 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.len(),
                 _ => 0,
             },
+            NativeIterSource::Bytearray(data) => data.borrow().len(),
             NativeIterSource::String { value, .. } => value.as_str().map_or(0, str::len),
             NativeIterSource::Exhausted => 0,
         }
@@ -353,6 +373,10 @@ impl NativeIterFrame {
                 ValueKind::Bytes(bytes) => bytes.get(index).map(|byte| Value::int(*byte as i64)),
                 _ => None,
             }),
+            NativeIterSource::Bytearray(data) => Ok(data
+                .borrow()
+                .get(index)
+                .map(|byte| Value::int(*byte as i64))),
             NativeIterSource::String { value, byte_pos } => {
                 let Some(text) = value.as_str() else {
                     return Ok(None);
@@ -413,6 +437,7 @@ impl NativeIterFrame {
                 | NativeIterSource::DictView { .. }
                 | NativeIterSource::Deque(_)
                 | NativeIterSource::Bytes(_)
+                | NativeIterSource::Bytearray(_)
                 | NativeIterSource::String { .. }
         ) {
             self.source = NativeIterSource::Exhausted;
@@ -518,5 +543,50 @@ impl NativeIterFrame {
         }
         self.latch_exhausted();
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod bytearray_frame_tests {
+    use pyrust_core::Value;
+
+    use super::{NativeIterFrame, NativeIterSource};
+
+    fn frame(bytes: &[u8]) -> (Value, NativeIterFrame) {
+        let value = pyrust_builtins::bytearray::bytearray(bytes.to_vec());
+        let frame = NativeIterFrame::bytearray(value.clone(), "bytearray_iterator")
+            .expect("a bytearray must classify as a live indexed walk");
+        (value, frame)
+    }
+
+    /// Dropping `Bytearray` from the unguarded classification is invisible to
+    /// the parity fixtures — the generic adapter yields exactly the same live
+    /// elements — but costs ~2.9x on `enumerate(bytearray)`, because the loop
+    /// then steps the pair through the protocol instead of the shared cursor.
+    /// Only a direct assertion pins it (#2921).
+    #[test]
+    fn bytearray_frame_is_an_unguarded_element_source() {
+        let (_value, frame) = frame(b"ab");
+        assert!(frame.guard.is_none());
+        assert!(frame.is_unguarded_element_source());
+    }
+
+    /// The element walk re-reads the buffer's size on every step, and the
+    /// exhaustion it reaches is permanent — CPython's `bytearray_iterator`
+    /// drops its buffer reference on the first `StopIteration`.
+    #[test]
+    fn bytearray_element_walk_reads_the_live_buffer_then_latches() {
+        let (value, mut frame) = frame(b"ab");
+        let data = pyrust_builtins::bytearray::as_bytearray_rc(&value).expect("bytearray storage");
+
+        assert_eq!(frame.advance_element().and_then(|v| v.as_int()), Some(97));
+        data.borrow_mut().push(99);
+        assert_eq!(frame.advance_element().and_then(|v| v.as_int()), Some(98));
+        assert_eq!(frame.advance_element().and_then(|v| v.as_int()), Some(99));
+        assert!(frame.advance_element().is_none());
+
+        data.borrow_mut().push(100);
+        assert!(frame.advance_element().is_none());
+        assert!(matches!(frame.source, NativeIterSource::Exhausted));
     }
 }

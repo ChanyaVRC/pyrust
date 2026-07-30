@@ -267,6 +267,8 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     NativeIterFrame::bytes(backing.clone(), type_name)
                 } else if matches!(backing.kind(), ValueKind::Str(_)) {
                     NativeIterFrame::string(backing.clone(), type_name)
+                } else if let Some(frame) = NativeIterFrame::bytearray(backing.clone(), type_name) {
+                    frame
                 } else {
                     // Use the carrier for error reporting so a non-iterable
                     // builtin subclass names the subclass, not its base.
@@ -318,6 +320,8 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                 NativeIterFrame::bytes(v.clone(), iter_type_name)
             } else if matches!(v.kind(), ValueKind::Str(_)) {
                 NativeIterFrame::string(v.clone(), iter_type_name)
+            } else if let Some(frame) = NativeIterFrame::bytearray(v.clone(), iter_type_name) {
+                frame
             } else if let Some(kind) = pyrust_builtins::dict_views::view_kind(v) {
                 if pyrust_builtins::ordered_mapping::view_policy(v).is_some() {
                     let dict = pyrust_builtins::dict_views::as_dict_rc(v).ok_or_else(|| {
