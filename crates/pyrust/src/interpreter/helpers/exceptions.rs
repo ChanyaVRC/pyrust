@@ -793,10 +793,15 @@ pub(crate) fn lookup_exc_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
 
 /// Build the `ExcClasses` map from the thread-local cache.  Called once
 /// per interpreter (lazily, on first exception raise or class lookup).
-pub(crate) fn build_exc_class_map() -> std::collections::HashMap<&'static str, Rc<RefCell<PyClass>>>
-{
+///
+/// Insertion ordered (issue #2918): `prepare_builtins_module` publishes the
+/// exception classes into `builtins` by iterating this map, so a hashed map
+/// made the tail of `vars(builtins)` differ run to run.  `EXC_CLASS_CACHE` is
+/// an ordered `Vec` declaring the hierarchy roots first, and that order carries
+/// through to the module namespace.
+pub(crate) fn build_exc_class_map() -> indexmap::IndexMap<&'static str, Rc<RefCell<PyClass>>> {
     EXC_CLASS_CACHE.with(|cache| {
-        let mut map = std::collections::HashMap::with_capacity(cache.len());
+        let mut map = indexmap::IndexMap::with_capacity(cache.len());
         for (name, cls) in cache {
             map.insert(*name, Rc::clone(cls));
         }

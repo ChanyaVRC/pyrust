@@ -1,8 +1,8 @@
 thread_local! {
     /// Per-thread cache of the `builtins` module value.
     /// `seed_module_dunders` clones this `Value` (one `Rc` increment) instead
-    /// of rebuilding the module's ~136-entry `HashMap<String, Value>` from
-    /// scratch on every script invocation.
+    /// of rebuilding the module's ~136-entry `ModuleAttrs` map from scratch on
+    /// every script invocation.
     static BUILTINS_MODULE_CACHE: Value = {
         let module = crate::builtin_modules::load_builtin_module("builtins")
             .unwrap_or_else(Value::none);

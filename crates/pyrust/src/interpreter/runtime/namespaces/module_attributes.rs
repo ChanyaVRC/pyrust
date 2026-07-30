@@ -62,12 +62,9 @@ impl Interpreter {
         // A source-backed module owns the exact root globals dict used by its
         // functions. Expose that same object, never a harvested snapshot.
         if name == "__dict__"
-            && let Some(namespace) = filesystem_namespace.as_ref()
+            && let Some(globals) = self.filesystem_module_globals(&module)
         {
-            return Ok(match namespace.environment() {
-                Some(environment) => self.globals_for_environment(&environment),
-                None => namespace.globals(),
-            });
+            return Ok(globals);
         }
 
         // CPython 3.12 module_getattro builds the error message by
@@ -140,36 +137,40 @@ impl Interpreter {
                 // Value::unset() is a deletion tombstone (written by
                 // delete_attr for synthetic dunders); filter it out so
                 // deleted dunders don't appear in __dict__.
-                let attrs_snapshot: HashMap<String, Value> = module.borrow().attrs.clone();
-                let mut d: PyDict = attrs_snapshot
-                    .iter()
-                    .filter(|(_, v)| !v.is_unset())
-                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
-                    .collect();
-                // Synthetic dunders: add only if the key is neither
-                // already present in attrs (user override) nor
-                // tombstoned (explicitly deleted by the user).
+                // `attrs` is insertion ordered (issue #2918), so this dict is
+                // identical run to run. The synthetic dunders go in *first*,
+                // in CPython's slot order, because CPython initialises a
+                // built-in module's dict with `__name__`, `__doc__`,
+                // `__package__`, `__loader__`, `__spec__` before executing the
+                // method table — `list(vars(math))[:5]` is those five names.
+                let attrs_snapshot = module.borrow().attrs.clone();
+                // Add a synthetic dunder only if the key is neither already
+                // present in attrs (user override — it keeps its stored
+                // position) nor tombstoned (explicitly deleted by the user).
                 let is_absent = |key: &str| !attrs_snapshot.contains_key(key);
-                let name_key = PyKey::str_from("__name__");
+                let mut d: PyDict =
+                    PyDict::with_capacity_and_hasher(attrs_snapshot.len() + 5, Default::default());
                 if is_absent("__name__") {
-                    d.insert(name_key, Value::string(mod_name));
+                    d.insert(PyKey::str_from("__name__"), Value::string(mod_name));
                 }
-                let pkg_key = PyKey::str_from("__package__");
-                if is_absent("__package__") {
-                    d.insert(pkg_key, Value::string(String::new()));
-                }
-                let spec_key = PyKey::str_from("__spec__");
-                if is_absent("__spec__") {
-                    d.insert(spec_key, Value::none());
-                }
-                let loader_key = PyKey::str_from("__loader__");
-                if is_absent("__loader__") {
-                    d.insert(loader_key, Value::none());
-                }
-                let doc_key = PyKey::str_from("__doc__");
                 if is_absent("__doc__") {
-                    d.insert(doc_key, Value::none());
+                    d.insert(PyKey::str_from("__doc__"), Value::none());
                 }
+                if is_absent("__package__") {
+                    d.insert(PyKey::str_from("__package__"), Value::string(String::new()));
+                }
+                if is_absent("__loader__") {
+                    d.insert(PyKey::str_from("__loader__"), Value::none());
+                }
+                if is_absent("__spec__") {
+                    d.insert(PyKey::str_from("__spec__"), Value::none());
+                }
+                d.extend(
+                    attrs_snapshot
+                        .iter()
+                        .filter(|(_, v)| !v.is_unset())
+                        .map(|(k, v)| (PyKey::str_from(k), v.clone())),
+                );
                 return Ok(Value::dict(d));
             }
             _ => {}

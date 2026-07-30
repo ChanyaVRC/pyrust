@@ -5,6 +5,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::{Environment, namespace_alias_tracking_active};
+    use crate::ModuleAttrs;
     use crate::object_model::{PyDict, PyKey, PyModule, Value};
 
     #[test]
@@ -294,7 +295,7 @@ mod tests {
     #[test]
     fn filesystem_module_writes_advance_the_provider_generation() {
         let root = Environment::new(None);
-        let module = PyModule::new("source_module".to_string(), HashMap::new());
+        let module = PyModule::new("source_module".to_string(), ModuleAttrs::default());
         let mutation = module.mutation_state();
         let _globals = root.borrow().namespace_globals();
         root.borrow()

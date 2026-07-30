@@ -101,7 +101,9 @@ impl Default for ModuleClassCache {
 /// built via the thread-local `EXC_CLASS_CACHE` only when actually needed.
 /// Scripts that never raise or catch exceptions pay zero startup cost.
 /// Lazily-built map from exception-class name to its resolved [`PyClass`].
-type ExcClassMap = HashMap<&'static str, Rc<RefCell<PyClass>>>;
+/// Insertion ordered so publishing it into `builtins` yields a stable
+/// `vars(builtins)` (issue #2918).
+type ExcClassMap = indexmap::IndexMap<&'static str, Rc<RefCell<PyClass>>>;
 
 pub(crate) struct ExcClasses(RefCell<Option<ExcClassMap>>);
 

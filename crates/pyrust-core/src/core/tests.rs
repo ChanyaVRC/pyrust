@@ -10,8 +10,8 @@ mod tests {
 
     use super::{
         ACTIVE_COLLECTION_MUTATION_STATES, COLLECTION_MUTATION_STATES, CanonicalClassTag,
-        FrozenSetKey, InstanceAttrs, MemberSlotId, NANBOX_HEAP_POINTER_ALIGNMENT, PAYLOAD_MASK,
-        POOL_B, POOL_OPAQUE, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet,
+        FrozenSetKey, InstanceAttrs, MemberSlotId, ModuleAttrs, NANBOX_HEAP_POINTER_ALIGNMENT,
+        PAYLOAD_MASK, POOL_B, POOL_OPAQUE, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet,
         STR_CODEPOINT_LEN_SHIFT, STR_CODEPOINT_LEN_TAG, STR_MAX_BYTE_LEN, STR_OWNED_HEADER_SIZE,
         STR_RC_MAX, STR_RC_ONE, STR_SLICE_LAYOUT_SIZE, TAG_LIST_BITS, UserFunction,
         UserFunctionKind, Value, ValueKind, alloc, builtin_type_name, drain_free_list,
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn module_mutation_state_tracks_attribute_namespace_and_provider_identity() {
-        let mut module = PyModule::new("provider".to_string(), HashMap::new());
+        let mut module = PyModule::new("provider".to_string(), ModuleAttrs::default());
         let state = module.mutation_state();
         assert_eq!(state.version(), 0);
 
@@ -91,9 +91,43 @@ mod tests {
         );
     }
 
+    /// `vars(module)` is a Python dict, so the direct `attrs` storage backing a
+    /// built-in module must behave like one: insertion ordered, rebinding keeps
+    /// a name's position, deleting shifts rather than swaps, and re-inserting a
+    /// deleted name appends (issue #2918).
+    #[test]
+    fn module_attrs_preserve_insertion_order_like_a_dict() {
+        let mut module = PyModule::new("ordered".to_string(), ModuleAttrs::default());
+        for name in ["zebra", "alpha", "mike", "delta"] {
+            module.insert_attr(name.to_string(), Value::int(1));
+        }
+        let names = |module: &PyModule| -> Vec<String> {
+            module.attrs_snapshot().keys().cloned().collect()
+        };
+        assert_eq!(names(&module), ["zebra", "alpha", "mike", "delta"]);
+
+        // Rebinding an existing name keeps its position.
+        module.insert_attr("alpha".to_string(), Value::int(2));
+        assert_eq!(names(&module), ["zebra", "alpha", "mike", "delta"]);
+
+        // Deleting must not swap the last entry into the hole.
+        module.remove_attr("alpha");
+        assert_eq!(names(&module), ["zebra", "mike", "delta"]);
+
+        // Re-inserting a removed name appends it, exactly like `dict`.
+        module.insert_attr("alpha".to_string(), Value::int(3));
+        assert_eq!(names(&module), ["zebra", "mike", "delta", "alpha"]);
+
+        // Moving the namespace into a live dict preserves that order.
+        module.attach_live_namespace();
+        assert_eq!(names(&module), ["zebra", "mike", "delta", "alpha"]);
+        module.remove_attr("mike");
+        assert_eq!(names(&module), ["zebra", "delta", "alpha"]);
+    }
+
     #[test]
     fn live_module_namespace_shares_alias_mutations_and_collection_generation() {
-        let mut attrs = HashMap::new();
+        let mut attrs = ModuleAttrs::default();
         attrs.insert("initial".to_string(), Value::int(1));
         let mut module = PyModule::new("native".to_string(), attrs);
         module.attach_live_namespace();
@@ -124,7 +158,7 @@ mod tests {
     #[test]
     fn filesystem_module_shares_root_globals_without_owning_environment_strongly() {
         let root = Environment::new(None);
-        let mut module = PyModule::new("source_module".to_string(), HashMap::new());
+        let mut module = PyModule::new("source_module".to_string(), ModuleAttrs::default());
         let module_state = module.mutation_state();
         module.attach_filesystem_namespace(&root);
 

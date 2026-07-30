@@ -99,12 +99,11 @@ mod iteration {
 
 mod reflection {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyClass, PyDict, PyError, PyKey, PyValue, Rc,
-        RefCell, Result, Value, ValueKind, attr_name_arg, class_suppresses_instance_dict,
-        compare_values, dir_names, inject_builtins_into_globals, invoke_class_method,
-        isinstance_check, issubclass_check, lookup_class_attr, parse_exec_eval_args,
-        reject_keyword_args_expanded, snapshot_current_locals, sync_module_env_to_globals_dict,
-        value_class, value_type_name_str,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyClass, PyError, PyKey, PyValue, Rc, RefCell,
+        Result, Value, ValueKind, attr_name_arg, class_suppresses_instance_dict, compare_values,
+        dir_names, inject_builtins_into_globals, invoke_class_method, isinstance_check,
+        issubclass_check, lookup_class_attr, parse_exec_eval_args, reject_keyword_args_expanded,
+        snapshot_current_locals, sync_module_env_to_globals_dict, value_class, value_type_name_str,
     };
     include!("builtins/reflection.rs");
 }
@@ -330,7 +329,9 @@ pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
 /// Build one builtins module by merging the attributes produced by each
 /// builtin family. Registration names remain flat through the shared FN_PREFIX.
 pub(crate) fn module() -> Value {
-    let mut attrs = std::collections::HashMap::new();
+    // Insertion-ordered (issue #2918): the sub-module list below is fixed at
+    // compile time, so `vars(builtins)` is stable across runs.
+    let mut attrs = crate::value::ModuleAttrs::default();
     for part in [
         scalar::module(),
         identity_and_repr::module(),

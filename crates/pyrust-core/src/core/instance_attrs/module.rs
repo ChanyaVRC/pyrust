@@ -41,7 +41,9 @@ impl FilesystemModuleNamespace {
 #[derive(Debug)]
 pub struct PyModule {
     pub name: String,
-    pub attrs: HashMap<String, Value>,
+    /// Insertion-ordered so `vars(module)` matches the module's declaration
+    /// order and is identical run to run (issue #2918).
+    pub attrs: ModuleAttrs,
     mutation_state: ModuleMutationState,
     /// Exact Python dictionary exposed by built-in modules whose namespace
     /// must remain writable through `module.__dict__`.
@@ -53,12 +55,12 @@ pub struct PyModule {
     /// Environment owner for a native module.
     live_namespace: Option<Value>,
     /// Boxed so the built-in-module common case pays only one nullable pointer
-    /// and continues to use its existing direct `attrs` HashMap fast path.
+    /// and continues to use its existing direct `attrs` fast path.
     filesystem_namespace: Option<Box<FilesystemModuleNamespace>>,
 }
 
 impl PyModule {
-    pub fn new(name: String, attrs: HashMap<String, Value>) -> Self {
+    pub fn new(name: String, attrs: ModuleAttrs) -> Self {
         Self {
             name,
             attrs,
@@ -133,7 +135,7 @@ impl PyModule {
     /// Filesystem module dictionaries may contain non-string keys through a
     /// direct `__dict__` alias; those are visible in the dictionary itself but
     /// are not Python attributes and are intentionally omitted here.
-    pub fn attrs_snapshot(&self) -> HashMap<String, Value> {
+    pub fn attrs_snapshot(&self) -> ModuleAttrs {
         if let Some(namespace) = self.live_namespace.as_ref() {
             return namespace
                 .dict_with(|dict| {
@@ -234,7 +236,10 @@ impl PyModule {
             }
             return removed;
         }
-        let removed = self.attrs.remove(name);
+        // `shift_remove`, not `swap_remove`: deleting one attribute must not
+        // reorder the surviving ones, matching `del d[k]` on a Python dict and
+        // the `dict_shift_remove` used by both namespace-backed branches above.
+        let removed = self.attrs.shift_remove(name);
         if removed.is_some() {
             self.mutation_state.bump();
         }
@@ -243,7 +248,7 @@ impl PyModule {
 
     /// Replace the complete module namespace while preserving its storage kind.
     #[inline]
-    pub fn replace_attrs(&mut self, attrs: HashMap<String, Value>) {
+    pub fn replace_attrs(&mut self, attrs: ModuleAttrs) {
         if let Some(namespace) = self.live_namespace.as_ref() {
             namespace
                 .dict_clear()
