@@ -2,20 +2,6 @@ pub(super) fn is_not_implemented(v: &Value) -> bool {
     matches!(v.kind(), ValueKind::NotImplemented)
 }
 
-/// Does a class-attribute value look like a callable method?  Accepts
-/// both pure-Python user functions and the `BuiltinFunction` entries
-/// that `pyrust_module!`'s `class { … }` block produces — anything
-/// else (descriptor, raw int set via `Foo.x = 1`, …) should fall
-/// through dunder dispatch without being invoked.  Issue #331 added
-/// `BuiltinFunction` to the accepted set so Counter's `__add__`
-/// participates in the binary-op path.
-pub(super) fn is_callable_method(v: &Value) -> bool {
-    matches!(
-        v.kind(),
-        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
-    )
-}
-
 /// Whether a resolved class-attribute slot value is callable, in the same
 /// sense as the `callable()` builtin.  A plain function / builtin function is
 /// callable (the common case); issue #2054 additionally accepts a callable

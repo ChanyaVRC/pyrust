@@ -24,7 +24,7 @@ pub(crate) use value_protocols::{
     normalize_complex_slot_result, normalize_float_slot_result, normalize_int_slot_result,
     slot_is_callable, slot_is_descriptor, slot_is_dispatchable,
 };
-use value_protocols::{coerce_operand_backing, is_callable_method, is_not_implemented};
+use value_protocols::{coerce_operand_backing, is_not_implemented};
 
 mod formatting {
     use super::{
@@ -197,11 +197,11 @@ mod expressions {
         builtin_data_backing, class_is_subclass_of, coerce_bytes_subclass_arg, coerce_numeric,
         coerce_operand_backing, coerce_str_subclass_arg, compare_values_with_op,
         effective_builtin_receiver, float_divmod, int_pow_promoting, invoke_class_method,
-        is_async_generator_value, is_builtin_class_getitem_sentinel, is_callable_method,
-        is_coroutine_value, is_not_implemented, is_stop_iteration_error, is_type_alias_class,
-        key_contains_object, lookup_class_attr, make_builtin_generic_alias, make_slice_value,
-        metaclass_dunder, nested_object_tuple_key, normalize_index, normalize_index_write,
-        py_mod_i64, range_len, type_class_singleton, value_type_name_str, values_are_identical,
+        is_async_generator_value, is_builtin_class_getitem_sentinel, is_coroutine_value,
+        is_not_implemented, is_stop_iteration_error, is_type_alias_class, key_contains_object,
+        lookup_class_attr, make_builtin_generic_alias, make_slice_value, metaclass_dunder,
+        nested_object_tuple_key, normalize_index, normalize_index_write, py_mod_i64, range_len,
+        slot_is_dispatchable, type_class_singleton, value_type_name_str, values_are_identical,
         vm_read,
     };
     include!("runtime/expr.rs");

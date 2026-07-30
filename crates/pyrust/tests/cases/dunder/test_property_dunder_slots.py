@@ -584,3 +584,123 @@ class KeepBad:
 
 
 t("non-callable slot", lambda: len(KeepBad()))
+
+
+# --- in-place operators obey the same descriptor rule ---------------------
+# The augmented-assignment slot is dispatched by its own site, which used to
+# accept only plain functions and answer "not defined" for everything else --
+# silently falling through to `__add__` / the backing fallback instead of
+# binding the descriptor.
+class IDesc:
+    def __get__(self, obj, objtype=None):
+        print(f"  [IDesc.__get__ objtype={objtype.__name__}]")
+        return lambda other: ("idesc", other)
+
+
+def _augmented(cls, op):
+    def go():
+        ns = {"o": cls()}
+        exec(f"o {op} 5", ns)
+        return ns["o"]
+
+    return go
+
+
+for _op, _name in [
+    ("+=", "__iadd__"),
+    ("-=", "__isub__"),
+    ("*=", "__imul__"),
+    ("//=", "__ifloordiv__"),
+    ("/=", "__itruediv__"),
+    ("%=", "__imod__"),
+    ("**=", "__ipow__"),
+    ("<<=", "__ilshift__"),
+    (">>=", "__irshift__"),
+    ("&=", "__iand__"),
+    ("|=", "__ior__"),
+    ("^=", "__ixor__"),
+    ("@=", "__imatmul__"),
+]:
+    _C = type("I_" + _name.strip("_"), (), {_name: IDesc()})
+    t(f"descriptor {_name}", _augmented(_C, _op))
+
+
+class PropIadd:
+    @property
+    def __iadd__(self):
+        print("  [PropIadd getter ran]")
+        return lambda other: ("prop-iadd", other)
+
+
+t("property __iadd__", _augmented(PropIadd, "+="))
+
+
+class PropIaddValue:
+    @property
+    def __iadd__(self):
+        print("  [PropIaddValue getter ran]")
+        return 7
+
+
+# The getter runs; the error names its result, exactly as for `__add__`.
+t("property __iadd__ -> non-callable", _augmented(PropIaddValue, "+="))
+
+
+class IaddNonCallable:
+    __iadd__ = 5
+
+    def __add__(self, other):
+        return ("add-fallback", other)
+
+
+# A non-callable in-place slot is an error, not a reason to fall back to
+# `__add__` (issue #2055).
+t("non-callable __iadd__ shadows __add__", _augmented(IaddNonCallable, "+="))
+
+
+class IaddCallableInstance:
+    class C:
+        def __call__(self, other):
+            return ("callable-instance", other)
+
+    __iadd__ = C()
+
+
+t("callable-instance __iadd__", _augmented(IaddCallableInstance, "+="))
+
+
+class IaddNotImplemented:
+    class D:
+        def __get__(self, obj, objtype=None):
+            return lambda other: NotImplemented
+
+    __iadd__ = D()
+
+    def __add__(self, other):
+        return ("add-fallback", other)
+
+
+# A bound descriptor returning NotImplemented still falls back to `__add__`.
+t("descriptor __iadd__ -> NotImplemented", _augmented(IaddNotImplemented, "+="))
+
+
+class IaddRaises:
+    class R:
+        def __get__(self, obj, objtype=None):
+            raise ValueError("iadd-get-boom")
+
+    __iadd__ = R()
+
+    def __add__(self, other):
+        return ("add-fallback", other)
+
+
+# The getter's exception propagates; it is not swallowed into the fallback.
+t("__iadd__ __get__ raises", _augmented(IaddRaises, "+="))
+
+
+class IaddStatic:
+    __iadd__ = staticmethod(lambda other: ("static-iadd", other))
+
+
+t("staticmethod __iadd__", _augmented(IaddStatic, "+="))
