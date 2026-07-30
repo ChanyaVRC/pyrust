@@ -61,21 +61,10 @@ impl Interpreter {
                 }
                 BinaryOp::Mul => {
                     // list *= n  =>  repeat in-place
-                    let n = match right.kind() {
-                        ValueKind::Int(n) => n,
-                        ValueKind::Bool(b) => b as i64,
-                        _ => return Ok(None), // fall through to TypeError
+                    let Some(n) = int_repeat_count(right) else {
+                        return Ok(None); // fall through to TypeError
                     };
-                    left.list_with_mut(|items| {
-                        if n <= 0 {
-                            items.clear();
-                        } else {
-                            let orig = items.clone();
-                            for _ in 1..n {
-                                items.extend_from_slice(&orig);
-                            }
-                        }
-                    });
+                    list_repeat_in_place(left, n)?;
                     return Ok(Some(left.clone()));
                 }
                 _ => {}
@@ -451,6 +440,27 @@ impl Interpreter {
                 }
             }
         }
+        // Issue #2986: PyInstance list subclass `+=` / `*=` — when no
+        // user-defined `__iadd__` / `__imul__` was found (the inherited
+        // `list.__i*__` sentinels are skipped in `try_call_binary_method`),
+        // mutate the backing list in place and return `left`, exactly as the
+        // plain-list arm above does.  Without this the operator fell through to
+        // `__add__` / `__mul__`, which build a *new* plain list: `p = LSub([1]);
+        // q = p; p += [9]` left `q == [1]` and `p is q` False, silently breaking
+        // every alias of the receiver.
+        //
+        // `result.is_none()` gates this to the no-override case only, for the
+        // same reason as the set / dict / bytearray arms: a user `__iadd__` that
+        // returned `NotImplemented` must fall back to plain binary `+` (yielding
+        // a plain `list` and dropping the subclass type), not mutate self (#2639).
+        if result.is_none()
+            && matches!(op, BinaryOp::Add | BinaryOp::Mul)
+            && let Some(backing) = builtin_data_backing(left)
+            && matches!(backing.kind(), ValueKind::List(_))
+            && self.list_backing_inplace_op(&backing, op, right)?
+        {
+            return Ok(Some(left.clone()));
+        }
         // Issue #2386: PyInstance bytearray subclass `+=` / `*=` — when no
         // user-defined `__iadd__` / `__imul__` was found (the inherited
         // `bytearray.__i*__` sentinels are skipped in `try_call_binary_method`),
@@ -522,4 +532,107 @@ impl Interpreter {
         }
         Ok(None)
     }
+
+    /// Apply `+=` / `*=` to the backing list of a `list` subclass instance,
+    /// mutating that storage so every alias of the instance observes the update
+    /// and the subclass type survives (issue #2986).
+    ///
+    /// This is the inherited `list.__iadd__` / `list.__imul__`, so it does the
+    /// same storage work as the plain-list arm of [`Self::try_inplace_op`] —
+    /// including reading the right operand to completion *before* the receiver
+    /// is touched, which is what makes `p += p` terminate.
+    ///
+    /// Returns `Ok(true)` when the operator was applied, `Ok(false)` when it
+    /// does not apply and the caller must fall through to the binary path (a
+    /// `*=` count with no `__index__`, which the right operand's `__rmul__` may
+    /// still handle, or one too large for an index-sized integer).
+    ///
+    /// `#[inline(never)]`: `try_inplace_op` is long and its codegen is layout-
+    /// sensitive (the plain `list` / `set` / `dict` / `bytearray` in-place loops
+    /// all run through it), so this subclass-only tail stays out of line.
+    #[inline(never)]
+    fn list_backing_inplace_op(
+        &mut self,
+        backing: &Value,
+        op: BinaryOp,
+        right: &Value,
+    ) -> Result<bool> {
+        match op {
+            BinaryOp::Add => {
+                let items = self.collect_iterable(right)?;
+                backing.list_extend(items)?;
+                Ok(true)
+            }
+            BinaryOp::Mul => {
+                // Off the hot path, so the count may take the full `__index__`
+                // protocol — CPython's sequence repetition does. A count with
+                // no `__index__` at all falls through rather than raising, so
+                // the right operand's `__rmul__` still gets its turn.
+                let n = match int_repeat_count(right) {
+                    Some(n) => n,
+                    None => {
+                        let Some(count) = self.try_value_to_index(right)? else {
+                            return Ok(false);
+                        };
+                        // A `BigInt` count cannot fit an index-sized integer;
+                        // `eval_binary` raises that `OverflowError` with the
+                        // operand names CPython uses, so leave it to do so.
+                        let Some(n) = int_repeat_count(&count) else {
+                            return Ok(false);
+                        };
+                        n
+                    }
+                };
+                list_repeat_in_place(backing, n)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+}
+
+/// The already-integral repetition count in `v`, if it has one.
+///
+/// A `BigInt` is deliberately excluded: it cannot fit an index-sized integer,
+/// so sequence repetition rejects it rather than truncating.
+#[inline]
+fn int_repeat_count(v: &Value) -> Option<i64> {
+    match v.kind() {
+        ValueKind::Int(n) => Some(n),
+        ValueKind::Bool(b) => Some(b as i64),
+        _ => None,
+    }
+}
+
+/// Repeat a `ValueKind::List`'s elements in place, the storage half of
+/// `list.__imul__`.  A count of zero or less empties the list.
+///
+/// The resulting length is range-checked and the growth reserved with
+/// `try_reserve` *before* any element is copied, so a count too large to
+/// allocate raises CPython's `MemoryError` instead of letting the allocator
+/// abort the whole process (`[1] *= 2**62`).  This is the same guard the
+/// non-mutating `seq_repeat_list` applies for `list * n`.
+#[inline]
+fn list_repeat_in_place(target: &Value, n: i64) -> Result<()> {
+    target
+        .list_with_mut(|items| {
+            if n <= 0 {
+                items.clear();
+                return Ok(());
+            }
+            let len = items.len();
+            let Some(total) = len.checked_mul(n as usize) else {
+                return Err(pyrust_core::py_err!("MemoryError", String::new()));
+            };
+            if items.try_reserve(total - len).is_err() {
+                return Err(pyrust_core::py_err!("MemoryError", String::new()));
+            }
+            let orig = items.clone();
+            for _ in 1..n {
+                items.extend_from_slice(&orig);
+            }
+            Ok(())
+        })
+        // Both call sites have already matched `ValueKind::List`.
+        .unwrap_or(Ok(()))
 }
