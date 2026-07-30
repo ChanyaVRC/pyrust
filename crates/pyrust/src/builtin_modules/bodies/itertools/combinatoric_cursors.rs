@@ -77,13 +77,88 @@ enum Cursor {
 }
 
 impl Cursor {
+    /// CPython's `stopped` flag *as `__reduce__` tests it*: the iterator has
+    /// yielded at least once (`result != NULL`) **and** has since run out. A
+    /// cursor that is empty before it ever started — `combinations(range(2), 5)`
+    /// — is deliberately excluded, because `combinations_reduce` checks
+    /// `result == NULL` first and so still reduces *with* its pool.
+    fn stopped(&self) -> bool {
+        match self {
+            Cursor::Product(cursor) => cursor.started && cursor.exhausted,
+            Cursor::Combinations(cursor) => cursor.started && cursor.exhausted,
+            Cursor::Permutations(cursor) => cursor.started && cursor.exhausted,
+        }
+    }
+
     /// The pooled `Value`s `deepcopy` must recurse into. `product` holds one
     /// list per dimension; the other two hold the elements directly.
+    ///
+    /// A stopped cursor exposes *nothing*: CPython's spent-iterator reduce
+    /// discards the pool (`(type, ((), r))`), so `deepcopy` of an exhausted
+    /// iterator never reaches a pooled element's `__deepcopy__`.
     fn pool_elements(&self) -> Vec<Value> {
+        if self.stopped() {
+            return Vec::new();
+        }
         match self {
             Cursor::Product(cursor) => cursor.pools.clone(),
             Cursor::Combinations(cursor) => cursor.pool.clone(),
             Cursor::Permutations(cursor) => cursor.pool.clone(),
+        }
+    }
+
+    /// The cursor a copy receives, modelling CPython's `__reduce__` rather than
+    /// a verbatim clone of the spent state.
+    ///
+    /// Once an iterator has stopped, CPython reduces it *without* its pool —
+    /// `(type, ((), r))` for `combinations` / `permutations` /
+    /// `combinations_with_replacement`, `(type, ((),))` for `product` — and the
+    /// copy is rebuilt from those arguments. For `r > 0` that reconstructs an
+    /// empty iterator, so cloning the spent cursor happens to agree; for
+    /// `r == 0` it reconstructs a *fresh* one over the empty pool, which yields
+    /// `()` one more time:
+    ///
+    /// ```python
+    /// it = itertools.combinations(range(3), 0)
+    /// list(it)              # [()] — and the next next() raises
+    /// list(copy.copy(it))   # [()] again, not []
+    /// ```
+    ///
+    /// Dropping the pool here is also what keeps `pool_elements` empty for a
+    /// stopped cursor, so the `deepcopy` side of the divergence goes with it.
+    fn reduced_clone(&self) -> Cursor {
+        if !self.stopped() {
+            return self.clone();
+        }
+        match self {
+            // `product(())` is one empty dimension. A dimensionless exhausted
+            // cursor is the same observable iterator and leaves the pool the
+            // reduce exposes genuinely empty, which `pool_elements` relies on.
+            Cursor::Product(_) => Cursor::Product(ProductCursor {
+                pools: Vec::new(),
+                indices: Vec::new(),
+                started: false,
+                exhausted: true,
+            }),
+            // `combinations((), r)` / `combinations_with_replacement((), r)`.
+            // A started cursor always kept `indices.len() == r`, so `r`
+            // survives even though it is not stored on its own.
+            Cursor::Combinations(cursor) => Cursor::Combinations(CombinationsCursor {
+                pool: Vec::new(),
+                indices: Vec::new(),
+                with_replacement: cursor.with_replacement,
+                started: false,
+                exhausted: !cursor.indices.is_empty(),
+            }),
+            // `permutations((), r)`.
+            Cursor::Permutations(cursor) => Cursor::Permutations(PermutationsCursor {
+                pool: Vec::new(),
+                r: cursor.r,
+                indices: Vec::new(),
+                cycles: Vec::new(),
+                started: false,
+                exhausted: cursor.r > 0,
+            }),
         }
     }
 
@@ -118,7 +193,9 @@ impl BuiltinTypeOps for CursorOps {
     /// `__reduce__` — `(type, (pool, r), indices)` — so a copy taken
     /// mid-iteration resumes exactly where the original stood and neither
     /// iterator can move the other; duplicating the index vectors reproduces
-    /// that without a Python-visible reduce round-trip.
+    /// that without a Python-visible reduce round-trip. `reduced_clone` also
+    /// models the one state where reduce is *not* a verbatim clone: a spent
+    /// iterator reduces without its pool.
     ///
     /// The clone is infallible, matching the other storage hooks: it re-asks
     /// for allocations whose sizes were already granted when the original
@@ -126,7 +203,7 @@ impl BuiltinTypeOps for CursorOps {
     fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
         let borrow = state.borrow();
         let cursor = borrow.downcast_ref::<Cursor>()?;
-        Some(cursor_value(cursor.clone()))
+        Some(cursor_value(cursor.reduced_clone()))
     }
 
     fn storage_elements(&self, state: &BuiltinState) -> Option<Vec<Value>> {

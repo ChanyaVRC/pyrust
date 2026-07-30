@@ -177,3 +177,99 @@ for label, build, steps in [
         list(itertools.islice(deep, 4)),
         list(itertools.islice(original, 4)),
     )
+
+print()
+print("== a spent iterator reduces WITHOUT its pool ==")
+# CPython's reduce for a stopped iterator is (type, ((), r)) — the pool is
+# dropped.  For r > 0 that rebuilds an empty iterator, so it is
+# indistinguishable from cloning the spent cursor; for r == 0 it rebuilds a
+# *fresh* one over the empty pool, which yields () one more time.  "Spent"
+# means StopIteration was actually raised: an iterator that is empty before it
+# ever started (r > n) reduces with its pool, like any unstarted one.
+COUNTED = [
+    ("comb", lambda pool, r: itertools.combinations(pool, r)),
+    ("perm", lambda pool, r: itertools.permutations(pool, r)),
+    ("cwr", lambda pool, r: itertools.combinations_with_replacement(pool, r)),
+]
+
+
+def drain(iterator):
+    taken = 0
+    while True:
+        try:
+            next(iterator)
+        except StopIteration:
+            return taken
+        taken += 1
+
+
+for label, build in COUNTED:
+    for n in (0, 1, 3):
+        for r in (0, 1, 2, 5):
+            pool = list(range(n))
+            spent = build(pool, r)
+            total = drain(spent)
+            print(
+                label,
+                n,
+                r,
+                total,
+                drain(copy.copy(spent)),
+                drain(copy.deepcopy(spent)),
+                drain(copy.copy(spent)),
+            )
+
+for label, build in [
+    ("product()", lambda: itertools.product()),
+    ("product repeat=0", lambda: itertools.product([1, 2], repeat=0)),
+    ("product 2x2", lambda: itertools.product([1, 2], [3, 4])),
+    ("product empty dim", lambda: itertools.product([], [1])),
+]:
+    spent = build()
+    total = drain(spent)
+    print(label, total, drain(copy.copy(spent)), drain(copy.deepcopy(spent)))
+
+print()
+print("== the r == 0 resurrection, spelled out ==")
+for label, build in COUNTED:
+    spent = build([10, 20, 30], 0)
+    print(label, "first yield:", step(spent), "then:", step(spent))
+    print(label, "copy of spent:", list(copy.copy(spent)), list(copy.deepcopy(spent)))
+    print(label, "original stays spent:", list(spent))
+
+print()
+print("== deepcopy does not recurse into a discarded pool ==")
+
+
+class Tracked:
+    def __init__(self, tag):
+        self.tag = tag
+
+    def __deepcopy__(self, memo):
+        print("  __deepcopy__", self.tag)
+        return Tracked(self.tag + "'")
+
+    def __repr__(self):
+        return "T(%s)" % self.tag
+
+
+TRACKED_BUILDS = [
+    ("comb", lambda pool: itertools.combinations(pool, 2)),
+    ("perm", lambda pool: itertools.permutations(pool, 2)),
+    ("cwr", lambda pool: itertools.combinations_with_replacement(pool, 2)),
+    ("product", lambda pool: itertools.product(pool, repeat=1)),
+]
+for label, build in TRACKED_BUILDS:
+    print(label, "fresh:")
+    copy.deepcopy(build([Tracked("a"), Tracked("b")]))
+    print(label, "started:")
+    started = build([Tracked("a"), Tracked("b")])
+    step(started)
+    copy.deepcopy(started)
+    print(label, "spent:")
+    spent = build([Tracked("a"), Tracked("b")])
+    drain(spent)
+    copy.deepcopy(spent)
+
+print("unstarted-but-empty (r > n) still carries its pool:")
+copy.deepcopy(itertools.combinations([Tracked("a")], 5))
