@@ -4,8 +4,13 @@
 /// iterator/coroutine state must be inspected instead of relying on the coarse
 /// core value tag.
 pub(crate) fn full_type_name_str(value: &Value) -> std::borrow::Cow<'static, str> {
-    if let ValueKind::Generator(state) = value.kind() {
-        let state = state.borrow();
+    if let ValueKind::Generator(cell) = value.kind() {
+        // Frame kinds come from the immutable tag, which is readable even
+        // while the body executes and the state cell is checked out (#2978).
+        if let Some(name) = cell.kind().frame_type_name() {
+            return std::borrow::Cow::Borrowed(name);
+        }
+        let state = cell.borrow();
         if state.downcast_ref::<MapIter>().is_some() {
             return std::borrow::Cow::Borrowed("map");
         }
@@ -42,14 +47,6 @@ pub(crate) fn full_type_name_str(value: &Value) -> std::borrow::Cow<'static, str
         }
         if state.downcast_ref::<AsyncGenASend>().is_some() {
             return std::borrow::Cow::Borrowed("async_generator_asend");
-        }
-        if let Some(frame) = state.downcast_ref::<GeneratorFrame>() {
-            if frame.is_async_generator() {
-                return std::borrow::Cow::Borrowed("async_generator");
-            }
-            if frame.is_coroutine {
-                return std::borrow::Cow::Borrowed("coroutine");
-            }
         }
     }
     value_type_name_str(value)

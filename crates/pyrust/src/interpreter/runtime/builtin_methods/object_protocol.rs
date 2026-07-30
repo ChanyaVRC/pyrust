@@ -168,21 +168,22 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::BuiltinObject { ops, .. } => {
             with_object_dunders(builtin_object_method_names(ops))
         }
-        ValueKind::Generator(state_rc) => {
+        ValueKind::Generator(cell) => {
             // CPython exposes a type-specific introspection surface per
             // generator kind (issue #2302): a plain generator advertises the
             // synchronous iteration protocol plus `gi_*`; an async generator
             // advertises the asynchronous protocol plus `ag_*`; a coroutine
             // advertises `send`/`throw`/`close` plus `cr_*` (but NOT
             // `__iter__`/`__next__`).
-            let (is_async_gen, is_coroutine) = state_rc
-                .try_borrow()
-                .ok()
-                .and_then(|b| {
-                    b.downcast_ref::<GeneratorFrame>()
-                        .map(|f| (f.is_async_generator(), f.is_coroutine))
-                })
-                .unwrap_or((false, false));
+            // Read from the immutable kind tag: a `dir()` taken from inside
+            // the running body must still describe the right surface, and the
+            // state cell is checked out for the whole of a resume (#2978).
+            let kind = cell.kind();
+            let is_async_gen = kind == GeneratorKind::AsyncGenerator;
+            let is_coroutine = matches!(
+                kind,
+                GeneratorKind::Coroutine | GeneratorKind::AsyncGenerator
+            );
             let mut names = vec![
                 "__class__".to_string(),
                 "__name__".to_string(),
@@ -236,7 +237,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
                 );
                 // Only the concrete built-in iterators carry a remaining-count
                 // slot (issue #2920); a real generator does not.
-                if state_rc
+                if cell
                     .try_borrow()
                     .is_ok_and(|state| builtin_iterator_has_length_hint(&**state))
                 {

@@ -74,10 +74,11 @@ pub(crate) struct GeneratorFrame {
     /// when an exception propagates out of the generator body (issue #908).
     /// `Arc<str>` so `.clone()` in `resume_generator_with_exc` is a
     /// reference-count bump rather than a heap allocation on every resume.
+    /// This is the *compile-time* name behind tracebacks and `co_name`; the
+    /// Python-visible `__name__` / `__qualname__` pair a user can reassign
+    /// lives on the owning `GeneratorCell`, outside the state this frame
+    /// occupies, so that it reads back while the body runs (#2978).
     pub(crate) fn_name: std::sync::Arc<str>,
-    /// Fully-qualified name of the generator function (issue #1270).
-    /// Exposed as `g.__qualname__`.
-    pub(crate) qualname: std::sync::Arc<str>,
     /// Source line of the `yield` the generator is currently suspended at
     /// (`0` before the first yield).  Restored into the dispatch loop's
     /// `cur_line` on resume so that an exception caught inside the body after a
@@ -146,7 +147,7 @@ impl Drop for GeneratorFrame {
 /// `StopAsyncIteration` when the generator is exhausted.
 pub(crate) struct AsyncGenASend {
     /// The async generator's state cell (its `GeneratorFrame`).
-    pub(crate) agen: Rc<RefCell<Box<dyn std::any::Any>>>,
+    pub(crate) agen: Rc<GeneratorCell>,
     /// Value to send into the next resume (the `asend` argument; `None` for
     /// `__anext__`).  Taken on the first drive step, then `None` thereafter.
     pub(crate) send_value: Option<Value>,
@@ -195,7 +196,7 @@ struct TrampFrame {
     memo_key: Option<MemoKey>,
 }
 
-/// Placeholder left inside a generator's state cell (`Rc<RefCell<Box<dyn Any>>>`)
+/// Placeholder left inside a generator's state cell (`Rc<GeneratorCell>`)
 /// while its `GeneratorFrame` is checked out and being driven (#2253).  Keeps the
 /// cell's contents valid (and the borrow released) during the drive, and lets a
 /// re-entrant `ForIter` on the same generator recognise "already executing"
@@ -211,7 +212,7 @@ struct GenDriveFrame {
     _depth_guard: CallDepthGuard,
     /// The generator's state cell; the checked-out frame is written back here on
     /// yield / return / error.
-    state_rc: Rc<RefCell<Box<dyn std::any::Any>>>,
+    state_rc: Rc<GeneratorCell>,
     /// The checked-out generator frame (a placeholder occupies the cell while it
     /// is driving, so the frame's heap address — and a `RegSlice` into its
     /// `regs` — stays stable).

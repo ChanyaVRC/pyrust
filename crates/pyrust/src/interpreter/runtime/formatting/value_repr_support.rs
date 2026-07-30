@@ -5,20 +5,16 @@
 /// of the underlying generator state, matching `id()` / `Value::value_id`.
 fn generator_repr(value: &Value) -> String {
     let addr = value.value_id().unwrap_or(0) as usize;
-    if let ValueKind::Generator(state_rc) = value.kind()
-        && let Some(frame) = state_rc.borrow().downcast_ref::<GeneratorFrame>()
+    if let ValueKind::Generator(cell) = value.kind()
+        && let Some(kind) = cell.kind().frame_type_name()
     {
         // Coroutines (`async def`, issue #1039) render as
         // `<coroutine object {qualname} at 0x...>`; async generators
-        // (#2280) as `<async_generator object {qualname} at 0x...>`.
-        let kind = if frame.is_async_generator() {
-            "async_generator"
-        } else if frame.is_coroutine {
-            "coroutine"
-        } else {
-            "generator"
-        };
-        return format!("<{kind} object {} at 0x{addr:x}>", frame.qualname);
+        // (#2280) as `<async_generator object {qualname} at 0x...>`.  Both the
+        // noun and the qualname live outside the state cell, so this renders
+        // the same whether or not the body is currently running (#2978).
+        let qualname = cell.qualname().unwrap_or_else(|| "?".into());
+        return format!("<{kind} object {qualname} at 0x{addr:x}>");
     }
     let type_name = full_type_name_str(value);
     format!("<{type_name} object at 0x{addr:x}>")

@@ -384,7 +384,7 @@ impl Interpreter {
     #[inline(never)]
     fn vm_enter_gen_drive(
         &mut self,
-        state_rc: Rc<RefCell<Box<dyn std::any::Any>>>,
+        state_rc: Rc<GeneratorCell>,
         dst: u32,
         exit_pc: usize,
         st: &mut UnwindState,

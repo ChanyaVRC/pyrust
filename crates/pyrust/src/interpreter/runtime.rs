@@ -28,13 +28,13 @@ use value_protocols::{coerce_operand_backing, is_callable_method, is_not_impleme
 
 mod formatting {
     use super::{
-        ExpandedCallArg, GeneratorFrame, HashMap, Interpreter, PyBigInt, PyError, PyInstance,
-        PyKey, Rc, RefCell, Result, Value, ValueKind, ascii_repr_interp,
-        bigint_to_float_or_overflow, builtin_data_backing, exception_str_with_dispatch,
-        extract_str_value, float_to_bigint, full_type_name_str, instance_builtin_data,
-        intern_string, invoke_class_method, is_exception_class, is_percent_format_mapping,
-        is_str_or_str_subclass, lookup_class_attr, lookup_value_special_method,
-        normalize_float_slot_result, render_instance_repr, try_value_to_float, value_type_name_str,
+        ExpandedCallArg, HashMap, Interpreter, PyBigInt, PyError, PyInstance, PyKey, Rc, RefCell,
+        Result, Value, ValueKind, ascii_repr_interp, bigint_to_float_or_overflow,
+        builtin_data_backing, exception_str_with_dispatch, extract_str_value, float_to_bigint,
+        full_type_name_str, instance_builtin_data, intern_string, invoke_class_method,
+        is_exception_class, is_percent_format_mapping, is_str_or_str_subclass, lookup_class_attr,
+        lookup_value_special_method, normalize_float_slot_result, render_instance_repr,
+        try_value_to_float, value_type_name_str,
     };
     include!("runtime/formatting.rs");
 }
@@ -78,12 +78,13 @@ mod calls {
     use super::classes::{PrimitiveLayout, classify_primitive_layout, primitive_layout_for_class};
     use super::{
         BUILTIN_DATA_ATTR, CallDepthGuard, EnvRef, ExcHandlersBuf, ExpandedArgBuf, ExpandedCallArg,
-        FnCode, FrameKind, GeneratorFrame, HandledExcBuf, HashMap, InstanceAttrs, Interpreter,
-        PyClass, PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf, Result,
-        UserFunction, Value, ValueKind, VmFrameView, call_depth, class_chain_new_slot_wrapped,
-        class_is_subclass_of, invoke_class_method, is_exception_class, is_primitive_class,
-        lookup_class_attr, mapping_entries_for_expansion, max_call_depth, object_class_singleton,
-        smallvec, type_class_singleton, value_type_name_str,
+        FnCode, FrameKind, GeneratorFrame, GeneratorKind, HandledExcBuf, HashMap, InstanceAttrs,
+        Interpreter, PyClass, PyDict, PyError, PyInstance, PyKey, Rc, RefCell, RegSlice, RegsBuf,
+        Result, UserFunction, Value, ValueKind, VmFrameView, call_depth,
+        class_chain_new_slot_wrapped, class_is_subclass_of, invoke_class_method,
+        is_exception_class, is_primitive_class, lookup_class_attr, mapping_entries_for_expansion,
+        max_call_depth, object_class_singleton, smallvec, type_class_singleton,
+        value_type_name_str,
     };
     include!("runtime/calls.rs");
 }
@@ -116,7 +117,7 @@ mod builtin_methods {
         set_subtract_in_place, value_iterable_needs_runtime_key_semantics,
     };
     use super::{
-        BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorFrame, IndexMap,
+        BUILTIN_DATA_ATTR, BinaryOp, ExpandedArgBuf, ExpandedCallArg, GeneratorKind, IndexMap,
         Interpreter, PrimitiveClassKind, PrintOptions, PyBigInt, PyClass, PyDict, PyError,
         PyInstance, PyKey, PySet, PyToPrimitive, Rc, RefCell, RegSlice, Result, Value, ValueKind,
         apply_format_spec, builtin_data_backing, builtin_iterator_has_length_hint,
@@ -213,17 +214,17 @@ pub(crate) use expressions::{
 
 mod attributes {
     use super::{
-        ExceptionSlotPolicy, ExpandedCallArg, GeneratorFrame, Interpreter, PyClass, PyDict,
-        PyError, PyInstance, PyKey, Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind,
-        Value, ValueKind, adapt_builtin_subclass_method, bind_builtin_class_special,
-        builtin_callable_metadata, builtin_class_doc, canonical_class_by_tag,
-        class_chain_new_slot_wrapped, class_hash_inherits_builtin_none, class_is_subclass_of,
-        class_suppresses_instance_dict, descriptor_get_slot_raw_call, exception_slot_policy,
-        instance_builtin_data, invoke_class_method, is_exception_class, is_type_alias_class,
-        is_typevar_class, lookup_class_attr, metaclass_dunder, metaclass_of,
-        mro_has_unslotted_ancestor, mro_slot_allows, object_class_singleton,
-        primitive_owned_object_dunder, replace_instance_dict, type_alias_readonly_attr_error,
-        typevar_readonly_attr_error, value_class, value_type_name_str,
+        ExceptionSlotPolicy, ExpandedCallArg, Interpreter, PyClass, PyDict, PyError, PyInstance,
+        PyKey, Rc, RefCell, Result, StrKey, UserFunction, UserFunctionKind, Value, ValueKind,
+        adapt_builtin_subclass_method, bind_builtin_class_special, builtin_callable_metadata,
+        builtin_class_doc, canonical_class_by_tag, class_chain_new_slot_wrapped,
+        class_hash_inherits_builtin_none, class_is_subclass_of, class_suppresses_instance_dict,
+        descriptor_get_slot_raw_call, exception_slot_policy, instance_builtin_data,
+        invoke_class_method, is_exception_class, is_type_alias_class, is_typevar_class,
+        lookup_class_attr, metaclass_dunder, metaclass_of, mro_has_unslotted_ancestor,
+        mro_slot_allows, object_class_singleton, primitive_owned_object_dunder,
+        replace_instance_dict, type_alias_readonly_attr_error, typevar_readonly_attr_error,
+        value_class, value_type_name_str,
     };
     include!("runtime/attributes.rs");
 }
@@ -280,8 +281,8 @@ mod pattern_matching {
 
 mod iteration {
     use super::{
-        ExpandedArgBuf, ExpandedCallArg, GenDriving, GeneratorFrame, Interpreter, PyBigInt,
-        PyBigIntSign, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
+        ExpandedArgBuf, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame, Interpreter,
+        PyBigInt, PyBigIntSign, PyError, PyInstance, PyKey, Rc, RefCell, Result, Value, ValueKind,
         builtin_data_backing, effective_user_iter, full_type_name_str,
         i64_range_native_cursor_safe, instance_builtin_data, instantiate_exception,
         invoke_class_method, is_coroutine_value, is_inherited_builtin_iter_sentinel,
@@ -305,10 +306,10 @@ pub(crate) use iteration::{
 
 mod type_objects {
     use super::{
-        AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GeneratorFrame,
-        GetItemIter, IndexMap, InstanceAttrs, MapIter, NativeIterFrame, ProviderIterator, PyClass,
-        PyError, PyInstance, RangeIter, Rc, RefCell, Result, UserFunctionKind, Value, ValueKind,
-        ZipIter, function_type_singleton, generic_alias_class_singleton, method_type_singleton,
+        AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GetItemIter,
+        IndexMap, InstanceAttrs, MapIter, NativeIterFrame, ProviderIterator, PyClass, PyError,
+        PyInstance, RangeIter, Rc, RefCell, Result, UserFunctionKind, Value, ValueKind, ZipIter,
+        function_type_singleton, generic_alias_class_singleton, method_type_singleton,
         primitive_class_for_value, type_class_singleton, value_type_name_str,
     };
     include!("runtime/type_objects.rs");
@@ -335,9 +336,9 @@ mod execution {
         try_scalar_truthiness_fast, try_tagged_int_unary, value_is_builtin_len,
     };
     use super::{
-        CallDepthGuard, EnvRef, FrameKind, HashMap, Interpreter, IterCacheBuf, IterState, ItersBuf,
-        LoopIteratorAdvance, MemoKey, PyError, Rc, RefCell, RegSlice, Result, Value, ValueKind,
-        VmFrameView, bump_global_struct_version, call_depth, callable_error_name,
+        CallDepthGuard, EnvRef, FrameKind, GeneratorCell, HashMap, Interpreter, IterCacheBuf,
+        IterState, ItersBuf, LoopIteratorAdvance, MemoKey, PyError, Rc, RegSlice, Result, Value,
+        ValueKind, VmFrameView, bump_global_struct_version, call_depth, callable_error_name,
         duplicate_keyword_error, extract_stop_iteration_value, initialize_typevar_attr,
         intern_string_value, is_stop_iteration_error, lookup_class_attr, make_slice_value,
         make_type_alias_from_syntax, make_typevar_from_syntax, max_call_depth,
@@ -353,9 +354,9 @@ use execution::{GenDriving, vm_read};
 
 mod generator_protocols {
     use super::{
-        AsyncGenASend, CoroStep, ExpandedCallArg, GenDriving, GeneratorFrame, GetItemIter,
-        Interpreter, NativeIterFrame, PyError, Rc, RefCell, Result, Value, ValueKind,
-        class_is_builtin_exception_subclass, class_is_subclass_of, full_type_name_str,
+        AsyncGenASend, CoroStep, ExpandedCallArg, GenDriving, GeneratorCell, GeneratorFrame,
+        GeneratorKind, GetItemIter, Interpreter, NativeIterFrame, PyError, Rc, Result, Value,
+        ValueKind, class_is_builtin_exception_subclass, class_is_subclass_of, full_type_name_str,
         instantiate_exception, invoke_class_method, lookup_class_attr, lookup_exc_class,
         value_has_length_hint, value_type_name_str,
     };

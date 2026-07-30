@@ -31,15 +31,6 @@ pub(crate) enum IteratorCopy {
     Rebuilt(Value),
 }
 
-/// The noun a *running* frame is refused under.
-///
-/// `def`, `async def`, and `async def` + `yield` are distinguished by a field of
-/// the very frame that is checked out while the body runs, so a mid-execution
-/// object cannot report which it is — the same reason `type()` cannot name one.
-/// CPython prints the exact noun; pyrust prints the common one until the
-/// running-frame type surface exists (#2934's family).
-const RUNNING_FRAME_NOUN: &str = "generator";
-
 /// Build the independent iterator CPython's `__reduce__` round-trip produces.
 ///
 /// `deep` detaches storage cells that are not Python values — a `bytearray`'s
@@ -53,15 +44,17 @@ pub(crate) fn copy_iterator_object(value: &Value, deep: bool) -> Result<Iterator
     let ValueKind::Generator(state_rc) = value.kind() else {
         return Ok(IteratorCopy::Unowned);
     };
-    // A cell checked out by its own running body cannot be read. Copying is
-    // still refused for the *reduction's* reason, not a re-entrancy one:
-    // `copy.copy` never touches the frame, it goes straight to
-    // `__reduce_ex__`, and a generator refuses that whether or not it is
-    // running. A running generator therefore raises the same `TypeError` as a
-    // suspended one rather than #2285's `ValueError`.
-    let Ok(borrow) = state_rc.try_borrow() else {
-        return Ok(IteratorCopy::Unpicklable(RUNNING_FRAME_NOUN));
-    };
+    // A frame refuses the reduction whatever it is doing: `copy.copy` never
+    // touches the frame, it goes straight to `__reduce_ex__`. So a running
+    // generator raises the same `TypeError` as a suspended one, rather than
+    // #2285's `ValueError` — and now under its exact noun, because the kind
+    // tag is readable even while the cell is checked out (#2978).
+    if let Some(noun) = state_rc.kind().frame_type_name() {
+        return Ok(IteratorCopy::Unpicklable(noun));
+    }
+    // Only built-in iterators reach here, and they release the cell before
+    // running any user code.
+    let borrow = state_rc.borrow();
     let tid = {
         let any_ref: &dyn std::any::Any = &**borrow;
         any_ref.type_id()
@@ -142,22 +135,6 @@ pub(crate) fn copy_iterator_object(value: &Value, deep: bool) -> Result<Iterator
             remaining: it.remaining,
             exhausted: it.exhausted,
         }));
-    }
-    if tid == TypeId::of::<GeneratorFrame>() {
-        let frame = expect_state::<GeneratorFrame>(&**borrow)?;
-        return Ok(IteratorCopy::Unpicklable(if frame.is_async_generator() {
-            "async_generator"
-        } else if frame.is_coroutine {
-            "coroutine"
-        } else {
-            "generator"
-        }));
-    }
-    // The gen-drive trampoline parked the frame here while the body runs
-    // (#2253), so the object is mid-execution just as above — and is refused
-    // for the same reduction reason.
-    if tid == TypeId::of::<GenDriving>() {
-        return Ok(IteratorCopy::Unpicklable(RUNNING_FRAME_NOUN));
     }
     // A standard-library provider owns its own cursor and reduce policy.
     Ok(IteratorCopy::Unowned)

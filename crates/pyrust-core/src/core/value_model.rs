@@ -63,7 +63,7 @@ pub enum ValueKind<'a> {
     SuperProxyUnbound {
         class: &'a Rc<RefCell<PyClass>>,
     },
-    Generator(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
+    Generator(&'a Rc<GeneratorCell>),
     /// Synthesized view of the [`NotImplemented`] sentinel.  No backing
     /// `Opaque` variant — the value is encoded as a reserved NaN-box bit
     /// pattern, and `kind()` decodes it here so existing matchers keep

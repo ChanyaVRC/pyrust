@@ -65,7 +65,15 @@ impl Interpreter {
     /// the `yield` it last paused at); `f_code` is a code object carrying the
     /// generator function's `co_name` / `co_firstlineno` / `co_consts` etc.
     /// (issue #2185).
-    pub(crate) fn build_generator_frame_object(&self, frame: &GeneratorFrame) -> Value {
+    ///
+    /// `qualname` comes from the generator object rather than the frame: the
+    /// writable name pair is stored beside the execution state, not in it
+    /// (#2978).
+    pub(crate) fn build_generator_frame_object(
+        &self,
+        frame: &GeneratorFrame,
+        qualname: &str,
+    ) -> Value {
         if frame.done {
             return Value::none();
         }
@@ -94,7 +102,7 @@ impl Interpreter {
         let code = self.build_code_from_fncode(
             &frame.code,
             frame.fn_name.as_ref(),
-            frame.qualname.as_ref(),
+            qualname,
             &frame.local_index,
         );
         frame_obj::frame(

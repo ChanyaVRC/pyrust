@@ -36,6 +36,7 @@ include!("instance_attrs.rs");
 include!("nanbox_strings.rs");
 include!("nanbox_pointers.rs");
 include!("builtin_types.rs");
+include!("generator_cell.rs");
 include!("containers.rs");
 include!("value_model.rs");
 include!("value_constructors.rs");

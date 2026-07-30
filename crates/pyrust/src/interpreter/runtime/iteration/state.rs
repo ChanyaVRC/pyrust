@@ -459,7 +459,7 @@ pub(crate) struct EnumerateIter {
 #[derive(Clone)]
 pub(crate) struct EnumerateElementCursor {
     /// The `enumerate` object's own state cell, holding the running counter.
-    pub(crate) enumerate: Rc<RefCell<Box<dyn std::any::Any>>>,
+    pub(crate) enumerate: Rc<GeneratorCell>,
     /// The enumerate's inner iterator cell.
     pub(crate) inner: EnumerateInnerCursor,
 }
@@ -473,10 +473,10 @@ pub(crate) struct EnumerateElementCursor {
 pub(crate) enum EnumerateInnerCursor {
     /// A [`NativeIterFrame`] whose source is an unguarded element walk over a
     /// list, tuple, snapshot, or an immutable `bytes` / `str`.
-    Frame(Rc<RefCell<Box<dyn std::any::Any>>>),
+    Frame(Rc<GeneratorCell>),
     /// A [`RangeIter`], the canonical i64-backed range cursor. Elements are
     /// generated from the cursor rather than read out of storage.
-    Range(Rc<RefCell<Box<dyn std::any::Any>>>),
+    Range(Rc<GeneratorCell>),
 }
 
 pub(crate) struct BigRangeIter {

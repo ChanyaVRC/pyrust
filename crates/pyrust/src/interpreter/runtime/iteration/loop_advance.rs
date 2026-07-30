@@ -1,6 +1,6 @@
 pub(crate) enum LoopIteratorAdvance {
     Item(Result<Value>),
-    DriveGenerator(Rc<RefCell<Box<dyn std::any::Any>>>),
+    DriveGenerator(Rc<GeneratorCell>),
     NotIterator,
 }
 
@@ -72,7 +72,7 @@ impl Interpreter {
 
     pub(crate) fn advance_generator_backed_iterator(
         &mut self,
-        state: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        state: &Rc<GeneratorCell>,
     ) -> Result<Value> {
         // A real generator frame is checked first: every other arm below is a
         // built-in adapter, so probing nine `is::<T>()` types before reaching
@@ -134,9 +134,7 @@ impl Interpreter {
     }
 }
 
-fn classify_generator_loop_state(
-    state: &Rc<RefCell<Box<dyn std::any::Any>>>,
-) -> Option<LoopIteratorAdvance> {
+fn classify_generator_loop_state(state: &Rc<GeneratorCell>) -> Option<LoopIteratorAdvance> {
     match state.try_borrow() {
         Ok(borrowed) => {
             if let Some(frame) = borrowed.downcast_ref::<GeneratorFrame>() {

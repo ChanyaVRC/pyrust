@@ -685,10 +685,34 @@ impl Value {
         })
     }
 
-    /// Create a generator value.  `state` is the type-erased `GeneratorFrame`
-    /// managed by the VM.
+    /// Create a built-in iterator value (`map`, `zip`, `range_iterator`, a
+    /// provider iterator, …).  `state` is the type-erased cursor managed by the
+    /// interpreter; these iterators release the cell before running user code,
+    /// so their exact type name is read back out of `state`.
     pub fn generator(state: Box<dyn std::any::Any>) -> Self {
-        Value::opaque(Opaque::Generator(Rc::new(RefCell::new(state))))
+        Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
+            kind: GeneratorKind::Iterator,
+            names: RefCell::new(None),
+            state: RefCell::new(state),
+        })))
+    }
+
+    /// Create a Python frame object — a generator, coroutine or async
+    /// generator.  `state` is the type-erased `GeneratorFrame` managed by the
+    /// VM; `kind` and the display names are stored beside it rather than
+    /// inside it, because the cell is mutably checked out for as long as the
+    /// body runs and the object must still be able to say what it is (#2978).
+    pub fn generator_frame(
+        state: Box<dyn std::any::Any>,
+        kind: GeneratorKind,
+        name: std::sync::Arc<str>,
+        qualname: std::sync::Arc<str>,
+    ) -> Self {
+        Value::opaque(Opaque::Generator(Rc::new(GeneratorCell {
+            kind,
+            names: RefCell::new(Some(GeneratorNames { name, qualname })),
+            state: RefCell::new(state),
+        })))
     }
 
     fn opaque(o: Opaque) -> Self {

@@ -270,7 +270,7 @@ impl Interpreter {
     /// - async-gen returned / exhausted → `StopAsyncIteration` (no value).
     fn step_async_gen_asend(
         &mut self,
-        asend_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+        asend_rc: &Rc<GeneratorCell>,
         _sent_val: Value,
     ) -> Result<Value> {
         // Take the per-step injection state out of the AsyncGenASend.  Only the
@@ -420,16 +420,17 @@ impl Interpreter {
             ValueKind::Generator(state_rc) => {
                 let state_rc = Rc::clone(state_rc);
 
-                // GetItemIter and NativeIterFrame have no Python frame; propagate.
-                if state_rc.borrow().downcast_ref::<GetItemIter>().is_some() {
-                    return Err(exc);
-                }
-
+                // Take the cell once: probing it first with an infallible
+                // `borrow()` aborted the process when the sub-iterator was
+                // itself mid-execution (#2978).
                 let mut borrow = state_rc
                     .try_borrow_mut()
                     .map_err(|_| pyrust_core::value_err!("generator already executing"))?;
 
-                if borrow.downcast_mut::<NativeIterFrame>().is_some() {
+                // GetItemIter and NativeIterFrame have no Python frame; propagate.
+                if borrow.downcast_mut::<GetItemIter>().is_some()
+                    || borrow.downcast_mut::<NativeIterFrame>().is_some()
+                {
                     return Err(exc);
                 }
 

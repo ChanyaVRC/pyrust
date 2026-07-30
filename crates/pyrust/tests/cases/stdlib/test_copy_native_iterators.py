@@ -492,4 +492,39 @@ for _ in loop_gen:
     break
 print(driven)
 
+# The refusal names the exact type even mid-run: the kind tag lives outside the
+# checked-out frame, so a running coroutine / async generator is no longer
+# lumped in under the "generator" noun (issue #2978).
+import asyncio
+
+
+async def coro_copies_itself():
+    try:
+        copy.copy(the_coro)
+        return "copied"
+    except TypeError as e:
+        return str(e)
+
+
+the_coro = coro_copies_itself()
+print(asyncio.run(the_coro))
+
+
+async def agen_copies_itself():
+    try:
+        copy.copy(the_agen)
+        yield "copied"
+    except TypeError as e:
+        yield str(e)
+
+
+the_agen = agen_copies_itself()
+
+
+async def drive_agen():
+    return await the_agen.__anext__()
+
+
+print(asyncio.run(drive_agen()))
+
 print("ok")
