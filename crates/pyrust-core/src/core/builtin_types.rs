@@ -189,6 +189,46 @@ pub trait BuiltinTypeOps: Any {
         let _ = state;
         None
     }
+
+    /// Produce an *independent* copy of this object's storage — the built-in
+    /// half of `copy.copy`.  The returned value must share no mutable backing
+    /// with `state`, so writing to it can never be observed through the
+    /// original; the element `Value`s it holds are shared (shallow-copy
+    /// semantics).  Any per-object bookkeeping that only describes the
+    /// original (mutation counters observed by live iterators, for example)
+    /// starts fresh in the copy.
+    ///
+    /// Immutable and identity-like built-ins keep the default `None`, which
+    /// tells the `copy` module to hand back the original object unchanged.
+    fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
+        let _ = state;
+        None
+    }
+
+    /// The `Value` payload this object's storage holds, in iteration order.
+    /// Only container storages override it; `copy.deepcopy` uses it to recurse
+    /// into the payload of a storage returned by
+    /// [`BuiltinTypeOps::copy_storage`].
+    fn storage_elements(&self, state: &BuiltinState) -> Option<Vec<Value>> {
+        let _ = state;
+        None
+    }
+
+    /// Re-seat the payload of a storage produced by
+    /// [`BuiltinTypeOps::copy_storage`].  Returns `false` when the type does
+    /// not support element replacement.
+    fn set_storage_elements(&self, state: &BuiltinState, elements: Vec<Value>) -> bool {
+        let _ = (state, elements);
+        false
+    }
+
+    /// Is this an implementation-internal payload parked in a Python object's
+    /// attributes rather than a user-visible value of its own?  Copying the
+    /// owning object must give the copy its own storage instead of aliasing
+    /// this one (issue #2935).
+    fn is_internal_storage(&self) -> bool {
+        false
+    }
 }
 
 /// Return whether a type-erased built-in operations table has concrete type

@@ -188,6 +188,16 @@ impl BuiltinTypeOps for ByteArrayOps {
         !s.data.borrow().is_empty()
     }
 
+    /// `copy.copy(bytearray(...))` — a new bytearray over its own buffer.
+    /// The payload is bytes, so there is nothing for `deepcopy` to recurse
+    /// into and the same copy serves both.
+    fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<ByteArrayState>()?;
+        let bytes = s.data.borrow().clone();
+        Some(bytearray(bytes))
+    }
+
     fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
         let borrow = state.borrow();
         let s = borrow
