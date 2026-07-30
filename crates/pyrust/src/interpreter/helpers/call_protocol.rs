@@ -417,7 +417,19 @@ pub(crate) fn invoke_class_method(
             //   fixing them means re-modelling those sentinels rather than widening
             //   this gate.
             if resolution.canonical_owner.is_none() {
-                let metadata = builtin_methods::builtin_callable_metadata(name);
+                // Reuse the registration `resolve_and_validate_builtin_method`
+                // already binary-searched.  `builtin_callable_metadata` repeats
+                // that search, and EVERY builtin dunder whose owner is not a
+                // canonical primitive reaches this branch — `Counter.__getitem__`,
+                // `deque.__len__`, `OrderedDict.__setitem__`, the `io` and
+                // `Decimal` dunders — so the duplicate `&str` binary search cost
+                // ~17% on a Counter/deque/OrderedDict dunder loop.  The fallback
+                // is only needed for a name with no registration at all, which is
+                // the cold path that errors or re-binds below.
+                let metadata = match resolution.registration {
+                    Some(entry) => entry.metadata,
+                    None => builtin_methods::builtin_callable_metadata(name),
+                };
                 if metadata.kind == crate::builtin_registry::BuiltinCallableKind::ModuleFunction
                     && metadata.python_module() == Some("builtins")
                 {
