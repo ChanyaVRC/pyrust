@@ -391,31 +391,61 @@ fn validate_iterator_result(iterator: Value) -> Result<Value> {
 
 /// Build the `reversed()` iterator for a `dict` or one of its views (#2448).
 ///
-/// `items` must already be in *reverse* order (the caller materialises the
-/// forward key/value/pair list and reverses it).  `container` is the live
-/// `dict` Value or dict-view whose size is re-read on each step: like CPython's
-/// forward dict iterators, mutating the dict's size during the `reversed()`
-/// walk raises `RuntimeError` on the next `next()` call.  The wording and
-/// check-ordering follow the provider policy shared with the forward path:
-/// tagged ordered views test exhaustion before the guard (`exhaust_first`),
-/// plain dicts test the guard first.
+/// `kind` selects the view (0 keys / 1 values / 2 items) and `container` is
+/// the live `dict` Value or dict-view the walk reads. Nothing is materialised:
+/// the cursor descends the mapping's entry positions and reads each key and
+/// value when it reaches them, so a value replaced mid-walk is observed
+/// exactly as CPython's `dictreviter` observes it (#2932).
+///
+/// The mapping's size is still re-read whenever its mutation generation moves:
+/// like CPython's forward dict iterators, changing the dict's size during the
+/// `reversed()` walk raises `RuntimeError` on the next `next()` call. The
+/// wording and check-ordering follow the provider policy shared with the
+/// forward path: tagged ordered views test exhaustion before the guard
+/// (`exhaust_first`), plain dicts test the guard first.
 ///
 /// `type_name` is the CPython iterator type name for the view kind (#2702):
 /// `dict_reversekeyiterator` / `dict_reversevalueiterator` /
 /// `dict_reverseitemiterator`.  It drives both `type(...).__name__` and the
 /// iterator's repr.
 pub(crate) fn make_reversed_dict_iter(
-    items: Vec<Value>,
     container: Value,
+    kind: u8,
     type_name: &'static str,
 ) -> NativeIterFrame {
-    let recorded_len = items.len();
     let ordered_policy = pyrust_builtins::ordered_mapping::view_policy(&container);
     // A provider may override the iterator presentation shared by its forward
     // and reverse views. Plain dicts retain the kind-specific name supplied by
     // the caller (#2702).
     let type_name = ordered_policy.map_or(type_name, |policy| policy.iterator_type_name);
-    let mut frame = NativeIterFrame::new(items, type_name);
+    let frame = NativeIterFrame::reverse_dict(container.clone(), kind, type_name);
+    let recorded_len = frame.reverse_dict_recorded_len();
+    guarded_reverse_mapping_iter(frame, container, recorded_len)
+}
+
+/// Build the `reversed()` iterator for a `mappingproxy` (#2728).
+///
+/// A class-backed proxy (`vars(C)`) has no `PyDict` to walk positionally, so
+/// its key order is captured up front. It only ever yields keys, so no value
+/// is read from the snapshot and the eager order costs nothing in freshness.
+pub(crate) fn make_reversed_mapping_snapshot_iter(
+    mut items: Vec<Value>,
+    container: Value,
+) -> NativeIterFrame {
+    items.reverse();
+    let recorded_len = items.len();
+    // mappingproxy reverses its keys: `dict_reversekeyiterator` (#2702).
+    let frame = NativeIterFrame::new(items, "dict_reversekeyiterator");
+    guarded_reverse_mapping_iter(frame, container, recorded_len)
+}
+
+/// Attach the size-mutation guard shared by every `reversed()` mapping walk.
+fn guarded_reverse_mapping_iter(
+    mut frame: NativeIterFrame,
+    container: Value,
+    recorded_len: usize,
+) -> NativeIterFrame {
+    let ordered_policy = pyrust_builtins::ordered_mapping::view_policy(&container);
     let (msg, exhaust_first) = ordered_policy
         .map(|policy| (policy.mutation_message, policy.exhaust_first))
         .unwrap_or(("dictionary changed size during iteration", false));

@@ -157,6 +157,11 @@ fn native_frame_remaining(frame: &NativeIterFrame) -> i64 {
                 _ => 0,
             }
         }
+        // The descending entry cursor is the count; the guard above has
+        // already reported zero if the mapping's size moved.
+        NativeIterSource::ReverseDict(cursor) => {
+            i64::try_from(cursor.next_index).unwrap_or(i64::MAX)
+        }
         NativeIterSource::DictView { keys, .. } => remaining_from(keys.len()),
         NativeIterSource::Deque(data) => remaining_from(data.borrow().len()),
         NativeIterSource::Bytes(value) => remaining_from(match value.kind() {

@@ -140,40 +140,20 @@ pyrust_module! {
             ));
         }
         // dict / dict views are reversible by insertion order (CPython 3.8+,
-        // issue #2093).  The backing IndexMap preserves insertion order, so we
-        // build a forward-ordered list of keys / values / (key, value) pairs,
-        // reverse it, and wrap it in a `NativeIterFrame` carrying a size-mutation
-        // guard keyed to the live backing dict (#2448).  Like CPython's forward
-        // view iterators, mutating the dict's size during a `reversed()` walk
-        // raises `RuntimeError` on the next `next()` call.
-        if let ValueKind::Dict(map) = seq.0.kind() {
-            let mut items: Vec<Value> = map.keys().map(|k| key_to_value(k.clone())).collect();
-            items.reverse();
+        // issue #2093).  The backing IndexMap preserves insertion order, so the
+        // iterator is a cursor descending the live entry positions, carrying a
+        // size-mutation guard keyed to the backing dict (#2448).  Like CPython's
+        // forward view iterators, mutating the dict's size during a `reversed()`
+        // walk raises `RuntimeError` on the next `next()` call; and like
+        // CPython's `dictreviter`, each key and value is read when the cursor
+        // reaches it rather than snapshotted up front (#2932).
+        if seq.0.is_dict() {
             // Bare `reversed(d)` iterates keys: `dict_reversekeyiterator` (#2702).
-            let frame = make_reversed_dict_iter(items, seq.0.clone(), "dict_reversekeyiterator");
+            let frame = make_reversed_dict_iter(seq.0.clone(), 0, "dict_reversekeyiterator");
             return Ok(Value::generator(Box::new(frame)));
         }
         if let Some(kind) = pyrust_builtins::dict_views::view_kind(&seq.0)
-            && let Some(rc) = pyrust_builtins::dict_views::as_dict_rc(&seq.0) {
-                let mut items: Vec<Value> = {
-                    let map = rc.borrow();
-                    match kind {
-                        // dict_keys
-                        pyrust_builtins::dict_views::DictViewKind::Keys => {
-                            map.keys().map(|k| key_to_value(k.clone())).collect()
-                        }
-                        // dict_values
-                        pyrust_builtins::dict_views::DictViewKind::Values => {
-                            map.values().cloned().collect()
-                        }
-                        // dict_items
-                        pyrust_builtins::dict_views::DictViewKind::Items => map
-                            .iter()
-                            .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
-                            .collect(),
-                    }
-                };
-                items.reverse();
+            && pyrust_builtins::dict_views::as_dict_rc(&seq.0).is_some() {
                 // CPython names the reverse iterator by view kind (#2702).
                 let type_name = match kind {
                     pyrust_builtins::dict_views::DictViewKind::Keys => {
@@ -186,7 +166,8 @@ pyrust_module! {
                         "dict_reverseitemiterator"
                     }
                 };
-                let frame = make_reversed_dict_iter(items, seq.0.clone(), type_name);
+                let frame =
+                    make_reversed_dict_iter(seq.0.clone(), kind.live_cursor_code(), type_name);
                 return Ok(Value::generator(Box::new(frame)));
             }
         // mappingproxy (`vars(C)` / `d.keys().mapping`): reverse like a dict, but
@@ -198,11 +179,8 @@ pyrust_module! {
         if pyrust_builtins::mapping_proxy::as_class_rc(&seq.0).is_some()
             || pyrust_builtins::mapping_proxy::as_dict_rc(&seq.0).is_some()
         {
-            let mut items = iter_values(&seq.0)?;
-            items.reverse();
-            // mappingproxy reverses its keys: `dict_reversekeyiterator` (#2702).
-            let frame =
-                make_reversed_dict_iter(items, seq.0.clone(), "dict_reversekeyiterator");
+            let items = iter_values(&seq.0)?;
+            let frame = make_reversed_mapping_snapshot_iter(items, seq.0.clone());
             return Ok(Value::generator(Box::new(frame)));
         }
         // BuiltinObject types that implement `__reversed__` (e.g. mappingproxy,

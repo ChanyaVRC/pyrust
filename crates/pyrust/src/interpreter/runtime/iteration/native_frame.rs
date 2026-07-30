@@ -78,6 +78,27 @@ impl NativeIterFrame {
         }
     }
 
+    /// Construct a descending walk over a live mapping's entries.
+    pub(crate) fn reverse_dict(container: Value, kind: u8, type_name: &'static str) -> Self {
+        NativeIterFrame {
+            source: NativeIterSource::ReverseDict(Box::new(ReverseDictCursor::new(
+                container, kind,
+            ))),
+            pos: 0,
+            type_name,
+            guard: None,
+            exhausted: false,
+        }
+    }
+
+    /// The recorded length of a freshly built reverse-dict frame.
+    fn reverse_dict_recorded_len(&self) -> usize {
+        match &self.source {
+            NativeIterSource::ReverseDict(cursor) => cursor.recorded_len(),
+            _ => 0,
+        }
+    }
+
     /// Construct a dict-view iterator that keeps key order stable while
     /// resolving values from the live mapping at each step.
     pub(crate) fn dict_view(
@@ -220,6 +241,7 @@ impl NativeIterFrame {
             NativeIterSource::ReverseIndexed { next_index, .. } => {
                 self.pos.saturating_add(*next_index)
             }
+            NativeIterSource::ReverseDict(cursor) => self.pos.saturating_add(cursor.next_index),
             NativeIterSource::DictView { keys, .. } => keys.len(),
             NativeIterSource::Deque(data) => data.borrow().len(),
             NativeIterSource::Bytes(value) => match value.kind() {
@@ -298,6 +320,12 @@ impl NativeIterFrame {
                     }
                     _ => None,
                 })
+            }
+            NativeIterSource::ReverseDict(cursor) => {
+                Ok(advance_reverse_dict_cursor(cursor)?.map(|item| match item {
+                    LiveDictViewItem::Item(value) => value,
+                    LiveDictViewItem::Pair(key, value) => Value::tuple(vec![key, value]),
+                }))
             }
             NativeIterSource::DictView { dict, keys, kind } => {
                 let Some(key) = keys.get(index) else {
@@ -379,6 +407,7 @@ impl NativeIterFrame {
             self.source,
             NativeIterSource::Indexed(_)
                 | NativeIterSource::ReverseIndexed { .. }
+                | NativeIterSource::ReverseDict(_)
                 | NativeIterSource::LiveKeys { .. }
                 | NativeIterSource::InstanceDict { .. }
                 | NativeIterSource::DictView { .. }
@@ -398,7 +427,14 @@ impl NativeIterFrame {
         if matches!(&self.source, NativeIterSource::LiveKeys { .. }) {
             return Ok(());
         }
-        let Some(guard) = &self.guard else {
+        // A reverse dict cursor owns the same generation, and its guard reads
+        // the mapping's length only once that generation moves.
+        if let NativeIterSource::ReverseDict(cursor) = &mut self.source
+            && !reverse_dict_needs_guard(cursor)
+        {
+            return Ok(());
+        }
+        let Some(guard) = &mut self.guard else {
             return Ok(());
         };
         let live = match &guard.kind {
@@ -414,6 +450,13 @@ impl NativeIterFrame {
                 );
                 (outcome.message, outcome.exhaust_after_raise)
             } else {
+                // CPython stamps `di_used` / `si_used` with -1 on the first
+                // size report, so no later length can match and the error is
+                // re-raised for the rest of the iterator's life — including
+                // after the container is restored to its original size
+                // (#2915). A provider guard keeps its own recorded length,
+                // which its outcome logic still needs.
+                guard.version = -1;
                 (guard.msg, false)
             };
             // A provider whose guard reports once leaves the iterator
@@ -422,6 +465,10 @@ impl NativeIterFrame {
             // keeps that true for `next()` and for native consumers alike.
             if exhaust_after_raise {
                 self.latch_exhausted();
+            } else if let NativeIterSource::ReverseDict(cursor) = &mut self.source {
+                // Keep the stamped guard reachable: a reverse cursor otherwise
+                // skips it while its mutation generation stays put.
+                cursor.size_changed = true;
             }
             return Err(PyError::Runtime(message.to_string()));
         }

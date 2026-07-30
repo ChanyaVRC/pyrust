@@ -265,6 +265,11 @@ pub fn entry_at(dict: &DictRc, index: usize) -> Option<(PyKey, Value)> {
         .map(|(key, value)| (key.clone(), value.clone()))
 }
 
+/// Read only the key stored at `index`.
+pub fn key_at(dict: &DictRc, index: usize) -> Option<PyKey> {
+    dict.borrow().get_index(index).map(|(key, _)| key.clone())
+}
+
 /// Read only the value stored at `index`.
 pub fn value_at(dict: &DictRc, index: usize) -> Option<Value> {
     dict.borrow()
