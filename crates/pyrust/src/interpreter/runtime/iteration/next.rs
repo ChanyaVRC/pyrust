@@ -22,19 +22,49 @@ impl Interpreter {
         })))
     }
 
-    /// Resolve one `next()` step: yield the produced value, or fall back to
-    /// `default` if the iterator is exhausted, or raise a bare `StopIteration`
-    /// if there is no default.  Shared by every built-in iterator arm in
-    /// [`call_next`], which previously inlined this same match.
-    fn step_or_stop(item: Option<Value>, default: Option<Value>) -> Result<Value> {
-        match item {
-            Some(v) => Ok(v),
-            None => default.ok_or_else(|| pyrust_core::py_err!("StopIteration", String::new())),
-        }
+    /// Resolve one `next()` step: yield the produced value, or raise a bare
+    /// `StopIteration` if the cursor is exhausted.  Shared by every built-in
+    /// iterator arm in [`Self::advance_iterator`], which previously inlined
+    /// this same match.
+    fn step_or_stop(item: Option<Value>) -> Result<Value> {
+        item.ok_or_else(|| pyrust_core::py_err!("StopIteration", String::new()))
     }
 
     /// Call next() on a generator or any object with __next__.
+    ///
+    /// `default`, when supplied, replaces a `StopIteration` raised by the
+    /// advance.  CPython's `builtin_next` catches exactly `StopIteration`
+    /// — subclasses included, since it tests with `PyErr_ExceptionMatches`
+    /// — and lets every other exception through, so a mutation-latched
+    /// cursor's `RuntimeError` or a `__next__` that raises `ValueError`
+    /// still propagates.
+    ///
+    /// The catch lives here, at the single entry point, rather than in the
+    /// per-kind arms: [`Self::advance_iterator`] only has to report
+    /// exhaustion as a `StopIteration` error and never has to know about
+    /// `default`.  Issue #2966 was exactly the gap that per-arm handling
+    /// left — built-in-module iterator classes raise
+    /// `PyError::Named("StopIteration", …)` from their `__next__`, which
+    /// the `PyInstance` arm's `PyError::Raised`-only match did not
+    /// recognise, so `next(itertools.combinations([1], 2), "done")` raised
+    /// instead of returning `"done"`.
     pub(crate) fn call_next(&mut self, val: &Value, default: Option<Value>) -> Result<Value> {
+        match self.advance_iterator(val) {
+            Ok(value) => Ok(value),
+            // Single-argument `next(it)` — by far the hotter form, and the
+            // one every internal consumer uses — never inspects the error,
+            // so exhaustion costs exactly what it did before.
+            Err(err) => match default {
+                Some(fallback) if is_stop_iteration_error(&err) => Ok(fallback),
+                _ => Err(err),
+            },
+        }
+    }
+
+    /// Advance `val` by exactly one element.  Exhaustion is reported as a
+    /// `StopIteration` error, which [`Self::call_next`] turns into the
+    /// caller's `default` when there is one.
+    fn advance_iterator(&mut self, val: &Value) -> Result<Value> {
         use std::any::TypeId;
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);
@@ -51,16 +81,7 @@ impl Interpreter {
                 .try_borrow_mut()
                 .map_err(|_| pyrust_core::value_err!("generator already executing"))?;
             if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
-                return match native.advance()? {
-                    Some(v) => Ok(v),
-                    None => {
-                        if let Some(d) = default {
-                            Ok(d)
-                        } else {
-                            Err(pyrust_core::py_err!("StopIteration", String::new()))
-                        }
-                    }
-                };
+                return Self::step_or_stop(native.advance()?);
             }
 
             // Single-probe dispatch on the concrete iterator-state type for
@@ -109,32 +130,19 @@ impl Interpreter {
                 }
                 if frame.done {
                     drop(borrow);
-                    return if let Some(d) = default {
-                        Ok(d)
+                    // Exhausted generator: StopIteration() with no args → .value is None.
+                    let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                        PyError::Raised(instantiate_exception(cls, vec![]))
                     } else {
-                        // Exhausted generator: StopIteration() with no args → .value is None.
-                        let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
-                            PyError::Raised(instantiate_exception(cls, vec![]))
-                        } else {
-                            pyrust_core::py_err!("StopIteration", String::new())
-                        };
-                        Err(exc)
+                        pyrust_core::py_err!("StopIteration", String::new())
                     };
+                    return Err(exc);
                 }
-                return match self.resume_generator(frame) {
-                    Ok(yielded) => Ok(yielded),
-                    Err(e) if is_stop_iteration_error(&e) => {
-                        drop(borrow);
-                        if let Some(d) = default {
-                            Ok(d)
-                        } else {
-                            // Propagate the original error so StopIteration.value
-                            // is preserved (PEP 380 / issue #600).
-                            Err(e)
-                        }
-                    }
-                    Err(e) => Err(e),
-                };
+                // A `StopIteration` from the body is returned verbatim so
+                // that `.value` survives for a bare `next(g)` (PEP 380 /
+                // issue #600); `call_next` discards it in favour of the
+                // caller's default when there is one.
+                return self.resume_generator(frame);
             }
 
             // The step_* helpers below re-borrow the state internally.
@@ -144,49 +152,49 @@ impl Interpreter {
             // Borrow released by step_getitem_iter before invoking the
             // method (it would otherwise re-entrantly re-borrow).
             if tid == TypeId::of::<GetItemIter>() {
-                return Self::step_or_stop(self.step_getitem_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_getitem_iter(&state_rc)?);
             }
 
             // CallableIter path: invoke callable(), stop when result == sentinel.
             if tid == TypeId::of::<CallableIter>() {
-                return Self::step_or_stop(self.step_callable_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_callable_iter(&state_rc)?);
             }
 
             // MapIter path: apply func to one row of columns per step.
             if tid == TypeId::of::<MapIter>() {
-                return Self::step_or_stop(self.step_map_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_map_iter(&state_rc)?);
             }
 
             // FilterIter path: scan forward for next passing element.
             if tid == TypeId::of::<FilterIter>() {
-                return Self::step_or_stop(self.step_filter_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_filter_iter(&state_rc)?);
             }
 
             // Standard-library iterators expose one typed advancement
             // interface; their concrete cursor and API policy remain with the
             // provider.
             if tid == TypeId::of::<ProviderIterator>() {
-                return Self::step_or_stop(self.step_provider_iterator(&state_rc)?, default);
+                return Self::step_or_stop(self.step_provider_iterator(&state_rc)?);
             }
 
             // RangeIter path: lazy common i64 range iteration.
             if tid == TypeId::of::<RangeIter>() {
-                return Self::step_or_stop(self.step_range_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_range_iter(&state_rc)?);
             }
 
             // BigRangeIter path: lazy arbitrary-precision range iteration (#2118).
             if tid == TypeId::of::<BigRangeIter>() {
-                return Self::step_or_stop(self.step_bigrange_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_bigrange_iter(&state_rc)?);
             }
 
             // EnumerateIter path: (counter, element) pair per step.
             if tid == TypeId::of::<EnumerateIter>() {
-                return Self::step_or_stop(self.step_enumerate_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_enumerate_iter(&state_rc)?);
             }
 
             // ZipIter path: one row tuple per step.
             if tid == TypeId::of::<ZipIter>() {
-                return Self::step_or_stop(self.step_zip_iter(&state_rc)?, default);
+                return Self::step_or_stop(self.step_zip_iter(&state_rc)?);
             }
 
             Err(PyError::Runtime("invalid generator state".to_string()))
@@ -194,21 +202,11 @@ impl Interpreter {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             if let Some(method_val) = lookup_class_attr(&class, "__next__") {
-                match invoke_class_method(self, method_val, Value::py_instance(inst_rc), &[]) {
-                    Ok(v) => Ok(v),
-                    Err(PyError::Raised(exc)) => {
-                        if is_stop_iteration_error(&PyError::Raised(exc.clone())) {
-                            if let Some(d) = default {
-                                Ok(d)
-                            } else {
-                                Err(PyError::Raised(exc))
-                            }
-                        } else {
-                            Err(PyError::Raised(exc))
-                        }
-                    }
-                    Err(e) => Err(e),
-                }
+                // Covers both user classes (`raise StopIteration` →
+                // `PyError::Raised`) and built-in-module iterator classes
+                // such as `itertools.combinations`, whose `__next__` reports
+                // exhaustion as `PyError::Named("StopIteration", …)`.
+                invoke_class_method(self, method_val, Value::py_instance(inst_rc), &[])
             } else {
                 Err(pyrust_core::type_err!(
                     "'{}' object is not an iterator",
@@ -218,7 +216,7 @@ impl Interpreter {
         } else if let ValueKind::BuiltinObject { ops, state } = val.kind()
             && ops.is_iterator()
         {
-            Self::step_or_stop(ops.iter_next(state)?, default)
+            Self::step_or_stop(ops.iter_next(state)?)
         } else {
             Err(pyrust_core::type_err!(
                 "'{}' object is not an iterator",
