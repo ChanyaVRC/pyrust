@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::value::{PyInstance, Value, ValueKind};
-use pyrust_core::BuiltinTypeOps;
+use pyrust_core::{BuiltinState, BuiltinTypeOps};
 
 fn memory_error() -> PyError {
     PyError::named("MemoryError", String::new())
@@ -64,10 +64,120 @@ pub(super) fn reserve_distinct_pools(distinct_pool_count: usize) -> Result<Vec<V
     try_value_vec(distinct_pool_count)
 }
 
+/// Cloning duplicates the index vectors and the pool *handles*; the pooled
+/// element `Value`s are shared by `Rc` clone. That is exactly `copy.copy`'s
+/// shallow contract, and it is what makes a copied iterator independent: the
+/// pool is materialised once and never mutated, so only the indices — the part
+/// that gets its own allocation here — distinguish two cursors over it.
+#[derive(Clone)]
 enum Cursor {
     Product(ProductCursor),
     Combinations(CombinationsCursor),
     Permutations(PermutationsCursor),
+}
+
+impl Cursor {
+    /// CPython's `stopped` flag *as `__reduce__` tests it*: the iterator has
+    /// yielded at least once (`result != NULL`) **and** has since run out. A
+    /// cursor that is empty before it ever started — `combinations(range(2), 5)`
+    /// — is deliberately excluded, because `combinations_reduce` checks
+    /// `result == NULL` first and so still reduces *with* its pool.
+    fn stopped(&self) -> bool {
+        match self {
+            Cursor::Product(cursor) => cursor.started && cursor.exhausted,
+            Cursor::Combinations(cursor) => cursor.started && cursor.exhausted,
+            Cursor::Permutations(cursor) => cursor.started && cursor.exhausted,
+        }
+    }
+
+    /// The pooled `Value`s `deepcopy` must recurse into. `product` holds one
+    /// list per dimension; the other two hold the elements directly.
+    ///
+    /// A stopped cursor exposes *nothing*: CPython's spent-iterator reduce
+    /// discards the pool (`(type, ((), r))`), so `deepcopy` of an exhausted
+    /// iterator never reaches a pooled element's `__deepcopy__`.
+    fn pool_elements(&self) -> Vec<Value> {
+        if self.stopped() {
+            return Vec::new();
+        }
+        match self {
+            Cursor::Product(cursor) => cursor.pools.clone(),
+            Cursor::Combinations(cursor) => cursor.pool.clone(),
+            Cursor::Permutations(cursor) => cursor.pool.clone(),
+        }
+    }
+
+    /// The cursor a copy receives, modelling CPython's `__reduce__` rather than
+    /// a verbatim clone of the spent state.
+    ///
+    /// Once an iterator has stopped, CPython reduces it *without* its pool —
+    /// `(type, ((), r))` for `combinations` / `permutations` /
+    /// `combinations_with_replacement`, `(type, ((),))` for `product` — and the
+    /// copy is rebuilt from those arguments. For `r > 0` that reconstructs an
+    /// empty iterator, so cloning the spent cursor happens to agree; for
+    /// `r == 0` it reconstructs a *fresh* one over the empty pool, which yields
+    /// `()` one more time:
+    ///
+    /// ```python
+    /// it = itertools.combinations(range(3), 0)
+    /// list(it)              # [()] — and the next next() raises
+    /// list(copy.copy(it))   # [()] again, not []
+    /// ```
+    ///
+    /// Dropping the pool here is also what keeps `pool_elements` empty for a
+    /// stopped cursor, so the `deepcopy` side of the divergence goes with it.
+    fn reduced_clone(&self) -> Cursor {
+        if !self.stopped() {
+            return self.clone();
+        }
+        match self {
+            // `product(())` is one empty dimension. A dimensionless exhausted
+            // cursor is the same observable iterator and leaves the pool the
+            // reduce exposes genuinely empty, which `pool_elements` relies on.
+            Cursor::Product(_) => Cursor::Product(ProductCursor {
+                pools: Vec::new(),
+                indices: Vec::new(),
+                started: false,
+                exhausted: true,
+            }),
+            // `combinations((), r)` / `combinations_with_replacement((), r)`.
+            // A started cursor always kept `indices.len() == r`, so `r`
+            // survives even though it is not stored on its own.
+            Cursor::Combinations(cursor) => Cursor::Combinations(CombinationsCursor {
+                pool: Vec::new(),
+                indices: Vec::new(),
+                with_replacement: cursor.with_replacement,
+                started: false,
+                exhausted: !cursor.indices.is_empty(),
+            }),
+            // `permutations((), r)`.
+            Cursor::Permutations(cursor) => Cursor::Permutations(PermutationsCursor {
+                pool: Vec::new(),
+                r: cursor.r,
+                indices: Vec::new(),
+                cycles: Vec::new(),
+                started: false,
+                exhausted: cursor.r > 0,
+            }),
+        }
+    }
+
+    /// Re-seat deep-copied pool contents. The replacement comes from
+    /// `deepcopy`-ing `pool_elements()`, so it is the same length and the live
+    /// indices stay in range; a mismatch is rejected rather than silently
+    /// desynchronising the cursor from its pool.
+    fn set_pool_elements(&mut self, elements: Vec<Value>) -> bool {
+        let pool = match self {
+            Cursor::Product(cursor) => &mut cursor.pools,
+            Cursor::Combinations(cursor) => &mut cursor.pool,
+            Cursor::Permutations(cursor) => &mut cursor.pool,
+        };
+        if pool.len() != elements.len() {
+            return false;
+        }
+        *pool = elements;
+        true
+    }
 }
 
 struct CursorOps;
@@ -76,6 +186,43 @@ const CURSOR_OPS: &CursorOps = &CursorOps;
 impl BuiltinTypeOps for CursorOps {
     fn type_name(&self) -> &'static str {
         "_itertools_combinatoric_cursor"
+    }
+
+    /// A cursor at the same position over the same pool, advancing on its own
+    /// (issue #2952). CPython's combinatoric iterators reconstruct through
+    /// `__reduce__` — `(type, (pool, r), indices)` — so a copy taken
+    /// mid-iteration resumes exactly where the original stood and neither
+    /// iterator can move the other; duplicating the index vectors reproduces
+    /// that without a Python-visible reduce round-trip. `reduced_clone` also
+    /// models the one state where reduce is *not* a verbatim clone: a spent
+    /// iterator reduces without its pool.
+    ///
+    /// The clone is infallible, matching the other storage hooks: it re-asks
+    /// for allocations whose sizes were already granted when the original
+    /// cursor was built.
+    fn copy_storage(&self, state: &BuiltinState) -> Option<Value> {
+        let borrow = state.borrow();
+        let cursor = borrow.downcast_ref::<Cursor>()?;
+        Some(cursor_value(cursor.reduced_clone()))
+    }
+
+    fn storage_elements(&self, state: &BuiltinState) -> Option<Vec<Value>> {
+        let borrow = state.borrow();
+        Some(borrow.downcast_ref::<Cursor>()?.pool_elements())
+    }
+
+    fn set_storage_elements(&self, state: &BuiltinState, elements: Vec<Value>) -> bool {
+        let mut borrow = state.borrow_mut();
+        borrow
+            .downcast_mut::<Cursor>()
+            .is_some_and(|cursor| cursor.set_pool_elements(elements))
+    }
+
+    /// The cursor lives in the iterator's `_cursor` attribute as an
+    /// implementation detail, not as one of its element values, so copying the
+    /// iterator must detach it (issue #2935's mechanism).
+    fn is_internal_storage(&self) -> bool {
+        true
     }
 }
 
@@ -107,6 +254,7 @@ fn with_cursor<R>(
     action(cursor)
 }
 
+#[derive(Clone)]
 struct ProductCursor {
     pools: Vec<Value>,
     indices: Vec<usize>,
@@ -189,6 +337,7 @@ pub(super) fn next_product(
     })
 }
 
+#[derive(Clone)]
 struct CombinationsCursor {
     pool: Vec<Value>,
     indices: Vec<usize>,
@@ -295,6 +444,7 @@ pub(super) fn next_combinations(
     })
 }
 
+#[derive(Clone)]
 struct PermutationsCursor {
     pool: Vec<Value>,
     r: usize,
