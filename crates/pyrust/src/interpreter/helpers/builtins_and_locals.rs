@@ -343,11 +343,21 @@ fn merge_frame_cells_into_dict_slow(view: &VmFrameView, dict: &mut PyDict) {
     let candidates = code.free_var_candidates();
     if !candidates.is_empty() {
         // An explicit `global x` targets the module env even when an enclosing
-        // function happens to bind `x` too.  A body that declares one always
-        // gets a local env carrying the declarations, so an absent env means
-        // none exist — and that env is the only thing a generator frame can
-        // consult, having no `UserFunction` to ask.
-        let declared_global = own_env.map(|env| Rc::clone(&env.borrow().global_names));
+        // function happens to bind `x` too, so those names are filtered out.
+        //
+        // The frame's own `UserFunction` is the authoritative source: it carries
+        // the declarations whether or not the frame published an env, which the
+        // env alone does not — `env` is only handed to the view for a frame with
+        // `nonlocal` names or cell vars, and the #2252 trampoline publishes none
+        // at all, so a body whose *only* reason for a local env is a `global`
+        // declaration would have been read as declaring nothing.  A generator
+        // frame has no `UserFunction`, and falls back to its own env, which a
+        // body that declares a `global` is always given.
+        let declared_global = view
+            .function
+            .as_ref()
+            .map(|f| Rc::clone(&f.global_names))
+            .or_else(|| own_env.map(|env| Rc::clone(&env.borrow().global_names)));
         let mut current = Some(defining_env);
         while let Some(env) = current {
             let bindings = env.borrow();

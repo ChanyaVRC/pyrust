@@ -209,6 +209,68 @@ def global_decl():
 
 
 global_decl()
+
+
+# A `global` declaration that *reads* the name is the case that distinguishes a
+# real filter from an accident: `writer` above only stores, which compiles to no
+# read, so the name never reaches the candidate set at all.  Here the enclosing
+# scope binds `probed` as a cell and the declaring body reads it, so the name is
+# a live candidate that resolves in an enclosing function scope — it must still
+# be filtered out, in a plain call and in a repeated (trampolined) one, and
+# whether or not the body has any other reason to own a local env.
+probed = "module probed"
+
+
+def global_read_decl():
+    probed = "enclosing"
+
+    def keep():  # makes `probed` a cell of this frame
+        return probed
+
+    def declares_global():
+        global probed
+        return sorted(locals()), probed
+
+    def declares_global_with_local():
+        global probed
+        own = 1
+        return sorted(locals()), probed, own
+
+    def free_reader():
+        return sorted(locals()), probed
+
+    print("global read decl:", declares_global())
+    print("global read decl + local:", declares_global_with_local())
+    print("free sibling:", free_reader())
+
+    # Repeat past the point where the call trampoline takes over: it publishes
+    # no env for the frame, so the declarations have to come from somewhere the
+    # trampolined frame can still reach.
+    last = None
+    for _ in range(200):
+        last = declares_global()
+    print("global read decl (repeated):", last)
+    keep()
+
+
+global_read_decl()
+
+
+def global_read_decl_gen():
+    probed = "enclosing gen"
+
+    def keep():
+        return probed
+
+    def gen():
+        global probed
+        yield sorted(locals()), probed
+
+    print("global read decl gen:", next(gen()))
+    keep()
+
+
+global_read_decl_gen()
 print("module global after:", shadowed)
 
 # --- lambdas, methods, generators, coroutines ------------------------------
