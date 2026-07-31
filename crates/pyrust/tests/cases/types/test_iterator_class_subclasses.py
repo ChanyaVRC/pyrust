@@ -177,6 +177,7 @@ expect_error(
     TypeError,
     lambda: object.__new__(MixedZip),
 )
+expect_error("unsafe-object-new-slice", TypeError, lambda: object.__new__(slice))
 
 for label, subtype in (
     ("zip", ZipSub),

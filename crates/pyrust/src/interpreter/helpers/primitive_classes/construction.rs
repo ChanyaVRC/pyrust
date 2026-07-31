@@ -146,38 +146,29 @@ pub(crate) fn builtin_type_class_isinstance_fast(
     Some(actual_kind == expected_kind)
 }
 
-/// Does this class inherit one of issue #3000's subclassable native iterator
-/// layouts?
+/// Does this class inherit one of issue #3000's native built-in layouts?
 ///
-/// The immutable tag exists only on the five real built-in iterator class
-/// singletons (and on `slice`, which is deliberately excluded here).  Walking
-/// the class graph once therefore distinguishes genuine descendants from an
-/// unrelated same-named user class without repeating a pointer-based subclass
-/// search for every possible iterator base.
+/// The immutable tag exists only on the six real built-in class singletons.
+/// Walking the class graph once therefore distinguishes genuine descendants
+/// from an unrelated same-named user class without repeating a pointer-based
+/// subclass search for every possible base. `slice` cannot have descendants,
+/// but its exact class must still reject bare allocation through
+/// `object.__new__`.
 #[inline]
-pub(crate) fn class_has_subclassable_builtin_type_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
+pub(crate) fn class_has_native_builtin_type_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
     let borrowed = class.borrow();
-    if matches!(
-        borrowed.builtin_type_tag,
-        Some(
-            pyrust_core::BuiltinTypeClassTag::Zip
-                | pyrust_core::BuiltinTypeClassTag::Map
-                | pyrust_core::BuiltinTypeClassTag::Filter
-                | pyrust_core::BuiltinTypeClassTag::Enumerate
-                | pyrust_core::BuiltinTypeClassTag::Reversed
-        )
-    ) {
+    if borrowed.builtin_type_tag.is_some() {
         return true;
     }
     if let Some(base) = &borrowed.base
-        && class_has_subclassable_builtin_type_ancestor(base)
+        && class_has_native_builtin_type_ancestor(base)
     {
         return true;
     }
     borrowed
         .extra_bases
         .iter()
-        .any(class_has_subclassable_builtin_type_ancestor)
+        .any(class_has_native_builtin_type_ancestor)
 }
 
 /// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the

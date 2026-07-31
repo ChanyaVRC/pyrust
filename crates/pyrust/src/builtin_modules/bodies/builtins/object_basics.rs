@@ -464,11 +464,11 @@ pyrust_module! {
                 ));
             }
         };
-        // These native iterator bases own a solid backing layout.  Allocating
-        // a bare PyInstance through object.__new__ would create an object that
-        // passes the subclass test but has no iterator state for its inherited
-        // slots.  CPython rejects the same unsafe allocator bypass.
-        if class_has_subclassable_builtin_type_ancestor(&class_rc) {
+        // These native built-in types own a backing layout. Allocating a bare
+        // PyInstance through object.__new__ would create an object that passes
+        // the class test but has no state for its native slots. CPython rejects
+        // the same unsafe allocator bypass, including for exact `slice`.
+        if class_has_native_builtin_type_ancestor(&class_rc) {
             let class_name = class_rc.borrow().name.clone();
             return Err(PyError::named(
                 "TypeError",
