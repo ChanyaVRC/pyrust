@@ -23,7 +23,8 @@ use crate::interpreter::{
     BuiltinTypeClass, CallableIter, EnumerateIter, FilterIter, Interpreter, IterSrcBuf, MapIter,
     ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
     bind_constructor_kwargs, builtin_data_backing, builtin_type_class_isinstance_fast,
-    class_is_subclass_of, class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
+    class_has_subclassable_builtin_type_ancestor, class_is_subclass_of,
+    class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
     coerce_subclass_backing, compare_values, compare_values_with_op, dir_names,
     dispatch_numeric_binop, extract_str_value, find_immutable_primitive_base,
     find_mutable_primitive_base, find_scalar_primitive_base, float_divmod, float_to_bigint,
@@ -223,11 +224,12 @@ mod container_protocols {
 
 mod object_basics {
     use super::{
-        BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc,
-        Result, Value, ValueKind, class_is_subclass_of, dir_names, find_immutable_primitive_base,
-        find_mutable_primitive_base, find_scalar_primitive_base, hash_value_with_interp,
-        instance_builtin_data, lookup_class_attr, reject_keyword_args_expanded, render_key_repr,
-        render_value_repr, value_class, value_type_name_str,
+        ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc, Result, Value,
+        ValueKind, class_has_subclassable_builtin_type_ancestor, dir_names,
+        find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
+        hash_value_with_interp, instance_builtin_data, lookup_class_attr,
+        reject_keyword_args_expanded, render_key_repr, render_value_repr, value_class,
+        value_type_name_str,
     };
     include!("builtins/object_basics.rs");
 }

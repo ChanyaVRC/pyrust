@@ -146,6 +146,40 @@ pub(crate) fn builtin_type_class_isinstance_fast(
     Some(actual_kind == expected_kind)
 }
 
+/// Does this class inherit one of issue #3000's subclassable native iterator
+/// layouts?
+///
+/// The immutable tag exists only on the five real built-in iterator class
+/// singletons (and on `slice`, which is deliberately excluded here).  Walking
+/// the class graph once therefore distinguishes genuine descendants from an
+/// unrelated same-named user class without repeating a pointer-based subclass
+/// search for every possible iterator base.
+#[inline]
+pub(crate) fn class_has_subclassable_builtin_type_ancestor(class: &Rc<RefCell<PyClass>>) -> bool {
+    let borrowed = class.borrow();
+    if matches!(
+        borrowed.builtin_type_tag,
+        Some(
+            pyrust_core::BuiltinTypeClassTag::Zip
+                | pyrust_core::BuiltinTypeClassTag::Map
+                | pyrust_core::BuiltinTypeClassTag::Filter
+                | pyrust_core::BuiltinTypeClassTag::Enumerate
+                | pyrust_core::BuiltinTypeClassTag::Reversed
+        )
+    ) {
+        return true;
+    }
+    if let Some(base) = &borrowed.base
+        && class_has_subclassable_builtin_type_ancestor(base)
+    {
+        return true;
+    }
+    borrowed
+        .extra_bases
+        .iter()
+        .any(class_has_subclassable_builtin_type_ancestor)
+}
+
 /// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
 /// canonical primitive class singletons, skip the `class_is_subclass_of`
 /// walk (which would require materialising `obj`'s class via

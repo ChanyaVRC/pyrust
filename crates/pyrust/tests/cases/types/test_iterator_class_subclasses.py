@@ -145,6 +145,39 @@ class ZipObject(zip, object):
 
 
 print("layout-compatible", issubclass(ZipObject, zip))
+
+
+class PlainObjectNew:
+    pass
+
+
+SameNamedZip = type("zip", (), {})
+
+
+class ObjectNewMixin:
+    pass
+
+
+class MixedZip(ObjectNewMixin, zip):
+    pass
+
+
+# The unsafe-allocation guard follows typed built-in ancestry: ordinary and
+# same-named classes remain safe, while a native iterator reached through an
+# extra multiple-inheritance base is still rejected.
+plain_object = object.__new__(PlainObjectNew)
+same_named_zip = object.__new__(SameNamedZip)
+print(
+    "safe-object-new",
+    type(plain_object) is PlainObjectNew,
+    type(same_named_zip) is SameNamedZip,
+)
+expect_error(
+    "unsafe-object-new-mixin-zip",
+    TypeError,
+    lambda: object.__new__(MixedZip),
+)
+
 for label, subtype in (
     ("zip", ZipSub),
     ("map", MapSub),

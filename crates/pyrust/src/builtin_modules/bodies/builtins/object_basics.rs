@@ -468,10 +468,7 @@ pyrust_module! {
         // a bare PyInstance through object.__new__ would create an object that
         // passes the subclass test but has no iterator state for its inherited
         // slots.  CPython rejects the same unsafe allocator bypass.
-        if BuiltinTypeClass::SUBCLASSABLE
-            .into_iter()
-            .any(|kind| class_is_subclass_of(&class_rc, &kind.singleton()))
-        {
+        if class_has_subclassable_builtin_type_ancestor(&class_rc) {
             let class_name = class_rc.borrow().name.clone();
             return Err(PyError::named(
                 "TypeError",
