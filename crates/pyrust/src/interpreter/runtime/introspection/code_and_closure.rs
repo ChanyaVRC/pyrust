@@ -194,13 +194,13 @@ impl Interpreter {
     /// their captured values, in CPython's `co_freevars` order (sorted by name).
     ///
     /// pyrust has no per-function free-var list: free variables are resolved at
-    /// runtime through the captured `env` chain.  We recover the set by scanning
-    /// the compiled body for `LoadGlobal` name references (free reads compile to
-    /// `LoadGlobal`, which walks the env chain) and keeping those that actually
-    /// resolve to a binding in a *non-module* enclosing env — exactly CPython's
-    /// definition of a free variable (bound in an enclosing function scope, not
-    /// a module global).  Names the function declares `global`/`local` are
-    /// excluded so an explicit `global x` is never mistaken for a closure cell.
+    /// runtime through the captured `env` chain.  We recover the set from the
+    /// code object's [`FnCode::free_var_candidates`] — the names it reads
+    /// through the environment — and keep those that actually resolve to a
+    /// binding in a *non-module* enclosing env, exactly CPython's definition of
+    /// a free variable (bound in an enclosing function scope, not a module
+    /// global).  Names the function declares `global`/`local` are excluded so an
+    /// explicit `global x` is never mistaken for a closure cell.
     pub(crate) fn closure_free_vars(&self, function: &UserFunction) -> Vec<(String, Value)> {
         let Some(rc) = function.precompiled_code.as_ref() else {
             return Vec::new();
@@ -209,22 +209,8 @@ impl Interpreter {
             return Vec::new();
         };
 
-        // Collect the distinct names loaded via `LoadGlobal` (free reads and
-        // true globals both go through this insn; the env-resolution filter
-        // below keeps only the free ones).  A free variable referenced *only*
-        // inside a nested code object — a comprehension/genexpr, `lambda`, or
-        // nested `def` — compiles its `LoadGlobal` into that nested
-        // `FnCode`, not into `fncode.insns`, yet CPython still reports it as a
-        // free variable of this function.  So recurse through `fn_protos` and
-        // gather candidates from every nested body too.  The env-resolution
-        // filter below is the authoritative gate: a nested proto's own local
-        // never resolves in `function.env`, so it cannot be falsely promoted.
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut candidates: Vec<String> = Vec::new();
-        collect_loadglobal_names(&fncode, &mut seen, &mut candidates);
-
         let mut found: Vec<(String, Value)> = Vec::new();
-        for name in &candidates {
+        for name in fncode.free_var_candidates() {
             // An explicit `global`/`nonlocal` mismatch or own local is not a
             // closure free var.  `global` names target the module env;
             // own-local names never reach `LoadGlobal` for a free read.

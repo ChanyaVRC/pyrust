@@ -600,6 +600,7 @@ impl Compiler {
             num_locals: self.base_temp,
             fn_protos: self.fn_protos,
             cell_vars: self.cell_vars.into_iter().collect(),
+            free_var_candidates: std::cell::OnceCell::new(),
             is_generator,
             is_coroutine: self.is_async_function,
             is_class_method: self.is_class_method,
