@@ -389,6 +389,27 @@ thread_local! {
         cls
     };
 
+    /// Per-thread `PyClass` singletons for the remaining `builtins` types that
+    /// pyrust used to model as `BuiltinFunction(name)` class-tokens: `zip`,
+    /// `map`, `filter`, `enumerate`, `slice`, `reversed` (issue #3000).  Same
+    /// shape as [`RANGE_CLASS`]: a real class based on `object`, so
+    /// `type(zip(...))` reprs as `<class 'zip'>`, `issubclass(type(z), object)`
+    /// is True and `type(z).__mro__` resolves.  Indexed by
+    /// [`BuiltinTypeClass`]; the constructor for each is wired into
+    /// `PRIMITIVE_CLASS_DISPATCH` below so `zip(a, b)` still reaches the
+    /// existing registry entry instead of allocating a `PyInstance`.
+    static BUILTIN_TYPE_CLASSES: [Rc<RefCell<PyClass>>; BuiltinTypeClass::ALL.len()] = {
+        let obj = OBJECT_CLASS.with(Rc::clone);
+        BuiltinTypeClass::ALL.map(|kind| {
+            let name = kind.class_name();
+            let mut class = PyClass::new(name, name, Some(Rc::clone(&obj)), IndexMap::new());
+            class.non_subclassable_name = kind.non_subclassable_name();
+            let cls = Rc::new(RefCell::new(class));
+            obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
+            cls
+        })
+    };
+
     /// Per-thread `PyClass` singleton for the `types.GenericAlias` type — the
     /// type of `list[int]`, `dict[str, int]`, etc. (PEP 585).  In CPython 3.12
     /// `type(list[int])` is `<class 'types.GenericAlias'>`, with
@@ -501,6 +522,17 @@ thread_local! {
         RANGE_CLASS.with(|r| {
             if let Some(dispatch) = crate::builtin_registry::lookup("range") {
                 cell.borrow_mut().insert(Rc::as_ptr(r), dispatch);
+            }
+        });
+        // Issue #3000: `zip` / `map` / `filter` / `enumerate` / `slice` /
+        // `reversed` are classes too, so `zip(a, b)` is a constructor call.
+        // Register each singleton against its existing registry entry, exactly
+        // as `range` above, so the call never reaches `call_class_expanded`.
+        BUILTIN_TYPE_CLASSES.with(|classes| {
+            for (kind, class) in BuiltinTypeClass::ALL.iter().zip(classes) {
+                if let Some(dispatch) = crate::builtin_registry::lookup(kind.class_name()) {
+                    cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+                }
             }
         });
         cell

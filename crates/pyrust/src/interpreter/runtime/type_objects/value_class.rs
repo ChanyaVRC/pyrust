@@ -43,32 +43,39 @@ pub(crate) fn value_class(value: &Value) -> Value {
             // their concrete cursor type is always readable here.
             let state = cell.borrow();
             if state.downcast_ref::<MapIter>().is_some() {
-                Value::builtin_function("map")
+                Value::py_class(BuiltinTypeClass::Map.singleton())
             } else if state.downcast_ref::<FilterIter>().is_some() {
-                Value::builtin_function("filter")
+                Value::py_class(BuiltinTypeClass::Filter.singleton())
             } else if let Some(iterator) = state.downcast_ref::<ProviderIterator>() {
                 iterator
                     .class()
                     .map(Value::py_class)
                     .unwrap_or_else(|| Value::builtin_function(iterator.fallback_class_name()))
             } else if state.downcast_ref::<EnumerateIter>().is_some() {
-                Value::builtin_function("enumerate")
+                Value::py_class(BuiltinTypeClass::Enumerate.singleton())
             } else if state.downcast_ref::<ZipIter>().is_some() {
-                Value::builtin_function("zip")
+                Value::py_class(BuiltinTypeClass::Zip.singleton())
             } else if state.downcast_ref::<CallableIter>().is_some() {
                 Value::builtin_function("callable_iterator")
             } else if let Some(iterator) = state.downcast_ref::<GetItemIter>() {
-                Value::builtin_function(if iterator.step < 0 {
-                    "reversed"
+                // A negative step marks the generic `reversed(seq)` cursor,
+                // whose CPython type is the `reversed` class itself.
+                if iterator.step < 0 {
+                    Value::py_class(BuiltinTypeClass::Reversed.singleton())
                 } else {
-                    "iterator"
-                })
+                    Value::builtin_function("iterator")
+                }
             } else if state.downcast_ref::<RangeIter>().is_some() {
                 Value::builtin_function("range_iterator")
             } else if state.downcast_ref::<BigRangeIter>().is_some() {
                 Value::builtin_function("longrange_iterator")
             } else if let Some(native) = state.downcast_ref::<NativeIterFrame>() {
-                Value::builtin_function(native.type_name)
+                // `reversed(tuple/str/bytes/bytearray)` reports the `reversed`
+                // class in CPython; the per-type cursors (`list_reverseiterator`,
+                // `dict_keyiterator`, …) remain unmigrated name tokens.
+                builtin_type_class_by_name(native.type_name)
+                    .map(Value::py_class)
+                    .unwrap_or_else(|| Value::builtin_function(native.type_name))
             } else if state.downcast_ref::<AsyncGenASend>().is_some() {
                 Value::builtin_function("async_generator_asend")
             } else {
@@ -87,6 +94,11 @@ pub(crate) fn value_class(value: &Value) -> Value {
             }
             if pyrust_builtins::generic_alias::is_generic_alias(value) {
                 return Value::py_class(generic_alias_class_singleton());
+            }
+            // Issue #3000: `slice` is a real class in CPython, so `type(a[1:2])`
+            // must be `<class 'slice'>` rather than a `BuiltinFunction` token.
+            if pyrust_builtins::slice::is_slice_ops(ops) {
+                return Value::py_class(BuiltinTypeClass::Slice.singleton());
             }
             Value::builtin_function(ops.type_name())
         }
@@ -109,5 +121,18 @@ pub(crate) fn value_class(value: &Value) -> Value {
         | ValueKind::PyInstance(_) => {
             unreachable!("primitive_class_for_value should have handled this variant")
         }
+    }
+}
+
+/// The `PyClass` that `type(value)` yields, or `None` when this value's type is
+/// still modelled as a `BuiltinFunction` name token (`generator`,
+/// `list_iterator`, `module`, …).
+///
+/// Lets `issubclass`-style class walks share [`value_class`]'s mapping instead
+/// of maintaining a second, drifting copy of it.
+pub(crate) fn value_class_object(value: &Value) -> Option<Rc<RefCell<PyClass>>> {
+    match value_class(value).kind() {
+        ValueKind::PyClass(class) => Some(Rc::clone(class)),
+        _ => None,
     }
 }

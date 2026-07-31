@@ -131,7 +131,7 @@ impl Interpreter {
                 || Rc::ptr_eq(&class, &crate::interpreter::method_type_singleton())
                 || Rc::ptr_eq(&class, &crate::interpreter::function_type_singleton())
                 || Rc::ptr_eq(&class, &crate::interpreter::type_class_singleton())
-                || Rc::ptr_eq(&class, &crate::interpreter::range_class_singleton());
+                || crate::interpreter::is_untagged_builtin_type_class(&class);
             if has_builtin_type_metadata {
                 if name == "__module__" {
                     return Ok(Value::string("builtins"));

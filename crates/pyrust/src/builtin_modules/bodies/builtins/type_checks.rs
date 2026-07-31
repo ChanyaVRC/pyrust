@@ -43,42 +43,15 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             return hit;
         }
         let actual_class = match obj.kind() {
+            // Instances of user classes are the common case and answer without
+            // building an intermediate `type()` value.
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
-            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
-                Some(method_type_singleton())
-            }
-            ValueKind::UserFunction(f)
-                if !matches!(
-                    f.kind,
-                    UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
-                ) =>
-            {
-                Some(function_type_singleton())
-            }
-            // Issue #1626: a class object is an instance of its metatype.
-            // When the class has no custom metatype (None), fall back to the
-            // `type` singleton so `isinstance(int, type)` etc. still works.
-            ValueKind::PyClass(cls_rc) => {
-                let meta = cls_rc.borrow().metatype.clone();
-                Some(meta.unwrap_or_else(type_class_singleton))
-            }
-            // A provider iterator may retain the exact class generation that
-            // created it. Consulting this typed identity keeps old objects
-            // stable across removal and re-import of their owning module.
-            // Only a built-in iterator can be one; a running frame's cell is
-            // checked out, and reading it here aborted the process (#2978).
-            ValueKind::Generator(cell) if cell.kind() == GeneratorKind::Iterator => cell
-                .borrow()
-                .downcast_ref::<ProviderIterator>()
-                .and_then(ProviderIterator::class),
-            // Issue #2733: `isinstance(list[int], type(list[int]))` is True —
-            // a PEP 585 alias is an instance of the `types.GenericAlias` class.
-            ValueKind::BuiltinObject { .. }
-                if pyrust_builtins::generic_alias::is_generic_alias(obj) =>
-            {
-                Some(crate::interpreter::generic_alias_class_singleton())
-            }
-            _ => crate::interpreter::primitive_class_for_value(obj),
+            // Everything else defers to `type()`'s own mapping, so a value
+            // whose class is a real `PyClass` — a method, a function, a class
+            // (via its metatype), a `zip` / `map` / `slice` object, a provider
+            // iterator retaining its originating class generation — resolves
+            // through one shared table rather than a duplicate of it here.
+            _ => crate::interpreter::value_class_object(obj),
         };
         if let Some(actual) = actual_class {
             return class_is_subclass_of(&actual, expected);
