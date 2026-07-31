@@ -72,10 +72,17 @@ impl Interpreter {
         cache: &RefCell<Vec<FmtSpecCacheEntry>>,
         site: usize,
     ) -> Result<Value> {
+        let spec = spec_value.as_str().unwrap_or("");
         let class_with_custom_metaclass =
             matches!(value.kind(), ValueKind::PyClass(class) if class.borrow().metatype.is_some());
-        if matches!(value.kind(), ValueKind::PyInstance(_)) || class_with_custom_metaclass {
-            return self.dispatch_dunder_format(value, spec_value.as_str().unwrap_or(""));
+        let owner_carrying_mappingproxy = spec.is_empty()
+            && value.is_builtin_object()
+            && pyrust_builtins::mapping_proxy::owner_of(value).is_some();
+        if matches!(value.kind(), ValueKind::PyInstance(_))
+            || class_with_custom_metaclass
+            || owner_carrying_mappingproxy
+        {
+            return self.dispatch_dunder_format(value, spec);
         }
         apply_format_spec_cached(value, spec_value, cache, site)
     }

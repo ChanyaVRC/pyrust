@@ -69,7 +69,20 @@ print(repr(MappingProxyType(md)))
 print(repr(MappingProxyType(plain)))
 
 print("--- str/print/f-string show the proxied object (repr does not) ---")
-print(str(p), "|", f"{p}", "|", "{}".format(p))
+empty_spec = ""
+print(
+    str(p),
+    "|",
+    f"{p}",
+    "|",
+    f"{p:}",
+    "|",
+    f"{p:{empty_spec}}",
+    "|",
+    "{}".format(p),
+    "|",
+    format(p, empty_spec),
+)
 print(p)
 print(str(MappingProxyType(ct)), "|", str(MappingProxyType(md)))
 
