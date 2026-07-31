@@ -293,7 +293,7 @@ impl Value {
                 Opaque::BuiltinObject { ops, state } => {
                     match ops.identity_payload(state) {
                         Some(payload) => ObjectIdentity::Builtin {
-                            type_id: ops.type_id(),
+                            type_id: (*ops).type_id(),
                             payload,
                         },
                         None => ObjectIdentity::Allocation(Rc::as_ptr(state) as u64),

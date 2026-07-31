@@ -327,6 +327,8 @@ mod object_id_tests {
 
     struct DefaultIdentityOpsA;
     struct DefaultIdentityOpsB;
+    struct OverrideIdentityOpsA;
+    struct OverrideIdentityOpsB;
 
     impl BuiltinTypeOps for DefaultIdentityOpsA {
         fn type_name(&self) -> &'static str {
@@ -340,8 +342,30 @@ mod object_id_tests {
         }
     }
 
+    impl BuiltinTypeOps for OverrideIdentityOpsA {
+        fn type_name(&self) -> &'static str {
+            "override_identity_test_a"
+        }
+
+        fn identity_payload(&self, _state: &BuiltinState) -> Option<u64> {
+            Some(7)
+        }
+    }
+
+    impl BuiltinTypeOps for OverrideIdentityOpsB {
+        fn type_name(&self) -> &'static str {
+            "override_identity_test_b"
+        }
+
+        fn identity_payload(&self, _state: &BuiltinState) -> Option<u64> {
+            Some(7)
+        }
+    }
+
     static DEFAULT_IDENTITY_OPS_A: DefaultIdentityOpsA = DefaultIdentityOpsA;
     static DEFAULT_IDENTITY_OPS_B: DefaultIdentityOpsB = DefaultIdentityOpsB;
+    static OVERRIDE_IDENTITY_OPS_A: OverrideIdentityOpsA = OverrideIdentityOpsA;
+    static OVERRIDE_IDENTITY_OPS_B: OverrideIdentityOpsB = OverrideIdentityOpsB;
 
     /// One representative value per identity representation, plus the pairs
     /// that used to collide on id `0`: `None` / `0` / `0.0` / `-0.0` /
@@ -542,5 +566,15 @@ mod object_id_tests {
         assert_ne!(first.object_id(), target_value.object_id());
         assert!(!values_are_identical(&first, &other));
         assert_ne!(first.object_id(), other.object_id());
+    }
+
+    #[test]
+    fn custom_builtin_identity_keeps_concrete_ops_types_disjoint() {
+        let first = Value::builtin_object(&OVERRIDE_IDENTITY_OPS_A, Box::new(()));
+        let same_payload_other_type =
+            Value::builtin_object(&OVERRIDE_IDENTITY_OPS_B, Box::new(()));
+
+        assert!(!values_are_identical(&first, &same_payload_other_type));
+        assert_ne!(first.object_id(), same_payload_other_type.object_id());
     }
 }
