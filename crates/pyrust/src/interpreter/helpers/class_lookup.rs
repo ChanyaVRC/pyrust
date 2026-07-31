@@ -402,7 +402,20 @@ thread_local! {
         let obj = OBJECT_CLASS.with(Rc::clone);
         BuiltinTypeClass::ALL.map(|kind| {
             let name = kind.class_name();
-            let mut class = PyClass::new(name, name, Some(Rc::clone(&obj)), IndexMap::new());
+            let mut attrs = IndexMap::new();
+            // CPython permits heap subclasses of these five iterator types.
+            // Their inherited allocator keeps the subclass class identity on a
+            // PyInstance while delegating state/arity policy to the existing
+            // exact built-in constructor; __iter__/__next__ then operate on
+            // that retained backing. `slice` deliberately remains
+            // non-subclassable and needs none of these slots.
+            if kind != BuiltinTypeClass::Slice {
+                for method in ["__new__", "__iter__", "__next__"] {
+                    let qualified = registered_builtin_method_name(name, method);
+                    attrs.insert(method.to_string(), Value::builtin_function(qualified));
+                }
+            }
+            let mut class = PyClass::new(name, name, Some(Rc::clone(&obj)), attrs);
             class.non_subclassable_name = kind.non_subclassable_name();
             let cls = Rc::new(RefCell::new(class));
             obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));

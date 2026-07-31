@@ -368,7 +368,7 @@ pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -
 /// canonical fallback when the subclass supplies no override.
 fn class_uses_inherited_builtin_slot(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
     lookup_class_attr_owner(class, name).is_none_or(|owner| {
-        is_primitive_class(&owner) || Rc::ptr_eq(&owner, &object_class_singleton())
+        primitive_class_kind(&owner).is_some() || Rc::ptr_eq(&owner, &object_class_singleton())
     })
 }
 

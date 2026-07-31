@@ -20,10 +20,10 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, EnumerateIter, FilterIter, Interpreter, IterSrcBuf, MapIter, ZipIter,
-    apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
-    bind_constructor_kwargs, builtin_data_backing, class_is_subclass_of,
-    class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
+    BuiltinTypeClass, CallableIter, EnumerateIter, FilterIter, Interpreter, IterSrcBuf, MapIter,
+    ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
+    bind_constructor_kwargs, builtin_data_backing, builtin_type_class_isinstance_fast,
+    class_is_subclass_of, class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
     coerce_subclass_backing, compare_values, compare_values_with_op, dir_names,
     dispatch_numeric_binop, extract_str_value, find_immutable_primitive_base,
     find_mutable_primitive_base, find_scalar_primitive_base, float_divmod, float_to_bigint,
@@ -87,10 +87,11 @@ mod aggregation {
 
 mod iteration {
     use super::{
-        CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter, IterSrcBuf,
-        MODULE_NAME, MapIter, PyError, PyValue, Rc, Result, Value, ValueKind, ZipIter,
-        full_type_name_str, invoke_class_method, iter_values, lookup_class_attr, make_iterator,
-        make_reversed_dict_iter, make_reversed_getitem_iterator,
+        BuiltinTypeClass, CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter,
+        InstanceAttrs, Interpreter, IterSrcBuf, MODULE_NAME, MapIter, PyError, PyValue, Rc, Result,
+        Value, ValueKind, ZipIter, builtin_type_class_isinstance_fast, class_is_subclass_of,
+        full_type_name_str, instance_builtin_data, invoke_class_method, iter_values,
+        lookup_class_attr, make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
         make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
         make_reversed_sequence_iterator, reject_keyword_args_expanded, value_type_name_str,
     };
