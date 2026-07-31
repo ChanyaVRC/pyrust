@@ -38,6 +38,13 @@ impl Interpreter {
                 ],
             );
         }
+        // Issue #2936: `str(mappingproxy)` is `str(proxied)`, which needs
+        // interpreter dispatch when the proxied object is a dict subclass
+        // instance.  Only owner-carrying proxies are affected, and the
+        // `BuiltinObject` test keeps every other kind on the path below.
+        if value.is_builtin_object() && pyrust_builtins::mapping_proxy::owner_of(value).is_some() {
+            return Ok(Value::string(render_instance_str(self, value)?));
+        }
         // Issue #2771: a bare `{cls}` field is `format(cls, "")`, which runs
         // `type(cls).__format__(cls, "")` — a metaclass `__format__` override
         // wins, otherwise the inherited `object.__format__` returns `str(cls)`
@@ -65,10 +72,17 @@ impl Interpreter {
         cache: &RefCell<Vec<FmtSpecCacheEntry>>,
         site: usize,
     ) -> Result<Value> {
+        let spec = spec_value.as_str().unwrap_or("");
         let class_with_custom_metaclass =
             matches!(value.kind(), ValueKind::PyClass(class) if class.borrow().metatype.is_some());
-        if matches!(value.kind(), ValueKind::PyInstance(_)) || class_with_custom_metaclass {
-            return self.dispatch_dunder_format(value, spec_value.as_str().unwrap_or(""));
+        let owner_carrying_mappingproxy = spec.is_empty()
+            && value.is_builtin_object()
+            && pyrust_builtins::mapping_proxy::owner_of(value).is_some();
+        if matches!(value.kind(), ValueKind::PyInstance(_))
+            || class_with_custom_metaclass
+            || owner_carrying_mappingproxy
+        {
+            return self.dispatch_dunder_format(value, spec);
         }
         apply_format_spec_cached(value, spec_value, cache, site)
     }
@@ -138,6 +152,16 @@ impl Interpreter {
                     "unsupported format string passed to {meta_name}.__format__"
                 ));
             }
+        }
+        // Issue #2936: `mappingproxy` inherits `object.__format__`, so an empty
+        // spec is `str(proxy)` — which CPython defines as `str(proxied)` and
+        // which needs interpreter dispatch for a dict-subclass owner.  A
+        // non-empty spec still raises through `apply_format_spec` below.
+        if spec.is_empty()
+            && value.is_builtin_object()
+            && pyrust_builtins::mapping_proxy::owner_of(value).is_some()
+        {
+            return Ok(Value::string(render_instance_str(self, value)?));
         }
         let ValueKind::PyInstance(inst) = value.kind() else {
             return apply_format_spec(value, spec);

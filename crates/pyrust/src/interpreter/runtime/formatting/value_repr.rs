@@ -192,6 +192,15 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         return Ok(value.repr_raw());
     }
 
+    // Issue #2936: a `mappingproxy` over a dict subclass (or over another
+    // proxy) renders as `mappingproxy(<repr of the proxied object>)`.  The
+    // proxied object is typically a `PyInstance` whose repr needs interpreter
+    // dispatch, which the built-in ops table cannot do, so intercept here.
+    if let Some(owner) = pyrust_builtins::mapping_proxy::owner_of(value) {
+        let inner = render_value_repr(interp, &owner)?;
+        return Ok(format!("mappingproxy({inner})"));
+    }
+
     // For containers, we need to recurse with interpreter access on each
     // element.  Use a thread-local cycle-detection stack identical in spirit
     // to the one in `Value::repr_raw()`.
