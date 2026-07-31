@@ -65,11 +65,17 @@ class ReverseSub(reversed):
 
 
 foreign_reverse = iter((9, 8))
+foreign_generic_reverse = reversed((7, 6))
 
 
 class ForeignReverse:
     def __reversed__(self):
         return foreign_reverse
+
+
+class ForeignGenericReverse:
+    def __reversed__(self):
+        return foreign_generic_reverse
 
 
 print(
@@ -80,6 +86,7 @@ print(
     type(ReverseSub(range(2))) is ReverseSub,
     type(ReverseSub(GenericReverseSeq())) is ReverseSub,
     ReverseSub(ForeignReverse()) is foreign_reverse,
+    ReverseSub(ForeignGenericReverse()) is foreign_generic_reverse,
 )
 
 # User construction hooks compose with the inherited native allocator.

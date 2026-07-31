@@ -90,6 +90,13 @@ fn builtin_type_new(
             kind.class_name()
         ));
     }
+    // Preserve factory provenance across the registry call.  A user
+    // `__reversed__` result always passes through unchanged; its concrete type
+    // is not evidence that the native constructor created it.
+    let reversed_passthrough = kind == BuiltinTypeClass::Reversed
+        && constructor_args.len() == 1
+        && constructor_args[0].name.is_none()
+        && iteration::reversed_uses_special_method(&constructor_args[0].value);
     let dispatch = crate::builtin_registry::lookup(kind.class_name()).ok_or_else(|| {
         PyError::Runtime(format!(
             "internal: {} constructor is not registered",
@@ -98,6 +105,9 @@ fn builtin_type_new(
     })?;
     let backing = dispatch(interp, constructor_args)?;
     if Rc::ptr_eq(&class, &base) {
+        return Ok(backing);
+    }
+    if reversed_passthrough {
         return Ok(backing);
     }
 

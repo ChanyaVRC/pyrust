@@ -1,5 +1,20 @@
 use pyrust_derive::pyrust_module;
 
+/// Whether `reversed(value)` will delegate to a value-owned `__reversed__`
+/// implementation.  `reversed.__new__` records this provenance before calling
+/// user code: the special method's result must pass through unchanged even
+/// when it happens to be an exact generic `reversed` object.
+pub(super) fn reversed_uses_special_method(value: &Value) -> bool {
+    match value.kind() {
+        ValueKind::PyInstance(instance) => {
+            let class = Rc::clone(&instance.borrow().class);
+            lookup_class_attr(&class, "__reversed__").is_some()
+        }
+        ValueKind::BuiltinObject { ops, .. } => ops.has_method("__reversed__"),
+        _ => false,
+    }
+}
+
 /// Validate an unbound iterator slot receiver and return its exact built-in
 /// backing.  Subclass instances carry that backing in `__builtin_data__`;
 /// exact objects are already generator-backed values.
@@ -233,11 +248,14 @@ pyrust_module! {
     /// range are reversible; all other types (Generator, BuiltinObject
     /// iterators, …) raise TypeError.
     fn reversed(#[positional_only] seq: PyValue) -> Result<Value> {
+        let uses_special_method = reversed_uses_special_method(&seq.0);
         if let ValueKind::PyInstance(inst) = seq.0.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             // Protocol step 1: __reversed__
-            if let Some(method_val) = lookup_class_attr(&class, "__reversed__") {
+            if uses_special_method {
+                let method_val = lookup_class_attr(&class, "__reversed__")
+                    .expect("special-method provenance must retain its class slot");
                 return invoke_class_method(
                     _interp,
                     method_val,
@@ -330,7 +348,7 @@ pyrust_module! {
         // issue #2684) dispatch to it directly, matching CPython's protocol
         // step 1.  `call_method` already returns the reverse-order iterator.
         if let ValueKind::BuiltinObject { ops, state } = seq.0.kind()
-            && ops.has_method("__reversed__")
+            && uses_special_method
         {
             return ops.call_method(state, "__reversed__", Vec::new(), &indexmap::IndexMap::new());
         }
