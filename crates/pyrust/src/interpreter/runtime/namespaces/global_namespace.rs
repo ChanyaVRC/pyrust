@@ -139,6 +139,21 @@ impl Interpreter {
         globals
     }
 
+    /// Expose the live `f_locals` mapping of a module-scope frame (issue #2926).
+    ///
+    /// CPython does not snapshot a module frame's locals: `f_locals` *is* the
+    /// module dictionary, so `frame.f_locals is frame.f_globals is globals()`
+    /// and a write through it is a global binding. Under `exec(code, g, l)` the
+    /// module code's locals are the caller's `l` instead, which is exactly what
+    /// the explicit provider records.
+    ///
+    /// Routing through the same provider `globals()` uses is what makes the
+    /// identity hold; building a dict here would reintroduce the copy.
+    pub(crate) fn frame_locals_for_module_environment(&self, env: &EnvRef) -> Value {
+        self.explicit_locals_for_environment(env)
+            .unwrap_or_else(|| self.globals_for_environment(env))
+    }
+
     /// Whether controlled module writes must mirror into the globals backing.
     ///
     /// Ordinary scripts require mirroring only after globals/locals escape.

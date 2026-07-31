@@ -41,18 +41,21 @@ impl Interpreter {
         };
 
         let back = self.build_frame_object(idx + 1, 0);
-        let globals = view
-            .env
-            .as_ref()
-            .map(|env| self.globals_for_environment(env))
-            .unwrap_or_else(|| self.globals_for_environment(&self.env));
-        // f_locals: a snapshot of this frame's namespace.  Reuse the same
-        // machinery `locals()` uses for the innermost frame; for outer frames
-        // fall back to an empty dict (a stale snapshot would be misleading).
-        let locals = if idx == 0 {
-            Value::dict(snapshot_current_locals(self))
-        } else {
-            Value::dict(Default::default())
+        let env = view.env.as_ref().unwrap_or(&self.env);
+        let globals = self.globals_for_environment(env);
+        // f_locals reads this frame's namespace — including for a suspended
+        // *outer* frame, whose register file is still live on the call stack
+        // (issue #2926; the old code returned an empty dict for every
+        // `idx > 0`, so `sys._getframe(1).f_locals` was always `{}`).
+        //
+        // A module frame does not get a snapshot at all: CPython's module
+        // f_locals IS the live module dict, so it must come from the same
+        // provider `globals()` uses or the `f_locals is f_globals` identity
+        // (and mutation-through-f_locals) would not hold.  Function and class
+        // bodies do snapshot, matching `locals()`.
+        let locals = match view.kind {
+            FrameKind::Script => self.frame_locals_for_module_environment(env),
+            FrameKind::Function | FrameKind::Class => Value::dict(snapshot_view_locals(self, view)),
         };
 
         frame_obj::frame(code, lineno, back, globals, locals)

@@ -234,22 +234,49 @@ fn merge_frame_view_into_dict(view: &VmFrameView, dict: &mut PyDict) {
 /// `Function` frame.  Falls back to the current env's `values` map
 /// when no frame is published (e.g. evaluating in a non-VM context).
 pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
-    let mut dict: PyDict = PyDict::default();
     match interp.vm_frame_views.last() {
-        Some(view) if view.kind == FrameKind::Script => {
+        Some(view) => snapshot_view_locals(interp, view),
+        None => {
+            // No active VM frame: fall back to env.values.
+            let mut dict: PyDict = PyDict::default();
+            for (k, v) in interp.env.borrow().values.iter() {
+                dict.insert(PyKey::str_from(k), v.clone());
+            }
+            dict
+        }
+    }
+}
+
+/// Take a snapshot of one frame view's local namespace.
+///
+/// Frame introspection (`sys._getframe(n).f_locals`) needs the same namespace
+/// walk `locals()` performs, but for a suspended *outer* frame — reading a
+/// caller's register file is exactly the "case (a)" the safety note on
+/// [`merge_frame_view_into_dict`] covers (issue #2926).
+///
+/// `#[inline]` so `locals()` keeps the single-call shape it had before the walk
+/// was split out of [`snapshot_current_locals`].
+#[inline]
+pub(crate) fn snapshot_view_locals(interp: &Interpreter, view: &VmFrameView) -> PyDict {
+    let mut dict: PyDict = PyDict::default();
+    match view.kind {
+        FrameKind::Script => {
             // Module scope: include the module env (built-in
             // classes + already-spilled bindings) so the user sees the
             // same complete view as `globals()`.  The root's ordered
             // materialisation walk covers both the env bindings and the live
             // script registers, so module-scope `locals()` has exactly the
             // key order `globals()` has (issue #2903).
-            let me = module_env(&interp.env);
+            //
+            // The view's own root is authoritative: an outer script frame may
+            // belong to a different module than the frame that is running now.
+            let me = module_env(view.env.as_ref().unwrap_or(&interp.env));
             let pairs = me.borrow().namespace_materialization_snapshot();
             for (name, value) in pairs {
                 dict.insert(PyKey::str_from(&name), value);
             }
         }
-        Some(view) if view.kind == FrameKind::Class => {
+        FrameKind::Class => {
             // Class-body scope (issue #487): return the partially-built class
             // attrs dict — i.e. the fastlocal registers of the class body,
             // filtered to names that have been assigned so far.  CPython
@@ -259,7 +286,7 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
             // the module globals.
             merge_frame_view_into_dict(view, &mut dict);
         }
-        Some(view) => {
+        FrameKind::Function => {
             // Function scope: the function's own fastlocals plus any
             // nonlocal bindings.  Matches CPython — `locals()` inside a
             // function includes `nonlocal` names as they live in an
@@ -293,12 +320,6 @@ pub(crate) fn snapshot_current_locals(interp: &Interpreter) -> PyDict {
                         dict.insert(PyKey::str_from(name), val);
                     }
                 }
-            }
-        }
-        None => {
-            // No active VM frame: fall back to env.values.
-            for (k, v) in interp.env.borrow().values.iter() {
-                dict.insert(PyKey::str_from(k), v.clone());
             }
         }
     }
