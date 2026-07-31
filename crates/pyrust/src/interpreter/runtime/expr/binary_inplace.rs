@@ -75,7 +75,13 @@ impl Interpreter {
                     // set |= / &= / -= / ^= require RHS to be a set or frozenset.
                     // If RHS is neither, raise the CPython-format TypeError directly
                     // (the op symbol must include `=` for in-place operators).
-                    let rhs_items = match set_items_from_value(right) {
+                    //
+                    // `mut` because the `&=` fast path below moves this owned
+                    // snapshot into the receiver.  It does so only after the
+                    // object-key check has already committed to the fast path,
+                    // so the eq-aware path further down always still sees it
+                    // populated.
+                    let mut rhs_items = match set_items_from_value(right) {
                         Some((items, _)) => items,
                         None => {
                             let op_sym = match op {
@@ -144,7 +150,21 @@ impl Interpreter {
                                     if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
                                         return true;
                                     }
-                                    lhs.retain(|k| rhs_items.contains(k));
+                                    // `s &= t` keeps the elements CPython keeps:
+                                    // it computes the intersection by scanning
+                                    // the smaller table and swaps that into the
+                                    // receiver, so the RHS's representatives win
+                                    // unless the RHS is the larger table (issue
+                                    // #2955).  `rhs_items` is already an owned
+                                    // snapshot, so both directions retain in
+                                    // place and neither allocates a new table.
+                                    if rhs_items.len() <= lhs.len() {
+                                        let mut out = std::mem::take(&mut rhs_items);
+                                        out.retain(|k| lhs.contains(k));
+                                        *lhs = out;
+                                    } else {
+                                        lhs.retain(|k| rhs_items.contains(k));
+                                    }
                                 }
                                 BinaryOp::Sub => {
                                     unreachable!("set subtraction is owned by collection_ops")
@@ -191,8 +211,9 @@ impl Interpreter {
                             }
                         }
                         BinaryOp::BitAnd => {
-                            for k in lhs.iter() {
-                                if self.set_lookup_in(&rhs_items, k)?.is_some() {
+                            let (scan, probe) = intersection_scan_order(&lhs, &rhs_items);
+                            for k in scan.iter() {
+                                if self.set_lookup_in(probe, k)?.is_some() {
                                     self.set_insert(&mut out, k.clone())?;
                                 }
                             }
@@ -379,7 +400,7 @@ impl Interpreter {
                         BinaryOp::BitXor => "^=",
                         _ => unreachable!(),
                     };
-                    let rhs_items = match set_items_from_value(right) {
+                    let mut rhs_items = match set_items_from_value(right) {
                         Some((items, _)) => items,
                         None => {
                             let lt = value_type_name_str(left);
@@ -400,7 +421,15 @@ impl Interpreter {
                             }
                         }
                         BinaryOp::BitAnd => {
-                            lhs.retain(|k| rhs_items.contains(k));
+                            // Keep the smaller table's representatives, as
+                            // CPython's `set_iand` does (issue #2955).
+                            if rhs_items.len() <= lhs.len() {
+                                let mut out = std::mem::take(&mut rhs_items);
+                                out.retain(|k| lhs.contains(k));
+                                *lhs = out;
+                            } else {
+                                lhs.retain(|k| rhs_items.contains(k));
+                            }
                         }
                         BinaryOp::Sub => {
                             unreachable!("set subtraction is owned by collection_ops")

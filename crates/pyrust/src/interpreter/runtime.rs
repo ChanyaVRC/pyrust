@@ -187,8 +187,9 @@ mod fast_path {
 mod expressions {
     use super::builtin_methods::i64_range_contains;
     use super::collection_ops::{
-        SetOp, bitor_operand_type_name, dict_entries_from_value, is_mapping_proxy, set_binary_op,
-        set_has_object_key, set_items_from_value, set_subset_cmp, set_subtract_in_place,
+        SetOp, bitor_operand_type_name, dict_entries_from_value, intersection_scan_order,
+        is_mapping_proxy, set_binary_op, set_has_object_key, set_items_from_value, set_subset_cmp,
+        set_subtract_in_place,
     };
     use super::fast_path::try_tagged_int_unary;
     use super::{

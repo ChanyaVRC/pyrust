@@ -249,8 +249,12 @@ pub fn call_resolved(method: Method, receiver: &Value, args: Vec<Value>) -> Resu
         Method::IntersectionUpdate => {
             for arg in args {
                 let snap = snapshot_iterable(receiver, arg)?;
+                let snap_is_set = is_concrete_set(arg);
                 receiver
-                    .set_with_mut(|items| items.retain(|k| snap.contains(k)))
+                    .set_with_mut(move |items| {
+                        let current = std::mem::take(items);
+                        *items = intersect_snapshot(current, snap, snap_is_set);
+                    })
                     .ok_or_else(not_set)?;
             }
             Ok(Value::none())
@@ -321,6 +325,49 @@ fn collect_iterables(receiver: &Value, args: &[Value]) -> Result<Vec<PySet>> {
     args.iter()
         .map(|arg| snapshot_iterable(receiver, arg))
         .collect()
+}
+
+/// True when `v` is a concrete `set` or `frozenset`, i.e. an operand CPython's
+/// `set_intersection` may scan *instead of* the receiver.  Any other iterable
+/// (list, tuple, generator, …) is always the scanned side.
+fn is_concrete_set(v: &Value) -> bool {
+    matches!(v.kind(), ValueKind::Set(_)) || crate::frozenset::as_items(v).is_some()
+}
+
+/// [`intersect_snapshot`] against a still-borrowed receiver: its table is
+/// copied only in the branch where the receiver's own elements survive.
+fn intersect_first(current: &PySet, other: PySet, other_is_set: bool) -> PySet {
+    if other_is_set && other.len() > current.len() {
+        intersect_snapshot(current.clone(), other, other_is_set)
+    } else {
+        let mut out = other;
+        out.retain(|k| current.contains(k));
+        out
+    }
+}
+
+/// Intersect `current` with one already-snapshotted operand, keeping the
+/// element objects CPython keeps (issue #2955).
+///
+/// CPython's `set_intersection` scans the smaller of the two tables and inserts
+/// the *scanned* side's elements, so between two `__eq__`-equal but
+/// distinguishable elements (`1 == 1.0 == True`) the survivor comes from the
+/// smaller operand — the argument wins ties.  A non-set iterable argument is
+/// always the scanned side, whatever its length.
+///
+/// Both directions retain in place over a table the caller already owns, so
+/// neither allocates.
+fn intersect_snapshot(current: PySet, other: PySet, other_is_set: bool) -> PySet {
+    if other_is_set && other.len() > current.len() {
+        // The receiver is the smaller table: keep its own representatives.
+        let mut out = current;
+        out.retain(|k| other.contains(k));
+        out
+    } else {
+        let mut out = other;
+        out.retain(|k| current.contains(k));
+        out
+    }
 }
 
 /// Same as `collect_iterable` but takes a snapshot of the receiver
@@ -546,11 +593,17 @@ fn union(receiver: &Value, args: &[Value]) -> Result<Value> {
 
 fn intersection(receiver: &Value, args: &[Value]) -> Result<Value> {
     let snapshots = collect_iterables(receiver, args)?;
+    let snaps_are_sets: Vec<bool> = args.iter().map(is_concrete_set).collect();
     receiver
-        .set_with(|items| {
-            let mut result = items.clone();
-            for snap in &snapshots {
-                result.retain(|k| snap.contains(k));
+        .set_with(move |items| {
+            let mut pairs = snapshots.into_iter().zip(snaps_are_sets);
+            let mut result = match pairs.next() {
+                // `s.intersection()` is a plain copy.
+                None => items.clone(),
+                Some((snap, is_set)) => intersect_first(items, snap, is_set),
+            };
+            for (snap, is_set) in pairs {
+                result = intersect_snapshot(result, snap, is_set);
             }
             Value::set(result)
         })

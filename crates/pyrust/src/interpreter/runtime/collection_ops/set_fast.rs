@@ -40,7 +40,11 @@ fn set_algebra_fast(a: &PySet, b: &PySet, op: SetOp) -> PySet {
     let mut out = PySet::with_capacity_and_hasher(capacity, Default::default());
     match op {
         SetOp::And => {
-            for key in a.iter().filter(|key| b.contains(*key)) {
+            // Scan the smaller table and keep *its* representatives, as CPython
+            // does; the right operand wins ties (issue #2955).  This is also the
+            // cheaper direction: the scan is O(min(len)) instead of O(len(a)).
+            let (scan, probe) = intersection_scan_order(a, b);
+            for key in scan.iter().filter(|key| probe.contains(*key)) {
                 out.insert(key.clone());
             }
         }
