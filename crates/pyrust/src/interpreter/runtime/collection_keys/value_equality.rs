@@ -333,6 +333,27 @@ impl Interpreter {
         Ok(false)
     }
 
+    /// CPython's `PyObject_RichCompareBool(a, b, Py_EQ)`: identity implies
+    /// equality, so an element always finds *itself* during a container search
+    /// even when its `__eq__` says otherwise.
+    ///
+    /// NaN is the observable primitive case (`nan == nan` is False, yet
+    /// `n in [n]` is True); `Value::is_identical_nan` is the NaN-boxed identity
+    /// test for it (#2344 / #2535 / #2911), and `values_user_eq`'s own
+    /// `a == b` fast path already covers object identity for everything else.
+    ///
+    /// Use this for every element-wise container scan (membership, `index`,
+    /// `count`, `remove`, element-wise `==`).  The list/tuple scans in
+    /// `builtin_methods/sequences.rs` and `expr/slicing_membership.rs` spell the
+    /// same rule out inline because they interleave it with a borrow-only
+    /// primitive fast path that never reaches the interpreter.
+    pub(crate) fn values_richcompare_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+        if a.is_identical_nan(b) {
+            return Ok(true);
+        }
+        self.values_user_eq(a, b)
+    }
+
     /// Enter equality recursion for the `(value_id(a), value_id(b))`
     /// pair.  Returns `true` when a cycle is detected (the caller should
     /// short-circuit to "equal" without pushing); returns `false`
