@@ -116,6 +116,20 @@ print("--- proxy of a proxy ---")
 pp = MappingProxyType(p)
 print(len(pp), pp["a"], repr(pp), type(pp.copy()).__name__, sorted(pp.copy().items()))
 
+# CPython forwards `==` / `!=` / `|` to the proxied object *recursively*: when
+# that object is itself a mappingproxy the forwarded call forwards again, so a
+# nested proxy compares and merges as the innermost mapping.  A single-hop
+# resolution would leave the inner proxy as the operand and silently fall back
+# to plain-dict semantics (equality False, `|` losing the proxied type).
+ppp = MappingProxyType(pp)
+print(pp == od, ppp == od, od == pp, pp != od, pp == p, p == pp)
+print(pp | {"c": 3}, {"c": 3} | pp, ppp | {"c": 3})
+nested_counter = MappingProxyType(MappingProxyType(ct))
+merged = nested_counter | Counter({"a": 5})
+print(merged, type(merged).__name__)
+nested_plain = MappingProxyType(MappingProxyType(plain))
+print(nested_plain == plain, nested_plain | {"z": 9})
+
 print("--- empty mappings ---")
 for label, mapping in [
     ("OrderedDict", OrderedDict()),

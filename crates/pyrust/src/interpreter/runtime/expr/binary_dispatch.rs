@@ -129,9 +129,10 @@ impl Interpreter {
                 // `od == od`.  Only proxies built over a separate object (a
                 // dict subclass, or another proxy) carry an owner; a proxy over
                 // a plain dict or a class `__dict__` compares through its own
-                // ops table as before.
-                let left = pyrust_builtins::mapping_proxy::owner_of(&left).unwrap_or(left);
-                let right = pyrust_builtins::mapping_proxy::owner_of(&right).unwrap_or(right);
+                // ops table as before.  `proxied_of` follows a nested chain to
+                // its end — the forwarding is recursive in CPython.
+                let left = pyrust_builtins::mapping_proxy::proxied_of(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::proxied_of(&right).unwrap_or(right);
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
@@ -145,8 +146,8 @@ impl Interpreter {
             BinaryOp::Ne => {
                 // Issue #2936: as for `Eq`, an owner-carrying `mappingproxy`
                 // compares as the object it proxies.
-                let left = pyrust_builtins::mapping_proxy::owner_of(&left).unwrap_or(left);
-                let right = pyrust_builtins::mapping_proxy::owner_of(&right).unwrap_or(right);
+                let left = pyrust_builtins::mapping_proxy::proxied_of(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::proxied_of(&right).unwrap_or(right);
                 // CPython's `slot_tp_richcompare` derives `__ne__` as the logical
                 // negation of `__eq__` whenever a class does not define its own
                 // `__ne__` (issue #2645).  pyrust resolves the inherited
@@ -303,9 +304,11 @@ impl Interpreter {
                 // object*, so `mappingproxy(od) | other` is `od | other` and
                 // keeps `od`'s type.  Owner-less proxies (plain dict / class
                 // `__dict__`) keep merging as `dict` through the entries path
-                // below.
-                let left = pyrust_builtins::mapping_proxy::owner_of(&left).unwrap_or(left);
-                let right = pyrust_builtins::mapping_proxy::owner_of(&right).unwrap_or(right);
+                // below.  `proxied_of` follows a nested chain to its end so
+                // `mappingproxy(mappingproxy(counter)) | other` still runs
+                // `Counter.__or__` rather than the inner proxy's dict merge.
+                let left = pyrust_builtins::mapping_proxy::proxied_of(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::proxied_of(&right).unwrap_or(right);
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
                     return r;
                 }
