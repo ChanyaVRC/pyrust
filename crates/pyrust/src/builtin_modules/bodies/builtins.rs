@@ -41,8 +41,8 @@ use crate::interpreter::{
     value_to_float, value_type_name_str,
 };
 use crate::value::{
-    InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero,
-    SortKind, UserFunctionKind, Value, ValueKind, classify_sort, range_len,
+    InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, SortKind,
+    UserFunctionKind, Value, ValueKind, classify_sort, range_len,
 };
 
 // Builtins are registered in independent semantic families, then merged into

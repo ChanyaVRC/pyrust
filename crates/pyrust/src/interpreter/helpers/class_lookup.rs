@@ -457,15 +457,27 @@ thread_local! {
     /// directly to the registry fn, skipping `call_class_expanded`'s
     /// PyInstance allocation + `lookup_class_attr("__init__")` walk +
     /// recursive `call_function_expanded` step.  The lookup is one
-    /// `HashMap::get` (cap = 11) + a fn pointer call.
+    /// `HashMap::get` + a fn pointer call.
+    ///
+    /// Hashed with `pyrust_core::PyHasher` rather than the stdlib default: the key is a
+    /// raw pointer to an interpreter-owned singleton, so SipHash's
+    /// DoS-resistance buys nothing while costing more than the probe it
+    /// guards.  Under the default hasher this lookup measured ~12 ns, which
+    /// showed up as a 1.1-1.3x regression on constructor-heavy loops the
+    /// moment #3000 moved `zip` / `map` / `filter` / `enumerate` / `slice` /
+    /// `reversed` onto this table.
     static PRIMITIVE_CLASS_DISPATCH:
         std::cell::RefCell<
             std::collections::HashMap<
                 *const std::cell::RefCell<PyClass>,
                 crate::builtin_registry::BuiltinDispatchFn,
+                pyrust_core::PyHasher,
             >,
         > = {
-        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(15));
+        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity_and_hasher(
+            24,
+            pyrust_core::PyHasher::default(),
+        ));
         PRIMITIVE_CLASSES.with(|c| {
             let mut m = cell.borrow_mut();
             for (class, name) in [

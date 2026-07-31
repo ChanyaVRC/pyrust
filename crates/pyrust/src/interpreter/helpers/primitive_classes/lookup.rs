@@ -49,8 +49,7 @@ pub(crate) fn builtin_type_class_by_name(name: &str) -> Option<Rc<RefCell<PyClas
 pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let ptr = Rc::as_ptr(class);
     RANGE_CLASS.with(|range| ptr == Rc::as_ptr(range))
-        || BUILTIN_TYPE_CLASSES
-            .with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
+        || BUILTIN_TYPE_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the migrated
