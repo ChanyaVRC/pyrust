@@ -219,6 +219,23 @@ class OrderedDict(dict):
         '''
         if key not in self:
             raise KeyError(key)
+        # CPython's `_odict_move_to_end` returns immediately when the node is
+        # already the one being moved to, leaving `od_state` untouched -- so a
+        # live iterator must not observe a mutation.  pyrust relinks by
+        # deleting and reinserting, which would bump the entry-order
+        # generation, so the no-op has to be recognised here (issue #2931).
+        # The end is read off `self.keys()` -- the same inherited view
+        # `popitem` already leans on.  `last=True` uses the reverse cursor,
+        # which is O(1) to create; the `last=False` branch below already walks
+        # the whole key order anyway.
+        if last:
+            end = next(reversed(self.keys()))
+        else:
+            end = next(iter(self.keys()))
+        # `is` first so a key that is not equal to itself (NaN) is still
+        # recognised as the node already sitting at that end.
+        if end is key or end == key:
+            return
         if last:
             value = self[key]
             del self[key]

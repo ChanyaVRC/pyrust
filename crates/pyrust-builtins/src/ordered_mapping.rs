@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
-use pyrust_core::{PyClass, PyError, Value};
+use pyrust_core::{CollectionMutationState, PyClass, PyError, Value};
 
 thread_local! {
     static CLASSES: RefCell<Vec<Weak<RefCell<PyClass>>>> =
@@ -105,8 +105,55 @@ pub fn view_policy(value: &Value) -> Option<IterationPolicy> {
 }
 
 /// Current clear-event sequence, captured when a guarded iterator is created.
-pub fn clear_sequence() -> u64 {
+fn clear_sequence() -> u64 {
     CLEAR_SEQUENCE.with(Cell::get)
+}
+
+/// Everything one live ordered-mapping iterator is diagnosed against, captured
+/// when it is created and carried for the rest of its life.
+///
+/// CPython's `odict_iterator` stamps two things at creation: `di_state`, a copy
+/// of the mapping's `od_state` node-relinking counter, and `di_size`. This is
+/// the `di_state` half plus the clear generation pyrust reconstructs its size
+/// arm from; the recorded length stays with the generic iteration adapter,
+/// which already owns it for every other container.
+#[derive(Clone)]
+pub struct IterationWatch {
+    clear_sequence: u64,
+    /// Absent only for a carrier whose backing mapping could not be resolved,
+    /// which leaves the size arm as the sole guard, exactly as before.
+    entry_order: Option<CollectionMutationState>,
+    entry_order_at_start: u64,
+}
+
+impl IterationWatch {
+    /// CPython's `di_state != od_state` test: some node has been relinked
+    /// since this iterator was created.
+    ///
+    /// Retaining the mapping's mutation state is what keeps the generation
+    /// advancing — an unobserved backing store tracks nothing — so the answer
+    /// covers every relink for exactly this iterator's lifetime, including the
+    /// ones a length comparison cannot see because the length was restored
+    /// before the next step (`move_to_end`, delete-then-reinsert).
+    #[inline]
+    pub fn relinked(&self) -> bool {
+        self.entry_order
+            .as_ref()
+            .is_some_and(|state| state.entry_order_version() != self.entry_order_at_start)
+    }
+}
+
+/// Snapshot the provider-owned guard inputs for a new ordered-mapping
+/// iterator over the mapping `entry_order` observes.
+pub fn watch_iteration(entry_order: Option<CollectionMutationState>) -> IterationWatch {
+    let entry_order_at_start = entry_order
+        .as_ref()
+        .map_or(0, CollectionMutationState::entry_order_version);
+    IterationWatch {
+        clear_sequence: clear_sequence(),
+        entry_order,
+        entry_order_at_start,
+    }
 }
 
 /// Record a clear of the canonical mapping's backing dict.
@@ -160,12 +207,26 @@ pub struct GuardOutcome {
 
 /// Select the provider-owned guard decision after generic iteration has
 /// resolved the backing identity and current length.
+///
+/// The two arms are tested in CPython's order: `odict_iterator` compares
+/// `od_state` first and only then `di_size`, so a mutation that both relinks
+/// nodes and changes the length (an insert, a delete) is reported as a
+/// mutation. Only `clear()` — which leaves `od_state` alone — reaches the size
+/// arm, and refilling a cleared mapping back to the recorded length relinks
+/// nodes again, so it is reported as a mutation rather than falling silent.
 pub fn guard_outcome(
     backing_id: Option<i64>,
     recorded_len: usize,
     current_len: Option<usize>,
-    iterator_sequence: u64,
+    watch: &IterationWatch,
 ) -> GuardOutcome {
+    if watch.relinked() {
+        return GuardOutcome {
+            message: POLICY.mutation_message,
+            exhaust_after_raise: true,
+        };
+    }
+    let iterator_sequence = watch.clear_sequence;
     let cleared = backing_id
         .and_then(|id| CLEAR_REGISTRY.with(|registry| registry.borrow().get(&id).copied()))
         .is_some_and(|mark| {
@@ -188,7 +249,22 @@ pub fn guard_outcome(
 
 #[cfg(test)]
 mod tests {
-    use super::{CLEAR_REGISTRY, CLEAR_SEQUENCE, clear_sequence, guard_outcome, note_clear};
+    use pyrust_core::{PyDict, PyKey, Value};
+
+    use super::{
+        CLEAR_REGISTRY, CLEAR_SEQUENCE, IterationWatch, clear_sequence, guard_outcome, note_clear,
+        watch_iteration,
+    };
+
+    /// A watch over no resolvable backing: the size arm is the only guard, so
+    /// these cases read exactly as they did before the entry-order counter.
+    fn watch_at(sequence: u64) -> IterationWatch {
+        IterationWatch {
+            clear_sequence: sequence,
+            entry_order: None,
+            entry_order_at_start: 0,
+        }
+    }
 
     #[test]
     fn clear_sequence_saturates_without_hiding_later_mutation() {
@@ -196,7 +272,7 @@ mod tests {
         note_clear(17, 3);
 
         assert_eq!(clear_sequence(), u64::MAX);
-        let outcome = guard_outcome(Some(17), 3, Some(0), u64::MAX);
+        let outcome = guard_outcome(Some(17), 3, Some(0), &watch_at(u64::MAX));
         assert_eq!(outcome.message, "OrderedDict changed size during iteration");
 
         CLEAR_REGISTRY.with(|registry| registry.borrow_mut().remove(&17));
@@ -208,17 +284,47 @@ mod tests {
     #[test]
     fn only_the_clear_arm_keeps_raising() {
         // No recorded clear for this backing: the mutation arm, which exhausts.
-        assert!(guard_outcome(Some(23), 3, Some(0), clear_sequence()).exhaust_after_raise);
+        assert!(
+            guard_outcome(Some(23), 3, Some(0), &watch_at(clear_sequence())).exhaust_after_raise
+        );
 
         note_clear(23, 3);
-        let cleared = guard_outcome(Some(23), 3, Some(0), 0);
+        let cleared = guard_outcome(Some(23), 3, Some(0), &watch_at(0));
         assert_eq!(cleared.message, "OrderedDict changed size during iteration");
         assert!(!cleared.exhaust_after_raise);
 
-        let mutated = guard_outcome(Some(23), 4, Some(5), 0);
+        let mutated = guard_outcome(Some(23), 4, Some(5), &watch_at(0));
         assert_eq!(mutated.message, "OrderedDict mutated during iteration");
         assert!(mutated.exhaust_after_raise);
 
         CLEAR_REGISTRY.with(|registry| registry.borrow_mut().remove(&23));
+    }
+
+    /// A relink the size arm cannot see still reports, and takes precedence
+    /// over a recorded clear that would otherwise pick the sticky arm.
+    #[test]
+    fn entry_order_relink_outranks_the_size_arm() {
+        let mut items = PyDict::default();
+        items.insert(PyKey::Int(1), Value::int(10));
+        let dict = Value::dict(items);
+        let id = dict.value_id().expect("dict identity");
+
+        let watch = watch_iteration(dict.dict_iteration_mutation_state());
+        assert!(!watch.relinked());
+        // A value rewrite keeps the entry order, so the walk stays valid.
+        dict.dict_with_mut(|d| d.insert(PyKey::Int(1), Value::int(20)));
+        assert!(!watch.relinked());
+
+        // Remove and reinsert: the length never differs when the guard looks.
+        dict.dict_with_mut(|d| d.shift_remove(&PyKey::Int(1)));
+        dict.dict_with_mut(|d| d.insert(PyKey::Int(1), Value::int(20)));
+        assert!(watch.relinked());
+
+        note_clear(id, 1);
+        let outcome = guard_outcome(Some(id), 1, Some(1), &watch);
+        assert_eq!(outcome.message, "OrderedDict mutated during iteration");
+        assert!(outcome.exhaust_after_raise);
+
+        CLEAR_REGISTRY.with(|registry| registry.borrow_mut().remove(&id));
     }
 }

@@ -16,14 +16,23 @@
 # test_ordereddict_iter_wording.py pins which message each mutation picks;
 # this file pins what happens on the steps AFTER the first raise.
 #
-# Not covered: pyrust detects OrderedDict mutation by length, so a structural
-# change that preserves length (move_to_end, del + reinsert) is not yet
-# observed at all.  That is a separate false-negative from the latch direction
-# and is deliberately left out of the matrix below.  It also reaches one case
-# that looks like a latch bug but is not: refilling a cleared mapping back to
-# the recorded length un-silences an already-diagnosed iterator, which CPython
-# reports on its od_state (mutation) arm rather than by keeping the size arm
-# sticky.  Pinning it would need the od_state counter, not a stickier latch.
+# Issue #2931 added the other half of the detection: CPython's odict iterator
+# compares `od_state` -- a counter bumped by every node relinking -- BEFORE it
+# compares sizes, so a structural change that preserves length is reported on
+# the mutation arm.  The matrices below pin both directions of that:
+#
+#   * a relink whose length is restored before the iterator looks again
+#     (move_to_end, delete + reinsert, pop + setdefault) still reports;
+#   * a mutation that only rewrites an existing key's value never bumps
+#     `od_state`, so the walk stays valid -- including a `move_to_end` whose
+#     key is already at the requested end, which CPython short-circuits.
+#
+# It also settles the case the previous revision of this header flagged as
+# needing the counter: refilling a cleared mapping back to the recorded length
+# un-silences an already-diagnosed iterator.  `clear()` is the one structural
+# mutation that leaves `od_state` alone, but the refill's inserts do bump it,
+# so CPython reports the refill on the mutation arm rather than by keeping the
+# size arm sticky.  Pinned under "clear then refill" below.
 
 from collections import OrderedDict
 
@@ -131,6 +140,215 @@ for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
             next(iterator)
             mutate(mapping, kind)
             print("latch", name, view, kind, steps(iterator))
+
+
+# ── Length-preserving relinks report on the same arm (issue #2931) ──────────
+#
+# None of these changes the mapping's length by the time the iterator looks
+# again, so a size comparison sees nothing.  CPython bumps `od_state` for each
+# one and reports the mutation arm, which latches into exhaustion exactly like
+# the size-changing relinks above.
+def relink(mapping, kind):
+    if kind == "move_to_end_last":
+        mapping.move_to_end("a")
+    elif kind == "move_to_end_first":
+        mapping.move_to_end("c", last=False)
+    elif kind == "move_round_trip":
+        # The order is fully restored, but two nodes were relinked to do it.
+        mapping.move_to_end("a")
+        mapping.move_to_end("a", last=False)
+    elif kind == "del_reinsert_same":
+        del mapping["a"]
+        mapping["a"] = 1
+    elif kind == "del_reinsert_other":
+        del mapping["a"]
+        mapping["z"] = 9
+    elif kind == "del_reinsert_behind_cursor":
+        # Both edits sit strictly behind a cursor that has yielded only "a",
+        # so neither the length nor the entry the cursor last read moves.
+        del mapping["c"]
+        mapping["z"] = 9
+    elif kind == "pop_setdefault":
+        mapping.pop("a")
+        mapping.setdefault("a", 1)
+    elif kind == "popitem_reinsert":
+        mapping.popitem()
+        mapping["q"] = 9
+    elif kind == "popitem_first_reinsert":
+        mapping.popitem(last=False)
+        mapping["q"] = 9
+    elif kind == "clear_refill":
+        # Back to the recorded length: only the entry-order counter can tell.
+        mapping.clear()
+        mapping.update(a=1, b=2, c=3)
+
+
+RELINKS = (
+    "move_to_end_last",
+    "move_to_end_first",
+    "move_round_trip",
+    "del_reinsert_same",
+    "del_reinsert_other",
+    "del_reinsert_behind_cursor",
+    "pop_setdefault",
+    "popitem_reinsert",
+    "popitem_first_reinsert",
+    "clear_refill",
+)
+for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
+    for view in VIEWS:
+        for kind in RELINKS:
+            mapping = factory(a=1, b=2, c=3)
+            iterator = get_iter(mapping, view)
+            next(iterator)
+            relink(mapping, kind)
+            print("relink", name, view, kind, steps(iterator))
+
+
+# ── A mutation that only rewrites values leaves the walk valid ──────────────
+#
+# CPython bumps `od_state` when a node is added or removed, never when an
+# existing key's value is replaced -- and `move_to_end` returns early when the
+# node is already the one being moved to, so it is a no-op for `od_state` too.
+# Every row here must run to completion with no RuntimeError.
+def silent(mapping, kind):
+    if kind == "assign_existing":
+        mapping["a"] = 99
+    elif kind == "setdefault_existing":
+        mapping.setdefault("a", 100)
+    elif kind == "update_existing":
+        mapping.update({"a": 99})
+    elif kind == "update_all_existing":
+        mapping.update({"a": 1, "b": 2, "c": 3})
+    elif kind == "update_empty":
+        mapping.update({})
+    elif kind == "ior_existing":
+        mapping |= {"a": 99}
+    elif kind == "pop_missing_default":
+        mapping.pop("nope", None)
+    elif kind == "get":
+        mapping.get("a")
+    elif kind == "read":
+        mapping["a"]
+    elif kind == "move_to_end_noop_last":
+        mapping.move_to_end("c")
+    elif kind == "move_to_end_noop_first":
+        mapping.move_to_end("a", last=False)
+    elif kind == "clear_empty":
+        # Clearing an already-empty *other* mapping must not reach this one.
+        OrderedDict().clear()
+
+
+SILENT = (
+    "assign_existing",
+    "setdefault_existing",
+    "update_existing",
+    "update_all_existing",
+    "update_empty",
+    "ior_existing",
+    "pop_missing_default",
+    "get",
+    "read",
+    "move_to_end_noop_last",
+    "move_to_end_noop_first",
+    "clear_empty",
+)
+for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
+    for view in VIEWS:
+        for kind in SILENT:
+            mapping = factory(a=1, b=2, c=3)
+            iterator = get_iter(mapping, view)
+            next(iterator)
+            silent(mapping, kind)
+            print("silent", name, view, kind, steps(iterator))
+
+
+# A single-element mapping has no node to move: `move_to_end` is a no-op in
+# both directions, and the iterator is already exhausted anyway.
+for last in (True, False):
+    mapping = OrderedDict(a=1)
+    iterator = iter(mapping)
+    mapping.move_to_end("a", last=last)
+    print("single move_to_end", last, steps(iterator, 2))
+
+# move_to_end still raises KeyError for an absent key, before touching order.
+mapping = OrderedDict(a=1, b=2, c=3)
+iterator = iter(mapping)
+next(iterator)
+try:
+    mapping.move_to_end("nope")
+except KeyError as error:
+    print("move_to_end missing", type(error).__name__, error)
+print("move_to_end missing left the walk alone", steps(iterator, 3))
+
+
+# A `for` loop over each relink propagates the first raise out of the loop.
+def relink_loop(kind):
+    mapping = OrderedDict(a=1, b=2, c=3)
+    try:
+        for key in mapping:
+            if key == "a":
+                relink(mapping, kind)
+        return "NO ERROR"
+    except RuntimeError as error:
+        return "RuntimeError: " + str(error)
+
+
+for kind in RELINKS:
+    print("for loop relink", kind, relink_loop(kind))
+
+
+# A relink observed by a native consumer draining the iterator agrees with
+# next(), on the first drain and on the retired second one.
+for kind in ("move_to_end_last", "del_reinsert_same", "clear_refill"):
+    mapping = OrderedDict(a=1, b=2, c=3)
+    iterator = iter(mapping)
+    next(iterator)
+    relink(mapping, kind)
+    try:
+        print("relink drain", kind, list(iterator))
+    except RuntimeError as error:
+        print("relink drain", kind, "RuntimeError:", error)
+    print("relink drain again", kind, list(iterator))
+
+
+# Two iterators over the same mapping both see the one relink.
+mapping = OrderedDict(a=1, b=2, c=3)
+first = iter(mapping)
+second = iter(mapping.items())
+next(first)
+next(second)
+mapping.move_to_end("a")
+print("relink aliased first", steps(first, 2))
+print("relink aliased second", steps(second, 2))
+
+
+# An iterator created AFTER the relink starts from the new order and is clean.
+mapping = OrderedDict(a=1, b=2, c=3)
+mapping.move_to_end("a")
+iterator = iter(mapping)
+print("relink before creation", steps(iterator, 4))
+
+
+# An iterator already at its end never reports a later relink: exhaustion is
+# tested first, for next() and for a drain alike.
+for kind in ("move_to_end_last", "del_reinsert_same"):
+    mapping = OrderedDict(a=1, b=2)
+    iterator = iter(mapping)
+    next(iterator)
+    next(iterator)
+    relink(mapping, kind)
+    print("exhausted then relink", kind, list(iterator), step(iterator))
+
+
+# A plain dict is NOT ordered-tagged, so the same length-preserving edit stays
+# invisible to it — the two containers must keep disagreeing.
+plain = {"a": 1, "b": 2, "c": 3}
+iterator = iter(plain)
+next(iterator)
+del plain["c"]
+plain["z"] = 9
+print("plain dict same-size relink", sorted(str(entry) for entry in steps(iterator, 3)))
 
 
 # ── The poison survives restoring the original size ─────────────────────────

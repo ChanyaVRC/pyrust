@@ -88,6 +88,12 @@ impl CollectionMutationState {
         self.0.version.get()
     }
 
+    /// Entry-order generation — CPython's `od_state`. See the field's docs.
+    #[inline]
+    pub fn entry_order_version(&self) -> u64 {
+        self.0.entry_order.get()
+    }
+
     /// Return the version only while equality-based caches may safely use it.
     #[inline]
     pub fn cache_version(&self) -> Option<u64> {
@@ -241,6 +247,18 @@ fn dict_usable_fraction(table_size: usize) -> usize {
 
 struct CollectionMutationStateInner {
     version: Cell<u64>,
+    /// Generation of the backing store's *entry order* alone, advanced only by
+    /// a mutation that adds or removes an entry — never by rewriting an
+    /// existing key's value, and never by a table reset.
+    ///
+    /// This is CPython's `od_state`, which `OrderedDict` iterators compare
+    /// per step: relinking a node (`move_to_end`, a delete, an insert of a new
+    /// key) invalidates the walk even when the mapping's length is restored
+    /// before the iterator looks again, while `od[k] = v` for a key already
+    /// present leaves the walk valid. `clear()` is the documented exception —
+    /// CPython reports it on the size arm instead, so a reset must leave this
+    /// counter alone (issue #2931).
+    entry_order: Cell<u64>,
     /// Sticky once the wrapping iterator generation exhausts its first cycle.
     ///
     /// Iterator cursors still need wrapping arithmetic so an iterator created
@@ -407,6 +425,7 @@ fn collection_mutation_state(
     let dict_len = dict_target_len(&target);
     let state = Rc::new(CollectionMutationStateInner {
         version: Cell::new(0),
+        entry_order: Cell::new(0),
         cache_exhausted: Cell::new(false),
         observers: Cell::new(0),
         removal_watchers: RefCell::new(Vec::new()),
@@ -538,6 +557,15 @@ fn bump_active_collection_mutation_state(
     let Some(dict_mutation) = dict_mutation else {
         return;
     };
+
+    // An entry appeared or disappeared: every node from there on is relinked.
+    // A pure value rewrite leaves both counts at zero, and a reset is the arm
+    // CPython diagnoses by size instead, so neither advances the generation.
+    if !dict_mutation.reset && dict_mutation.removed_count + dict_mutation.inserted_count > 0 {
+        state
+            .entry_order
+            .set(state.entry_order.get().wrapping_add(1));
+    }
 
     {
         let mut pending = state.pending_removed_keys.borrow_mut();
@@ -921,6 +949,7 @@ mod mutation_version_tests {
         };
         let inner = Rc::new(CollectionMutationStateInner {
             version: Cell::new(u64::MAX - 1),
+            entry_order: Cell::new(0),
             cache_exhausted: Cell::new(false),
             observers: Cell::new(0),
             removal_watchers: RefCell::new(Vec::new()),

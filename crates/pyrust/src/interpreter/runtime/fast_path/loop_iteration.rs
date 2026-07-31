@@ -125,7 +125,7 @@ pub(super) fn advance_loop_fast_state(
             recorded_len,
             msg,
             exhaust_first,
-            provider_sequence,
+            ordered_watch,
         } => {
             if *exhaust_first && *pos >= items.len() {
                 return LoopFastOutcome::Exhausted;
@@ -134,7 +134,7 @@ pub(super) fn advance_loop_fast_state(
                 container,
                 *recorded_len,
                 msg,
-                *provider_sequence,
+                ordered_watch.as_ref(),
             ));
             let current = *pos;
             if current < items.len() {
@@ -184,7 +184,7 @@ pub(super) fn advance_loop_fast_state(
             recorded_len,
             msg,
             exhaust_first,
-            provider_sequence,
+            ordered_watch,
         } => {
             if *exhaust_first && *pos >= keys.len() {
                 return LoopFastOutcome::Exhausted;
@@ -193,7 +193,7 @@ pub(super) fn advance_loop_fast_state(
                 container,
                 *recorded_len,
                 msg,
-                *provider_sequence,
+                ordered_watch.as_ref(),
             ));
             let current = *pos;
             if current < keys.len() {
@@ -259,15 +259,18 @@ fn ensure_loop_collection_unchanged(
     container: &Value,
     recorded_len: usize,
     default_message: &'static str,
-    provider_sequence: u64,
+    ordered_watch: Option<&OrderedIterationWatch>,
 ) -> Result<()> {
-    if live_collection_len(container) == Some(recorded_len) {
+    // A relink that restored the mapping's length is invisible to the size
+    // comparison, so an ordered mapping consults its entry-order generation
+    // even when the length still matches (#2931).
+    let relinked = ordered_watch.is_some_and(|watch| watch.relinked());
+    if !relinked && live_collection_len(container) == Some(recorded_len) {
         return Ok(());
     }
-    let message = if provider_sequence != 0 {
-        ordered_mapping_guard_outcome(container, recorded_len, provider_sequence).message
-    } else {
-        default_message
+    let message = match ordered_watch {
+        Some(watch) => ordered_mapping_guard_outcome(container, recorded_len, watch).message,
+        None => default_message,
     };
     Err(PyError::Runtime(message.to_string()))
 }
