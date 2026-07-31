@@ -156,15 +156,17 @@ impl Interpreter {
                                     // receiver, so the RHS's representatives win
                                     // unless the RHS is the larger table (issue
                                     // #2955).  `rhs_items` is already an owned
-                                    // snapshot, so both directions retain in
-                                    // place and neither allocates a new table.
-                                    if rhs_items.len() <= lhs.len() {
-                                        let mut out = std::mem::take(&mut rhs_items);
-                                        out.retain(|k| lhs.contains(k));
-                                        *lhs = out;
-                                    } else {
-                                        lhs.retain(|k| rhs_items.contains(k));
-                                    }
+                                    // snapshot, so neither direction allocates
+                                    // a new table; the shared helper also owns
+                                    // the shrink-vs-replace choice that keeps a
+                                    // large receiver's buffer alive.  `&=`
+                                    // rejects a non-set RHS above, so the
+                                    // operand is always a concrete set here.
+                                    pyrust_builtins::set::intersect_in_place(
+                                        lhs,
+                                        std::mem::take(&mut rhs_items),
+                                        true,
+                                    );
                                 }
                                 BinaryOp::Sub => {
                                     unreachable!("set subtraction is owned by collection_ops")
@@ -414,40 +416,61 @@ impl Interpreter {
                         set_subtract_in_place(self, &backing, &rhs_items)?;
                         return Ok(Some(left.clone()));
                     }
-                    backing.set_with_mut(|lhs| match op {
-                        BinaryOp::BitOr => {
-                            for k in &rhs_items {
-                                lhs.insert(k.clone());
-                            }
-                        }
-                        BinaryOp::BitAnd => {
-                            // Keep the smaller table's representatives, as
-                            // CPython's `set_iand` does (issue #2955).
-                            if rhs_items.len() <= lhs.len() {
-                                let mut out = std::mem::take(&mut rhs_items);
-                                out.retain(|k| lhs.contains(k));
-                                *lhs = out;
-                            } else {
-                                lhs.retain(|k| rhs_items.contains(k));
-                            }
-                        }
-                        BinaryOp::Sub => {
-                            unreachable!("set subtraction is owned by collection_ops")
-                        }
-                        BinaryOp::BitXor => {
-                            let mut to_add: Vec<PyKey> = Vec::new();
-                            for k in &rhs_items {
-                                if !lhs.contains(k) {
-                                    to_add.push(k.clone());
+                    // `&=` needs the same object-key bail as its plain-`set`
+                    // sibling above: the raw `contains` below compares
+                    // `PyKey::Object`s by identity, so it drops every
+                    // `__eq__`-equal element and leaves `S({a}) &= {b}` empty
+                    // where CPython keeps `{b}` (issue #2955).  The check is
+                    // folded into the same single `set_with_mut` borrow the
+                    // mutation already takes, so the primitive subclass path
+                    // pays no extra borrow.
+                    let needs_eq = backing
+                        .set_with_mut(|lhs| {
+                            match op {
+                                BinaryOp::BitOr => {
+                                    for k in &rhs_items {
+                                        lhs.insert(k.clone());
+                                    }
                                 }
+                                BinaryOp::BitAnd => {
+                                    if set_has_object_key(lhs) || set_has_object_key(&rhs_items) {
+                                        return true;
+                                    }
+                                    // Keep the smaller table's representatives,
+                                    // as CPython's `set_iand` does (issue
+                                    // #2955) — same helper as the plain-set
+                                    // sibling above.
+                                    pyrust_builtins::set::intersect_in_place(
+                                        lhs,
+                                        std::mem::take(&mut rhs_items),
+                                        true,
+                                    );
+                                }
+                                BinaryOp::Sub => {
+                                    unreachable!("set subtraction is owned by collection_ops")
+                                }
+                                BinaryOp::BitXor => {
+                                    let mut to_add: Vec<PyKey> = Vec::new();
+                                    for k in &rhs_items {
+                                        if !lhs.contains(k) {
+                                            to_add.push(k.clone());
+                                        }
+                                    }
+                                    lhs.retain(|k| !rhs_items.contains(k));
+                                    for k in to_add {
+                                        lhs.insert(k);
+                                    }
+                                }
+                                _ => unreachable!(),
                             }
-                            lhs.retain(|k| !rhs_items.contains(k));
-                            for k in to_add {
-                                lhs.insert(k);
-                            }
-                        }
-                        _ => unreachable!(),
-                    });
+                            false
+                        })
+                        .unwrap_or(false);
+                    if needs_eq {
+                        // `rhs_items` is untouched on this branch: the bail
+                        // happens before the `mem::take` above.
+                        self.set_iand_eq_aware(&backing, &rhs_items)?;
+                    }
                     return Ok(Some(left.clone()));
                 }
             } else {
@@ -617,6 +640,30 @@ impl Interpreter {
             }
             _ => Ok(false),
         }
+    }
+
+    /// `&=` against a set backing that holds user-instance keys.
+    ///
+    /// Membership and insertion have to dispatch user `__hash__`/`__eq__`, and
+    /// that user code can re-enter and mutate the receiver, so the backing
+    /// borrow must not be held across it: snapshot, compute, then write the
+    /// result back in place so aliases observe it.  The smaller table is
+    /// scanned and its elements kept, so the surviving representatives match
+    /// CPython's `set_iand` (issue #2955).
+    fn set_iand_eq_aware(&mut self, backing: &Value, rhs_items: &PySet) -> Result<()> {
+        let lhs = backing
+            .set_with(|s| s.clone())
+            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+        let mut out: PySet = PySet::default();
+        let (scan, probe) = intersection_scan_order(&lhs, rhs_items);
+        for k in scan.iter() {
+            if self.set_lookup_in(probe, k)?.is_some() {
+                self.set_insert(&mut out, k.clone())?;
+            }
+        }
+        backing
+            .set_with_mut(|s| *s = out)
+            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))
     }
 }
 

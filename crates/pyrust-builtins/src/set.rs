@@ -251,10 +251,7 @@ pub fn call_resolved(method: Method, receiver: &Value, args: Vec<Value>) -> Resu
                 let snap = snapshot_iterable(receiver, arg)?;
                 let snap_is_set = is_concrete_set(arg);
                 receiver
-                    .set_with_mut(move |items| {
-                        let current = std::mem::take(items);
-                        *items = intersect_snapshot(current, snap, snap_is_set);
-                    })
+                    .set_with_mut(move |items| intersect_in_place(items, snap, snap_is_set))
                     .ok_or_else(not_set)?;
             }
             Ok(Value::none())
@@ -343,6 +340,42 @@ fn intersect_first(current: &PySet, other: PySet, other_is_set: bool) -> PySet {
         let mut out = other;
         out.retain(|k| current.contains(k));
         out
+    }
+}
+
+/// [`intersect_snapshot`] applied to a receiver's live table, shared by
+/// `intersection_update` and the `&=` operator forms.
+///
+/// `other` must already be an owned snapshot; `other_is_set` follows
+/// [`is_concrete_set`] (always true for `&=`, whose RHS must be a set).
+///
+/// The receiver keeps the operand's representatives whenever the operand is
+/// the scanned side, but *how* they get there is a perf decision:
+///
+/// - Shrinking the receiver a lot (a large `s` intersected with a small
+///   operand) re-seeds `items`' own buffer.  Replacing the whole table instead
+///   frees that buffer mid-loop, and once it is past glibc's mmap threshold
+///   every iteration hands it back to the kernel and re-faults a fresh one —
+///   measured at 1.7-1.8x wall-clock on an 8000-key receiver, all of it system
+///   time.  The pre-#2955 `retain` kept the buffer too, so peak footprint is
+///   unchanged.
+/// - Otherwise the tables are of comparable size, the buffer being dropped is
+///   no larger than the one replacing it, and moving the operand's table in is
+///   cheaper than re-hashing every survivor (re-seeding unconditionally costs
+///   ~1.25x on an equal-size `s &= t`).
+pub fn intersect_in_place(items: &mut PySet, other: PySet, other_is_set: bool) {
+    if other_is_set && other.len() > items.len() {
+        // The receiver is the smaller table: keep its own representatives.
+        items.retain(|k| other.contains(k));
+        return;
+    }
+    let mut out = other;
+    out.retain(|k| items.contains(k));
+    if out.len().saturating_mul(4) <= items.len() {
+        items.clear();
+        items.extend(out);
+    } else {
+        *items = out;
     }
 }
 

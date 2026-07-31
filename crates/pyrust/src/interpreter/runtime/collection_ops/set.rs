@@ -202,11 +202,18 @@ pub(super) fn intersection_scan_order<'a>(a: &'a PySet, b: &'a PySet) -> (&'a Py
 /// `d.keys() & other` is not `set.__and__`: CPython routes it through
 /// `_PyDictView_Intersect`, whose own swap rule is stated in terms of the view
 /// (even when the view is the *right* operand, since `set & view` reaches it
-/// via `__rand__`).  Applying the plain-set rule here would change which object
-/// a view intersection keeps in cases where the current behaviour already
-/// matches CPython, so views keep scanning the left operand.
+/// via `__rand__`), and delegates to `other.intersection(view)` only when
+/// `other` is an *exact* `set` no smaller than the view — so a `frozenset` or a
+/// `set` subclass on the other side falls through to a manual loop.  That is a
+/// different rule from the plain-set one, and the left-to-right scan kept here
+/// does not implement it either; dict-view retention is tracked separately as
+/// issue #3006 and is deliberately out of scope for #2955.
 #[inline]
-fn intersection_scan<'a>(a: &'a PySet, b: &'a PySet, view_operands: bool) -> (&'a PySet, &'a PySet) {
+fn intersection_scan<'a>(
+    a: &'a PySet,
+    b: &'a PySet,
+    view_operands: bool,
+) -> (&'a PySet, &'a PySet) {
     if view_operands {
         (a, b)
     } else {
