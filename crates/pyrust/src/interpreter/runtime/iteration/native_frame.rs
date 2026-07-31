@@ -470,13 +470,17 @@ impl NativeIterFrame {
             GuardVersion::Size => live_collection_len(&guard.container).map(|len| len as i64),
             GuardVersion::DequeState { counter } => Some(counter.get()),
         };
-        if live != Some(guard.version) {
-            let (message, exhaust_after_raise) = if guard.provider_sequence != 0 {
-                let outcome = ordered_mapping_guard_outcome(
-                    &guard.container,
-                    guard.version as usize,
-                    guard.provider_sequence,
-                );
+        // An ordered mapping is diagnosed on two independent facts, so either
+        // one reaching the provider is enough: a relink that restores the
+        // length before the next step leaves `live` matching (#2931).
+        let relinked = guard
+            .ordered_watch
+            .as_ref()
+            .is_some_and(|watch| watch.relinked());
+        if relinked || live != Some(guard.version) {
+            let (message, exhaust_after_raise) = if let Some(watch) = &guard.ordered_watch {
+                let outcome =
+                    ordered_mapping_guard_outcome(&guard.container, guard.version as usize, watch);
                 (outcome.message, outcome.exhaust_after_raise)
             } else {
                 // CPython stamps `di_used` / `si_used` with -1 on the first

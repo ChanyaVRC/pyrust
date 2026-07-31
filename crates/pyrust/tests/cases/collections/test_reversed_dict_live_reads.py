@@ -32,6 +32,12 @@
 # entry is yielded twice -- the second half on a mapping built large and then
 # deleted down, so that CPython has entry slots to spare, cannot compact, and
 # is duplicate-free too.
+#
+# That freedom belongs to `dict` alone.  An OrderedDict compares its `od_state`
+# node-relinking counter before anything else, so the delete retires the walk
+# outright and there is no element sequence left to depend on the table -- so
+# those rows ARE pinned here, exactly, since issue #2931 gave pyrust the
+# counter.
 
 from collections import OrderedDict
 
@@ -281,6 +287,52 @@ def structural(size, cut, victim):
 for size in (3, 5, 9):
     for victim in ("a", "c", chr(97 + size - 1)):
         print("structural", size, victim, structural(size, 1, victim))
+
+
+# ── The same mutation on an OrderedDict is fully determined (issue #2931) ────
+#
+# The freedom above is a plain dict's: its walk keeps going, so what it yields
+# depends on the table. An OrderedDict compares `od_state` before it looks at
+# anything else, so the delete alone retires the walk and the exact element
+# sequence never comes into it. That is why these rows could not be pinned
+# while pyrust detected mutation by length only.
+def ordered_structural(factory, view, size, cut, victim):
+    mapping = factory((chr(97 + index), index) for index in range(size))
+    iterator = reverse(mapping, view)
+    observed = [next(iterator) for _ in range(cut)]
+    del mapping[victim]
+    mapping["z"] = 99
+    try:
+        observed.extend(iterator)
+        return len(observed), "NO ERROR"
+    except RuntimeError as error:
+        return len(observed), "RuntimeError: " + str(error)
+
+
+for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
+    for view in VIEWS:
+        for size in (3, 5, 9):
+            for victim in ("a", "c", chr(97 + size - 1)):
+                print(
+                    "ordered structural",
+                    name,
+                    view,
+                    size,
+                    victim,
+                    ordered_structural(factory, view, size, 1, victim),
+                )
+
+
+# A `move_to_end` mid-walk changes no length at all, so nothing but the
+# entry-order counter can retire these walks.
+for name, factory in (("OrderedDict", OrderedDict), ("ODSub", ODSub)):
+    for view in VIEWS:
+        for last in (True, False):
+            mapping = factory(a=1, b=2, c=3, d=4)
+            iterator = reverse(mapping, view)
+            next(iterator)
+            mapping.move_to_end("b", last=last)
+            print("ordered move_to_end", name, view, last, steps(iterator, 3))
 
 
 # ── The descending cursor re-anchors instead of holding a raw position ───────

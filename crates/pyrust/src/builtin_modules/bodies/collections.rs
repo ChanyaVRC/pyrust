@@ -1499,7 +1499,7 @@ pyrust_module! {
                 kind: GuardVersion::DequeState { counter },
                 msg: "deque mutated during iteration",
                 exhaust_first: false,
-                provider_sequence: 0,
+                ordered_watch: None,
             }));
             Ok(Value::generator(Box::new(frame)))
         }
