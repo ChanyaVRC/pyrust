@@ -306,11 +306,12 @@ pub(crate) use iteration::{
 
 mod type_objects {
     use super::{
-        AsyncGenASend, BigRangeIter, CallableIter, EnumerateIter, FilterIter, GetItemIter,
-        IndexMap, InstanceAttrs, MapIter, NativeIterFrame, ProviderIterator, PyClass, PyError,
-        PyInstance, RangeIter, Rc, RefCell, Result, UserFunctionKind, Value, ValueKind, ZipIter,
-        function_type_singleton, generic_alias_class_singleton, method_type_singleton,
-        primitive_class_for_value, type_class_singleton, value_type_name_str,
+        AsyncGenASend, BigRangeIter, BuiltinTypeClass, CallableIter, EnumerateIter, FilterIter,
+        GetItemIter, IndexMap, InstanceAttrs, MapIter, NativeIterFrame, ProviderIterator, PyClass,
+        PyError, PyInstance, RangeIter, Rc, RefCell, Result, UserFunctionKind, Value, ValueKind,
+        ZipIter, builtin_type_class_by_name, function_type_singleton,
+        generic_alias_class_singleton, method_type_singleton, primitive_class_for_value,
+        type_class_singleton, value_type_name_str,
     };
     include!("runtime/type_objects.rs");
 }
@@ -319,7 +320,7 @@ pub(crate) use type_objects::{
     full_type_name_str, initialize_typevar_attr, is_type_alias_class, is_typevar_class,
     make_slot_member_descriptor, make_type_alias_from_syntax, make_typevar_from_syntax,
     type_alias_class_singleton, type_alias_readonly_attr_error, typevar_class_singleton,
-    typevar_readonly_attr_error, value_class,
+    typevar_readonly_attr_error, value_class, value_class_object,
 };
 
 #[inline]

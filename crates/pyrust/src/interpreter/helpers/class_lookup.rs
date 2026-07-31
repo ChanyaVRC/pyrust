@@ -389,6 +389,43 @@ thread_local! {
         cls
     };
 
+    /// Per-thread `PyClass` singletons for the remaining `builtins` types that
+    /// pyrust used to model as `BuiltinFunction(name)` class-tokens: `zip`,
+    /// `map`, `filter`, `enumerate`, `slice`, `reversed` (issue #3000).  Same
+    /// shape as [`RANGE_CLASS`]: a real class based on `object`, so
+    /// `type(zip(...))` reprs as `<class 'zip'>`, `issubclass(type(z), object)`
+    /// is True and `type(z).__mro__` resolves.  Indexed by
+    /// [`BuiltinTypeClass`]; the constructor for each is wired into
+    /// `PRIMITIVE_CLASS_DISPATCH` below so `zip(a, b)` still reaches the
+    /// existing registry entry instead of allocating a `PyInstance`.
+    static BUILTIN_TYPE_CLASSES: [Rc<RefCell<PyClass>>; BuiltinTypeClass::ALL.len()] = {
+        let obj = OBJECT_CLASS.with(Rc::clone);
+        BuiltinTypeClass::ALL.map(|kind| {
+            let name = kind.class_name();
+            let mut attrs = IndexMap::new();
+            // CPython permits heap subclasses of these five iterator types.
+            // Their inherited allocator keeps the subclass class identity on a
+            // PyInstance while delegating state/arity policy to the existing
+            // exact built-in constructor; __iter__/__next__ then operate on
+            // that retained backing. `slice` deliberately remains
+            // non-subclassable, but still exposes its native `__new__` slot.
+            let qualified = registered_builtin_method_name(name, "__new__");
+            attrs.insert("__new__".to_string(), Value::builtin_function(qualified));
+            if kind != BuiltinTypeClass::Slice {
+                for method in ["__iter__", "__next__"] {
+                    let qualified = registered_builtin_method_name(name, method);
+                    attrs.insert(method.to_string(), Value::builtin_function(qualified));
+                }
+            }
+            let mut class = PyClass::new(name, name, Some(Rc::clone(&obj)), attrs);
+            class.builtin_type_tag = Some(kind.tag());
+            class.non_subclassable_name = kind.non_subclassable_name();
+            let cls = Rc::new(RefCell::new(class));
+            obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
+            cls
+        })
+    };
+
     /// Per-thread `PyClass` singleton for the `types.GenericAlias` type — the
     /// type of `list[int]`, `dict[str, int]`, etc. (PEP 585).  In CPython 3.12
     /// `type(list[int])` is `<class 'types.GenericAlias'>`, with
@@ -436,15 +473,27 @@ thread_local! {
     /// directly to the registry fn, skipping `call_class_expanded`'s
     /// PyInstance allocation + `lookup_class_attr("__init__")` walk +
     /// recursive `call_function_expanded` step.  The lookup is one
-    /// `HashMap::get` (cap = 11) + a fn pointer call.
+    /// `HashMap::get` + a fn pointer call.
+    ///
+    /// Hashed with `pyrust_core::PyHasher` rather than the stdlib default: the key is a
+    /// raw pointer to an interpreter-owned singleton, so SipHash's
+    /// DoS-resistance buys nothing while costing more than the probe it
+    /// guards.  Under the default hasher this lookup measured ~12 ns, which
+    /// showed up as a 1.1-1.3x regression on constructor-heavy loops the
+    /// moment #3000 moved `zip` / `map` / `filter` / `enumerate` / `slice` /
+    /// `reversed` onto this table.
     static PRIMITIVE_CLASS_DISPATCH:
         std::cell::RefCell<
             std::collections::HashMap<
                 *const std::cell::RefCell<PyClass>,
                 crate::builtin_registry::BuiltinDispatchFn,
+                pyrust_core::PyHasher,
             >,
         > = {
-        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(15));
+        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity_and_hasher(
+            24,
+            pyrust_core::PyHasher::default(),
+        ));
         PRIMITIVE_CLASSES.with(|c| {
             let mut m = cell.borrow_mut();
             for (class, name) in [
@@ -501,6 +550,17 @@ thread_local! {
         RANGE_CLASS.with(|r| {
             if let Some(dispatch) = crate::builtin_registry::lookup("range") {
                 cell.borrow_mut().insert(Rc::as_ptr(r), dispatch);
+            }
+        });
+        // Issue #3000: `zip` / `map` / `filter` / `enumerate` / `slice` /
+        // `reversed` are classes too, so `zip(a, b)` is a constructor call.
+        // Register each singleton against its existing registry entry, exactly
+        // as `range` above, so the call never reaches `call_class_expanded`.
+        BUILTIN_TYPE_CLASSES.with(|classes| {
+            for (kind, class) in BuiltinTypeClass::ALL.iter().zip(classes) {
+                if let Some(dispatch) = crate::builtin_registry::lookup(kind.class_name()) {
+                    cell.borrow_mut().insert(Rc::as_ptr(class), dispatch);
+                }
             }
         });
         cell

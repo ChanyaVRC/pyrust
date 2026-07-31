@@ -20,29 +20,29 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, EnumerateIter, FilterIter, Interpreter, IterSrcBuf, MapIter, ProviderIterator,
+    BuiltinTypeClass, CallableIter, EnumerateIter, FilterIter, Interpreter, IterSrcBuf, MapIter,
     ZipIter, apply_format_spec, apply_format_spec_named, ascii_repr_interp, bigint_divmod_floor,
-    bind_constructor_kwargs, builtin_data_backing, class_is_subclass_of,
-    class_suppresses_instance_dict, classify_exception_class, coerce_numeric,
-    coerce_subclass_backing, compare_values, compare_values_with_op, dir_names,
-    dispatch_numeric_binop, extract_str_value, find_immutable_primitive_base,
-    find_mutable_primitive_base, find_scalar_primitive_base, float_divmod, float_to_bigint,
-    format_bin_i64, format_oct_i64, full_type_name_str, function_type_singleton,
-    hash_value_with_interp, instance_builtin_data, invoke_class_method, is_str_or_str_subclass,
-    iter_values, lookup_class_attr, lookup_value_special_method, make_iterator,
-    make_reversed_dict_iter, make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
-    make_reversed_range_iterator, make_reversed_sequence_iterator, mapping_pairs_via_protocol,
-    method_type_singleton, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64,
-    normalize_complex_slot_result, normalize_float_slot_result, normalize_int_slot_result,
-    primitive_class_by_name, py_mod_i64, py_round_half_even_checked, reject_keyword_args_expanded,
-    render_instance_str, render_key_repr, render_value_repr, resolve_zero_arg_super,
-    round_bigint_neg_ndigits, round_float_ndigits, snapshot_current_locals,
-    sync_module_env_to_globals_dict, type_class_singleton, unicode_exc_set_attrs, value_class,
-    value_to_float, value_type_name_str,
+    bind_constructor_kwargs, builtin_data_backing, builtin_type_class_isinstance_fast,
+    class_has_native_builtin_type_ancestor, class_is_subclass_of, class_suppresses_instance_dict,
+    classify_exception_class, coerce_numeric, coerce_subclass_backing, compare_values,
+    compare_values_with_op, dir_names, dispatch_numeric_binop, extract_str_value,
+    find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
+    float_divmod, float_to_bigint, format_bin_i64, format_oct_i64, full_type_name_str,
+    function_type_singleton, hash_value_with_interp, instance_builtin_data, invoke_class_method,
+    is_str_or_str_subclass, iter_values, lookup_class_attr, lookup_value_special_method,
+    make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
+    make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
+    make_reversed_sequence_iterator, mapping_pairs_via_protocol, method_type_singleton,
+    modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, normalize_complex_slot_result,
+    normalize_float_slot_result, normalize_int_slot_result, primitive_class_by_name, py_mod_i64,
+    py_round_half_even_checked, reject_keyword_args_expanded, render_instance_str, render_key_repr,
+    render_value_repr, resolve_zero_arg_super, round_bigint_neg_ndigits, round_float_ndigits,
+    snapshot_current_locals, sync_module_env_to_globals_dict, type_class_singleton,
+    unicode_exc_set_attrs, value_class, value_to_float, value_type_name_str,
 };
 use crate::value::{
-    GeneratorKind, InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero,
-    SortKind, UserFunctionKind, Value, ValueKind, classify_sort, range_len,
+    InstanceAttrs, PyBigInt, PyClass, PyDict, PyKey, PySet, PyToPrimitive, PyZero, SortKind,
+    UserFunctionKind, Value, ValueKind, classify_sort, range_len,
 };
 
 // Builtins are registered in independent semantic families, then merged into
@@ -87,12 +87,14 @@ mod aggregation {
 
 mod iteration {
     use super::{
-        CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter, IterSrcBuf,
-        MODULE_NAME, MapIter, PyError, PyValue, Rc, Result, Value, ValueKind, ZipIter,
-        full_type_name_str, invoke_class_method, iter_values, lookup_class_attr, make_iterator,
-        make_reversed_dict_iter, make_reversed_getitem_iterator,
-        make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
-        make_reversed_sequence_iterator, reject_keyword_args_expanded, value_type_name_str,
+        BuiltinTypeClass, CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter,
+        Interpreter, IterSrcBuf, MODULE_NAME, MapIter, PyError, PyValue, Rc, Result, Value,
+        ValueKind, ZipIter, builtin_type_class_isinstance_fast, builtin_type_new,
+        class_is_subclass_of, full_type_name_str, instance_builtin_data, invoke_class_method,
+        iter_values, lookup_class_attr, make_iterator, make_reversed_dict_iter,
+        make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
+        make_reversed_range_iterator, make_reversed_sequence_iterator,
+        reject_keyword_args_expanded, value_type_name_str,
     };
     include!("builtins/iteration.rs");
 }
@@ -200,11 +202,12 @@ mod float_constructor {
 
 mod services {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, PyKey, PyStr, PyValue, Rc,
-        Result, Value, ValueKind, class_is_subclass_of, instance_builtin_data, invoke_class_method,
-        is_dict_subclass_instance, is_not_iterable_error, lookup_class_attr,
-        mapping_pairs_via_protocol, reject_keyword_args_expanded, render_instance_str,
-        resolve_zero_arg_super, type_class_singleton, value_type_name_str,
+        BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, PyKey, PyStr,
+        PyValue, Rc, Result, Value, ValueKind, builtin_type_new, class_is_subclass_of,
+        instance_builtin_data, invoke_class_method, is_dict_subclass_instance,
+        is_not_iterable_error, lookup_class_attr, mapping_pairs_via_protocol,
+        reject_keyword_args_expanded, render_instance_str, resolve_zero_arg_super,
+        type_class_singleton, value_type_name_str,
     };
     include!("builtins/services.rs");
 }
@@ -221,10 +224,11 @@ mod container_protocols {
 mod object_basics {
     use super::{
         ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc, Result, Value,
-        ValueKind, dir_names, find_immutable_primitive_base, find_mutable_primitive_base,
-        find_scalar_primitive_base, hash_value_with_interp, instance_builtin_data,
-        lookup_class_attr, reject_keyword_args_expanded, render_key_repr, render_value_repr,
-        value_class, value_type_name_str,
+        ValueKind, class_has_native_builtin_type_ancestor, dir_names,
+        find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
+        hash_value_with_interp, instance_builtin_data, lookup_class_attr,
+        reject_keyword_args_expanded, render_key_repr, render_value_repr, value_class,
+        value_type_name_str,
     };
     include!("builtins/object_basics.rs");
 }

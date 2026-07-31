@@ -29,25 +29,31 @@ pub(crate) fn prepare_builtins_module(module: &Value) {
     let ValueKind::PyModule(module) = module.kind() else {
         return;
     };
-    for primitive in [
+    for type_name in [
         "bool",
         "bytearray",
         "bytes",
         "complex",
         "dict",
+        "enumerate",
+        "filter",
         "float",
         "frozenset",
         "int",
         "list",
+        "map",
         "range",
+        "reversed",
         "set",
+        "slice",
         "str",
         "tuple",
+        "zip",
     ] {
-        if let Some(class) = crate::interpreter::primitive_class_by_name(primitive) {
+        if let Some(class) = crate::interpreter::primitive_class_by_name(type_name) {
             module
                 .borrow_mut()
-                .insert_attr(primitive.to_string(), Value::py_class(class));
+                .insert_attr(type_name.to_string(), Value::py_class(class));
         }
     }
     module.borrow_mut().insert_attr(

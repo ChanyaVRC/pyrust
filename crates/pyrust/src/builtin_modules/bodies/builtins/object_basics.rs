@@ -464,6 +464,19 @@ pyrust_module! {
                 ));
             }
         };
+        // These native built-in types own a backing layout. Allocating a bare
+        // PyInstance through object.__new__ would create an object that passes
+        // the class test but has no state for its native slots. CPython rejects
+        // the same unsafe allocator bypass, including for exact `slice`.
+        if class_has_native_builtin_type_ancestor(&class_rc) {
+            let class_name = class_rc.borrow().name.clone();
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "object.__new__({class_name}) is not safe, use {class_name}.__new__()"
+                ),
+            ));
+        }
         // Issue #1421: reject extra args unless the full CPython 3.12 leniency
         // rule is satisfied.  From Objects/typeobject.c (object_new):
         //

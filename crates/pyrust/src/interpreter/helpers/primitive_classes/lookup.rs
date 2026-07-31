@@ -31,6 +31,27 @@ pub(crate) fn generic_alias_class_singleton() -> Rc<RefCell<PyClass>> {
     GENERIC_ALIAS_CLASS.with(Rc::clone)
 }
 
+/// Returns this thread's singleton for one of the `builtins` types that own no
+/// primitive storage variant (`zip`, `map`, `filter`, `enumerate`, `slice`,
+/// `reversed`), or `None` for any other name.  Issue #3000.
+pub(crate) fn builtin_type_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    BuiltinTypeClass::ALL
+        .into_iter()
+        .find(|kind| kind.class_name() == name)
+        .map(BuiltinTypeClass::singleton)
+}
+
+/// True when `class` is an interpreter-owned `builtins` type singleton that
+/// carries no [`CanonicalClassTag`](pyrust_core::CanonicalClassTag) — `range`
+/// plus the [`BuiltinTypeClass`] group.  Such a class still has the built-in
+/// type metadata (`__module__ == "builtins"`, a `__doc__` from
+/// [`builtin_class_doc`]) that `type` supplies virtually.
+pub(crate) fn is_untagged_builtin_type_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    let ptr = Rc::as_ptr(class);
+    RANGE_CLASS.with(|range| ptr == Rc::as_ptr(range))
+        || BUILTIN_TYPE_CLASSES.with(|classes| classes.iter().any(|entry| ptr == Rc::as_ptr(entry)))
+}
+
 /// Look up the per-primitive `PyClass` singleton for one of the migrated
 /// primitive type names (`int`, `str`, `list`, …).  Returns `None` for any
 /// other name — callers fall through to the legacy `BuiltinFunction(name)`
@@ -38,6 +59,9 @@ pub(crate) fn generic_alias_class_singleton() -> Rc<RefCell<PyClass>> {
 pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>> {
     if name == "range" {
         return Some(RANGE_CLASS.with(Rc::clone));
+    }
+    if let Some(class) = builtin_type_class_by_name(name) {
+        return Some(class);
     }
     PRIMITIVE_CLASSES.with(|c| {
         Some(Rc::clone(match name {

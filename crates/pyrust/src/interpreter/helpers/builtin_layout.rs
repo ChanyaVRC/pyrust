@@ -128,12 +128,13 @@ pub(crate) fn is_tuple_or_tuple_subclass(val: &Value) -> bool {
 
 /// Returns `true` if `class` is one of the built-in types that carry a
 /// non-trivial C-level instance layout (`int`, `str`, `float`, `bytes`,
-/// `tuple`, `list`, `dict`, `set`, `frozenset`).  CPython raises
-/// `TypeError: multiple bases have instance lay-out conflict` when two or
-/// more such types appear in the same bases tuple.  Issue #1677.
-pub(crate) fn is_solid_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
+/// `tuple`, `list`, `dict`, `set`, `frozenset`, or issue #3000's five
+/// subclassable iterator types).  CPython raises `TypeError: multiple bases
+/// have instance lay-out conflict` when unrelated solid bases appear in the
+/// same bases tuple.  Issue #1677.
+pub(crate) fn is_solid_builtin_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let ptr = Rc::as_ptr(class);
-    PRIMITIVE_CLASSES.with(|c| {
+    let primitive = PRIMITIVE_CLASSES.with(|c| {
         ptr == Rc::as_ptr(&c.int_class)
             || ptr == Rc::as_ptr(&c.str_class)
             || ptr == Rc::as_ptr(&c.float_class)
@@ -143,7 +144,11 @@ pub(crate) fn is_solid_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
             || ptr == Rc::as_ptr(&c.dict_class)
             || ptr == Rc::as_ptr(&c.set_class)
             || ptr == Rc::as_ptr(&c.frozenset_class)
-    })
+    });
+    primitive
+        || BuiltinTypeClass::SUBCLASSABLE
+            .into_iter()
+            .any(|kind| ptr == Rc::as_ptr(&kind.singleton()))
 }
 
 /// Returns `true` if `class` introduces extra instance variables beyond its
@@ -153,7 +158,7 @@ pub(crate) fn is_solid_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// is a built-in primitive with its own C-level layout.  Mirrors the part of
 /// CPython's `extra_ivars` that distinguishes a fresh "solid base".
 fn class_adds_ivars(class: &Rc<RefCell<PyClass>>) -> bool {
-    if is_solid_primitive_class(class) {
+    if is_solid_builtin_class(class) {
         return true;
     }
     let borrowed = class.borrow();
@@ -368,7 +373,7 @@ pub(crate) fn effective_builtin_receiver(v: &Value, override_dunders: &[&str]) -
 /// canonical fallback when the subclass supplies no override.
 fn class_uses_inherited_builtin_slot(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
     lookup_class_attr_owner(class, name).is_none_or(|owner| {
-        is_primitive_class(&owner) || Rc::ptr_eq(&owner, &object_class_singleton())
+        primitive_class_kind(&owner).is_some() || Rc::ptr_eq(&owner, &object_class_singleton())
     })
 }
 

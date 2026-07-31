@@ -1,6 +1,164 @@
 use pyrust_derive::pyrust_module;
 
+/// Whether `reversed(value)` will delegate to a value-owned `__reversed__`
+/// implementation.  `reversed.__new__` records this provenance before calling
+/// user code: the special method's result must pass through unchanged even
+/// when it happens to be an exact generic `reversed` object.
+pub(super) fn reversed_uses_special_method(value: &Value) -> bool {
+    match value.kind() {
+        ValueKind::PyInstance(instance) => {
+            let class = Rc::clone(&instance.borrow().class);
+            lookup_class_attr(&class, "__reversed__").is_some()
+        }
+        ValueKind::BuiltinObject { ops, .. } => ops.has_method("__reversed__"),
+        _ => false,
+    }
+}
+
+/// Validate an unbound iterator slot receiver and return its exact built-in
+/// backing.  Subclass instances carry that backing in `__builtin_data__`;
+/// exact objects are already generator-backed values.
+fn builtin_iterator_backing(
+    args: &[ExpandedCallArg],
+    kind: BuiltinTypeClass,
+    method: &str,
+) -> Result<(Value, Value)> {
+    let Some((receiver_arg, rest)) = args
+        .split_first()
+        .filter(|(receiver_arg, _)| receiver_arg.name.is_none())
+    else {
+        return Err(pyrust_core::type_err!(
+            "descriptor '{method}' of '{}' object needs an argument",
+            kind.class_name()
+        ));
+    };
+    if rest.iter().any(|arg| arg.name.is_some()) {
+        return Err(pyrust_core::type_err!(
+            "{}.{method}() takes no keyword arguments",
+            kind.class_name()
+        ));
+    }
+    if !rest.is_empty() {
+        return Err(pyrust_core::type_err!(
+            "expected 0 arguments, got {}",
+            rest.len()
+        ));
+    }
+
+    let receiver = receiver_arg.value.clone();
+    if let ValueKind::PyInstance(instance) = receiver.kind() {
+        let class = Rc::clone(&instance.borrow().class);
+        let base = kind.singleton();
+        if class_is_subclass_of(&class, &base)
+            && let Some(backing) = instance_builtin_data(instance)
+            && builtin_type_class_isinstance_fast(&backing, &base) == Some(true)
+        {
+            return Ok((receiver.clone(), backing));
+        }
+    } else {
+        let base = kind.singleton();
+        if builtin_type_class_isinstance_fast(&receiver, &base) == Some(true) {
+            return Ok((receiver.clone(), receiver));
+        }
+    }
+
+    Err(pyrust_core::type_err!(
+        "descriptor '{method}' requires a '{}' object but received a '{}'",
+        kind.class_name(),
+        full_type_name_str(&receiver)
+    ))
+}
+
+fn builtin_iterator_iter(args: &[ExpandedCallArg], kind: BuiltinTypeClass) -> Result<Value> {
+    let (receiver, _) = builtin_iterator_backing(args, kind, "__iter__")?;
+    Ok(receiver)
+}
+
+fn builtin_iterator_next(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    kind: BuiltinTypeClass,
+) -> Result<Value> {
+    let (_, backing) = builtin_iterator_backing(args, kind, "__next__")?;
+    interp.call_next(&backing, None)
+}
+
 pyrust_module! {
+    #[py_name = "zip.__new__"]
+    fn zip_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::Zip)
+    }
+
+    #[py_name = "zip.__iter__"]
+    fn zip_iter(args) -> Result<Value> {
+        builtin_iterator_iter(args, BuiltinTypeClass::Zip)
+    }
+
+    #[py_name = "zip.__next__"]
+    fn zip_next(args) -> Result<Value> {
+        builtin_iterator_next(_interp, args, BuiltinTypeClass::Zip)
+    }
+
+    #[py_name = "map.__new__"]
+    fn map_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::Map)
+    }
+
+    #[py_name = "map.__iter__"]
+    fn map_iter(args) -> Result<Value> {
+        builtin_iterator_iter(args, BuiltinTypeClass::Map)
+    }
+
+    #[py_name = "map.__next__"]
+    fn map_next(args) -> Result<Value> {
+        builtin_iterator_next(_interp, args, BuiltinTypeClass::Map)
+    }
+
+    #[py_name = "filter.__new__"]
+    fn filter_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::Filter)
+    }
+
+    #[py_name = "filter.__iter__"]
+    fn filter_iter(args) -> Result<Value> {
+        builtin_iterator_iter(args, BuiltinTypeClass::Filter)
+    }
+
+    #[py_name = "filter.__next__"]
+    fn filter_next(args) -> Result<Value> {
+        builtin_iterator_next(_interp, args, BuiltinTypeClass::Filter)
+    }
+
+    #[py_name = "enumerate.__new__"]
+    fn enumerate_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::Enumerate)
+    }
+
+    #[py_name = "enumerate.__iter__"]
+    fn enumerate_iter(args) -> Result<Value> {
+        builtin_iterator_iter(args, BuiltinTypeClass::Enumerate)
+    }
+
+    #[py_name = "enumerate.__next__"]
+    fn enumerate_next(args) -> Result<Value> {
+        builtin_iterator_next(_interp, args, BuiltinTypeClass::Enumerate)
+    }
+
+    #[py_name = "reversed.__new__"]
+    fn reversed_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::Reversed)
+    }
+
+    #[py_name = "reversed.__iter__"]
+    fn reversed_iter(args) -> Result<Value> {
+        builtin_iterator_iter(args, BuiltinTypeClass::Reversed)
+    }
+
+    #[py_name = "reversed.__next__"]
+    fn reversed_next(args) -> Result<Value> {
+        builtin_iterator_next(_interp, args, BuiltinTypeClass::Reversed)
+    }
+
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.
     /// <https://docs.python.org/3/library/functions.html#enumerate>
     ///
@@ -90,11 +248,14 @@ pyrust_module! {
     /// range are reversible; all other types (Generator, BuiltinObject
     /// iterators, …) raise TypeError.
     fn reversed(#[positional_only] seq: PyValue) -> Result<Value> {
+        let uses_special_method = reversed_uses_special_method(&seq.0);
         if let ValueKind::PyInstance(inst) = seq.0.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             // Protocol step 1: __reversed__
-            if let Some(method_val) = lookup_class_attr(&class, "__reversed__") {
+            if uses_special_method {
+                let method_val = lookup_class_attr(&class, "__reversed__")
+                    .expect("special-method provenance must retain its class slot");
                 return invoke_class_method(
                     _interp,
                     method_val,
@@ -187,7 +348,7 @@ pyrust_module! {
         // issue #2684) dispatch to it directly, matching CPython's protocol
         // step 1.  `call_method` already returns the reverse-order iterator.
         if let ValueKind::BuiltinObject { ops, state } = seq.0.kind()
-            && ops.has_method("__reversed__")
+            && uses_special_method
         {
             return ops.call_method(state, "__reversed__", Vec::new(), &indexmap::IndexMap::new());
         }

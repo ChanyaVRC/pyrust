@@ -34,14 +34,15 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         if Rc::ptr_eq(expected, &type_class_singleton()) {
             return matches!(obj.kind(), ValueKind::PyClass(_));
         }
-        // Fast path: if `expected` is one of the 11 primitive class
-        // singletons, do a direct `ValueKind` tag check.  Skips the
-        // `primitive_class_for_value` thread_local + Rc::clone + the
-        // base-chain walk, recovering most of the master-vs-PR
-        // `isinstance` regression (#462).
+        // Fast path: canonical primitive classes answer from their backing
+        // kind, skipping the class materialisation and base-chain walk (#462).
         if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, expected) {
             return hit;
         }
+        // The variants whose class is a single-expression lookup answer here.
+        // Routing them through `value_class` instead measured 1.15–1.18x slower
+        // on tight `isinstance(f, C)` / `isinstance(C, D)` loops: that call is
+        // opaque to the inliner and round-trips the class through a `Value`.
         let actual_class = match obj.kind() {
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
@@ -62,23 +63,23 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
                 let meta = cls_rc.borrow().metatype.clone();
                 Some(meta.unwrap_or_else(type_class_singleton))
             }
-            // A provider iterator may retain the exact class generation that
-            // created it. Consulting this typed identity keeps old objects
-            // stable across removal and re-import of their owning module.
-            // Only a built-in iterator can be one; a running frame's cell is
-            // checked out, and reading it here aborted the process (#2978).
-            ValueKind::Generator(cell) if cell.kind() == GeneratorKind::Iterator => cell
-                .borrow()
-                .downcast_ref::<ProviderIterator>()
-                .and_then(ProviderIterator::class),
-            // Issue #2733: `isinstance(list[int], type(list[int]))` is True —
-            // a PEP 585 alias is an instance of the `types.GenericAlias` class.
-            ValueKind::BuiltinObject { .. }
-                if pyrust_builtins::generic_alias::is_generic_alias(obj) =>
-            {
-                Some(crate::interpreter::generic_alias_class_singleton())
+            // Issue #3000's six iterator/slice classes answer directly from
+            // their backing kind.  This arm is reached only for generator or
+            // opaque built-in values, so unrelated primitive/user-class miss
+            // paths keep exactly their previous branch and comparison count.
+            ValueKind::Generator(_) | ValueKind::BuiltinObject { .. } => {
+                if let Some(hit) =
+                    crate::interpreter::builtin_type_class_isinstance_fast(obj, expected)
+                {
+                    return hit;
+                }
+                crate::interpreter::value_class_object(obj)
             }
-            _ => crate::interpreter::primitive_class_for_value(obj),
+            // Everything else with a non-trivial mapping — a provider iterator
+            // retaining its class generation, `types.GenericAlias`, and the
+            // primitives — defers to `type()`'s own table rather than keeping a
+            // second copy of it here that could drift.
+            _ => crate::interpreter::value_class_object(obj),
         };
         if let Some(actual) = actual_class {
             return class_is_subclass_of(&actual, expected);
@@ -199,12 +200,10 @@ fn isinstance_check(
     // (e.g. all ABC classes). We look up the attr via get_attr so its explicit
     // classmethod descriptor binds the ABC before the hook is called.
     if let ValueKind::PyClass(cls_rc) = cls.kind() {
-        // Fast path: when `cls` is one of the 11 primitive class singletons
-        // (`int`, `str`, …) a direct `ValueKind` tag check settles the result
-        // without the `metaclass_dunder` / `__instancecheck__` / Protocol
-        // probing below.  Primitives can never carry those hooks nor be a
-        // Protocol subclass, so this both preserves the hot `isinstance(x, int)`
-        // path and absorbs the cost of the #2526 Protocol check added later.
+        // Fast path: canonical primitive classes settle from their backing
+        // kind without the `metaclass_dunder` / `__instancecheck__` / Protocol
+        // probing below.  They cannot carry those hooks or be a Protocol
+        // subclass, so the hot primitive paths stay direct.
         if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, cls_rc) {
             return Ok(hit);
         }
