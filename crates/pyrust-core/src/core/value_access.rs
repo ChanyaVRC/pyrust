@@ -252,26 +252,26 @@ impl Value {
     ///   address or monotonic id, so aliases agree;
     /// - **`complex`** is identified by its component bits rather than by its
     ///   heap slot, because that is what `is` compares (#2949) — the two
-    ///   `f64`s fold into one 64-bit id;
+    ///   `f64` bit patterns are concatenated into one exact 128-bit payload;
     /// - **immediates** (int, bool, `None`, `...`, `NotImplemented`) have no
     ///   address at all, so the NaN-box pattern *is* the identity — exactly
     ///   the bits `is` compares.  Distinct tags keep the kinds disjoint
     ///   (`id(0)`, `id(False)` and `id(None)` all differ);
     /// - **`float`** is the one immediate with no tag — its box is the double
     ///   — so its raw bits would overlap the heap ids (see
-    ///   [`float_obj_id`]).  It is relabelled through a bijection instead,
-    ///   which keeps `is`'s bit comparison intact; a minted NaN payload still
-    ///   gives every `float('nan')` its own id.
+    ///   [`float_obj_id`]).  Its 64-bit payload is placed above the ordinary
+    ///   `u64` id space instead; a minted NaN payload still gives every
+    ///   `float('nan')` its own id.
     ///
-    /// The result is unsigned: a tag or a mixed float occupies the top bits,
-    /// so callers must surface it as a Python `int` via [`Value::uint`]
-    /// rather than wrapping it negative.
+    /// The result is already a non-negative Python `int` [`Value`].  Ordinary
+    /// identities use [`Value::uint`]; the exact float and complex namespaces
+    /// use arbitrary-precision ints because they extend past 64 bits.
     ///
-    /// Uniqueness among live objects is exact within every kind.  Across
-    /// kinds it is exact for the tagged ones and probabilistic for `float`
-    /// and `complex`, which each spread over the whole word — a collision
-    /// needs a deliberately inverted murmur3, not an ordinary value.
-    pub fn object_id(&self) -> u64 {
+    /// Float and complex ids are injective in the exact bits that `is`
+    /// compares, and their numeric ranges are disjoint from each other and
+    /// every ordinary id.  Identity therefore never depends on a hash
+    /// collision not occurring.
+    pub fn object_id(&self) -> Value {
         // A string's identity is its whole NaN box rather than the bare
         // payload `value_id` returns: an inline (SSO) string *is* its
         // payload, so a short one would otherwise land in the same small
@@ -280,14 +280,14 @@ impl Value {
         // kind's, and within `str` the two forms differ by a constant, so the
         // equality relation `is` uses is unchanged.
         if top16(self.0) == TAG_STR {
-            return self.0;
+            return Value::uint(self.0);
         }
         if let Some(id) = self.value_id() {
-            return id as u64;
+            return Value::uint(id as u64);
         }
         if top16(self.0) == TAG_OPAQUE {
-            return match unsafe { &*self.opaque_ptr() } {
-                Opaque::Complex(re, im) => complex_obj_id(*re, *im),
+            let id = match unsafe { &*self.opaque_ptr() } {
+                Opaque::Complex(re, im) => return Value::bigint(complex_obj_id(*re, *im)),
                 // PyClass / PyInstance: one `Rc` can be wrapped by several
                 // opaque slots (`Value::py_instance` clones the `Rc` into a
                 // fresh slot), so identity is the inner pointer — the same
@@ -299,14 +299,15 @@ impl Value {
                 // slot — shared by every clone — is the object itself.
                 _ => (unsafe { self.opaque_slot_ptr() }) as u64,
             };
+            return Value::uint(id);
         }
         // Immediate: the NaN-box pattern is the object.  A float is the one
-        // that carries no tag to keep it clear of the heap ids, so it is
-        // relabelled; the bijection preserves `is`'s bit equality.
+        // that carries no tag to keep it clear of the heap ids, so its exact
+        // bits occupy a separate arbitrary-precision namespace.
         if self.is_float() {
-            return float_obj_id(self.0);
+            return Value::bigint(float_obj_id(self.0));
         }
-        self.0
+        Value::uint(self.0)
     }
 
     // ── Private unsafe helpers ───────────────────────────────────────────────

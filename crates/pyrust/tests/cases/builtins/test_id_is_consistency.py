@@ -104,6 +104,28 @@ heap_objs = [{}, [1], (1, 2, 3), {1}, b"xy", Obj(), "a long string kept off the 
 print("subnormal-vs-heap", all(id(5e-324 * id(o)) != id(o) for o in heap_objs))
 print("subnormal-vs-first-alloc", all(id(5e-324 * k) not in {id(o) for o in heap_objs} for k in range(1, 64)))
 
+# Mixing the float bits with a bijective u64 finalizer still leaves every u64
+# reachable.  This is the exact finite float obtained by inverting the old
+# finalizer for `id(None)`; the two identities must occupy disjoint namespaces.
+old_fmix_collision = float.fromhex("-0x1.77077a6d0dbbbp+947")
+print(
+    "fmix-inverse-vs-none",
+    old_fmix_collision is not None,
+    id(old_fmix_collision) != id(None),
+    consistent(old_fmix_collision, None),
+)
+
+# The old complex id folded 128 component bits into 64.  These two component
+# pairs produced the same fold even though `is` compares them as distinct.
+old_fold_a = complex(0.0, 0.0)
+old_fold_b = complex(1.0, float.fromhex("0x1.1ebef62fc0279p-625"))
+print(
+    "complex-fold-distinct",
+    old_fold_a is not old_fold_b,
+    id(old_fold_a) != id(old_fold_b),
+    consistent(old_fold_a, old_fold_b),
+)
+
 # Systematic sweep: many simultaneously-live distinct objects, all ids
 # distinct.  `keep` holds every object alive, so no id can be recycled.
 keep = []
@@ -124,7 +146,22 @@ for k in range(1, 200):
     keep.append({k: k})
     keep.append(bytes([k % 256]))
     keep.append(Obj())
-keep.extend([None, ..., NotImplemented, True, False, float("nan"), float("nan"), 0.0, -0.0])
+keep.extend(
+    [
+        None,
+        ...,
+        NotImplemented,
+        True,
+        False,
+        float("nan"),
+        float("nan"),
+        0.0,
+        -0.0,
+        old_fmix_collision,
+        old_fold_a,
+        old_fold_b,
+    ]
+)
 print("sweep-size", len(keep))
 print("sweep-distinct-ids", len({id(o) for o in keep}) == len(keep))
 print("sweep-consistent", all(consistent(keep[i], keep[i + 1]) for i in range(len(keep) - 1)))

@@ -66,7 +66,7 @@ impl Interpreter {
     /// a second implementation.
     pub(super) fn try_identity_builtin_call(function: &Value, argument: &Value) -> Option<Value> {
         matches!(function.kind(), ValueKind::BuiltinFunction("id"))
-            .then(|| Value::uint(argument.object_id()))
+            .then(|| argument.object_id())
     }
 
     /// Handle the concrete class objects supplied by the builtin layer.

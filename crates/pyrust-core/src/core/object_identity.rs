@@ -1,5 +1,7 @@
 use std::cell::Cell;
 
+use num_bigint::BigInt;
+
 // Monotonic counter for list/tuple object identity. Each new allocation gets a
 // unique id stored at hdr+24; clones copy the same id so `id(x) == id(y)` when
 // y is a copy of x, and `id([1]) != id([2])` because they are separate objects.
@@ -15,56 +17,51 @@ pub(crate) fn next_obj_id() -> u64 {
     })
 }
 
-/// Golden-ratio constant, so no bit pattern folds to a trivial id: the
-/// finaliser below maps 0 to 0, and an unseeded fold would hand `0j` the id
-/// `0` — which `0.0`, whose box bits really are zero, already owns.
-const ID_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
-
-/// murmur3's 64-bit finaliser.  A bijection on `u64`, so it re-labels an id
-/// space without ever merging two distinct inputs.
-fn fmix64(mut x: u64) -> u64 {
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    x ^= x >> 33;
-    x
-}
-
 /// Object id for a `float`, derived from its NaN-box bit pattern.
 ///
-/// The bits cannot be used raw.  Every other kind carries a tag in the top 16
-/// bits, but a float's box *is* the double, so the float id space is the
-/// entire 64-bit word and overlaps every other kind's — and it overlaps them
-/// in a structured, constructible way.  Heap ids are small: the monotonic
-/// list/tuple/set counter starts at 1, and an `Rc` address fits in 48 bits.
-/// Every such pattern is a subnormal double and `5e-324 * n` is exactly the
-/// subnormal whose bits are `n`, so raw bits made
+/// A float's box is the double itself, so its identity consumes all 64 bits;
+/// no fixed-width permutation can separate that full domain from another
+/// kind's ids.  Put it in the next 64-bit-wide Python-integer namespace
+/// instead:
 ///
 /// ```text
-/// id(5e-324) == id((1, 2, 3))          # the first tuple allocated
-/// d = {}; id(5e-324 * id(d)) == id(d)  # any heap object at all
+/// ordinary ids: [0,    2^64)
+/// float ids:    [2^64, 2^65)
 /// ```
 ///
-/// both `True` while `is` said `False` (#2956 review).
-///
-/// The finaliser is a bijection, so distinct floats keep distinct ids — `is`
-/// compares exactly these bits — while the id lands anywhere in the word, so
-/// colliding with another kind now means inverting murmur3 rather than
-/// multiplying out a subnormal.
-pub(crate) fn float_obj_id(bits: u64) -> u64 {
-    fmix64(bits ^ ID_SEED)
+/// Adding the namespace base is reversible, so two floats have the same id
+/// exactly when their NaN-box bits — the bits `is` compares — are equal.
+pub(crate) fn float_obj_id(bits: u64) -> BigInt {
+    (BigInt::from(1_u8) << 64) + BigInt::from(bits)
 }
 
-/// Fold a `complex`'s two component bit patterns into a single object id.
+/// Exact object id for a `complex`'s two component bit patterns.
 ///
 /// `complex` is the one heap-allocated value whose identity is *not* its
 /// allocation: `is` compares the (real, imaginary) bit patterns (#2949), so
 /// `id()` has to be a function of exactly those bits (#2956).
 ///
-/// Both components run through the murmur3 finaliser, so the fold is
-/// injective in each component taken separately; only the unavoidable
-/// 128 -> 64 narrowing can collide.
-pub(crate) fn complex_obj_id(re: f64, im: f64) -> u64 {
-    fmix64(fmix64(re.to_bits() ^ ID_SEED) ^ im.to_bits())
+/// Concatenating the two 64-bit components is injective.  Prefix that 128-bit
+/// payload with a bit outside it, placing every complex id in `[2^128, 2^129)`
+/// and therefore outside both the ordinary and float namespaces.
+pub(crate) fn complex_obj_id(re: f64, im: f64) -> BigInt {
+    (BigInt::from(1_u8) << 128) + (BigInt::from(re.to_bits()) << 64) + BigInt::from(im.to_bits())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{complex_obj_id, float_obj_id};
+    use num_bigint::BigInt;
+
+    #[test]
+    fn exact_numeric_identity_namespaces_are_disjoint() {
+        let ordinary_max = BigInt::from(u64::MAX);
+        let float_min = float_obj_id(0);
+        let float_max = float_obj_id(u64::MAX);
+        let complex_min = complex_obj_id(0.0, 0.0);
+
+        assert!(ordinary_max < float_min);
+        assert!(float_min < float_max);
+        assert!(float_max < complex_min);
+    }
 }

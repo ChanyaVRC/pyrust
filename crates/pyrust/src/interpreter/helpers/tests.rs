@@ -343,13 +343,19 @@ mod object_id_tests {
             Value::float(f64::NAN),
             // The two smallest subnormals: their raw bit patterns are `1` and
             // `2`, which is the range the monotonic list/tuple/set counter
-            // hands out.  See `float_bits_never_collide_with_a_heap_id`.
+            // hands out.  Their wide namespace keeps those numbers disjoint.
             Value::float(f64::from_bits(1)),
             Value::float(f64::from_bits(2)),
+            // The float whose old fmix64 id was exactly `id(None)`.  A hash
+            // permutation cannot make two full u64 domains disjoint.
+            Value::float(f64::from_bits(0xfb27_7077_a6d0_dbbb)),
             Value::complex(0.0, 0.0),
             Value::complex(1.0, 2.0),
             Value::complex(1.0, 2.0),
             Value::complex(2.0, 1.0),
+            // Together with `0j`, this collided under the old 128 -> 64
+            // murmur fold even though the component bits are different.
+            Value::complex(1.0, f64::from_bits(0x18e1_ebef_62fc_0279)),
             Value::complex(f64::NAN, 0.0),
             Value::string(""),
             Value::string("abc"),
@@ -400,41 +406,36 @@ mod object_id_tests {
     /// The old `id()` returned `0` for every kind it had not enumerated,
     /// which is what gave all floats and complexes one shared id.  Nothing
     /// reaches `0` any more: the tagged kinds carry their tag, and the two
-    /// bit-derived kinds are seeded past the finaliser's `0 -> 0` fixed point.
+    /// bit-derived kinds live in explicit non-zero namespaces.
     #[test]
     fn no_value_falls_back_to_a_zero_id() {
         for value in matrix() {
-            assert_ne!(value.object_id(), 0, "unexpected zero id");
+            assert_ne!(value.object_id(), Value::int(0), "unexpected zero id");
         }
     }
 
-    /// A heap id is a small number — the monotonic list/tuple/set counter
-    /// starts at `1` and an `Rc` address fits in 48 bits — and every such
-    /// pattern is also a subnormal `f64`.  Taking a float's id from its raw
-    /// box bits therefore collided with live objects in one step, because
-    /// `5e-324 * n` is exactly the subnormal whose bits are `n`:
-    /// `id(5e-324) == id((1, 2, 3))` and `id(5e-324 * id(d)) == id(d)` were
-    /// both True while `is` was False (#2956 review).
+    /// `fmix64` is a permutation of all u64s, so it kept float ids distinct
+    /// from each other but could not separate them from any other full-width
+    /// identity domain.  Inverting it for `id(None)` gives this ordinary,
+    /// constructible finite float, which made `id(f) == id(None)` on the
+    /// reviewed implementation.
     #[test]
-    fn float_bits_never_collide_with_a_heap_id() {
-        let heap = vec![
-            Value::list(vec![Value::int(1)]),
-            Value::tuple(vec![Value::int(1), Value::int(2), Value::int(3)]),
-            Value::set(PySet::default()),
-            Value::dict(PyDict::default()),
-            Value::bytes(vec![1, 2]),
-            Value::string("a string far too long to be stored inline"),
-        ];
-        for object in &heap {
-            // The float whose bit pattern *is* this object's id — the value a
-            // Python program reaches by multiplying out `5e-324`.
-            let twin = Value::float(f64::from_bits(object.object_id()));
-            assert!(!values_are_identical(object, &twin));
-            assert_ne!(
-                object.object_id(),
-                twin.object_id(),
-                "a float's id collided with a live heap object's id"
-            );
-        }
+    fn float_id_namespace_rejects_the_inverted_fmix_collision() {
+        let float = Value::float(f64::from_bits(0xfb27_7077_a6d0_dbbb));
+        let none = Value::none();
+        assert!(!values_are_identical(&float, &none));
+        assert_ne!(float.object_id(), none.object_id());
+    }
+
+    /// A pair of 64-bit components cannot be injected into one u64.  These
+    /// two complexes had the same previous murmur fold; retaining all 128
+    /// bits makes their ids distinct for the same reason `is` says they are.
+    #[test]
+    fn complex_id_keeps_both_component_bit_patterns() {
+        let zero = Value::complex(0.0, 0.0);
+        let old_fold_collision =
+            Value::complex(1.0, f64::from_bits(0x18e1_ebef_62fc_0279));
+        assert!(!values_are_identical(&zero, &old_fold_collision));
+        assert_ne!(zero.object_id(), old_fold_collision.object_id());
     }
 }
