@@ -42,15 +42,36 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, expected) {
             return hit;
         }
+        // The variants whose class is a single-expression lookup answer here.
+        // Routing them through `value_class` instead measured 1.15–1.18x slower
+        // on tight `isinstance(f, C)` / `isinstance(C, D)` loops: that call is
+        // opaque to the inliner and round-trips the class through a `Value`.
         let actual_class = match obj.kind() {
-            // Instances of user classes are the common case and answer without
-            // building an intermediate `type()` value.
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
-            // Everything else defers to `type()`'s own mapping, so a value
-            // whose class is a real `PyClass` — a method, a function, a class
-            // (via its metatype), a `zip` / `map` / `slice` object, a provider
-            // iterator retaining its originating class generation — resolves
-            // through one shared table rather than a duplicate of it here.
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+                Some(method_type_singleton())
+            }
+            ValueKind::UserFunction(f)
+                if !matches!(
+                    f.kind,
+                    UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+                ) =>
+            {
+                Some(function_type_singleton())
+            }
+            // Issue #1626: a class object is an instance of its metatype.
+            // When the class has no custom metatype (None), fall back to the
+            // `type` singleton so `isinstance(int, type)` etc. still works.
+            ValueKind::PyClass(cls_rc) => {
+                let meta = cls_rc.borrow().metatype.clone();
+                Some(meta.unwrap_or_else(type_class_singleton))
+            }
+            // Everything with a non-trivial mapping — built-in iterators
+            // (`zip` / `map` / `filter` / `enumerate` / `reversed`), a provider
+            // iterator retaining the class generation that created it, `slice`,
+            // `types.GenericAlias`, and the primitives — defers to `type()`'s
+            // own table rather than keeping a second copy of it here that could
+            // drift.  None of these is on a measurable hot path.
             _ => crate::interpreter::value_class_object(obj),
         };
         if let Some(actual) = actual_class {
