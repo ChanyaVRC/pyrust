@@ -282,6 +282,91 @@ except KeyError as error:
 print("move_to_end missing left the walk alone", steps(iterator, 3))
 
 
+# ── The no-op short-circuit is a dict lookup, not "equal to the end key" ─────
+#
+# CPython reaches its `od_state`-preserving early return only when
+# `_odict_find_node(od, key)` resolves to the node already at that end -- a
+# dict lookup, so the hash has to agree before equality is consulted.  Two
+# keys that compare equal but hash differently occupy two separate entries, so
+# the move is real and the walk must retire.
+class Loose:
+    """Equal to everything, hashed by an explicit digest."""
+
+    def __init__(self, digest, name):
+        self.digest = digest
+        self.name = name
+
+    def __hash__(self):
+        return self.digest
+
+    def __eq__(self, other):
+        return True
+
+    def __repr__(self):
+        return "Loose(" + self.name + ")"
+
+
+for last in (True, False):
+    first, second = Loose(1, "first"), Loose(2, "second")
+    mapping = OrderedDict()
+    mapping[first] = 1
+    mapping[second] = 2
+    iterator = iter(mapping)
+    next(iterator)
+    # `first` is not the last node and `second` is not the first one, so both
+    # of these are real moves even though each compares equal to the end key.
+    mapping.move_to_end(first if last else second, last=last)
+    print("loose relink", last, [repr(key) for key in mapping], steps(iterator, 3))
+
+# The same lookup rule keeps a key whose `__eq__` rejects foreign objects from
+# ever being compared against the end key: their hashes differ, so CPython
+# never asks, and neither may pyrust.
+class Strict:
+    """Raises rather than comparing against anything but its own type."""
+
+    def __hash__(self):
+        return 7
+
+    def __eq__(self, other):
+        if isinstance(other, Strict):
+            return self is other
+        raise ValueError("Strict refuses foreign comparison")
+
+    def __repr__(self):
+        return "Strict"
+
+
+mapping = OrderedDict()
+mapping["x"] = 1
+mapping[Strict()] = 2
+iterator = iter(mapping)
+next(iterator)
+mapping.move_to_end("x")
+print("strict relink last", [repr(key) for key in mapping], steps(iterator, 3))
+
+mapping = OrderedDict()
+mapping[Strict()] = 2
+mapping["x"] = 1
+iterator = iter(mapping)
+next(iterator)
+mapping.move_to_end("x", last=False)
+print("strict relink first", [repr(key) for key in mapping], steps(iterator, 3))
+
+# A key that IS the end node still short-circuits through the hash gate, for
+# the numeric-equivalence pairs a dict collapses into one entry.
+for argument in (True, 1, 1.0):
+    mapping = OrderedDict([("x", 0), (1, "one")])
+    iterator = iter(mapping)
+    next(iterator)
+    mapping.move_to_end(argument)
+    print("equivalent end key", repr(argument), list(mapping.items()), steps(iterator, 3))
+    mapping = OrderedDict([(1, "one"), ("x", 0)])
+    iterator = iter(mapping)
+    next(iterator)
+    mapping.move_to_end(argument, last=False)
+    print("equivalent first key", repr(argument), list(mapping.items()), steps(iterator, 3))
+
+
 # A `for` loop over each relink propagates the first raise out of the loop.
 def relink_loop(kind):
     mapping = OrderedDict(a=1, b=2, c=3)

@@ -232,17 +232,28 @@ class OrderedDict(dict):
             end = next(reversed(self.keys()))
         else:
             end = next(iter(self.keys()))
-        # `is` first so a key that is not equal to itself (NaN) is still
+        # The node CPython short-circuits on is the one `_odict_find_node`
+        # resolves `key` to, i.e. a dict lookup: the hash has to agree before
+        # equality is consulted at all.  Comparing `end == key` on its own is
+        # not that test -- two keys that compare equal but hash differently
+        # occupy two separate entries, and asking a key whose `__eq__` rejects
+        # foreign objects would raise where CPython simply relinks.
+        # `is` stays first so a key that is not equal to itself (NaN) is still
         # recognised as the node already sitting at that end.
-        if end is key or end == key:
+        if end is key or (hash(end) == hash(key) and end == key):
             return
         if last:
             value = self[key]
             del self[key]
             self[key] = value
         else:
-            items = [(k, self[k]) for k in self.keys() if k != key]
+            # Drop the moved entry with a lookup rather than filtering the key
+            # order by `k != key`: equality is not entry identity, so that
+            # filter deleted every key merely equal to `key` and asked keys
+            # that reject foreign comparison a question CPython never asks.
             value = self[key]
+            del self[key]
+            items = list(self.items())
             self.clear()
             self[key] = value
             for k, v in items:
