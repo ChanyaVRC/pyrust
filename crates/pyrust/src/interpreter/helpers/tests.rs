@@ -317,7 +317,7 @@ mod singleton_method_name_tests {
 #[cfg(test)]
 mod object_id_tests {
     use super::values_are_identical;
-    use pyrust_core::{PyDict, PySet, Value, ValueKind};
+    use pyrust_core::{PyDict, PySet, Value};
 
     /// One representative value per identity representation, plus the pairs
     /// that used to collide on id `0`: `None` / `0` / `0.0` / `-0.0` /
@@ -338,8 +338,14 @@ mod object_id_tests {
             Value::float(1.5),
             Value::float(-1.5),
             Value::float(f64::INFINITY),
+            Value::float(f64::NEG_INFINITY),
             Value::float(f64::NAN),
             Value::float(f64::NAN),
+            // The two smallest subnormals: their raw bit patterns are `1` and
+            // `2`, which is the range the monotonic list/tuple/set counter
+            // hands out.  See `float_bits_never_collide_with_a_heap_id`.
+            Value::float(f64::from_bits(1)),
+            Value::float(f64::from_bits(2)),
             Value::complex(0.0, 0.0),
             Value::complex(1.0, 2.0),
             Value::complex(1.0, 2.0),
@@ -392,17 +398,43 @@ mod object_id_tests {
     }
 
     /// The old `id()` returned `0` for every kind it had not enumerated,
-    /// which is what gave all floats and complexes one shared id.
+    /// which is what gave all floats and complexes one shared id.  Nothing
+    /// reaches `0` any more: the tagged kinds carry their tag, and the two
+    /// bit-derived kinds are seeded past the finaliser's `0 -> 0` fixed point.
     #[test]
     fn no_value_falls_back_to_a_zero_id() {
         for value in matrix() {
-            // `0.0` is the one value whose box bits legitimately are zero.
-            if value.object_id() == 0 {
-                assert!(
-                    matches!(value.kind(), ValueKind::Float(f) if f == 0.0 && f.is_sign_positive()),
-                    "unexpected zero id"
-                );
-            }
+            assert_ne!(value.object_id(), 0, "unexpected zero id");
+        }
+    }
+
+    /// A heap id is a small number — the monotonic list/tuple/set counter
+    /// starts at `1` and an `Rc` address fits in 48 bits — and every such
+    /// pattern is also a subnormal `f64`.  Taking a float's id from its raw
+    /// box bits therefore collided with live objects in one step, because
+    /// `5e-324 * n` is exactly the subnormal whose bits are `n`:
+    /// `id(5e-324) == id((1, 2, 3))` and `id(5e-324 * id(d)) == id(d)` were
+    /// both True while `is` was False (#2956 review).
+    #[test]
+    fn float_bits_never_collide_with_a_heap_id() {
+        let heap = vec![
+            Value::list(vec![Value::int(1)]),
+            Value::tuple(vec![Value::int(1), Value::int(2), Value::int(3)]),
+            Value::set(PySet::default()),
+            Value::dict(PyDict::default()),
+            Value::bytes(vec![1, 2]),
+            Value::string("a string far too long to be stored inline"),
+        ];
+        for object in &heap {
+            // The float whose bit pattern *is* this object's id — the value a
+            // Python program reaches by multiplying out `5e-324`.
+            let twin = Value::float(f64::from_bits(object.object_id()));
+            assert!(!values_are_identical(object, &twin));
+            assert_ne!(
+                object.object_id(),
+                twin.object_id(),
+                "a float's id collided with a live heap object's id"
+            );
         }
     }
 }

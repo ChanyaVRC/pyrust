@@ -253,20 +253,24 @@ impl Value {
     /// - **`complex`** is identified by its component bits rather than by its
     ///   heap slot, because that is what `is` compares (#2949) — the two
     ///   `f64`s fold into one 64-bit id;
-    /// - **immediates** (float, int, bool, `None`, `...`, `NotImplemented`)
-    ///   have no address at all, so the NaN-box pattern *is* the identity —
-    ///   exactly the bits `is` compares.  Distinct tags keep the kinds
-    ///   disjoint (`id(0)`, `id(0.0)`, `id(False)` and `id(None)` all
-    ///   differ), and a minted NaN payload gives every `float('nan')` its own
-    ///   id.
+    /// - **immediates** (int, bool, `None`, `...`, `NotImplemented`) have no
+    ///   address at all, so the NaN-box pattern *is* the identity — exactly
+    ///   the bits `is` compares.  Distinct tags keep the kinds disjoint
+    ///   (`id(0)`, `id(False)` and `id(None)` all differ);
+    /// - **`float`** is the one immediate with no tag — its box is the double
+    ///   — so its raw bits would overlap the heap ids (see
+    ///   [`float_obj_id`]).  It is relabelled through a bijection instead,
+    ///   which keeps `is`'s bit comparison intact; a minted NaN payload still
+    ///   gives every `float('nan')` its own id.
     ///
-    /// The result is unsigned: a non-float immediate's tag occupies the top
-    /// bits, so callers must surface it as a Python `int` via
-    /// [`Value::uint`] rather than wrapping it negative.
+    /// The result is unsigned: a tag or a mixed float occupies the top bits,
+    /// so callers must surface it as a Python `int` via [`Value::uint`]
+    /// rather than wrapping it negative.
     ///
-    /// Uniqueness among live objects is exact for every kind except
-    /// `complex`, whose 128-bit component pair is necessarily folded into 64
-    /// bits.
+    /// Uniqueness among live objects is exact within every kind.  Across
+    /// kinds it is exact for the tagged ones and probabilistic for `float`
+    /// and `complex`, which each spread over the whole word — a collision
+    /// needs a deliberately inverted murmur3, not an ordinary value.
     pub fn object_id(&self) -> u64 {
         // A string's identity is its whole NaN box rather than the bare
         // payload `value_id` returns: an inline (SSO) string *is* its
@@ -296,7 +300,12 @@ impl Value {
                 _ => (unsafe { self.opaque_slot_ptr() }) as u64,
             };
         }
-        // Immediate: the NaN-box pattern is the object.
+        // Immediate: the NaN-box pattern is the object.  A float is the one
+        // that carries no tag to keep it clear of the heap ids, so it is
+        // relabelled; the bijection preserves `is`'s bit equality.
+        if self.is_float() {
+            return float_obj_id(self.0);
+        }
         self.0
     }
 

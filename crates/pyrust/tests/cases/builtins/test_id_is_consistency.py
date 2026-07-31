@@ -83,8 +83,48 @@ print("int-type", all(type(id(o)) is int for o in objs))
 print("non-negative", all(id(o) >= 0 for o in objs))
 print("id-keyed", len({id(o): None for o in objs}) == len(objs))
 
-# A direct one-argument `id(x)` and an `id` reached through a variable or
-# `map()` take different call paths through the interpreter; they must not
-# disagree.
+# A direct one-argument `id(x)` and an `id` reached through a variable, a
+# `map()` or a module attribute take different call paths through the
+# interpreter; they must not disagree.
+import builtins
+
 alias = id
-print("paths-agree", list(map(id, objs)) == [alias(o) for o in objs] == [id(o) for o in objs])
+by_attr = getattr(builtins, "id")
+direct = [id(o) for o in objs]
+print(
+    "paths-agree",
+    list(map(id, objs)) == [alias(o) for o in objs] == [by_attr(o) for o in objs] == direct,
+)
+
+# A float carries no type tag — its box *is* the double — so an id taken from
+# its raw bit pattern shares a number line with every heap object's id.  The
+# smallest subnormal is `1` in bits and `5e-324 * n` is exactly the subnormal
+# whose bits are `n`, so this reached a live object's id in one step.
+heap_objs = [{}, [1], (1, 2, 3), {1}, b"xy", Obj(), "a long string kept off the inline path"]
+print("subnormal-vs-heap", all(id(5e-324 * id(o)) != id(o) for o in heap_objs))
+print("subnormal-vs-first-alloc", all(id(5e-324 * k) not in {id(o) for o in heap_objs} for k in range(1, 64)))
+
+# Systematic sweep: many simultaneously-live distinct objects, all ids
+# distinct.  `keep` holds every object alive, so no id can be recycled.
+keep = []
+for k in range(1, 200):
+    keep.append(5e-324 * k)  # subnormal floats: raw bits 1..199
+    keep.append(float(k))
+    keep.append(-float(k))
+    keep.append(complex(k, 0.0))
+    keep.append(complex(0.0, k))
+    keep.append(k)
+    keep.append(-k)
+    keep.append(k * 10**30)
+    keep.append(str(k))
+    keep.append("pad" * 12 + str(k))
+    keep.append([k])
+    keep.append((k,))
+    keep.append({k})
+    keep.append({k: k})
+    keep.append(bytes([k % 256]))
+    keep.append(Obj())
+keep.extend([None, ..., NotImplemented, True, False, float("nan"), float("nan"), 0.0, -0.0])
+print("sweep-size", len(keep))
+print("sweep-distinct-ids", len({id(o) for o in keep}) == len(keep))
+print("sweep-consistent", all(consistent(keep[i], keep[i + 1]) for i in range(len(keep) - 1)))
