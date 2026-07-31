@@ -20,7 +20,9 @@
 #
 # Environment:
 #   PYRUST_BENCH_MEM_MB     address-space cap for every child (default 4096;
-#                           0 disables)
+#                           0 disables).  This caps VIRTUAL size, not RSS —
+#                           see the floor note by BENCH_MEM_FLOOR_MB before
+#                           lowering it.
 #   PYRUST_BENCH_TIMEOUT_S  wall-clock cap per benchmark case (default 300;
 #                           0 disables)
 #
@@ -83,16 +85,34 @@ done
 BENCH_MEM_MB="${PYRUST_BENCH_MEM_MB:-4096}"
 BENCH_TIMEOUT_S="${PYRUST_BENCH_TIMEOUT_S:-300}"
 
+# `ulimit -v` caps ADDRESS SPACE, not resident memory, and a pyrust child
+# reserves its interpreter thread stack up front (main.rs::INTERPRETER_STACK_SIZE
+# — 128 MiB release, 256 MiB debug).  Measured on this box: VmPeak ~275 MB
+# release / ~415 MB debug against a peak RSS of only ~10-15 MB.  Sizing this cap
+# from RSS is therefore the trap: below ~184 MiB (release) / ~320 MiB (debug,
+# which is bench.sh's default target) every child aborts before it runs a line of
+# Python, and the only symptom is "hyperfine failed for <case> (exit 1)".
+BENCH_MEM_FLOOR_MB=512
+
 # Reject junk loudly: a typo'd override must not silently leave children
-# uncapped, which is the exact failure these limits exist to prevent.
-[[ "$BENCH_MEM_MB" =~ ^[0-9]+$ ]] || {
-  echo "error: PYRUST_BENCH_MEM_MB must be a non-negative integer (got '$BENCH_MEM_MB')" >&2
+# uncapped, which is the exact failure these limits exist to prevent.  The digit
+# bound matters as much as the character class — a value with more digits than
+# this overflows the `* 1024` below and would quietly install a nonsense cap
+# (18014398509481985 wraps to exactly 1024 KiB).
+[[ "$BENCH_MEM_MB" =~ ^[0-9]{1,7}$ ]] || {
+  echo "error: PYRUST_BENCH_MEM_MB must be an integer in 0..9999999 (got '$BENCH_MEM_MB')" >&2
   exit 2
 }
-[[ "$BENCH_TIMEOUT_S" =~ ^[0-9]+$ ]] || {
-  echo "error: PYRUST_BENCH_TIMEOUT_S must be a non-negative integer (got '$BENCH_TIMEOUT_S')" >&2
+[[ "$BENCH_TIMEOUT_S" =~ ^[0-9]{1,7}$ ]] || {
+  echo "error: PYRUST_BENCH_TIMEOUT_S must be an integer in 0..9999999 (got '$BENCH_TIMEOUT_S')" >&2
   exit 2
 }
+
+if [[ "$BENCH_MEM_MB" -gt 0 ]] && [[ "$BENCH_MEM_MB" -lt "$BENCH_MEM_FLOOR_MB" ]]; then
+  echo "warning: PYRUST_BENCH_MEM_MB=$BENCH_MEM_MB is below the ${BENCH_MEM_FLOOR_MB} MiB floor;" >&2
+  echo "         pyrust reserves a 128-256 MiB interpreter stack, so cases may abort at" >&2
+  echo "         startup and be reported as ordinary benchmark failures" >&2
+fi
 
 CAP_DESC="disabled"
 if [[ "$BENCH_MEM_MB" -gt 0 ]]; then
