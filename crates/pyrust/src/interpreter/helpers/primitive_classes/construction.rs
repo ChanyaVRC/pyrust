@@ -77,8 +77,83 @@ fn ellipsis_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<
     Ok(Value::ellipsis())
 }
 
+/// Identify one of the iterator/slice values migrated to a real built-in class
+/// in issue #3000 without materialising the class as a `Value`.
+///
+/// The caller only invokes the pointer table when this object-first probe
+/// succeeds.  Ordinary primitive and user values therefore do not acquire six
+/// more class-pointer comparisons on their `isinstance` miss path.
+#[inline]
+fn builtin_type_class_for_isinstance(obj: &Value) -> Option<BuiltinTypeClass> {
+    match obj.kind() {
+        ValueKind::Generator(cell) => {
+            // A running generator/coroutine frame owns a mutably-borrowed cell.
+            // Its immutable kind tag proves it cannot be one of these built-in
+            // iterators, so never inspect the state in that case (#2978).
+            if cell.kind().frame_type_name().is_some() {
+                return None;
+            }
+            // Built-in iterators release their state before executing user
+            // code, making this borrow safe under the same invariant as
+            // `value_class`.
+            let state = cell.borrow();
+            if state.downcast_ref::<ZipIter>().is_some() {
+                return Some(BuiltinTypeClass::Zip);
+            }
+            if state.downcast_ref::<MapIter>().is_some() {
+                return Some(BuiltinTypeClass::Map);
+            }
+            if state.downcast_ref::<FilterIter>().is_some() {
+                return Some(BuiltinTypeClass::Filter);
+            }
+            if state.downcast_ref::<EnumerateIter>().is_some() {
+                return Some(BuiltinTypeClass::Enumerate);
+            }
+            if let Some(iterator) = state.downcast_ref::<GetItemIter>()
+                && iterator.step < 0
+            {
+                return Some(BuiltinTypeClass::Reversed);
+            }
+            if let Some(iterator) = state.downcast_ref::<NativeIterFrame>()
+                && iterator.type_name == "reversed"
+            {
+                return Some(BuiltinTypeClass::Reversed);
+            }
+            None
+        }
+        ValueKind::BuiltinObject { ops, .. } if pyrust_builtins::slice::is_slice_ops(ops) => {
+            Some(BuiltinTypeClass::Slice)
+        }
+        _ => None,
+    }
+}
+
+/// Fast `isinstance` check for issue #3000's six built-in type singletons.
+///
+/// Callers deliberately invoke this only from the existing `Generator` /
+/// `BuiltinObject` arms of `isinstance_single`.  Keeping it outside the
+/// primitive fast path means ordinary hits and misses execute exactly the same
+/// branches and class-pointer comparisons they did before #3000.
+#[inline]
+pub(crate) fn builtin_type_class_isinstance_fast(
+    obj: &Value,
+    cls: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    let actual_kind = builtin_type_class_for_isinstance(obj)?;
+    let cls_ptr = Rc::as_ptr(cls);
+    BUILTIN_TYPE_CLASSES.with(|classes| {
+        if cls_ptr == Rc::as_ptr(&classes[actual_kind as usize]) {
+            return Some(true);
+        }
+        classes
+            .iter()
+            .any(|candidate| cls_ptr == Rc::as_ptr(candidate))
+            .then_some(false)
+    })
+}
+
 /// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
-/// 11 primitive class singletons, skip the `class_is_subclass_of`
+/// canonical primitive class singletons, skip the `class_is_subclass_of`
 /// walk (which would require materialising `obj`'s class via
 /// `primitive_class_for_value`'s thread_local + Rc::clone) and do a
 /// direct `ValueKind` tag check.  `Some(true/false)` on a hit,

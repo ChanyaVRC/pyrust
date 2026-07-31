@@ -48,6 +48,11 @@ print(isinstance(s, slice), type(s) is slice)
 r = range(3)
 print(isinstance(r, range), type(r) is range)
 
+# The backing-kind fast path distinguishes the six classes exactly; it must
+# not turn a different iterator class (or an unrelated primitive) into a hit.
+print(isinstance(z, map), isinstance(m, zip), isinstance(s, enumerate))
+print(isinstance(1, zip), isinstance(z, int))
+
 # The classes are usable as `issubclass` arguments in both directions.
 print(issubclass(zip, object), issubclass(object, zip))
 print(issubclass(slice, object), issubclass(slice, slice))
