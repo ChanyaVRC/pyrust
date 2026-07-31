@@ -369,8 +369,8 @@ pub(crate) use generator_protocols::{
 
 mod introspection {
     use super::{
-        GeneratorFrame, Interpreter, Rc, UserFunction, Value, ValueKind,
-        lookup_enclosing_function_value, snapshot_current_locals,
+        FrameKind, GeneratorFrame, Interpreter, Rc, UserFunction, Value, ValueKind,
+        lookup_enclosing_function_value, snapshot_view_locals,
     };
     include!("runtime/introspection.rs");
 }

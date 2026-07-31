@@ -36,31 +36,45 @@ impl Interpreter {
             // Each captured frame owns the root namespace in which that frame
             // executed.  In particular, an imported callee must not inherit the
             // globals of the frame that happened to catch its exception.
-            let globals = fi
-                .globals
-                .as_ref()
-                .map(|owner| self.globals_for_environment(owner.environment()))
-                .unwrap_or_else(|| Value::dict(Default::default()));
-            let frame = frame_obj::frame(
-                co,
-                lineno,
-                Value::none(),
-                globals,
-                Value::dict(Default::default()),
-            );
+            //
+            // A module-scope node keeps CPython's `tb_frame.f_locals is
+            // f_globals` identity (issue #2926).  A function frame has already
+            // unwound by the time the traceback materialises, so its register
+            // file is gone and its locals stay empty.
+            let (globals, locals) = match fi.globals.as_ref() {
+                Some(owner) if fi.funcname.as_ref() == "<module>" => (
+                    self.globals_for_environment(owner.environment()),
+                    self.frame_locals_for_module_environment(owner.environment()),
+                ),
+                Some(owner) => (
+                    self.globals_for_environment(owner.environment()),
+                    Value::dict(Default::default()),
+                ),
+                None => (
+                    Value::dict(Default::default()),
+                    Value::dict(Default::default()),
+                ),
+            };
+            let frame = frame_obj::frame(co, lineno, Value::none(), globals, locals);
             // Carry the captured frame's PEP 657 caret anchor onto the node so a
             // re-raised / chained exception renders the same carets (#2411).
             node = tb_obj::traceback_node_with_col(frame, node, lineno, -1, fi.col_span);
         }
 
         // Finally, the catching frame as the outermost node.
-        let catch_globals = self.globals_for_environment(catch.globals.environment());
+        let catch_env = catch.globals.environment();
+        let catch_globals = self.globals_for_environment(catch_env);
+        let catch_locals = if matches!(catch.code, TracebackCatchCodeSnapshot::Module { .. }) {
+            self.frame_locals_for_module_environment(catch_env)
+        } else {
+            Value::dict(Default::default())
+        };
         let catch_frame = frame_obj::frame(
             catch_code,
             catch.lineno,
             Value::none(),
             catch_globals,
-            Value::dict(Default::default()),
+            catch_locals,
         );
         tb_obj::traceback_node_with_col(catch_frame, node, catch.lineno, -1, catch.col_span)
     }
