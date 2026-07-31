@@ -82,6 +82,38 @@ print(deque([w]) == deque([w]), deque([w]) == deque([v]))
 dw.remove(w)
 print(len(dw))
 
+
+# Identity also wins for an __eq__ that raises: it is never reached.
+class Boom:
+    def __eq__(self, other):
+        raise RuntimeError("__eq__ must not run on the identical element")
+
+    def __hash__(self):
+        return 1
+
+
+bo = Boom()
+db = deque([bo])
+print(bo in db, db.index(bo), db.count(bo), deque([bo]) == deque([bo]))
+
+# Iterator-ish objects are objects too: an alias of one finds itself even
+# though two separately-built iterators over equal data never compare equal.
+def one():
+    yield 1
+
+
+gen = one()
+it = iter([1])
+vals = {1: 2}.values()
+for o in (gen, it, vals, enumerate([1]), zip([1], [2]), map(str, [1]), reversed([1])):
+    print(o in deque([o]), deque([o]).index(o), deque([o]).count(o), deque([o]) == deque([o]))
+print(iter([1]) in deque([iter([1])]), deque([one()]) == deque([one()]))
+
+# A deque holding itself resolves through the same identity rule.
+sd = deque()
+sd.append(sd)
+print(sd == sd, sd in deque([sd]), deque([sd]).index(sd), sd.count(sd))
+
 # Non-NaN elements are unaffected.
 print(1 in deque([1]), 3 in deque([1, 2]))
 print(deque([1, 2]) == deque([1, 2]), deque([1, 2]) == deque([1, 3]))

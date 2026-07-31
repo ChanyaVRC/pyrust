@@ -337,18 +337,31 @@ impl Interpreter {
     /// equality, so an element always finds *itself* during a container search
     /// even when its `__eq__` says otherwise.
     ///
-    /// NaN is the observable primitive case (`nan == nan` is False, yet
-    /// `n in [n]` is True); `Value::is_identical_nan` is the NaN-boxed identity
-    /// test for it (#2344 / #2535 / #2911), and `values_user_eq`'s own
-    /// `a == b` fast path already covers object identity for everything else.
+    /// The identity test is `values_are_identical` — the same predicate `is`
+    /// uses — not just `Value::is_identical_nan`.  NaN is the observable
+    /// *primitive* case (`nan == nan` is False, yet `n in [n]` is True, #2344 /
+    /// #2535 / #2911), but it is not the only one: values whose `PartialEq`
+    /// reports two aliases of one object as unequal — generators, the native
+    /// iterators (`iter(x)`, `enumerate`, `zip`, `map`, `filter`, `reversed`),
+    /// `dict_values` — need the same short-circuit, as does any instance whose
+    /// `__eq__` answers False (or raises) for itself.
     ///
     /// Use this for every element-wise container scan (membership, `index`,
     /// `count`, `remove`, element-wise `==`).  The list/tuple scans in
     /// `builtin_methods/sequences.rs` and `expr/slicing_membership.rs` spell the
-    /// same rule out inline because they interleave it with a borrow-only
-    /// primitive fast path that never reaches the interpreter.
+    /// rule out inline because they interleave it with a borrow-only primitive
+    /// fast path that never reaches the interpreter; those copies still test
+    /// only `is_identical_nan` and so miss the iterator cases above.
     pub(crate) fn values_richcompare_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
-        if a.is_identical_nan(b) {
+        if a.cannot_user_eq() {
+            // Scalar NaN-box tag (`Float`/`None`/`Bool`/`Int`/`Str`): NaN is the
+            // only value of these whose identity is not already implied by `==`,
+            // so the inlined bit test is the whole rule and the general
+            // (kind-matching) predicate would be dead weight on int/str scans.
+            if a.is_identical_nan(b) {
+                return Ok(true);
+            }
+        } else if values_are_identical(a, b) {
             return Ok(true);
         }
         self.values_user_eq(a, b)
