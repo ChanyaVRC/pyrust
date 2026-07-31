@@ -57,12 +57,15 @@ pub(crate) fn bind_legacy_builtin_subclass_backing(
 
 impl Interpreter {
     /// Preserve object identity for the VM's borrowed-register `id(x)` fast
-    /// path. Returning `None` lets values without an allocation identity use
-    /// the ordinary registered builtin.
+    /// path.
+    ///
+    /// This used to answer only for values with an *allocation* identity and
+    /// hand everything else to the registered builtin, which is how the two
+    /// paths came to disagree (#2956).  Both now read the one definition,
+    /// [`Value::object_id`], so the fast path is a pure short-cut rather than
+    /// a second implementation.
     pub(super) fn try_identity_builtin_call(function: &Value, argument: &Value) -> Option<Value> {
-        matches!(function.kind(), ValueKind::BuiltinFunction("id"))
-            .then(|| argument.value_id().map(Value::int))
-            .flatten()
+        matches!(function.kind(), ValueKind::BuiltinFunction("id")).then(|| argument.object_id())
     }
 
     /// Handle the concrete class objects supplied by the builtin layer.

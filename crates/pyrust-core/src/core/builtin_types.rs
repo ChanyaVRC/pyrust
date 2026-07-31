@@ -35,6 +35,19 @@ pub trait BuiltinTypeOps: Any {
             .map_or_else(|| self.type_name(), CanonicalClassTag::canonical_name)
     }
 
+    /// Override the backing state address used for Python object identity.
+    ///
+    /// Most built-in objects are identified by their shared [`BuiltinState`]
+    /// cell and keep `None`.  A proxy whose Python identity belongs to another
+    /// live target returns that target's exact pointer payload instead.  Core
+    /// combines an override with this ops implementation's concrete `TypeId`
+    /// in a dedicated numeric namespace, so it cannot collide with the target
+    /// object itself or an override supplied by another built-in type.
+    fn identity_payload(&self, state: &BuiltinState) -> Option<u64> {
+        let _ = state;
+        None
+    }
+
     fn repr(&self, state: &BuiltinState) -> String {
         let _ = state;
         format!("<{} object>", self.display_type_name())

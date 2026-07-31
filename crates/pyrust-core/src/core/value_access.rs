@@ -246,6 +246,99 @@ impl Value {
         }
     }
 
+    /// The single typed identity key consumed by both `is` and `id()`.
+    ///
+    /// Allocation addresses, monotonic ids, inline boxes, floats, complexes,
+    /// and target-identity built-in proxies are distinct variants.  Equality
+    /// can therefore never merge two representations merely because their
+    /// raw `u64` payloads happen to match.
+    fn object_identity(&self) -> ObjectIdentity {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::object_identity() called on an uninitialised register slot"
+        );
+
+        if self.is_float() {
+            return ObjectIdentity::Float(self.0);
+        }
+        if self.is_not_implemented() || self.is_ellipsis() {
+            return ObjectIdentity::RawValue(self.0);
+        }
+
+        match top16(self.0) {
+            TAG_NONE | TAG_BOOL | TAG_INT => ObjectIdentity::RawValue(self.0),
+            TAG_STR if str_is_inline_bits(self.0) => ObjectIdentity::RawValue(self.0),
+            TAG_STR => ObjectIdentity::Allocation(self.0 & PAYLOAD_MASK),
+            TAG_TUPLE => ObjectIdentity::Counter(unsafe { self.tuple_inner() }.obj_id),
+            TAG_LIST => ObjectIdentity::Counter(unsafe { self.list_inner() }.obj_id),
+            TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
+                Opaque::PyBigInt(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Dict(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Set(rc) => ObjectIdentity::Counter(rc.obj_id),
+                // Range aliases share this refcounted opaque slot; separately
+                // constructed equal ranges have distinct slots.
+                Opaque::Range { .. } => {
+                    ObjectIdentity::Allocation(unsafe { self.opaque_slot_ptr() } as u64)
+                }
+                Opaque::BigRange(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::UserFunction(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::PyClass(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::PyInstance(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::PyModule(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::BoundMethod { obj_id, .. }
+                | Opaque::ClassBoundMethod { obj_id, .. }
+                | Opaque::SuperProxy { obj_id, .. }
+                | Opaque::SuperProxyClass { obj_id, .. }
+                | Opaque::SuperProxyUnbound { obj_id, .. } => ObjectIdentity::Counter(*obj_id),
+                Opaque::Generator(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Bytes(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Complex(re, im) => ObjectIdentity::Complex {
+                    real: re.to_bits(),
+                    imag: im.to_bits(),
+                },
+                Opaque::SmallTuple2 { obj_id, .. } | Opaque::SmallTuple3 { obj_id, .. } => {
+                    ObjectIdentity::Counter(*obj_id)
+                }
+                Opaque::BuiltinObject { ops, state } => match ops.identity_payload(state) {
+                    Some(payload) => ObjectIdentity::Builtin {
+                        type_id: (*ops).type_id(),
+                        payload,
+                    },
+                    None => ObjectIdentity::Allocation(Rc::as_ptr(state) as u64),
+                },
+            },
+            _ => unreachable!("invalid NaN-box tag in object identity"),
+        }
+    }
+
+    /// Exact Python object-identity comparison.
+    ///
+    /// This is allocation-free.  The interpreter's `is` / `is not` operators
+    /// delegate here so they cannot drift from [`Value::object_id`].
+    #[inline]
+    pub fn is_identical_to(&self, other: &Value) -> bool {
+        self.object_identity() == other.object_identity()
+    }
+
+    /// Python object identity — the non-negative integer `id()` reports.
+    ///
+    /// [`Value::is_identical_to`] and this method consume the same typed key.
+    /// Its injective numeric encoding gives the total contract
+    ///
+    /// ```text
+    /// a.is_identical_to(b) == (a.object_id() == b.object_id())
+    /// ```
+    ///
+    /// Allocation-backed values retain their existing `u64` address id.
+    /// Counter, raw-box, float, complex, and custom built-in identities occupy
+    /// disjoint arbitrary-precision namespaces; none relies on hashing.
+    pub fn object_id(&self) -> Value {
+        match self.object_identity().encode() {
+            EncodedObjectIdentity::Unsigned(id) => Value::uint(id),
+            EncodedObjectIdentity::Wide(id) => Value::bigint(id),
+        }
+    }
+
     // ── Private unsafe helpers ───────────────────────────────────────────────
 
     unsafe fn str_hdr(&self) -> *const u8 {

@@ -59,7 +59,7 @@ mod scalar {
 
 mod identity_and_repr {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyValue, Rc, Result, Value, ValueKind,
+        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyValue, Result, Value, ValueKind,
         ascii_repr_interp, hash_value_with_interp, render_value_repr,
     };
     include!("builtins/identity_and_repr.rs");

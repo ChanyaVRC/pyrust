@@ -25,7 +25,7 @@ use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 use crate::cycle_guards::{EqGuard, ReprGuard};
 use crate::environment::{EnvRef, Environment, NameSet};
 use crate::errors::{PyError, Result};
-use crate::object_identity::next_obj_id;
+use crate::object_identity::{EncodedObjectIdentity, ObjectIdentity, next_obj_id};
 
 include!("prelude.rs");
 include!("int_string_limits.rs");
