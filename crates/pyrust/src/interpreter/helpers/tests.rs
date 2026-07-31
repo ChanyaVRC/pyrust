@@ -313,3 +313,96 @@ mod singleton_method_name_tests {
         assert_eq!(first, second);
     }
 }
+
+#[cfg(test)]
+mod object_id_tests {
+    use super::values_are_identical;
+    use pyrust_core::{PyDict, PySet, Value, ValueKind};
+
+    /// One representative value per identity representation, plus the pairs
+    /// that used to collide on id `0`: `None` / `0` / `0.0` / `-0.0` /
+    /// `False`, two separately boxed NaNs, and two equal complexes.
+    fn matrix() -> Vec<Value> {
+        vec![
+            Value::none(),
+            Value::ellipsis(),
+            Value::not_implemented(),
+            Value::bool_(false),
+            Value::bool_(true),
+            Value::int(0),
+            Value::int(1),
+            Value::int(-1),
+            Value::float(0.0),
+            Value::float(-0.0),
+            Value::float(1.0),
+            Value::float(1.5),
+            Value::float(-1.5),
+            Value::float(f64::INFINITY),
+            Value::float(f64::NAN),
+            Value::float(f64::NAN),
+            Value::complex(0.0, 0.0),
+            Value::complex(1.0, 2.0),
+            Value::complex(1.0, 2.0),
+            Value::complex(2.0, 1.0),
+            Value::complex(f64::NAN, 0.0),
+            Value::string(""),
+            Value::string("abc"),
+            Value::string("a string far too long to be stored inline"),
+            Value::bytes(vec![1, 2]),
+            Value::list(vec![]),
+            Value::list(vec![]),
+            Value::tuple(vec![]),
+            Value::tuple(vec![Value::int(1), Value::int(2)]),
+            Value::set(PySet::default()),
+            Value::dict(PyDict::default()),
+        ]
+    }
+
+    /// `id()` is `Value::object_id`, so `id()` and `is` agree exactly when
+    /// `object_id` equality agrees with `values_are_identical` (#2956).  This
+    /// is the guard that keeps the two definitions from drifting apart again.
+    ///
+    /// Two known holes are deliberately left out of the matrix; both are `is`
+    /// bugs rather than `id` bugs.  `range` has no arm in
+    /// `values_are_identical` at all (so even `r is r` is False), and an
+    /// `instance_dict` proxy compares by proxy *target*, which lives in
+    /// `pyrust-builtins` and is invisible to `pyrust-core`.
+    #[test]
+    fn object_id_agrees_with_values_are_identical() {
+        let values = matrix();
+        for (i, left) in values.iter().enumerate() {
+            for (j, right) in values.iter().enumerate() {
+                assert_eq!(
+                    values_are_identical(left, right),
+                    left.object_id() == right.object_id(),
+                    "`is` and `id()` disagree for matrix[{i}] vs matrix[{j}]"
+                );
+            }
+        }
+    }
+
+    /// An alias is the same object, so a clone must keep the id.
+    #[test]
+    fn clones_keep_their_object_id() {
+        for value in matrix() {
+            let alias = value.clone();
+            assert!(values_are_identical(&value, &alias));
+            assert_eq!(value.object_id(), alias.object_id());
+        }
+    }
+
+    /// The old `id()` returned `0` for every kind it had not enumerated,
+    /// which is what gave all floats and complexes one shared id.
+    #[test]
+    fn no_value_falls_back_to_a_zero_id() {
+        for value in matrix() {
+            // `0.0` is the one value whose box bits legitimately are zero.
+            if value.object_id() == 0 {
+                assert!(
+                    matches!(value.kind(), ValueKind::Float(f) if f == 0.0 && f.is_sign_positive()),
+                    "unexpected zero id"
+                );
+            }
+        }
+    }
+}

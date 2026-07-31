@@ -20,28 +20,20 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#id>
     ///
     /// Migrated to the typed-signature dialect (#400).  `PyValue` is the
-    /// catch-all wrapper since `id` accepts every Python object; the
-    /// existing per-kind dispatch becomes the body's only concern.
+    /// catch-all wrapper since `id` accepts every Python object.
+    ///
+    /// The identity itself is [`Value::object_id`] — the single definition
+    /// `is` is built on.  This body used to re-derive one per kind and fell
+    /// back to `0` for everything it had not enumerated, which handed every
+    /// float and complex the same id (#2956); deriving it in one place is
+    /// what keeps `id()` and `is` from disagreeing.  Ids are unsigned, hence
+    /// `Value::uint`.
     ///
     /// `#[arity_style(takes_exactly_one)]` (#400/#2331) reproduces the
     /// METH_O wording `id() takes exactly one argument (N given)`.
     #[arity_style(takes_exactly_one)]
     fn id(#[positional_only] obj: PyValue) -> Result<Value> {
-        let value = &obj.0;
-        let id_val: i64 = if let Some(function) = value.as_function_rc() {
-            Rc::as_ptr(function) as i64
-        } else {
-            match value.kind() {
-                ValueKind::PyInstance(rc) => Rc::as_ptr(rc) as i64,
-                ValueKind::PyClass(rc) => Rc::as_ptr(rc) as i64,
-                ValueKind::PyModule(rc) => Rc::as_ptr(rc) as i64,
-                ValueKind::Int(n) => n,
-                ValueKind::Bool(b) => b as i64,
-                ValueKind::None => 0,
-                _ => value.value_id().unwrap_or(0),
-            }
-        };
-        Ok(Value::int(id_val))
+        Ok(Value::uint(obj.0.object_id()))
     }
 
     /// CPython: repr(object) — printable representation string.

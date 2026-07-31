@@ -50,6 +50,19 @@ impl Value {
         }
     }
 
+    /// Box an *unsigned* 64-bit integer as a Python `int`.
+    ///
+    /// [`Value::int`] takes an `i64`, so anything above `i64::MAX` would wrap
+    /// negative.  Object ids are unsigned — a non-float immediate carries its
+    /// tag in the top bits (#2956) — and CPython's `id()` is likewise always
+    /// non-negative, so promote those to a big int instead.
+    pub fn uint(n: u64) -> Self {
+        match i64::try_from(n) {
+            Ok(n) => Value::int(n),
+            Err(_) => Value::bigint(BigInt::from(n)),
+        }
+    }
+
     pub fn bigint(n: BigInt) -> Self {
         Value::opaque(Opaque::PyBigInt(Rc::new(n)))
     }

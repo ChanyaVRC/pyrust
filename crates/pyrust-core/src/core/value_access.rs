@@ -235,6 +235,71 @@ impl Value {
         }
     }
 
+    /// Python object identity — the number `id()` reports.
+    ///
+    /// Unlike [`Value::value_id`] this is *total*: every value has an
+    /// identity, so `id()` no longer has to invent one per kind and can no
+    /// longer disagree with `is` by omission (#2956).  The contract is
+    ///
+    /// ```text
+    /// values_are_identical(a, b)  ==  (a.object_id() == b.object_id())
+    /// ```
+    ///
+    /// which `helpers/tests.rs::object_id_agrees_with_values_are_identical`
+    /// pins.  Three representations feed it:
+    ///
+    /// - **heap-backed values** reuse [`Value::value_id`]'s shared backing
+    ///   address or monotonic id, so aliases agree;
+    /// - **`complex`** is identified by its component bits rather than by its
+    ///   heap slot, because that is what `is` compares (#2949) — the two
+    ///   `f64`s fold into one 64-bit id;
+    /// - **immediates** (float, int, bool, `None`, `...`, `NotImplemented`)
+    ///   have no address at all, so the NaN-box pattern *is* the identity —
+    ///   exactly the bits `is` compares.  Distinct tags keep the kinds
+    ///   disjoint (`id(0)`, `id(0.0)`, `id(False)` and `id(None)` all
+    ///   differ), and a minted NaN payload gives every `float('nan')` its own
+    ///   id.
+    ///
+    /// The result is unsigned: a non-float immediate's tag occupies the top
+    /// bits, so callers must surface it as a Python `int` via
+    /// [`Value::uint`] rather than wrapping it negative.
+    ///
+    /// Uniqueness among live objects is exact for every kind except
+    /// `complex`, whose 128-bit component pair is necessarily folded into 64
+    /// bits.
+    pub fn object_id(&self) -> u64 {
+        // A string's identity is its whole NaN box rather than the bare
+        // payload `value_id` returns: an inline (SSO) string *is* its
+        // payload, so a short one would otherwise land in the same small
+        // range as the monotonic list/tuple ids (`id("") == id([])`).
+        // Keeping the tag makes every string id disjoint from every other
+        // kind's, and within `str` the two forms differ by a constant, so the
+        // equality relation `is` uses is unchanged.
+        if top16(self.0) == TAG_STR {
+            return self.0;
+        }
+        if let Some(id) = self.value_id() {
+            return id as u64;
+        }
+        if top16(self.0) == TAG_OPAQUE {
+            return match unsafe { &*self.opaque_ptr() } {
+                Opaque::Complex(re, im) => complex_obj_id(*re, *im),
+                // PyClass / PyInstance: one `Rc` can be wrapped by several
+                // opaque slots (`Value::py_instance` clones the `Rc` into a
+                // fresh slot), so identity is the inner pointer — the same
+                // thing the `Rc::ptr_eq` behind `is` compares.
+                Opaque::PyClass(rc) => Rc::as_ptr(rc) as u64,
+                Opaque::PyInstance(rc) => Rc::as_ptr(rc) as u64,
+                Opaque::BigRange(rc) => Rc::as_ptr(rc) as u64,
+                // `Opaque::Range` stores its bounds inline, so the refcounted
+                // slot — shared by every clone — is the object itself.
+                _ => (unsafe { self.opaque_slot_ptr() }) as u64,
+            };
+        }
+        // Immediate: the NaN-box pattern is the object.
+        self.0
+    }
+
     // ── Private unsafe helpers ───────────────────────────────────────────────
 
     unsafe fn str_hdr(&self) -> *const u8 {
