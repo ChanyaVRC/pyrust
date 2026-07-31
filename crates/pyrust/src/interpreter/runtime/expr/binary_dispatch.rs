@@ -124,6 +124,14 @@ impl Interpreter {
                 self.modulo(left, right)
             }
             BinaryOp::Eq => {
+                // Issue #2936: CPython's `mappingproxy_richcompare` compares
+                // the *proxied object*, so `mappingproxy(od) == od` is
+                // `od == od`.  Only proxies built over a separate object (a
+                // dict subclass, or another proxy) carry an owner; a proxy over
+                // a plain dict or a class `__dict__` compares through its own
+                // ops table as before.
+                let left = pyrust_builtins::mapping_proxy::owner_of(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::owner_of(&right).unwrap_or(right);
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
@@ -135,6 +143,10 @@ impl Interpreter {
                 Ok(Value::bool_(self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Ne => {
+                // Issue #2936: as for `Eq`, an owner-carrying `mappingproxy`
+                // compares as the object it proxies.
+                let left = pyrust_builtins::mapping_proxy::owner_of(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::owner_of(&right).unwrap_or(right);
                 // CPython's `slot_tp_richcompare` derives `__ne__` as the logical
                 // negation of `__eq__` whenever a class does not define its own
                 // `__ne__` (issue #2645).  pyrust resolves the inherited
@@ -287,6 +299,13 @@ impl Interpreter {
                 ))
             }
             BinaryOp::BitOr => {
+                // Issue #2936: CPython's `mappingproxy_or` merges the *proxied
+                // object*, so `mappingproxy(od) | other` is `od | other` and
+                // keeps `od`'s type.  Owner-less proxies (plain dict / class
+                // `__dict__`) keep merging as `dict` through the entries path
+                // below.
+                let left = pyrust_builtins::mapping_proxy::owner_of(&left).unwrap_or(left);
+                let right = pyrust_builtins::mapping_proxy::owner_of(&right).unwrap_or(right);
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
                     return r;
                 }

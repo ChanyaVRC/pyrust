@@ -91,6 +91,15 @@ pub(crate) fn render_instance_str(
             {
                 render_value_repr(interp, value)
             }
+            // Issue #2936: CPython's `mappingproxy_str` is `str(proxied)`, so
+            // `print(mappingproxy(od))` shows `OrderedDict({...})`.  Only
+            // proxies built over a separate object carry an owner; a proxy over
+            // a plain dict or a class `__dict__` keeps its current rendering.
+            ValueKind::BuiltinObject { .. }
+                if let Some(owner) = pyrust_builtins::mapping_proxy::owner_of(value) =>
+            {
+                render_instance_str(interp, &owner)
+            }
             // Issue #2771: `str(cls)` / `print(cls)` dispatches the metaclass
             // `__str__` (falling back to `__repr__`) when overridden; returns
             // `None` for an ordinary class so plain classes keep `to_py_str()`.

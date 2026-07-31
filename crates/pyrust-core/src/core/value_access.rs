@@ -72,6 +72,17 @@ impl Value {
         top16(self.0) == TAG_OPAQUE && matches!(unsafe { &*self.opaque_ptr() }, Opaque::Set(_))
     }
 
+    /// Tag-only `BuiltinObject` classification: `true` for the extension types
+    /// carried by a `BuiltinTypeOps` table (`frozenset`, `bytearray`,
+    /// `mappingproxy`, dict views, …).  Unlike `kind()`, this never builds a
+    /// `ValueKind` or borrows the object's state, so operator dispatch can
+    /// cheaply skip built-in-object special cases for every other value.
+    #[inline(always)]
+    pub fn is_builtin_object(&self) -> bool {
+        top16(self.0) == TAG_OPAQUE
+            && matches!(unsafe { &*self.opaque_ptr() }, Opaque::BuiltinObject { .. })
+    }
+
     /// Return the shared function object carried by this value.
     ///
     /// Both Python functions and native builtins use

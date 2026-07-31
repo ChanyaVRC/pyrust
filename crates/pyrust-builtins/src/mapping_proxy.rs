@@ -32,6 +32,13 @@ pub enum MappingProxySource {
 /// Internal state: a live reference to the mapping being proxied.
 pub struct MappingProxyState {
     pub source: MappingProxySource,
+    /// The proxied object, when it is not the `source` itself — i.e. when
+    /// `types.MappingProxyType` was handed a dict *subclass* instance
+    /// (`OrderedDict` / `Counter` / `defaultdict` / a user `class D(dict)`) or
+    /// another `mappingproxy` (issue #2936).  `source` still points at that
+    /// object's live backing dict, so every read stays a live view; `owner`
+    /// only carries the identity CPython delegates `repr` and `copy` to.
+    pub owner: Option<Value>,
 }
 
 pub struct MappingProxyOps;
@@ -48,6 +55,15 @@ impl BuiltinTypeOps for MappingProxyOps {
     }
 
     fn repr(&self, state: &BuiltinState) -> String {
+        // CPython renders `mappingproxy(%R)` over the *proxied object*, so a
+        // proxy over an `OrderedDict` reads `mappingproxy(OrderedDict({...}))`
+        // (issue #2936).  A `PyInstance` owner needs interpreter dispatch to
+        // render, so `render_value_repr` intercepts this case before the
+        // built-in ops table is consulted; the `repr_raw` here is the
+        // no-interpreter fallback and is exact for a nested `mappingproxy`.
+        if let Some(owner) = borrow_owner(state) {
+            return format!("mappingproxy({})", owner.repr_raw());
+        }
         let src = borrow_source(state).expect("mappingproxy state");
         let inner: Vec<String> = match &src {
             MappingProxySource::Class(cls) => cls
@@ -149,12 +165,12 @@ impl BuiltinTypeOps for MappingProxyOps {
             MappingProxySource::Class(cls) => {
                 let key_str = match key.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::named("KeyError", key.repr_raw())),
+                    _ => return Err(PyError::key_error(key.clone())),
                 };
                 let value = cls.borrow().attrs.get(&key_str).cloned();
                 value
                     .map(|value| expose_class_value(&value))
-                    .ok_or_else(|| PyError::named("KeyError", key.repr_raw()))
+                    .ok_or_else(|| PyError::key_error(key.clone()))
             }
             MappingProxySource::Dict(rc) => {
                 let pk = key
@@ -163,7 +179,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                 rc.borrow()
                     .get(&pk)
                     .cloned()
-                    .ok_or_else(|| PyError::named("KeyError", key.repr_raw()))
+                    .ok_or_else(|| PyError::key_error(key.clone()))
             }
         }
     }
@@ -401,6 +417,7 @@ fn key_to_value(key: &PyKey) -> Value {
 pub fn mapping_proxy(class: Rc<RefCell<PyClass>>) -> Value {
     let state: Box<dyn Any> = Box::new(MappingProxyState {
         source: MappingProxySource::Class(class),
+        owner: None,
     });
     Value::builtin_object(MAPPING_PROXY_OPS, state)
 }
@@ -409,8 +426,47 @@ pub fn mapping_proxy(class: Rc<RefCell<PyClass>>) -> Value {
 pub fn mapping_proxy_dict(dict: Rc<RefCell<PyDict>>) -> Value {
     let state: Box<dyn Any> = Box::new(MappingProxyState {
         source: MappingProxySource::Dict(dict),
+        owner: None,
     });
     Value::builtin_object(MAPPING_PROXY_OPS, state)
+}
+
+/// Construct a `mappingproxy` over `owner` — a mapping that is not itself a
+/// plain `dict` (issue #2936).  `source` must be `owner`'s *live* storage, so
+/// reads through the proxy observe later mutations of `owner`; `owner` is kept
+/// only so `repr` and `copy` can delegate to the proxied object the way
+/// CPython's `mappingproxy` does.
+pub fn mapping_proxy_owned(source: MappingProxySource, owner: Value) -> Value {
+    let state: Box<dyn Any> = Box::new(MappingProxyState {
+        source,
+        owner: Some(owner),
+    });
+    Value::builtin_object(MAPPING_PROXY_OPS, state)
+}
+
+/// The proxied object of an owner-carrying `mappingproxy`, or `None` for a
+/// proxy over a plain dict or a class `__dict__` (where the source *is* the
+/// proxied object).
+#[inline]
+pub fn owner_of(value: &Value) -> Option<Value> {
+    // Tag-only pre-check: operator dispatch calls this on every operand, so the
+    // common non-`BuiltinObject` case must not pay for building a `ValueKind`.
+    if !value.is_builtin_object() {
+        return None;
+    }
+    let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+        return None;
+    };
+    if !builtin_ops_is::<MappingProxyOps>(ops) {
+        return None;
+    }
+    borrow_owner(state)
+}
+
+/// Clone the live source out of a `mappingproxy` Value, for re-proxying it
+/// (`mappingproxy(some_proxy)`).
+pub fn source_of(value: &Value) -> Option<MappingProxySource> {
+    borrow_source_of(value)
 }
 
 /// Return whether `value` is backed by this module's mappingproxy operations
@@ -464,6 +520,14 @@ fn borrow_source_of(value: &Value) -> Option<MappingProxySource> {
         return None;
     }
     borrow_source(state)
+}
+
+/// Clone the proxied object out of the proxy state, if any.
+fn borrow_owner(state: &BuiltinState) -> Option<Value> {
+    let borrow = state.borrow();
+    borrow
+        .downcast_ref::<MappingProxyState>()
+        .and_then(|s| s.owner.clone())
 }
 
 /// Clone the live `Rc` out of the proxy state.  Both variants are cheap `Rc`
