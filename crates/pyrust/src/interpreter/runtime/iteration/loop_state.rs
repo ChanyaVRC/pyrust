@@ -86,8 +86,9 @@ pub(crate) enum IterState {
         msg: &'static str,
         /// Provider-tagged ordered mappings may test exhaustion first.
         exhaust_first: bool,
-        /// Provider clear-registry sequence, or zero for other collections.
-        provider_sequence: u64,
+        /// Provider-owned guard state for a tagged ordered mapping; `None`
+        /// for every other guarded collection.
+        ordered_watch: Option<OrderedIterationWatch>,
     },
     /// Live key walk for plain dict/set containers and plain dict views.
     LiveKeysGuarded {
@@ -103,7 +104,7 @@ pub(crate) enum IterState {
         recorded_len: usize,
         msg: &'static str,
         exhaust_first: bool,
-        provider_sequence: u64,
+        ordered_watch: Option<OrderedIterationWatch>,
     },
 }
 
@@ -238,7 +239,7 @@ impl Interpreter {
                     });
                 }
                 let items = iter_values(&backing)?;
-                let provider_sequence = pyrust_builtins::ordered_mapping::clear_sequence();
+                let ordered_watch = Some(ordered_iteration_watch(&backing));
                 return Ok(IterState::MaterializedGuarded {
                     items,
                     pos: 0,
@@ -246,7 +247,7 @@ impl Interpreter {
                     recorded_len,
                     msg,
                     exhaust_first,
-                    provider_sequence,
+                    ordered_watch,
                 });
             }
             if backing.is_set() {
@@ -318,11 +319,9 @@ impl Interpreter {
                 .map(|policy| (policy.mutation_message, policy.exhaust_first))
                 .unwrap_or(("dictionary changed size during iteration", false))
         };
-        let provider_sequence = if ordered_policy.is_some() {
-            pyrust_builtins::ordered_mapping::clear_sequence()
-        } else {
-            0
-        };
+        let ordered_watch = ordered_policy
+            .is_some()
+            .then(|| ordered_iteration_watch(&source));
         Ok(IterState::MaterializedGuarded {
             items,
             pos: 0,
@@ -330,7 +329,7 @@ impl Interpreter {
             recorded_len,
             msg,
             exhaust_first,
-            provider_sequence,
+            ordered_watch,
         })
     }
 
@@ -353,7 +352,7 @@ impl Interpreter {
             };
         }
         let keys = pyrust_builtins::dict_views::backing_keys(&dict);
-        let provider_sequence = pyrust_builtins::ordered_mapping::clear_sequence();
+        let ordered_watch = Some(ordered_iteration_watch(&source));
         IterState::DictViewGuarded {
             keys,
             kind,
@@ -362,7 +361,7 @@ impl Interpreter {
             recorded_len,
             msg,
             exhaust_first,
-            provider_sequence,
+            ordered_watch,
         }
     }
 }

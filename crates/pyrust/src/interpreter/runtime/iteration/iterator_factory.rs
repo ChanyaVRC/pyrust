@@ -291,11 +291,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                         kind: GuardVersion::Size,
                         msg,
                         exhaust_first,
-                        provider_sequence: if ordered {
-                            pyrust_builtins::ordered_mapping::clear_sequence()
-                        } else {
-                            0
-                        },
+                        ordered_watch: ordered.then(|| ordered_iteration_watch(&backing)),
                     }));
                 }
                 Ok(Value::generator(Box::new(frame)))
@@ -358,11 +354,7 @@ pub(crate) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Resul
                     kind: GuardVersion::Size,
                     msg,
                     exhaust_first,
-                    provider_sequence: if ordered_policy.is_some() {
-                        pyrust_builtins::ordered_mapping::clear_sequence()
-                    } else {
-                        0
-                    },
+                    ordered_watch: ordered_policy.is_some().then(|| ordered_iteration_watch(v)),
                 }));
             }
             Ok(Value::generator(Box::new(frame)))
@@ -453,18 +445,16 @@ fn guarded_reverse_mapping_iter(
     let (msg, exhaust_first) = ordered_policy
         .map(|policy| (policy.mutation_message, policy.exhaust_first))
         .unwrap_or(("dictionary changed size during iteration", false));
-    let provider_sequence = if ordered_policy.is_some() {
-        pyrust_builtins::ordered_mapping::clear_sequence()
-    } else {
-        0
-    };
+    let ordered_watch = ordered_policy
+        .is_some()
+        .then(|| ordered_iteration_watch(&container));
     frame.guard = Some(Box::new(NativeIterGuard {
         container,
         version: recorded_len as i64,
         kind: GuardVersion::Size,
         msg,
         exhaust_first,
-        provider_sequence,
+        ordered_watch,
     }));
     frame
 }

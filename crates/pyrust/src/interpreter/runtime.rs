@@ -174,11 +174,11 @@ mod fast_path {
     use super::{
         BigRangeState, BinaryOp, CallBuiltinCacheEntry, ExpandedCallArg, GlobalCacheEntry,
         GlobalResolutionCache, Interpreter, IterState, LiveDictViewItem, MemoKey,
-        NativeClassMethodCachePlan, PyDict, PyError, PyKey, Rc, ReadAttributeCachePlan,
-        ReadMethodCachePlan, RegSlice, Result, UserFunction, Value, ValueKind,
-        bind_builtin_attribute, bind_cached_native_class_method, comp_read_is_free, float_divmod,
-        indexed_sequence_item, invoke_class_method, live_collection_len, live_dict_view_item,
-        ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
+        NativeClassMethodCachePlan, OrderedIterationWatch, PyDict, PyError, PyKey, Rc,
+        ReadAttributeCachePlan, ReadMethodCachePlan, RegSlice, Result, UserFunction, Value,
+        ValueKind, bind_builtin_attribute, bind_cached_native_class_method, comp_read_is_free,
+        float_divmod, indexed_sequence_item, invoke_class_method, live_collection_len,
+        live_dict_view_item, ordered_mapping_guard_outcome, py_mod_i64, read_attribute_cache_plan,
         read_method_cache_plan, value_from_bigint, write_attribute_cache_class,
     };
     include!("runtime/fast_path.rs");
@@ -296,12 +296,12 @@ pub(crate) use iteration::{
     BigRangeIter, BigRangeState, CallableIter, ConsumerIterator, EnumerateIter, FilterIter,
     GetItemIter, GuardVersion, IterCacheBuf, IterSrcBuf, IterState, IteratorCopy, ItersBuf,
     LiveDictViewItem, LoopIteratorAdvance, MapIter, NativeIterFrame, NativeIterGuard,
-    ProviderIterator, RangeIter, ZipIter, builtin_iterator_has_length_hint, copy_iterator_object,
-    indexed_sequence_item, iter_values, iterator_retained_values, live_collection_len,
-    live_dict_view_item, make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
-    make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
-    make_reversed_sequence_iterator, ordered_mapping_guard_outcome, set_iterator_retained_values,
-    value_has_length_hint,
+    OrderedIterationWatch, ProviderIterator, RangeIter, ZipIter, builtin_iterator_has_length_hint,
+    copy_iterator_object, indexed_sequence_item, iter_values, iterator_retained_values,
+    live_collection_len, live_dict_view_item, make_iterator, make_reversed_dict_iter,
+    make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
+    make_reversed_range_iterator, make_reversed_sequence_iterator, ordered_mapping_guard_outcome,
+    set_iterator_retained_values, value_has_length_hint,
 };
 
 mod type_objects {

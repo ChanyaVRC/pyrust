@@ -945,14 +945,32 @@ fn ordered_mapping_backing_id(container: &Value) -> Option<i64> {
 pub(crate) fn ordered_mapping_guard_outcome(
     container: &Value,
     recorded_len: usize,
-    iter_seq: u64,
+    watch: &OrderedIterationWatch,
 ) -> pyrust_builtins::ordered_mapping::GuardOutcome {
     pyrust_builtins::ordered_mapping::guard_outcome(
         ordered_mapping_backing_id(container),
         recorded_len,
         live_collection_len(container),
-        iter_seq,
+        watch,
     )
+}
+
+/// The provider-owned guard state a tagged ordered-mapping iterator carries
+/// for life. Named here so consumers — including the fast-path domain, which
+/// must not reach into the builtins crate — see one typed decision surface.
+pub(crate) type OrderedIterationWatch = pyrust_builtins::ordered_mapping::IterationWatch;
+
+/// Snapshot the provider-owned guard state a new ordered-mapping iterator
+/// carries, registering it against the backing mapping so entry-order
+/// relinking is tracked for as long as the iterator lives (#2931).
+///
+/// Registration is what makes the generation advance at all, so holding it
+/// for the guard's lifetime is load-bearing rather than incidental — and it
+/// resolves every carrier shape (the mapping, a builtin-subclass instance's
+/// `__builtin_data__`, a live dict view) to the one backing store the clear
+/// registry is also keyed by.
+pub(crate) fn ordered_iteration_watch(container: &Value) -> OrderedIterationWatch {
+    pyrust_builtins::ordered_mapping::watch_iteration(live_collection_mutation_state(container))
 }
 
 #[cfg(test)]

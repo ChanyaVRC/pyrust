@@ -341,7 +341,10 @@ pub(crate) struct NativeIterGuard {
     pub(crate) kind: GuardVersion,
     pub(crate) msg: &'static str,
     pub(crate) exhaust_first: bool,
-    pub(crate) provider_sequence: u64,
+    /// Provider-owned guard state for a tagged ordered mapping — the clear
+    /// generation and the entry-order counter this iterator is diagnosed
+    /// against. `None` for every other guarded collection.
+    pub(crate) ordered_watch: Option<OrderedIterationWatch>,
 }
 
 #[derive(Clone)]
