@@ -15,12 +15,13 @@
 //!
 //! ## Identity (`vars(obj) is vars(obj)`)
 //!
-//! CPython guarantees `vars(obj) is vars(obj)` for the same instance.  pyrust
-//! implements this in `values_are_identical` (helpers.rs): when both operands
-//! are `instance_dict` proxies, identity is True iff both reference the same
-//! underlying `PyInstance` (checked via `Rc::ptr_eq`).  This avoids caching
-//! state in `PyInstance` (which would create a reference cycle) while still
-//! satisfying the CPython parity test.
+//! CPython guarantees `vars(obj) is vars(obj)` for the same instance.  The
+//! typed [`BuiltinTypeOps::identity_payload`] hook below publishes the target
+//! `PyInstance` pointer as this proxy type's identity payload.  Core combines
+//! it with the concrete ops type in a dedicated namespace, so repeated fresh
+//! proxy states for one target agree without colliding with the target object
+//! itself.  This avoids caching state in `PyInstance` (which would create a
+//! reference cycle).
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -74,6 +75,10 @@ impl BuiltinTypeOps for InstanceDictOps {
 
     fn canonical_class_tag(&self) -> Option<pyrust_core::CanonicalClassTag> {
         Some(pyrust_core::CanonicalClassTag::Dict)
+    }
+
+    fn identity_payload(&self, state: &BuiltinState) -> Option<u64> {
+        borrow_state(state).map(|proxy| Rc::as_ptr(&proxy.instance) as u64)
     }
 
     fn repr(&self, state: &BuiltinState) -> String {
@@ -647,54 +652,11 @@ pub fn exception_dict_state(instance: &Rc<RefCell<PyInstance>>) -> Vec<(String, 
 /// Construct an `instance_dict` proxy wrapping a live `PyInstance` reference.
 ///
 /// Each call returns a fresh `BuiltinObject` value whose backing `Rc` is
-/// distinct.  CPython identity (`vars(obj) is vars(obj)`) is implemented
-/// separately in `values_are_identical` by comparing the `instance` `Rc`
-/// pointers of two `instance_dict` proxies.
+/// distinct.  The ops table's typed identity hook makes each state expose the
+/// shared target instance identity to core.
 pub fn instance_dict(instance: Rc<RefCell<PyInstance>>) -> Value {
     let state: Box<dyn Any> = Box::new(InstanceDictState { instance });
     Value::builtin_object(INSTANCE_DICT_OPS, state)
-}
-
-/// Return `true` if both `BuiltinState` values are `instance_dict` proxies for
-/// the same underlying `PyInstance` (by `Rc` pointer equality).
-///
-/// Used by `values_are_identical` to implement `vars(a) is vars(a)` → `True`
-/// without caching the proxy inside the instance.
-pub fn same_instance(a: &BuiltinState, b: &BuiltinState) -> bool {
-    let a_s = match borrow_state(a) {
-        Some(s) => s,
-        None => return false,
-    };
-    let b_s = match borrow_state(b) {
-        Some(s) => s,
-        None => return false,
-    };
-    Rc::ptr_eq(&a_s.instance, &b_s.instance)
-}
-
-/// Return `true` when both values are `instance_dict` proxies for the same
-/// underlying Python instance.
-///
-/// Keeping the concrete-type checks beside the state downcast prevents the
-/// interpreter's generic identity layer from decoding this module's Python
-/// presentation name.
-pub fn same_proxy_target(a: &Value, b: &Value) -> bool {
-    let (
-        ValueKind::BuiltinObject {
-            ops: a_ops,
-            state: a_state,
-        },
-        ValueKind::BuiltinObject {
-            ops: b_ops,
-            state: b_state,
-        },
-    ) = (a.kind(), b.kind())
-    else {
-        return false;
-    };
-    builtin_ops_is::<InstanceDictOps>(a_ops)
-        && builtin_ops_is::<InstanceDictOps>(b_ops)
-        && same_instance(a_state, b_state)
 }
 
 fn borrow_state(state: &BuiltinState) -> Option<std::cell::Ref<'_, InstanceDictState>> {

@@ -317,12 +317,64 @@ mod singleton_method_name_tests {
 #[cfg(test)]
 mod object_id_tests {
     use super::values_are_identical;
-    use pyrust_core::{PyDict, PySet, Value};
+    use pyrust_core::{
+        BuiltinState, BuiltinTypeOps, InstanceAttrs, PyBigInt, PyClass, PyDict, PyInstance, PySet,
+        Value,
+    };
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct DefaultIdentityOpsA;
+    struct DefaultIdentityOpsB;
+
+    impl BuiltinTypeOps for DefaultIdentityOpsA {
+        fn type_name(&self) -> &'static str {
+            "identity_test_a"
+        }
+    }
+
+    impl BuiltinTypeOps for DefaultIdentityOpsB {
+        fn type_name(&self) -> &'static str {
+            "identity_test_b"
+        }
+    }
+
+    static DEFAULT_IDENTITY_OPS_A: DefaultIdentityOpsA = DefaultIdentityOpsA;
+    static DEFAULT_IDENTITY_OPS_B: DefaultIdentityOpsB = DefaultIdentityOpsB;
 
     /// One representative value per identity representation, plus the pairs
     /// that used to collide on id `0`: `None` / `0` / `0.0` / `-0.0` /
     /// `False`, two separately boxed NaNs, and two equal complexes.
     fn matrix() -> Vec<Value> {
+        let class = Rc::new(RefCell::new(PyClass::default()));
+        let instance = Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(&class),
+            attrs: InstanceAttrs::new(),
+        }));
+        let other_instance = Rc::new(RefCell::new(PyInstance {
+            class,
+            attrs: InstanceAttrs::new(),
+        }));
+        let instance_value = Value::py_instance(Rc::clone(&instance));
+        let proxy_a = pyrust_builtins::instance_dict::instance_dict(Rc::clone(&instance));
+        let proxy_alias_state =
+            pyrust_builtins::instance_dict::instance_dict(Rc::clone(&instance));
+        let other_proxy = pyrust_builtins::instance_dict::instance_dict(other_instance);
+        let big_stop: PyBigInt = PyBigInt::from(1_u8) << 70;
+        let shared_builtin_state: BuiltinState =
+            Rc::new(RefCell::new(Box::new(()) as Box<dyn Any>));
+        let default_builtin_a = Value::builtin_object_shared(
+            &DEFAULT_IDENTITY_OPS_A,
+            Rc::clone(&shared_builtin_state),
+        );
+        // The historical BuiltinObject identity is its shared state even if
+        // two wrappers install different default ops tables.
+        let default_builtin_shared_other_ops =
+            Value::builtin_object_shared(&DEFAULT_IDENTITY_OPS_B, shared_builtin_state);
+        let default_builtin_distinct =
+            Value::builtin_object(&DEFAULT_IDENTITY_OPS_A, Box::new(()));
+
         vec![
             Value::none(),
             Value::ellipsis(),
@@ -367,6 +419,17 @@ mod object_id_tests {
             Value::tuple(vec![Value::int(1), Value::int(2)]),
             Value::set(PySet::default()),
             Value::dict(PyDict::default()),
+            Value::range(0, 10, 1),
+            Value::range(0, 10, 1),
+            Value::range_big(PyBigInt::from(0), big_stop.clone(), PyBigInt::from(1)),
+            Value::range_big(PyBigInt::from(0), big_stop, PyBigInt::from(1)),
+            instance_value,
+            proxy_a,
+            proxy_alias_state,
+            other_proxy,
+            default_builtin_a,
+            default_builtin_shared_other_ops,
+            default_builtin_distinct,
         ]
     }
 
@@ -374,11 +437,9 @@ mod object_id_tests {
     /// `object_id` equality agrees with `values_are_identical` (#2956).  This
     /// is the guard that keeps the two definitions from drifting apart again.
     ///
-    /// Two known holes are deliberately left out of the matrix; both are `is`
-    /// bugs rather than `id` bugs.  `range` has no arm in
-    /// `values_are_identical` at all (so even `r is r` is False), and an
-    /// `instance_dict` proxy compares by proxy *target*, which lives in
-    /// `pyrust-builtins` and is invisible to `pyrust-core`.
+    /// The matrix includes every identity representation, including compact
+    /// and big ranges plus two fresh `instance_dict` proxy states for the same
+    /// target.  There are no excluded kinds.
     #[test]
     fn object_id_agrees_with_values_are_identical() {
         let values = matrix();
@@ -437,5 +498,49 @@ mod object_id_tests {
             Value::complex(1.0, f64::from_bits(0x18e1_ebef_62fc_0279));
         assert!(!values_are_identical(&zero, &old_fold_collision));
         assert_ne!(zero.object_id(), old_fold_collision.object_id());
+    }
+
+    #[test]
+    fn range_identity_uses_the_shared_object_not_equal_bounds() {
+        let compact = Value::range(0, 10, 1);
+        let compact_alias = compact.clone();
+        let equal_compact = Value::range(0, 10, 1);
+        assert!(values_are_identical(&compact, &compact_alias));
+        assert_eq!(compact.object_id(), compact_alias.object_id());
+        assert!(!values_are_identical(&compact, &equal_compact));
+        assert_ne!(compact.object_id(), equal_compact.object_id());
+
+        let stop: PyBigInt = PyBigInt::from(1_u8) << 70;
+        let big = Value::range_big(PyBigInt::from(0), stop.clone(), PyBigInt::from(1));
+        let big_alias = big.clone();
+        let equal_big = Value::range_big(PyBigInt::from(0), stop, PyBigInt::from(1));
+        assert!(values_are_identical(&big, &big_alias));
+        assert_eq!(big.object_id(), big_alias.object_id());
+        assert!(!values_are_identical(&big, &equal_big));
+        assert_ne!(big.object_id(), equal_big.object_id());
+    }
+
+    #[test]
+    fn instance_dict_identity_uses_a_typed_target_namespace() {
+        let class = Rc::new(RefCell::new(PyClass::default()));
+        let target = Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(&class),
+            attrs: InstanceAttrs::new(),
+        }));
+        let other_target = Rc::new(RefCell::new(PyInstance {
+            class,
+            attrs: InstanceAttrs::new(),
+        }));
+        let target_value = Value::py_instance(Rc::clone(&target));
+        let first = pyrust_builtins::instance_dict::instance_dict(Rc::clone(&target));
+        let fresh_state = pyrust_builtins::instance_dict::instance_dict(target);
+        let other = pyrust_builtins::instance_dict::instance_dict(other_target);
+
+        assert!(values_are_identical(&first, &fresh_state));
+        assert_eq!(first.object_id(), fresh_state.object_id());
+        assert!(!values_are_identical(&first, &target_value));
+        assert_ne!(first.object_id(), target_value.object_id());
+        assert!(!values_are_identical(&first, &other));
+        assert_ne!(first.object_id(), other.object_id());
     }
 }

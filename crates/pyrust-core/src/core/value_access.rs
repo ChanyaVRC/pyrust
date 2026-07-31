@@ -235,79 +235,101 @@ impl Value {
         }
     }
 
-    /// Python object identity — the number `id()` reports.
+    /// The single typed identity key consumed by both `is` and `id()`.
     ///
-    /// Unlike [`Value::value_id`] this is *total*: every value has an
-    /// identity, so `id()` no longer has to invent one per kind and can no
-    /// longer disagree with `is` by omission (#2956).  The contract is
+    /// Allocation addresses, monotonic ids, inline boxes, floats, complexes,
+    /// and target-identity built-in proxies are distinct variants.  Equality
+    /// can therefore never merge two representations merely because their
+    /// raw `u64` payloads happen to match.
+    fn object_identity(&self) -> ObjectIdentity {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::object_identity() called on an uninitialised register slot"
+        );
+
+        if self.is_float() {
+            return ObjectIdentity::Float(self.0);
+        }
+        if self.is_not_implemented() || self.is_ellipsis() {
+            return ObjectIdentity::RawValue(self.0);
+        }
+
+        match top16(self.0) {
+            TAG_NONE | TAG_BOOL | TAG_INT => ObjectIdentity::RawValue(self.0),
+            TAG_STR if str_is_inline_bits(self.0) => ObjectIdentity::RawValue(self.0),
+            TAG_STR => ObjectIdentity::Allocation(self.0 & PAYLOAD_MASK),
+            TAG_TUPLE => ObjectIdentity::Counter(unsafe { self.tuple_inner() }.obj_id),
+            TAG_LIST => ObjectIdentity::Counter(unsafe { self.list_inner() }.obj_id),
+            TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
+                Opaque::PyBigInt(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Dict(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Set(rc) => ObjectIdentity::Counter(rc.obj_id),
+                // Range aliases share this refcounted opaque slot; separately
+                // constructed equal ranges have distinct slots.
+                Opaque::Range { .. } => {
+                    ObjectIdentity::Allocation(unsafe { self.opaque_slot_ptr() } as u64)
+                }
+                Opaque::BigRange(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::UserFunction(rc) => {
+                    ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64)
+                }
+                Opaque::PyClass(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::PyInstance(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::PyModule(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::BoundMethod { obj_id, .. }
+                | Opaque::ClassBoundMethod { obj_id, .. }
+                | Opaque::SuperProxy { obj_id, .. }
+                | Opaque::SuperProxyClass { obj_id, .. }
+                | Opaque::SuperProxyUnbound { obj_id, .. } => ObjectIdentity::Counter(*obj_id),
+                Opaque::Generator(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Bytes(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
+                Opaque::Complex(re, im) => ObjectIdentity::Complex {
+                    real: re.to_bits(),
+                    imag: im.to_bits(),
+                },
+                Opaque::SmallTuple2 { obj_id, .. } | Opaque::SmallTuple3 { obj_id, .. } => {
+                    ObjectIdentity::Counter(*obj_id)
+                }
+                Opaque::BuiltinObject { ops, state } => {
+                    match ops.identity_payload(state) {
+                        Some(payload) => ObjectIdentity::Builtin {
+                            type_id: ops.type_id(),
+                            payload,
+                        },
+                        None => ObjectIdentity::Allocation(Rc::as_ptr(state) as u64),
+                    }
+                }
+            },
+            _ => unreachable!("invalid NaN-box tag in object identity"),
+        }
+    }
+
+    /// Exact Python object-identity comparison.
+    ///
+    /// This is allocation-free.  The interpreter's `is` / `is not` operators
+    /// delegate here so they cannot drift from [`Value::object_id`].
+    #[inline]
+    pub fn is_identical_to(&self, other: &Value) -> bool {
+        self.object_identity() == other.object_identity()
+    }
+
+    /// Python object identity — the non-negative integer `id()` reports.
+    ///
+    /// [`Value::is_identical_to`] and this method consume the same typed key.
+    /// Its injective numeric encoding gives the total contract
     ///
     /// ```text
-    /// values_are_identical(a, b)  ==  (a.object_id() == b.object_id())
+    /// a.is_identical_to(b) == (a.object_id() == b.object_id())
     /// ```
     ///
-    /// which `helpers/tests.rs::object_id_agrees_with_values_are_identical`
-    /// pins.  Three representations feed it:
-    ///
-    /// - **heap-backed values** reuse [`Value::value_id`]'s shared backing
-    ///   address or monotonic id, so aliases agree;
-    /// - **`complex`** is identified by its component bits rather than by its
-    ///   heap slot, because that is what `is` compares (#2949) — the two
-    ///   `f64` bit patterns are concatenated into one exact 128-bit payload;
-    /// - **immediates** (int, bool, `None`, `...`, `NotImplemented`) have no
-    ///   address at all, so the NaN-box pattern *is* the identity — exactly
-    ///   the bits `is` compares.  Distinct tags keep the kinds disjoint
-    ///   (`id(0)`, `id(False)` and `id(None)` all differ);
-    /// - **`float`** is the one immediate with no tag — its box is the double
-    ///   — so its raw bits would overlap the heap ids (see
-    ///   [`float_obj_id`]).  Its 64-bit payload is placed above the ordinary
-    ///   `u64` id space instead; a minted NaN payload still gives every
-    ///   `float('nan')` its own id.
-    ///
-    /// The result is already a non-negative Python `int` [`Value`].  Ordinary
-    /// identities use [`Value::uint`]; the exact float and complex namespaces
-    /// use arbitrary-precision ints because they extend past 64 bits.
-    ///
-    /// Float and complex ids are injective in the exact bits that `is`
-    /// compares, and their numeric ranges are disjoint from each other and
-    /// every ordinary id.  Identity therefore never depends on a hash
-    /// collision not occurring.
+    /// Allocation-backed values retain their existing `u64` address id.
+    /// Counter, raw-box, float, complex, and custom built-in identities occupy
+    /// disjoint arbitrary-precision namespaces; none relies on hashing.
     pub fn object_id(&self) -> Value {
-        // A string's identity is its whole NaN box rather than the bare
-        // payload `value_id` returns: an inline (SSO) string *is* its
-        // payload, so a short one would otherwise land in the same small
-        // range as the monotonic list/tuple ids (`id("") == id([])`).
-        // Keeping the tag makes every string id disjoint from every other
-        // kind's, and within `str` the two forms differ by a constant, so the
-        // equality relation `is` uses is unchanged.
-        if top16(self.0) == TAG_STR {
-            return Value::uint(self.0);
+        match self.object_identity().encode() {
+            EncodedObjectIdentity::Unsigned(id) => Value::uint(id),
+            EncodedObjectIdentity::Wide(id) => Value::bigint(id),
         }
-        if let Some(id) = self.value_id() {
-            return Value::uint(id as u64);
-        }
-        if top16(self.0) == TAG_OPAQUE {
-            let id = match unsafe { &*self.opaque_ptr() } {
-                Opaque::Complex(re, im) => return Value::bigint(complex_obj_id(*re, *im)),
-                // PyClass / PyInstance: one `Rc` can be wrapped by several
-                // opaque slots (`Value::py_instance` clones the `Rc` into a
-                // fresh slot), so identity is the inner pointer — the same
-                // thing the `Rc::ptr_eq` behind `is` compares.
-                Opaque::PyClass(rc) => Rc::as_ptr(rc) as u64,
-                Opaque::PyInstance(rc) => Rc::as_ptr(rc) as u64,
-                Opaque::BigRange(rc) => Rc::as_ptr(rc) as u64,
-                // `Opaque::Range` stores its bounds inline, so the refcounted
-                // slot — shared by every clone — is the object itself.
-                _ => (unsafe { self.opaque_slot_ptr() }) as u64,
-            };
-            return Value::uint(id);
-        }
-        // Immediate: the NaN-box pattern is the object.  A float is the one
-        // that carries no tag to keep it clear of the heap ids, so its exact
-        // bits occupy a separate arbitrary-precision namespace.
-        if self.is_float() {
-            return Value::bigint(float_obj_id(self.0));
-        }
-        Value::uint(self.0)
     }
 
     // ── Private unsafe helpers ───────────────────────────────────────────────

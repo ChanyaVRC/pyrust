@@ -35,6 +35,16 @@ class Obj:
 
 inst = Obj()
 inst_alias = inst
+other_inst = Obj()
+inst_dict_a = vars(inst)
+inst_dict_b = vars(inst)
+other_inst_dict = vars(other_inst)
+small_range = range(10)
+small_range_alias = small_range
+equal_small_range = range(10)
+big_range = range(10**30)
+big_range_alias = big_range
+equal_big_range = range(10**30)
 
 pairs = [
     (nan1, nan1),
@@ -59,6 +69,13 @@ pairs = [
     (lst_a, lst_b),
     (inst, inst_alias),
     (inst, lst_a),
+    (small_range, small_range_alias),
+    (small_range, equal_small_range),
+    (big_range, big_range_alias),
+    (big_range, equal_big_range),
+    (inst_dict_a, inst_dict_b),
+    (inst_dict_a, other_inst_dict),
+    (inst_dict_a, inst),
     ("abc", "abc"),
     (b"xy", b"xy"),
 ]
@@ -73,12 +90,51 @@ print("complex-distinct", id(c1) != id(c2))
 print("cross-type-distinct", len({id(o) for o in (0, 0.0, False, None, ..., NotImplemented)}) == 6)
 print("int-float-distinct", id(1) != id(1.0), id(1) != id(True))
 print("heap-distinct", id(lst_a) != id(lst_b), id(inst) != id(lst_a))
+print(
+    "range-identity",
+    id(small_range) == id(small_range_alias),
+    id(small_range) != id(equal_small_range),
+    id(big_range) == id(big_range_alias),
+    id(big_range) != id(equal_big_range),
+)
+print(
+    "instance-dict-identity",
+    id(inst_dict_a) == id(inst_dict_b),
+    id(inst_dict_a) != id(other_inst_dict),
+    id(inst_dict_a) != id(inst),
+)
 
 # Stability: the same object keeps its id.
 print("stable", id(f1) == id(f1), id(nan1) == id(nan1), id(c1) == id(c1), id(inst) == id(inst))
 
 # id() is a non-negative int, and is usable as a dict key.
-objs = [nan1, nan2, f1, f2, zero, neg_zero, c1, c2, 0, 1, True, False, None, ..., NotImplemented, lst_a, lst_b, inst, "abc"]
+objs = [
+    nan1,
+    nan2,
+    f1,
+    f2,
+    zero,
+    neg_zero,
+    c1,
+    c2,
+    0,
+    1,
+    True,
+    False,
+    None,
+    ...,
+    NotImplemented,
+    lst_a,
+    lst_b,
+    inst,
+    inst_dict_a,
+    other_inst_dict,
+    small_range,
+    equal_small_range,
+    big_range,
+    equal_big_range,
+    "abc",
+]
 print("int-type", all(type(id(o)) is int for o in objs))
 print("non-negative", all(id(o) >= 0 for o in objs))
 print("id-keyed", len({id(o): None for o in objs}) == len(objs))
@@ -160,6 +216,14 @@ keep.extend(
         old_fmix_collision,
         old_fold_a,
         old_fold_b,
+        inst,
+        inst_dict_a,
+        other_inst,
+        other_inst_dict,
+        small_range,
+        equal_small_range,
+        big_range,
+        equal_big_range,
     ]
 )
 print("sweep-size", len(keep))
