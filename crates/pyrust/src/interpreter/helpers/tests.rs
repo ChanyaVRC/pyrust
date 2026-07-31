@@ -382,22 +382,18 @@ mod object_id_tests {
         }));
         let instance_value = Value::py_instance(Rc::clone(&instance));
         let proxy_a = pyrust_builtins::instance_dict::instance_dict(Rc::clone(&instance));
-        let proxy_alias_state =
-            pyrust_builtins::instance_dict::instance_dict(Rc::clone(&instance));
+        let proxy_alias_state = pyrust_builtins::instance_dict::instance_dict(Rc::clone(&instance));
         let other_proxy = pyrust_builtins::instance_dict::instance_dict(other_instance);
         let big_stop: PyBigInt = PyBigInt::from(1_u8) << 70;
         let shared_builtin_state: BuiltinState =
             Rc::new(RefCell::new(Box::new(()) as Box<dyn Any>));
-        let default_builtin_a = Value::builtin_object_shared(
-            &DEFAULT_IDENTITY_OPS_A,
-            Rc::clone(&shared_builtin_state),
-        );
+        let default_builtin_a =
+            Value::builtin_object_shared(&DEFAULT_IDENTITY_OPS_A, Rc::clone(&shared_builtin_state));
         // The historical BuiltinObject identity is its shared state even if
         // two wrappers install different default ops tables.
         let default_builtin_shared_other_ops =
             Value::builtin_object_shared(&DEFAULT_IDENTITY_OPS_B, shared_builtin_state);
-        let default_builtin_distinct =
-            Value::builtin_object(&DEFAULT_IDENTITY_OPS_A, Box::new(()));
+        let default_builtin_distinct = Value::builtin_object(&DEFAULT_IDENTITY_OPS_A, Box::new(()));
 
         vec![
             Value::none(),
@@ -518,8 +514,7 @@ mod object_id_tests {
     #[test]
     fn complex_id_keeps_both_component_bit_patterns() {
         let zero = Value::complex(0.0, 0.0);
-        let old_fold_collision =
-            Value::complex(1.0, f64::from_bits(0x18e1_ebef_62fc_0279));
+        let old_fold_collision = Value::complex(1.0, f64::from_bits(0x18e1_ebef_62fc_0279));
         assert!(!values_are_identical(&zero, &old_fold_collision));
         assert_ne!(zero.object_id(), old_fold_collision.object_id());
     }
@@ -571,8 +566,7 @@ mod object_id_tests {
     #[test]
     fn custom_builtin_identity_keeps_concrete_ops_types_disjoint() {
         let first = Value::builtin_object(&OVERRIDE_IDENTITY_OPS_A, Box::new(()));
-        let same_payload_other_type =
-            Value::builtin_object(&OVERRIDE_IDENTITY_OPS_B, Box::new(()));
+        let same_payload_other_type = Value::builtin_object(&OVERRIDE_IDENTITY_OPS_B, Box::new(()));
 
         assert!(!values_are_identical(&first, &same_payload_other_type));
         assert_ne!(first.object_id(), same_payload_other_type.object_id());

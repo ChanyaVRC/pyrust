@@ -65,8 +65,7 @@ impl Interpreter {
     /// [`Value::object_id`], so the fast path is a pure short-cut rather than
     /// a second implementation.
     pub(super) fn try_identity_builtin_call(function: &Value, argument: &Value) -> Option<Value> {
-        matches!(function.kind(), ValueKind::BuiltinFunction("id"))
-            .then(|| argument.object_id())
+        matches!(function.kind(), ValueKind::BuiltinFunction("id")).then(|| argument.object_id())
     }
 
     /// Handle the concrete class objects supplied by the builtin layer.

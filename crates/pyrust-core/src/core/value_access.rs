@@ -270,9 +270,7 @@ impl Value {
                     ObjectIdentity::Allocation(unsafe { self.opaque_slot_ptr() } as u64)
                 }
                 Opaque::BigRange(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
-                Opaque::UserFunction(rc) => {
-                    ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64)
-                }
+                Opaque::UserFunction(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
                 Opaque::PyClass(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
                 Opaque::PyInstance(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
                 Opaque::PyModule(rc) => ObjectIdentity::Allocation(Rc::as_ptr(rc) as u64),
@@ -290,15 +288,13 @@ impl Value {
                 Opaque::SmallTuple2 { obj_id, .. } | Opaque::SmallTuple3 { obj_id, .. } => {
                     ObjectIdentity::Counter(*obj_id)
                 }
-                Opaque::BuiltinObject { ops, state } => {
-                    match ops.identity_payload(state) {
-                        Some(payload) => ObjectIdentity::Builtin {
-                            type_id: (*ops).type_id(),
-                            payload,
-                        },
-                        None => ObjectIdentity::Allocation(Rc::as_ptr(state) as u64),
-                    }
-                }
+                Opaque::BuiltinObject { ops, state } => match ops.identity_payload(state) {
+                    Some(payload) => ObjectIdentity::Builtin {
+                        type_id: (*ops).type_id(),
+                        payload,
+                    },
+                    None => ObjectIdentity::Allocation(Rc::as_ptr(state) as u64),
+                },
             },
             _ => unreachable!("invalid NaN-box tag in object identity"),
         }
