@@ -20,6 +20,7 @@ mod vm_tests {
             num_locals: 0,
             fn_protos: vec![],
             cell_vars: smallvec::smallvec![],
+            free_var_candidates: std::cell::OnceCell::new(),
             is_generator: false,
             is_coroutine: false,
             is_class_method: false,

@@ -562,38 +562,3 @@ impl pyrust_core::BuiltinTypeOps for DeferredTracebackOps {
         DEFERRED_TRACEBACK_NAME
     }
 }
-
-/// Collect the distinct names referenced via `LoadGlobal` in `fncode` and,
-/// recursively, in every nested code object (`fn_protos`).  A free variable
-/// read only inside a comprehension/genexpr, `lambda`, or nested `def`
-/// compiles its `LoadGlobal` into the nested body, so the enclosing
-/// function's free-variable set must include those names too (issue #2106).
-/// Names are de-duplicated via `seen`; the caller applies the env-resolution
-/// filter that distinguishes a true free variable from a module global or a
-/// nested body's own local.
-fn collect_loadglobal_names(
-    fncode: &crate::bytecode::FnCode,
-    seen: &mut std::collections::HashSet<String>,
-    out: &mut Vec<String>,
-) {
-    for insn in &fncode.insns {
-        // A free-variable read is `LoadGlobal` for a true global / module-scope
-        // capture, or `LoadCell` for a function-scope cell / `nonlocal` (issue
-        // #2339).  Both must feed the candidate set so `__closure__` /
-        // `co_freevars` still see cell reads now routed through `LoadCell`.
-        let name_idx = match insn {
-            crate::bytecode::Insn::LoadGlobal(_, idx) | crate::bytecode::Insn::LoadCell(_, idx) => {
-                *idx
-            }
-            _ => continue,
-        };
-        if let Some(name) = fncode.names.get(name_idx as usize)
-            && seen.insert(name.clone())
-        {
-            out.push(name.clone());
-        }
-    }
-    for proto in &fncode.fn_protos {
-        collect_loadglobal_names(&proto.code, seen, out);
-    }
-}

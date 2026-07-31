@@ -69,6 +69,11 @@ pub struct FnCode {
     /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
     /// functions with four or fewer captured variables.
     pub(crate) cell_vars: SmallVec<[CellVar; 4]>,
+    /// Memoized result of [`FnCode::free_var_candidates`] — the sorted, distinct
+    /// names this body reads through the environment chain.  Filled on first
+    /// use (`__closure__` / `co_freevars` / `locals()`), never on the dispatch
+    /// path.
+    pub(crate) free_var_candidates: std::cell::OnceCell<Vec<String>>,
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
     pub(crate) is_generator: bool,
@@ -183,6 +188,53 @@ pub struct FnCode {
     /// propagates straight out (no frame on the stack could catch it).
     /// Conservatively `true` for un-optimized bytecode (no trampolining).
     pub(crate) has_exc_handlers: bool,
+}
+
+impl FnCode {
+    /// The distinct names this body reads through the environment chain, sorted.
+    ///
+    /// A read that is not a fastlocal compiles to `LoadGlobal` (a true module
+    /// global or a module-scope capture) or `LoadCell` (a function-scope cell /
+    /// `nonlocal`, issue #2339), so both opcodes feed the set.  A free variable
+    /// referenced *only* inside a nested code object — a comprehension /
+    /// genexpr, `lambda`, or nested `def` — compiles its read into that nested
+    /// `FnCode`, yet CPython still reports it as a free variable of this one, so
+    /// every nested prototype contributes too.
+    ///
+    /// This is only a *candidate* set: which names are genuinely free variables
+    /// (rather than module globals or builtins) depends on the environment the
+    /// closure captured, so callers filter by resolving each name against that
+    /// chain.  The scan itself depends on nothing but the code object, so it is
+    /// memoized — `locals()` in a nested function would otherwise re-walk every
+    /// instruction on each call.
+    pub(crate) fn free_var_candidates(&self) -> &[String] {
+        self.free_var_candidates.get_or_init(|| {
+            let mut seen: HashSet<String> = HashSet::new();
+            let mut names: Vec<String> = Vec::new();
+            collect_env_read_names(self, &mut seen, &mut names);
+            // CPython reports `co_freevars` (and orders `__closure__` cells and
+            // the free-variable tail of `locals()`) sorted by name.
+            names.sort_unstable();
+            names
+        })
+    }
+}
+
+fn collect_env_read_names(fncode: &FnCode, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+    for insn in &fncode.insns {
+        let name_idx = match insn {
+            Insn::LoadGlobal(_, idx) | Insn::LoadCell(_, idx) => *idx,
+            _ => continue,
+        };
+        if let Some(name) = fncode.names.get(name_idx as usize)
+            && seen.insert(name.clone())
+        {
+            out.push(name.clone());
+        }
+    }
+    for proto in &fncode.fn_protos {
+        collect_env_read_names(&proto.code, seen, out);
+    }
 }
 
 pub(crate) use crate::optimizer::EXC_NO_HANDLER;

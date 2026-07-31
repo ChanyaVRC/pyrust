@@ -370,7 +370,10 @@ impl Interpreter {
                 } else {
                     Some(Rc::clone(&function.nonlocal_names))
                 };
-                let env_opt = if function.nonlocal_names.is_empty() {
+                // Issue #3024: a frame with cell vars must publish its env too —
+                // the cells live in the local env created above, not in the
+                // register file, so `locals()` can only reach them through here.
+                let env_opt = if function.nonlocal_names.is_empty() && code.cell_vars.is_empty() {
                     None
                 } else {
                     Some(Rc::clone(&self.env))
