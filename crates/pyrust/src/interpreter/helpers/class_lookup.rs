@@ -418,6 +418,7 @@ thread_local! {
                 }
             }
             let mut class = PyClass::new(name, name, Some(Rc::clone(&obj)), attrs);
+            class.builtin_type_tag = Some(kind.tag());
             class.non_subclassable_name = kind.non_subclassable_name();
             let cls = Rc::new(RefCell::new(class));
             obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));

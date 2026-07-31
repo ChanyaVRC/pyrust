@@ -132,24 +132,18 @@ fn builtin_type_class_for_isinstance(obj: &Value) -> Option<BuiltinTypeClass> {
 ///
 /// Callers deliberately invoke this only from the existing `Generator` /
 /// `BuiltinObject` arms of `isinstance_single`.  Keeping it outside the
-/// primitive fast path means ordinary hits and misses execute exactly the same
-/// branches and class-pointer comparisons they did before #3000.
+/// primitive fast path means ordinary primitive and user values do not acquire
+/// backing-kind probes.  The expected class's immutable tag is checked first,
+/// so a native iterator tested against an unrelated user class also falls
+/// through without inspecting its backing.
 #[inline]
 pub(crate) fn builtin_type_class_isinstance_fast(
     obj: &Value,
     cls: &Rc<RefCell<PyClass>>,
 ) -> Option<bool> {
+    let expected_kind = BuiltinTypeClass::from_tag(cls.borrow().builtin_type_tag?);
     let actual_kind = builtin_type_class_for_isinstance(obj)?;
-    let cls_ptr = Rc::as_ptr(cls);
-    BUILTIN_TYPE_CLASSES.with(|classes| {
-        if cls_ptr == Rc::as_ptr(&classes[actual_kind as usize]) {
-            return Some(true);
-        }
-        classes
-            .iter()
-            .any(|candidate| cls_ptr == Rc::as_ptr(candidate))
-            .then_some(false)
-    })
+    Some(actual_kind == expected_kind)
 }
 
 /// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the

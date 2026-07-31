@@ -75,6 +75,28 @@ impl BuiltinTypeClass {
         }
     }
 
+    pub(crate) const fn tag(self) -> pyrust_core::BuiltinTypeClassTag {
+        match self {
+            Self::Zip => pyrust_core::BuiltinTypeClassTag::Zip,
+            Self::Map => pyrust_core::BuiltinTypeClassTag::Map,
+            Self::Filter => pyrust_core::BuiltinTypeClassTag::Filter,
+            Self::Enumerate => pyrust_core::BuiltinTypeClassTag::Enumerate,
+            Self::Slice => pyrust_core::BuiltinTypeClassTag::Slice,
+            Self::Reversed => pyrust_core::BuiltinTypeClassTag::Reversed,
+        }
+    }
+
+    pub(crate) const fn from_tag(tag: pyrust_core::BuiltinTypeClassTag) -> Self {
+        match tag {
+            pyrust_core::BuiltinTypeClassTag::Zip => Self::Zip,
+            pyrust_core::BuiltinTypeClassTag::Map => Self::Map,
+            pyrust_core::BuiltinTypeClassTag::Filter => Self::Filter,
+            pyrust_core::BuiltinTypeClassTag::Enumerate => Self::Enumerate,
+            pyrust_core::BuiltinTypeClassTag::Slice => Self::Slice,
+            pyrust_core::BuiltinTypeClassTag::Reversed => Self::Reversed,
+        }
+    }
+
     /// CPython gives `zip` / `map` / `filter` / `enumerate` / `reversed` the
     /// `Py_TPFLAGS_BASETYPE` flag, so they may be subclassed; `slice` does not
     /// have it and raises `TypeError: type 'slice' is not an acceptable base

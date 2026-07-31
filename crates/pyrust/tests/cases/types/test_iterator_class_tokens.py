@@ -62,6 +62,8 @@ class UserIteratorClass:
 # generator must be rejected from its immutable kind tag without borrowing its
 # currently checked-out frame state.
 print(isinstance(z, UserIteratorClass), isinstance(UserIteratorClass(), zip))
+SameNamedZip = type("zip", (object,), {})
+print(isinstance(z, SameNamedZip), isinstance(SameNamedZip(), zip))
 running_holder = {}
 
 

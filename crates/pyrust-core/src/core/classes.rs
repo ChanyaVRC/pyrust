@@ -108,6 +108,21 @@ impl CanonicalClassTag {
     }
 }
 
+/// Immutable identity for the real built-in class objects introduced by issue
+/// #3000.  They do not own a primitive [`ValueKind`] tag, so this metadata is
+/// intentionally separate from [`CanonicalClassTag`].  Ordinary user classes,
+/// including same-named classes and subclasses of these types, never receive
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinTypeClassTag {
+    Zip,
+    Map,
+    Filter,
+    Enumerate,
+    Slice,
+    Reversed,
+}
+
 #[derive(Debug, Clone)]
 pub struct PyClass {
     pub name: String,
@@ -182,6 +197,10 @@ pub struct PyClass {
     /// `NoneType` decisions use it instead of mutable visible names. `None`
     /// denotes an ordinary user-defined class.
     pub canonical_tag: Option<CanonicalClassTag>,
+    /// Stable identity for issue #3000's six non-primitive built-in type
+    /// singletons.  Kept off Python-visible attrs so renaming or copying a
+    /// native descriptor onto a user class cannot spoof the identity.
+    pub builtin_type_tag: Option<BuiltinTypeClassTag>,
     /// Stable canonical name for a built-in exception class.
     ///
     /// This is internal type metadata, not Python-visible `__name__`.
@@ -218,6 +237,7 @@ impl Default for PyClass {
             new_slot_wrapped: Cell::new(false),
             override_repr: None,
             canonical_tag: None,
+            builtin_type_tag: None,
             builtin_exception_name: None,
             non_subclassable_name: None,
         }
