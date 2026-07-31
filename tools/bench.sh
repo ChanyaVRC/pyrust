@@ -18,6 +18,14 @@
 #   --markdown-out PATH
 #   --json-out PATH
 #
+# Environment:
+#   PYRUST_BENCH_MEM_MB     address-space cap for every child (default 4096;
+#                           0 disables).  This caps VIRTUAL size, not RSS —
+#                           see the floor note by BENCH_MEM_FLOOR_MB before
+#                           lowering it.
+#   PYRUST_BENCH_TIMEOUT_S  wall-clock cap per benchmark case (default 300;
+#                           0 disables)
+#
 # Requires: hyperfine  (cargo install hyperfine  or  apt install hyperfine)
 
 set -euo pipefail
@@ -60,6 +68,88 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# ── resource caps ──────────────────────────────────────────────────────────────
+# A runaway interpreter (allocation storm, unbounded native recursion) can eat
+# memory faster than the host can reclaim it and take the whole box down — this
+# has crashed the WSL2 development VM.  tools/run-limited.sh caps every ad-hoc
+# invocation and the parity harness caps every fixture child; benchmark children
+# were the remaining uncapped path.
+#
+# Benches must stay low-overhead, so we do NOT wrap each timed command (that
+# would put an extra process in every measurement).  Instead the address-space
+# cap is applied once to this shell: rlimits are inherited across fork/exec, so
+# hyperfine, /usr/bin/time and every interpreter they spawn run under it at zero
+# measurement cost.  The wall-clock cap goes around each hyperfine invocation,
+# outside the timing loop.
+BENCH_MEM_MB="${PYRUST_BENCH_MEM_MB:-4096}"
+BENCH_TIMEOUT_S="${PYRUST_BENCH_TIMEOUT_S:-300}"
+
+# `ulimit -v` caps ADDRESS SPACE, not resident memory, and a pyrust child
+# reserves its interpreter thread stack up front (main.rs::INTERPRETER_STACK_SIZE
+# — 128 MiB release, 256 MiB debug).  Measured on this box: VmPeak ~275 MB
+# release / ~415 MB debug against a peak RSS of only ~10-15 MB.  Sizing this cap
+# from RSS is therefore the trap: below ~184 MiB (release) / ~320 MiB (debug,
+# which is bench.sh's default target) every child aborts before it runs a line of
+# Python, and the only symptom is "hyperfine failed for <case> (exit 1)".
+BENCH_MEM_FLOOR_MB=512
+
+# Reject junk loudly: a typo'd override must not silently leave children
+# uncapped, which is the exact failure these limits exist to prevent.  The digit
+# bound matters as much as the character class — a value with more digits than
+# this overflows the `* 1024` below and would quietly install a nonsense cap
+# (18014398509481985 wraps to exactly 1024 KiB).
+[[ "$BENCH_MEM_MB" =~ ^[0-9]{1,7}$ ]] || {
+  echo "error: PYRUST_BENCH_MEM_MB must be an integer in 0..9999999 (got '$BENCH_MEM_MB')" >&2
+  exit 2
+}
+[[ "$BENCH_TIMEOUT_S" =~ ^[0-9]{1,7}$ ]] || {
+  echo "error: PYRUST_BENCH_TIMEOUT_S must be an integer in 0..9999999 (got '$BENCH_TIMEOUT_S')" >&2
+  exit 2
+}
+
+if [[ "$BENCH_MEM_MB" -gt 0 ]] && [[ "$BENCH_MEM_MB" -lt "$BENCH_MEM_FLOOR_MB" ]]; then
+  echo "warning: PYRUST_BENCH_MEM_MB=$BENCH_MEM_MB is below the ${BENCH_MEM_FLOOR_MB} MiB floor;" >&2
+  echo "         pyrust reserves a 128-256 MiB interpreter stack, so cases may abort at" >&2
+  echo "         startup and be reported as ordinary benchmark failures" >&2
+fi
+
+CAP_DESC="disabled"
+if [[ "$BENCH_MEM_MB" -gt 0 ]]; then
+  BENCH_MEM_KB=$((BENCH_MEM_MB * 1024))
+  # -v (RLIMIT_AS) and -d (RLIMIT_DATA) mirror tools/run-limited.sh.  Both are
+  # attempted independently so a platform that only honours one still gets it.
+  # A lower inherited limit (bench.sh run under run-limited.sh, say) cannot be
+  # raised and must not be reported as a failure — read back what is actually in
+  # force and describe the tighter of the two.
+  ulimit -v "$BENCH_MEM_KB" 2>/dev/null || true
+  ulimit -d "$BENCH_MEM_KB" 2>/dev/null || true
+  EFFECTIVE_KB=""
+  for cur in "$(ulimit -v)" "$(ulimit -d)"; do
+    [[ "$cur" =~ ^[0-9]+$ ]] || continue          # "unlimited"
+    if [[ -z "$EFFECTIVE_KB" ]] || [[ "$cur" -lt "$EFFECTIVE_KB" ]]; then
+      EFFECTIVE_KB="$cur"
+    fi
+  done
+  if [[ -n "$EFFECTIVE_KB" ]]; then
+    CAP_DESC="$((EFFECTIVE_KB / 1024)) MiB"
+  else
+    echo "warning: could not lower the address-space rlimit; bench children run uncapped" >&2
+  fi
+fi
+
+HYPERFINE_CMD=(hyperfine)
+PROBE_CMD=()
+TIMEOUT_DESC="disabled"
+if [[ "$BENCH_TIMEOUT_S" -gt 0 ]]; then
+  if command -v timeout >/dev/null 2>&1; then
+    HYPERFINE_CMD=(timeout -k 5 "$BENCH_TIMEOUT_S" hyperfine)
+    PROBE_CMD=(timeout -k 5 "$BENCH_TIMEOUT_S")
+    TIMEOUT_DESC="${BENCH_TIMEOUT_S}s per case"
+  else
+    echo "warning: 'timeout' not found; bench cases run without a wall-clock cap" >&2
+  fi
+fi
 
 # ── resolve binaries ───────────────────────────────────────────────────────────
 PYTHON="${PYRUST_PY_BIN:-python3}"
@@ -117,7 +207,10 @@ echo "  pyrust : $PYRUST"
 echo "  python : $PYTHON"
 [[ -n "$BASE_BIN" ]] && echo "  base   : $BASE_BIN"
 echo "  scripts: ${#SCRIPTS[@]}"
+echo "  caps   : address space $CAP_DESC, wall clock $TIMEOUT_DESC"
 echo ""
+
+TIMED_OUT=()
 
 for script in "${SCRIPTS[@]}"; do
   rel="${script#"$CASES_DIR/"}"
@@ -136,7 +229,7 @@ for script in "${SCRIPTS[@]}"; do
   # Probe the base binary before benchmarking — skip it for scripts that
   # exercise features not yet on the base branch (e.g. tests added in this PR).
   if [[ -n "$BASE_BIN" ]]; then
-    if "$BASE_BIN" "$script" >/dev/null 2>&1; then
+    if "${PROBE_CMD[@]}" "$BASE_BIN" "$script" >/dev/null 2>&1; then
       CMD_NAMES+=(--command-name "base:$rel")
       CMDS+=("$BASE_BIN $script")
     else
@@ -144,14 +237,40 @@ for script in "${SCRIPTS[@]}"; do
     fi
   fi
 
-  hyperfine \
+  status=0
+  "${HYPERFINE_CMD[@]}" \
     --warmup   "$warmup" \
     --runs     "$iters"  \
     --style    full      \
     --export-json "$RESULTS_DIR/$name.json" \
     "${CMD_NAMES[@]}"   \
-    "${CMDS[@]}"
+    "${CMDS[@]}" || status=$?
+
+  if [[ "$status" -ne 0 ]]; then
+    # 124 = `timeout` fired; 137 = the follow-up SIGKILL landed.
+    if [[ "$status" -eq 124 ]] || [[ "$status" -eq 137 ]]; then
+      echo "  [timeout] $rel exceeded ${BENCH_TIMEOUT_S}s and was killed" \
+           "(raise PYRUST_BENCH_TIMEOUT_S if legitimate)" >&2
+      # A killed hyperfine leaves a partial/absent export; drop it so the
+      # report never averages a truncated run.
+      rm -f "$RESULTS_DIR/$name.json"
+      TIMED_OUT+=("$rel")
+      continue
+    fi
+    echo "error: hyperfine failed for $rel (exit $status)" >&2
+    exit "$status"
+  fi
 done
+
+# Announce timeouts before the report runs, so the diagnosis survives even when
+# the report itself bails out (e.g. every case timed out and there is nothing
+# left to report on).
+if [[ ${#TIMED_OUT[@]} -gt 0 ]]; then
+  echo "" >&2
+  echo "error: ${#TIMED_OUT[@]} case(s) exceeded the ${BENCH_TIMEOUT_S}s cap and are excluded from the report:" >&2
+  printf '  %s\n' "${TIMED_OUT[@]}" >&2
+  echo "" >&2
+fi
 
 # ── measure peak RSS (Linux only, requires /usr/bin/time -v) ──────────────────
 MEMORY_DIR=""
@@ -175,7 +294,7 @@ if [[ "$MEASURE_MEMORY" -eq 1 ]]; then
       _mem_kb() {
         local bin="$1"
         local kb
-        kb=$( { /usr/bin/time -v "$bin" "$script" >/dev/null; } 2>&1 \
+        kb=$( { "${PROBE_CMD[@]}" /usr/bin/time -v "$bin" "$script" >/dev/null; } 2>&1 \
                 | grep -i "Maximum resident" | awk '{print $NF}' )
         printf '%s' "${kb:-null}"
       }
@@ -212,3 +331,10 @@ REPORT_ARGS=(
 [[ -n "$JSON_OUT"             ]] && REPORT_ARGS+=(--json-out             "$JSON_OUT")
 
 "$PYTHON" "$REPORT_PY" "${REPORT_ARGS[@]}"
+
+# Reports are written first so a partial run still produces usable output; the
+# timeout is then surfaced as a failure, because a case that outlives its cap is
+# a bug and must not pass silently.
+if [[ ${#TIMED_OUT[@]} -gt 0 ]]; then
+  exit 1
+fi
