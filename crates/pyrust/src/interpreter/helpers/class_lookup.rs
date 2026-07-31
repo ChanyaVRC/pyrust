@@ -408,9 +408,11 @@ thread_local! {
             // PyInstance while delegating state/arity policy to the existing
             // exact built-in constructor; __iter__/__next__ then operate on
             // that retained backing. `slice` deliberately remains
-            // non-subclassable and needs none of these slots.
+            // non-subclassable, but still exposes its native `__new__` slot.
+            let qualified = registered_builtin_method_name(name, "__new__");
+            attrs.insert("__new__".to_string(), Value::builtin_function(qualified));
             if kind != BuiltinTypeClass::Slice {
-                for method in ["__new__", "__iter__", "__next__"] {
+                for method in ["__iter__", "__next__"] {
                     let qualified = registered_builtin_method_name(name, method);
                     attrs.insert(method.to_string(), Value::builtin_function(qualified));
                 }

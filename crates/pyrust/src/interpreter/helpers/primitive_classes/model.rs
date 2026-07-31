@@ -51,6 +51,17 @@ impl BuiltinTypeClass {
         Self::Reversed,
     ];
 
+    /// Members whose native iterator layout may be inherited by a Python
+    /// subclass.  `slice` is deliberately absent because CPython does not set
+    /// `Py_TPFLAGS_BASETYPE` on it.
+    pub(crate) const SUBCLASSABLE: [Self; 5] = [
+        Self::Zip,
+        Self::Map,
+        Self::Filter,
+        Self::Enumerate,
+        Self::Reversed,
+    ];
+
     /// The Python-visible class name, which is also this type's `builtins`
     /// binding and its constructor's key in the builtin registry.
     pub(crate) const fn class_name(self) -> &'static str {

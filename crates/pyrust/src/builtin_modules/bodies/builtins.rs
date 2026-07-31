@@ -88,12 +88,13 @@ mod aggregation {
 mod iteration {
     use super::{
         BuiltinTypeClass, CallableIter, EnumerateIter, ExpandedCallArg, FN_PREFIX, FilterIter,
-        InstanceAttrs, Interpreter, IterSrcBuf, MODULE_NAME, MapIter, PyError, PyValue, Rc, Result,
-        Value, ValueKind, ZipIter, builtin_type_class_isinstance_fast, class_is_subclass_of,
-        full_type_name_str, instance_builtin_data, invoke_class_method, iter_values,
-        lookup_class_attr, make_iterator, make_reversed_dict_iter, make_reversed_getitem_iterator,
-        make_reversed_mapping_snapshot_iter, make_reversed_range_iterator,
-        make_reversed_sequence_iterator, reject_keyword_args_expanded, value_type_name_str,
+        Interpreter, IterSrcBuf, MODULE_NAME, MapIter, PyError, PyValue, Rc, Result, Value,
+        ValueKind, ZipIter, builtin_type_class_isinstance_fast, builtin_type_new,
+        class_is_subclass_of, full_type_name_str, instance_builtin_data, invoke_class_method,
+        iter_values, lookup_class_attr, make_iterator, make_reversed_dict_iter,
+        make_reversed_getitem_iterator, make_reversed_mapping_snapshot_iter,
+        make_reversed_range_iterator, make_reversed_sequence_iterator,
+        reject_keyword_args_expanded, value_type_name_str,
     };
     include!("builtins/iteration.rs");
 }
@@ -201,11 +202,12 @@ mod float_constructor {
 
 mod services {
     use super::{
-        ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, PyKey, PyStr, PyValue, Rc,
-        Result, Value, ValueKind, class_is_subclass_of, instance_builtin_data, invoke_class_method,
-        is_dict_subclass_instance, is_not_iterable_error, lookup_class_attr,
-        mapping_pairs_via_protocol, reject_keyword_args_expanded, render_instance_str,
-        resolve_zero_arg_super, type_class_singleton, value_type_name_str,
+        BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, MODULE_NAME, PyDict, PyError, PyKey, PyStr,
+        PyValue, Rc, Result, Value, ValueKind, builtin_type_new, class_is_subclass_of,
+        instance_builtin_data, invoke_class_method, is_dict_subclass_instance,
+        is_not_iterable_error, lookup_class_attr, mapping_pairs_via_protocol,
+        reject_keyword_args_expanded, render_instance_str, resolve_zero_arg_super,
+        type_class_singleton, value_type_name_str,
     };
     include!("builtins/services.rs");
 }
@@ -221,11 +223,11 @@ mod container_protocols {
 
 mod object_basics {
     use super::{
-        ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc, Result, Value,
-        ValueKind, dir_names, find_immutable_primitive_base, find_mutable_primitive_base,
-        find_scalar_primitive_base, hash_value_with_interp, instance_builtin_data,
-        lookup_class_attr, reject_keyword_args_expanded, render_key_repr, render_value_repr,
-        value_class, value_type_name_str,
+        BuiltinTypeClass, ExpandedCallArg, FN_PREFIX, InstanceAttrs, MODULE_NAME, PyError, Rc,
+        Result, Value, ValueKind, class_is_subclass_of, dir_names, find_immutable_primitive_base,
+        find_mutable_primitive_base, find_scalar_primitive_base, hash_value_with_interp,
+        instance_builtin_data, lookup_class_attr, reject_keyword_args_expanded, render_key_repr,
+        render_value_repr, value_class, value_type_name_str,
     };
     include!("builtins/object_basics.rs");
 }

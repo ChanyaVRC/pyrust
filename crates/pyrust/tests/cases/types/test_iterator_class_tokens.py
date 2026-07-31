@@ -53,6 +53,26 @@ print(isinstance(r, range), type(r) is range)
 print(isinstance(z, map), isinstance(m, zip), isinstance(s, enumerate))
 print(isinstance(1, zip), isinstance(z, int))
 
+
+class UserIteratorClass:
+    pass
+
+
+# A user class must stay a miss for a native iterator, and a running Python
+# generator must be rejected from its immutable kind tag without borrowing its
+# currently checked-out frame state.
+print(isinstance(z, UserIteratorClass), isinstance(UserIteratorClass(), zip))
+running_holder = {}
+
+
+def running_probe():
+    yield isinstance(running_holder["value"], zip)
+
+
+running_value = running_probe()
+running_holder["value"] = running_value
+print(next(running_value))
+
 # The classes are usable as `issubclass` arguments in both directions.
 print(issubclass(zip, object), issubclass(object, zip))
 print(issubclass(slice, object), issubclass(slice, slice))

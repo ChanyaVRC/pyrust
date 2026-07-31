@@ -1,61 +1,5 @@
 use pyrust_derive::pyrust_module;
 
-/// Allocate one of issue #3000's iterator subclasses with the existing exact
-/// built-in constructor as its backing.  The wrapper owns only the Python
-/// carrier (`PyInstance` + class identity); iterator state and argument policy
-/// remain with the registry constructor used by the exact built-in type.
-fn builtin_iterator_new(
-    interp: &mut Interpreter,
-    args: &[ExpandedCallArg],
-    kind: BuiltinTypeClass,
-) -> Result<Value> {
-    let Some((class_arg, constructor_args)) = args
-        .split_first()
-        .filter(|(class_arg, _)| class_arg.name.is_none())
-    else {
-        return Err(pyrust_core::type_err!(
-            "{}.__new__(): not enough arguments",
-            kind.class_name()
-        ));
-    };
-    let class = match class_arg.value.kind() {
-        ValueKind::PyClass(class) => Rc::clone(class),
-        _ => {
-            return Err(pyrust_core::type_err!(
-                "{}.__new__(X): X is not a type object ({})",
-                kind.class_name(),
-                value_type_name_str(&class_arg.value)
-            ));
-        }
-    };
-    let base = kind.singleton();
-    if !class_is_subclass_of(&class, &base) {
-        return Err(pyrust_core::type_err!(
-            "{}.__new__({}): {} is not a subtype of {}",
-            kind.class_name(),
-            class.borrow().name,
-            class.borrow().name,
-            kind.class_name()
-        ));
-    }
-    let dispatch = crate::builtin_registry::lookup(kind.class_name()).ok_or_else(|| {
-        PyError::Runtime(format!(
-            "internal: {} constructor is not registered",
-            kind.class_name()
-        ))
-    })?;
-    let backing = dispatch(interp, constructor_args)?;
-    if Rc::ptr_eq(&class, &base) {
-        return Ok(backing);
-    }
-
-    let mut attrs = InstanceAttrs::new();
-    attrs.insert(crate::interpreter::BUILTIN_DATA_ATTR, backing);
-    Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
-        crate::value::PyInstance { class, attrs },
-    ))))
-}
-
 /// Validate an unbound iterator slot receiver and return its exact built-in
 /// backing.  Subclass instances carry that backing in `__builtin_data__`;
 /// exact objects are already generator-backed values.
@@ -92,6 +36,7 @@ fn builtin_iterator_backing(
         let base = kind.singleton();
         if class_is_subclass_of(&class, &base)
             && let Some(backing) = instance_builtin_data(instance)
+            && builtin_type_class_isinstance_fast(&backing, &base) == Some(true)
         {
             return Ok((receiver.clone(), backing));
         }
@@ -126,7 +71,7 @@ fn builtin_iterator_next(
 pyrust_module! {
     #[py_name = "zip.__new__"]
     fn zip_new(args) -> Result<Value> {
-        builtin_iterator_new(_interp, args, BuiltinTypeClass::Zip)
+        builtin_type_new(_interp, args, BuiltinTypeClass::Zip)
     }
 
     #[py_name = "zip.__iter__"]
@@ -141,7 +86,7 @@ pyrust_module! {
 
     #[py_name = "map.__new__"]
     fn map_new(args) -> Result<Value> {
-        builtin_iterator_new(_interp, args, BuiltinTypeClass::Map)
+        builtin_type_new(_interp, args, BuiltinTypeClass::Map)
     }
 
     #[py_name = "map.__iter__"]
@@ -156,7 +101,7 @@ pyrust_module! {
 
     #[py_name = "filter.__new__"]
     fn filter_new(args) -> Result<Value> {
-        builtin_iterator_new(_interp, args, BuiltinTypeClass::Filter)
+        builtin_type_new(_interp, args, BuiltinTypeClass::Filter)
     }
 
     #[py_name = "filter.__iter__"]
@@ -171,7 +116,7 @@ pyrust_module! {
 
     #[py_name = "enumerate.__new__"]
     fn enumerate_new(args) -> Result<Value> {
-        builtin_iterator_new(_interp, args, BuiltinTypeClass::Enumerate)
+        builtin_type_new(_interp, args, BuiltinTypeClass::Enumerate)
     }
 
     #[py_name = "enumerate.__iter__"]
@@ -186,7 +131,7 @@ pyrust_module! {
 
     #[py_name = "reversed.__new__"]
     fn reversed_new(args) -> Result<Value> {
-        builtin_iterator_new(_interp, args, BuiltinTypeClass::Reversed)
+        builtin_type_new(_interp, args, BuiltinTypeClass::Reversed)
     }
 
     #[py_name = "reversed.__iter__"]

@@ -53,6 +53,77 @@ fn check_new_subtype(class_rc: &Rc<RefCell<PyClass>>, base_name: &str) -> Result
     ))
 }
 
+/// Invoke issue #3000's existing exact built-in constructor as a native
+/// `__new__` slot.  Exact classes return that constructor's value directly;
+/// subclassable iterator types retain a matching native iterator as the
+/// subclass instance's internal backing.
+fn builtin_type_new(
+    interp: &mut Interpreter,
+    args: &[ExpandedCallArg],
+    kind: BuiltinTypeClass,
+) -> Result<Value> {
+    let Some((class_arg, constructor_args)) = args
+        .split_first()
+        .filter(|(class_arg, _)| class_arg.name.is_none())
+    else {
+        return Err(pyrust_core::type_err!(
+            "{}.__new__(): not enough arguments",
+            kind.class_name()
+        ));
+    };
+    let class = match class_arg.value.kind() {
+        ValueKind::PyClass(class) => Rc::clone(class),
+        _ => {
+            return Err(pyrust_core::type_err!(
+                "{}.__new__(X): X is not a type object ({})",
+                kind.class_name(),
+                value_type_name_str(&class_arg.value)
+            ));
+        }
+    };
+    let base = kind.singleton();
+    if !class_is_subclass_of(&class, &base) {
+        let class_name = class.borrow().name.clone();
+        return Err(pyrust_core::type_err!(
+            "{}.__new__({class_name}): {class_name} is not a subtype of {}",
+            kind.class_name(),
+            kind.class_name()
+        ));
+    }
+    let dispatch = crate::builtin_registry::lookup(kind.class_name()).ok_or_else(|| {
+        PyError::Runtime(format!(
+            "internal: {} constructor is not registered",
+            kind.class_name()
+        ))
+    })?;
+    let backing = dispatch(interp, constructor_args)?;
+    if Rc::ptr_eq(&class, &base) {
+        return Ok(backing);
+    }
+
+    // `reversed` is a factory as well as the generic reverse-iterator type.
+    // A sequence-specialised cursor (`list_reverseiterator`, `range_iterator`)
+    // or an arbitrary value returned by `obj.__reversed__()` is already the
+    // final constructor result.  Only the generic reversed backing belongs in
+    // a `reversed` subclass carrier.
+    let backing_matches = builtin_type_class_isinstance_fast(&backing, &base) == Some(true);
+    if !backing_matches {
+        if kind == BuiltinTypeClass::Reversed {
+            return Ok(backing);
+        }
+        return Err(PyError::Runtime(format!(
+            "internal: {} constructor returned an incompatible backing",
+            kind.class_name()
+        )));
+    }
+
+    let mut attrs = InstanceAttrs::new();
+    attrs.insert(crate::interpreter::BUILTIN_DATA_ATTR, backing);
+    Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+        crate::value::PyInstance { class, attrs },
+    ))))
+}
+
 /// `type(obj)` — the class object for any value, mirroring CPython's
 /// `obj.__class__`.  Extracted from the `type` builtin so the `__class__`
 /// attribute (issue #2150) and the object-protocol fallback (#2151) share a

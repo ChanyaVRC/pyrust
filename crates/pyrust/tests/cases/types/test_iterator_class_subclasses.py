@@ -2,6 +2,8 @@
 # built-in iterator types in CPython.  Their subclasses retain their Python
 # class identity while the inherited native constructor owns iterator state.
 
+import copy
+
 
 class ZipSub(zip):
     pass
@@ -42,6 +44,43 @@ for label, value, subtype, base in instances:
 print("zip-empty", list(ZipSub()))
 print("zip-many", list(ZipSub([1, 2], "ab", range(2))))
 print("map-many", list(MapSub(lambda a, b: a + b, [1, 2], [3, 4])))
+
+
+# reversed is also a factory: specialised sequence cursors and a user
+# __reversed__ result pass through unchanged.  Only its generic native cursor
+# is wrapped in the requested subclass.
+class GenericReverseSeq:
+    def __init__(self):
+        self.data = [1, 2, 3]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+
+class ReverseSub(reversed):
+    pass
+
+
+foreign_reverse = iter((9, 8))
+
+
+class ForeignReverse:
+    def __reversed__(self):
+        return foreign_reverse
+
+
+print(
+    "reversed-results",
+    type(ReverseSub([1, 2])) is ReverseSub,
+    type(ReverseSub((1, 2))) is ReverseSub,
+    type(ReverseSub("ab")) is ReverseSub,
+    type(ReverseSub(range(2))) is ReverseSub,
+    type(ReverseSub(GenericReverseSeq())) is ReverseSub,
+    ReverseSub(ForeignReverse()) is foreign_reverse,
+)
 
 # User construction hooks compose with the inherited native allocator.
 class InitZip(zip):
@@ -90,9 +129,60 @@ expect_error("zip-new-type", TypeError, lambda: zip.__new__(int))
 expect_error("zip-new-keyword-self", TypeError, lambda: zip.__new__(cls=zip))
 expect_error("map-next-type", TypeError, lambda: map.__next__(zip()))
 expect_error("map-next-keyword-self", TypeError, lambda: map.__next__(self=map(str, [])))
+expect_error("layout-zip-map", TypeError, lambda: type("Mixed", (zip, map), {}))
+expect_error("layout-zip-list", TypeError, lambda: type("Mixed", (zip, list), {}))
+
+
+class ZipObject(zip, object):
+    pass
+
+
+print("layout-compatible", issubclass(ZipObject, zip))
+for label, subtype in (
+    ("zip", ZipSub),
+    ("map", MapSub),
+    ("filter", FilterSub),
+    ("enumerate", EnumerateSub),
+    ("reversed", ReversedSub),
+):
+    expect_error(
+        "unsafe-object-new-" + label,
+        TypeError,
+        lambda subtype=subtype: object.__new__(subtype),
+    )
+
+
+native_slice = slice.__new__(slice, 1, 4, 2)
+print(
+    "slice-new",
+    "__new__" in slice.__dict__,
+    native_slice.start,
+    native_slice.stop,
+    native_slice.step,
+)
+expect_error("slice-new-type", TypeError, lambda: slice.__new__(int, 1))
 try:
     class SliceSub(slice):
         pass
     print("slice-subclass", False)
 except TypeError:
     print("slice-subclass", True)
+
+
+# copy.copy keeps the subclass carrier but follows each native iterator's
+# reduction semantics: zip/map/filter share their shallow inner cursor;
+# enumerate shares the source while retaining an independent count; generic
+# reversed has an independent index.  deepcopy detaches every retained source.
+copy_cases = (
+    ("zip", ZipSub([1, 2, 3], "abc")),
+    ("map", MapSub(str, [1, 2, 3])),
+    ("filter", FilterSub(None, [1, 2, 3, 4])),
+    ("enumerate", EnumerateSub("abcd", 4)),
+    ("reversed", ReversedSub(GenericReverseSeq())),
+)
+for label, value in copy_cases:
+    first = next(value)
+    shallow = copy.copy(value)
+    deep = copy.deepcopy(value)
+    print("copy-types", label, type(shallow) is type(value), type(deep) is type(value))
+    print("copy-cursors", label, first, next(shallow), next(value), next(deep))

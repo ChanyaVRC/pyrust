@@ -597,6 +597,11 @@ pyrust_module! {
     /// CPython: slice(stop) / slice(start, stop[, step]) — construct a slice
     /// object.  Used as both a callable constructor and an `isinstance` target.
     /// <https://docs.python.org/3/library/functions.html#slice>
+    #[py_name = "slice.__new__"]
+    fn slice_new(args) -> Result<Value> {
+        builtin_type_new(_interp, args, BuiltinTypeClass::Slice)
+    }
+
     fn slice(args) -> Result<Value> {
         // CPython 3.12: slice() is positional-only; any keyword argument
         // raises TypeError with the message "slice() takes no keyword
