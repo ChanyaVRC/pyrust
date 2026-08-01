@@ -5,6 +5,7 @@ include!("compiler/api.rs");
 include!("compiler/free_var_reads.rs");
 include!("compiler/cell_analysis.rs");
 include!("compiler/binding_analysis.rs");
+include!("compiler/namespace_exposure_analysis.rs");
 include!("compiler/comprehension_analysis.rs");
 include!("compiler/class_scope_analysis.rs");
 include!("compiler/free_variables.rs");

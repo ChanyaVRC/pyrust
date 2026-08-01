@@ -101,22 +101,60 @@ fn shared_module_namespace_mode_does_not_replace_script_fastlocals() {
 }
 
 #[test]
-fn discarded_module_name_uses_checked_load_without_changing_other_fastpaths() {
-    let discarded = compile_source_with_positions("value = 1\nvalue\n");
-    let value_name = discarded
+fn discarded_module_name_only_uses_checked_load_when_namespace_may_escape() {
+    let assignment_only = compile_source_with_positions("value = 1\n");
+    let unexposed = compile_source_with_positions("value = 1\nvalue\n");
+    let value_name = unexposed
         .names
         .iter()
         .position(|name| name == "value")
         .expect("value name") as u16;
-    let checked_load = discarded
-        .insns
-        .iter()
-        .position(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name))
-        .expect("discarded module name must perform a checked global load");
-    assert_eq!(discarded.lineno_table[checked_load], 2);
-    assert_ne!(discarded.col_table[checked_load], (0, 0, 0, 0));
+    assert_eq!(
+        unexposed.insns.len(),
+        assignment_only.insns.len(),
+        "an unexposed namespace must retain zero-instruction discarded reads"
+    );
+    assert!(
+        unexposed
+            .insns
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+        "an unexposed namespace must retain the definitely-bound register fast path"
+    );
 
-    let consumed = compile_source("value = 1\ncopy = value\n");
+    for source in [
+        "value = 1\nglobals()\nvalue\n",
+        "value = 1\nlocals()\nvalue\n",
+        "value = 1\nvars()\nvalue\n",
+        "value = 1\nexec('pass')\nvalue\n",
+        "value = 1\neval('None')\nvalue\n",
+        "value = 1\nexpose = globals\nvalue\n",
+        "import sys\nvalue = 1\nsys._getframe\nvalue\n",
+        "value = 1\nframe.f_locals\nvalue\n",
+        "import sys\nvalue = 1\nsys._getframe().f_locals\nvalue\n",
+        "value = 1\nframe.f_globals\nvalue\n",
+        "value = 1\ndef expose():\n    globals()\nvalue\n",
+        "value = 1\nclass Expose:\n    namespace = locals()\nvalue\n",
+    ] {
+        let exposed = compile_source_with_positions(source);
+        let value_name = exposed
+            .names
+            .iter()
+            .position(|name| name == "value")
+            .expect("value name") as u16;
+        let checked_load = exposed
+            .insns
+            .iter()
+            .position(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name))
+            .expect("an exposed module name must perform a checked global load");
+        assert_eq!(
+            exposed.lineno_table[checked_load],
+            source.lines().count() as u32
+        );
+        assert_ne!(exposed.col_table[checked_load], (0, 0, 0, 0));
+    }
+
+    let consumed = compile_source("value = 1\nglobals()\ncopy = value\n");
     let value_name = consumed
         .names
         .iter()
@@ -130,7 +168,7 @@ fn discarded_module_name_uses_checked_load_without_changing_other_fastpaths() {
         "consumed module reads must retain the definitely-bound register fast path"
     );
 
-    let module = compile_source("def f():\n    value = 1\n    value\n");
+    let module = compile_source("globals()\ndef f():\n    value = 1\n    value\n");
     let function = module
         .fn_protos
         .iter()
