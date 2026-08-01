@@ -183,6 +183,44 @@ pub(super) fn value_iterable_needs_runtime_key_semantics(v: &Value) -> bool {
     }
 }
 
+/// Split the operands of `a & b` into `(scanned, probed)` the way CPython's
+/// `set_intersection` does (issue #2955).
+///
+/// CPython swaps the two tables so the *smaller* one is walked, then inserts
+/// the walked side's elements into the result.  With `__eq__`-equal but
+/// distinguishable elements (`1 == 1.0 == True`, or user instances carrying a
+/// payload) the surviving object is therefore the smaller operand's, and the
+/// right operand wins ties.  Walking the smaller table is also the cheaper
+/// direction, so this costs nothing.
+pub(super) fn intersection_scan_order<'a>(a: &'a PySet, b: &'a PySet) -> (&'a PySet, &'a PySet) {
+    if b.len() <= a.len() { (b, a) } else { (a, b) }
+}
+
+/// [`intersection_scan_order`] for [`set_binary_op_from_items`], with the
+/// dict-view operators held at their existing left-to-right scan.
+///
+/// `d.keys() & other` is not `set.__and__`: CPython routes it through
+/// `_PyDictView_Intersect`, whose own swap rule is stated in terms of the view
+/// (even when the view is the *right* operand, since `set & view` reaches it
+/// via `__rand__`), and delegates to `other.intersection(view)` only when
+/// `other` is an *exact* `set` no smaller than the view — so a `frozenset` or a
+/// `set` subclass on the other side falls through to a manual loop.  That is a
+/// different rule from the plain-set one, and the left-to-right scan kept here
+/// does not implement it either; dict-view retention is tracked separately as
+/// issue #3006 and is deliberately out of scope for #2955.
+#[inline]
+fn intersection_scan<'a>(
+    a: &'a PySet,
+    b: &'a PySet,
+    view_operands: bool,
+) -> (&'a PySet, &'a PySet) {
+    if view_operands {
+        (a, b)
+    } else {
+        intersection_scan_order(a, b)
+    }
+}
+
 pub(super) fn set_binary_op(
     interp: &mut Interpreter,
     left: &Value,
@@ -298,8 +336,9 @@ fn set_binary_op_from_items(
                 }
             }
             SetOp::And => {
-                for k in a.iter() {
-                    if b.contains(k) {
+                let (scan, probe) = intersection_scan(&a, &b, force_set);
+                for k in scan.iter() {
+                    if probe.contains(k) {
                         out.insert(k.clone());
                     }
                 }
@@ -338,8 +377,9 @@ fn set_binary_op_from_items(
                     }
                 }
                 SetOp::And => {
-                    for k in a.iter() {
-                        if interp.set_lookup_in(&b, k)?.is_some() {
+                    let (scan, probe) = intersection_scan(&a, &b, force_set);
+                    for k in scan.iter() {
+                        if interp.set_lookup_in(probe, k)?.is_some() {
                             interp.set_insert(&mut out, k.clone())?;
                         }
                     }
