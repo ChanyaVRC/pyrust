@@ -17,6 +17,23 @@ fn compile_source(src: &str) -> FnCode {
     compile_script_with_linenos(&stmts, local_index, false, &[], "<test>").unwrap()
 }
 
+fn compile_source_with_positions(src: &str) -> FnCode {
+    use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
+
+    let (tokens, line_nos, cols, cols_end) = Lexer::new(src).unwrap().into_tokens_with_pos();
+    let mut parser = Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+    let (stmts, stmt_linenos) = parser.parse_program_with_linenos().unwrap();
+    let empty = HashSet::new();
+    let names = collect_local_names(&[], &stmts, &empty, &empty);
+    let local_index = Rc::new(
+        (0u32..)
+            .zip(names)
+            .map(|(slot, name)| (name, slot))
+            .collect(),
+    );
+    compile_script_with_linenos(&stmts, local_index, false, &stmt_linenos, "<test>").unwrap()
+}
+
 fn compile_source_error(src: &str) -> String {
     use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
 
@@ -80,6 +97,52 @@ fn shared_module_namespace_mode_does_not_replace_script_fastlocals() {
             .iter()
             .any(|insn| matches!(insn, Insn::SyncModuleGlobal(..))),
         "shared module bodies must not retain a second register-backed binding"
+    );
+}
+
+#[test]
+fn discarded_module_name_uses_checked_load_without_changing_other_fastpaths() {
+    let discarded = compile_source_with_positions("value = 1\nvalue\n");
+    let value_name = discarded
+        .names
+        .iter()
+        .position(|name| name == "value")
+        .expect("value name") as u16;
+    let checked_load = discarded
+        .insns
+        .iter()
+        .position(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name))
+        .expect("discarded module name must perform a checked global load");
+    assert_eq!(discarded.lineno_table[checked_load], 2);
+    assert_ne!(discarded.col_table[checked_load], (0, 0, 0, 0));
+
+    let consumed = compile_source("value = 1\ncopy = value\n");
+    let value_name = consumed
+        .names
+        .iter()
+        .position(|name| name == "value")
+        .expect("value name") as u16;
+    assert!(
+        consumed
+            .insns
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+        "consumed module reads must retain the definitely-bound register fast path"
+    );
+
+    let module = compile_source("def f():\n    value = 1\n    value\n");
+    let function = module
+        .fn_protos
+        .iter()
+        .find(|proto| proto.name.as_ref() == "f")
+        .expect("f prototype");
+    assert!(
+        function
+            .code
+            .insns
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LoadGlobal(..) | Insn::CheckLocal(..))),
+        "function-scope discarded locals must retain the zero-instruction fast path"
     );
 }
 

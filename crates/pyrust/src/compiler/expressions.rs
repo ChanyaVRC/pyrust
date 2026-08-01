@@ -125,6 +125,31 @@ impl Compiler {
         dst
     }
 
+    /// Compile an expression whose result is discarded by its enclosing
+    /// statement.  A definitely-bound local normally compiles to its register
+    /// with no instruction, but a module binding can be removed through the
+    /// live globals mapping without changing the compiler's `def_set`.  Force
+    /// the existing checked `LoadGlobal` path for a bare module name so the
+    /// discarded read still performs Python's runtime name lookup (#3026).
+    fn compile_discarded_expr(&mut self, expr: &Expr) -> Reg {
+        let Expr::Var(name, _) = expr else {
+            return self.compile_expr(expr);
+        };
+        let Some(reg) = self.local_reg(name) else {
+            return self.compile_expr(expr);
+        };
+        let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
+        if !self.is_module_scope || !definitely_bound {
+            return self.compile_expr(expr);
+        }
+
+        let saved_def_set = self.def_set;
+        self.def_set &= !(1u64 << reg);
+        let result = self.compile_expr(expr);
+        self.def_set = saved_def_set;
+        result
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> Reg {
         if self.failed {
             return 0;

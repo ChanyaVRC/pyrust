@@ -89,7 +89,7 @@ impl Compiler {
                 if self.try_emit_list_comp_append(expr) {
                     return;
                 }
-                let r = self.compile_expr(expr);
+                let r = self.compile_discarded_expr(expr);
                 self.free_temp(r);
             }
             Stmt::Assign(target, expr) => {
