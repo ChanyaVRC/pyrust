@@ -118,7 +118,7 @@ impl Interpreter {
             }
             return Err(pyrust_core::type_err!(
                 "'{}' object is not subscriptable",
-                class.borrow().name
+                pyrust_core::error_type_name(target)
             ));
         }
 
@@ -253,7 +253,7 @@ impl Interpreter {
             _ => {
                 return Err(pyrust_core::type_err!(
                     "'{}' object is not subscriptable",
-                    pyrust_core::builtin_type_name(target)
+                    pyrust_core::error_type_name(target)
                 ));
             }
         };

@@ -72,12 +72,15 @@ pub(crate) fn prepare_module_classes(module: &Value) {
     let ValueKind::PyModule(module) = module.kind() else {
         return;
     };
-    for value in module.borrow().attrs.values() {
+    for (name, value) in &module.borrow().attrs {
         if let ValueKind::PyClass(class) = value.kind() {
+            let mut class = class.borrow_mut();
             class
-                .borrow_mut()
                 .attrs
                 .insert("__module__".to_string(), Value::string("functools"));
+            if name == "partial" {
+                class.error_name = Some("functools.partial");
+            }
         }
     }
 }

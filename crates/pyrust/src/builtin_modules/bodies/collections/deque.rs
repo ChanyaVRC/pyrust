@@ -324,7 +324,7 @@ fn deque_repeat(
     let resolved = _interp.value_to_index(multiplier, |value| {
         pyrust_core::type_err!(
             "can't multiply sequence by non-int of type '{}'",
-            value_type_name_str(value)
+            pyrust_core::error_type_name(value)
         )
     })?;
     let overflow = format!(

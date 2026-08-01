@@ -151,6 +151,9 @@ pub(crate) fn inject_python_members(
         .ok_or_else(|| PyError::Runtime("types: exec namespace not a dict".into()))?;
     for name in TYPES_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
+            if let crate::value::ValueKind::PyClass(class) = val.kind() {
+                class.borrow_mut().error_name = Some("types.SimpleNamespace");
+            }
             module
                 .borrow_mut()
                 .attrs

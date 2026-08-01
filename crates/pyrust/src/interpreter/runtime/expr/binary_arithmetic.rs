@@ -161,7 +161,7 @@ impl Interpreter {
         // CPython's repeat-count message names the *original* object's type
         // (both for the non-index TypeError and the BigInt OverflowError), so
         // capture it before `value_to_index` may resolve through `__index__`.
-        let type_name_for_err = value_type_name_str(&val).to_string();
+        let type_name_for_err = crate::interpreter::error_type_name_str(&val).to_string();
         let resolved = self.value_to_index(&val, |_| {
             pyrust_core::type_err!(
                 "can't multiply sequence by non-int of type '{type_name_for_err}'"
@@ -195,7 +195,7 @@ impl Interpreter {
                     ));
                 }
                 _ => {
-                    let type_name = value_type_name_str(&right);
+                    let type_name = crate::interpreter::error_type_name_str(&right);
                     return Err(pyrust_core::type_err!(
                         "can't multiply sequence by non-int of type '{type_name}'"
                     ));
@@ -213,7 +213,7 @@ impl Interpreter {
                     ));
                 }
                 _ => {
-                    let type_name = value_type_name_str(&left);
+                    let type_name = crate::interpreter::error_type_name_str(&left);
                     return Err(pyrust_core::type_err!(
                         "can't multiply sequence by non-int of type '{type_name}'"
                     ));
@@ -277,13 +277,13 @@ impl Interpreter {
                 let is_int_like =
                     |v: &Value| matches!(v.kind(), ValueKind::Int(_) | ValueKind::BigInt(_));
                 if is_sequence(&l) && !is_int_like(&r) {
-                    let type_name = value_type_name_str(&r);
+                    let type_name = crate::interpreter::error_type_name_str(&r);
                     return Err(pyrust_core::type_err!(
                         "can't multiply sequence by non-int of type '{type_name}'"
                     ));
                 }
                 if is_sequence(&r) && !is_int_like(&l) {
-                    let type_name = value_type_name_str(&l);
+                    let type_name = crate::interpreter::error_type_name_str(&l);
                     return Err(pyrust_core::type_err!(
                         "can't multiply sequence by non-int of type '{type_name}'"
                     ));
@@ -332,7 +332,7 @@ impl Interpreter {
                 "TypeError",
                 format!(
                     "'{}' object is not callable",
-                    value_type_name_str(&method_value)
+                    pyrust_core::error_type_name(&method_value)
                 ),
             ));
         }

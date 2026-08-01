@@ -209,6 +209,11 @@ pub struct PyClass {
     /// can legitimately have the same visible name as a built-in exception.
     /// `None` for ordinary classes and user-defined exception subclasses.
     pub builtin_exception_name: Option<&'static str>,
+    /// CPython's `tp_name` spelling for error messages emitted by an exact
+    /// static stdlib type.  This is deliberately separate from the mutable
+    /// Python-visible `name` / `qualname`: user subclasses and same-named
+    /// classes keep their own bare names rather than inheriting this metadata.
+    pub error_name: Option<&'static str>,
     /// Stable display name for built-in classes that cannot be used as a
     /// Python base class.  Owners set this when constructing a final runtime
     /// type; generic class creation consumes the metadata without branching
@@ -239,6 +244,7 @@ impl Default for PyClass {
             canonical_tag: None,
             builtin_type_tag: None,
             builtin_exception_name: None,
+            error_name: None,
             non_subclassable_name: None,
         }
     }

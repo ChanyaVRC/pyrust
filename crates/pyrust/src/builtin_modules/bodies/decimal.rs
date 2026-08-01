@@ -142,10 +142,13 @@ pub(crate) fn inject_python_members(
             if DECIMAL_PY_CLASS_NAMES.contains(name)
                 && let ValueKind::PyClass(cls_rc) = val.kind()
             {
-                cls_rc
-                    .borrow_mut()
+                let mut class = cls_rc.borrow_mut();
+                class
                     .attrs
                     .insert("__module__".to_string(), Value::string("decimal"));
+                if *name == "Decimal" {
+                    class.error_name = Some("decimal.Decimal");
+                }
             }
             module
                 .borrow_mut()

@@ -91,8 +91,8 @@ impl Interpreter {
                                 BinaryOp::BitXor => "^=",
                                 _ => unreachable!(),
                             };
-                            let lt = value_type_name_str(left);
-                            let rt = value_type_name_str(right);
+                            let lt = crate::interpreter::error_type_name_str(left);
+                            let rt = crate::interpreter::error_type_name_str(right);
                             return Err(pyrust_core::type_err!(
                                 "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
                             ));
@@ -277,7 +277,7 @@ impl Interpreter {
                             ));
                         }
                         _ => {
-                            let type_name = value_type_name_str(right);
+                            let type_name = crate::interpreter::error_type_name_str(right);
                             return Err(pyrust_core::type_err!(
                                 "can't multiply sequence by non-int of type '{type_name}'"
                             ));
@@ -405,8 +405,8 @@ impl Interpreter {
                     let mut rhs_items = match set_items_from_value(right) {
                         Some((items, _)) => items,
                         None => {
-                            let lt = value_type_name_str(left);
-                            let rt = value_type_name_str(right);
+                            let lt = crate::interpreter::error_type_name_str(left);
+                            let rt = crate::interpreter::error_type_name_str(right);
                             return Err(pyrust_core::type_err!(
                                 "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
                             ));
@@ -484,8 +484,8 @@ impl Interpreter {
                         BinaryOp::BitXor => "^=",
                         _ => unreachable!(),
                     };
-                    let lt = value_type_name_str(left);
-                    let rt = value_type_name_str(right);
+                    let lt = crate::interpreter::error_type_name_str(left);
+                    let rt = crate::interpreter::error_type_name_str(right);
                     return Err(pyrust_core::type_err!(
                         "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
                     ));
@@ -562,7 +562,7 @@ impl Interpreter {
                             ));
                         }
                         _ => {
-                            let type_name = value_type_name_str(right);
+                            let type_name = crate::interpreter::error_type_name_str(right);
                             return Err(pyrust_core::type_err!(
                                 "can't multiply sequence by non-int of type '{type_name}'"
                             ));

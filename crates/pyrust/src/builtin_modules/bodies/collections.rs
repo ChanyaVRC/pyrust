@@ -158,14 +158,21 @@ fn tag_public_classes(
         if let Some(cls_val) = cls
             && let ValueKind::PyClass(cls_rc) = cls_val.kind()
         {
-            cls_rc
-                .borrow_mut()
+            let mut class = cls_rc.borrow_mut();
+            class
                 .attrs
                 .insert("__module__".to_string(), Value::string("collections"));
-            cls_rc.borrow_mut().attrs.insert(
+            class.attrs.insert(
                 "__class_getitem__".to_string(),
                 Value::builtin_function(class_getitem_dispatch),
             );
+            class.error_name = match cls_name {
+                "OrderedDict" => Some("collections.OrderedDict"),
+                "defaultdict" => Some("collections.defaultdict"),
+                "deque" => Some("collections.deque"),
+                _ => None,
+            };
+            drop(class);
             if cls_name == "OrderedDict" {
                 pyrust_builtins::ordered_mapping::register_class(cls_rc);
             }

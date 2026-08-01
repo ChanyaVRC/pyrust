@@ -9,16 +9,16 @@ mod tests {
     use crate::environment::Environment;
 
     use super::{
-        ACTIVE_COLLECTION_MUTATION_STATES, COLLECTION_MUTATION_STATES, CanonicalClassTag,
-        FrozenSetKey, InstanceAttrs, MemberSlotId, ModuleAttrs, NANBOX_HEAP_POINTER_ALIGNMENT,
-        PAYLOAD_MASK, POOL_B, POOL_OPAQUE, PyClass, PyDict, PyInstance, PyKey, PyModule, PySet,
-        STR_CODEPOINT_LEN_SHIFT, STR_CODEPOINT_LEN_TAG, STR_MAX_BYTE_LEN, STR_OWNED_HEADER_SIZE,
-        STR_RC_MAX, STR_RC_ONE, STR_SLICE_LAYOUT_SIZE, TAG_LIST_BITS, UserFunction,
-        UserFunctionKind, Value, ValueKind, alloc, builtin_type_name, drain_free_list,
-        encode_nanbox_heap_pointer, float_bits_as_exact_i64, instance_backing_for_repr, next_fn_id,
-        opaque_layout, py_hash_pykey, range_len, str_is_inline_bits, take_thread_exit_drains,
-        try_nanbox_heap_pointer_payload, try_nanbox_owned_string_layout, uncached_utf8_byte_offset,
-        utf8_codepoint_count,
+        ACTIVE_COLLECTION_MUTATION_STATES, BuiltinTypeOps, COLLECTION_MUTATION_STATES,
+        CanonicalClassTag, FrozenSetKey, InstanceAttrs, MemberSlotId, ModuleAttrs,
+        NANBOX_HEAP_POINTER_ALIGNMENT, PAYLOAD_MASK, POOL_B, POOL_OPAQUE, PyClass, PyDict,
+        PyInstance, PyKey, PyModule, PySet, STR_CODEPOINT_LEN_SHIFT, STR_CODEPOINT_LEN_TAG,
+        STR_MAX_BYTE_LEN, STR_OWNED_HEADER_SIZE, STR_RC_MAX, STR_RC_ONE, STR_SLICE_LAYOUT_SIZE,
+        TAG_LIST_BITS, UserFunction, UserFunctionKind, Value, ValueKind, alloc, builtin_type_name,
+        drain_free_list, encode_nanbox_heap_pointer, error_type_name, float_bits_as_exact_i64,
+        instance_backing_for_repr, next_fn_id, opaque_layout, py_hash_pykey, range_len,
+        str_is_inline_bits, take_thread_exit_drains, try_nanbox_heap_pointer_payload,
+        try_nanbox_owned_string_layout, uncached_utf8_byte_offset, utf8_codepoint_count,
     };
 
     thread_local! {
@@ -67,6 +67,61 @@ mod tests {
 
         metaclass.borrow_mut().name = "RenamedMeta".to_string();
         assert_eq!(builtin_type_name(&custom), "RenamedMeta");
+    }
+
+    struct DiagnosticNameOps;
+
+    impl BuiltinTypeOps for DiagnosticNameOps {
+        fn type_name(&self) -> &'static str {
+            "native"
+        }
+
+        fn display_error_name(&self) -> &'static str {
+            "module.native"
+        }
+    }
+
+    static DIAGNOSTIC_NAME_OPS: DiagnosticNameOps = DiagnosticNameOps;
+
+    fn plain_instance(class: Rc<RefCell<PyClass>>) -> Value {
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class,
+            attrs: InstanceAttrs::new(),
+        })))
+    }
+
+    #[test]
+    fn error_type_name_is_exact_metadata_not_visible_or_inherited() {
+        let mut native = PyClass::new("Native", "Native", None, IndexMap::new());
+        native.error_name = Some("module.Native");
+        let native = Rc::new(RefCell::new(native));
+        let exact = plain_instance(Rc::clone(&native));
+        assert_eq!(builtin_type_name(&exact), "Native");
+        assert_eq!(error_type_name(&exact), "module.Native");
+
+        let subclass = plain_instance(Rc::new(RefCell::new(PyClass::new(
+            "Child",
+            "Child",
+            Some(native),
+            IndexMap::new(),
+        ))));
+        assert_eq!(builtin_type_name(&subclass), "Child");
+        assert_eq!(error_type_name(&subclass), "Child");
+
+        let lookalike = plain_instance(Rc::new(RefCell::new(PyClass::new(
+            "Native",
+            "Native",
+            None,
+            IndexMap::new(),
+        ))));
+        assert_eq!(error_type_name(&lookalike), "Native");
+    }
+
+    #[test]
+    fn builtin_object_error_name_does_not_change_visible_type_name() {
+        let value = Value::builtin_object(&DIAGNOSTIC_NAME_OPS, Box::new(()));
+        assert_eq!(builtin_type_name(&value), "native");
+        assert_eq!(error_type_name(&value), "module.native");
     }
 
     #[test]

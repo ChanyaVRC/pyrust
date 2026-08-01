@@ -29,7 +29,7 @@ pyrust_module! {
             ValueKind::Str(s) => s.to_string(),
             _ => {
                 // CPython: "attribute name must be string, not 'TYPE'"
-                let type_name = value_type_name_str(&args[1].value);
+                let type_name = pyrust_core::error_type_name(&args[1].value);
                 return Err(PyError::named(
                     "TypeError",
                     format!("attribute name must be string, not '{type_name}'"),
@@ -85,7 +85,7 @@ pyrust_module! {
                 // list, etc.) — their slots are immutable from Python.  The
                 // general assign_attr catch-all returns RuntimeError here, which
                 // is wrong; emit the same message CPython does instead.
-                let type_name = value_type_name_str(&args[0].value);
+                let type_name = pyrust_core::error_type_name(&args[0].value);
                 return Err(PyError::named(
                     "AttributeError",
                     format!("'{type_name}' object has no attribute '{name}'"),
@@ -115,7 +115,7 @@ pyrust_module! {
         let name = match args[1].value.kind() {
             ValueKind::Str(s) => s.to_string(),
             _ => {
-                let type_name = value_type_name_str(&args[1].value);
+                let type_name = pyrust_core::error_type_name(&args[1].value);
                 return Err(PyError::named(
                     "TypeError",
                     format!("attribute name must be string, not '{type_name}'"),
@@ -131,7 +131,7 @@ pyrust_module! {
                 // CPython raises AttributeError for non-instance values — same
                 // pattern as in object_setattr_dunder; the general delete_attr
                 // catch-all returns RuntimeError here, which is wrong.
-                let type_name = value_type_name_str(&args[0].value);
+                let type_name = pyrust_core::error_type_name(&args[0].value);
                 return Err(PyError::named(
                     "AttributeError",
                     format!("'{type_name}' object has no attribute '{name}'"),

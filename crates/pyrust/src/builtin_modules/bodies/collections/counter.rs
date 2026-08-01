@@ -533,7 +533,7 @@ fn counter_operand_items_iterator(interp: &mut crate::Interpreter, other: &Value
         "AttributeError",
         format!(
             "'{}' object has no attribute 'items'",
-            value_type_name_str(other)
+            pyrust_core::error_type_name(other)
         ),
     ))
 }
@@ -569,7 +569,7 @@ fn counter_mapping_getitem(
         "TypeError",
         format!(
             "'{}' object is not subscriptable",
-            value_type_name_str(other)
+            pyrust_core::error_type_name(other)
         ),
     ))
 }

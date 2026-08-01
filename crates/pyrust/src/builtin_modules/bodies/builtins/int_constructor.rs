@@ -162,7 +162,7 @@ pyrust_module! {
                         "TypeError",
                         format!(
                             "int() argument must be a string, a bytes-like object or a real number, not '{}'",
-                            value_type_name_str(&self_val)
+                            crate::interpreter::error_type_name_str(&self_val)
                         ),
                     ))
                 }
@@ -180,7 +180,7 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "int() argument must be a string, a bytes-like object or a real number, not '{}'",
-                        value_type_name_str(&args[0].value),
+                        crate::interpreter::error_type_name_str(&args[0].value),
                     ),
                 )),
             },

@@ -646,7 +646,7 @@ pub(crate) fn call_slot_value_unbound(
             "TypeError",
             format!(
                 "'{}' object is not callable",
-                value_type_name_str(&method_val)
+                pyrust_core::error_type_name(&method_val)
             ),
         ))
     }

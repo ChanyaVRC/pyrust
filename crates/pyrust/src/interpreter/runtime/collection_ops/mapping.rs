@@ -5,7 +5,7 @@ pub(super) fn bitor_operand_type_name(v: &Value) -> std::borrow::Cow<'static, st
     if is_mapping_proxy(v) {
         std::borrow::Cow::Borrowed("dict")
     } else {
-        value_type_name_str(v)
+        crate::interpreter::error_type_name_str(v)
     }
 }
 

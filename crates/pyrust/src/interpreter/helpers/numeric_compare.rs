@@ -33,6 +33,13 @@ pub(crate) fn value_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     pyrust_core::builtin_type_name(v)
 }
 
+/// CPython `tp_name` spelling used only by diagnostics. Unlike
+/// [`value_type_name_str`], this may be module-qualified for exact static
+/// stdlib classes and must never feed type presentation or runtime policy.
+pub(crate) fn error_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
+    pyrust_core::error_type_name(v)
+}
+
 /// Exact ordering between an `i64` integer and an `f64` float.
 ///
 /// Mirrors CPython's richcmp for int vs float: instead of converting the int
@@ -261,8 +268,8 @@ pub(crate) fn compare_values_with_op(
             "TypeError",
             format!(
                 "'{op_name}' not supported between instances of '{}' and '{}'",
-                value_type_name_str(a),
-                value_type_name_str(b),
+                error_type_name_str(a),
+                error_type_name_str(b),
             ),
         )),
     }

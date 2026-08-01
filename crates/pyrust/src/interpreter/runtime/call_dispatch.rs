@@ -63,7 +63,7 @@ impl Interpreter {
             }
             return Err(pyrust_core::type_err!(
                 "'{}' object is not callable",
-                class.borrow().name
+                pyrust_core::error_type_name(&function)
             ));
         }
 
@@ -79,7 +79,7 @@ impl Interpreter {
 
         Err(pyrust_core::type_err!(
             "'{}' object is not callable",
-            pyrust_core::builtin_type_name(&function)
+            pyrust_core::error_type_name(&function)
         ))
     }
 }

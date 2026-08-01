@@ -823,8 +823,8 @@ fn slot_rshift(lhs: &NumericSlot, rhs: &Value) -> Result<Value> {
 /// operator token CPython uses in the message (e.g. `/`, `//`, `%`,
 /// `** or pow()`).
 fn unsupported_operand(op_sym: &str, left: &Value, right: &Value) -> PyError {
-    let lt = value_type_name_str(left);
-    let rt = value_type_name_str(right);
+    let lt = crate::interpreter::error_type_name_str(left);
+    let rt = crate::interpreter::error_type_name_str(right);
     pyrust_core::type_err!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'")
 }
 

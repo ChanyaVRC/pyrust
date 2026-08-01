@@ -296,7 +296,10 @@ pub(super) fn set_binary_op(
                     bitor_operand_type_name(right),
                 )
             } else {
-                (value_type_name_str(left), value_type_name_str(right))
+                (
+                    crate::interpreter::error_type_name_str(left),
+                    crate::interpreter::error_type_name_str(right),
+                )
             };
             return Some(Err(pyrust_core::type_err!(
                 "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"

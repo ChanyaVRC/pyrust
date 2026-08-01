@@ -7,6 +7,30 @@ struct GroupByClassGeneration {
     grouper: Rc<RefCell<PyClass>>,
 }
 
+const ITERTOOLS_ERROR_NAMES: [(&str, &str); 18] = [
+    ("count", "itertools.count"),
+    ("cycle", "itertools.cycle"),
+    ("repeat", "itertools.repeat"),
+    ("chain", "itertools.chain"),
+    ("islice", "itertools.islice"),
+    ("zip_longest", "itertools.zip_longest"),
+    ("product", "itertools.product"),
+    ("accumulate", "itertools.accumulate"),
+    ("groupby", "itertools.groupby"),
+    ("permutations", "itertools.permutations"),
+    ("combinations", "itertools.combinations"),
+    (
+        "combinations_with_replacement",
+        "itertools.combinations_with_replacement",
+    ),
+    ("starmap", "itertools.starmap"),
+    ("takewhile", "itertools.takewhile"),
+    ("dropwhile", "itertools.dropwhile"),
+    ("filterfalse", "itertools.filterfalse"),
+    ("compress", "itertools.compress"),
+    ("pairwise", "itertools.pairwise"),
+];
+
 thread_local! {
     /// Every still-live imported `groupby` → `_grouper` class generation.
     ///
@@ -75,10 +99,18 @@ pub(crate) fn patch_class_modules(module_value: &Value) {
                 .insert("__module__".to_string(), Value::string("itertools"));
         }
     }
+    for (export_name, error_name) in ITERTOOLS_ERROR_NAMES {
+        let value = module.borrow().attrs.get(export_name).cloned();
+        if let Some(value) = value
+            && let ValueKind::PyClass(class) = value.kind()
+        {
+            class.borrow_mut().error_name = Some(error_name);
+        }
+    }
 }
 
 /// Finalize one imported itertools generation and register its private class
-/// identities for internal factories.
+/// identities and diagnostic name for internal factories.
 pub(crate) fn prepare_module_classes(module_value: &Value) {
     patch_class_modules(module_value);
     let ValueKind::PyModule(module) = module_value.kind() else {
@@ -90,6 +122,7 @@ pub(crate) fn prepare_module_classes(module_value: &Value) {
         && let (ValueKind::PyClass(groupby), ValueKind::PyClass(grouper)) =
             (groupby.kind(), grouper.kind())
     {
+        grouper.borrow_mut().error_name = Some("itertools._grouper");
         register_groupby_generation(groupby, grouper);
     }
 }

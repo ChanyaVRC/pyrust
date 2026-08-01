@@ -65,6 +65,9 @@ pub(crate) fn inject_python_members(
         .ok_or_else(|| PyError::Runtime("time: exec namespace not a dict".into()))?;
     for name in TIME_PY_EXPORTS {
         if let Some(val) = dict.get(&PyKey::str_from(name)) {
+            if let ValueKind::PyClass(class) = val.kind() {
+                class.borrow_mut().error_name = Some("time.struct_time");
+            }
             module
                 .borrow_mut()
                 .attrs

@@ -8,9 +8,7 @@ use std::cmp::Ordering;
 
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
-use crate::interpreter::{
-    Interpreter, coerce_subclass_backing, compare_values, value_type_name_str,
-};
+use crate::interpreter::{Interpreter, coerce_subclass_backing, compare_values};
 use crate::value::{PyBigIntSign, PyKey, PyToPrimitive, Value, ValueKind};
 
 /// Use bounded selection only when the requested prefix is materially smaller
@@ -93,7 +91,7 @@ fn resolve_limit(n: Option<&Value>, len: usize) -> Result<Option<usize>> {
             "TypeError",
             format!(
                 "'>=' not supported between instances of '{}' and 'int'",
-                value_type_name_str(n)
+                pyrust_core::error_type_name(n)
             ),
         )),
     }

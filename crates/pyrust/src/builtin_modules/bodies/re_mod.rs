@@ -80,10 +80,15 @@ pub(crate) fn inject_python_members(
             // `__module__` to `re` so reprs / qualnames match CPython
             // (`re.error`, `re.Pattern`, `re.Match`).
             if let ValueKind::PyClass(cls_rc) = val.kind() {
-                cls_rc
-                    .borrow_mut()
+                let mut class = cls_rc.borrow_mut();
+                class
                     .attrs
                     .insert("__module__".to_string(), Value::string("re"));
+                class.error_name = match name {
+                    "Pattern" => Some("re.Pattern"),
+                    "Match" => Some("re.Match"),
+                    _ => None,
+                };
             }
             module
                 .borrow_mut()

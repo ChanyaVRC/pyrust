@@ -171,7 +171,10 @@ impl Interpreter {
         if !slot_is_dispatchable(&m) {
             return Some(Err(PyError::named(
                 "TypeError",
-                format!("'{}' object is not callable", value_type_name_str(&m)),
+                format!(
+                    "'{}' object is not callable",
+                    pyrust_core::error_type_name(&m)
+                ),
             )));
         }
         // BuiltinFunction dunders (e.g. `int.__radd__`) operate on the backing
@@ -203,7 +206,10 @@ impl Interpreter {
                 if !slot_is_dispatchable(&m) {
                     return Some(Err(PyError::named(
                         "TypeError",
-                        format!("'{}' object is not callable", value_type_name_str(&m)),
+                        format!(
+                            "'{}' object is not callable",
+                            pyrust_core::error_type_name(&m)
+                        ),
                     )));
                 }
                 // BuiltinFunction dunders operate on the backing primitive value;
@@ -362,8 +368,8 @@ impl Interpreter {
                     // TypeError just as CPython does for max().
                     None => Err(pyrust_core::type_err!(
                         "'>' not supported between instances of '{}' and '{}'",
-                        value_type_name_str(a),
-                        value_type_name_str(b),
+                        pyrust_core::error_type_name(a),
+                        pyrust_core::error_type_name(b),
                     )),
                 }
             }
@@ -372,8 +378,8 @@ impl Interpreter {
             // CPython's max() TypeError wording.
             None => Err(pyrust_core::type_err!(
                 "'>' not supported between instances of '{}' and '{}'",
-                value_type_name_str(a),
-                value_type_name_str(b),
+                pyrust_core::error_type_name(a),
+                pyrust_core::error_type_name(b),
             )),
         }
     }
