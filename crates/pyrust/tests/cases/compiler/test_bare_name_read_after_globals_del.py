@@ -51,3 +51,51 @@ rebound = 5
 del globals()["rebound"]
 rebound = 6
 print("rebound:", rebound)
+
+
+def run_alias_case(label, source, namespace=None):
+    if namespace is None:
+        namespace = {}
+    try:
+        exec(source, namespace)
+    except NameError:
+        print(label + ": NameError")
+    else:
+        print(label + ": NO ERROR")
+
+
+run_alias_case(
+    "direct alias",
+    "g = globals\nns = g()\nb = 2\ndel ns['b']\nb",
+)
+run_alias_case(
+    "attribute alias",
+    "import builtins as bi\ng = bi.globals\nns = g()\nb = 2\ndel ns['b']\nb",
+)
+run_alias_case(
+    "import alias",
+    "from builtins import globals as g\nns = g()\nb = 2\ndel ns['b']\nb",
+)
+run_alias_case(
+    "getattr alias",
+    "import builtins as bi\ng = getattr(bi, 'globals')\nns = g()\nb = 2\ndel ns['b']\nb",
+)
+run_alias_case(
+    "function globals",
+    "def owner(): pass\nns = owner.__globals__\nb = 2\ndel ns['b']\nb",
+)
+run_alias_case(
+    "builtins dict",
+    "import builtins as bi\ng = bi.__dict__['globals']\nns = g()\nb = 2\ndel ns['b']\nb",
+)
+
+
+def delete_frame_name(frame, name):
+    del frame.f_locals[name]
+
+
+run_alias_case(
+    "sys import alias",
+    "from sys import _getframe as get_frame\nb = 2\ndelete_frame_name(get_frame(), 'b')\nb",
+    {"delete_frame_name": delete_frame_name},
+)

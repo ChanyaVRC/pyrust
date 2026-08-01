@@ -185,6 +185,61 @@ fn discarded_module_name_only_uses_checked_load_when_namespace_may_escape() {
 }
 
 #[test]
+fn namespace_accessor_aliases_gate_discarded_module_reads() {
+    fn assert_checked(source: &str) {
+        let code = compile_source_with_positions(source);
+        let value_name = code
+            .names
+            .iter()
+            .position(|name| name == "value")
+            .expect("value name") as u16;
+        assert!(
+            code.insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+            "namespace exposure syntax must check the final discarded read:\n{source}"
+        );
+    }
+
+    for accessor in ["globals", "locals", "vars", "exec", "eval"] {
+        assert_checked(&format!(
+            "from builtins import {accessor} as expose\nvalue = 1\nvalue\n"
+        ));
+        assert_checked(&format!(
+            "import builtins\nexpose = builtins.{accessor}\nvalue = 1\nvalue\n"
+        ));
+    }
+    assert_checked("from sys import _getframe as get_frame\nvalue = 1\nvalue\n");
+    assert_checked(
+        "value = 1\ndef expose():\n    from builtins import globals as get_globals\nvalue\n",
+    );
+    assert_checked("import builtins as b\nexpose = getattr(b, 'globals')\nvalue = 1\nvalue\n");
+    assert_checked("def owner():\n    pass\nnamespace = owner.__globals__\nvalue = 1\nvalue\n");
+    assert_checked("import builtins as b\nexpose = b.__dict__['globals']\nvalue = 1\nvalue\n");
+    assert_checked("expose = __builtins__['globals']\nvalue = 1\nvalue\n");
+
+    for source in [
+        "value = 1\nnamespace = holder.__dict__\nvalue\n",
+        "value = 1\nnamespace = holder.__dict__['other']\nvalue\n",
+        "from other import globals as expose\nvalue = 1\nvalue\n",
+    ] {
+        let unrelated = compile_source(source);
+        let value_name = unrelated
+            .names
+            .iter()
+            .position(|name| name == "value")
+            .expect("value name") as u16;
+        assert!(
+            unrelated
+                .insns
+                .iter()
+                .all(|insn| !matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+            "unrelated introspection/import syntax must not expose this namespace:\n{source}"
+        );
+    }
+}
+
+#[test]
 fn syntactic_range_call_keeps_runtime_resolution_and_conditional_target_store() {
     let code = compile_source(
         r#"for target in range(0):

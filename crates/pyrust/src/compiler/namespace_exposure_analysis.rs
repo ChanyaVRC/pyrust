@@ -6,6 +6,28 @@ fn module_namespace_may_be_exposed(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_may_expose_module_namespace)
 }
 
+fn is_builtin_namespace_accessor(name: &str) -> bool {
+    matches!(name, "globals" | "locals" | "vars" | "exec" | "eval")
+}
+
+fn is_namespace_exposing_attr(name: &str) -> bool {
+    is_builtin_namespace_accessor(name)
+        || matches!(name, "_getframe" | "f_locals" | "f_globals" | "__globals__")
+}
+
+fn import_from_may_expose_module_namespace(
+    module: &str,
+    names: &[(String, Option<String>)],
+) -> bool {
+    match module {
+        "builtins" => names
+            .iter()
+            .any(|(name, _)| name == "*" || is_builtin_namespace_accessor(name)),
+        "sys" => names.iter().any(|(name, _)| name == "_getframe"),
+        _ => false,
+    }
+}
+
 fn stmt_may_expose_module_namespace(stmt: &Stmt) -> bool {
     let mut exposed = false;
     stmt.visit_scope_dependency_exprs(&mut |expr| {
@@ -16,6 +38,9 @@ fn stmt_may_expose_module_namespace(stmt: &Stmt) -> bool {
     }
 
     match stmt {
+        Stmt::ImportFrom { module, names } => {
+            import_from_may_expose_module_namespace(module, names)
+        }
         Stmt::Def { body, .. } | Stmt::Class { body, .. } | Stmt::With { body, .. } => {
             module_namespace_may_be_exposed(body)
         }
@@ -75,17 +100,39 @@ fn target_may_expose_module_namespace(target: &AssignTarget) -> bool {
     exposed
 }
 
+fn call_uses_sensitive_getattr(func: &Expr, args: &[CallArg]) -> bool {
+    matches!(func, Expr::Var(name, _) if name == "getattr")
+        && args.get(1).is_some_and(|argument| {
+            argument.name.is_none()
+                && !argument.splat
+                && !argument.double_splat
+                && matches!(&argument.value, Expr::Str(name) if is_namespace_exposing_attr(name))
+        })
+}
+
+fn index_reads_namespace_accessor(target: &Expr, index: &Expr) -> bool {
+    let sensitive_container = match target {
+        Expr::Attr { name, .. } => name == "__dict__",
+        Expr::Var(name, _) => name == "__builtins__",
+        _ => false,
+    };
+    let sensitive_name = match index {
+        Expr::Str(name) => is_builtin_namespace_accessor(name),
+        _ => false,
+    };
+    sensitive_container && sensitive_name
+}
+
 fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
     match expr {
         // A bare read is enough: the callable can be retained under an alias
         // and invoked later, so looking only for direct calls is unsound.
-        Expr::Var(name, _) => matches!(
-            name.as_str(),
-            "globals" | "locals" | "vars" | "exec" | "eval" | "_getframe"
-        ),
+        Expr::Var(name, _) => {
+            is_builtin_namespace_accessor(name)
+                || matches!(name.as_str(), "_getframe" | "builtins" | "__builtins__")
+        }
         Expr::Attr { target, name, .. } => {
-            matches!(name.as_str(), "_getframe" | "f_locals" | "f_globals")
-                || expr_may_expose_module_namespace(target)
+            is_namespace_exposing_attr(name) || expr_may_expose_module_namespace(target)
         }
         Expr::Binary { left, right, .. } => {
             expr_may_expose_module_namespace(left) || expr_may_expose_module_namespace(right)
@@ -118,13 +165,15 @@ fn expr_may_expose_module_namespace(expr: &Expr) -> bool {
             }) || expr_may_expose_module_namespace(body)
         }
         Expr::Call { func, args, .. } => {
-            expr_may_expose_module_namespace(func)
+            call_uses_sensitive_getattr(func, args)
+                || expr_may_expose_module_namespace(func)
                 || args
                     .iter()
                     .any(|argument| expr_may_expose_module_namespace(&argument.value))
         }
         Expr::Index { target, index, .. } => {
-            let target_exposed = expr_may_expose_module_namespace(target);
+            let target_exposed = index_reads_namespace_accessor(target, index)
+                || expr_may_expose_module_namespace(target);
             target_exposed || expr_may_expose_module_namespace(index)
         }
         Expr::Slice {
