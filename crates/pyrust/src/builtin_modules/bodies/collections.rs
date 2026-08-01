@@ -1274,7 +1274,8 @@ pyrust_module! {
             }))))
         }
 
-        /// `d.count(x)` — count occurrences of `x` using `==` equality.
+        /// `d.count(x)` — count occurrences of `x`, comparing elements with
+        /// CPython's identity-then-equality rule (`x is y or x == y`).
         fn count(args) -> Result<Value> {
             let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
             let target = arg.clone();
@@ -1282,7 +1283,7 @@ pyrust_module! {
                 deque_items_snapshot_guarded(&inst)?;
             let mut n: i64 = 0;
             for v in &items {
-                let equal = _interp.values_user_eq(v, &target)?;
+                let equal = _interp.values_richcompare_eq(v, &target)?;
                 deque_require_unmutated(&mutation_state, version, "RuntimeError")?;
                 if equal {
                     n += 1;
@@ -1300,7 +1301,7 @@ pyrust_module! {
                 deque_items_snapshot_guarded(&inst)?;
             let mut found: Option<usize> = None;
             for (i, v) in items.iter().enumerate() {
-                let equal = _interp.values_user_eq(v, &target)?;
+                let equal = _interp.values_richcompare_eq(v, &target)?;
                 deque_require_unmutated(&mutation_state, version, "IndexError")?;
                 if equal {
                     found = Some(i);
@@ -1360,7 +1361,7 @@ pyrust_module! {
                 .as_ref()
                 .map_or(len, |value| deque_normalize_search_bound(value, len));
             for (i, item) in items.iter().enumerate().take(stop).skip(start) {
-                let equal = _interp.values_user_eq(item, &target)?;
+                let equal = _interp.values_richcompare_eq(item, &target)?;
                 deque_require_unmutated(&mutation_state, version, "RuntimeError")?;
                 if equal {
                     return Ok(Value::int(i as i64));
@@ -1459,14 +1460,15 @@ pyrust_module! {
             Ok(Value::none())
         }
 
-        /// `x in d` — membership test using `==` equality.
+        /// `x in d` — membership test comparing elements with CPython's
+        /// identity-then-equality rule (`x is y or x == y`).
         fn __contains__(args) -> Result<Value> {
             let (inst, arg) = expect_self_one_arg(args, FN_NAME)?;
             let target = arg.clone();
             let (items, mutation_state, version) =
                 deque_items_snapshot_guarded(&inst)?;
             for v in &items {
-                let equal = _interp.values_user_eq(v, &target)?;
+                let equal = _interp.values_richcompare_eq(v, &target)?;
                 deque_require_unmutated(&mutation_state, version, "RuntimeError")?;
                 if equal {
                     return Ok(Value::bool_(true));
@@ -1591,7 +1593,8 @@ pyrust_module! {
         }
 
         /// `d == other` — equal iff `other` is a deque with the same
-        /// elements in the same order (element-wise `==`).  Non-deque
+        /// elements in the same order, compared with CPython's
+        /// identity-then-equality rule (`x is y or x == y`).  Non-deque
         /// comparisons return `NotImplemented`.
         fn __eq__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
@@ -1619,7 +1622,7 @@ pyrust_module! {
                 return Ok(Value::bool_(false));
             }
             for (a, b) in self_items.iter().zip(other_items.iter()) {
-                let equal = _interp.values_user_eq(a, b)?;
+                let equal = _interp.values_richcompare_eq(a, b)?;
                 if !equal {
                     // CPython returns immediately on a mismatch; a mutation
                     // performed by that final false comparison is not checked.
