@@ -184,6 +184,10 @@ struct Compiler {
     /// after `globals()` has been called.  Child compilers for functions and
     /// class bodies set this to false — they write to fastlocals only.
     is_module_scope: bool,
+    /// True when syntax anywhere in the top-level compile unit can retain or
+    /// mutate its live namespace mapping. Used to keep discarded, definitely
+    /// bound module-name reads free when no such alias can exist.
+    module_namespace_may_be_exposed: bool,
     /// True once we have compiled a statement that is neither a module docstring
     /// nor a `from __future__ import ...`.  After this point any `from __future__`
     /// import must be rejected with

@@ -17,6 +17,23 @@ fn compile_source(src: &str) -> FnCode {
     compile_script_with_linenos(&stmts, local_index, false, &[], "<test>").unwrap()
 }
 
+fn compile_source_with_positions(src: &str) -> FnCode {
+    use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
+
+    let (tokens, line_nos, cols, cols_end) = Lexer::new(src).unwrap().into_tokens_with_pos();
+    let mut parser = Parser::new_with_pos(tokens, line_nos, cols, cols_end);
+    let (stmts, stmt_linenos) = parser.parse_program_with_linenos().unwrap();
+    let empty = HashSet::new();
+    let names = collect_local_names(&[], &stmts, &empty, &empty);
+    let local_index = Rc::new(
+        (0u32..)
+            .zip(names)
+            .map(|(slot, name)| (name, slot))
+            .collect(),
+    );
+    compile_script_with_linenos(&stmts, local_index, false, &stmt_linenos, "<test>").unwrap()
+}
+
 fn compile_source_error(src: &str) -> String {
     use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
 
@@ -81,6 +98,154 @@ fn shared_module_namespace_mode_does_not_replace_script_fastlocals() {
             .any(|insn| matches!(insn, Insn::SyncModuleGlobal(..))),
         "shared module bodies must not retain a second register-backed binding"
     );
+}
+
+#[test]
+fn discarded_module_name_only_uses_checked_load_when_namespace_may_escape() {
+    let assignment_only = compile_source_with_positions("value = 1\n");
+    let unexposed = compile_source_with_positions("value = 1\nvalue\n");
+    let value_name = unexposed
+        .names
+        .iter()
+        .position(|name| name == "value")
+        .expect("value name") as u16;
+    assert_eq!(
+        unexposed.insns.len(),
+        assignment_only.insns.len(),
+        "an unexposed namespace must retain zero-instruction discarded reads"
+    );
+    assert!(
+        unexposed
+            .insns
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+        "an unexposed namespace must retain the definitely-bound register fast path"
+    );
+
+    for source in [
+        "value = 1\nglobals()\nvalue\n",
+        "value = 1\nlocals()\nvalue\n",
+        "value = 1\nvars()\nvalue\n",
+        "value = 1\nexec('pass')\nvalue\n",
+        "value = 1\neval('None')\nvalue\n",
+        "value = 1\nexpose = globals\nvalue\n",
+        "import sys\nvalue = 1\nsys._getframe\nvalue\n",
+        "value = 1\nframe.f_locals\nvalue\n",
+        "import sys\nvalue = 1\nsys._getframe().f_locals\nvalue\n",
+        "value = 1\nframe.f_globals\nvalue\n",
+        "value = 1\ndef expose():\n    globals()\nvalue\n",
+        "value = 1\nclass Expose:\n    namespace = locals()\nvalue\n",
+    ] {
+        let exposed = compile_source_with_positions(source);
+        let value_name = exposed
+            .names
+            .iter()
+            .position(|name| name == "value")
+            .expect("value name") as u16;
+        let checked_load = exposed
+            .insns
+            .iter()
+            .position(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name))
+            .expect("an exposed module name must perform a checked global load");
+        assert_eq!(
+            exposed.lineno_table[checked_load],
+            source.lines().count() as u32
+        );
+        assert_ne!(exposed.col_table[checked_load], (0, 0, 0, 0));
+    }
+
+    let consumed = compile_source("value = 1\nglobals()\ncopy = value\n");
+    let value_name = consumed
+        .names
+        .iter()
+        .position(|name| name == "value")
+        .expect("value name") as u16;
+    assert!(
+        consumed
+            .insns
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+        "consumed module reads must retain the definitely-bound register fast path"
+    );
+
+    let module = compile_source("globals()\ndef f():\n    value = 1\n    value\n");
+    let function = module
+        .fn_protos
+        .iter()
+        .find(|proto| proto.name.as_ref() == "f")
+        .expect("f prototype");
+    assert!(
+        function
+            .code
+            .insns
+            .iter()
+            .all(|insn| !matches!(insn, Insn::LoadGlobal(..) | Insn::CheckLocal(..))),
+        "function-scope discarded locals must retain the zero-instruction fast path"
+    );
+}
+
+#[test]
+fn namespace_accessor_aliases_gate_discarded_module_reads() {
+    fn assert_checked(source: &str) {
+        let code = compile_source_with_positions(source);
+        let value_name = code
+            .names
+            .iter()
+            .position(|name| name == "value")
+            .expect("value name") as u16;
+        assert!(
+            code.insns
+                .iter()
+                .any(|insn| matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+            "namespace exposure syntax must check the final discarded read:\n{source}"
+        );
+    }
+
+    for accessor in ["globals", "locals", "vars", "exec", "eval"] {
+        assert_checked(&format!(
+            "from builtins import {accessor} as expose\nvalue = 1\nvalue\n"
+        ));
+        assert_checked(&format!(
+            "import builtins\nexpose = builtins.{accessor}\nvalue = 1\nvalue\n"
+        ));
+    }
+    assert_checked("from sys import _getframe as get_frame\nvalue = 1\nvalue\n");
+    assert_checked(
+        "value = 1\ndef expose():\n    from builtins import globals as get_globals\nvalue\n",
+    );
+    assert_checked("import builtins as b\nexpose = getattr(b, 'globals')\nvalue = 1\nvalue\n");
+    assert_checked("def owner():\n    pass\nnamespace = owner.__globals__\nvalue = 1\nvalue\n");
+    assert_checked("import builtins as b\nexpose = b.__dict__['globals']\nvalue = 1\nvalue\n");
+    assert_checked("expose = __builtins__['globals']\nvalue = 1\nvalue\n");
+    assert_checked(
+        "import builtins as b\naccessors = b.__dict__\nexpose = accessors['globals']\nvalue = 1\nvalue\n",
+    );
+    assert_checked(
+        "from builtins import __dict__ as accessors\nexpose = accessors['globals']\nvalue = 1\nvalue\n",
+    );
+    assert_checked("value = 1\ndef expose():\n    import builtins as b\nvalue\n");
+
+    for source in [
+        "value = 1\nnamespace = holder.__dict__\nvalue\n",
+        "value = 1\nnamespace = holder.__dict__['other']\nvalue\n",
+        "from other import globals as expose\nvalue = 1\nvalue\n",
+        "import other as b\nvalue = 1\nvalue\n",
+        "from other import __dict__ as accessors\nvalue = 1\nvalue\n",
+    ] {
+        let unrelated = compile_source(source);
+        let value_name = unrelated
+            .names
+            .iter()
+            .position(|name| name == "value")
+            .expect("value name") as u16;
+        assert!(
+            unrelated
+                .insns
+                .iter()
+                .all(|insn| !matches!(insn, Insn::LoadGlobal(_, name) if *name == value_name)),
+            "unrelated introspection/import syntax must not expose this namespace:\n{source}"
+        );
+    }
 }
 
 #[test]

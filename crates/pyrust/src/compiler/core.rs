@@ -55,6 +55,7 @@ impl Compiler {
             is_async_generator_fn: false,
             is_syntax_error: false,
             is_module_scope: false,
+            module_namespace_may_be_exposed: false,
             past_future_zone: false,
             future_annotations: false,
             has_dead_yield: false,

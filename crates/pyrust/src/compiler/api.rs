@@ -49,6 +49,7 @@ pub fn compile_script_with_linenos(
     // Issue #820: module-scope stores emit SyncModuleGlobal to keep
     // module_globals_dict live after globals() has been called.
     c.is_module_scope = true;
+    c.module_namespace_may_be_exposed = module_namespace_may_be_exposed(stmts);
     // Issue #711: if the first statement is a bare string literal and we are
     // compiling a script file (not the REPL), it is the module docstring.
     // Emit a StoreGlobal for `__doc__` (CPython parity) before compiling the
