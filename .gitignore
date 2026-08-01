@@ -254,3 +254,6 @@ rustc-ice-*.txt
 # Claude
 .claude/
 CLAUDE.*
+.codex/
+.codex-tmp/
+.agents/
