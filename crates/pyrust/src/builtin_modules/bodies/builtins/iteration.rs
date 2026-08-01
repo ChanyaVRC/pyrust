@@ -166,32 +166,39 @@ pyrust_module! {
     /// `PyValue` (not `PyIterable`) so that user-defined `PyInstance`
     /// iterables reach `make_iterator` (which dispatches `__iter__`) — the
     /// registry-only path cannot dispatch `__iter__` dunders.  `start` is
-    /// `Option<PyValue>`
-    /// so the body can handle both `int` and `bool` inputs (CPython
+    /// `PyValue` so the body can handle both `int` and `bool` inputs (CPython
     /// accepts both; `bool ⊆ int` in CPython) and produce the
-    /// exact CPython `TypeError` wording for non-integer `start`.
+    /// exact CPython `TypeError` wording for non-integer `start`.  Keeping the
+    /// default as an integer `PyValue` distinguishes an omitted start from an
+    /// explicitly supplied `None`.
     fn enumerate(
         #[positional_only] iterable: PyValue,
-        #[default(None)]
-        start: Option<PyValue>,
+        #[default(PyValue(Value::int(0)))]
+        start: PyValue,
     ) -> Result<Value> {
-        // `start` accepts any int (incl. BigInt and bool); a non-int raises the
-        // CPython TypeError.  The counter is kept as a `Value` so it promotes to
-        // BigInt on overflow instead of wrapping (#2125).
-        let start_val: Value = match start {
-            None => Value::int(0),
-            Some(v) => match v.0.kind() {
-                ValueKind::Int(_) | ValueKind::BigInt(_) => v.0.clone(),
-                ValueKind::Bool(b) => Value::int(b as i64),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(&v.0),
-                    ),
-                )),
-            },
+        // Resolve through the shared index protocol before storing the counter,
+        // preserving the invariant that next_enumerate_counter only sees the
+        // int family.  Normalize bool to an exact int as CPython does.
+        let start_val = _interp.value_to_index(&start.0, |value| {
+            PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    value_type_name_str(value),
+                ),
+            )
+        })?;
+        let bool_start = match start_val.kind() {
+            ValueKind::Bool(value) => Some(value),
+            ValueKind::Int(_) | ValueKind::BigInt(_) => None,
+            _ => unreachable!("value_to_index guarantees an integer"),
         };
+        let start_val = match bool_start {
+            Some(value) => Value::int(value as i64),
+            None => start_val,
+        };
+        // The counter stays a `Value` so it promotes to BigInt on overflow
+        // instead of wrapping (#2125).
         // Convert the iterable to a lazy iterator without consuming any elements.
         // Elements are pulled lazily by step_enumerate_iter via call_next.
         let source = make_iterator(_interp, &iterable.0)?;
