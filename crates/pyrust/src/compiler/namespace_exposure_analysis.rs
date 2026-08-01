@@ -20,12 +20,16 @@ fn import_from_may_expose_module_namespace(
     names: &[(String, Option<String>)],
 ) -> bool {
     match module {
-        "builtins" => names
-            .iter()
-            .any(|(name, _)| name == "*" || is_builtin_namespace_accessor(name)),
+        "builtins" => names.iter().any(|(name, _)| {
+            name == "*" || name == "__dict__" || is_builtin_namespace_accessor(name)
+        }),
         "sys" => names.iter().any(|(name, _)| name == "_getframe"),
         _ => false,
     }
+}
+
+fn import_may_expose_module_namespace(names: &[(String, Option<String>)]) -> bool {
+    names.iter().any(|(module, _)| module == "builtins")
 }
 
 fn stmt_may_expose_module_namespace(stmt: &Stmt) -> bool {
@@ -38,6 +42,7 @@ fn stmt_may_expose_module_namespace(stmt: &Stmt) -> bool {
     }
 
     match stmt {
+        Stmt::Import { names } => import_may_expose_module_namespace(names),
         Stmt::ImportFrom { module, names } => {
             import_from_may_expose_module_namespace(module, names)
         }

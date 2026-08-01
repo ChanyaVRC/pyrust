@@ -88,6 +88,14 @@ run_alias_case(
     "builtins dict",
     "import builtins as bi\ng = bi.__dict__['globals']\nns = g()\nb = 2\ndel ns['b']\nb",
 )
+run_alias_case(
+    "two-stage builtins dict",
+    "import builtins as bi\naccessors = bi.__dict__\ng = accessors['globals']\nns = g()\nb = 2\ndel ns['b']\nb",
+)
+run_alias_case(
+    "imported builtins dict",
+    "from builtins import __dict__ as accessors\ng = accessors['globals']\nns = g()\nb = 2\ndel ns['b']\nb",
+)
 
 
 def delete_frame_name(frame, name):

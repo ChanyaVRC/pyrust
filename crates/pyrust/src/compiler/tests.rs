@@ -217,11 +217,20 @@ fn namespace_accessor_aliases_gate_discarded_module_reads() {
     assert_checked("def owner():\n    pass\nnamespace = owner.__globals__\nvalue = 1\nvalue\n");
     assert_checked("import builtins as b\nexpose = b.__dict__['globals']\nvalue = 1\nvalue\n");
     assert_checked("expose = __builtins__['globals']\nvalue = 1\nvalue\n");
+    assert_checked(
+        "import builtins as b\naccessors = b.__dict__\nexpose = accessors['globals']\nvalue = 1\nvalue\n",
+    );
+    assert_checked(
+        "from builtins import __dict__ as accessors\nexpose = accessors['globals']\nvalue = 1\nvalue\n",
+    );
+    assert_checked("value = 1\ndef expose():\n    import builtins as b\nvalue\n");
 
     for source in [
         "value = 1\nnamespace = holder.__dict__\nvalue\n",
         "value = 1\nnamespace = holder.__dict__['other']\nvalue\n",
         "from other import globals as expose\nvalue = 1\nvalue\n",
+        "import other as b\nvalue = 1\nvalue\n",
+        "from other import __dict__ as accessors\nvalue = 1\nvalue\n",
     ] {
         let unrelated = compile_source(source);
         let value_name = unrelated
