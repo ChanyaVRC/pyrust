@@ -62,8 +62,9 @@ impl Interpreter {
         if needs_seq_dispatch {
             // Slow path: snapshot both sides to drop the borrow before
             // recursing into user code, then walk element-wise through
-            // `values_user_eq` so `PyInstance` elements dispatch
-            // `__eq__`.  Element clones are cheap (Rc/NaN-box copy).
+            // `values_richcompare_eq` so aliases compare equal by identity
+            // before iterator/instance elements dispatch `__eq__`.  Element
+            // clones are cheap (Rc/NaN-box copy).
             let list_pair = a.is_list() && b.is_list();
             let (av, bv): (Vec<Value>, Vec<Value>) = match (a.kind(), b.kind()) {
                 (ValueKind::List(la), ValueKind::List(lb)) => {
@@ -80,7 +81,7 @@ impl Interpreter {
             }
             let mut result = (|| -> Result<bool> {
                 for (x, y) in av.iter().zip(bv.iter()) {
-                    if !self.values_user_eq(x, y)? {
+                    if !self.values_richcompare_eq(x, y)? {
                         return Ok(false);
                     }
                 }
@@ -346,12 +347,10 @@ impl Interpreter {
     /// `dict_values` — need the same short-circuit, as does any instance whose
     /// `__eq__` answers False (or raises) for itself.
     ///
-    /// Use this for every element-wise container scan (membership, `index`,
-    /// `count`, `remove`, element-wise `==`).  The list/tuple scans in
-    /// `builtin_methods/sequences.rs` and `expr/slicing_membership.rs` spell the
-    /// rule out inline because they interleave it with a borrow-only primitive
-    /// fast path that never reaches the interpreter; those copies still test
-    /// only `is_identical_nan` and so miss the iterator cases above.
+    /// Use this for every callback-capable element-wise container scan.  The
+    /// list/tuple scans keep scalar identity/equality inline for their
+    /// borrow-only primitive fast path, then delegate only the slow branch
+    /// here.
     pub(crate) fn values_richcompare_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
         if a.cannot_user_eq() {
             // Scalar NaN-box tag (`Float`/`None`/`Bool`/`Int`/`Str`): NaN is the

@@ -9,6 +9,7 @@ fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
     matches!(
         a.kind(),
         ValueKind::PyInstance(_)
+            | ValueKind::Generator(_)
             | ValueKind::List(_)
             | ValueKind::Tuple(_)
             | ValueKind::Dict(_)
@@ -17,6 +18,7 @@ fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
     ) || matches!(
         b.kind(),
         ValueKind::PyInstance(_)
+            | ValueKind::Generator(_)
             | ValueKind::List(_)
             | ValueKind::Tuple(_)
             | ValueKind::Dict(_)
