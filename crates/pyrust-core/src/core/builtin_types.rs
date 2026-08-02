@@ -35,6 +35,15 @@ pub trait BuiltinTypeOps: Any {
             .map_or_else(|| self.type_name(), CanonicalClassTag::canonical_name)
     }
 
+    /// CPython's `tp_name` spelling used only in error messages.
+    ///
+    /// Most opaque built-ins use their Python-visible display name. Static
+    /// stdlib types whose diagnostics are module-qualified override this
+    /// without changing repr or type presentation.
+    fn display_error_name(&self) -> &'static str {
+        self.display_type_name()
+    }
+
     /// Override the backing state address used for Python object identity.
     ///
     /// Most built-in objects are identified by their shared [`BuiltinState`]
@@ -79,7 +88,7 @@ pub trait BuiltinTypeOps: Any {
             "AttributeError",
             format!(
                 "'{}' object has no attribute '{}'",
-                self.display_type_name(),
+                self.display_error_name(),
                 name
             ),
         ))
@@ -94,7 +103,7 @@ pub trait BuiltinTypeOps: Any {
         let _ = (state, args, kwargs);
         Err(PyError::named(
             "TypeError",
-            format!("'{}' object is not callable", self.display_type_name()),
+            format!("'{}' object is not callable", self.display_error_name()),
         ))
     }
 
@@ -110,7 +119,7 @@ pub trait BuiltinTypeOps: Any {
             "AttributeError",
             format!(
                 "'{}' object has no attribute '{}'",
-                self.display_type_name(),
+                self.display_error_name(),
                 name
             ),
         ))
@@ -120,7 +129,7 @@ pub trait BuiltinTypeOps: Any {
         let _ = state;
         Err(PyError::named(
             "TypeError",
-            format!("'{}' object is not iterable", self.display_type_name()),
+            format!("'{}' object is not iterable", self.display_error_name()),
         ))
     }
 
@@ -133,7 +142,10 @@ pub trait BuiltinTypeOps: Any {
         let _ = (state, key);
         Err(PyError::named(
             "TypeError",
-            format!("'{}' object is not subscriptable", self.display_type_name()),
+            format!(
+                "'{}' object is not subscriptable",
+                self.display_error_name()
+            ),
         ))
     }
 
@@ -143,7 +155,7 @@ pub trait BuiltinTypeOps: Any {
             "TypeError",
             format!(
                 "'{}' object does not support item assignment",
-                self.display_type_name()
+                self.display_error_name()
             ),
         ))
     }
@@ -154,7 +166,7 @@ pub trait BuiltinTypeOps: Any {
             "TypeError",
             format!(
                 "'{}' object does not support item deletion",
-                self.display_type_name()
+                self.display_error_name()
             ),
         ))
     }
@@ -165,7 +177,7 @@ pub trait BuiltinTypeOps: Any {
             "TypeError",
             format!(
                 "argument of type '{}' is not iterable",
-                self.display_type_name()
+                self.display_error_name()
             ),
         ))
     }

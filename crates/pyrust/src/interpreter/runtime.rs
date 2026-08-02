@@ -151,7 +151,7 @@ mod collection_keys {
         Interpreter, PyDict, PyError, PyKey, PySet, Rc, Result, StrKey, Value, ValueKind,
         class_hash_inherits_builtin_none, coerce_numeric, coerce_subclass_backing,
         invoke_class_method, lookup_class_attr, py_hash_bigint, py_hash_float, py_hash_int,
-        range_len, slot_is_dispatchable, value_type_name_str, values_are_identical,
+        range_len, slot_is_dispatchable, values_are_identical,
     };
     include!("runtime/collection_keys.rs");
 }

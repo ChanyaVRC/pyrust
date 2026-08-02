@@ -284,8 +284,8 @@ impl Interpreter {
                     return Ok(Value::bool_(a & b));
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = value_type_name_str(&left);
-                let rt = value_type_name_str(&right);
+                let lt = crate::interpreter::error_type_name_str(&left);
+                let rt = crate::interpreter::error_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
                 // Canonical numeric `&` via the NumericOps slot table (#458):
@@ -353,8 +353,8 @@ impl Interpreter {
                 // `None | None`: both operands looked like union components but neither
                 // was a type, so CPython raises TypeError with the operand-type message.
                 if is_union_operand(&left) && is_union_operand(&right) {
-                    let lt = value_type_name_str(&left);
-                    let rt = value_type_name_str(&right);
+                    let lt = crate::interpreter::error_type_name_str(&left);
+                    let rt = crate::interpreter::error_type_name_str(&right);
                     return Err(pyrust_core::type_err!(
                         "unsupported operand type(s) for |: '{lt}' and '{rt}'"
                     ));
@@ -394,8 +394,8 @@ impl Interpreter {
                     return Ok(Value::bool_(a ^ b));
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = value_type_name_str(&left);
-                let rt = value_type_name_str(&right);
+                let lt = crate::interpreter::error_type_name_str(&left);
+                let rt = crate::interpreter::error_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
                 // Canonical numeric `^` via the NumericOps slot table (#458).
@@ -412,8 +412,8 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = value_type_name_str(&left);
-                let rt = value_type_name_str(&right);
+                let lt = crate::interpreter::error_type_name_str(&left);
+                let rt = crate::interpreter::error_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
                 // Canonical numeric `<<` via the NumericOps slot table (#458):
@@ -434,8 +434,8 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                let lt = value_type_name_str(&left);
-                let rt = value_type_name_str(&right);
+                let lt = crate::interpreter::error_type_name_str(&left);
+                let rt = crate::interpreter::error_type_name_str(&right);
                 let left = coerce_numeric(&left);
                 let right = coerce_numeric(&right);
                 // Canonical numeric `>>` via the NumericOps slot table (#458):

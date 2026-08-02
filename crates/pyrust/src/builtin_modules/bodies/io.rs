@@ -96,13 +96,22 @@ pub(crate) fn inject_python_members(
         let abc_val = module.borrow().attrs.get(abc).cloned();
         if let (Some(c), Some(a)) = (concrete_val, abc_val)
             && let (ValueKind::PyClass(c_rc), ValueKind::PyClass(a_rc)) = (c.kind(), a.kind())
-            && c_rc.borrow().base.is_none()
         {
-            c_rc.borrow_mut().base = Some(Rc::clone(a_rc));
-            a_rc.borrow()
-                .subclasses
-                .borrow_mut()
-                .push(Rc::downgrade(c_rc));
+            let error_name = match concrete {
+                "BytesIO" => "_io.BytesIO",
+                "StringIO" => "_io.StringIO",
+                _ => unreachable!(),
+            };
+            let mut class = c_rc.borrow_mut();
+            class.error_name = Some(error_name);
+            if class.base.is_none() {
+                class.base = Some(Rc::clone(a_rc));
+                drop(class);
+                a_rc.borrow()
+                    .subclasses
+                    .borrow_mut()
+                    .push(Rc::downgrade(c_rc));
+            }
         }
     }
     Ok(())

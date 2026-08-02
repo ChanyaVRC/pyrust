@@ -50,7 +50,10 @@ pyrust_module! {
                 None => {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("object of type '{}' has no len()", ops.type_name()),
+                        format!(
+                            "object of type '{}' has no len()",
+                            ops.display_error_name()
+                        ),
                     ));
                 }
             },
@@ -91,7 +94,9 @@ pyrust_module! {
                                         "TypeError",
                                         format!(
                                             "object of type '{}' has no len()",
-                                            inst_rc.borrow().class.borrow().name,
+                                            pyrust_core::error_type_name(&Value::py_instance(
+                                                Rc::clone(&inst_rc)
+                                            )),
                                         ),
                                     ));
                                 }
@@ -102,7 +107,9 @@ pyrust_module! {
                                 "TypeError",
                                 format!(
                                     "object of type '{}' has no len()",
-                                    inst_rc.borrow().class.borrow().name,
+                                    pyrust_core::error_type_name(&Value::py_instance(Rc::clone(
+                                        &inst_rc
+                                    ))),
                                 ),
                             ));
                         }
@@ -112,7 +119,7 @@ pyrust_module! {
                         "TypeError",
                         format!(
                             "object of type '{}' has no len()",
-                            inst_rc.borrow().class.borrow().name,
+                            pyrust_core::error_type_name(&Value::py_instance(Rc::clone(&inst_rc))),
                         ),
                     ));
                 }
@@ -126,7 +133,7 @@ pyrust_module! {
                         "TypeError",
                         format!(
                             "object of type '{}' has no len()",
-                            pyrust_core::builtin_type_name(value),
+                            pyrust_core::error_type_name(value),
                         ),
                     ));
                 };
@@ -139,7 +146,7 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "object of type '{}' has no len()",
-                        pyrust_core::builtin_type_name(value),
+                        pyrust_core::error_type_name(value),
                     ),
                 ));
             }

@@ -734,7 +734,7 @@ impl Interpreter {
             }
             _ => Err(pyrust_core::type_err!(
                 "'{}' object is not callable",
-                pyrust_core::builtin_type_name(function)
+                pyrust_core::error_type_name(function)
             )),
         }
     }

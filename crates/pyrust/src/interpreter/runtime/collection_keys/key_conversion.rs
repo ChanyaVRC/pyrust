@@ -174,7 +174,7 @@ impl Interpreter {
             // dict/set-key case) never does, so it skips the MRO-walking helper
             // entirely (avoids a ~7% regression on user-instance keys).
             if has_builtin_data && crate::interpreter::class_hash_inherits_builtin_none(&class) {
-                let class_name = class.borrow().name.clone();
+                let class_name = pyrust_core::error_type_name(value);
                 return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
             }
             // CPython treats a class that explicitly sets `__hash__ = None`
@@ -182,7 +182,7 @@ impl Interpreter {
             // the same way for now.
             if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
                 if matches!(hash_method.kind(), ValueKind::None) {
-                    let class_name = class.borrow().name.clone();
+                    let class_name = pyrust_core::error_type_name(value);
                     return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
                 }
                 // Issue #2299/#2386: the unhashable builtins (list/dict/set/
@@ -198,7 +198,7 @@ impl Interpreter {
                     crate::interpreter::CanonicalSlot::ObjectHash,
                 ) && class_hash_inherits_builtin_none(&class)
                 {
-                    let class_name = class.borrow().name.clone();
+                    let class_name = pyrust_core::error_type_name(value);
                     return Err(pyrust_core::type_err!("unhashable type: '{class_name}'"));
                 }
                 // Issue #2055: a non-callable `__hash__` slot (`__hash__ = 5`)
@@ -211,7 +211,7 @@ impl Interpreter {
                         "TypeError",
                         format!(
                             "'{}' object is not callable",
-                            value_type_name_str(&hash_method)
+                            pyrust_core::error_type_name(&hash_method)
                         ),
                     ));
                 }
@@ -323,7 +323,7 @@ impl Interpreter {
                 value: value.clone(),
             });
         }
-        let type_name = value_type_name_str(value);
+        let type_name = pyrust_core::error_type_name(value);
         Err(pyrust_core::type_err!("unhashable type: '{type_name}'"))
     }
 

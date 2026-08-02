@@ -68,6 +68,27 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
     }
 }
 
+/// Return the exact type spelling CPython uses in diagnostics.
+///
+/// Python-visible type presentation stays routed through
+/// [`builtin_type_name`]. Exact static stdlib classes may instead carry an
+/// immutable module-qualified `tp_name` equivalent; the metadata is not
+/// inherited, so user subclasses continue to report their own bare class
+/// names. Opaque built-ins expose the same distinction through their ops.
+pub fn error_type_name(value: &Value) -> Cow<'static, str> {
+    match value.kind() {
+        ValueKind::PyInstance(instance) => {
+            let class = Rc::clone(&instance.borrow().class);
+            let class = class.borrow();
+            class
+                .error_name
+                .map_or_else(|| Cow::Owned(class.name.clone()), Cow::Borrowed)
+        }
+        ValueKind::BuiltinObject { ops, .. } => Cow::Borrowed(ops.display_error_name()),
+        _ => builtin_type_name(value),
+    }
+}
+
 /// Display name for a value used in error messages of the form `"not <name>"`.
 ///
 /// CPython special-cases `None` in certain TypeError contexts: it prints the

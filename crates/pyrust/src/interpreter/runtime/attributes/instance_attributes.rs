@@ -328,9 +328,9 @@ impl Interpreter {
             return r;
         }
 
-        let class_name = class.borrow().name.clone();
+        let error_name = pyrust_core::error_type_name(&Value::py_instance(Rc::clone(&instance)));
         Err(PyError::attribute_error(
-            format!("'{}' object has no attribute '{}'", class_name, name),
+            format!("'{}' object has no attribute '{}'", error_name, name),
             Some(name.to_string()),
             Some(Value::py_instance(Rc::clone(&instance))),
         ))
@@ -411,7 +411,8 @@ impl Interpreter {
                 && !mro_slot_allows(&class, name)
                 && !mro_has_unslotted_ancestor(&class)
             {
-                let class_name = class.borrow().name.clone();
+                let class_name =
+                    pyrust_core::error_type_name(&Value::py_instance(Rc::clone(&instance)));
                 return Err(pyrust_core::py_err!(
                     "AttributeError",
                     "'{class_name}' object has no attribute '{name}'"
@@ -496,7 +497,8 @@ impl Interpreter {
             return policy.delete(&instance, name);
         }
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
-            let class_name = instance.borrow().class.borrow().name.clone();
+            let class_name =
+                pyrust_core::error_type_name(&Value::py_instance(Rc::clone(&instance)));
             return Err(PyError::attribute_error(
                 format!("'{class_name}' object has no attribute '{name}'"),
                 Some(name.to_string()),

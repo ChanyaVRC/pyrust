@@ -257,7 +257,7 @@ impl Interpreter {
                 }
             }
             _ => {
-                let type_name = pyrust_core::builtin_type_name(&target);
+                let type_name = pyrust_core::error_type_name(&target);
                 // CPython distinguishes "attribute does not exist" from
                 // "attribute exists on the type but is read-only" (issue #2562).
                 // `(1).real = 5` resolves `real` to a read-only getset_descriptor
@@ -358,7 +358,7 @@ impl Interpreter {
         // still matches CPython's stable ordering contract.
         // CPython raises AttributeError when the attribute is absent.
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
-            let class_name = instance.borrow().class.borrow().name.clone();
+            let class_name = pyrust_core::error_type_name(&Value::py_instance(Rc::clone(instance)));
             return Err(pyrust_core::py_err!(
                 "AttributeError",
                 "'{class_name}' object has no attribute '{name}'"

@@ -119,15 +119,15 @@ fn hash_value(value: &Value) -> Result<i64> {
             Some(h) => Ok(h as i64),
             None => Err(PyError::named(
                 "TypeError",
-                format!("unhashable type: '{}'", ops.display_type_name()),
+                format!("unhashable type: '{}'", ops.display_error_name()),
             )),
         },
         // PyInstance arriving here means either the caller didn't intercept
         // it for __hash__ dispatch (e.g. a tuple element), or no __hash__
         // method exists.  Use the actual class name rather than the generic
         // "object" returned by builtin_type_name.
-        ValueKind::PyInstance(inst) => {
-            let class_name = inst.borrow().class.borrow().name.clone();
+        ValueKind::PyInstance(_) => {
+            let class_name = pyrust_core::error_type_name(value);
             Err(PyError::named(
                 "TypeError",
                 format!("unhashable type: '{class_name}'"),
@@ -196,10 +196,7 @@ fn hash_value(value: &Value) -> Result<i64> {
         }
         _ => Err(PyError::named(
             "TypeError",
-            format!(
-                "unhashable type: '{}'",
-                pyrust_core::builtin_type_name(value)
-            ),
+            format!("unhashable type: '{}'", pyrust_core::error_type_name(value)),
         )),
     }
 }
@@ -363,7 +360,7 @@ pub(crate) fn hash_value_with_interp(
             }
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
-            let class_name = class.borrow().name.clone();
+            let class_name = pyrust_core::error_type_name(value);
             if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
                 // __hash__ = None means explicitly unhashable (CPython rule).
                 if matches!(hash_method.kind(), ValueKind::None) {

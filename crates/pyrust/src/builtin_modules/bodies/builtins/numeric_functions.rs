@@ -308,8 +308,8 @@ pyrust_module! {
             "TypeError",
             format!(
                 "unsupported operand type(s) for divmod(): '{}' and '{}'",
-                value_type_name_str(a),
-                value_type_name_str(b),
+                crate::interpreter::error_type_name_str(a),
+                crate::interpreter::error_type_name_str(b),
             ),
         ))
     }
@@ -375,9 +375,9 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "unsupported operand type(s) for ** or pow(): '{}', '{}', '{}'",
-                        value_type_name_str(base_val),
-                        value_type_name_str(exp_val),
-                        value_type_name_str(mod_val),
+                        crate::interpreter::error_type_name_str(base_val),
+                        crate::interpreter::error_type_name_str(exp_val),
+                        crate::interpreter::error_type_name_str(mod_val),
                     ),
                 ));
             }
@@ -585,8 +585,8 @@ pyrust_module! {
                     "TypeError",
                     format!(
                         "unsupported operand type(s) for ** or pow(): '{}' and '{}'",
-                        value_type_name_str(base_val),
-                        value_type_name_str(exp_val),
+                        crate::interpreter::error_type_name_str(base_val),
+                        crate::interpreter::error_type_name_str(exp_val),
                     ),
                 ));
             }
