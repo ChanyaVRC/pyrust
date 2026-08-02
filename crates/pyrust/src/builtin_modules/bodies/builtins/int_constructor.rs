@@ -123,7 +123,9 @@ pyrust_module! {
                         }
                     }
                     // CPython 3.12 dispatch: __int__ → __index__ → __trunc__
-                    if let Some(method) = lookup_value_special_method(&self_val, "__int__") {
+                    if let Some(method) =
+                        lookup_value_special_method(&self_val, "__int__").transpose()?
+                    {
                         let result =
                             invoke_class_method(_interp, method, self_val.clone(), &[])?;
                         if let Some(normalized) = normalize_int_slot_result(&result) {
@@ -138,7 +140,9 @@ pyrust_module! {
                         return Ok(normalize_int_slot_result(&result)
                             .expect("try_value_to_index guarantees an integer"));
                     }
-                    if let Some(method) = lookup_value_special_method(&self_val, "__trunc__") {
+                    if let Some(method) =
+                        lookup_value_special_method(&self_val, "__trunc__").transpose()?
+                    {
                         // Deprecated since 3.11 but still works in 3.12; call int() on the result.
                         let trunc_result =
                             invoke_class_method(_interp, method, self_val.clone(), &[])?;

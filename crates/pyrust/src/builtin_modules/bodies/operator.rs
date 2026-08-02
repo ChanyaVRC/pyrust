@@ -16,9 +16,9 @@
 // module by `inject_python_members`, wired from `env.rs::load_module`'s
 // post-import hook (mirrors `collections` / `asyncio`, issues #1884 / #1039).
 //
-// The native `pyrust_module!` block is intentionally empty — it exists only so
-// the `pyrust_builtin_modules!` plumbing (`module()` / `regs()`) is generated
-// and `import operator` resolves to a real `PyModule`.
+// The two APIs whose accelerated CPython semantics differ observably from the
+// reference source (`index` and `length_hint`) are declared natively below;
+// every other public member comes from the Python body.
 //
 // Reference: <https://docs.python.org/3/library/operator.html>
 
@@ -36,13 +36,12 @@ const OPERATOR_PY_SOURCE: &str = include_str!("operator_py.py");
 
 /// Public names from `OPERATOR_PY_SOURCE` exported onto the `operator` module.
 ///
-/// Matches CPython 3.12's `operator.__all__` minus `length_hint`: CPython's
-/// `Lib/operator.py` ends with `from _operator import *`, so the accelerated C
-/// definitions shadow the Python ones, and `length_hint` is the one member
-/// whose two implementations observably differ (issue #2920).  It is declared
-/// natively below instead, and must not be overwritten from the Python
-/// namespace here.
-const OPERATOR_PY_EXPORTS: [&str; 54] = [
+/// Matches CPython 3.12's `operator.__all__` minus `index` and `length_hint`:
+/// CPython's `Lib/operator.py` ends with `from _operator import *`, so the
+/// accelerated C definitions shadow the Python ones. Both are declared
+/// natively below and must not be overwritten from the Python namespace here
+/// (issues #2920 and #2947).
+const OPERATOR_PY_EXPORTS: [&str; 53] = [
     "abs",
     "add",
     "and_",
@@ -65,7 +64,6 @@ const OPERATOR_PY_EXPORTS: [&str; 54] = [
     "imatmul",
     "imod",
     "imul",
-    "index",
     "indexOf",
     "inv",
     "invert",
@@ -119,6 +117,15 @@ pub(crate) fn inject_python_members(
                 .insert(name.to_string(), val.clone());
         }
     }
+    module.borrow_mut().attrs.insert(
+        "index".to_string(),
+        pyrust_builtins::native_builtin_callable::native_intrinsic_builtin(
+            pyrust_builtins::native_builtin_callable::NativeBuiltinIntrinsic::IndexProtocol,
+            "index",
+            "_operator",
+            Some("Same as a.__index__()"),
+        ),
+    );
     Ok(())
 }
 

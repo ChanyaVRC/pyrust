@@ -714,7 +714,8 @@ impl Interpreter {
             // subclass under `EnumMeta`): `member in Color` dispatches the
             // metaclass slot with the class as the receiver (#2611).
             ValueKind::PyClass(cls) if metaclass_dunder(cls, "__contains__").is_some() => {
-                let method_val = metaclass_dunder(cls, "__contains__").unwrap();
+                let method_val = metaclass_dunder_for_call(cls, "__contains__")
+                    .expect("metaclass slot was checked above")?;
                 let result = invoke_class_method(
                     self,
                     method_val,

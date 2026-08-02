@@ -7,11 +7,11 @@ impl Interpreter {
             // Special methods on a class object are resolved on its metaclass,
             // just like len(C) and C() dispatch through the metaclass rather
             // than through C's own namespace.
-            if let Some(method) = metaclass_dunder(class, "__bool__") {
+            if let Some(method) = metaclass_dunder_for_call(class, "__bool__").transpose()? {
                 let result = invoke_class_method(self, method, value.clone(), &[])?;
                 return truthy_bool_slot_result(&result);
             }
-            if let Some(method) = metaclass_dunder(class, "__len__") {
+            if let Some(method) = metaclass_dunder_for_call(class, "__len__").transpose()? {
                 let result = invoke_class_method(self, method, value.clone(), &[])?;
                 return Ok(self.normalize_len_result(&result)? != 0);
             }

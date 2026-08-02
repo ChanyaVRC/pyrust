@@ -80,11 +80,9 @@ def floordiv(a, b):
 
 def index(a):
     "Same as a.__index__()."
-    # CPython's C `_operator.index` is `PyNumber_Index`, which raises
-    # `TypeError: '<type>' object cannot be interpreted as an integer` when
-    # `__index__` is absent — not the bare `AttributeError` the literal
-    # `a.__index__()` of the pure-Python reference would surface.  We target
-    # the user-visible C behaviour (issue #2514).
+    # This pure-Python reference is intentionally not exported: CPython's
+    # public operator.index is the accelerated PyNumber_Index wrapper, which
+    # pyrust declares natively beside length_hint.
     try:
         m = type(a).__index__
     except AttributeError:

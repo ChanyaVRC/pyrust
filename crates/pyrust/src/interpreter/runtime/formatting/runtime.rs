@@ -119,7 +119,7 @@ impl Interpreter {
                 // `type(cls).__format__(cls, spec)` for *any* spec, not just the
                 // inherited `object.__format__`.
                 if let Some(method_val) =
-                    crate::interpreter::metaclass_dunder(&cls_rc, "__format__")
+                    metaclass_dunder_for_call(&cls_rc, "__format__").transpose()?
                 {
                     let result = invoke_class_method(
                         self,

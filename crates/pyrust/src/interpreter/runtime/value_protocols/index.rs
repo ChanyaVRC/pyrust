@@ -123,7 +123,7 @@ impl Interpreter {
         {
             return Ok(Some(backing));
         }
-        let Some(method_val) = lookup_value_special_method(val, "__index__") else {
+        let Some(method_val) = lookup_value_special_method(val, "__index__").transpose()? else {
             return Ok(None);
         };
         let result = invoke_class_method(self, method_val, val.clone(), &[])?;

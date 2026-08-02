@@ -113,7 +113,8 @@ impl Interpreter {
                 Err(error) => Err(error),
             };
         }
-        let Some(method) = lookup_value_special_method(value, "__length_hint__") else {
+        let Some(method) = lookup_value_special_method(value, "__length_hint__").transpose()?
+        else {
             return Ok(LengthHintSlot::Missing);
         };
         match invoke_class_method(self, method, value.clone(), &[]) {

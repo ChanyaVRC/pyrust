@@ -74,8 +74,11 @@ pyrust_module! {
                         return Ok(Value::complex(real, imag));
                     }
                     if complex_backing.is_none()
-                        && let Some(method) =
-                            lookup_value_special_method(&self_val, "__complex__")
+                        && let Some(method) = lookup_value_special_method(
+                            &self_val,
+                            "__complex__",
+                        )
+                        .transpose()?
                     {
                         let result =
                             invoke_class_method(_interp, method, self_val.clone(), &[])?;
@@ -106,7 +109,9 @@ pyrust_module! {
                         return value_to_float(&backing, "__SENTINEL__")
                             .map(|value| Value::complex(value, 0.0));
                     }
-                    if let Some(method) = lookup_value_special_method(&self_val, "__float__") {
+                    if let Some(method) =
+                        lookup_value_special_method(&self_val, "__float__").transpose()?
+                    {
                         let result =
                             invoke_class_method(_interp, method, self_val.clone(), &[])?;
                         return if let Some(normalized) =
@@ -185,7 +190,7 @@ pyrust_module! {
                         {
                             value_to_float(&backing, "__SENTINEL__")?
                         } else if let Some(method) =
-                            lookup_value_special_method(self_val, "__float__")
+                            lookup_value_special_method(self_val, "__float__").transpose()?
                         {
                             let result =
                                 invoke_class_method(_interp, method, self_val.clone(), &[])?;
@@ -235,8 +240,11 @@ pyrust_module! {
                     {
                         (re, im, true)
                     } else if complex_backing.is_none()
-                        && let Some(method) =
-                            lookup_value_special_method(&first_val, "__complex__")
+                        && let Some(method) = lookup_value_special_method(
+                            &first_val,
+                            "__complex__",
+                        )
+                        .transpose()?
                     {
                         let result =
                             invoke_class_method(_interp, method, first_val.clone(), &[])?;

@@ -75,7 +75,9 @@ pyrust_module! {
                         }
                     }
                     // CPython 3.12 dispatch: __float__ → __index__
-                    if let Some(method) = lookup_value_special_method(&self_val, "__float__") {
+                    if let Some(method) =
+                        lookup_value_special_method(&self_val, "__float__").transpose()?
+                    {
                         let result =
                             invoke_class_method(_interp, method, self_val.clone(), &[])?;
                         if let Some(normalized) = normalize_float_slot_result(&result) {

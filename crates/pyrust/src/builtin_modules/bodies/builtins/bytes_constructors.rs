@@ -76,7 +76,9 @@ pyrust_module! {
                     {
                         return Ok(backing);
                     }
-                    if let Some(method) = lookup_value_special_method(&self_val, "__bytes__") {
+                    if let Some(method) =
+                        lookup_value_special_method(&self_val, "__bytes__").transpose()?
+                    {
                         let result =
                             invoke_class_method(_interp, method, self_val.clone(), &[])?;
                         return if matches!(result.kind(), ValueKind::Bytes(_)) {

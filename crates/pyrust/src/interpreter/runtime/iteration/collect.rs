@@ -227,7 +227,7 @@ impl Interpreter {
 
             self.collect_iterator(&iterator)
         } else if let ValueKind::PyClass(class) = val.kind()
-            && let Some(iter_method) = metaclass_dunder(class, "__iter__")
+            && let Some(iter_method) = metaclass_dunder_for_call(class, "__iter__").transpose()?
         {
             let iterator = invoke_class_method(self, iter_method, val.clone(), &[])?;
             let iterator = validate_iterator_result(iterator)?;
