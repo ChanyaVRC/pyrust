@@ -66,23 +66,25 @@ impl Interpreter {
         if !allow_iterable {
             return None;
         }
-        // Not set-like: treat as an arbitrary iterable (CPython builds a set
+        Some(self.coerce_setop_iterable_operand(v))
+    }
+
+    /// Build a plain set from an operand through its iterator protocol.
+    ///
+    /// This deliberately skips [`Self::coerce_set_operand`].  CPython's
+    /// `_PyDictView_Intersect` manually iterates every non-exact-set operand,
+    /// including set and frozenset subclasses, so their overridden `__iter__`
+    /// method (and any exception it raises) must remain observable (#3006).
+    pub(crate) fn coerce_setop_iterable_operand(&mut self, v: &Value) -> Result<(PySet, bool)> {
+        // Treat the operand as an arbitrary iterable (CPython builds a set
         // from it).  A non-iterable operand surfaces the iterator protocol's
         // own `'<type>' object is not iterable` TypeError — matching CPython,
-        // whose `dictviews_and`/etc. iterate the operand directly.
-        let items = match self.collect_iterable(v) {
-            Ok(items) => items,
-            Err(e) => return Some(Err(e)),
-        };
+        // whose dict-view set operations iterate the operand directly.
+        let items = self.collect_iterable(v)?;
         let mut out: PySet = PySet::default();
         for item in items {
-            match self.value_to_pykey(&item) {
-                Ok(k) => {
-                    out.insert(k);
-                }
-                Err(e) => return Some(Err(e)),
-            }
+            out.insert(self.value_to_pykey(&item)?);
         }
-        Some(Ok((out, false)))
+        Ok((out, false))
     }
 }
