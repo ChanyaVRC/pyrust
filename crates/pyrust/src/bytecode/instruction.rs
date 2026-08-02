@@ -629,6 +629,13 @@ pub enum Insn {
     ListAppend(Reg, Reg),
     /// R[list].extend(iter(R[src]))  — in-place extend
     ListExtend(Reg, Reg),
+    /// Call-context list extension for one `*` operand. The callee name is
+    /// resolved from `name` only if `R[src]` is not iterable.
+    ListExtendCall {
+        list: Reg,
+        src: Reg,
+        name: KwCallName,
+    },
     /// R[dict].update(R[src])  — in-place dict merge
     DictUpdate(Reg, Reg),
     /// R[dict].merge(R[src]) for a `**d` keyword splat in a *call* context.

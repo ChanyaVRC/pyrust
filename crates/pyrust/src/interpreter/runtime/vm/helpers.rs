@@ -59,7 +59,7 @@ impl Interpreter {
                 let class = match receiver.kind() {
                     ValueKind::PyInstance(instance) => Rc::clone(&instance.borrow().class),
                     ValueKind::PyClass(class) => Rc::clone(class),
-                    _ => return None,
+                    _ => value_class_object(&receiver)?,
                 };
                 let unbound = lookup_class_attr(&class, method)?;
                 callable_error_name(&unbound)

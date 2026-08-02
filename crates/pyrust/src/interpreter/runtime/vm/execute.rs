@@ -1544,6 +1544,16 @@ impl Interpreter {
                     let src_val = vm_try!(vm_read(&regs, *src_reg, num_locals));
                     vm_try!(self.extend_list_accumulator(&list, &src_val));
                 }
+                Insn::ListExtendCall { list, src, name } => {
+                    let list_val = vm_try!(vm_read(&regs, *list, num_locals));
+                    let src_val = vm_try!(vm_read(&regs, *src, num_locals));
+                    if let Err(error) = self.extend_list_accumulator(&list_val, &src_val) {
+                        let error = star_operand_error(&src_val, error, || {
+                            self.kwcall_func_name(&regs, num_locals, name, code)
+                        });
+                        vm_try!(Err(error));
+                    }
+                }
                 Insn::DictUpdate(dict_reg, src_reg) => {
                     let dict = vm_try!(vm_read(&regs, *dict_reg, num_locals));
                     let src_val = vm_try!(vm_read(&regs, *src_reg, num_locals));
@@ -1558,9 +1568,19 @@ impl Interpreter {
                         .as_some()
                         .cloned()
                         .unwrap_or(Value::none());
-                    if let Some(kw) = vm_try!(self.merge_kwcall_mapping(&dict_val, &src_val)) {
-                        let fname = self.kwcall_func_name(&regs, num_locals, name, code);
-                        vm_try!(Err(duplicate_keyword_error(fname.as_deref(), &kw)));
+                    match vm_try!(self.merge_kwcall_mapping(&dict_val, &src_val)) {
+                        KwCallMappingMerge::Complete => {}
+                        KwCallMappingMerge::Duplicate(keyword) => {
+                            let fname = self.kwcall_func_name(&regs, num_locals, name, code);
+                            vm_try!(Err(duplicate_keyword_error(fname.as_deref(), &keyword)));
+                        }
+                        KwCallMappingMerge::NotMapping => {
+                            let fname = self.kwcall_func_name(&regs, num_locals, name, code);
+                            vm_try!(Err(keyword_mapping_operand_error(
+                                fname.as_deref(),
+                                &src_val,
+                            )));
+                        }
                     }
                 }
 

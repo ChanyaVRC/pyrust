@@ -182,9 +182,27 @@ fn counter_tally_into_backing<const SUBTRACT: bool>(
         return Ok(());
     }
 
-    if crate::interpreter::visit_mapping_pairs_via_protocol(interp, other, |interp, key, value| {
-        counter_apply_mapping_entry::<SUBTRACT>(interp, backing, key, value, preserve)
-    })? {
+    // `dict.update` and `**` accept `keys()` alone when it yields no keys, but
+    // Counter's mapping/element split is stricter: without `__getitem__` the
+    // source falls through to ordinary iteration even when keys() is empty.
+    // Keep that Counter-specific classification outside the shared mapping
+    // visitor so the dict-family consumers retain their CPython behaviour.
+    let exposes_getitem = match other.kind() {
+        ValueKind::PyInstance(instance) => {
+            let class = Rc::clone(&instance.borrow().class);
+            lookup_class_attr(&class, "__getitem__").is_some()
+        }
+        _ => false,
+    };
+    if exposes_getitem
+        && crate::interpreter::visit_mapping_pairs_via_protocol(
+            interp,
+            other,
+            |interp, key, value| {
+                counter_apply_mapping_entry::<SUBTRACT>(interp, backing, key, value, preserve)
+            },
+        )?
+    {
         return Ok(());
     }
 

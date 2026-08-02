@@ -461,6 +461,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | SetAdd(..)
         | ListAppend(..)
         | ListExtend(..)
+        | ListExtendCall { .. }
         | DictUpdate(..)
         | DictMergeKwCall { .. }
         | SetItemKwCall { .. }

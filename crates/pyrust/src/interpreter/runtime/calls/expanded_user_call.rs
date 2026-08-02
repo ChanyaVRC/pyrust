@@ -1,3 +1,57 @@
+fn is_supplied_keyword_only(function: &UserFunction, name: &str) -> bool {
+    function
+        .params
+        .iter()
+        .any(|param| param.is_keyword_only && param.name == name)
+}
+
+fn too_many_positional_error(
+    function: &UserFunction,
+    required_positional_count: usize,
+    positional_param_count: usize,
+    positional_given: usize,
+    keyword_only_given: usize,
+) -> PyError {
+    let (takes_str, arg_word) = if required_positional_count == positional_param_count {
+        let arg_word = if positional_param_count == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        (format!("{positional_param_count}"), arg_word)
+    } else {
+        (
+            format!("from {required_positional_count} to {positional_param_count}"),
+            "arguments",
+        )
+    };
+    if keyword_only_given == 0 {
+        let given_word = if positional_given == 1 { "was" } else { "were" };
+        pyrust_core::type_err!(
+            "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+            function.effective_qualname(),
+            positional_given,
+        )
+    } else {
+        let positional_word = if positional_given == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        let keyword_word = if keyword_only_given == 1 {
+            "argument"
+        } else {
+            "arguments"
+        };
+        pyrust_core::type_err!(
+            "{}() takes {takes_str} positional {arg_word} but {} positional {positional_word} (and {} keyword-only {keyword_word}) were given",
+            function.effective_qualname(),
+            positional_given,
+            keyword_only_given,
+        )
+    }
+}
+
 impl Interpreter {
     pub(crate) fn call_user_function_expanded(
         &mut self,
@@ -102,30 +156,17 @@ impl Interpreter {
                     .count();
                 let total_positional_given = positional_count + bound_prefix.len();
                 if total_positional_given > positional_param_count {
-                    let given_word = if total_positional_given == 1 {
-                        "was"
-                    } else {
-                        "were"
-                    };
-                    let (takes_str, arg_word) = if required_positional_count
-                        == positional_param_count
-                    {
-                        let arg_word = if positional_param_count == 1 {
-                            "argument"
-                        } else {
-                            "arguments"
-                        };
-                        (format!("{positional_param_count}"), arg_word)
-                    } else {
-                        (
-                            format!("from {required_positional_count} to {positional_param_count}"),
-                            "arguments",
-                        )
-                    };
-                    return Err(pyrust_core::type_err!(
-                        "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                        function.effective_qualname(),
+                    let keyword_only_given = args
+                        .iter()
+                        .filter_map(|arg| arg.name.as_deref())
+                        .filter(|name| is_supplied_keyword_only(&function, name))
+                        .count();
+                    return Err(too_many_positional_error(
+                        &function,
+                        required_positional_count,
+                        positional_param_count,
                         total_positional_given,
+                        keyword_only_given,
                     ));
                 }
                 // Per-param "already bound" flags (stack-allocated for typical
@@ -208,32 +249,17 @@ impl Interpreter {
                         if positional_index >= nparams
                             || function.params[positional_index].is_keyword_only
                         {
-                            let given_word = if total_positional_given == 1 {
-                                "was"
-                            } else {
-                                "were"
-                            };
-                            let (takes_str, arg_word) = if required_positional_count
-                                == positional_param_count
-                            {
-                                let arg_word = if positional_param_count == 1 {
-                                    "argument"
-                                } else {
-                                    "arguments"
-                                };
-                                (format!("{positional_param_count}"), arg_word)
-                            } else {
-                                (
-                                    format!(
-                                        "from {required_positional_count} to {positional_param_count}"
-                                    ),
-                                    "arguments",
-                                )
-                            };
-                            return Err(pyrust_core::type_err!(
-                                "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                                function.effective_qualname(),
+                            let keyword_only_given = args
+                                .iter()
+                                .filter_map(|arg| arg.name.as_deref())
+                                .filter(|name| is_supplied_keyword_only(&function, name))
+                                .count();
+                            return Err(too_many_positional_error(
+                                &function,
+                                required_positional_count,
+                                positional_param_count,
                                 total_positional_given,
+                                keyword_only_given,
                             ));
                         }
                         bind_param(

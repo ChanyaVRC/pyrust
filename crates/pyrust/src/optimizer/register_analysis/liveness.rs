@@ -329,6 +329,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | FormatValueSpec(_, a, b)
         | DeleteItem(a, b) => *a == r || *b == r,
 
+        ListExtendCall { list, src, name } => *list == r || *src == r || kwcall_name_reads(name, r),
+
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => *obj == r || *val == r,
 
         // Three source registers.
@@ -528,6 +530,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | DeleteItem(a, b) => {
             reads.insert(*a);
             reads.insert(*b);
+        }
+
+        ListExtendCall { list, src, name } => {
+            reads.insert(*list);
+            reads.insert(*src);
+            kwcall_name_insert(name, reads);
         }
 
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => {
