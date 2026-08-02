@@ -85,10 +85,11 @@ class error(Exception):
 #   ('bol_a',)                   \A
 #   ('eol_z',)                   \Z
 #   ('wordb', negated)           \b / \B
-#   ('backref', idx)             \1 .. \99
-#   ('backref_name', name)       (?P=name)
+#   ('backref', idx, available)             \1 .. \99
+#   ('backref_name', name, available)       (?P=name)
 #   ('lookahead', positive, node)   (?=...) / (?!...)
 #   ('lookbehind', positive, node, width)   (?<=...) / (?<!...) (fixed width)
+#   ('scoped', flags, node)       (?i:...) / (?-i:...)
 
 
 class _Parser:
@@ -99,6 +100,14 @@ class _Parser:
         self.flags = flags
         self.group_count = 0
         self.groupindex = {}
+        # Completed capture bodies keyed by numeric group id.  Lookbehind
+        # width analysis records the highest group id on entry, so
+        # backreferences can use earlier fixed-width groups without admitting
+        # forward, open, or same-lookbehind groups (issue #2803).
+        self.group_nodes = {}
+        # Nested lookbehinds inherit the outer assertion's boundary: a group
+        # defined anywhere inside that outer assertion remains unavailable.
+        self._lookbehind_group_limit = None
         # Tracks whether any real atom has been parsed yet; global inline
         # flags ``(?i)`` are only valid before the first atom (CPython rule).
         self._seen_atom = False
@@ -262,11 +271,15 @@ class _Parser:
                     idx = self._register_group(name)
                     node = self._parse_alt()
                     self._expect(')')
+                    self.group_nodes[idx] = node
                     return ('group', idx, name, node)
                 if self.i < self.n and self.s[self.i] == '=':
                     self.i += 1
                     name = self._read_group_name(')')
-                    return ('backref_name', name)
+                    idx = self.groupindex.get(name)
+                    available = (idx is not None
+                                 and idx in self.group_nodes)
+                    return ('backref_name', name, available)
                 self._err("unknown extension ?P")
             if kind == '=' or kind == '!':
                 self.i += 1
@@ -280,9 +293,15 @@ class _Parser:
                 sub = self.s[self.i]
                 if sub == '=' or sub == '!':
                     self.i += 1
+                    previous_limit = self._lookbehind_group_limit
+                    max_group = (self.group_count if previous_limit is None
+                                 else previous_limit)
+                    self._lookbehind_group_limit = max_group
                     node = self._parse_alt()
                     self._expect(')')
-                    width = _fixed_width(node)
+                    self._lookbehind_group_limit = previous_limit
+                    width = _fixed_width(node, self.group_nodes,
+                                         self.groupindex, max_group)
                     if width < 0:
                         raise error("look-behind requires fixed-width pattern")
                     return ('lookbehind', sub == '=', node, width)
@@ -293,6 +312,7 @@ class _Parser:
         idx = self._register_group(None)
         node = self._parse_alt()
         self._expect(')')
+        self.group_nodes[idx] = node
         return ('group', idx, None, node)
 
     def _parse_flag_group(self):
@@ -461,7 +481,8 @@ class _Parser:
             while self.i < self.n and self.s[self.i].isdigit() and len(num) < 2:
                 num += self.s[self.i]
                 self.i += 1
-            return ('backref', int(num))
+            idx = int(num)
+            return ('backref', idx, idx in self.group_nodes)
         return ('lit', _decode_simple_escape(c))
 
 
@@ -498,54 +519,107 @@ def _decode_class_escape(c):
 # --------------------------------------------------------------------------- #
 
 
-def _fixed_width(node):
-    """Return the constant character width matched by ``node``, or -1 if the
-    width is variable (so lookbehind can reject it)."""
+_INVALID_WIDTH = -2
+
+
+def _fixed_width(node, group_nodes=None, groupindex=None, max_group=None,
+                 resolving=(), width_cache=None):
+    """Return the constant character width matched by ``node``.
+
+    ``-1`` denotes a variable width and ``_INVALID_WIDTH`` an unavailable or
+    cyclic group reference.  Keeping those cases distinct lets an exact zero
+    repeat discard a variable-width body without hiding an invalid reference.
+
+    ``group_nodes`` contains completed capture bodies and ``max_group`` is the
+    highest id registered before the lookbehind began.  Backreferences resolve
+    recursively within that boundary.
+    """
+    if width_cache is None:
+        width_cache = {}
     tag = node[0]
     if tag == 'lit' or tag == 'any' or tag == 'cat' or tag == 'class':
         return 1
     if tag == 'backref' or tag == 'backref_name':
-        return -1
-    if tag in ('start', 'end', 'bol_a', 'eol_z', 'wordb',
-               'lookahead', 'lookbehind'):
+        if group_nodes is None:
+            return _INVALID_WIDTH
+        if not node[2]:
+            return _INVALID_WIDTH
+        if tag == 'backref':
+            idx = node[1]
+        else:
+            idx = groupindex.get(node[1]) if groupindex is not None else None
+        if (idx is None or idx not in group_nodes or idx in resolving
+                or (max_group is not None and idx > max_group)):
+            return _INVALID_WIDTH
+        if idx in width_cache:
+            return width_cache[idx]
+        width = _fixed_width(group_nodes[idx], group_nodes, groupindex,
+                             max_group, resolving + (idx,), width_cache)
+        width_cache[idx] = width
+        return width
+    if tag in ('start', 'end', 'bol_a', 'eol_z', 'wordb'):
         return 0
+    if tag == 'lookahead' or tag == 'lookbehind':
+        width = _fixed_width(node[2], group_nodes, groupindex, max_group,
+                             resolving, width_cache)
+        return _INVALID_WIDTH if width == _INVALID_WIDTH else 0
     if tag == 'seq':
         total = 0
+        variable = False
         for child in node[1]:
-            w = _fixed_width(child)
-            if w < 0:
-                return -1
-            total += w
-        return total
+            width = _fixed_width(child, group_nodes, groupindex, max_group,
+                                 resolving, width_cache)
+            if width >= 0:
+                total += width
+            elif width == _INVALID_WIDTH:
+                return _INVALID_WIDTH
+            else:
+                variable = True
+        return -1 if variable else total
     if tag == 'group':
-        return _fixed_width(node[3])
+        return _fixed_width(node[3], group_nodes, groupindex, max_group,
+                            resolving, width_cache)
+    if tag == 'scoped':
+        return _fixed_width(node[2], group_nodes, groupindex, max_group,
+                            resolving, width_cache)
     if tag == 'alt':
         width = None
+        variable = False
         for branch in node[1]:
-            w = _fixed_width(branch)
-            if w < 0:
-                return -1
-            if width is None:
-                width = w
-            elif width != w:
-                return -1
+            branch_width = _fixed_width(branch, group_nodes, groupindex,
+                                        max_group, resolving, width_cache)
+            if branch_width >= 0:
+                if width is None:
+                    width = branch_width
+                elif width != branch_width:
+                    variable = True
+            elif branch_width == _INVALID_WIDTH:
+                return _INVALID_WIDTH
+            else:
+                variable = True
+        if variable:
+            return -1
         return width if width is not None else 0
-    if tag == 'opt':
-        # node? — variable unless the inner width is 0.
-        return -1
-    if tag == 'star':
-        return -1
-    if tag == 'plus':
-        return -1
+    if tag == 'opt' or tag == 'star' or tag == 'plus':
+        width = _fixed_width(node[1], group_nodes, groupindex, max_group,
+                             resolving, width_cache)
+        if width == _INVALID_WIDTH:
+            return _INVALID_WIDTH
+        return 0 if width == 0 else -1
     if tag == 'repeat':
         lo = node[2]
         hi = node[3]
+        width = _fixed_width(node[1], group_nodes, groupindex, max_group,
+                             resolving, width_cache)
+        if width == _INVALID_WIDTH:
+            return _INVALID_WIDTH
         if hi is None or lo != hi:
+            return 0 if width == 0 else -1
+        if lo == 0:
+            return 0
+        if width < 0:
             return -1
-        w = _fixed_width(node[1])
-        if w < 0:
-            return -1
-        return w * lo
+        return width * lo
     return -1
 
 
