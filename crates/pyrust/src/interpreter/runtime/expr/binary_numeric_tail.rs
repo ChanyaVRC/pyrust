@@ -62,9 +62,10 @@ impl Interpreter {
     }
 
     fn compare(
-        &self,
+        &mut self,
         left: Value,
         right: Value,
+        op: BinaryOp,
         op_name: &str,
         cmp: impl Fn(std::cmp::Ordering) -> bool,
     ) -> Result<Value> {
@@ -82,8 +83,110 @@ impl Interpreter {
         {
             return Ok(Value::bool_(false));
         }
-        Ok(Value::bool_(cmp(compare_values_with_op(
-            &left, &right, op_name,
-        )?)))
+        match compare_values_with_op(&left, &right, op_name) {
+            Ok(ordering) => Ok(Value::bool_(cmp(ordering))),
+            Err(error) => {
+                if !matches!(&error, PyError::Named(class, _) if class.as_ref() == "TypeError") {
+                    return Err(error);
+                }
+                self.richcmp_sequence_binary(&left, &right, op)
+                    .unwrap_or(Err(error))
+            }
+        }
+    }
+
+    /// Interpreter-aware fallback for list/tuple ordering whose primitive
+    /// comparison reached a user instance (issue #2817).
+    ///
+    /// CPython scans an equality prefix, then returns the exact requested rich
+    /// comparison for the first unequal pair.  Returning that value directly
+    /// preserves non-bool dunder results; recursively entering `eval_binary`
+    /// also retains reflected/subtype dispatch and exception propagation.
+    fn richcmp_sequence_binary(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        op: BinaryOp,
+    ) -> Option<Result<Value>> {
+        if !matches!(
+            (left.kind(), right.kind()),
+            (ValueKind::List(_), ValueKind::List(_)) | (ValueKind::Tuple(_), ValueKind::Tuple(_))
+        ) {
+            return None;
+        }
+
+        Some((|| {
+            let mut index = 0;
+            loop {
+                // Clone only the current pair, then drop the list borrow before
+                // invoking user code.  Re-borrowing on each iteration mirrors
+                // CPython when `__eq__` mutates a list: an equal prefix is
+                // followed by a comparison of the operands' live lengths.
+                let (left_item, right_item) = match (left.kind(), right.kind()) {
+                    (ValueKind::List(left), ValueKind::List(right)) => {
+                        if index >= left.len().min(right.len()) {
+                            return Ok(Value::bool_(match op {
+                                BinaryOp::Lt => left.len() < right.len(),
+                                BinaryOp::Le => left.len() <= right.len(),
+                                BinaryOp::Gt => left.len() > right.len(),
+                                BinaryOp::Ge => left.len() >= right.len(),
+                                _ => unreachable!("sequence comparison used non-ordering operator"),
+                            }));
+                        }
+                        (left[index].clone(), right[index].clone())
+                    }
+                    (ValueKind::Tuple(left), ValueKind::Tuple(right)) => {
+                        if index >= left.len().min(right.len()) {
+                            return Ok(Value::bool_(match op {
+                                BinaryOp::Lt => left.len() < right.len(),
+                                BinaryOp::Le => left.len() <= right.len(),
+                                BinaryOp::Gt => left.len() > right.len(),
+                                BinaryOp::Ge => left.len() >= right.len(),
+                                _ => unreachable!("sequence comparison used non-ordering operator"),
+                            }));
+                        }
+                        (left[index].clone(), right[index].clone())
+                    }
+                    _ => unreachable!("sequence kinds changed during comparison"),
+                };
+
+                if self.values_user_eq(&left_item, &right_item)? {
+                    index += 1;
+                } else {
+                    // CPython fetches the differing pair again after `__eq__`
+                    // returns, so replacements made by that hook participate
+                    // in ordering.  If mutation removed the current index,
+                    // there is no pair left to order and the live lengths
+                    // decide the result instead.
+                    let (live_items, left_len, right_len) = match (left.kind(), right.kind()) {
+                        (ValueKind::List(left), ValueKind::List(right)) => (
+                            left.get(index)
+                                .zip(right.get(index))
+                                .map(|(left, right)| (left.clone(), right.clone())),
+                            left.len(),
+                            right.len(),
+                        ),
+                        (ValueKind::Tuple(left), ValueKind::Tuple(right)) => (
+                            left.get(index)
+                                .zip(right.get(index))
+                                .map(|(left, right)| (left.clone(), right.clone())),
+                            left.len(),
+                            right.len(),
+                        ),
+                        _ => unreachable!("sequence kinds changed during comparison"),
+                    };
+                    if let Some((left_item, right_item)) = live_items {
+                        return self.eval_binary(left_item, op, right_item);
+                    }
+                    return Ok(Value::bool_(match op {
+                        BinaryOp::Lt => left_len < right_len,
+                        BinaryOp::Le => left_len <= right_len,
+                        BinaryOp::Gt => left_len > right_len,
+                        BinaryOp::Ge => left_len >= right_len,
+                        _ => unreachable!("sequence comparison used non-ordering operator"),
+                    }));
+                }
+            }
+        })())
     }
 }

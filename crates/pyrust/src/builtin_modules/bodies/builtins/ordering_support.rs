@@ -21,10 +21,15 @@ fn min_max_primitive_slice(items: &[Value], is_max: bool) -> Option<Result<Value
                 }
             }
             // The interpreter-free comparator cannot see a PyInstance nested
-            // inside a list/tuple.  Let the caller retry that non-primitive
-            // case through `min_max_compare`; an actually incompatible
-            // primitive pair will produce the same error there.
-            Err(_) => return None,
+            // inside a list/tuple.  Retry only that TypeError through
+            // `min_max_compare`; semantic failures such as RecursionError
+            // must propagate without a second comparison pass.
+            Err(error) => {
+                if matches!(&error, PyError::Named(class, _) if class.as_ref() == "TypeError") {
+                    return None;
+                }
+                return Some(Err(error));
+            }
         }
     }
     Some(Ok(best.clone()))
