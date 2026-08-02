@@ -115,6 +115,11 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::SetAdd(st, val) => Insn::SetAdd(st, s(&copies, val)),
             Insn::ListAppend(lst, val) => Insn::ListAppend(lst, s(&copies, val)),
             Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
+            Insn::ListExtendCall { list, src, name } => Insn::ListExtendCall {
+                list,
+                src: s(&copies, src),
+                name: kwcall_name_subst(name, |r| s(&copies, r)),
+            },
             Insn::DictUpdate(dct, other) => Insn::DictUpdate(dct, s(&copies, other)),
             Insn::DictMergeKwCall { dict, src, name } => Insn::DictMergeKwCall {
                 dict,

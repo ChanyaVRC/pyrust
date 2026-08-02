@@ -487,6 +487,15 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*b);
         }
 
+        ListExtendCall { list, src, name } => {
+            f(*list);
+            f(*src);
+            match name {
+                crate::bytecode::KwCallName::Callee(reg) => f(*reg),
+                crate::bytecode::KwCallName::Method { obj, .. } => f(*obj),
+            }
+        }
+
         SetAttr(obj, _, val) | SetTypeVarAttr(obj, _, val) => {
             f(*obj);
             f(*val);

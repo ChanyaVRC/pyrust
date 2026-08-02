@@ -730,10 +730,6 @@ pub(crate) fn visit_mapping_pairs_via_protocol(
         Some(m) => m,
         None => return Ok(false),
     };
-    let getitem = match getitem {
-        Some(m) => m,
-        None => return Ok(false),
-    };
     // Call `m.keys()` and materialise its result (CPython does not require it to
     // be a list — any iterable of keys is accepted).  CPython intentionally
     // exhausts this iterable before the first `__getitem__`: a keys-iterator
@@ -747,15 +743,23 @@ pub(crate) fn visit_mapping_pairs_via_protocol(
     )?;
     let keys = interp.collect_iterable(&keys_source)?;
     for k in keys {
-        let v = invoke_class_method(
-            interp,
-            getitem.clone(),
-            Value::py_instance(Rc::clone(&inst)),
-            &[ExpandedCallArg {
-                name: None,
-                value: k.clone(),
-            }],
-        )?;
+        let v = if let Some(getitem) = &getitem {
+            invoke_class_method(
+                interp,
+                getitem.clone(),
+                Value::py_instance(Rc::clone(&inst)),
+                &[ExpandedCallArg {
+                    name: None,
+                    value: k.clone(),
+                }],
+            )?
+        } else {
+            // `keys()` establishes the mapping protocol. CPython does not
+            // require `__getitem__` until a yielded key is actually consumed,
+            // so an empty keys iterable succeeds and a nonempty one reaches
+            // the ordinary subscription TypeError.
+            interp.eval_index(value, k.clone())?
+        };
         let key = interp.value_to_pykey(&k)?;
         visit(interp, key, v)?;
     }

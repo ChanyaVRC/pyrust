@@ -47,6 +47,50 @@ pub(super) fn duplicate_keyword_error(func_name: Option<&str>, keyword: &str) ->
     }
 }
 
+pub(crate) enum KwCallMappingMerge {
+    Complete,
+    Duplicate(String),
+    NotMapping,
+}
+
+/// Build the call-specific error for a non-mapping `**` operand.
+pub(super) fn keyword_mapping_operand_error(func_name: Option<&str>, source: &Value) -> PyError {
+    match func_name {
+        Some(name) => pyrust_core::type_err!(
+            "{}() argument after ** must be a mapping, not {}",
+            name,
+            value_type_name_str(source)
+        ),
+        None => {
+            pyrust_core::type_err!("'{}' object is not a mapping", value_type_name_str(source))
+        }
+    }
+}
+
+/// Replace only the generic non-iterable error from a call's `*` operand.
+/// The callee-name callback runs exclusively on that error path.
+pub(super) fn star_operand_error(
+    source: &Value,
+    error: PyError,
+    func_name: impl FnOnce() -> Option<String>,
+) -> PyError {
+    let type_name = value_type_name_str(source);
+    let generic_message = format!("'{type_name}' object is not iterable");
+    let is_non_iterable = matches!(
+        &error,
+        PyError::Named(class_name, message)
+            if class_name.as_ref() == "TypeError" && message == &generic_message
+    );
+    let Some(name) = is_non_iterable.then(func_name).flatten() else {
+        return error;
+    };
+    pyrust_core::type_err!(
+        "{}() argument after * must be an iterable, not {}",
+        name,
+        type_name
+    )
+}
+
 fn keyword_name(key: &PyKey) -> String {
     match key {
         PyKey::Str(value) => value.as_str().unwrap_or_default().to_owned(),
@@ -55,16 +99,33 @@ fn keyword_name(key: &PyKey) -> String {
 }
 
 impl Interpreter {
+    /// Materialise a call's `*` operand and add callee context only when the
+    /// generic iterator path proves that the operand is not iterable.
+    pub(crate) fn collect_call_splat(
+        &mut self,
+        callee: &Value,
+        source: &Value,
+    ) -> Result<Vec<Value>> {
+        match self.collect_iterable(source) {
+            Ok(items) => Ok(items),
+            Err(error) => Err(star_operand_error(source, error, || {
+                callable_error_name(callee)
+            })),
+        }
+    }
+
     /// Append a call's `**mapping` entries to the general expanded-argument
     /// buffer. Mapping protocol semantics come from `collection_ops`; this
     /// call-specific adapter owns keyword validation and diagnostics.
     pub(crate) fn expand_kwargs_into(
         &mut self,
+        callee: &Value,
         kwargs: &Value,
         buffer: &mut Vec<ExpandedCallArg>,
     ) -> Result<()> {
         let pairs = mapping_entries_for_expansion(self, kwargs)?.ok_or_else(|| {
-            pyrust_core::type_err!("'{}' object is not a mapping", value_type_name_str(kwargs))
+            let name = callable_error_name(callee);
+            keyword_mapping_operand_error(name.as_deref(), kwargs)
         })?;
         for (key, value) in pairs {
             match key {
@@ -83,9 +144,14 @@ impl Interpreter {
         &mut self,
         receiver: &Value,
         source: &Value,
-    ) -> Result<Option<String>> {
-        let pairs = self.mapping_splat_pairs(source)?;
-        self.dict_merge_kwcall(receiver, pairs)
+    ) -> Result<KwCallMappingMerge> {
+        let Some(pairs) = mapping_entries_for_expansion(self, source)? else {
+            return Ok(KwCallMappingMerge::NotMapping);
+        };
+        Ok(match self.dict_merge_kwcall(receiver, pairs)? {
+            Some(keyword) => KwCallMappingMerge::Duplicate(keyword),
+            None => KwCallMappingMerge::Complete,
+        })
     }
 
     /// Insert one named call operand after validating its internal string key.

@@ -67,28 +67,16 @@ impl Interpreter {
                 })
                 .count();
             if positional_vals.len() > positional_param_count {
-                let given_word = if positional_vals.len() == 1 {
-                    "was"
-                } else {
-                    "were"
-                };
-                let (takes_str, arg_word) = if required_positional_count == positional_param_count {
-                    let arg_word = if positional_param_count == 1 {
-                        "argument"
-                    } else {
-                        "arguments"
-                    };
-                    (format!("{positional_param_count}"), arg_word)
-                } else {
-                    (
-                        format!("from {required_positional_count} to {positional_param_count}"),
-                        "arguments",
-                    )
-                };
-                return Err(pyrust_core::type_err!(
-                    "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
-                    function.effective_qualname(),
+                let keyword_only_given = keyword_vals
+                    .iter()
+                    .filter(|(name, _)| is_supplied_keyword_only(&function, name))
+                    .count();
+                return Err(too_many_positional_error(
+                    &function,
+                    required_positional_count,
+                    positional_param_count,
                     positional_vals.len(),
+                    keyword_only_given,
                 ));
             }
         }

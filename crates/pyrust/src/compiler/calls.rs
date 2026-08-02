@@ -445,16 +445,20 @@ impl Compiler {
         // compact call opcodes. Evaluate each argument once in source order,
         // accumulating positionals into a private list and keywords into a
         // private dict; the merge instructions preserve duplicate-key errors.
-        // Method calls use CallMethodExpanded so a fast-local receiver can be
-        // written back in place. Other calls pass the materialized pair through
-        // CallExArgs directly, without exposing transport through Python globals.
+        // Method calls use CallMethodExpanded. Other calls pass the materialized
+        // pair through CallExArgs directly, without exposing transport through
+        // Python globals.
         if let Expr::Attr { target, name, .. } = func {
-            // Same fast-local optimisation as compile_method_call: use the
-            // variable's own register as `obj` so mutations persist.
+            // Snapshot a fast-local receiver before evaluating arguments.
+            // Argument expressions may rebind that local, while Python still
+            // calls the object evaluated before them. Value::clone keeps the
+            // shared backing of mutable receivers, so in-place mutations made
+            // by the method remain visible through the original object.
             let (obj_reg, dst_reg) = if let Expr::Var(tname, _) = target.as_ref() {
                 if let Some(local) = self.local_reg(tname) {
-                    let dst = self.alloc_temp();
-                    (local, dst)
+                    let obj = self.alloc_temp();
+                    self.emit(Insn::Move(obj, local));
+                    (obj, obj)
                 } else {
                     let o = self.alloc_temp();
                     self.compile_expr_into(target, o);
@@ -487,7 +491,14 @@ impl Compiler {
             for arg in args {
                 if arg.splat {
                     let val = self.compile_expr(&arg.value);
-                    self.emit(Insn::ListExtend(pos_list_reg, val));
+                    self.emit(Insn::ListExtendCall {
+                        list: pos_list_reg,
+                        src: val,
+                        name: crate::bytecode::KwCallName::Method {
+                            obj: obj_reg,
+                            name_idx,
+                        },
+                    });
                     self.free_temp(val);
                 } else if arg.double_splat {
                     let val = self.compile_expr(&arg.value);
@@ -587,7 +598,11 @@ impl Compiler {
         for arg in args {
             if arg.splat {
                 let val = self.compile_expr(&arg.value);
-                self.emit(Insn::ListExtend(pos_list_reg, val));
+                self.emit(Insn::ListExtendCall {
+                    list: pos_list_reg,
+                    src: val,
+                    name: crate::bytecode::KwCallName::Callee(func_reg),
+                });
                 self.free_temp(val);
             } else if arg.double_splat {
                 let val = self.compile_expr(&arg.value);

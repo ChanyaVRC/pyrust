@@ -153,7 +153,7 @@ impl Interpreter {
                 value: vm_read(regs, func + 1 + i, num_locals)?,
             });
         }
-        let extend_result = self.expand_kwargs_into(&kwargs_val, &mut buf);
+        let extend_result = self.expand_kwargs_into(&func_val, &kwargs_val, &mut buf);
         let call_result = extend_result.and_then(|()| self.call_function_expanded(func_val, &buf));
         self.call_arg_buf = buf;
         call_result
@@ -484,23 +484,25 @@ impl Interpreter {
                 value: vm_read(regs, func + 1 + i, num_locals)?,
             });
         }
-        let result = self.collect_iterable(&args_splat_val).and_then(|items| {
-            for value in items {
-                buf.push(ExpandedCallArg { name: None, value });
-            }
-            // Literal `kw=v` keyword args (empty unless `nkw > 0`; never co-occur
-            // with `**kw` per the shape check).
-            for (name, value) in &lit_kw {
-                buf.push(ExpandedCallArg {
-                    name: Some(name.clone()),
-                    value: value.clone(),
-                });
-            }
-            if let Some(kwargs_val) = &kwargs_val {
-                self.expand_kwargs_into(kwargs_val, &mut buf)?;
-            }
-            self.call_function_expanded(func_val, &buf)
-        });
+        let result = self
+            .collect_call_splat(&func_val, &args_splat_val)
+            .and_then(|items| {
+                for value in items {
+                    buf.push(ExpandedCallArg { name: None, value });
+                }
+                // Literal `kw=v` keyword args (empty unless `nkw > 0`; never co-occur
+                // with `**kw` per the shape check).
+                for (name, value) in &lit_kw {
+                    buf.push(ExpandedCallArg {
+                        name: Some(name.clone()),
+                        value: value.clone(),
+                    });
+                }
+                if let Some(kwargs_val) = &kwargs_val {
+                    self.expand_kwargs_into(&func_val, kwargs_val, &mut buf)?;
+                }
+                self.call_function_expanded(func_val, &buf)
+            });
         self.call_arg_buf = buf;
         result
     }
