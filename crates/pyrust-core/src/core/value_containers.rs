@@ -409,6 +409,44 @@ impl Value {
         Some(result)
     }
 
+    /// Move one exact dict entry to another insertion-order index.
+    ///
+    /// This is the storage primitive for operations such as
+    /// `OrderedDict.move_to_end`: unlike remove + insert, it preserves the
+    /// stored key and value objects.  A real move advances both the ordinary
+    /// mutation version and the entry-order generation observed by ordered
+    /// iterators.  It does not touch removal/reinsertion watches or compact
+    /// dict layout bookkeeping because the entry set and length are unchanged.
+    /// Moving an entry to its current index is a true no-op.
+    pub fn dict_move_index(&self, from: usize, to: usize) -> Result<bool> {
+        let rc = self.dict_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "dict_move_index receiver is not a dict".to_string(),
+            )
+        })?;
+        let len = rc.borrow().len();
+        if from >= len || to >= len {
+            return Err(PyError::Runtime(format!(
+                "internal: dict_move_index index out of bounds ({from} -> {to}, len {len})"
+            )));
+        }
+        if from == to {
+            return Ok(false);
+        }
+
+        let mutation_state = active_collection_mutation_state(dict_container_key(rc));
+        rc.borrow_mut().move_index(from, to);
+        if let Some(state) = mutation_state {
+            state
+                .entry_order
+                .set(state.entry_order.get().wrapping_add(1));
+            bump_active_collection_mutation_state(Some(state), None);
+        }
+        crate::environment::notify_namespace_dict_mutation(rc);
+        Ok(true)
+    }
+
     /// `dict[key] = value`.
     pub fn dict_insert(&self, key: PyKey, value: Value) -> Result<Option<Value>> {
         let rc = self.dict_rc().ok_or_else(|| {

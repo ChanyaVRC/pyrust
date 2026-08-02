@@ -217,47 +217,7 @@ class OrderedDict(dict):
 
         Raise KeyError if the element does not exist.
         '''
-        if key not in self:
-            raise KeyError(key)
-        # CPython's `_odict_move_to_end` returns immediately when the node is
-        # already the one being moved to, leaving `od_state` untouched -- so a
-        # live iterator must not observe a mutation.  pyrust relinks by
-        # deleting and reinserting, which would bump the entry-order
-        # generation, so the no-op has to be recognised here (issue #2931).
-        # The end is read off `self.keys()` -- the same inherited view
-        # `popitem` already leans on.  `last=True` uses the reverse cursor,
-        # which is O(1) to create; the `last=False` branch below already walks
-        # the whole key order anyway.
-        if last:
-            end = next(reversed(self.keys()))
-        else:
-            end = next(iter(self.keys()))
-        # The node CPython short-circuits on is the one `_odict_find_node`
-        # resolves `key` to, i.e. a dict lookup: the hash has to agree before
-        # equality is consulted at all.  Comparing `end == key` on its own is
-        # not that test -- two keys that compare equal but hash differently
-        # occupy two separate entries, and asking a key whose `__eq__` rejects
-        # foreign objects would raise where CPython simply relinks.
-        # `is` stays first so a key that is not equal to itself (NaN) is still
-        # recognised as the node already sitting at that end.
-        if end is key or (hash(end) == hash(key) and end == key):
-            return
-        if last:
-            value = self[key]
-            del self[key]
-            self[key] = value
-        else:
-            # Drop the moved entry with a lookup rather than filtering the key
-            # order by `k != key`: equality is not entry identity, so that
-            # filter deleted every key merely equal to `key` and asked keys
-            # that reject foreign comparison a question CPython never asks.
-            value = self[key]
-            del self[key]
-            items = list(self.items())
-            self.clear()
-            self[key] = value
-            for k, v in items:
-                self[k] = v
+        return _ordered_dict_move_to_end(self, key, last)
 
     def __eq__(self, other):
         '''od.__eq__(y) <==> od==y.  Comparison to another OD is order-sensitive

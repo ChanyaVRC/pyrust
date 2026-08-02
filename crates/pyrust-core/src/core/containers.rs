@@ -247,9 +247,10 @@ fn dict_usable_fraction(table_size: usize) -> usize {
 
 struct CollectionMutationStateInner {
     version: Cell<u64>,
-    /// Generation of the backing store's *entry order* alone, advanced only by
-    /// a mutation that adds or removes an entry — never by rewriting an
-    /// existing key's value, and never by a table reset.
+    /// Generation of the backing store's *entry order* alone, advanced by a
+    /// mutation that adds/removes an entry or explicitly relinks an existing
+    /// entry — never by rewriting an existing key's value, and never by a
+    /// table reset.
     ///
     /// This is CPython's `od_state`, which `OrderedDict` iterators compare
     /// per step: relinking a node (`move_to_end`, a delete, an insert of a new

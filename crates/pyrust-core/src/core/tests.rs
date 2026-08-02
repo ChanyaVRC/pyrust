@@ -480,6 +480,51 @@ mod tests {
     }
 
     #[test]
+    fn dict_move_index_relinks_exact_entry_and_tracks_only_real_moves() {
+        let first = PyKey::str_from("first");
+        let middle = PyKey::str_from("middle");
+        let last = PyKey::str_from("last");
+        let mut items = PyDict::default();
+        items.insert(first.clone(), Value::int(1));
+        items.insert(middle.clone(), Value::int(2));
+        items.insert(last.clone(), Value::int(3));
+        let dict = Value::dict(items);
+        let state = dict.dict_iteration_mutation_state().unwrap();
+        let terminal_cursor = state.watch_key_reinsertion(&first);
+
+        let before_version = state.version();
+        let before_order = state.entry_order_version();
+        assert!(dict.dict_move_index(0, 2).unwrap());
+        assert_eq!(state.version(), before_version.wrapping_add(1));
+        assert_eq!(state.entry_order_version(), before_order.wrapping_add(1));
+        assert_eq!(
+            dict.dict_with(|items| items.keys().cloned().collect::<Vec<_>>()),
+            Some(vec![middle.clone(), last.clone(), first.clone()])
+        );
+        assert_eq!(
+            dict.dict_with(|items| items.get(&first).and_then(Value::as_int)),
+            Some(Some(1))
+        );
+        assert!(!state.key_reinserted_at_or_after_since(&first, before_version, terminal_cursor));
+
+        let before_noop_version = state.version();
+        let before_noop_order = state.entry_order_version();
+        assert!(!dict.dict_move_index(2, 2).unwrap());
+        assert_eq!(state.version(), before_noop_version);
+        assert_eq!(state.entry_order_version(), before_noop_order);
+
+        assert!(dict.dict_move_index(2, 0).unwrap());
+        assert_eq!(
+            dict.dict_with(|items| items.keys().cloned().collect::<Vec<_>>()),
+            Some(vec![first, middle, last])
+        );
+        assert_eq!(
+            state.entry_order_version(),
+            before_noop_order.wrapping_add(1)
+        );
+    }
+
+    #[test]
     fn set_mutation_state_advances_only_for_structural_changes() {
         let existing = PyKey::str_from("existing");
         let inserted = PyKey::str_from("inserted");
