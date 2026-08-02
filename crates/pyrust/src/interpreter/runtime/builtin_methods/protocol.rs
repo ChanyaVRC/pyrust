@@ -554,8 +554,15 @@ impl Interpreter {
         recv: &Value,
         other: &Value,
     ) -> Result<Value> {
+        // Issue #2847: an explicitly selected primitive base slot compares
+        // the builtin payload of subclass instances; it must neither reject
+        // their visible subclass names nor redispatch their user overrides.
+        // Keep genuine user objects intact so incompatible operands still
+        // produce the base slot's NotImplemented result below.
+        let recv = coerce_subclass_backing(recv, &[]).unwrap_or_else(|| recv.clone());
+        let other = coerce_subclass_backing(other, &[]).unwrap_or_else(|| other.clone());
         let is_equality = matches!(method, "__eq__" | "__ne__");
-        if !richcmp_operand_accepted(recv, other, is_equality) {
+        if !richcmp_operand_accepted(&recv, &other, is_equality) {
             return Ok(Value::not_implemented());
         }
         let op = match method {
@@ -566,7 +573,7 @@ impl Interpreter {
             "__gt__" => crate::ast::BinaryOp::Gt,
             _ => crate::ast::BinaryOp::Ge,
         };
-        self.eval_binary(recv.clone(), op, other.clone())
+        self.eval_binary(recv, op, other)
     }
 
     /// Issue #2297: `int.__round__([ndigits])`.  CPython's `int.__round__`

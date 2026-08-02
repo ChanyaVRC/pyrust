@@ -35,22 +35,33 @@ impl Interpreter {
         // This avoids the `kind_ok` type guard in
         // `call_function_expanded` rejecting the PyInstance receiver.
         // Issue #1204: same mechanism for str/int/float/bytes subclasses.
+        // Issue #2847: some primitive comparison slots are represented in the
+        // subclass MRO by the canonical object sentinel rather than a
+        // type-qualified sentinel.  Treat that sentinel as primitive protocol
+        // dispatch only when provenance confirms that the subclass truly
+        // inherits the slot; an explicit user assignment/override still wins.
+        let inherited_primitive_richcmp = matches!(
+            method,
+            "__eq__" | "__ne__" | "__lt__" | "__le__" | "__gt__" | "__ge__"
+        ) && effective_builtin_receiver(receiver, &[method])
+            .is_some();
         if let ValueKind::BuiltinFunction(fn_name) = method_val.kind()
-            && fn_name.split_once('.').is_some_and(|(t, _)| {
-                matches!(
-                    t,
-                    "dict"
-                        | "list"
-                        | "set"
-                        | "frozenset"
-                        | "tuple"
-                        | "str"
-                        | "int"
-                        | "float"
-                        | "bytes"
-                        | "bytearray"
-                )
-            })
+            && (inherited_primitive_richcmp
+                || fn_name.split_once('.').is_some_and(|(t, _)| {
+                    matches!(
+                        t,
+                        "dict"
+                            | "list"
+                            | "set"
+                            | "frozenset"
+                            | "tuple"
+                            | "str"
+                            | "int"
+                            | "float"
+                            | "bytes"
+                            | "bytearray"
+                    )
+                }))
             && let Some(backing) = builtin_data_backing(receiver)
         {
             // Issue #1909: container protocol dunders
