@@ -374,9 +374,7 @@ pub(crate) fn modinv_i64(value: i64, modulus: i64) -> Option<i64> {
 ///
 /// Special cases:
 /// - `+inf` → `314159`, `-inf` → `-314159`  (CPython: `sys.hash_info.inf`)
-/// - `NaN`  → `0`  (CPython uses object-identity hash for NaN; pyrust returns
-///   `sys.hash_info.nan = 0` as a stable fallback since float NaN values are
-///   not objects with stable addresses in this VM)
+/// - `NaN`  → a stable per-object hash derived from its minted identity payload
 /// - `0.0` / `-0.0` → `0`
 /// - Integral floats (e.g. `1.0`, `2.0`) hash the same as the corresponding
 ///   integer: `hash(1.0) == hash(1)` (CPython invariant).
@@ -388,14 +386,7 @@ pub(crate) fn py_hash_float(v: f64) -> i64 {
         return if v > 0.0 { 314159 } else { -314159 };
     }
     if v.is_nan() {
-        // CPython calls PyObject_GenericHash (id-based) for NaN, so two NaNs
-        // report different `hash()` values there.  We deliberately keep the
-        // stable `sys.hash_info.nan` value (0) instead: exposing a raw NaN
-        // payload as a Python-visible hash would leak an allocation counter.
-        // Container behaviour does not depend on it — distinct NaN keys are
-        // separated by `PyKey`'s Rust `Hash` impl, which buckets on the full
-        // bit pattern, and by the identity-aware `PartialEq` (#2911).
-        return 0;
+        return pyrust_core::py_hash_nan(v);
     }
     if v == 0.0 {
         return 0;

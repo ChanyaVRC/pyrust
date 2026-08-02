@@ -158,6 +158,22 @@ fn pykey_hash_bigint(n: &BigInt) -> i64 {
     if raw == -1 { -2 } else { raw }
 }
 
+/// Hash a NaN from the stable object identity carried in its IEEE-754 bits.
+///
+/// CPython hashes NaN with `_Py_HashPointer`: rotate the object's identity
+/// word right by four bits, then remap the reserved `-1` result to `-2`.
+/// pyrust's floats are immediate values rather than heap allocations, but each
+/// boxed NaN carries a unique, stable identity in its payload (#2911).  Treating
+/// the complete bit pattern as the identity word gives the same observable
+/// contract: aliases hash stably while simultaneously live NaNs hash apart.
+#[cold]
+#[inline(never)]
+pub fn py_hash_nan(value: f64) -> i64 {
+    debug_assert!(value.is_nan());
+    let hash = value.to_bits().rotate_right(4) as i64;
+    if hash == -1 { -2 } else { hash }
+}
+
 /// Compute the CPython-compatible hash for a complex number.
 ///
 /// Mirrors `complexobject.c` in CPython 3.12:
@@ -180,7 +196,7 @@ fn py_hash_complex(re: f64, im: f64) -> i64 {
     fn hash_float_as_u64(v: f64) -> u64 {
         const P: u64 = (1u64 << 61) - 1;
         if v.is_nan() {
-            return 0;
+            return py_hash_nan(v) as u64;
         }
         if v.is_infinite() {
             return if v > 0.0 {
@@ -594,7 +610,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
         PyKey::Float(bits) => {
             let f = f64::from_bits(*bits);
             if f.is_nan() {
-                0
+                py_hash_nan(f)
             } else if f.is_infinite() {
                 if f > 0.0 { 314159 } else { -314159 }
             } else if f == 0.0 {
