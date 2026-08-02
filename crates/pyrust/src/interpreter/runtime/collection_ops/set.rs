@@ -196,28 +196,93 @@ pub(super) fn intersection_scan_order<'a>(a: &'a PySet, b: &'a PySet) -> (&'a Py
     if b.len() <= a.len() { (b, a) } else { (a, b) }
 }
 
-/// [`intersection_scan_order`] for [`set_binary_op_from_items`], with the
-/// dict-view operators held at their existing left-to-right scan.
+#[derive(Clone, Copy)]
+enum DictViewOperandKind {
+    View,
+    ExactSet,
+    Other,
+}
+
+impl DictViewOperandKind {
+    fn from_value(value: &Value) -> Self {
+        if is_setlike_view(value) {
+            Self::View
+        } else if matches!(value.kind(), ValueKind::Set(_)) {
+            Self::ExactSet
+        } else {
+            Self::Other
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DictViewOperands {
+    left: DictViewOperandKind,
+    right: DictViewOperandKind,
+}
+
+impl DictViewOperands {
+    fn new(left: &Value, right: &Value) -> Self {
+        let operands = Self {
+            left: DictViewOperandKind::from_value(left),
+            right: DictViewOperandKind::from_value(right),
+        };
+        debug_assert!(
+            matches!(operands.left, DictViewOperandKind::View)
+                || matches!(operands.right, DictViewOperandKind::View)
+        );
+        operands
+    }
+}
+
+/// Choose the scanned and probed sides for `_PyDictView_Intersect` (#3006).
 ///
 /// `d.keys() & other` is not `set.__and__`: CPython routes it through
 /// `_PyDictView_Intersect`, whose own swap rule is stated in terms of the view
 /// (even when the view is the *right* operand, since `set & view` reaches it
 /// via `__rand__`), and delegates to `other.intersection(view)` only when
-/// `other` is an *exact* `set` no smaller than the view — so a `frozenset` or a
-/// `set` subclass on the other side falls through to a manual loop.  That is a
-/// different rule from the plain-set one, and the left-to-right scan kept here
-/// does not implement it either; dict-view retention is tracked separately as
-/// issue #3006 and is deliberately out of scope for #2955.
+/// `other` is an *exact* `set` no smaller than the view.  Otherwise its manual
+/// loop scans `other`; for two views it first swaps when needed so the smaller
+/// view is scanned, with the right view winning a size tie.  The scanned side's
+/// object is the one inserted into the result.
+#[inline]
+fn dictview_intersection_scan_order<'a>(
+    a: &'a PySet,
+    b: &'a PySet,
+    operands: DictViewOperands,
+) -> (&'a PySet, &'a PySet) {
+    match (operands.left, operands.right) {
+        (DictViewOperandKind::View, DictViewOperandKind::View) => intersection_scan_order(a, b),
+        (DictViewOperandKind::View, DictViewOperandKind::ExactSet) if a.len() <= b.len() => (a, b),
+        (DictViewOperandKind::View, _) => (b, a),
+        (DictViewOperandKind::ExactSet, DictViewOperandKind::View) if b.len() <= a.len() => (b, a),
+        (_, DictViewOperandKind::View) => (a, b),
+        _ => unreachable!("dict-view intersection metadata requires a view operand"),
+    }
+}
+
 #[inline]
 fn intersection_scan<'a>(
     a: &'a PySet,
     b: &'a PySet,
-    view_operands: bool,
+    view_operands: Option<DictViewOperands>,
 ) -> (&'a PySet, &'a PySet) {
-    if view_operands {
-        (a, b)
+    match view_operands {
+        Some(operands) => dictview_intersection_scan_order(a, b, operands),
+        None => intersection_scan_order(a, b),
+    }
+}
+
+fn coerce_dictview_operand(
+    interp: &mut Interpreter,
+    value: &Value,
+    op: SetOp,
+    kind: DictViewOperandKind,
+) -> Option<Result<(PySet, bool)>> {
+    if matches!(op, SetOp::And) && matches!(kind, DictViewOperandKind::Other) {
+        Some(interp.coerce_setop_iterable_operand(value))
     } else {
-        intersection_scan_order(a, b)
+        interp.coerce_setop_operand(value, true)
     }
 }
 
@@ -235,17 +300,18 @@ pub(super) fn set_binary_op(
     // "set operand required" rule, so only relax it when a view is involved.
     let view_involved = is_setlike_view(left) || is_setlike_view(right);
     if view_involved {
-        let lhs_items = match interp.coerce_setop_operand(left, true) {
+        let view_operands = DictViewOperands::new(left, right);
+        let lhs_items = match coerce_dictview_operand(interp, left, op, view_operands.left) {
             Some(Ok(items)) => items,
             Some(Err(e)) => return Some(Err(e)),
             None => return None,
         };
-        let rhs_items = match interp.coerce_setop_operand(right, true) {
+        let rhs_items = match coerce_dictview_operand(interp, right, op, view_operands.right) {
             Some(Ok(items)) => items,
             Some(Err(e)) => return Some(Err(e)),
             None => return None,
         };
-        return set_binary_op_from_items(interp, lhs_items, rhs_items, op, true);
+        return set_binary_op_from_items(interp, lhs_items, rhs_items, op, Some(view_operands));
     }
     // Fast path: both operands are plain `set` / `frozenset` (or `PyInstance`
     // subclasses backed by either) whose elements are all primitive (no
@@ -306,21 +372,21 @@ pub(super) fn set_binary_op(
             )));
         }
     };
-    set_binary_op_from_items(interp, lhs_items, rhs_items, op, false)
+    set_binary_op_from_items(interp, lhs_items, rhs_items, op, None)
 }
 
 /// Shared set-algebra core for [`set_binary_op`].  Computes `lhs OP rhs` over
 /// already-coerced `(PySet, frozen)` operands and packages the result.
 ///
-/// `force_set` forces a plain `set` result regardless of the operands' frozen
-/// flags — used for dict-view operators, which always return `set` (issue
-/// #1891); otherwise the result type follows the LEFT operand (issue #2042).
+/// `view_operands` both carries the original operand kinds needed by dict-view
+/// intersection and forces a plain `set` result for every dict-view operator
+/// (issue #1891). Otherwise the result type follows the LEFT operand (#2042).
 fn set_binary_op_from_items(
     interp: &mut Interpreter,
     lhs_items: (PySet, bool),
     rhs_items: (PySet, bool),
     op: SetOp,
-    force_set: bool,
+    view_operands: Option<DictViewOperands>,
 ) -> Option<Result<Value>> {
     let (a, l_frozen) = lhs_items;
     // RHS frozen-ness is irrelevant: the result type follows the LEFT operand
@@ -339,7 +405,7 @@ fn set_binary_op_from_items(
                 }
             }
             SetOp::And => {
-                let (scan, probe) = intersection_scan(&a, &b, force_set);
+                let (scan, probe) = intersection_scan(&a, &b, view_operands);
                 for k in scan.iter() {
                     if probe.contains(k) {
                         out.insert(k.clone());
@@ -380,7 +446,7 @@ fn set_binary_op_from_items(
                     }
                 }
                 SetOp::And => {
-                    let (scan, probe) = intersection_scan(&a, &b, force_set);
+                    let (scan, probe) = intersection_scan(&a, &b, view_operands);
                     for k in scan.iter() {
                         if interp.set_lookup_in(probe, k)?.is_some() {
                             interp.set_insert(&mut out, k.clone())?;
@@ -416,9 +482,8 @@ fn set_binary_op_from_items(
     };
     // Result type follows the LEFT operand (CPython 3.12, issue #2042): `set &
     // frozenset` → `set`, `frozenset & set` → `frozenset`. The RHS frozen-ness
-    // never affects the result type. Dict-view operators always yield `set`
-    // (`force_set`).
-    Some(Ok(if l_frozen && !force_set {
+    // never affects the result type. Dict-view operators always yield `set`.
+    Some(Ok(if l_frozen && view_operands.is_none() {
         pyrust_builtins::frozenset::frozenset(out)
     } else {
         Value::set(out)
